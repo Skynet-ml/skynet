@@ -21,6 +21,7 @@ from ..repo_tree import unpack_tree, version_patch
 from ..repo_workspace import (
     _PROBE_OK,
     PREPARED_DIR,
+    REPO_DIR,
     WORK_DIR,
     NetworkCutoffError,
     RepoSetupError,
@@ -534,17 +535,20 @@ def test_a_large_stage_answer_is_written_by_file_and_stamped_again(
 
 
 def test_tampering_with_the_prepared_tree_is_caught_on_the_next_version(tmp_path: Path) -> None:
-    """Compare against fingerprints the parent holds, so rewriting the prepared copy in the box does not hide a change."""
+    """Compare against a digest the parent holds, so the next version gets a fresh box with the clean files (E38)."""
     space, archive = _guarded(tmp_path)
     try:
         version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
         space.checkout(version)
-        space.session().run(f"printf 'a,0\\n' > {PREPARED_DIR}/eval/labels.csv")
+        box = space.session()
+        box.run(f"printf 'a,0\\n' > {PREPARED_DIR}/eval/labels.csv")
 
         space.checkout(version)
         space.stamp_before_run()
 
-        assert [problem.split("'")[1] for problem in space.protected_changes()] == ["eval/labels.csv"]
+        assert box.closed
+        assert space.session().read_file(f"{WORK_DIR}/eval/labels.csv") == "a,1\n"
+        assert space.protected_changes() == ()
     finally:
         space.close()
 
@@ -558,7 +562,7 @@ def test_a_workspace_without_protected_paths_skips_the_check(
     space.checkout("")
 
     assert space.protected_changes() == ()
-    assert all("hashlib" not in command for command, _, _ in runtime.boxes[0].commands)
+    assert all("def digest(path)" not in command for command, _, _ in runtime.boxes[0].commands)
 
 
 def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp_path: Path) -> None:
@@ -586,6 +590,239 @@ def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp
         assert space.install_metric_files() is None
         assert box.read_file(f"{WORK_DIR}/src/metric.py") == "def score(): return 0.1\n"
         assert box.read_file(f"{WORK_DIR}/.optimize/exploits/a") is None
+    finally:
+        space.close()
+
+
+def _metric_space(tmp_path: Path) -> tuple[RepoWorkspace, _Runtime]:
+    """Build a workspace that hides ``eval/metric.py``, laid out with the base version.
+
+    Args:
+        tmp_path: Where the archive goes.
+
+    Returns:
+        The workspace and its runtime.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.py": "SECRET = 0.3\n"})
+    runtime = _Runtime()
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=_ONLINE,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        hidden_paths=["eval/metric.py"],
+    )
+    assert space.checkout("").path == WORK_DIR
+    return space, runtime
+
+
+def _left_at_close(box: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the names in the box's repo folder just before the box closes.
+
+    Args:
+        box: The recording box.
+        monkeypatch: Swaps its ``close``.
+
+    Returns:
+        A list that fills with the names when the box closes.
+    """
+    seen: list[str] = []
+    close = box.close
+
+    def recording_close() -> None:
+        """List the repo folder, then close."""
+        seen.extend(box.run(f"ls -a {REPO_DIR}").stdout.split())
+        close()
+
+    monkeypatch.setattr(box, "close", recording_close)
+    return seen
+
+
+def test_a_failed_metric_install_removes_the_archive_and_ends_the_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No later version reads the metric archive after an install fails (SKY-375, E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        monkeypatch.setattr(space, "_metric_files", "not an archive")
+
+        assert space.install_metric_files() == "The metric files could not be installed after the version ran."
+
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
+        assert space.session() is not box
+        assert len(runtime.boxes) == 2
+    finally:
+        space.close()
+
+
+def test_a_version_that_turns_a_metric_folder_into_a_file_has_no_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the install, remove the archive and end the box when ``eval`` became a file (E38)."""
+    space, _ = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        assert box.run(f"cd {WORK_DIR} && rm -rf eval && touch eval").ok
+
+        problem = space.install_metric_files()
+
+        assert problem == "The version replaced a folder of the metric files with a file or a link, so it has no score."
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
+    finally:
+        space.close()
+
+
+def test_a_version_that_links_a_metric_folder_outside_gets_no_metric_written_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never write the metric through a link the version put in place of ``eval`` (E38)."""
+    space, _ = _metric_space(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        assert box.run(f"cd {WORK_DIR} && rm -rf eval && ln -s {outside} eval").ok
+
+        problem = space.install_metric_files()
+
+        assert problem == "The version replaced a folder of the metric files with a file or a link, so it has no score."
+        assert list(outside.iterdir()) == []
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
+    finally:
+        space.close()
+
+
+_LINKED = "The version replaced a folder of the scoring box with a link, so it has no score."
+
+
+def test_a_version_that_swaps_its_checkout_for_a_link_gets_no_metric_and_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the install when ``work`` is a link to a folder the next checkout would keep (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        root = Path(box.run("pwd").stdout.strip())
+        assert box.run(f"cd {REPO_DIR} && mv work w2 && ln -s w2 work").ok
+
+        assert space.install_metric_files() == _LINKED
+
+        assert not (root / REPO_DIR / "w2" / "eval" / "metric.py").exists()
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
+        assert space.checkout("").path == WORK_DIR
+        assert len(runtime.boxes) == 2
+    finally:
+        space.close()
+
+
+def test_a_version_that_moves_the_repo_folder_behind_a_link_gets_no_metric_there(tmp_path: Path) -> None:
+    """Refuse the install before the archive goes in when ``.app-repo`` is a link (E38)."""
+    space, _ = _metric_space(tmp_path)
+    outside = tmp_path / "moved"
+    outside.mkdir()
+    try:
+        box = space.session()
+        assert box.run(f"mv {REPO_DIR} {outside}/{REPO_DIR} && ln -s {outside}/{REPO_DIR} {REPO_DIR}").ok
+
+        assert space.install_metric_files() == _LINKED
+
+        moved = outside / REPO_DIR
+        assert not [path.name for path in moved.iterdir() if path.name.startswith("hidden")]
+        assert not (moved / "work" / "eval" / "metric.py").exists()
+        assert box.closed
+    finally:
+        space.close()
+
+
+def test_a_checkout_removes_what_a_version_left_next_to_its_tree(tmp_path: Path) -> None:
+    """Keep only the prepared tree in ``.app-repo``, so no copy of a checkout outlives it (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        root = Path(box.run("pwd").stdout.strip())
+        assert box.run(f"cd {REPO_DIR} && cp -a work w2 && touch loose && ln -s w2 link").ok
+
+        assert space.checkout("").path == WORK_DIR
+
+        assert sorted(path.name for path in (root / REPO_DIR).iterdir()) == ["prepared", "version.patch", "work"]
+        assert len(runtime.boxes) == 1
+    finally:
+        space.close()
+
+
+def test_a_checkout_in_a_box_whose_prepared_tree_is_a_link_uses_a_fresh_box(tmp_path: Path) -> None:
+    """Never copy a checkout from a prepared tree a version replaced with a link (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        assert box.run(f"cd {REPO_DIR} && mv prepared p2 && ln -s p2 prepared").ok
+
+        assert space.checkout("").path == WORK_DIR
+
+        assert box.closed
+        assert len(runtime.boxes) == 2
+        assert space.install_metric_files() is None
+    finally:
+        space.close()
+
+
+def test_a_version_that_writes_into_the_prepared_tree_gets_a_fresh_box(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Never copy a later checkout from a prepared tree a version wrote into, ``.git`` included (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        assert box.run(
+            f"cd {WORK_DIR} && echo planted > ../prepared/planted.py"
+            " && git -C ../prepared config core.fsmonitor 'echo pwn'"
+        ).ok
+
+        with caplog.at_level(logging.WARNING, logger=repo_workspace.__name__):
+            assert space.checkout("").path == WORK_DIR
+
+        assert box.closed
+        assert len(runtime.boxes) == 2
+        fresh = space.session()
+        assert fresh.run(f"test ! -e {WORK_DIR}/planted.py").ok
+        assert not fresh.run(f"git -C {WORK_DIR} config core.fsmonitor").ok
+        assert "planted" not in caplog.text
+        assert "pwn" not in caplog.text
+        assert "prepared repository changed" in caplog.text
+        assert space.install_metric_files() is None
+    finally:
+        space.close()
+
+
+def test_a_version_that_only_writes_its_own_checkout_keeps_the_box(tmp_path: Path) -> None:
+    """Find no change in the prepared tree when versions write only in their checkout (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        assert box.run(f"cd {WORK_DIR} && echo out > result.txt && git config core.fsmonitor 'echo pwn'").ok
+
+        assert space.checkout("").path == WORK_DIR
+        assert space.checkout("").path == WORK_DIR
+
+        assert not box.closed
+        assert len(runtime.boxes) == 1
+        assert box.run(f"test ! -e {WORK_DIR}/result.txt").ok
     finally:
         space.close()
 

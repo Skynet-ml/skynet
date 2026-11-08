@@ -368,6 +368,7 @@ def test_server_without_pkce_s256_is_refused(oauth_server: OAuthServerState, con
 @pytest.mark.parametrize(
     ("name", "url", "code"),
     [
+        ("mapstools.googleapis.com", "https://mcp.example/mcp", "mcp_connection.invalid_name"),
         ("maps", "https://mcp.example/mcp", "mcp_connection.name_reserved"),
         ("Bad Name", "https://mcp.example/mcp", "mcp_connection.invalid_name"),
         ("tracker", "ftp://mcp.example/mcp", "mcp_connection.invalid_url"),
@@ -376,7 +377,7 @@ def test_server_without_pkce_s256_is_refused(oauth_server: OAuthServerState, con
     ],
 )
 def test_bad_name_or_url_is_refused_before_any_request(connections: Any, name: str, url: str, code: str) -> None:
-    """Refuse catalog names, malformed names and unsafe URLs."""
+    """Refuse catalog hosts, malformed names and unsafe URLs."""
     with pytest.raises(client.McpOAuthError) as refused:
         client.start_connection("alice", name, url, REDIRECT_URI)
     assert refused.value.code == code

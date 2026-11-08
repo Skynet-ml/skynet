@@ -28,6 +28,11 @@ from typing import Any
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+from sqlalchemy import create_engine, delete
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
 from ...models import (
     GridSearchResponse,
     OptimizedPredictor,
@@ -36,6 +41,8 @@ from ...models import (
     RunResponse,
     SplitCounts,
 )
+from ...storage.models import Base, RunCallModel, RunCandidateModel
+from ...storage.run_call_store import PostgresRunCallStore
 
 _FIXTURES_ROOT = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
 
@@ -210,6 +217,26 @@ class _BaseFakeJobStore:
         self._checkpoints: dict[str, dict[int, dict]] = {}
         self._grid_pair_results: dict[str, dict[int, dict]] = {}
         self._agent_runs: dict[str, dict[int, dict]] = {}
+        self._run_call_engine: Engine | None = None
+
+    def _run_call_store(self) -> PostgresRunCallStore:
+        """Return the run record store on a private in-memory SQLite engine.
+
+        The fake reuses the real store so router tests see the same secret
+        strip, cut and cursor rules as production. The engine is made on first
+        use, so tests that never touch the run record pay nothing.
+
+        Returns:
+            The store bound to this fake's engine.
+        """
+        if self._run_call_engine is None:
+            self._run_call_engine = create_engine(
+                "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+            )
+            Base.metadata.create_all(
+                self._run_call_engine, tables=[RunCallModel.__table__, RunCandidateModel.__table__]
+            )
+        return PostgresRunCallStore(self._run_call_engine)
 
     def stage_dataset(self, username: str, dataset_filename: str, rows: list[dict]) -> str:
         """Persist staged rows in memory and return their opaque id.
@@ -298,6 +325,33 @@ class _BaseFakeJobStore:
         self._checkpoints.pop(optimization_id, None)
         self._grid_pair_results.pop(optimization_id, None)
         self._agent_runs.pop(optimization_id, None)
+        if self._run_call_engine is not None:
+            with Session(self._run_call_engine) as session:
+                session.execute(delete(RunCallModel).where(RunCallModel.optimization_id == optimization_id))
+                session.execute(delete(RunCandidateModel).where(RunCandidateModel.optimization_id == optimization_id))
+                session.commit()
+
+    def record_run_call(self, optimization_id: str, call: dict, secrets: list[str]) -> int:
+        """Write one relay call through the real store; see :meth:`PostgresRunCallStore.record_call`."""
+        return self._run_call_store().record_call(optimization_id, call, secrets)
+
+    def set_run_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
+        """Set one candidate's state through the real store."""
+        self._run_call_store().set_candidate_state(optimization_id, candidate_id, role, state)
+
+    def list_run_calls(
+        self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
+    ) -> list[dict]:
+        """Return a candidate's calls after ``since`` through the real store."""
+        return self._run_call_store().list_calls(optimization_id, candidate_id, since=since, limit=limit)
+
+    def get_run_candidate(self, optimization_id: str, candidate_id: str) -> dict | None:
+        """Return one candidate's summary through the real store, or ``None``."""
+        return self._run_call_store().get_candidate(optimization_id, candidate_id)
+
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Return one page of the run's candidate summaries through the real store."""
+        return self._run_call_store().list_candidates(optimization_id, limit=limit, offset=offset)
 
     def save_agent_run(self, optimization_id: str, run: dict) -> None:
         """Store one agent run record under its ``run_id``.

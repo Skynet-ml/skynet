@@ -47,6 +47,9 @@ _HIDDEN_FROM_GENERALIST = {
     "set_hardening_exploit_verdict",
     "decide_hardening_fix",
     "retry_hardening_job",
+    # The run record is owner-only debug data; the generalist gets it in a later change.
+    "list_run_calls_optimizations",
+    "list_run_candidates_optimizations",
 }
 
 _FOLDER_WRITES = ("create_folder", "update_folder", "move_folder", "move_runs_to_folder", "delete_folder")

@@ -22,6 +22,7 @@ import logging
 import posixpath
 import shlex
 import threading
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,17 @@ _GIT_IDENTITY = "-c user.name=app -c user.email=app@localhost -c commit.gpgsign=
 # git 2.47), whose lock files come and go while ``cp -a`` walks ``.git`` and
 # fail the copy with "cannot stat .git/objects/maintenance.lock".
 _GIT_NO_MAINTENANCE = "-c maintenance.auto=false -c gc.auto=0"
+# A version's code can write $HOME and the XDG config folder, outside .app-repo,
+# so the reset and the prepared digest never see them. A filter, hook or
+# fsmonitor command set there would run in a later checkout's git call, outside
+# every candidate stop (E38). Box git reads only the repository's own config.
+# The env and -c overrides are the guard, not HOME: a root candidate can create
+# any HOME folder, but git then reads no file in it.
+GIT = (
+    "env HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null"
+    " GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null"
+    " -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false"
+)
 _PROBE_TIMEOUT_SECONDS = 120.0
 _PROBE_ATTEMPTS = 5
 _PROBE_OK = "app-network-closed"
@@ -64,6 +76,63 @@ with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
 with open(sys.argv[1], "w", encoding="ascii") as handle:
     handle.write(base64.b64encode(buffer.getvalue()).decode("ascii"))
 """
+# Puts the hidden files back into the checkout once the version's code
+# stopped. ``-I``: the checkout is the version's. It removes the archive in
+# every case, so no later version reads it. It refuses a folder above a hidden
+# path that the version turned into a file or a link, so nothing is written
+# through a link, and it removes what the version left at a hidden path
+# without following links. Extraction then only makes files and folders
+# below real folders (and links that stay inside the checkout, where the
+# ``data`` filter exists).
+_INSTALL_HIDDEN = r"""
+import base64, io, os, shutil, sys, tarfile
+
+source, paths = sys.argv[1], sys.argv[2:]
+try:
+    for path in paths:
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if os.path.islink(parent) or (os.path.lexists(parent) and not os.path.isdir(parent)):
+                sys.exit(3)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    if source:
+        with open(source, "rb") as handle:
+            data = base64.b64decode(handle.read(), validate=True)
+        data_filter = getattr(tarfile, "data_filter", None)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            members = archive.getmembers()
+            if data_filter is None and not all(member.isfile() or member.isdir() for member in members):
+                sys.exit(4)
+            for member in members:
+                name = os.path.normpath(member.name)
+                if os.path.isabs(name) or name == ".." or name.startswith("../"):
+                    sys.exit(4)
+            if data_filter is None:
+                archive.extractall(".")
+            else:
+                archive.extractall(".", filter=data_filter)
+finally:
+    if source and os.path.lexists(source):
+        os.unlink(source)
+"""
+# The install script's exit code when the version replaced a folder above a hidden path.
+_NOT_A_FOLDER = 3
+# A version's code can swap a folder of the box layout for a link while it
+# runs. A write through that link lands outside the checkout, where the next
+# version reads it, and the next checkout removes only the link (E38). The
+# check fails with ``_NOT_A_FOLDER`` unless each folder is a real folder.
+_LAYOUT_CHECK = (
+    f'for d in {REPO_DIR} {PREPARED_DIR}; do if [ -L "$d" ] || [ ! -d "$d" ]; then exit {_NOT_A_FOLDER}; fi; done'
+)
+# The checkout too, and it must resolve to its own place in the box.
+_WORK_CHECK = (
+    f"{_LAYOUT_CHECK}; if [ -L {WORK_DIR} ] || [ ! -d {WORK_DIR} ]"
+    f' || [ "$(cd {WORK_DIR} && pwd -P)" != "$(pwd -P)/{WORK_DIR}" ]; then exit {_NOT_A_FOLDER}; fi'
+)
 # Linux caps one environment string at 128 KiB; a larger stage answer goes
 # through a file write and fresh stamps instead.
 _ANSWER_ENV_BYTES = 100_000
@@ -115,6 +184,29 @@ if answer:
         handle.write(os.environ["APP_ANSWER"])
     os.replace(answer + ".tmp", answer)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
+"""
+# Hashes the whole prepared tree, ``.git`` included: each path's type, mode,
+# link target and content. A version's code runs as the box's only user, so
+# it can write into the prepared tree that every later checkout copies (E38).
+# Only the digest leaves the box; the parent holds the expected value.
+_HASH_PREPARED = r"""
+import hashlib, os, stat
+
+sha = hashlib.sha256()
+for folder, folders, files in os.walk(".", followlinks=False):
+    folders.sort()
+    for name in sorted(folders + files):
+        path = os.path.join(folder, name)
+        info = os.lstat(path)
+        sha.update(f"{path}\0{stat.S_IFMT(info.st_mode)}\0{stat.S_IMODE(info.st_mode)}\0".encode("utf-8", "surrogateescape"))
+        if stat.S_ISLNK(info.st_mode):
+            sha.update(os.fsencode(os.readlink(path)))
+        elif stat.S_ISREG(info.st_mode):
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    sha.update(block)
+        sha.update(b"\0")
+print(sha.hexdigest())
 """
 
 
@@ -248,6 +340,9 @@ class RepoWorkspace:
         # copy of the tree inside the box, the prepared one included.
         self._protected_baseline: dict[str, str] = {}
         self._stamps_before_run: dict[str, str] | None = None
+        # Held in the parent for the same reason: the prepared tree's digest
+        # once setup is done, which every checkout checks before it copies.
+        self._prepared_digest: str | None = None
         # The hidden files, packed, held here while no checkout has them (E38).
         self._metric_files: str | None = None
         self._metric_installed = False
@@ -330,7 +425,7 @@ class RepoWorkspace:
         files = " ".join(shlex.quote(part) for part in parts)
         result = session.run(
             f"set -e; mkdir -p {BASE_DIR}; cat {files} | base64 -d | tar -xzf - -C {BASE_DIR}; rm -f {files};"
-            f" cd {BASE_DIR}; git init -q; git add -A -f; git {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE} commit -q --allow-empty -m base;"
+            f" cd {BASE_DIR}; {GIT} init -q; {GIT} add -A -f; {GIT} {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE} commit -q --allow-empty -m base;"
             f" cd - >/dev/null; rm -rf {WORK_DIR} {PREPARED_DIR}; mv {BASE_DIR} {WORK_DIR}",
             timeout_seconds=_SETUP_TIMEOUT_SECONDS,
         )
@@ -355,6 +450,26 @@ class RepoWorkspace:
             self._protected_baseline = baseline[0]
         if self._hidden:
             self._take_hidden(session)
+        self._prepared_digest = self._digest_prepared(session)
+        if self._prepared_digest is None:
+            raise RepoSetupError("The prepared repository could not be fingerprinted.")
+
+    def _digest_prepared(self, session: SandboxSession) -> str | None:
+        """Hash the whole prepared tree in the box.
+
+        Args:
+            session: The box holding the prepared tree.
+
+        Returns:
+            The tree's SHA-256 digest, or ``None`` when the hashing command
+            failed or printed something that is not a digest.
+        """
+        result = session.run(
+            f"cd {PREPARED_DIR} && python3 -I -c {shlex.quote(_HASH_PREPARED)}", timeout_seconds=_HASH_TIMEOUT_SECONDS
+        )
+        lines = result.stdout.strip().splitlines() if result.ok else []
+        digest = lines[-1] if lines else ""
+        return digest if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest) else None
 
     def _take_hidden(self, session: SandboxSession) -> None:
         """Move the hidden files out of the prepared tree and its git history into the parent.
@@ -377,7 +492,7 @@ class RepoWorkspace:
         text = session.read_file(HIDDEN_FILE) if packed.ok else None
         if text is None:
             raise RepoSetupError(f"The metric files could not be packed: {_tail(packed)}")
-        git = f"git {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE}"
+        git = f"{GIT} {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE}"
         # The base commit and every loose object hold the hidden files too;
         # the amended commit replaces it and the old objects are pruned.
         removed = session.run(
@@ -482,10 +597,28 @@ class RepoWorkspace:
             self._stamps_before_run = None
             self._metric_installed = False
             session = self.session()
+            # Everything in .app-repo but the prepared tree goes. The prepared
+            # tree must still match the digest taken after setup, or the box
+            # is replaced. So nothing an earlier version wrote in .app-repo
+            # reaches this checkout (E38).
+            clear = (
+                f"{_LAYOUT_CHECK}; find {REPO_DIR} -mindepth 1 -maxdepth 1"
+                f" ! -name {posixpath.basename(PREPARED_DIR)} -exec rm -rf {{}} +"
+            )
+            if not session.run(clear, timeout_seconds=_SETUP_TIMEOUT_SECONDS).ok:
+                # The layout is not the one this box was prepared with; a fresh box is.
+                self._end_box()
+                session = self.session()
             session.write_files({PATCH_FILE: patch})
+            if self._digest_prepared(session) != self._prepared_digest:
+                # Only the reason is logged: the tree is the user's code.
+                logger.warning("The prepared repository changed after a version ran; a fresh box is prepared.")
+                self._end_box()
+                session = self.session()
+                session.write_files({PATCH_FILE: patch})
             applied = session.run(
-                f"set -e; rm -rf {WORK_DIR}; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
-                f" if [ -s ../version.patch ]; then git apply --binary --whitespace=nowarn ../version.patch; fi",
+                f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
+                f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if not applied.ok:
@@ -503,21 +636,36 @@ class RepoWorkspace:
                 self._metric_installed = True
                 return None
             session = self.session()
+            # Checked before the archive goes in, so it is never written through a link.
+            try:
+                layout = session.run(_WORK_CHECK, timeout_seconds=_SETUP_TIMEOUT_SECONDS)
+            except BaseException:
+                self._end_box()
+                raise
+            if not layout.ok:
+                self._end_box()
+                return "The version replaced a folder of the scoring box with a link, so it has no score."
             paths = " ".join(shlex.quote(path) for path in self._hidden)
-            if self._metric_files is not None:
-                session.write_files({HIDDEN_FILE: self._metric_files})
-            name = posixpath.basename(HIDDEN_FILE)
-            # No pipe: ``sh`` has no pipefail, so a failed decode would pass unseen.
-            unpack = (
-                f" base64 -d < ../{name} > ../{name}.tgz; tar -xzf ../{name}.tgz; rm -f ../{name} ../{name}.tgz;"
-                if self._metric_files is not None
-                else ""
-            )
-            # Whatever the version left at a hidden path goes first.
-            result = session.run(
-                f"set -e; cd {WORK_DIR}; rm -rf -- {paths};{unpack}", timeout_seconds=_SETUP_TIMEOUT_SECONDS
-            )
+            # A fresh name: the version may have left a file or a link at any name it knew.
+            source = f"{REPO_DIR}/hidden-{uuid.uuid4().hex}.b64" if self._metric_files is not None else ""
+            try:
+                if self._metric_files is not None:
+                    session.write_files({source: self._metric_files})
+                argument = f"../{posixpath.basename(source)}" if source else "''"
+                result = session.run(
+                    f"cd {WORK_DIR} && python3 -I -c {shlex.quote(_INSTALL_HIDDEN)} {argument} {paths}",
+                    timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+                )
+            except BaseException:
+                self._end_box()
+                raise
             if not result.ok:
+                # The archive may still be in the box; no later version runs in it (E38).
+                self._end_box()
+                if result.exit_code == _NOT_A_FOLDER:
+                    return (
+                        "The version replaced a folder of the metric files with a file or a link, so it has no score."
+                    )
                 return "The metric files could not be installed after the version ran."
             self._metric_installed = True
             return None
@@ -676,6 +824,10 @@ class RepoWorkspace:
     def close(self) -> None:
         """Destroy the box."""
         with self._lock:
-            if self._session is not None:
-                session, self._session = self._session, None
-                session.close()
+            self._end_box()
+
+    def _end_box(self) -> None:
+        """Destroy the box; the caller holds the lock."""
+        if self._session is not None:
+            session, self._session = self._session, None
+            session.close()

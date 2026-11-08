@@ -64,6 +64,11 @@ _probe_cache_lock = threading.Lock()
 # process arguments) nor in the Docker CLI's own environment. `env`, unlike
 # bash's `export`, takes any name an environment can hold, as Vercel does.
 _ENV_LOADER = 'pairs=(); while IFS= read -r -d "" pair; do pairs+=("$pair"); done; exec env -- "${pairs[@]}" "$@"'
+# A login or interactive shell reads ~/.bash_profile, ~/.profile or ~/.bashrc,
+# which a version's code can write. Some bash builds (Debian, Homebrew) also read
+# ~/.bashrc in a plain `bash -c` when SSH_CLIENT is set. Code planted there would run before every
+# later box command: the reset, the metric install and the metric step (E38).
+_SHELL = ("bash", "--noprofile", "--norc", "-c")
 _MISSING_FILE_EXIT = 3
 _READ_FILE_SCRIPT = f'test -f "$1" || exit {_MISSING_FILE_EXIT}; exec cat -- "$1"'
 # The proxy sidecar's own way out; the setup box never joins it.
@@ -302,7 +307,7 @@ class DockerSandboxSession:
         timeout_seconds: float | None = None,
         on_output: sandbox_contract.OutputSink | None = None,
     ) -> sandbox_contract.CommandResult:
-        """Run ``command`` through ``bash -lc`` in the working directory and stream its output.
+        """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and stream its output.
 
         Args:
             command: Shell command line.
@@ -316,7 +321,7 @@ class DockerSandboxSession:
         Raises:
             ServiceError: When the command outlives its kill deadline or Docker is missing.
         """
-        inner = ["bash", "-lc", command]
+        inner = [*_SHELL, command]
         deadline = None
         seconds = None
         if timeout_seconds is not None:
@@ -324,7 +329,7 @@ class DockerSandboxSession:
             inner = ["timeout", "--signal=KILL", f"{seconds}s", *inner]
             deadline = seconds + sandbox_contract.KILL_GRACE_SECONDS
         stream = _env_stream({**self._env, **(env or {})})
-        loader = ["bash", "-c", _ENV_LOADER, "skynet-env"]
+        loader = [*_SHELL, _ENV_LOADER, "skynet-env"]
         argv = [self._docker_bin, "exec", "-i", "-w", WORKSPACE_DIR, self.container, *loader, *inner]
         try:
             process = subprocess.Popen(

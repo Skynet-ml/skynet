@@ -564,7 +564,10 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     """Refuse an unenforceable optimize.toml in the setup check, in the user's language, before the setup model runs."""
     client, _engine, calls = setup_client
     archive = tmp_path / "tree.tgz"
-    raw = b'[proposer]\ntools = ["bash"]\n[services.maps]\nsecrets = ["GOOGLE_MAPS_API_KEY"]\n'
+    raw = (
+        b'[proposer]\nnetwork = []\n[services.maps]\nurl = "https://maps.example.com"\n'
+        b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }\n'
+    )
     with tarfile.open(archive, "w:gz") as packed:
         info = tarfile.TarInfo("optimize.toml")
         info.size = len(raw)
@@ -592,7 +595,7 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
         ("setup", "repo_gate.unenforced_cloud"),
         ("setup", "repo_gate.missing_secret"),
     ]
-    assert body["checks"][0]["message"] == t_locale("he", "repo_gate.unenforced_cloud", key="[proposer] tools")
+    assert body["checks"][0]["message"] == t_locale("he", "repo_gate.unenforced_cloud", key="[proposer] network")
     assert not inferred
     assert not calls
     assert body["budget"]["setup_spent_cents"] == "0"
