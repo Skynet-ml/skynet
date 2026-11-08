@@ -114,6 +114,8 @@ class FakeCloud:
     calls: list[str] = field(default_factory=list)
     clients: list[dict[str, Any]] = field(default_factory=list)
     killed: list[str] = field(default_factory=list)
+    list_limits: list[int] = field(default_factory=list)
+    list_hangs: bool = False
     create_error: BaseException | None = None
     create_hangs: bool = False
     exec_hangs: bool = False
@@ -323,10 +325,14 @@ class FakeSDK:
             limit: The page size.
 
         Yields:
-            Box views.
+            Box views. The listing hangs after the last box when the cloud
+            says it hangs.
         """
+        CLOUD.list_limits.append(limit)
         for box in list(CLOUD.boxes.values()):
             yield SimpleNamespace(id=box.id, metadata=box.metadata, status=box.status)
+        if CLOUD.list_hangs:
+            await asyncio.Event().wait()
 
     async def _shutdown(self, box_id: str) -> None:
         """Shut a box down by id.
@@ -385,6 +391,8 @@ class FakeSDK:
             allow_agent_gateway=params["allow_agent_gateway"],
             allow_devbox_to_devbox=params["allow_devbox_to_devbox"],
             allow_mcp_gateway=params["allow_mcp_gateway"],
+            allow_runloop_mirrors=params["allow_runloop_mirrors"],
+            allowed_cidrs=[],
             allowed_hostnames=list(params["allowed_hostnames"]),
         )
         policy = SimpleNamespace(id=f"np-{next(CLOUD.ids)}", name=params["name"], egress=egress)
@@ -649,6 +657,96 @@ async def test_policy_with_other_egress_is_fatal(fake_sdk: FakeCloud) -> None:
     assert "create" not in fake_sdk.calls
 
 
+def _egress(**overrides: Any) -> SimpleNamespace:
+    """Return a policy egress that allows only ``a.example``.
+
+    Args:
+        **overrides: Egress fields to replace.
+
+    Returns:
+        The egress view.
+    """
+    fields = {
+        "allow_all": False,
+        "allow_agent_gateway": False,
+        "allow_devbox_to_devbox": False,
+        "allow_mcp_gateway": False,
+        "allow_runloop_mirrors": False,
+        "allowed_cidrs": [],
+        "allowed_hostnames": ["a.example"],
+    }
+    return SimpleNamespace(**{**fields, **overrides})
+
+
+_WIDER_EGRESS = [
+    pytest.param({"allow_runloop_mirrors": True}, id="mirrors"),
+    pytest.param({"allowed_cidrs": [SimpleNamespace(cidr="0.0.0.0/0")]}, id="cidrs"),
+]
+
+
+async def test_policy_create_turns_the_mirrors_off(fake_sdk: FakeCloud) -> None:
+    """Create the policy with the Runloop mirrors off and no CIDRs."""
+    async with RunloopEnvironment(_spec(allowed_hosts=("a.example",))):
+        pass
+    (policy,) = fake_sdk.policies
+    assert policy.egress.allow_runloop_mirrors is False
+    assert policy.egress.allowed_cidrs == []
+
+
+@pytest.mark.parametrize("wider", _WIDER_EGRESS)
+async def test_policy_with_mirrors_or_cidrs_is_fatal(fake_sdk: FakeCloud, wider: dict[str, Any]) -> None:
+    """Refuse a same-name policy that also allows the mirrors or CIDRs."""
+    name = runloop._policy_name(["a.example"])
+    fake_sdk.policies.append(SimpleNamespace(id="np-wide", name=name, egress=_egress(**wider)))
+    with pytest.raises(SandboxFatalError, match="different egress"):
+        await RunloopEnvironment(_spec(allowed_hosts=("a.example",))).start()
+    assert "create" not in fake_sdk.calls
+
+
+@pytest.mark.parametrize("wider", _WIDER_EGRESS)
+async def test_conflict_policy_with_mirrors_or_cidrs_is_fatal(fake_sdk: FakeCloud, wider: dict[str, Any]) -> None:
+    """Refuse a parallel policy that also allows the mirrors or CIDRs."""
+    name = runloop._policy_name(["a.example"])
+    fake_sdk.policy_conflict = SimpleNamespace(id="np-wide", name=name, egress=_egress(**wider))
+    with pytest.raises(SandboxFatalError, match="different egress"):
+        await RunloopEnvironment(_spec(allowed_hosts=("a.example",))).start()
+    assert "create" not in fake_sdk.calls
+
+
+async def test_a_second_start_is_refused(fake_sdk: FakeCloud) -> None:
+    """Refuse a second start, while the box runs and after the stop."""
+    env = RunloopEnvironment(_spec())
+    await env.start()
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    await env.stop()
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    assert fake_sdk.calls.count("create") == 1
+
+
+async def test_a_stop_before_the_start_still_lets_the_box_stop(fake_sdk: FakeCloud) -> None:
+    """Start after an early stop, then shut the box down at the next stop."""
+    env = RunloopEnvironment(_spec())
+    await env.stop()
+    await env.start()
+    await env.stop()
+    (box,) = fake_sdk.boxes.values()
+    assert box.status == "shutdown"
+
+
+async def test_a_second_start_after_a_failed_start_is_refused(fake_sdk: FakeCloud) -> None:
+    """Refuse a start after a failed start, so no create reuses the box tag."""
+    fake_sdk.create_error = FakeRateLimitError("slow down")
+    env = RunloopEnvironment(_spec())
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    fake_sdk.create_error = None
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    assert fake_sdk.calls.count("create") == 1
+
+
 async def test_exec_wraps_cwd_and_env() -> None:
     """Run in the cwd with quoted env values."""
     async with RunloopEnvironment(_spec()) as env:
@@ -754,6 +852,42 @@ async def test_orphan_sweep_leaves_other_boxes_running(fake_sdk: FakeCloud) -> N
         await RunloopEnvironment(_spec(), timeouts=_timeouts(start=0.05)).start()
     assert [box.status for box in fake_sdk.boxes.values()] == ["running", "shutdown"]
     await other.stop()
+
+
+async def test_orphan_sweep_stops_at_its_box(fake_sdk: FakeCloud) -> None:
+    """Read no box after the tagged one, with large pages."""
+    env = RunloopEnvironment(_spec())
+    read: list[str] = []
+    shut: list[str] = []
+
+    async def listing(*, limit: int) -> AsyncIterator[SimpleNamespace]:
+        """Yield the tagged box, then many other boxes."""
+        assert limit == 5000
+        yield SimpleNamespace(id="mine", metadata={BOX_TAG: env._box_tag}, status="running")
+        for n in range(100):
+            read.append(f"other-{n}")
+            yield SimpleNamespace(id=f"other-{n}", metadata={}, status="running")
+
+    async def shutdown(box_id: str) -> None:
+        """Record the shutdown."""
+        shut.append(box_id)
+
+    client = SimpleNamespace(api=SimpleNamespace(devboxes=SimpleNamespace(list=listing, shutdown=shutdown)))
+    await env._shut_down_orphan(client)
+    assert shut == ["mine"]
+    assert read == []
+
+
+async def test_stop_job_sandboxes_bounds_the_list(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shut down the boxes found before a list that runs past the limit."""
+    monkeypatch.setattr(runloop, "STOP_TIMEOUT", 0.05)
+    env = RunloopEnvironment(_spec(tags={JOB_TAG: "job-5"}))
+    await env.start()
+    fake_sdk.list_hangs = True
+    assert await RunloopEnvironment.stop_job_sandboxes("job-5") == 1
+    assert fake_sdk.list_limits == [5000]
+    assert fake_sdk.calls[-1] == "aclose"
+    await env.stop()
 
 
 async def test_stop_job_sandboxes_skips_ended_boxes(fake_sdk: FakeCloud) -> None:

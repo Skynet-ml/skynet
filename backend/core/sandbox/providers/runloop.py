@@ -87,6 +87,7 @@ BOX_TAG = "skynet_box"
 STOP_TIMEOUT = 60.0
 KILL_TIMEOUT = 30.0
 POLL_INTERVAL = 1.0
+_LIST_LIMIT = 5000
 # The asyncio phase timeouts bound every wait, so the SDK poll limit must
 # never end a wait first.
 _UNBOUNDED_POLLS = 10**9
@@ -235,6 +236,8 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
         and getattr(egress, "allow_agent_gateway", False) is False
         and getattr(egress, "allow_devbox_to_devbox", False) is False
         and getattr(egress, "allow_mcp_gateway", False) is False
+        and getattr(egress, "allow_runloop_mirrors", False) is False
+        and not list(getattr(egress, "allowed_cidrs", None) or [])
         and list(getattr(egress, "allowed_hostnames", None) or []) == hosts
     )
 
@@ -286,6 +289,7 @@ class RunloopEnvironment(SandboxEnvironment):
         self._devbox: Any = None
         self._starting: asyncio.Future[None] | None = None
         self._create_dispatched = False
+        self._started = False
         self._stop_task: asyncio.Future[None] | None = None
 
     @classmethod
@@ -317,11 +321,18 @@ class RunloopEnvironment(SandboxEnvironment):
 
         Raises:
             StartTimeoutError: The devbox did not run within the start timeout.
-            SandboxInfraError: A stop ended the start.
+            SandboxInfraError: A stop ended the start, or the sandbox already
+                started once.
             SandboxError: The create call failed; see ``_mapped``.
         """
+        if self._started:
+            # The box tag is the create idempotency key, so a second create
+            # would get the first box back.
+            raise SandboxInfraError("The Runloop sandbox already started once; it cannot start again.")
+        self._started = True
+        # A stop before the start leaves a finished stop task; drop it so the
+        # stop after this start shuts the box down.
         self._stop_task = None
-        self._create_dispatched = False
         self._client = self._make_client()
         self._starting = asyncio.ensure_future(self._create())
         try:
@@ -389,6 +400,7 @@ class RunloopEnvironment(SandboxEnvironment):
                     allow_agent_gateway=False,
                     allow_devbox_to_devbox=False,
                     allow_mcp_gateway=False,
+                    allow_runloop_mirrors=False,
                     allowed_hostnames=hosts,
                     description="Managed by Skynet. Every Skynet box with this egress shares it.",
                     idempotency_key=name,
@@ -593,9 +605,11 @@ class RunloopEnvironment(SandboxEnvironment):
         Args:
             client: The SDK client.
         """
-        async for box in client.api.devboxes.list(limit=100):
-            if (box.metadata or {}).get(BOX_TAG) == self._box_tag and box.status not in _ENDED_STATUSES:
-                await client.api.devboxes.shutdown(box.id)
+        async for box in client.api.devboxes.list(limit=_LIST_LIMIT):
+            if (box.metadata or {}).get(BOX_TAG) == self._box_tag:
+                if box.status not in _ENDED_STATUSES:
+                    await client.api.devboxes.shutdown(box.id)
+                return
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
@@ -605,16 +619,23 @@ class RunloopEnvironment(SandboxEnvironment):
             job_id: The job tag value.
 
         Returns:
-            The number of devboxes that were shut down.
+            The number of devboxes that were shut down. A list that runs past
+            ``STOP_TIMEOUT`` is logged, and only the devboxes found so far
+            are shut down.
         """
         client = cls._make_client()
         try:
-            with _mapped("list the devboxes"):
-                ids = [
-                    box.id
-                    async for box in client.api.devboxes.list(limit=100)
-                    if (box.metadata or {}).get(JOB_TAG) == job_id and box.status not in _ENDED_STATUSES
-                ]
+            ids: list[str] = []
+            try:
+                async with asyncio.timeout(STOP_TIMEOUT):
+                    with _mapped("list the devboxes"):
+                        # A loop, not a comprehension, keeps the ids found
+                        # before a list timeout.
+                        async for box in client.api.devboxes.list(limit=_LIST_LIMIT):
+                            if (box.metadata or {}).get(JOB_TAG) == job_id and box.status not in _ENDED_STATUSES:
+                                ids.append(box.id)  # noqa: PERF401
+            except TimeoutError:
+                logger.warning("Runloop did not list the devboxes of job %s in time.", job_id)
             stopped = 0
             for box_id in ids:
                 if await _bounded(client.api.devboxes.shutdown(box_id), "shut a job devbox down"):
