@@ -14,7 +14,7 @@ from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
 
@@ -121,8 +121,8 @@ class CallRecorder:
             failure_reason: Why the call failed or was refused.
             cost_usd: What the call cost the run, when known.
             secrets: Every secret value the call could carry. The store
-                removes their raw and JSON-escaped forms, and their base64
-                and Basic-auth forms from :func:`_secret_forms`.
+                removes their raw and JSON-escaped forms, and their base64,
+                percent-encoded and Basic-auth forms from :func:`_secret_forms`.
             duration_ms: The duration another process measured, such as the
                 egress proxy; None measures it from ``started``.
         """
@@ -151,18 +151,21 @@ def _secret_forms(secret: str) -> set[str]:
     """List the forms of one secret that an echoing server can send back.
 
     Besides the value itself, a server may echo it base64-encoded (standard
-    or URL-safe), and a Basic-auth token may come back decoded as
-    ``user:password`` or as the password alone. Padding is left off each
-    base64 form, so the padded form is masked too.
+    or URL-safe) or percent-encoded (as in a URL query or a form body), and a
+    Basic-auth token may come back decoded as ``user:password`` or as the
+    password alone. Padding is left off each base64 form, so the padded form
+    is masked too.
 
     Args:
         secret: One nonempty secret value.
 
     Returns:
-        The value and its encoded and decoded forms; at most seven strings.
+        The value and its encoded and decoded forms; at most ten strings.
     """
     raw = secret.encode()
     forms = {secret, *(encode(raw).decode().rstrip("=") for encode in (base64.b64encode, base64.urlsafe_b64encode))}
+    # A standard base64 key holds "+", "/" and "=", which a URL or form encoder changes.
+    forms |= {quote(secret), quote(secret, safe=""), quote_plus(secret)}
     token = secret.partition(" ")[2] if secret[:6].lower() == "basic " else secret
     forms.add(token)
     try:

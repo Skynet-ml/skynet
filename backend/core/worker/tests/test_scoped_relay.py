@@ -215,10 +215,15 @@ def test_budget_service_exposes_its_engine() -> None:
 
 
 def test_secret_forms_stay_bounded_and_decode_only_basic_credentials() -> None:
-    """Add at most seven forms for a secret, and decode only a ``user:password`` token."""
+    """Add at most ten forms for a secret, and decode only a ``user:password`` token."""
     plain = scoped_relay._secret_forms("sk-live-abcdef123456")
     assert plain == {"sk-live-abcdef123456", "c2stbGl2ZS1hYmNkZWYxMjM0NTY"}
 
+    azure = scoped_relay._secret_forms("Zm9v+YmFy/YmF6PQ==")
+    assert {"Zm9v%2BYmFy/YmF6PQ%3D%3D", "Zm9v%2BYmFy%2FYmF6PQ%3D%3D"} <= azure
+    assert len(azure) <= 10
+
     basic = scoped_relay._secret_forms("Basic c3ZjOnB3LXNlY3JldC05")
     assert {"c3ZjOnB3LXNlY3JldC05", "svc:pw-secret-9", "pw-secret-9"} <= basic
-    assert len(basic) <= 7
+    assert "Basic+c3ZjOnB3LXNlY3JldC05" in basic
+    assert len(basic) <= 10

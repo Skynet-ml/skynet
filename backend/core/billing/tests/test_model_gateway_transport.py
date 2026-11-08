@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import quote, quote_plus
 
 import httpx
 import pytest
@@ -1807,6 +1808,43 @@ def test_a_tool_that_echoes_bare_credential_parts_leaks_none_of_them(gateway: Mo
     stored = json.dumps(tool)
     for secret in ("bare-tool-key", "url-password", "query/secret", "query%2Fsecret"):
         assert secret not in stored
+
+
+def test_a_query_key_in_a_failed_tool_url_is_masked_in_the_record(gateway: ModelGateway) -> None:
+    """Mask a URL query key that comes back in the error text, as sent and as the tool re-encodes it.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+    azure = "Zm9v+YmFy/YmF6PQ=="
+    tool_url = f"https://tools.example/mcp?key={quote_plus(azure)}"
+
+    class _Tools:
+        """Fail the way httpx reports an error status: the text holds the full URL."""
+
+        url = tool_url
+        headers: dict[str, str] = {}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Raise an error whose text holds the URL and the key re-encoded with ``quote``."""
+            request = httpx.Request("POST", tool_url)
+            response = httpx.Response(401, request=request)
+            message = f"401 for url '{tool_url}', key {quote(azure)}"
+            raise httpx.HTTPStatusError(message, request=request, response=response)
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    with pytest.raises(httpx.HTTPStatusError):
+        gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {})
+
+    [tool] = store.list_calls("job-1", "cand-1")
+    assert (tool["kind"], tool["status"]) == ("mcp", "failed")
+    assert tool["failure_reason"].count("[REDACTED]") == 2
+    stored = json.dumps(tool)
+    for form in (azure, quote_plus(azure), quote(azure, safe="")):
+        assert form not in stored
 
 
 @pytest.mark.parametrize(

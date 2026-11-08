@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlsplit
 
 import httpx
 import pytest
@@ -711,9 +711,11 @@ def test_relay_records_a_timed_out_or_stopped_send(calls: PostgresRunCallStore, 
 
 
 def test_relay_records_no_encoded_form_of_a_secret_the_server_echoes(calls: PostgresRunCallStore) -> None:
-    """Mask a key the server echoes as base64, URL-safe base64, JSON-escaped, or as a decoded Basic credential."""
+    """Mask a key the server echoes base64-, JSON- or percent-encoded, or as a decoded Basic credential."""
     key = 'user-"judge"/key?~~>123'
     basic = base64.b64encode(b"svc-user:basic-pass-456").decode()
+    # A standard base64 key, as Azure and AWS issue them, changes in a URL query.
+    azure = "Zm9v+YmFy/YmF6PQ=="
 
     def send(_url: str, _headers: dict[str, str], _body: bytes) -> bytes:
         """Echo each encoded form of the filled secrets."""
@@ -724,17 +726,20 @@ def test_relay_records_no_encoded_form_of_a_secret_the_server_echoes(calls: Post
             "basic_token": basic,
             "basic_decoded": "svc-user:basic-pass-456",
             "basic_password": "basic-pass-456",
+            "quoted": quote(key),
+            "quoted_all": quote(key, safe=""),
+            "query": f"https://api.judge.example/v1?key={quote_plus(azure)}",
         }
         return json.dumps(echo).encode()
 
     relay_request(
         url="https://api.judge.example/v1",
-        headers={"X-Key": "${JUDGE_KEY}", "Authorization": "Basic ${BASIC_TOKEN}"},
+        headers={"X-Key": "${JUDGE_KEY}", "Authorization": "Basic ${BASIC_TOKEN}", "X-Azure": "${AZURE_KEY}"},
         body=b"{}",
-        user_secrets={"JUDGE_KEY": key, "BASIC_TOKEN": basic},
+        user_secrets={"JUDGE_KEY": key, "BASIC_TOKEN": basic, "AZURE_KEY": azure},
         bindings={},
-        secret_hosts={"JUDGE_KEY": "api.judge.example", "BASIC_TOKEN": "api.judge.example"},
-        allowed_hosts={"JUDGE_KEY": ["api.judge.example"], "BASIC_TOKEN": ["api.judge.example"]},
+        secret_hosts=dict.fromkeys(("JUDGE_KEY", "BASIC_TOKEN", "AZURE_KEY"), "api.judge.example"),
+        allowed_hosts={name: ["api.judge.example"] for name in ("JUDGE_KEY", "BASIC_TOKEN", "AZURE_KEY")},
         send=send,
         recorder=_recorder(calls),
     )
@@ -746,8 +751,11 @@ def test_relay_records_no_encoded_form_of_a_secret_the_server_echoes(calls: Post
         base64.urlsafe_b64encode(key.encode()).decode().rstrip("="),
         basic,
         "basic-pass-456",
+        quote(key),
+        quote(key, safe=""),
+        quote_plus(azure),
     )
-    assert record["response"].count("[REDACTED]") == 6
+    assert record["response"].count("[REDACTED]") == 9
 
 
 def test_relay_records_a_refused_call_with_its_reason(calls: PostgresRunCallStore) -> None:
