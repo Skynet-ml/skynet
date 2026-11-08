@@ -662,10 +662,99 @@ def test_guard_follows_folder_options(tmp_path: Path, command: str) -> None:
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
 
 
-@pytest.mark.parametrize("command", ["grep -C 3 foo notes.txt", "cd - && cat notes.txt", "cd -P src && cat notes.txt"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -C 3 foo notes.txt",
+        "cd - && cat notes.txt",
+        "cd -P src && cat notes.txt",
+        "git -C a status && git -C b status && git -C c status",
+        "git -C sub status && git -C sub diff && git -C sub log",
+        " && ".join(["grep -C 3 foo f.py"] * 5),
+    ],
+)
 def test_guard_allows_ordinary_option_forms(tmp_path: Path, command: str) -> None:
     """Allow a context count after ``grep -C`` and a ``cd`` option before an ordinary folder."""
     assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) is None
+
+
+@pytest.mark.parametrize(
+    "command", ["cd; cat shinka-run/repo/optimize.toml", "cd && cat shinka-run/repo/optimize.toml"]
+)
+def test_guard_follows_a_bare_cd_to_the_home_folder(tmp_path: Path, command: str) -> None:
+    """Refuse a hidden path after a ``cd`` with no folder, which goes to the home folder."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) == "config"
+    assert harness_bridge.guard_check(policy, "Bash", {"command": "cd; cat notes/optimize.md"}) is None
+
+
+def test_guard_checks_a_call_in_the_folder_the_hook_event_names(tmp_path: Path) -> None:
+    """Refuse a hidden name relative to the event's ``cwd``, as after an earlier ``cd data`` call."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    policy = json.loads(policy_file.read_text())
+    call = {"command": "cat cases.jsonl"}
+    assert harness_bridge.guard_check(policy, "Bash", call) is None
+    assert harness_bridge.guard_check(policy, "Bash", call, "data") == "scoring"
+    assert harness_bridge.guard_check(policy, "Bash", call, str(tmp_path / "work" / "data")) == "scoring"
+    assert harness_bridge.guard_check(policy, "Bash", {"command": "cat score.py"}, "data") is None
+    event = {"tool_name": "Bash", "tool_input": call, "cwd": str(tmp_path / "work" / "data")}
+    assert _guard("hook", policy_file, event)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def _link_tree(workspace: Path, max_target: int) -> list[str]:
+    """Make about 2,000 links whose targets are long runs of parts that are not links.
+
+    Each top link points at mid links, and each mid link at leaf links, so one
+    candidate makes the resolver walk every target. A cap on links alone let
+    this call run for 30 s.
+
+    Args:
+        workspace: The folder that gets the links.
+        max_target: The longest link target the system allows.
+
+    Returns:
+        The names of the top links.
+    """
+
+    def filler(tag: str, budget: int) -> str:
+        """Return a target of ``budget`` characters that ends where it starts."""
+        count = max(0, (budget - len(tag) - 4) // 5)
+        return tag + "/" + "a/" * count + "../" * (count + 1)
+
+    leaves = []
+    for mid in range(44):
+        names = []
+        for leaf in range(44):
+            name = f"L{mid}_{leaf}"
+            (workspace / name).symlink_to(filler(f"q{mid}_{leaf}", max_target))
+            names.append(name)
+        target = "/".join(names) + "/"
+        (workspace / f"M{mid}").symlink_to(target + filler(f"r{mid}", max_target - len(target)))
+        leaves.append(f"M{mid}")
+    target = "/".join(leaves) + "/"
+    (workspace / "T0").symlink_to(target + filler("s0", max_target - len(target)))
+    return ["T0"]
+
+
+def test_guard_denies_a_link_tree_of_long_targets_inside_the_hook_timeout(tmp_path: Path) -> None:
+    """Deny a call whose links point at long paths, well before the 10 s hook timeout."""
+    session = tmp_path / "session"
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    harness_bridge.install_guard(session, workspace, _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    max_target = 1023 if sys.platform == "darwin" else 4095
+    command = "cat " + " ".join(_link_tree(workspace, max_target))
+    started = time.monotonic()
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    # The guard stops at its 5 s deadline or its step cap; CLI start-up adds the rest.
+    assert time.monotonic() - started < 8
 
 
 def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:

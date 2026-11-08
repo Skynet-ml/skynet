@@ -398,8 +398,10 @@ _GUARD_MAX_TEXT = 64_000
 _GUARD_MAX_CHECKS = 8_000
 _GUARD_MAX_PARTS = 32
 # The agent can make links in the workspace, so link resolution is part of the
-# cost. Linux also refuses a path behind more than 40 links (ELOOP).
-_GUARD_MAX_LINKS = 2_000
+# cost. Each path part the resolver looks at counts, link or not, because a
+# link can point at a long path of parts that are not links. Linux also
+# refuses a path behind more than 40 links (ELOOP).
+_GUARD_MAX_LINK_STEPS = 200_000
 _GUARD_MAX_LINK_DEPTH = 40
 _GUARD_DEADLINE_SECONDS = 5.0
 # Options of these commands that name the folder the command works in.
@@ -567,13 +569,18 @@ class _LinkResolver:
     ``os.path.realpath`` follows every link of a chain each time it is called.
     The agent can make long chains, so a call with many candidates could keep
     the guard past the hook timeout. This resolver keeps each link's result and
-    refuses when the call needs too many links.
+    refuses when the call needs too many path steps or runs past its deadline.
     """
 
-    def __init__(self) -> None:
-        """Start with no links read."""
+    def __init__(self, deadline: float) -> None:
+        """Start with no path parts read.
+
+        Args:
+            deadline: The ``time.monotonic()`` value after which the resolver refuses.
+        """
         self._paths: dict[str, str] = {}
-        self._links_left = _GUARD_MAX_LINKS
+        self._steps_left = _GUARD_MAX_LINK_STEPS
+        self._deadline = deadline
 
     def resolve(self, path: str) -> str:
         """Return the real form of an absolute path.
@@ -586,8 +593,8 @@ class _LinkResolver:
             exist stays as it is, as in ``os.path.realpath``.
 
         Raises:
-            ValueError: When the path needs too many links, or a chain is
-                longer than the system allows.
+            ValueError: When the path needs too many steps, a chain is longer
+                than the system allows, or the deadline passes.
         """
         return self._walk("/", path, 0)
 
@@ -601,9 +608,15 @@ class _LinkResolver:
 
         Returns:
             The resolved path.
+
+        Raises:
+            ValueError: When the call needs too many steps, or the deadline passes.
         """
         resolved = "/" if path.startswith("/") else start
         for part in path.split("/"):
+            self._steps_left -= 1
+            if self._steps_left < 0:
+                raise ValueError("too many symbolic links to check")
             if part in ("", "."):
                 continue
             if part == "..":
@@ -623,19 +636,20 @@ class _LinkResolver:
             The link's resolved target, or ``path`` when it is not a link.
 
         Raises:
-            ValueError: When the call needs too many links, or a chain is
-                longer than the system allows.
+            ValueError: When the call needs too many steps, a chain is longer
+                than the system allows, or the deadline passes.
         """
         known = self._paths.get(path)
         if known is not None:
             return known
+        if time.monotonic() > self._deadline:
+            raise ValueError("tool call took too long to check")
         try:
             target = str(Path(path).readlink())
         except OSError:
             self._paths[path] = path
             return path
-        self._links_left -= 1
-        if self._links_left < 0 or depth >= _GUARD_MAX_LINK_DEPTH:
+        if depth >= _GUARD_MAX_LINK_DEPTH:
             raise ValueError("too many symbolic links to check")
         result = self._walk(str(Path(path).parent), target, depth + 1)
         self._paths[path] = result
@@ -682,13 +696,14 @@ def _hidden_match(
     return None
 
 
-def _shell_words(command: str, bases: list[str], depth: int = 0) -> Iterator[str]:
+def _shell_words(command: str, bases: list[str], home: str = "", depth: int = 0) -> Iterator[str]:
     """Yield every word, and every path-like run inside a word, of a shell command.
 
     Args:
         command: Shell command text.
         bases: Receives the directory of each ``cd`` or ``pushd``, and of each
             folder option such as ``env -C`` or ``git -C``, in the command.
+        home: The agent's home folder, where a ``cd`` with no folder goes.
         depth: Nesting level, for quoted scripts such as ``bash -lc '...'``.
 
     Yields:
@@ -710,20 +725,25 @@ def _shell_words(command: str, bases: list[str], depth: int = 0) -> Iterator[str
         option, _, value = word.partition("=")
         if option in _GUARD_DIR_OPTIONS and value:
             bases.append(value)
-        elif word.startswith("-C") and not word.startswith("--") and not word[2:].isdigit():
+        elif word.startswith("-C") and len(word) > 2 and not word.startswith("--") and not word[2:].isdigit():
             bases.append(word[2:])
         # ``cd -P dir`` and ``cd -- dir`` work in ``dir``; a lone ``-`` is the old folder.
         if after_cd and not is_operator and (word == "-" or not word.startswith("-")):
             bases.append(word)
             after_cd = False
         elif is_operator:
+            # A ``cd`` with no folder goes to the home folder.
+            if after_cd and home:
+                bases.append(home)
             after_cd = False
         elif word in _GUARD_CD_WORDS:
             after_cd = True
         yield word
         yield from _GUARD_WORD_RE.findall(word)
         if depth < _GUARD_SHELL_DEPTH and any(character.isspace() for character in word):
-            yield from _shell_words(word, bases, depth + 1)
+            yield from _shell_words(word, bases, home, depth + 1)
+    if after_cd and home:
+        bases.append(home)
 
 
 def _guard_candidates(
@@ -766,7 +786,7 @@ def _guard_candidates(
         if "*** Begin Patch" in value:
             yield from _GUARD_PATCH_RE.findall(value)
         if name in _GUARD_COMMAND_KEYS:
-            yield from _shell_words(value, bases)
+            yield from _shell_words(value, bases, home)
         elif name in _GUARD_BASE_KEYS:
             bases.append(value)
             yield value
@@ -777,13 +797,16 @@ def _guard_candidates(
             yield value
 
 
-def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | None:
+def guard_check(policy: dict[str, Any], tool: str, tool_input: Any, cwd: str | None = None) -> str | None:
     """Tell whether one tool call names a hidden path.
 
     Args:
         policy: Policy from :func:`guard_policy`.
         tool: The harness's tool name.
         tool_input: The tool's arguments.
+        cwd: The folder the call runs in, when the harness reports it. A shell
+            that keeps its folder between calls runs a call after ``cd eval``
+            in ``eval``.
 
     Returns:
         The hidden kind the call names, or ``None`` to let it run.
@@ -798,10 +821,12 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
         raise ValueError("guard policy has no hashes")
     workspace = str(policy.get("workspace") or Path.cwd())
     roots = list(dict.fromkeys([workspace, os.path.realpath(workspace)]))
+    # The call's folder is exact, so it stays out of the cap on named folders.
+    start = [os.path.normpath(Path(roots[0], cwd))] if cwd else []
     named: list[str] = []
     texts: list[str] = []
     home = str(policy.get("home") or "")
-    candidates = list(_guard_candidates(tool, tool_input, roots[0], home, named, texts))
+    candidates = list(_guard_candidates(tool, tool_input, (start or roots)[0], home, named, texts))
     fold = bool(policy.get("fold_case"))
     for text in texts:
         kind = _dynamic_match(text, hashes, fold)
@@ -810,16 +835,16 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
     if len(named) > _GUARD_MAX_BASES:
         raise ValueError("too many directory changes to check")
     # A later cd is relative to an earlier one, so each one extends every known directory.
-    bases = list(roots)
+    bases = list(dict.fromkeys(roots + start))
     for directory in named:
         bases += [os.path.normpath(Path(base, directory)) for base in bases]
         bases = list(dict.fromkeys(bases))
     candidates = list(dict.fromkeys(candidates))
     if len(bases) * sum(1 + candidate.count("/") for candidate in candidates) > _GUARD_MAX_CHECKS:
         raise ValueError("tool call too large to check")
-    links = _LinkResolver()
     # A backstop for a cost the caps above miss, such as a slow file system.
     deadline = time.monotonic() + _GUARD_DEADLINE_SECONDS
+    links = _LinkResolver(deadline)
     for candidate in candidates:
         if time.monotonic() > deadline:
             raise ValueError("tool call took too long to check")
@@ -832,7 +857,8 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
 def guard_main(argv: list[str]) -> int:
     """Answer one tool-call check from a harness hook.
 
-    ``hook`` reads a Codex ``PreToolUse`` event and prints its deny answer.
+    ``hook`` reads a Codex or Claude ``PreToolUse`` event, which also gives
+    the call's folder as ``cwd``, and prints its deny answer.
     ``check`` reads ``{"tool", "input"}`` and prints ``{"reason"}``, with a
     ``null`` reason to let the call run. Each refusal appends only the tool
     and the path kind to the policy log. A guard that cannot answer (a
@@ -859,9 +885,10 @@ def guard_main(argv: list[str]) -> int:
         request = json.loads(sys.stdin.read() or "{}")
         if mode == "hook":
             tool, tool_input = str(request.get("tool_name") or ""), request.get("tool_input")
+            cwd = request.get("cwd") if isinstance(request.get("cwd"), str) else None
         else:
-            tool, tool_input = str(request.get("tool") or ""), request.get("input")
-        kind = guard_check(policy, tool, tool_input)
+            tool, tool_input, cwd = str(request.get("tool") or ""), request.get("input"), None
+        kind = guard_check(policy, tool, tool_input, cwd)
         if kind and policy.get("log"):
             with Path(policy["log"]).open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"tool": tool, "kind": kind}) + "\n")

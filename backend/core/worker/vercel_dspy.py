@@ -166,6 +166,10 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             )
         )
         _require_image_protocol(session, lifetime)
+        # A Codex proposer runs as a contained subprocess of this box and
+        # cannot run as root, so the parent writes and checks the root-owned
+        # file here, before the optimizer starts (SKY-389).
+        session.write_codex_requirements()
         session_root = f".app-dspy-{nonce}"
         snapshot = guest_payload.pop(REPO_SNAPSHOT_KEY, None)
         if isinstance(snapshot, dict):

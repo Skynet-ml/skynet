@@ -41,10 +41,12 @@ from .sandbox import (
     SandboxRuntime,
     SandboxSession,
     SandboxSpec,
+    check_codex_requirements,
     current_sandbox_runtime,
     sandbox_runtime_from_settings,
     sandbox_unavailable_reason,
     unique_sandbox_name,
+    write_codex_requirements,
 )
 from .upstream import (
     AUTORESEARCH_SOURCE,
@@ -993,6 +995,29 @@ def _shinka_editor(options: NativeOptions, relay: str | None) -> dict[str, Any]:
     return {"max_tool_calls": options.proposer.max_tool_calls, "launches": launches}
 
 
+def _require_codex_requirements(runtime: SandboxRuntime, session: SandboxSession) -> None:
+    """Make sure the root-owned Codex requirements file is in place before Codex starts.
+
+    A contained session runs inside an outer box whose parent already wrote the
+    file, and it cannot run as root, so it only reads the file back.
+
+    Args:
+        runtime: The runtime that opened ``session``.
+        session: The proposer's box.
+
+    Raises:
+        ServiceError: When the file cannot be written or does not match.
+    """
+    if getattr(runtime, "contained", False):
+        check_codex_requirements(session)
+        return
+    writer = getattr(session, "write_codex_requirements", None)
+    if writer is not None:
+        writer()
+    else:
+        write_codex_requirements(session)
+
+
 def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
     """Execute an unchanged upstream agent engine inside the managed sandbox.
 
@@ -1176,6 +1201,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         if not installed.ok or installed.timed_out:
             detail = (installed.stderr or installed.stdout)[-2000:]
             raise ServiceError(f"Native optimizer runtime setup failed: {detail}")
+        if not editor and proposer.harness == BLACKBOX_HARNESS_CODEX:
+            _require_codex_requirements(runtime, session)
         env = {
             "ANTHROPIC_BASE_URL": (relay or options.gateway.url).removesuffix("/v1"),
             "ANTHROPIC_AUTH_TOKEN": _INJECTED_KEY_PLACEHOLDER if headers else options.gateway.api_key,

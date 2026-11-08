@@ -305,7 +305,8 @@ def host_refusals(
         hidden_paths: Repository-relative hidden files and folders.
 
     Returns:
-        One ``{"tool", "kind"}`` entry per refusal.
+        One ``{"tool", "kind"}`` entry per refusal. The kind is ``"unknown"``
+        when the check cannot name it.
     """
     if not hidden_paths:
         return []
@@ -318,7 +319,16 @@ def host_refusals(
             if not isinstance(denial, dict):
                 continue
             tool = str(denial.get("tool_name") or "")
-            kind = harness_bridge.guard_check(policy, tool, denial.get("tool_input"))
+            try:
+                kind = harness_bridge.guard_check(policy, tool, denial.get("tool_input"))
+            # The hook refused a call above a cost cap; the turn's work must not be lost for it.
+            except ValueError:
+                kind = "unknown"
+            # A denial does not carry the shell's folder, so a Bash call the guard
+            # refused after a ``cd`` can look clean here. Only a hidden path
+            # denies Bash in a guarded turn.
+            if kind is None and tool == "Bash":
+                kind = "unknown"
             if kind is not None:
                 refusals.append({"tool": tool, "kind": kind})
     return refusals

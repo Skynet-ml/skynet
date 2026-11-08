@@ -457,6 +457,20 @@ def test_session_commands_address_the_container(fake_docker: tuple[str, Path]) -
     assert remove == ["rm", "-f", "box1"]
 
 
+def test_a_root_command_runs_as_the_container_root_user_only_when_asked(fake_docker: tuple[str, Path]) -> None:
+    """Only a ``sudo`` command adds ``-u root`` to ``docker exec``; a plain one keeps the image user."""
+    binary, log = fake_docker
+    session = DockerSandboxSession(binary, "box1", env={}, owner=None)
+
+    session.run("id -u")
+    session.run("id -u", sudo=True)
+    session.close()
+
+    plain, root, _remove = _calls(log)
+    assert "-u" not in plain
+    assert root[:6] == ["exec", "-i", "-u", "root", "-w", "/workspace"]
+
+
 def test_a_planted_shell_profile_never_runs_and_the_env_still_reaches_the_command(
     fake_docker: tuple[str, Path], tmp_path: Path
 ) -> None:

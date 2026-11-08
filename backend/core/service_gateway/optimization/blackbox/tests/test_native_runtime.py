@@ -46,7 +46,14 @@ from .. import (
 from ..harness import GatewayConfig, build_launch, launch_payload
 from ..native_runtime import NativeOptions, _bootstrap_command, check_native_runtime, run_native_engine
 from ..protocol import EvalServer, Result, ScorerAbortError, Task
-from ..sandbox import CommandResult, SandboxSpec
+from ..sandbox import (
+    _CODEX_REQUIREMENTS_CHECK,
+    _CODEX_REQUIREMENTS_COMMAND,
+    _CODEX_REQUIREMENTS_READBACK,
+    CODEX_REQUIREMENTS_PATH,
+    CommandResult,
+    SandboxSpec,
+)
 
 
 class FakeSession:
@@ -66,6 +73,8 @@ class FakeSession:
         self.incomplete_usage = incomplete_usage
         self.no_incumbent = False
         self.candidate: Any = "better"
+        self.requirements: list[tuple[str, dict[str, Any]]] = []
+        self.readback = _CODEX_REQUIREMENTS_READBACK
 
     def write_files(self, files: dict[str, str]) -> None:
         """Persist files as an in-memory child filesystem.
@@ -96,6 +105,9 @@ class FakeSession:
         Returns:
             The scripted process outcome.
         """
+        if CODEX_REQUIREMENTS_PATH in command:
+            self.requirements.append((command, kwargs))
+            return CommandResult(exit_code=0, stdout=self.readback)
         self.calls.append((command, kwargs))
         if len(self.calls) == 1:
             return CommandResult(exit_code=0)
@@ -2041,3 +2053,92 @@ def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> 
 
     assert reason == "Production optimizations run in the managed cloud sandbox."
     assert "vercel" not in reason.lower()
+
+
+class _OrderedSession(FakeSession):
+    """Record how many runner commands ran before the requirements step."""
+
+    def __init__(self, *, own_writer: bool = False) -> None:
+        """Optionally give the session its own requirements writer, as a remote child session has."""
+        super().__init__()
+        self.before: list[int] = []
+        self.writer_calls = 0
+        if own_writer:
+            self.write_codex_requirements = self._write
+
+    def _write(self) -> None:
+        """Stand in for the broker action of a remote child session."""
+        self.before.append(len(self.calls))
+        self.writer_calls += 1
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Note the position of the requirements step, then run the scripted dialogue."""
+        if CODEX_REQUIREMENTS_PATH in command:
+            self.before.append(len(self.calls))
+        return super().run(command, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("contained", "own_writer", "expected"),
+    [
+        (True, False, [(_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})]),
+        (False, False, [(_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})]),
+        (False, True, []),
+    ],
+    ids=["outer-box-check-only", "docker-or-vercel-root-write", "remote-child-broker-action"],
+)
+def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, own_writer: bool, expected: list[Any]
+) -> None:
+    """Each box kind puts the root-owned file in place after setup and before the Codex runner starts."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = _OrderedSession(own_writer=own_writer)
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == expected
+    assert session.writer_calls == (1 if own_writer else 0)
+    assert session.before == [1]
+    assert len(session.calls) == 2
+
+
+@pytest.mark.parametrize("contained", [True, False], ids=["outer-box", "docker-or-vercel"])
+@pytest.mark.parametrize(
+    "readback",
+    ["", _CODEX_REQUIREMENTS_READBACK.replace("root:root:644", "user:user:644")],
+    ids=["missing", "user-owned"],
+)
+def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, readback: str
+) -> None:
+    """A bad read-back fails closed: the runner command never runs and the box closes."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.readback = readback
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex"))
+
+    with pytest.raises(ServiceError, match="Codex cannot start"):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert len(session.requirements) == 1
+    assert len(session.calls) == 1
+    assert session.closed
+
+
+def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a Codex proposer needs the file, so a Pi run never asks for root."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="pi"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == []

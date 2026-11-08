@@ -19,6 +19,9 @@ from core.exceptions import ServiceError
 
 from .. import sandbox as sandbox_mod
 from ..sandbox import (
+    _CODEX_REQUIREMENTS_CHECK,
+    _CODEX_REQUIREMENTS_COMMAND,
+    _CODEX_REQUIREMENTS_READBACK,
     _CREDENTIALS_MISSING,
     _PACKAGE_MISSING,
     KILL_GRACE_SECONDS,
@@ -30,9 +33,11 @@ from ..sandbox import (
     VercelCredentials,
     VercelSandboxRuntime,
     VercelSandboxSession,
+    check_codex_requirements,
     sandbox_runtime_from_settings,
     sandbox_unavailable_reason,
     unique_sandbox_name,
+    write_codex_requirements,
 )
 
 # The Vercel SDK is a declared dependency; skip the settings-availability
@@ -190,9 +195,10 @@ class _FakeBox:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         kill_after: float | None = None,
+        sudo: bool = False,
     ) -> _FakeProcess:
         """Record the invocation, hand back a detached fake process and schedule its exit file."""
-        self.runs.append({"program": program, "args": args, "env": env, "kill_after": kill_after})
+        self.runs.append({"program": program, "args": args, "env": env, "kill_after": kill_after, "sudo": sudo})
         self.fs.land_after(_exit_file(args[-1]), f"{self._returncode}\n", self._polls_to_finish)
         stdout_file, stderr_file = _output_files(args[-1])
         self.fs.files[stdout_file] = self._stdout
@@ -287,6 +293,76 @@ def test_run_without_timeout_has_no_kill_timer() -> None:
     assert result.timed_out is False
     assert result.exit_code == 124
     assert result.stdout == "hi"
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+def test_a_vercel_run_passes_sudo_to_the_provider(sudo: bool) -> None:
+    """A Vercel command runs as root only when the caller asks for it, through the SDK's own option."""
+    box = _FakeBox(returncode=0)
+    VercelSandboxSession(box, _FakeApiSession(), contextvars.copy_context()).run("id -u", sudo=sudo)
+
+    assert box.runs[0]["sudo"] is sudo
+
+
+def test_a_local_session_refuses_a_root_command() -> None:
+    """A local session never runs a command as root on the user's machine."""
+    session = LocalSubprocessSession(SandboxSpec(lifetime_seconds=60))
+    try:
+        with pytest.raises(ServiceError, match="cannot run commands as root"):
+            session.run("id -u", sudo=True)
+    finally:
+        session.close()
+
+
+class _RecordingSession:
+    """Session that records each command and returns one fixed result."""
+
+    def __init__(self, result: CommandResult) -> None:
+        """Keep the result to return."""
+        self.result = result
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Record the command and return the fixed result."""
+        self.calls.append((command, kwargs))
+        return self.result
+
+
+def test_the_codex_requirements_write_runs_the_fixed_command_as_root() -> None:
+    """The write runs one fixed root command, and a matching read-back lets Codex start."""
+    session = _RecordingSession(CommandResult(exit_code=0, stdout=_CODEX_REQUIREMENTS_READBACK))
+
+    write_codex_requirements(session)
+
+    assert session.calls == [(_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})]
+    assert _CODEX_REQUIREMENTS_COMMAND.endswith(_CODEX_REQUIREMENTS_CHECK)
+
+
+def test_the_codex_requirements_check_runs_without_root() -> None:
+    """A contained session only reads the file back and never asks for root."""
+    session = _RecordingSession(CommandResult(exit_code=0, stdout=_CODEX_REQUIREMENTS_READBACK))
+
+    check_codex_requirements(session)
+
+    assert session.calls == [(_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        CommandResult(exit_code=1, stdout=_CODEX_REQUIREMENTS_READBACK),
+        CommandResult(exit_code=0, stdout=_CODEX_REQUIREMENTS_READBACK, timed_out=True),
+        CommandResult(exit_code=1, stdout="", stderr="No such file or directory"),
+        CommandResult(exit_code=0, stdout=_CODEX_REQUIREMENTS_READBACK.replace("root:root:644", "user:user:644")),
+        CommandResult(exit_code=0, stdout=_CODEX_REQUIREMENTS_READBACK.replace("false", "true")),
+    ],
+    ids=["failed", "timed-out", "missing", "user-owned", "wrong-content"],
+)
+@pytest.mark.parametrize("step", [write_codex_requirements, check_codex_requirements])
+def test_a_bad_codex_requirements_read_back_stops_codex(result: CommandResult, step: Any) -> None:
+    """A failed, missing, user-owned or changed file fails closed in the write and the check."""
+    with pytest.raises(ServiceError, match="Codex cannot start"):
+        step(_RecordingSession(result))
 
 
 def test_a_planted_shell_profile_never_runs_in_a_box_command(tmp_path: Path) -> None:

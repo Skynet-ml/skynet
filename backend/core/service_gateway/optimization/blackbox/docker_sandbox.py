@@ -306,6 +306,7 @@ class DockerSandboxSession:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: sandbox_contract.OutputSink | None = None,
+        sudo: bool = False,
     ) -> sandbox_contract.CommandResult:
         """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and stream its output.
 
@@ -314,6 +315,7 @@ class DockerSandboxSession:
             env: Extra environment for this command.
             timeout_seconds: Kill the command after this long.
             on_output: Receives each line of output as it is written.
+            sudo: Run as the container's root user.
 
         Returns:
             Exit code, captured output and whether the timeout fired.
@@ -330,7 +332,8 @@ class DockerSandboxSession:
             deadline = seconds + sandbox_contract.KILL_GRACE_SECONDS
         stream = _env_stream({**self._env, **(env or {})})
         loader = [*_SHELL, _ENV_LOADER, "skynet-env"]
-        argv = [self._docker_bin, "exec", "-i", "-w", WORKSPACE_DIR, self.container, *loader, *inner]
+        user = ["-u", "root"] if sudo else []
+        argv = [self._docker_bin, "exec", "-i", *user, "-w", WORKSPACE_DIR, self.container, *loader, *inner]
         try:
             process = subprocess.Popen(
                 argv,

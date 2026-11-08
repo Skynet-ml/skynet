@@ -1520,6 +1520,22 @@ def test_claude_denials_in_another_case_or_through_home_become_refusals(
     assert refusals == [{"tool": tool, "kind": kind} for tool, kind in zip(["Read"] * 3 + ["Bash"], kinds, strict=True)]
 
 
+def test_claude_denials_the_check_cannot_name_become_unknown_refusals(tmp_path: Path) -> None:
+    """Keep the turn when a denial is above a guard cost cap, or is a Bash denial after a ``cd``."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    denials = [
+        {"tool_name": "Bash", "tool_input": {"command": "echo " + "w " * 40_000}},
+        {"tool_name": "Bash", "tool_input": {"command": "cat cases.jsonl"}},
+        {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com"}},
+    ]
+    stdout = json.dumps({"type": "result", "permission_denials": denials})
+
+    refusals = host_agent.host_refusals("claude", stdout, tmp_path, workspace, _HIDDEN)
+
+    assert refusals == [{"tool": "Bash", "kind": "unknown"}, {"tool": "Bash", "kind": "unknown"}]
+
+
 _CLAUDE = os.environ.get("APP_TEST_CLAUDE") or shutil.which("claude")
 
 
