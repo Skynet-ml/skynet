@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import os
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1122,16 +1124,49 @@ def test_async_session_keeps_box_death_errors_retryable(
         session.close()
 
 
-def test_async_session_close_logs_a_stop_past_the_deadline(
+def test_async_session_close_waits_for_a_teardown_past_the_bridge_deadline(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A stop that outlives the bridge deadline is logged, so the caller keeps its finished result."""
+    """Close calls the shielded stop again, so a slow teardown ends before close returns."""
     monkeypatch.setattr(sync_bridge, "_STOP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(sandbox_mod, "_ASYNC_CLOSE_BUDGET_SECONDS", 5.0)
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60))
+    teardown: dict[str, Any] = {}
+    calls: list[int] = []
+
+    async def finish_teardown() -> None:
+        """Outlive several bridge deadlines, then mark the box stopped."""
+        await anyio.sleep(0.7)
+        teardown["done"] = True
+
+    async def shielded_stop() -> None:
+        """Start the teardown once and wait on it shielded, like the Vercel stop."""
+        calls.append(1)
+        if "task" not in teardown:
+            teardown["task"] = asyncio.ensure_future(finish_teardown())
+        await asyncio.shield(teardown["task"])
+
+    monkeypatch.setattr(session._session.environment, "stop", shielded_stop)
+    with caplog.at_level(logging.ERROR, logger=sandbox_mod.logger.name):
+        session.close()
+    assert teardown.get("done") is True
+    assert len(calls) > 1
+    assert caplog.records == []
+
+
+def test_async_session_close_logs_a_stop_past_the_close_budget(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stop that outlives the close budget is logged, so the caller keeps its finished result."""
+    monkeypatch.setattr(sync_bridge, "_STOP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(sandbox_mod, "_ASYNC_CLOSE_BUDGET_SECONDS", 0.5)
     session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60, tags={"skynet_job": "job-9"}))
+    calls: list[int] = []
 
     async def slow_stop() -> None:
-        """Outlive the shortened stop deadline."""
-        await anyio.sleep(1.0)
+        """Outlive the shortened stop deadline on every call."""
+        calls.append(1)
+        await anyio.sleep(10.0)
 
     monkeypatch.setattr(session._session.environment, "stop", slow_stop)
 
@@ -1142,8 +1177,12 @@ def test_async_session_close_logs_a_stop_past_the_deadline(
         finally:
             session.close()
 
+    started = time.monotonic()
     with caplog.at_level(logging.ERROR, logger=sandbox_mod.logger.name):
         assert finish() == "winner"
+    # The budget plus at most one more bridge deadline, with slack for a loaded host.
+    assert time.monotonic() - started < 0.5 + 0.2 + 1.0
+    assert len(calls) > 1
     [record] = caplog.records
     assert "job-9" in record.getMessage()
     assert record.exc_info is not None

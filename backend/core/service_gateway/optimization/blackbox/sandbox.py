@@ -968,6 +968,17 @@ def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
         raise
 
 
+# The async Vercel teardown waits up to 60 s (``STOP_TIMEOUT`` in
+# ``core/sandbox/providers/vercel.py``) for each of get_sandbox, box.stop,
+# destroy and aclose. The bridge gives one stop call only 30 s, so close calls
+# the idempotent stop again until this budget ends: an early return lets the
+# atexit bridge shutdown cut the teardown and leave the box up (SKY-419 review).
+# The constant is copied, not imported: the factory loads each provider module
+# only when a job selects it, and an import here would load the Vercel SDK for
+# every backend.
+_ASYNC_CLOSE_BUDGET_SECONDS = 4 * 60.0
+
+
 class AsyncBridgeSession:
     """Expose a sync-bridge session through the ``SandboxSession`` protocol."""
 
@@ -1059,17 +1070,29 @@ class AsyncBridgeSession:
 
         Callers close in ``finally`` blocks and catch only usage errors, so any
         other stop failure here would replace a finished result or the real error.
+        A stop that passes the bridge deadline is called again, so close waits
+        for the shielded teardown up to ``_ASYNC_CLOSE_BUDGET_SECONDS``, plus at
+        most one more bridge deadline.
 
         Raises:
             UsagePendingError: When paid usage cannot yet be reconciled.
             BudgetError: When trusted usage violates the reserved bounds.
         """
-        try:
-            self._session.close()
-        except (UsagePendingError, BudgetError):
-            raise
-        except Exception:
-            logger.exception("failed to stop the sandbox of job %s", self.log_owner or "?")
+        deadline = time.monotonic() + _ASYNC_CLOSE_BUDGET_SECONDS
+        while True:
+            try:
+                self._session.close()
+                return
+            except (UsagePendingError, BudgetError):
+                raise
+            except TimeoutError:
+                if time.monotonic() < deadline:
+                    continue
+                logger.exception("failed to stop the sandbox of job %s", self.log_owner or "?")
+                return
+            except Exception:
+                logger.exception("failed to stop the sandbox of job %s", self.log_owner or "?")
+                return
 
 
 class AsyncBridgeRuntime:
