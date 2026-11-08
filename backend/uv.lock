@@ -4463,7 +4463,7 @@ training = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
-    { name = "anyio", specifier = "==4.14.2" },
+    { name = "anyio", specifier = ">=4.14" },
     { name = "build123d", marker = "extra == 'render'", specifier = ">=0.11" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "dspy", specifier = ">=3.3.1,<3.4" },

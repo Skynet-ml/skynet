@@ -324,3 +324,73 @@ def test_invalid_policy_raises(kwargs: dict[str, object]) -> None:
     """Reject out-of-range or wrongly typed fields."""
     with pytest.raises((TypeError, ValueError)):
         RetryPolicy(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "leaf",
+    [
+        UsagePendingError("pending"),
+        BudgetError("over budget"),
+        SandboxRejectedError("bad request"),
+        SandboxFatalError("auth"),
+        RunTimeoutError(5),
+        KeyboardInterrupt(),
+    ],
+)
+@pytest.mark.parametrize("include", [(), (Exception,)])
+def test_group_with_one_unsafe_leaf_never_retries(
+    leaf: BaseException, include: tuple[type[BaseException], ...]
+) -> None:
+    """Refuse a retry when any error in a nested exception group is refused."""
+    policy = RetryPolicy(max_retries=2, include=include)
+    nested = BaseExceptionGroup("outer", [SandboxTransientError("503"), BaseExceptionGroup("inner", [leaf])])
+    assert policy.should_retry(nested) is False
+
+
+def test_group_retries_only_when_every_leaf_retries() -> None:
+    """Retry a group of retryable errors, and honor exclude on the group."""
+    group = ExceptionGroup("tg", [SandboxTransientError("503"), ExceptionGroup("inner", [StartTimeoutError(1)])])
+    assert RetryPolicy(max_retries=1).should_retry(group) is True
+    assert RetryPolicy(max_retries=1, exclude=(ExceptionGroup,)).should_retry(group) is False
+    assert RetryPolicy(max_retries=1).should_retry(ExceptionGroup("tg", [RuntimeError("unknown")])) is False
+
+
+async def test_task_group_billing_error_runs_once() -> None:
+    """Stop after one attempt when a TaskGroup child raises a budget error."""
+    keys: list[str] = []
+
+    async def operation(key: str) -> None:
+        """Record the key, then fail inside a TaskGroup.
+
+        Args:
+            key: The attempt's operation key.
+
+        Raises:
+            ExceptionGroup: The TaskGroup error that wraps ``UsagePendingError``.
+        """
+        keys.append(key)
+
+        async def child() -> None:
+            """Raise the budget error."""
+            raise UsagePendingError("pending")
+
+        async with asyncio.TaskGroup() as group:
+            group.create_task(child())
+
+    with pytest.raises(ExceptionGroup):
+        await run_with_retry(operation, "op", RetryPolicy(max_retries=3, include=(Exception,), **FAST))
+    assert keys == ["op:attempt-1"]
+
+
+class _NoGroupTimeoutError(PhaseTimeoutError):
+    """Name a phase but no error group, like a new phase before it gets a row."""
+
+    phase = "test"
+
+
+@pytest.mark.parametrize("error", [SandboxError("bare"), _NoGroupTimeoutError(1)])
+def test_base_errors_without_group_are_unknown(error: SandboxError) -> None:
+    """Classify a base sandbox error as unknown, so it never retries by default."""
+    assert classify(error) is None
+    assert RetryPolicy(max_retries=1).should_retry(error) is False
+    assert RetryPolicy(max_retries=1, include=(SandboxError,)).should_retry(error) is True

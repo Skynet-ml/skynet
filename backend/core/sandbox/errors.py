@@ -172,7 +172,9 @@ def classify(exc: BaseException) -> ErrorGroup | None:
         The error group, or ``None`` when the error is unknown.
     """
     if isinstance(exc, SandboxError):
-        return exc.group
+        # The base classes SandboxError and PhaseTimeoutError set no group, so
+        # they stay unknown.
+        return getattr(exc, "group", None)
     if is_billing_error(exc):
         return ErrorGroup.REJECTED
     if isinstance(exc, asyncio.CancelledError):

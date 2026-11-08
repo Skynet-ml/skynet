@@ -68,7 +68,8 @@ class RetryPolicy:
     ``max_retries`` counts the retries after the first attempt. With
     ``include`` empty, only the errors in a retryable group retry. With
     ``include`` set, only the named classes retry, and only when their group
-    is retryable or unknown. ``include`` never opens the no-retry groups
+    is retryable or unknown. An exception group retries only when every
+    error in it retries. ``include`` never opens the no-retry groups
     (rejected, fatal, run outcome), budget errors, cancellation, or a
     ``BaseException`` that is not an ``Exception``. ``exclude`` always narrows.
     """
@@ -121,9 +122,13 @@ class RetryPolicy:
         # KeyboardInterrupt, SystemExit and GeneratorExit must stop the loop.
         if not isinstance(exc, Exception):
             return False
-        if is_billing_error(exc) or isinstance(exc, asyncio.CancelledError):
-            return False
         if self.exclude and isinstance(exc, self.exclude):
+            return False
+        # A TaskGroup wraps its child errors, so one budget error or no-retry
+        # error inside the group must still stop the loop.
+        if isinstance(exc, BaseExceptionGroup):
+            return all(self.should_retry(leaf) for leaf in exc.exceptions)
+        if is_billing_error(exc) or isinstance(exc, asyncio.CancelledError):
             return False
         group = classify(exc)
         # A run-outcome retry repeats a paid agent run, so include cannot open
