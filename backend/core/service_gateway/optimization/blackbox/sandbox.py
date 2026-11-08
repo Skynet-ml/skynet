@@ -39,6 +39,10 @@ from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelUsageReservation
 from ....config import Settings, app_env, with_legacy_env
 from ....exceptions import ServiceError
+from ....sandbox import ExecResult, ResourceRequest
+from ....sandbox import SandboxSpec as AsyncSandboxSpec
+from ....sandbox.factory import create_environment, load_provider
+from ....sandbox.sync_bridge import SyncSession, open_session
 from . import docker_sandbox
 from .sandbox_contract import (
     _TIMEOUT_EXIT_CODES,
@@ -925,6 +929,123 @@ class ContainedSubprocessRuntime:
         return LocalSubprocessSession(replace(spec, env=environment), protected_relay=relay)
 
 
+class AsyncBridgeSession:
+    """Expose a sync-bridge session through the ``SandboxSession`` protocol."""
+
+    def __init__(self, session: SyncSession) -> None:
+        """Wrap a started bridge session.
+
+        Args:
+            session: The bridge session over a started async environment.
+        """
+        self._session = session
+
+    def write_files(self, files: Mapping[str, str]) -> None:
+        """Write text files at paths relative to the working directory.
+
+        Args:
+            files: Relative path → content.
+        """
+        self._session.write_files(files)
+
+    def run(
+        self,
+        command: str,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+        on_output: OutputSink | None = None,
+        sudo: bool = False,
+    ) -> CommandResult:
+        """Run one shell command in the sandbox and wait for it.
+
+        Args:
+            command: Shell command line.
+            env: Extra environment for this command.
+            timeout_seconds: Kill the command after this long.
+            on_output: Receives each new piece of output. It runs on the bridge thread.
+            sudo: Run as root.
+
+        Returns:
+            Exit code, captured output and whether the timeout fired.
+        """
+        result: ExecResult = self._session.run(
+            command, env=env, timeout_seconds=timeout_seconds, on_output=on_output, sudo=sudo
+        )
+        # Callers read ``ok`` as "exit code 0"; the async result also counts a timeout.
+        return CommandResult(
+            exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out
+        )
+
+    def read_file(self, path: str) -> str | None:
+        """Return the text of ``path``, or ``None`` when it does not exist.
+
+        Args:
+            path: Relative file path.
+
+        Returns:
+            The file's text, or ``None``.
+        """
+        return self._session.read_file(path)
+
+    def close(self) -> None:
+        """Stop the sandbox."""
+        self._session.close()
+
+
+class AsyncBridgeRuntime:
+    """Open sandboxes of one async ``core.sandbox`` provider through the sync bridge (SKY-419)."""
+
+    def __init__(self, provider: str) -> None:
+        """Bind the runtime to a provider and check that this build can load it.
+
+        Args:
+            provider: A provider name from ``core.sandbox.factory.PROVIDERS``.
+
+        Raises:
+            SandboxFatalError: The provider is unknown, missing from this
+                build, or not allowed in production.
+        """
+        self.provider = provider
+        self.injects_headers = load_provider(provider).capabilities.injects_headers
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Create and start a sandbox per ``spec``.
+
+        Args:
+            spec: Lifetime, environment, image, header injection and labels for the sandbox.
+
+        Returns:
+            The session over the new sandbox.
+        """
+        environment = create_environment(self.provider, _async_spec(spec))
+        return AsyncBridgeSession(open_session(environment))
+
+
+def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
+    """Convert a blackbox sandbox spec to the async provider spec.
+
+    Args:
+        spec: The blackbox spec.
+
+    Returns:
+        The same sandbox, with ``vcpus`` moved into the resource request.
+    """
+    return AsyncSandboxSpec(
+        lifetime_seconds=spec.lifetime_seconds,
+        resources=ResourceRequest(cpus=spec.vcpus),
+        env=spec.env,
+        name=spec.name,
+        tags=spec.tags,
+        image=spec.image,
+        inject_headers=spec.inject_headers,
+        network_disabled=spec.network_disabled,
+        allowed_hosts=spec.allowed_hosts,
+        operation_key=spec.operation_key,
+        private=spec.private,
+    )
+
+
 def sandbox_unavailable_reason(settings: Settings) -> str | None:
     """Explain why this deployment cannot create agent sandboxes, or return ``None``.
 
@@ -951,17 +1072,24 @@ def sandbox_runtime_from_settings(settings: Settings) -> SandboxRuntime | None:
     """Build the deployment's runtime from settings, or return ``None`` when unconfigured.
 
     Local mode builds the local Docker runtime; every other deployment builds Vercel.
+    With ``sandbox_backend = "async"`` the same provider comes from
+    ``core.sandbox`` through the sync bridge instead.
 
     Args:
         settings: The backend settings.
 
     Returns:
         A runtime, or ``None`` when :func:`sandbox_unavailable_reason` is set.
+
+    Raises:
+        SandboxFatalError: The async backend cannot load its provider.
     """
     if current_sandbox_runtime() is not None:
         return current_sandbox_runtime()
     if sandbox_unavailable_reason(settings) is not None:
         return None
+    if settings.sandbox_backend == "async":
+        return AsyncBridgeRuntime("docker" if settings.local_mode else "vercel")
     if settings.local_mode:
         return docker_sandbox.docker_runtime_from_settings(settings)
     return VercelSandboxRuntime(

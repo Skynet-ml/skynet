@@ -13,9 +13,13 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
 from core.exceptions import ServiceError
+from core.sandbox import factory as sandbox_factory
+from core.sandbox.factory import ProviderEntry, UnknownProviderError
+from core.sandbox.tests.fake_provider import InMemorySandbox
 
 from .. import sandbox as sandbox_mod
 from ..sandbox import (
@@ -26,6 +30,8 @@ from ..sandbox import (
     _PACKAGE_MISSING,
     KILL_GRACE_SECONDS,
     SANDBOX_TAG,
+    AsyncBridgeRuntime,
+    AsyncBridgeSession,
     CommandResult,
     LocalSubprocessRuntime,
     LocalSubprocessSession,
@@ -46,6 +52,7 @@ _SDK_PRESENT = sandbox_mod.vercel_sync is not None and sandbox_mod.vercel_api is
 _needs_sdk = pytest.mark.skipif(not _SDK_PRESENT, reason="the Vercel Sandbox SDK is not installed")
 
 _VERCEL_ENV = (
+    "SANDBOX_BACKEND",
     "VERCEL_TOKEN",
     "VERCEL_TEAM_ID",
     "VERCEL_PROJECT_ID",
@@ -881,3 +888,62 @@ def test_disable_network_fails_closed_without_confirmation(echoed: Any) -> None:
     session = VercelSandboxSession(_PolicyBox(echoed), _FakeApiSession(), contextvars.copy_context())
     with pytest.raises(ServiceError):
         session.disable_network()
+
+
+_VERCEL_CREDS = {"vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
+
+
+@_needs_sdk
+def test_legacy_backend_returns_the_sync_vercel_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``legacy`` is the default and builds the same sync runtime as before SKY-419."""
+    default = _settings(monkeypatch, **_VERCEL_CREDS)
+    explicit = _settings(monkeypatch, **_VERCEL_CREDS, sandbox_backend="legacy")
+
+    assert default.sandbox_backend == "legacy"
+    for configured in (default, explicit):
+        runtime = sandbox_runtime_from_settings(configured)
+        assert type(runtime) is VercelSandboxRuntime
+        assert runtime.injects_headers is True
+
+
+@_needs_sdk
+def test_async_backend_returns_the_bridge_for_the_configured_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``async`` opens the configured provider through the sync bridge; a fake stands in for Vercel."""
+    monkeypatch.setitem(
+        sandbox_factory.PROVIDERS,
+        "vercel",
+        ProviderEntry("core.sandbox.tests.fake_provider", "InMemorySandbox", None, True),
+    )
+    runtime = sandbox_runtime_from_settings(_settings(monkeypatch, **_VERCEL_CREDS, sandbox_backend="async"))
+
+    assert isinstance(runtime, AsyncBridgeRuntime)
+    assert runtime.provider == "vercel"
+    assert runtime.injects_headers is True
+    session = runtime.open(SandboxSpec(lifetime_seconds=60, env={"GREETING": "hi"}, vcpus=4))
+    assert isinstance(session, AsyncBridgeSession)
+    environment = session._session.environment
+    assert isinstance(environment, InMemorySandbox)
+    assert environment.spec.resources.cpus == 4
+    session.write_files({"a.txt": "alpha"})
+    assert session.read_file("a.txt") == "alpha"
+    assert session.read_file("missing.txt") is None
+    result = session.run("printenv GREETING")
+    assert isinstance(result, CommandResult)
+    assert result.ok
+    assert result.stdout.strip() == "hi"
+    assert session.run("exit 3") == CommandResult(exit_code=3)
+    session.close()
+    assert environment.running is False
+
+
+def test_unknown_sandbox_backend_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A value other than ``legacy`` or ``async`` stops the settings from loading."""
+    monkeypatch.setenv("SANDBOX_BACKEND", "turbo")
+    with pytest.raises(ValidationError, match=r"sandbox_backend|SANDBOX_BACKEND"):
+        Settings(_env_file=None)
+
+
+def test_async_runtime_refuses_an_unknown_provider() -> None:
+    """The bridge runtime checks its provider when it is built, not on the first open."""
+    with pytest.raises(UnknownProviderError):
+        AsyncBridgeRuntime("nope")
