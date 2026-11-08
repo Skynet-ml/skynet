@@ -10,7 +10,10 @@ from ``harbor/environments/sail.py``. Changes:
   maps to ``SandboxInfraError``, because the SDK error classes are not known.
 - The start and run phase timeouts bound the create and each command. A
   create that a timeout or a stop cancels gets a short grace to return its
-  handle, as in Harbor, so the box can still be terminated.
+  handle, as in Harbor, so the box can still be terminated. Unlike Harbor,
+  a create that is still running when the grace ends, or when a second
+  cancel comes, is not dropped: a callback terminates its box when the
+  handle arrives.
 - Every Sailbox gets ``max_lifetime_seconds`` from the spec lifetime, so Sail
   ends a box that a lost process never stops.
 - The spec sizes map to ``Sailbox.size_for``. The spec image comes from a
@@ -72,6 +75,9 @@ SAIL_CAPABILITIES = EnvironmentCapabilities(
 
 # Process-local: the sweep sees only the boxes that this process started.
 _JOB_BOXES: dict[str, set[SailEnvironment]] = {}
+# Strong references to the creates that outlive their start, and to the
+# terminate calls of their late boxes, so the event loop does not drop them.
+_LATE_TASKS: set[asyncio.Future[Any]] = set()
 
 
 @contextlib.contextmanager
@@ -111,6 +117,34 @@ async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
         logger.warning("Sail could not %s: %s", action, type(error).__name__)
         return False
     return True
+
+
+def _terminate_late(create: asyncio.Future[Any]) -> None:
+    """Terminate the box of a create that outlives its start, when it arrives.
+
+    Args:
+        create: The create task. It can still run or be done already.
+    """
+    _LATE_TASKS.add(create)
+    create.add_done_callback(_on_late_create)
+
+
+def _on_late_create(create: asyncio.Future[Any]) -> None:
+    """Start the terminate call for the box of a late create.
+
+    Args:
+        create: The finished create task.
+    """
+    _LATE_TASKS.discard(create)
+    if create.cancelled():
+        return
+    error = create.exception()
+    if error is not None:
+        logger.warning("A late Sailbox create failed: %s", type(error).__name__)
+        return
+    terminate = asyncio.ensure_future(_bounded(create.result().terminate.aio(), "terminate a late Sailbox"))
+    _LATE_TASKS.add(terminate)
+    terminate.add_done_callback(_LATE_TASKS.discard)
 
 
 def _egress_policy(*, disabled: bool, allowed_hosts: tuple[str, ...]) -> Any:
@@ -190,6 +224,7 @@ class SailEnvironment(SandboxEnvironment):
         self._sailbox: Any = None
         self._create_task: asyncio.Future[Any] | None = None
         self._starting: asyncio.Future[None] | None = None
+        self._settling = False
         self._started = False
         self._terminated = False
         self._stop_task: asyncio.Future[None] | None = None
@@ -279,15 +314,31 @@ class SailEnvironment(SandboxEnvironment):
             raise StartTimeoutError(limit) from None
 
     async def _settle_create(self) -> None:
-        """Give a cancelled create ``CREATE_GRACE`` seconds to return the box."""
+        """Give a cancelled create ``CREATE_GRACE`` seconds to return the box.
+
+        A create that is still running when the grace ends, or when a second
+        cancel comes, goes to ``_terminate_late``. The server can still make
+        the box after the client gives up, so a cancel of the create would
+        lose the handle while the box runs until its lifetime limit.
+        """
         task = self._create_task
         if task is None:
             return
+        self._settling = True
         try:
-            self._keep(await asyncio.wait_for(task, CREATE_GRACE))
-        except (asyncio.CancelledError, Exception) as error:
-            task.cancel()
-            logger.warning("Sail did not return a cancelled Sailbox create: %s", type(error).__name__)
+            sailbox = await asyncio.wait_for(asyncio.shield(task), CREATE_GRACE)
+        except asyncio.CancelledError:
+            _terminate_late(task)
+            logger.warning("A second cancel came during the Sailbox create grace.")
+        except TimeoutError:
+            _terminate_late(task)
+            logger.warning("Sail did not return a cancelled Sailbox create within the grace.")
+        except Exception as error:
+            logger.warning("A cancelled Sailbox create failed: %s", type(error).__name__)
+        else:
+            self._keep(sailbox)
+        finally:
+            self._settling = False
 
     def _keep(self, sailbox: Any) -> None:
         """Keep the Sailbox handle and list the box under its job.
@@ -355,7 +406,9 @@ class SailEnvironment(SandboxEnvironment):
         except TimeoutError:
             raise RunTimeoutError(limit) from None
         if result.timed_out:
-            raise RunTimeoutError(limit)
+            # Without a limit, Sail ended the command at its own default
+            # limit, which the provider does not know; 0 marks it as unknown.
+            raise RunTimeoutError(limit if limit is not None else 0)
         if result.stdout_truncated or result.stderr_truncated:
             logger.warning("Sail kept only the last %d MiB of a command output stream.", OUTPUT_BUFFER_BYTES >> 20)
         sink = on_output or current_output_sink()
@@ -395,8 +448,8 @@ class SailEnvironment(SandboxEnvironment):
             The file text, or ``None`` when the file does not exist.
 
         Raises:
-            SandboxInfraError: The Sailbox is not running, or the read failed
-                for a file that exists.
+            SandboxInfraError: The Sailbox is not running, the read failed
+                for a file that exists, or the file is not UTF-8 text.
         """
         sailbox = self._require_sailbox()
         chunks: list[bytes] = []
@@ -413,7 +466,11 @@ class SailEnvironment(SandboxEnvironment):
             if probe.exit_code == 1:
                 return None
             raise
-        return b"".join(chunks).decode("utf-8")
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError:
+            # The message names no bytes, so no file content reaches the logs.
+            raise SandboxInfraError("Sail read a file that is not UTF-8 text.") from None
 
     async def _apply_network_policy(self, policy: NetworkPolicy) -> None:
         """Send a new egress policy to the running Sailbox.
@@ -438,12 +495,16 @@ class SailEnvironment(SandboxEnvironment):
 
     async def _teardown(self) -> None:
         """End a running start, then terminate the Sailbox."""
-        if self._starting is not None and not self._starting.done():
+        starting = self._starting
+        if starting is not None and not starting.done():
             # A stop during the start: end the create first, so its box handle
-            # is known before this teardown looks for it.
-            self._starting.cancel()
+            # is known before this teardown looks for it. A create in its
+            # grace already had its cancel; a second cancel would end the
+            # grace before the handle arrives.
+            if not self._settling:
+                starting.cancel()
             with contextlib.suppress(BaseException):
-                await self._starting
+                await asyncio.wait_for(asyncio.shield(starting), CREATE_GRACE + STOP_TIMEOUT)
         sailbox, self._sailbox = self._sailbox, None
         if sailbox is None:
             return

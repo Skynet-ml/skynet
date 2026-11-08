@@ -410,6 +410,7 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
         monkeypatch.setattr(sail, name, value)
     monkeypatch.setattr(sail, "STOP_TIMEOUT", 1.0)
     monkeypatch.setattr(sail, "_JOB_BOXES", {})
+    monkeypatch.setattr(sail, "_LATE_TASKS", set())
     return CLOUD
 
 
@@ -569,6 +570,14 @@ async def test_a_timed_out_command_raises(fake_sdk: FakeCloud) -> None:
             await env.exec("true", timeout_sec=1)
 
 
+async def test_a_timed_out_command_without_a_limit_raises(fake_sdk: FakeCloud) -> None:
+    """Raise RunTimeoutError when Sail reports a timeout and no limit is set."""
+    async with SailEnvironment(_spec()) as env:
+        fake_sdk.exec_times_out = True
+        with pytest.raises(RunTimeoutError):
+            await env.exec("true")
+
+
 async def test_a_hung_run_call_raises_a_run_timeout(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
     """End a run call that the SDK never returns, after the limit and the grace."""
     monkeypatch.setattr(sail, "EXEC_GRACE", 0.01)
@@ -606,6 +615,17 @@ async def test_download_probes_after_an_unknown_read_error(fake_sdk: FakeCloud) 
             await env.download_file("/tmp/here.txt")
 
 
+async def test_a_non_utf8_download_is_infra_without_the_bytes(fake_sdk: FakeCloud) -> None:
+    """Map a file that is not UTF-8 to SandboxInfraError, with no file bytes in the message."""
+    async with SailEnvironment(_spec()) as env:
+        await env.upload_files({"/tmp/b.bin": "x"})
+        env._sailbox._box.files["/tmp/b.bin"] = b"\xff\xfe secret"
+        with pytest.raises(SandboxInfraError, match="not UTF-8") as info:
+            await env.download_file("/tmp/b.bin")
+    assert "secret" not in str(info.value)
+    assert "xff" not in str(info.value)
+
+
 async def test_a_create_error_is_infra_and_leaves_no_box(fake_sdk: FakeCloud) -> None:
     """Map an SDK create error to SandboxInfraError, with one create call."""
     fake_sdk.create_error = FakeSailError("quota")
@@ -623,14 +643,115 @@ async def test_a_start_timeout_terminates_the_late_box(fake_sdk: FakeCloud) -> N
     assert [box.terminated for box in fake_sdk.boxes] == [True]
 
 
-async def test_a_create_past_the_grace_is_cancelled(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cancel a create that does not return within the grace."""
+def _server_side_create(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the fake create act like a real cloud call.
+
+    Once the request is sent, the server makes the box even when the client
+    cancels its wait.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    server_work: set[asyncio.Future[Any]] = set()
+
+    async def make_box(params: dict[str, Any]) -> FakeSailbox:
+        """Make the box after the delay that the fake cloud sets.
+
+        Args:
+            params: The create parameters.
+
+        Returns:
+            The Sailbox handle.
+        """
+        await asyncio.sleep(CLOUD.create_delay)
+        box = BoxState(id=f"sb-{next(CLOUD.ids)}", params=params, egress=params["egress_policy"])
+        CLOUD.boxes.append(box)
+        return FakeSailbox(box)
+
+    async def create(**params: Any) -> FakeSailbox:
+        """Send the create request and wait for the box.
+
+        Args:
+            **params: The create parameters.
+
+        Returns:
+            The Sailbox handle.
+        """
+        CLOUD.create_calls += 1
+        CLOUD.create_started.set()
+        server = asyncio.ensure_future(make_box(params))
+        server_work.add(server)
+        return await asyncio.shield(server)
+
+    monkeypatch.setattr(FakeSailbox, "create", _aio(create))
+
+
+async def _late_tasks_done() -> None:
+    """Wait until every late create and its terminate call end."""
+    async with asyncio.timeout(5):
+        # A late create adds its terminate call to the set when it ends.
+        while sail._LATE_TASKS:
+            await asyncio.wait(set(sail._LATE_TASKS))
+            await asyncio.sleep(0)
+
+
+async def test_a_create_past_the_grace_is_terminated_when_it_returns(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep a create that outlives the grace, and terminate its box when it arrives."""
     monkeypatch.setattr(sail, "CREATE_GRACE", 0.01)
-    fake_sdk.create_delay = 5
+    _server_side_create(monkeypatch)
+    fake_sdk.create_delay = 0.2
     with pytest.raises(StartTimeoutError):
         await SailEnvironment(_spec(), timeouts=_timeouts(start=0.01)).start()
-    await asyncio.sleep(0)
     assert fake_sdk.boxes == []
+    await _late_tasks_done()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+
+
+async def test_a_single_cancel_of_a_server_side_create_terminates_the_box(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminate the box after a start timeout, inside the grace."""
+    _server_side_create(monkeypatch)
+    fake_sdk.create_delay = 0.2
+    with pytest.raises(StartTimeoutError):
+        await SailEnvironment(_spec(), timeouts=_timeouts(start=0.05)).start()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    assert not sail._LATE_TASKS
+
+
+async def test_a_stop_during_the_create_grace_terminates_the_box(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wait for the box in the grace when a stop comes, then terminate it."""
+    _server_side_create(monkeypatch)
+    fake_sdk.create_delay = 0.3
+    env = SailEnvironment(_spec(tags={JOB_TAG: "job-grace"}), timeouts=_timeouts(start=0.05))
+    starting = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.15)
+    await env.stop()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
+    with pytest.raises(StartTimeoutError):
+        await starting
+    assert sail._JOB_BOXES == {}
+
+
+async def test_a_second_cancel_during_the_create_grace_terminates_the_box(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass the cancel on, and terminate the late box when the handle arrives."""
+    _server_side_create(monkeypatch)
+    fake_sdk.create_delay = 0.3
+    starting = asyncio.ensure_future(SailEnvironment(_spec()).start())
+    await fake_sdk.create_started.wait()
+    starting.cancel()
+    await asyncio.sleep(0.05)
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    await _late_tasks_done()
+    assert [box.terminated for box in fake_sdk.boxes] == [True]
 
 
 async def test_a_stop_during_start_terminates_the_box(fake_sdk: FakeCloud) -> None:
