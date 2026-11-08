@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -38,6 +39,10 @@ ENGINE_BOX_KEY_PREFIX = "native-engine:"
 _ENGINE_BOX_PERMITS = threading.BoundedSemaphore(NATIVE_BOX_LIMIT)
 # An open that waits for a permit checks this often whether its broker closed.
 _PERMIT_POLL_SECONDS = 1.0
+# RemoteSandboxRuntime gives an open max(90, lifetime + 60) seconds. Waiting at
+# most max(30, lifetime) for a permit leaves the box creation 60 of them, so the
+# parent never opens a paid box after its child gave up on the open.
+_PERMIT_WAIT_FLOOR_SECONDS = 30.0
 
 
 class SandboxCommandRunner(Protocol):
@@ -78,6 +83,10 @@ class _OwnedSession:
 
 def _close_owned(owned: _OwnedSession) -> None:
     """Close one guest box, and give back its engine box permit even when the close fails.
+
+    The caller already removed the box, so nothing else could release its permit
+    later. A box that outlives a failed close is stopped by the worker's sweep of
+    the job's tag.
 
     Args:
         owned: A box the caller just removed from its broker, so no one else releases it.
@@ -388,7 +397,7 @@ class SandboxBroker:
         engine = request_id.startswith(ENGINE_BOX_KEY_PREFIX)
         try:
             if engine:
-                self._take_engine_permit()
+                self._take_engine_permit(max(_PERMIT_WAIT_FLOOR_SECONDS, lifetime))
             try:
                 session = self._runtime.open(
                     SandboxSpec(
@@ -421,20 +430,29 @@ class SandboxBroker:
             with self._lock:
                 self._opening.discard(request_id)
 
-    def _take_engine_permit(self) -> None:
+    def _take_engine_permit(self, wait_seconds: float) -> None:
         """Wait for one engine box permit, and stop waiting when this broker closes.
 
-        A user cancel stops the job's child process, and the job's teardown closes
+        A user cancel stops the job's child process, and the job's teardown stops
         its broker, so a waiting open for a cancelled job ends here.
 
+        Args:
+            wait_seconds: The most seconds to wait, shorter than the child's wait.
+
         Raises:
-            ServiceError: When the broker closes before a permit is free.
+            ServiceError: When the broker closes, or no permit is free in time.
         """
         if not _ENGINE_BOX_PERMITS.acquire(blocking=False):
             logger.info("sandbox broker: waiting for one of the %d engine box permits", NATIVE_BOX_LIMIT)
-            while not _ENGINE_BOX_PERMITS.acquire(timeout=_PERMIT_POLL_SECONDS):
+            deadline = time.monotonic() + wait_seconds
+            while True:
                 if self._closed:
                     raise ServiceError("The sandbox broker is closed.")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ServiceError("Every engine box permit stayed in use, so the engine box did not open.")
+                if _ENGINE_BOX_PERMITS.acquire(timeout=min(_PERMIT_POLL_SECONDS, remaining)):
+                    break
         if self._closed:
             _ENGINE_BOX_PERMITS.release()
             raise ServiceError("The sandbox broker is closed.")
@@ -593,6 +611,15 @@ class SandboxBroker:
         if self._command_runner is not None:
             return self._command_runner(owned.session, command, **options)
         return owned.session.run(command, **options)
+
+    def stop_waiting(self) -> None:
+        """Refuse new boxes, and end every open that still waits for an engine box permit.
+
+        The gateway calls this before it joins its request threads, because a
+        waiting open would hold that join until another job frees a permit.
+        """
+        with self._lock:
+            self._closed = True
 
     def close(self) -> None:
         """Stop every owned sandbox, preserving any failed settlement for reconciliation.

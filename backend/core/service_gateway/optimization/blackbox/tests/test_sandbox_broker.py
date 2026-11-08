@@ -6,15 +6,21 @@ import json
 import threading
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
-from core.billing.runtime import UsagePendingError
+from core.billing.budgets import BudgetService
+from core.billing.model_gateway import ModelGateway
+from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
+from core.storage.models import Base, BillingCustomerModel
 
 from .. import sandbox_broker
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
@@ -649,3 +655,80 @@ def test_scorer_and_pool_boxes_open_while_the_run_holds_the_only_permit(monkeypa
     assert _free_permits(permits, 1) == 0
     broker.close()
     assert _free_permits(permits, 1) == 1
+
+
+def _setup_gateway(tmp_path: Path) -> ModelGateway:
+    """Start a real model gateway on a throwaway SQLite budget, as a job's setup phase holds it.
+
+    Args:
+        tmp_path: Pytest directory for the SQLite file.
+
+    Returns:
+        The running gateway.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'gateway.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(BillingCustomerModel(username="alice", stripe_customer_id="f", balance_cents=50, grant_remaining=0))
+        session.commit()
+    ledger = BudgetService(engine=engine)
+    budget = ledger.create("alice", 20, idempotency_key="f")
+    return ModelGateway(BudgetRuntime(ledger, username="alice", budget_id=budget.id, generation=0, phase="setup"))
+
+
+def test_gateway_close_ends_a_waiting_engine_open_and_opens_no_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Job teardown does not wait for another job's permit, and the waiting open never opens a box."""
+    permits = _limit_engine_boxes(monkeypatch, 1)
+    assert permits.acquire(blocking=False)
+    runtime = FakeRuntime()
+    gateway = _setup_gateway(tmp_path)
+    gateway.bind_sandbox(SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=10), image=IMAGE, lifetime_seconds=10)
+    child = RemoteSandboxRuntime(gateway.url, gateway._control_token)
+    errors: list[BaseException] = []
+
+    def child_open() -> None:
+        """Open an engine box from the job child, and keep its error."""
+        try:
+            child.open(SandboxSpec(lifetime_seconds=5, operation_key=f"{ENGINE_BOX_KEY_PREFIX}abc"))
+        except BaseException as error:
+            errors.append(error)
+
+    opener = threading.Thread(target=child_open, daemon=True)
+    opener.start()
+    opener.join(timeout=0.5)
+    assert opener.is_alive()
+
+    closer = threading.Thread(target=gateway.close, daemon=True)
+    closer.start()
+    closer.join(timeout=5)
+    assert not closer.is_alive()
+    opener.join(timeout=5)
+    assert not opener.is_alive()
+    assert len(errors) == 1
+
+    permits.release()
+    time.sleep(0.1)
+    assert runtime.sessions == []
+    assert _free_permits(permits, 1) == 1
+
+
+def test_waiting_engine_open_gives_up_before_its_child_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An open that waits past its bound fails with a clear error, and a later free permit opens no box."""
+    permits = _limit_engine_boxes(monkeypatch, 1)
+    monkeypatch.setattr(sandbox_broker, "_PERMIT_WAIT_FLOOR_SECONDS", 0.0)
+    assert permits.acquire(blocking=False)
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=10)
+
+    started = time.monotonic()
+    with pytest.raises(ServiceError, match="permit stayed in use"):
+        broker.handle("open", {"request_id": f"{ENGINE_BOX_KEY_PREFIX}late", "spec": {"lifetime_seconds": 0.3}})
+    assert time.monotonic() - started < 2
+
+    permits.release()
+    time.sleep(0.1)
+    assert runtime.sessions == []
+    assert _free_permits(permits, 1) == 1
+    broker.close()
