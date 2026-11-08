@@ -454,13 +454,14 @@ def relay_request(
     started = recorder.start() if recorder is not None else None
     try:
         answer = _relay(url, headers, body, user_secrets, bindings, secret_hosts, allowed_hosts, send, runtime, state)
-    except Exception as error:
+    except BaseException as error:  # a worker stop or cancel must still leave the call in the record
         if recorder is not None and started is not None:
             recorder.record(
                 started,
                 kind=kind,
                 target=(urlsplit(url).hostname or "").rstrip(".").lower(),
-                status="failed" if state.sent else "refused",
+                # Only a refusal raised by the relay's own checks is "refused".
+                status="failed" if state.sent or not isinstance(error, Exception) else "refused",
                 request=body,
                 failure_reason=f"{type(error).__name__}: {error}",
                 # A tool that failed after the send still settles its price.

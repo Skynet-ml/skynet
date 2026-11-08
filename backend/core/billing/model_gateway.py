@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Protocol
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -32,7 +32,7 @@ from .byok_upstreams import (
     validate_custom_base,
 )
 from .cli_dispatch import CliDispatcher
-from .credential_safety import scrub_model_config
+from .credential_safety import credential_fragments, scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
 from .env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS_KEY
@@ -921,7 +921,12 @@ class ModelGateway:
             kind, target, recorder = "model", route.model, recorder.bind(role=route.role)
         elif tools is not None:
             kind, target = "mcp", _tool_target(body)
-            secret_values += [*(tools.headers or {}).values(), *(v for _, v in parse_qsl(urlsplit(tools.url).query))]
+            # A bound header is often "Bearer <key>", and a tool may echo the bare key.
+            for value in (tools.headers or {}).values():
+                secret_values += credential_fragments(value)
+            secret_values += credential_fragments(None, endpoint=tools.url)
+            # A tool that echoes its request line shows the query values still percent-encoded.
+            secret_values += [part.partition("=")[2] for part in urlsplit(tools.url).query.split("&")]
         else:
             kind, target = "evaluator", "evaluator"
         request = json.dumps(dict(body), default=str)
@@ -939,7 +944,7 @@ class ModelGateway:
                 secrets=secret_values,
             )
             raise
-        except Exception as error:
+        except BaseException as error:  # a worker stop or cancel must still leave the call in the record
             recorder.record(
                 started,
                 kind=kind,

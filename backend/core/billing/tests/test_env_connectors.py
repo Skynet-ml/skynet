@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import create_engine, select
@@ -676,6 +677,36 @@ def test_relay_records_a_failed_send_with_its_reason(calls: PostgresRunCallStore
     assert record["status"] == "failed"
     assert record["failure_reason"].startswith("OSError: connection reset")
     _assert_no_secret([record], secret)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ReadTimeout("read timed out"), KeyboardInterrupt(), SystemExit(1)],
+    ids=["timeout", "interrupt", "exit"],
+)
+def test_relay_records_a_timed_out_or_stopped_send(calls: PostgresRunCallStore, error: BaseException) -> None:
+    """Store a timeout or a worker stop during the send as failed, then raise it again."""
+
+    def send(*_args: object) -> bytes:
+        """Stop the call while it waits for the answer."""
+        raise error
+
+    with pytest.raises(type(error)):
+        relay_request(
+            url="https://api.judge.example/v1",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+            body=b"{}",
+            user_secrets={"JUDGE_KEY": "user-judge-key-321"},
+            bindings={},
+            secret_hosts={"JUDGE_KEY": "api.judge.example"},
+            allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+            send=send,
+            recorder=_recorder(calls),
+        )
+    [record] = _stored(calls)
+    assert record["status"] == "failed"
+    assert record["failure_reason"].startswith(type(error).__name__)
+    _assert_no_secret([record], "user-judge-key-321")
 
 
 def test_relay_records_a_refused_call_with_its_reason(calls: PostgresRunCallStore) -> None:

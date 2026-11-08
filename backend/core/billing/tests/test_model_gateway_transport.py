@@ -1779,6 +1779,72 @@ def test_tool_and_evaluator_calls_are_recorded_without_their_bound_secrets(gatew
         assert secret not in stored
 
 
+def test_a_tool_that_echoes_bare_credential_parts_leaks_none_of_them(gateway: ModelGateway) -> None:
+    """Mask the bare bearer key, the URL password and the encoded query key a tool echoes.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Tools:
+        """Echo each credential part alone, the way a server prints its request."""
+
+        url = "https://svc:url-password@tools.example/mcp?key=query%2Fsecret"
+        headers = {"Authorization": "Bearer bare-tool-key"}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with the parts of the bound credentials."""
+            echo = ["bare-tool-key", "url-password", "query/secret", "/mcp?key=query%2Fsecret"]
+            return ModelHTTPResult(200, "application/json", json.dumps({"echo": echo}).encode())
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    assert gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {}).status == 200
+
+    [tool] = store.list_calls("job-1", "cand-1")
+    stored = json.dumps(tool)
+    for secret in ("bare-tool-key", "url-password", "query/secret", "query%2Fsecret"):
+        assert secret not in stored
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ReadTimeout("read timed out"), KeyboardInterrupt(), SystemExit(1)],
+    ids=["timeout", "interrupt", "exit"],
+)
+def test_a_tool_call_that_times_out_or_is_stopped_is_recorded(gateway: ModelGateway, error: BaseException) -> None:
+    """Record a timeout or a worker stop as failed, without the bound key, then raise it again.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        error: What stops the call.
+    """
+
+    class _Tools:
+        """Stop while the tool server answers."""
+
+        url = "https://tools.example/mcp"
+        headers = {"Authorization": "Bearer stopped-tool-key"}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Raise the stop."""
+            raise error
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    with pytest.raises(type(error)):
+        gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {})
+
+    [tool] = store.list_calls("job-1", "cand-1")
+    assert (tool["kind"], tool["status"]) == ("mcp", "failed")
+    assert tool["failure_reason"].startswith(type(error).__name__)
+    assert "stopped-tool-key" not in json.dumps(tool)
+
+
 def test_a_gateway_without_a_recorder_writes_no_run_call(gateway: ModelGateway) -> None:
     """Setup work binds no recorder, so a model call leaves the run record empty.
 
