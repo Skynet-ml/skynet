@@ -98,8 +98,16 @@ def _aider_config(gateway: GatewayConfig, reasoning_effort: str | None) -> str:
         "check-update": False,
         "show-release-notes": False,
         "detect-urls": False,
-        "chat-history-file": ".app/aider/chat.history.md",
-        "input-history-file": ".app/aider/input.history",
+        # A file Aider writes in the workspace joins the version patch, which
+        # the parent scores and can open as a pull request. The histories hold
+        # the prompt and replies, so they go nowhere.
+        "chat-history-file": "/dev/null",
+        "input-history-file": "/dev/null",
+        "llm-history-file": "/dev/null",
+        # The repo map writes its tags cache (``.aider.tags.cache.v4/``) at the
+        # repository root, and Aider has no option to move it. Without the map,
+        # the model asks Aider to add the files it needs to the chat.
+        "map-tokens": 0,
     }
     if reasoning_effort:
         settings["reasoning-effort"] = reasoning_effort

@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from core.models.blackbox import BLACKBOX_TARGET_AGENT, BlackboxTarget
 
+from .. import repo_tree
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
-from ..harness_bridge import parse_plain_output
+from ..harness_bridge import parse_plain_output, workspace_files
 from ..harnesses import REGISTRY
 from ..harnesses.aider import (
     _PROTECTED_ENV,
@@ -72,6 +76,54 @@ def _config(content: str) -> dict[str, object]:
         key, _, value = line.partition(": ")
         settings[key] = json.loads(value)
     return settings
+
+
+# Aider's defaults for the files it writes at the repository root when the
+# config names no other path.
+_AIDER_DEFAULT_FILES = {
+    "chat-history-file": ".aider.chat.history.md",
+    "input-history-file": ".aider.input.history",
+}
+
+
+def _fake_aider_run(checkout: Path, settings: dict[str, object]) -> None:
+    """Write the files Aider writes for these settings, then make one real code change.
+
+    Args:
+        checkout: The workspace Aider runs in.
+        settings: The parsed Aider config.
+    """
+    files = {key: settings.get(key, default) for key, default in _AIDER_DEFAULT_FILES.items()}
+    files["llm-history-file"] = settings.get("llm-history-file")
+    for path in files.values():
+        if path:
+            with (checkout / str(path)).open("a", encoding="utf-8") as stream:
+                stream.write("USER: the prompt\nASSISTANT: the reply\n")
+    if settings.get("map-tokens") != 0:
+        cache = checkout / ".aider.tags.cache.v4"
+        cache.mkdir(exist_ok=True)
+        (cache / "cache.db").write_bytes(b"tags")
+    (checkout / "main.py").write_text("print(2)\n")
+
+
+def _shipped_tree(tmp_path: Path) -> Path:
+    """Unpack a one-file shipped tree the way a repo-mode run does.
+
+    Args:
+        tmp_path: Test folder.
+
+    Returns:
+        The checkout.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tree:
+        data = b"print(1)\n"
+        info = tarfile.TarInfo("main.py")
+        info.size = len(data)
+        tree.addfile(info, io.BytesIO(data))
+    chunk = tmp_path / "chunk0"
+    chunk.write_text(base64.b64encode(buffer.getvalue()).decode("ascii"))
+    return repo_tree.unpack_tree([chunk], tmp_path / "repo")
 
 
 def test_registry_lists_aider_with_its_pin_and_plain_parser() -> None:
@@ -199,3 +251,23 @@ def test_launch_payload_names_the_plain_parser() -> None:
 
     assert payload["output_format"] == "plain"
     assert payload["files"][AIDER_CONFIG_FILE]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_version_patch_holds_only_the_code_change(tmp_path: Path) -> None:
+    """Aider's config, instructions, histories and repo-map cache never join a repo-mode version patch."""
+    checkout = _shipped_tree(tmp_path)
+    payload = launch_payload(build_launch(_target(), _GATEWAY))
+    repo_tree.exclude_paths(checkout, workspace_files(payload))
+    for name, content in payload["files"].items():
+        path = checkout / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    (checkout / payload["instructions_file"]).write_text("instructions\n")
+
+    _fake_aider_run(checkout, _config(payload["files"][AIDER_CONFIG_FILE]))
+
+    patch = repo_tree.version_patch(checkout)
+    assert [line for line in patch.splitlines() if line.startswith("diff --git")] == ["diff --git a/main.py b/main.py"]
+    assert "+print(2)" in patch
+    assert "the prompt" not in patch
