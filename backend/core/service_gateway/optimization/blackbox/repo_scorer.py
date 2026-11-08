@@ -68,7 +68,7 @@ from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .protocol import STATUS_KEY
 from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
-from .repo_services import RoleRelayError, open_stage_boxes, service_endpoint, stage_spec
+from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
 from .repo_workspace import GIT, HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
@@ -196,6 +196,7 @@ class RepoScorer:
         max_concurrency: int = 1,
         services: Mapping[str, ServiceSpec] | None = None,
         service_roles: Mapping[str, tuple[str, ...]] | None = None,
+        mcp_roles: Mapping[str, RoleEnvironment] | None = None,
         run_entry: str | tuple[str, ...] | None = None,
         run_timeout: float = 60.0,
         secret_bindings: Mapping[str, str] | None = None,
@@ -230,6 +231,9 @@ class RepoScorer:
                 go through the relay, and their secrets stay out of the box.
             service_roles: The services each role lists, by role name;
                 ``run`` for the ``[run]`` entry and ``metric`` for the scorer.
+            mcp_roles: Each role with the servers of its own MCP file, by
+                role name; each server goes through the relay, and its
+                secrets stay out of the box.
             run_entry: The ``[run]`` entry: ``path/file.py:function`` or a
                 command; ``None`` runs no version code before the metric.
             run_timeout: Longest one ``[run]`` call may run.
@@ -253,6 +257,7 @@ class RepoScorer:
         self._services = {name: spec for name, spec in (services or {}).items() if spec.url is not None}
         self._declared = dict(services or {})
         self._service_roles = dict(service_roles or {})
+        self._mcp_roles = dict(mcp_roles or {})
         self._secret_bindings = dict(secret_bindings or {})
         self._secret_hosts = dict(secret_hosts or {})
         self._secret_allowed_hosts = dict(secret_allowed_hosts or {})
@@ -591,16 +596,18 @@ class RepoScorer:
 
     @contextlib.contextmanager
     def _service_relay(self, role: str, response_dir: str) -> Iterator[_StageRelay | None]:
-        """Relay one call's service requests, checked against one role, with no stage boxes.
+        """Relay one call's service and MCP requests, checked against one role, with no stage boxes.
 
         Args:
             role: ``run`` for the ``[run]`` entry, ``metric`` for the scorer.
             response_dir: The call's answer folder, relative to the box.
 
         Yields:
-            The relay, or ``None`` when the role lists no service with a url.
+            The relay, or ``None`` when the role lists no service with a url
+            and its MCP file holds no server.
         """
-        if not any(name in self._services for name in self._service_roles.get(role, ())):
+        services = any(name in self._services for name in self._service_roles.get(role, ()))
+        if not services and not self._mcp_role(role).mcp_servers:
             yield None
             return
         relay = self._relay({}, response_dir, role=role)
@@ -612,12 +619,12 @@ class RepoScorer:
     def _relay(
         self, boxes: Mapping[str, SandboxSession], response_dir: str, *, role: str = _METRIC_ROLE
     ) -> _StageRelay:
-        """Build the relay for one call, checking service requests against one role.
+        """Build the relay for one call, checking service and MCP requests against one role.
 
         Args:
             boxes: Each stage's open box, by stage name.
             response_dir: The call's answer folder, relative to the box.
-            role: The role whose services the caller may reach.
+            role: The role whose services and MCP servers the caller may reach.
 
         Returns:
             The relay for this call.
@@ -632,12 +639,24 @@ class RepoScorer:
             services=self._declared,
             role=role,
             allowed=self._service_roles.get(role, ()),
+            mcp=self._mcp_role(role),
             secrets=self._workspace.secrets,
             bindings=self._secret_bindings,
             secret_hosts=self._secret_hosts,
             allowed_hosts=self._secret_allowed_hosts,
             budget=self._budget,
         )
+
+    def _mcp_role(self, role: str) -> RoleEnvironment:
+        """Return one role with the servers of its own MCP file, or an empty role.
+
+        Args:
+            role: ``run`` or ``metric``.
+
+        Returns:
+            The role's environment.
+        """
+        return self._mcp_roles.get(role) or RoleEnvironment()
 
     def _lay_out(self, box: SandboxSession, patch: str) -> bool:
         """Unpack the tree without the hidden metric into one stage box and apply the version.
@@ -741,7 +760,7 @@ class RepoScorer:
 
 
 class _StageRelay:
-    """Answer one scorer call's ``call(name, input)`` and service frames.
+    """Answer one scorer call's ``call(name, input)``, service and MCP frames.
 
     Calls to one stage run in parallel, each in its own process and folder,
     up to ``max_concurrency`` at a time (E34). Service requests run in their
@@ -760,6 +779,7 @@ class _StageRelay:
         services: Mapping[str, ServiceSpec] | None = None,
         role: str = _METRIC_ROLE,
         allowed: tuple[str, ...] = (),
+        mcp: RoleEnvironment | None = None,
         secrets: Mapping[str, str] | None = None,
         bindings: Mapping[str, str] | None = None,
         secret_hosts: Mapping[str, str] | None = None,
@@ -781,6 +801,8 @@ class _StageRelay:
             role: The role that each service request is checked against:
                 ``run`` for the ``[run]`` entry, ``metric`` for the scorer (E37).
             allowed: The services that ``role`` lists.
+            mcp: ``role`` with the servers of its own MCP file; no other
+                role's server is reachable (E55).
             secrets: The run's secret values, filled into service headers
                 here in the parent.
             bindings: ``user`` or ``managed`` for each secret name.
@@ -804,6 +826,7 @@ class _StageRelay:
         self._services = {name: spec for name, spec in self._declared.items() if spec.url is not None}
         self._role = role
         self._allowed = tuple(allowed)
+        self._mcp = mcp or RoleEnvironment()
         self._secrets = dict(secrets or {})
         self._bindings = dict(bindings or {})
         self._secret_hosts = dict(secret_hosts or {})
@@ -827,14 +850,16 @@ class _StageRelay:
             root: The scorer box's working directory.
 
         Returns:
-            ``{"prefix", "response_dir", "names", "services"}`` for the
-            call's input; ``services`` lists what the role may call.
+            ``{"prefix", "response_dir", "names", "services", "mcp"}`` for
+            the call's input; ``services`` and ``mcp`` list what the role
+            may call, by name only.
         """
         return {
             "prefix": self._prefix,
             "response_dir": f"{root}/{self._response_dir}",
             "names": list(self._boxes),
             "services": [name for name in self._services if name in self._allowed],
+            "mcp": [server.name for server in self._mcp.mcp_servers],
         }
 
     def output(self, stream: str, data: str) -> None:
@@ -864,7 +889,8 @@ class _StageRelay:
                 try:
                     frame = json.loads(line[start + len(self._prefix) :])
                     identity = frame["id"]
-                    name = frame["service"] if "service" in frame else frame["stage"]
+                    kind = next((key for key in ("service", "mcp") if key in frame), "stage")
+                    name = frame[kind]
                 except (ValueError, KeyError, TypeError):
                     continue
                 if (
@@ -875,10 +901,11 @@ class _StageRelay:
                 ):
                     continue
                 self._seen.add(identity)
-                if "service" in frame:
-                    refusal = self._refusal(name)
+                if kind != "stage":
+                    refusal = self._refusal(name) if kind == "service" else self._mcp_refusal(name)
                     if refusal is None:
-                        self._service_pool.submit(self._service, name, identity, frame)
+                        handler = self._service if kind == "service" else self._mcp_call
+                        self._service_pool.submit(handler, name, identity, frame)
                     else:
                         self._refusals.submit(self._answer, identity, refusal)
                     continue
@@ -905,6 +932,40 @@ class _StageRelay:
             return {"status": 403, "error": str(error)}
         return None
 
+    def _mcp_refusal(self, name: Any) -> dict[str, Any] | None:
+        """Check that the server is in the calling role's own MCP file.
+
+        Args:
+            name: The server the frame names.
+
+        Returns:
+            The refusal answer, or ``None`` when the request may go out.
+        """
+        if not isinstance(name, str):
+            return {"status": 404, "error": f"Unknown MCP server {name!r}."}
+        try:
+            mcp_endpoint(f"[{self._role}]", self._mcp, name)
+        except RoleRelayError as error:
+            return {"status": 403, "error": str(error)}
+        return None
+
+    def _mcp_call(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
+        """Send one MCP request and write the response for the caller.
+
+        Args:
+            name: The server, already checked against the role's MCP file.
+            identity: The request's id, also its answer name.
+            frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
+        """
+        label = f"MCP server {name!r}"
+        try:
+            url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
+            response = self._request(url, headers, label, frame)
+        except Exception as error:
+            logger.warning("MCP server %s request failed in the parent: %s", name, error)
+            response = {"status": 502, "error": f"{label} could not be reached."}
+        self._answer(identity, response)
+
     def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
         """Send one service request and write the response for the scorer.
 
@@ -914,14 +975,17 @@ class _StageRelay:
             frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
         """
         try:
-            response = self._request(self._services[name], name, frame)
+            spec = self._services[name]
+            response = self._request(str(spec.url), spec.request_headers, f"Service {name!r}", frame)
         except Exception as error:
             logger.warning("Service %s request failed in the parent: %s", name, error)
             response = {"status": 502, "error": f"Service {name!r} could not be reached."}
         self._answer(identity, response)
 
-    def _request(self, spec: ServiceSpec, name: str, frame: Mapping[str, Any]) -> dict[str, Any]:
-        """Call a service's url through :func:`relay_request`, so its secrets stay in the parent.
+    def _request(
+        self, origin: str, declared: Mapping[str, str], label: str, frame: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Call a service's or MCP server's url through :func:`relay_request`, so its secrets stay in the parent.
 
         ``relay_request`` fills the declared headers, refuses a secret outside
         its host or the run's allowed hosts, meters a Skynet key, and removes
@@ -930,8 +994,9 @@ class _StageRelay:
         redirects come back to the guest unchanged.
 
         Args:
-            spec: The service's declaration.
-            name: The service.
+            origin: The declared url; the guest's path goes after it.
+            declared: The declared headers, with ``${SECRET}`` placeholders.
+            label: ``Service '<name>'`` or ``MCP server '<name>'``, for the errors.
             frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
 
         Returns:
@@ -946,12 +1011,12 @@ class _StageRelay:
         """
         method, path = frame.get("method"), frame.get("path", "")
         if not isinstance(method, str) or not _HTTP_METHOD.fullmatch(method) or not isinstance(path, str):
-            return {"status": 400, "error": f"Service {name!r} got a malformed request."}
-        url = str(spec.url).rstrip("/") + "/" + path.lstrip("/")
-        origin, target = httpx.URL(str(spec.url)), httpx.URL(url)
-        if (target.scheme, target.host, target.port) != (origin.scheme, origin.host, origin.port):
-            return {"status": 400, "error": f"Service {name!r} got a path outside its url."}
-        declared = spec.request_headers
+            return {"status": 400, "error": f"{label} got a malformed request."}
+        # An empty path is the declared url itself: an MCP endpoint may not answer with a slash added.
+        url = origin.rstrip("/") + "/" + path.lstrip("/") if path else origin
+        base, target = httpx.URL(origin), httpx.URL(url)
+        if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port):
+            return {"status": 400, "error": f"{label} got a path outside its url."}
         overrides = {key.lower() for key in declared}
         guest = [
             (pair[0], pair[1])
@@ -969,7 +1034,7 @@ class _StageRelay:
             """Send the filled request once and return its header lines and body together.
 
             Args:
-                address: The service url with the guest's path.
+                address: The declared url with the guest's path.
                 filled: The declared headers with their secrets filled in.
                 content: The guest's body.
 
@@ -982,11 +1047,11 @@ class _StageRelay:
                 _AnswerTooLargeError: When the body passes 4 MiB.
             """
             try:
-                pinned = _pinned_address(str(spec.url), False, label=f"service {name!r} url")
+                pinned = _pinned_address(origin, False, label=f"{label} url")
             except ValueError as error:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
-            transport = _PinnedTransport(str(spec.url), pinned)
+            transport = _PinnedTransport(origin, pinned)
             try:
                 with (
                     httpx.Client(
@@ -1022,10 +1087,10 @@ class _StageRelay:
                 runtime=self._budget,
             )
         except _AnswerTooLargeError:
-            return {"status": 502, "error": f"Service {name!r} answered with more than 4 MiB."}
+            return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
         except ValueError as error:
             # relay_request names the secret and the host, never a value.
-            return {"status": 403, "error": f"Service {name!r} was refused: {error}"}
+            return {"status": 403, "error": f"{label} was refused: {error}"}
         head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
         return {
             "status": status[0],

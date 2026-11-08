@@ -27,13 +27,16 @@ OpenAI-compatible endpoint the scorer's ``llm()`` helper talks to; its
 ``api_key`` may be absent when the sandbox injects the credential at the
 network edge instead.
 
-An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services"}``)
+An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services", "mcp"}``)
 lets the scorer reach the run's ``[target.<name>]`` stages through the
 parent's relay with ``call(name, input)``. Its optional ``services`` list
 names the ``[services.<name>]`` with a url that the metric may reach: each
 gets ``SKYNET_SERVICE_<NAME>_URL``, a loopback address in the box whose
 requests go through the same relay, so the service's key stays with the
-parent. In a stage box,
+parent. Its optional ``mcp`` list names the http servers of the role's own
+MCP file: each gets ``SKYNET_MCP_<NAME>_URL`` on the same loopback port, and
+``SKYNET_MCP_CONFIG`` names a ``.mcp.json`` in the box that holds only those
+loopback urls, never a header or a secret. In a stage box,
 ``python3 app_runner.py --stage <call_dir> <path/file.py:function>`` runs
 one stage call and writes ``{"output": ...}`` or ``{"error": ...}``.
 
@@ -64,6 +67,7 @@ import site
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -71,7 +75,7 @@ import types
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -97,6 +101,10 @@ STAGE_ERROR_NAME = "StageError"
 STAGE_FLAG = "--stage"
 # The metric reaches each listed service at this variable's loopback address (E45).
 SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
+# Each server of the role's own MCP file is at this variable's loopback address (E49).
+MCP_ENV_PREFIX = "SKYNET_MCP_"
+# Names a ``.mcp.json`` with only the loopback urls, for MCP clients that read a config file.
+MCP_CONFIG_ENV = "SKYNET_MCP_CONFIG"
 # ``app_runner.py --candidate <call_dir>`` runs the ``[run]`` entry and stops what it left (E38).
 CANDIDATE_FLAG = "--candidate"
 # ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
@@ -197,7 +205,7 @@ class StageClient:
         """Bind the relay's frame prefix, response folder and stage names.
 
         Args:
-            config: ``{"prefix", "response_dir", "names", "services"}`` from the call's input.
+            config: ``{"prefix", "response_dir", "names", "services", "mcp"}`` from the call's input.
         """
         self._prefix = str(config["prefix"])
         self._responses = Path(str(config["response_dir"]))
@@ -268,26 +276,45 @@ def service_env_name(name: str) -> str:
     Returns:
         ``SKYNET_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
     """
-    return SERVICE_ENV_PREFIX + "".join(char if char.isalnum() else "_" for char in name.upper()) + "_URL"
+    return SERVICE_ENV_PREFIX + _env_part(name) + "_URL"
 
 
-def start_service_proxy(client: StageClient, names: list[str]) -> dict[str, str]:
-    """Serve the run's services on a loopback port whose requests go through the parent's relay.
+def mcp_env_name(name: str) -> str:
+    """Return the variable that holds one MCP server's loopback address.
 
-    The box is offline and never holds a service's key: the parent checks
-    that the metric may use the service, adds the key, calls the service and
-    sends its response back unchanged.
+    Args:
+        name: The server's name in the role's MCP file.
+
+    Returns:
+        ``SKYNET_MCP_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+    """
+    return MCP_ENV_PREFIX + _env_part(name) + "_URL"
+
+
+def _env_part(name: str) -> str:
+    """Return a name as a variable part: upper case, each character other than a letter or digit as ``_``."""
+    return "".join(char if char.isalnum() else "_" for char in name.upper())
+
+
+def start_service_proxy(client: StageClient, names: Sequence[str], mcp: Sequence[str] = ()) -> dict[str, str]:
+    """Serve the run's services and MCP servers on a loopback port whose requests go through the parent's relay.
+
+    The box is offline and never holds a key: the parent checks that the
+    role may use the service or server, adds the key, calls it and sends
+    its response back unchanged.
 
     Args:
         client: The relay client of this call.
-        names: The services the metric may reach.
+        names: The services the role may reach.
+        mcp: The servers of the role's own MCP file.
 
     Returns:
-        ``SKYNET_SERVICE_<NAME>_URL`` for each service.
+        ``SKYNET_SERVICE_<NAME>_URL`` for each service, ``SKYNET_MCP_<NAME>_URL``
+        for each server, and ``SKYNET_MCP_CONFIG`` when there is a server.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        """Send each ``/service/<name>/<path>`` request to the parent and return its answer."""
+        """Send each ``/service/<name>/<path>`` or ``/mcp/<name>/<path>`` request to the parent."""
 
         def read_body(self) -> bytes:
             """Read the request body, sent with a Content-Length or in chunks.
@@ -310,8 +337,11 @@ def start_service_proxy(client: StageClient, names: list[str]) -> dict[str, str]
             return b"".join(chunks)
 
         def relay(self) -> None:
-            """Relay one request and write the service's response."""
-            _, _, rest = self.path.partition("/service/")
+            """Relay one request and write the service's or server's response."""
+            kind, _, rest = self.path.lstrip("/").partition("/")
+            if kind not in ("service", "mcp"):
+                self.send_error(404, "Unknown relay path")
+                return
             name, _, path = rest.partition("/")
             try:
                 body = self.read_body()
@@ -320,7 +350,7 @@ def start_service_proxy(client: StageClient, names: list[str]) -> dict[str, str]
                 return
             response = client.exchange(
                 {
-                    "service": urllib.parse.unquote(name),
+                    kind: urllib.parse.unquote(name),
                     "path": path,
                     "method": self.command,
                     "headers": list(self.headers.items()),
@@ -350,8 +380,31 @@ def start_service_proxy(client: StageClient, names: list[str]) -> dict[str, str]
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, name="service-proxy", daemon=True).start()
-    base = f"http://127.0.0.1:{server.server_address[1]}/service/"
-    return {service_env_name(name): f"{base}{urllib.parse.quote(name, safe='')}/" for name in names}
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    env = {service_env_name(name): f"{base}/service/{urllib.parse.quote(name, safe='')}/" for name in names}
+    servers = {name: f"{base}/mcp/{urllib.parse.quote(name, safe='')}" for name in mcp}
+    env.update({mcp_env_name(name): url for name, url in servers.items()})
+    if servers:
+        handle, config = tempfile.mkstemp(prefix="skynet-mcp-", suffix=".json")
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump({"mcpServers": {name: {"type": "http", "url": url} for name, url in servers.items()}}, stream)
+        env[MCP_CONFIG_ENV] = config
+    return env
+
+
+def _relay_env(client: StageClient, stages: dict[str, Any]) -> dict[str, str]:
+    """Start the loopback proxy when the role may reach a service or an MCP server.
+
+    Args:
+        client: The relay client of this call.
+        stages: The call's relay config.
+
+    Returns:
+        The proxy's variables, or nothing when the role reaches neither.
+    """
+    services = [str(name) for name in stages.get("services") or ()]
+    mcp = [str(name) for name in stages.get("mcp") or ()]
+    return start_service_proxy(client, services, mcp) if services or mcp else {}
 
 
 def missing_stage(name: Any = None, input: Any = None) -> Any:
@@ -1048,9 +1101,9 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     gateway = payload.get("gateway")
     stages = payload.get("stages")
     relay = StageClient(stages) if isinstance(stages, dict) else None
-    if relay is not None and stages.get("services"):
+    if relay is not None:
         # Set before the scorer loads, so its imports and child processes see the addresses.
-        os.environ.update(start_service_proxy(relay, [str(name) for name in stages["services"]]))
+        os.environ.update(_relay_env(relay, stages))
     llm: GatewayClient | None = None
     if isinstance(gateway, dict):
         llm = GatewayClient(
@@ -1224,8 +1277,8 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     _become_subreaper()
     env = dict(os.environ)
     stages = payload.get("stages")
-    if isinstance(stages, dict) and stages.get("services"):
-        env.update(start_service_proxy(StageClient(stages), [str(name) for name in stages["services"]]))
+    if isinstance(stages, dict):
+        env.update(_relay_env(StageClient(stages), stages))
     env[CANDIDATE_TOKEN_ENV] = token
     run_dir = call_dir / RUN_DIR
     run_dir.mkdir(parents=True, exist_ok=True)

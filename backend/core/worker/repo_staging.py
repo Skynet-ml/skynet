@@ -49,6 +49,7 @@ from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     MetricSpec,
+    RoleEnvironment,
     ServiceSpec,
     TargetStage,
     effective_environment,
@@ -121,6 +122,9 @@ class StagedRepository:
     # The services each role lists, by role name: [run] for the version's entry,
     # [metric] for the scorer. Each runs in its own process with its own relay (E37).
     service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Each role with the servers of its own MCP file: the relay checks each
+    # MCP request against the calling role only (E49, E55).
+    mcp_roles: Mapping[str, RoleEnvironment] = field(default_factory=dict)
     # The [run] entry, which runs before the metric with the metric files out of the tree (E38).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = 60.0
@@ -271,6 +275,9 @@ def stage_repository(
             "metric": environment.constraints.metric_role.services,
             "run": environment.constraints.run_role.services,
         }
+        if environment.constraints is not None
+        else {},
+        mcp_roles={"metric": environment.constraints.metric_role, "run": environment.constraints.run_role}
         if environment.constraints is not None
         else {},
         run_entry=environment.constraints.run_entry if environment.constraints is not None else None,
@@ -592,6 +599,7 @@ def bind_repo_scorer(
         max_concurrency=int(payload.get("max_concurrency") or 1),
         services=staged.services,
         service_roles=staged.service_roles,
+        mcp_roles=staged.mcp_roles,
         run_entry=staged.run_entry,
         run_timeout=staged.run_timeout,
         secret_bindings=staged.secret_bindings,

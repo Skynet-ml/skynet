@@ -138,9 +138,7 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
         (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
         (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
         (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
-        (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
         (b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
-        (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
         (b'[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
     ],
 )
@@ -163,11 +161,13 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
         (b'[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
         (b'[services.grader]\nurl = "https://api.example.com"\n[metric]\nservices = ["grader"]\n', "[metric] services"),
         (b"[metric]\nservices = []\n", "[metric] services"),
+        (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
+        (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str, place: str) -> None:
-    """The stage relay enforces the run and metric service lists, so the gate stops refusing them (SKY-385)."""
+    """The stage relay enforces the run and metric service lists and MCP files, so the gate stops refusing them (SKY-385)."""
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert key not in [failure.key for failure in failures]

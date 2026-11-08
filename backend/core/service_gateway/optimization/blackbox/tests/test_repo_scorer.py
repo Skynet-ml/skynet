@@ -24,7 +24,7 @@ from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
 from .. import repo_scorer
-from ..repo_constraints import ServiceSpec, TargetStage
+from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
 from ..repo_scorer import (
     _STAGE_LAYOUT_SECONDS,
     SETUP_ALLOWANCE_SECONDS,
@@ -1707,6 +1707,120 @@ def test_a_metric_that_does_not_list_the_service_gets_the_fix_in_the_error(echo:
 
     assert answer["status"] == 403
     assert answer["error"].endswith('Add it: [metric] services = ["judge-api"]')
+    assert echo.paths == []
+
+
+def _mcp_relay(workspace: _Workspace, role: str, mcp: RoleEnvironment) -> _StageRelay:
+    """Build a relay with no stage boxes and no services that forwards to the role's MCP servers.
+
+    Args:
+        workspace: Records the answers.
+        role: The calling role.
+        mcp: The role with the servers of its own MCP file.
+
+    Returns:
+        The relay.
+    """
+    return _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=2,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        role=role,
+        mcp=mcp,
+        secrets={"JUDGE_KEY": "judge-secret-value"},
+        secret_hosts={"JUDGE_KEY": "judge.example.test"},
+        allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+    )
+
+
+def _mcp_answer(relay: _StageRelay, workspace: _Workspace, name: str, path: str = "") -> dict[str, Any]:
+    """Send one MCP frame through the relay and wait for its answer.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+        name: The server the frame names.
+        path: The request path under the server's url.
+
+    Returns:
+        The answer the box gets.
+    """
+    frame = {"id": "e" * 32, "mcp": name, "path": path, "method": "GET", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while not workspace.writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    relay.close()
+    [(_, text)] = workspace.writes
+    return json.loads(text)
+
+
+def _mcp_role(port: int, endpoint: str = "echo") -> RoleEnvironment:
+    """Return a role whose MCP file holds one ``search`` server on the echo upstream.
+
+    Args:
+        port: The upstream's port.
+        endpoint: The server url's path.
+
+    Returns:
+        The role.
+    """
+    server = McpServer(
+        name="search",
+        url=f"http://judge.example.test:{port}/{endpoint}",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+    )
+    return RoleEnvironment(mcp=".mcp.json", mcp_servers=(server,))
+
+
+def test_an_mcp_server_gets_the_key_and_the_box_gets_only_the_redacted_form(echo: _Echo) -> None:
+    """An MCP call goes to the exact declared url with the key filled, and the echo comes back redacted (E49, E56)."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+    assert relay.config("/work")["mcp"] == ["search"]
+
+    answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    assert ["X-Echo", "[REDACTED]"] in answer["headers"]
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert echo.paths == ["/echo"]
+
+
+def test_an_mcp_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo) -> None:
+    """The relay returns an MCP server's 302 as it is, so the key never reaches the redirect target (E53)."""
+    workspace = _Workspace()
+    answer = _mcp_answer(_mcp_relay(workspace, "metric", _mcp_role(echo.port, "redirect")), workspace, "search")
+
+    assert answer["status"] == 302
+    assert ["Location", "/leak"] in answer["headers"]
+    assert echo.paths == ["/redirect"]
+
+
+@pytest.mark.parametrize(
+    ("mcp", "message"),
+    [
+        (RoleEnvironment(), 'Add it to a .mcp.json file and set [metric] mcp = ".mcp.json".'),
+        (
+            RoleEnvironment(mcp="eval/.mcp.json"),
+            "MCP server 'search' is not in eval/.mcp.json, the [metric] MCP file. Add it there.",
+        ),
+    ],
+)
+def test_a_role_reaches_only_the_servers_of_its_own_mcp_file(echo: _Echo, mcp: RoleEnvironment, message: str) -> None:
+    """[metric] cannot call a server that only the [run] file holds, and the refusal names the fix (E55)."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "metric", mcp)
+    assert relay.config("/work")["mcp"] == []
+
+    answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 403
+    assert answer["error"].endswith(message)
     assert echo.paths == []
 
 

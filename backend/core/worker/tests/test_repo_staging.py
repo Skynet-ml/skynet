@@ -33,7 +33,13 @@ from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
-from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, ServiceSpec, TargetStage
+from core.service_gateway.optimization.blackbox.repo_constraints import (
+    ConstraintsError,
+    McpServer,
+    RoleEnvironment,
+    ServiceSpec,
+    TargetStage,
+)
 from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
@@ -299,6 +305,20 @@ def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch:
     staged.cleanup()
 
 
+def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[run] keeps the servers of its own MCP file, and [metric] gets none of them (E49, E55)."""
+    files = {
+        "optimize.toml": '[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
+        ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
+    }
+
+    _, staged = _stage_with(files, monkeypatch)
+
+    assert [server.name for server in staged.mcp_roles["run"].mcp_servers] == ["search"]
+    assert staged.mcp_roles["metric"].mcp_servers == ()
+    staged.cleanup()
+
+
 def test_failed_fetch_leaves_nothing_on_disk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove the scratch folder when the clone fails."""
     workdirs: list[Path] = []
@@ -557,6 +577,21 @@ def test_binding_gives_the_scorer_the_secret_hosts_and_the_run_budget(tmp_path: 
     assert scorer._secret_hosts == {"API_KEY": "api.example.com"}
     assert scorer._secret_allowed_hosts == {"API_KEY": ("api.example.com",)}
     assert scorer._budget is budget
+    staged.close_scorers()
+
+
+def test_binding_gives_the_scorer_each_roles_mcp_servers(tmp_path: Path) -> None:
+    """The scorer's relay gets the [run] and [metric] roles, so each call reaches only its own MCP file."""
+    payload, bare = _binding(tmp_path, None)
+    run = RoleEnvironment(
+        mcp=".mcp.json", mcp_servers=(McpServer(name="search", url="https://search.example.com/mcp"),)
+    )
+    staged = dataclasses.replace(bare, mcp_roles={"run": run, "metric": RoleEnvironment()})
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert gateway.evaluator._mcp_roles == {"run": run, "metric": RoleEnvironment()}
     staged.close_scorers()
 
 

@@ -35,10 +35,11 @@ Place = Literal["local", "cloud"]
 # metric files and the exploit folder from the agent's tree in both places,
 # and ``check_hidden`` proves it (SKY-353). The issue that enforces another
 # setting adds its kind here, and the gate stops refusing it. The run and
-# metric boxes reach ``[services.<name>]`` only through the stage relay, which
-# checks the role's list and fills each secret by host (SKY-385).
+# metric boxes reach ``[services.<name>]`` and the servers of their own MCP
+# file only through the stage relay, which checks the role and fills each
+# secret by host (SKY-385).
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
-_STAGE_SERVICES = frozenset({"services", "run.services", "metric.services"})
+_STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
 _ENFORCED_EVERYWHERE = _METRIC_HIDING | _STAGE_SERVICES
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
