@@ -143,6 +143,79 @@ def test_null_environment_values_are_left_out() -> None:
     assert service.environment == (("E4", ""),)
 
 
+def test_interpolation_uses_an_empty_environment(tmp_path: Path) -> None:
+    """Check that variables get their defaults or empty text, and that `$$` reaches bash as a literal `$`."""
+    (db,) = parse_compose(
+        "services:\n  db:\n"
+        "    command: echo $$HOME \"$$HOME\" ${X:-d} ${X}|$X|${X:+y} sh -c 'echo $$0'\n"
+        "    working_dir: ${DIR:-/srv}\n"
+        "    environment: {PASSWORD: '${PW:-postgres}', PRICE: 'a$$b'}\n"
+        "    healthcheck: {test: [CMD-SHELL, pg_isready -U $$PASSWORD]}\n"
+    )
+    assert db.command == "echo \\$HOME \"\\$HOME\" d || sh -c 'echo $0'"
+    assert db.working_dir == "/srv"
+    assert db.environment == (("PASSWORD", "postgres"), ("PRICE", "a$b"))
+    assert db.healthcheck is not None
+    assert db.healthcheck.command == "pg_isready -U $PASSWORD"
+    script = launch_command(db).split(" > ")[0].replace("setsid nohup ", "")
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+        env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)},
+    )
+    assert result.stdout.split("\n")[0] == "$HOME $HOME d"
+
+
+@pytest.mark.parametrize("form", ["${PW:?set the password}", "${PW?set the password}"])
+def test_required_variable_names_the_variable(form: str) -> None:
+    """Check that a required variable fails the parse, because the box has no host environment."""
+    with pytest.raises(ComposeError, match="needs the variable PW"):
+        parse_compose(f"services:\n  db:\n    command: postgres\n    environment: {{PW: '{form}'}}\n")
+
+
+def test_depends_on_condition_the_box_cannot_wait_for_names_the_fix() -> None:
+    """Check that service_completed_successfully fails loud, and the supported conditions still parse."""
+    with pytest.raises(ComposeError, match=r"service_completed_successfully.*service_started and service_healthy"):
+        parse_compose(
+            "services:\n  api:\n    command: x\n"
+            "    depends_on: {migrate: {condition: service_completed_successfully}}\n"
+            "  migrate:\n    command: y\n"
+        )
+    services = parse_compose(
+        "services:\n  api:\n    command: x\n"
+        "    depends_on: {db: {condition: service_healthy}, cache: {condition: service_started}}\n"
+        "  db:\n    command: y\n  cache:\n    command: z\n"
+    )
+    assert [service.name for service in services] == ["db", "cache", "api"]
+
+
+def test_profile_services_are_skipped() -> None:
+    """Check that a profiles service is left out before the command check and the size, and cannot be a dependency."""
+    services = parse_compose(
+        "services:\n  app:\n    command: x\n  debug:\n    image: busybox\n    profiles: [debug]\n    cpus: 8\n"
+    )
+    assert [service.name for service in services] == ["app"]
+    alone = parse_compose("services:\n  app:\n    command: x\n")
+    request = ResourceRequest(cpus=2)
+    assert box_resources(request, services, VERCEL_CAPABILITIES) == box_resources(request, alone, VERCEL_CAPABILITIES)
+    with pytest.raises(ComposeError, match="depends on debug, which sets 'profiles'"):
+        parse_compose(
+            "services:\n  app:\n    command: x\n    depends_on: [debug]\n"
+            "  debug:\n    command: y\n    profiles: [debug]\n"
+        )
+
+
+def test_healthcheck_timeout_zero_is_the_docker_default() -> None:
+    """Check that a healthcheck timeout of 0 means Docker's 30 s default, not no time."""
+    for timeout in ("0s", "0"):
+        (db,) = parse_compose(f"services:\n  db:\n    command: x\n    healthcheck: {{test: y, timeout: {timeout}}}\n")
+        assert db.healthcheck is not None
+        assert db.healthcheck.timeout_sec == 30.0
+
+
 def test_healthcheck_reads_disable_and_plain_numbers_from_text() -> None:
     """Check that disable, a unitless interval and retries still parse when plain scalars stay text."""
     off, on = parse_compose(
@@ -322,7 +395,7 @@ async def test_healthcheck_runs_in_the_service_dir_and_env() -> None:
     (db,) = parse_compose(
         "services:\n  db:\n    command: postgres\n    working_dir: /srv/my db\n"
         "    environment: {POSTGRES_USER: app}\n"
-        "    healthcheck: {test: [CMD-SHELL, pg_isready -U $POSTGRES_USER], interval: 0s}\n"
+        "    healthcheck: {test: [CMD-SHELL, pg_isready -U $$POSTGRES_USER], interval: 0s}\n"
     )
     env = FakeEnv()
     await start_services(env, (db,), [])

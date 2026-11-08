@@ -51,6 +51,10 @@ _NUMBER = re.compile(r"^\d+(?:\.\d+)?$")
 _INTEGER = re.compile(r"^\d+$")
 _TRUE = ("true", "True", "TRUE")
 _KEPT_TAGS = ("tag:yaml.org,2002:null", "tag:yaml.org,2002:merge")
+# Compose interpolation: `$$`, `${...}` and `$NAME`. A `$` in any other form stays as written, as in compose.
+_INTERPOLATION = re.compile(r"\$(?:(\$)|\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_BRACED = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])(.*))?$", re.DOTALL)
+_DEPENDS_CONDITIONS = ("service_started", "service_healthy")
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -111,7 +115,8 @@ def parse_compose(text: str) -> tuple[ComposeService, ...]:
 
     Raises:
         ComposeError: The file is not valid compose, a service has no
-            command, or ``depends_on`` names an unknown service or a cycle.
+            command, a required variable is not set, or ``depends_on`` names
+            an unknown service, a skipped service or a cycle.
     """
     try:
         data = yaml.load(text, Loader=_ComposeLoader)
@@ -119,8 +124,131 @@ def parse_compose(text: str) -> tuple[ComposeService, ...]:
         raise ComposeError(f"The compose file is not valid YAML: {error}") from error
     if not isinstance(data, Mapping) or not isinstance(data.get("services"), Mapping):
         raise ComposeError("The compose file needs a 'services' mapping.")
-    services = [_service(str(name), body) for name, body in data["services"].items()]
+    bodies = {str(name): _interpolated(str(name), body, {}) for name, body in data["services"].items()}
+    # No compose profile is active in the box, so a service that sets profiles never starts.
+    skipped = {name for name, body in bodies.items() if isinstance(body, Mapping) and body.get("profiles")}
+    services = [_service(name, body) for name, body in bodies.items() if name not in skipped]
+    for service in services:
+        needs = sorted(set(service.depends_on) & skipped)
+        if needs:
+            raise ComposeError(
+                f"The compose service {service.name} depends on {', '.join(needs)}, which sets 'profiles'. "
+                "No profile is active in the box: remove 'profiles' from that service or remove the depends_on entry."
+            )
     return _start_order(services)
+
+
+def _interpolated(name: str, value: Any, seen: dict[int, Any]) -> Any:
+    """Interpolate every string value in a compose service body.
+
+    Args:
+        name: The service name, for the error.
+        value: A body value. Mapping keys stay as written, as in compose.
+        seen: The containers done so far, by id, so a YAML alias is done
+            once and an alias bomb stays linear.
+
+    Returns:
+        The value with each string interpolated.
+
+    Raises:
+        ComposeError: A string has an invalid or a required variable.
+    """
+    if isinstance(value, str):
+        return _interpolate(name, value)
+    if not isinstance(value, Mapping | list):
+        return value
+    if id(value) in seen:
+        return seen[id(value)]
+    if isinstance(value, Mapping):
+        mapping: dict[Any, Any] = {}
+        seen[id(value)] = mapping
+        mapping.update((key, _interpolated(name, item, seen)) for key, item in value.items())
+        return mapping
+    items: list[Any] = []
+    seen[id(value)] = items
+    items.extend(_interpolated(name, item, seen) for item in value)
+    return items
+
+
+def _interpolate(name: str, text: str) -> str:
+    """Interpolate one compose string against an empty environment.
+
+    The box has no host environment, so every variable is unset: a default
+    form gives its default, a required form fails, and every other form
+    gives empty text. ``$$`` gives one literal ``$``.
+
+    Args:
+        name: The service name, for the error.
+        text: The string.
+
+    Returns:
+        The interpolated string.
+
+    Raises:
+        ComposeError: A ``${...}`` form is invalid or nested, or it is a
+            required variable (``${X:?msg}`` or ``${X?msg}``).
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        """Return the text for one interpolation match.
+
+        Args:
+            match: The match of ``_INTERPOLATION``.
+
+        Returns:
+            The replacement text.
+
+        Raises:
+            ComposeError: The form is invalid, nested or required.
+        """
+        if match.group(1) is not None:
+            return "$"
+        if match.group(3) is not None:
+            return ""
+        braced = _BRACED.match(match.group(2))
+        if braced is None or "${" in match.group(2):
+            raise ComposeError(f"The compose service {name} has an invalid interpolation {match.group(0)!r}.")
+        variable, operator, word = braced.groups()
+        if operator in ("-", ":-"):
+            return _interpolate(name, word)
+        if operator in ("?", ":?"):
+            raise ComposeError(
+                f"The compose service {name} needs the variable {variable} ({word or 'not set'}). "
+                "The box has no host environment: write the value into the compose file."
+            )
+        return ""
+
+    return _INTERPOLATION.sub(replace, text)
+
+
+def _literal_dollars(text: str) -> str:
+    """Escape each ``$`` of shell text so that bash keeps it as a literal.
+
+    After interpolation, every ``$`` that is left is a literal in compose,
+    because compose splits a string command into words and runs no shell.
+    A ``$`` in single quotes is already literal, and a backslash there
+    would stay in the word, so only a ``$`` outside single quotes changes.
+
+    Args:
+        text: The interpolated shell text.
+
+    Returns:
+        The text with ``\\$`` for each ``$`` outside single quotes.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif char in "'\"" and quote in (None, char):
+            quote = char if quote is None else None
+        elif char == "$" and quote != "'":
+            char = "\\$"
+        out.append(char)
+    return "".join(out)
 
 
 def _service(name: str, body: Any) -> ComposeService:
@@ -244,7 +372,7 @@ def _command_text(name: str, field: str, value: Any) -> str:
         ComposeError: The value is neither a string nor a list of scalars.
     """
     if isinstance(value, str):
-        return value.strip()
+        return _literal_dollars(value.strip())
     if isinstance(value, list):
         return shlex.join(_scalar(name, field, item) for item in value)
     raise ComposeError(f"The {field} of compose service {name} is not a string or a list.")
@@ -343,11 +471,21 @@ def _depends_on(name: str, value: Any) -> tuple[str, ...]:
         The names of the services this one needs.
 
     Raises:
-        ComposeError: The value is neither a list nor a mapping, or a name
-            is not a scalar.
+        ComposeError: The value is neither a list nor a mapping, a name is
+            not a scalar, or a condition is not ``service_started`` or
+            ``service_healthy``.
     """
     if value is None:
         return ()
+    if isinstance(value, Mapping):
+        for item, spec in value.items():
+            condition = _mapping(name, "depends_on", spec).get("condition", "service_started")
+            if condition not in _DEPENDS_CONDITIONS:
+                raise ComposeError(
+                    f"The compose service {name} depends on {item} with condition {condition!r}. The box supports "
+                    "only service_started and service_healthy: use one of them, or run the one-time step in the "
+                    "service command."
+                )
     if isinstance(value, Mapping | list):
         return tuple(_scalar(name, "depends_on", item) for item in value)
     raise ComposeError(f"The compose service {name} has a depends_on that is not a list or a mapping.")
@@ -453,10 +591,12 @@ def _healthcheck(name: str, value: Any) -> HealthcheckConfig | None:
     else:
         raise ComposeError(f"The compose service {name} has an invalid healthcheck test.")
     defaults = HealthcheckConfig(command="")
+    # Docker reads a timeout of 0 as "use the default", not as "no time at all".
+    timeout = _duration(name, value.get("timeout"), defaults.timeout_sec) or defaults.timeout_sec
     return HealthcheckConfig(
         command=command,
         interval_sec=_duration(name, value.get("interval"), 30.0),
-        timeout_sec=_duration(name, value.get("timeout"), defaults.timeout_sec),
+        timeout_sec=timeout,
         start_period_sec=_duration(name, value.get("start_period"), defaults.start_period_sec),
         start_interval_sec=_duration(name, value.get("start_interval"), defaults.start_interval_sec),
         retries=_retries(name, value.get("retries"), defaults.retries),
