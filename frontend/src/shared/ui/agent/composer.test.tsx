@@ -48,33 +48,38 @@ void describe("Composer", () => {
     assert.match(html, /<textarea/);
   });
 
-  void it("shows held input as plain tray rows with no Send now", () => {
+  void it("shows a paused header, a Steer button and no Send now for an idle paused tray", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("held");
-    store.hold();
+    store.pause();
     store.setBusy(false);
     const html = render({ midTurn: midTurnOf(() => store, store.getSnapshot()) });
-    assert.ok(html.includes("held"), html);
-    assert.ok(!html.includes(">Send now<"), html);
-    assert.ok(!html.includes('role="status"'), html);
+    assert.ok(html.includes(msg("agent.pending.paused")), html);
+    assert.ok(!html.includes("Send now"), html);
+    assert.ok(html.includes(`aria-label="${msg("agent.pending.steer")}"`), html);
+    assert.ok(html.includes('role="status"'), html);
   });
 
-  void it("shows queued rows for a running turn", () => {
+  void it("shows no tray header for a running turn with pending input", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("next");
     const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    assert.ok(!html.includes(msg("agent.pending.paused")), html);
+    assert.ok(!html.includes("Send now"), html);
     assert.ok(html.includes(`aria-label="${msg("agent.pending.remove")}"`), html);
     assert.ok(!html.includes("opacity-0"), html);
   });
 
-  void it("keeps steers out of the tray, because the chat shows them", () => {
+  void it("shows the reason an over-limit paused head cannot send", () => {
     const store = new SteerQueue();
-    store.openTurn({ post: () => new Promise(() => {}), withdraw: async () => ({ ids: [], delivered: [] }) });
-    store.steer("use pandas");
-    const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
-    assert.ok(!html.includes("use pandas"), html);
-    assert.ok(!html.includes(`aria-label="${msg("agent.pending.list_label")}"`), html);
+    store.setMaxLength(3);
+    store.setBusy(true);
+    store.enqueue("long");
+    store.pause();
+    store.setBusy(false);
+    const html = render({ onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    assert.ok(html.includes(msg("agent.pending.too_long", { count: 4, max: 3 })), html);
   });
 });

@@ -1116,7 +1116,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             key={chatView.key}
             messages={agent.messages}
             streaming={streaming}
-            steering={agent.midTurn.steering}
             editAndResend={webChat ? () => false : agent.editAndResend}
             renderToolCall={renderToolCall}
             isStepCall={isStepCall}

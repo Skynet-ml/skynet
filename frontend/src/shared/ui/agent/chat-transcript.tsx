@@ -42,8 +42,6 @@ interface ChatTranscriptProps {
   /** What an agent message shows after its text, such as a tool's closing outcome. */
   renderAfterContent?: (msg: AgentMessage) => React.ReactNode;
   animatePairs?: boolean;
-  /** Messages sent into the running turn that the agent has not read yet. */
-  steering?: ReadonlyArray<{ id: string; text: string }>;
   trailing?: (state: ChatTranscriptState) => React.ReactNode;
 }
 
@@ -65,7 +63,6 @@ export function ChatTranscript({
   allowLink,
   renderAfterContent,
   animatePairs,
-  steering,
   trailing,
 }: ChatTranscriptProps) {
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
@@ -277,9 +274,6 @@ export function ChatTranscript({
   return (
     <>
       {pairsNode}
-      {steering?.map((item) => (
-        <UserBubble key={item.id} content={item.text} editable={false} />
-      ))}
       {trailing?.({ isEditingAny, editingIndex })}
     </>
   );

@@ -26,7 +26,7 @@ test("R3 remove keeps a truly unknown withdrawal visible", async () => {
   assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
 });
 
-for (const action of ["settle", "edit"] as const) {
+for (const action of ["settle", "edit", "reorder"] as const) {
   test(`R3 ${action} reports delivered text as applied, never uncertain`, async () => {
     const applied: unknown[] = [];
     const channel = { post: async () => "id", withdraw: async () => ({ ids: [], delivered: ["id"] }),
@@ -35,30 +35,15 @@ for (const action of ["settle", "edit"] as const) {
     queue.steer("already read");
     await flush();
     const id = queue.getSnapshot().steering[0]!.id;
-    if (action === "settle") { queue.hold(); queue.setBusy(false); }
+    if (action === "settle") { queue.pause(); queue.setBusy(false); }
     if (action === "edit") assert.equal(await queue.edit(id), null);
+    if (action === "reorder") queue.reorderSteering([id]);
     await flush();
     assert.deepEqual(applied, [{ ids: ["id"], text: "already read" }]);
     assert.equal(queue.hasPending(), false);
-    assert.equal(queue.takeHeld(), null);
     assert.deepEqual(sent, []);
   });
 }
-
-test("R3 refused send restores tray ordering metadata", async () => {
-  const queue = new SteerQueue(() => false);
-  queue.setBusy(true);
-  queue.enqueue("A"); queue.enqueue("B");
-  queue.setBusy(false);
-  await flush();
-  assert.equal(queue.getSnapshot().held, true);
-  queue.openTurn({ post: async () => "c", withdraw: async () => ({ ids: ["c"], delivered: [] }) });
-  queue.steer("C");
-  await flush();
-  queue.setBusy(false);
-  await flush();
-  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["C", "A", "B"]);
-});
 
 test("R3 changed limits publish a fresh snapshot", () => {
   const queue = new SteerQueue();
@@ -98,9 +83,9 @@ test("PR929 F2 a claimed withdrawal stays uncertain in the stopped tray", async 
   });
   queue.steer("not yet delivered");
   await flush();
-  queue.hold(); queue.setBusy(false);
+  queue.pause(); queue.setBusy(false);
   await flush();
-  assert.equal(queue.getSnapshot().held, true);
+  assert.equal(queue.getSnapshot().paused, true);
   assert.equal(queue.getSnapshot().queued[0]?.text, "not yet delivered");
   assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
   assert.deepEqual(applied, []);

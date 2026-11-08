@@ -4,7 +4,7 @@ import test from "node:test";
 import ts from "typescript";
 
 import { discardStaleDocsResponse, docsAskFailure } from "../../../features/docs/lib/docs-queue.ts";
-import { askBody, isQuestionTooLong, trimHistory } from "../../../features/docs/lib/docs-answer.ts";
+import { askBody, isQuestionTooLong, trimHistory, MAX_QUESTION_CHARS } from "../../../features/docs/lib/docs-answer.ts";
 import { handleComposerEscape } from "./composer-keys.ts";
 import { midTurnOf, SteerQueue } from "./steer-queue.ts";
 import { visibleSuggestion } from "./next-prompt.ts";
@@ -39,7 +39,7 @@ test("PR929 F5 unmount disables the sender during settlement", async () => {
   resolve({ ids: ["id"], delivered: [] });
   await flush();
   assert.deepEqual(sent, []);
-  assert.equal(store.getSnapshot().held, true);
+  assert.equal(store.getSnapshot().paused, true);
   assert.equal(store.getSnapshot().queued[0]?.text, "unseen");
 });
 
@@ -89,7 +89,7 @@ for (const thinking of [false, true]) {
 }
 
 for (const failure of ["replacement", "network"] as const) {
-  test(`R3 docs ${failure} closes or holds the right steering channel`, async () => {
+  test(`R3 docs ${failure} closes or pauses the right steering channel`, async () => {
     const store = new SteerQueue();
     store.openTurn({ post: async () => "old", withdraw: async (ids) => ({ ids, delivered: [] }) });
     store.enqueue("keep after failure");
@@ -109,7 +109,7 @@ for (const failure of ["replacement", "network"] as const) {
       readServerSentEvents: async () => {},
     });
     await callback("question");
-    if (failure === "network") assert.equal(store.getSnapshot().held, true);
+    if (failure === "network") assert.equal(store.getSnapshot().paused, true);
     else assert.equal(replacementCanSteer, false, "old channel must close before replacement fetch");
   });
 }
@@ -258,7 +258,7 @@ test("R2 an idle next-prompt hint cannot block streaming Escape", () => {
 {
   const file = "src/features/agent-panel/hooks/use-generalist-agent.ts";
   for (const action of ["editAndResend", "retry"]) {
-  test(`R2 ${file} holds unread input before ${action}`, () => {
+  test(`R2 ${file} pauses unread input before ${action}`, () => {
     const queue = new SteerQueue();
     queue.setBusy(true);
     queue.enqueue("keep after replacement");
@@ -270,7 +270,7 @@ test("R2 an idle next-prompt hint cannot block streaming Escape", () => {
       autoFixAttemptsRef: { current: 0 }, requestRun: () => {}, runAgent: () => {},
     });
     callback(0, "replacement");
-    assert.equal(queue.getSnapshot().held, true);
+    assert.equal(queue.getSnapshot().paused, true);
   });
   }
 }

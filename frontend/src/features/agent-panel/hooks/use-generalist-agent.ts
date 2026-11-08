@@ -1006,7 +1006,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         messageIndex,
         runtimesRef.current.get(key)?.unsavedEdit ?? null,
       );
-      steerQueueFor(key).hold();
+      steerQueueFor(key).pause();
       requestRun(key, trimmed, truncated, undefined, regenerate, false, editUserTurn);
     },
     [requestRun, steerQueueFor],
@@ -1032,7 +1032,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     const { regenerate, editUserTurn } = retryMode(
       runtimesRef.current.get(key)?.unsavedEdit ?? null,
     );
-    steerQueueFor(key).hold();
+    steerQueueFor(key).pause();
     requestRun(
       key,
       lastUser.content,
@@ -1045,7 +1045,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   }, [requestRun, steerQueueFor]);
 
   const stopSession = React.useCallback((key: string) => {
-    steerQueueFor(key).hold();
+    steerQueueFor(key).pause();
     const wasQueued = sessionsRef.current.get(key)?.status === "queued";
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "" });

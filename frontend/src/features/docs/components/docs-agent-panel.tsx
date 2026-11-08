@@ -286,7 +286,7 @@ export function DocsAgentPanel({
           res,
           controller.signal.aborted || abortRef.current !== controller,
         )) return;
-        failed = docsAskFailure(res.status, Boolean(res.body), () => steerStore.hold());
+        failed = docsAskFailure(res.status, Boolean(res.body), () => steerStore.pause());
         if (!failed && res.body) {
           await readServerSentEvents(res.body, (event) => {
             if (controller.signal.aborted || abortRef.current !== controller) return;
@@ -308,7 +308,7 @@ export function DocsAgentPanel({
       if (abortRef.current !== controller) return;
       // Steers the server reports late are placed after their anchor, not after this answer.
       abortRef.current = null;
-      if (failed && failed !== "tooLong") steerStore.hold();
+      if (failed && failed !== "tooLong") steerStore.pause();
       setStreaming(false);
       // A question refused while this answer streamed keeps its "too long" notice.
       setNotice((prev) => failed ?? (prev === "tooLong" ? prev : null));
@@ -478,7 +478,6 @@ export function DocsAgentPanel({
                 <ChatTranscript
                   messages={transcript}
                   streaming={streaming}
-                  steering={midTurn.steering}
                   editAndResend={editAndResend}
                   allowLink={isDocsHref}
                   renderToolCall={renderToolCall}
