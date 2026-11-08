@@ -9,7 +9,7 @@ Jeder Durchlauf optimiert ein Repository. Sie können auf zwei Arten beginnen:
 | Repository verwenden        | Skynet ändert die Dateien in den Pfaden, die Sie freigeben, in einem GitHub-Repository, das Sie verbinden. |
 | Neues Repository erstellen  | Sie geben eine Aufgabe und Daten vor. Skynet erstellt ein neues GitHub-Repository in Ihrem Konto und schreibt eine erste Lösung. |
 
-Der Code im Repository kann alles sein: eine Prompt-Pipeline, ein Agent-Harness, ein Skript oder eine Bibliothek. Er kann jede Bibliothek verwenden.
+Der Code im Repository kann alles sein: eine Anwendung, ein Dienst, ein Skript oder eine Bibliothek. Er kann jede Bibliothek verwenden.
 
 Jeder Durchlauf nutzt denselben Vertrag. Ihr Scorer definiert `score(repo_path, case)`. Er gibt einen Score und schriftliches Feedback zurück. Der Optimierer liest das Feedback, um die nächste Version zu verbessern.
 

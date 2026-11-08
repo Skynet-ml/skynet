@@ -62,8 +62,9 @@ export const PRIVACY_POLICY: LegalDocument = {
         {
           kind: "paragraph",
           text:
-            "The core function of the Service is to optimize prompts against large language models. " +
-            "To do this, we send the prompts and dataset content involved in your jobs to third-party " +
+            "The core function of the Service is to optimize the code in your repositories, and it uses " +
+            "large language models to do this. We send the repository code, prompts and dataset content " +
+            "involved in your jobs to third-party " +
             "LLM providers, reached through OpenRouter and, where configured, a self-hosted gateway. " +
             "Those providers process the content to return completions, which we use to produce your " +
             "results.",
