@@ -775,6 +775,75 @@ async def test_cancel_in_exec_stops_process_and_box_once(client: FakeClient, log
     assert env.usage.calls.count("settle") == 1
 
 
+async def test_cancel_in_exec_with_hung_terminate_still_stops_box(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a terminate call that never returns does not keep the box running."""
+    grace = 0.2
+    monkeypatch.setattr(vercel, "CANCEL_GRACE", grace)
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    box.block = True
+    hang = asyncio.Event()
+
+    async def hung_terminate() -> None:
+        """Stall like an HTTP call with a very long read timeout."""
+        await hang.wait()
+
+    task = asyncio.create_task(env.exec("sleep 100", timeout_sec=30))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    box.processes[0].terminate = hung_terminate
+    task.cancel()
+    try:
+        done, _ = await asyncio.wait({task}, timeout=3 * grace)
+        assert task in done
+    finally:
+        hang.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert box.processes[0].killed == 1
+    await env.stop()
+    assert box.stops == 1
+    assert env.usage.calls.count("settle") == 1
+
+
+async def test_teardown_settles_after_running_create_confirmation(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a cancel during the create confirmation settles only after it ends."""
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def slow_confirm(self: FakeUsage, session: Any) -> None:
+        """Hold the create confirmation until the test releases it.
+
+        Args:
+            self: The fake reservation.
+            session: Unused.
+        """
+        entered.set()
+        gate.wait(5)
+        self._record("confirm_created")
+
+    monkeypatch.setattr(FakeUsage, "confirm_created", slow_confirm)
+    env = make_env(client, log, lifetime=1200)
+    task = asyncio.create_task(env.start())
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    try:
+        assert "settle" not in log
+    finally:
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+    await env.stop()
+    assert log.index("confirm_created") < log.index("settle")
+    assert client.boxes[env.name].stops == 1
+
+
 async def test_failed_create_is_not_retried_and_fails_reservation(client: FakeClient, log: list[str]) -> None:
     """Check that a failed create is sent once and releases the reservation."""
     client.create_errors = [SandboxApiError(httpx.Response(500), "boom")]

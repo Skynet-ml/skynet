@@ -505,7 +505,7 @@ class VercelEnvironment(SandboxEnvironment):
         self._session = session
         if usage is not None:
             self._funded_until = self._clock.monotonic() + first_ms / 1000
-            await asyncio.to_thread(usage.confirm_created, session)
+            await self._billing(usage.confirm_created, session)
         if (initial.disabled or initial.allowed_hosts) and not policy_confirmed(initial, session.network_policy):
             raise SandboxInfraError("Vercel did not confirm the sandbox network policy.")
         whole_ms = math.ceil(self.spec.lifetime_seconds * 1000)
@@ -612,7 +612,7 @@ class VercelEnvironment(SandboxEnvironment):
                 logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
         if self._client is not None:
             with contextlib.suppress(Exception):
-                await self._client.aclose()
+                await asyncio.wait_for(self._client.aclose(), STOP_TIMEOUT)
 
     def _require_session(self) -> Any:
         """Return the funded runtime session of the running box.
@@ -849,13 +849,15 @@ class VercelEnvironment(SandboxEnvironment):
         Args:
             process: The SDK process handle.
         """
+        # The caller shields this abort, so every call needs its own limit;
+        # otherwise a stalled HTTP call keeps the box alive past the cancel.
         with contextlib.suppress(Exception):
-            await process.terminate()
+            await asyncio.wait_for(process.terminate(), CANCEL_GRACE)
         try:
             await asyncio.wait_for(process.wait(), CANCEL_GRACE)
         except Exception:
             with contextlib.suppress(Exception):
-                await process.kill()
+                await asyncio.wait_for(process.kill(), CANCEL_GRACE)
 
     async def _read_optional(self, session: Any, path: str) -> str | None:
         """Read one text file when it exists.
