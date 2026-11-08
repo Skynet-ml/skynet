@@ -95,8 +95,10 @@ def _drop_legacy_page(path: str) -> str:
 
     A project path has at least a group and a project, so only a third or
     later segment can start a page. GitLab reserves ``tree``, ``blob`` and
-    ``commits`` as project names; a subgroup named ``merge_requests`` would
-    be cut too.
+    ``commits`` as project names. It does not reserve ``merge_requests``, so
+    a project or subgroup with that name is cut too:
+    ``https://gitlab.com/g/sub/merge_requests`` reads as ``g/sub``. For such
+    a project, the user types the plain path ``g/sub/merge_requests``.
 
     Args:
         path: The URL path, after any ``/-/`` page is cut.
