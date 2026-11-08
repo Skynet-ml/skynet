@@ -27,14 +27,14 @@ jobs:
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: ${{ env.DAGGER_VERSION }}
-      # sdk/ and clients/ under .dagger/modules/skynet-ci are generated, not committed.
-      - name: Generate the Dagger module SDK
-        run: dagger generate -y
       # The credential-free `core/` tier runs without Postgres, an LLM, or a live
       # server; the `tests/` integration tier (DB + paid LLM) is a separate,
       # nightly concern and is intentionally not gated here.
       - name: Core test suite
         run: dagger check skynet-ci/backend-core-${{ matrix.shard }}
+      # dagger check hides the pytest output. Print the pass and skip counts.
+      - name: Show test summary
+        run: dagger call skynet-ci summary --shard ${{ matrix.shard }}
       # Same pipeline as the check, so the engine serves the file from cache.
       - name: Export dispatched nodeids
         run: dagger call skynet-ci dispatched --shard ${{ matrix.shard }} -o backend/dispatched-${{ matrix.shard }}.txt
@@ -55,9 +55,6 @@ jobs:
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: ${{ env.DAGGER_VERSION }}
-      # sdk/ and clients/ under .dagger/modules/skynet-ci are generated, not committed.
-      - name: Generate the Dagger module SDK
-        run: dagger generate -y
       # Ruff, the terraform script tests, the requirements.txt/uv.lock sync
       # check, the PostgreSQL gates (Dagger runs postgres:16-alpine as a
       # service) and the load-test SLO gate. See .dagger/modules/skynet-ci.
@@ -73,9 +70,6 @@ jobs:
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: ${{ env.DAGGER_VERSION }}
-      # sdk/ and clients/ under .dagger/modules/skynet-ci are generated, not committed.
-      - name: Generate the Dagger module SDK
-        run: dagger generate -y
       - name: Collect full core suite
         run: dagger check skynet-ci/backend-shard-coverage
       - name: Export collected nodeids
@@ -240,9 +234,6 @@ jobs:
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: ${{ env.DAGGER_VERSION }}
-      # sdk/ and clients/ under .dagger/modules/skynet-ci are generated, not committed.
-      - name: Generate the Dagger module SDK
-        run: dagger generate -y
       - name: Typecheck
         run: dagger check skynet-ci/frontend-typecheck
 
@@ -255,9 +246,6 @@ jobs:
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: ${{ env.DAGGER_VERSION }}
-      # sdk/ and clients/ under .dagger/modules/skynet-ci are generated, not committed.
-      - name: Generate the Dagger module SDK
-        run: dagger generate -y
       - name: Lint
         run: dagger check skynet-ci/frontend-lint
 
@@ -270,9 +258,6 @@ jobs:
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: ${{ env.DAGGER_VERSION }}
-      # sdk/ and clients/ under .dagger/modules/skynet-ci are generated, not committed.
-      - name: Generate the Dagger module SDK
-        run: dagger generate -y
       - name: Unit tests
         run: dagger check skynet-ci/frontend-unit
 

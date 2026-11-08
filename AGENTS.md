@@ -34,7 +34,7 @@ cd frontend && npm run build                                   # production buil
 just check-i18n
 
 # The same CI checks in Docker, as GitHub Actions runs them (Dagger v1.0.0-beta.25).
-dagger generate -y                          # once per clone, and after a module change
+dagger generate -y                          # after a module change; commit sdk/, clients/, uv.lock
 dagger check -l                             # list the checks
 dagger check skynet-ci/backend-gates        # one check; `dagger check 'skynet-ci/*'` runs all
 ```

@@ -5,6 +5,10 @@ on:
     branches: [main, staging]
   pull_request:
 
+env:
+  # Keep the same value as DAGGER_VERSION in ci.yml.
+  DAGGER_VERSION: v1.0.0-beta.25
+
 jobs:
   check:
     name: Generated artefacts in sync with catalog
@@ -14,9 +18,6 @@ jobs:
       - name: Install Dagger
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          version: v1.0.0-beta.25
-      # sdk/ and clients/ under .dagger/modules/skynet-ci are generated, not committed.
-      - name: Generate the Dagger module SDK
-        run: dagger generate -y
+          version: ${{ env.DAGGER_VERSION }}
       - name: Verify codegen drift, naming regex, schema
         run: dagger check skynet-ci/locale-drift

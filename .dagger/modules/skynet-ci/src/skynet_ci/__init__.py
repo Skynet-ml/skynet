@@ -27,6 +27,11 @@ SOURCE_EXCLUDE = [
     "**/*.tsbuildinfo",
     ".dagger",
     ".claude",
+    # Local secrets must not reach the engine. A test reads backend/.env.example.
+    "**/.env",
+    "**/.env.*",
+    "!**/.env.example",
+    "**/*.pem",
 ]
 
 
@@ -76,6 +81,12 @@ class SkynetCi:
                     'test -e /usr/bin/python3 || ln -s "$(command -v python3)" /usr/bin/python3',
                 ]
             )
+            # The hidden-path guard tests in test_harness_bridge.py run the Pi
+            # and OpenCode guard scripts with node, and skip without it.
+            .with_file(
+                "/usr/local/bin/node",
+                core().container().from_(NODE_IMAGE).file("/usr/local/bin/node"),
+            )
             .with_mounted_cache("/root/.cache/uv", core().cache_volume("skynet-uv"))
             .with_env_variable("UV_LINK_MODE", "copy")
             .with_env_variable("UV_PYTHON_DOWNLOADS", "never")
@@ -120,7 +131,7 @@ class SkynetCi:
             self._backend()
             .with_env_variable("SKYNET_TEST_SHARD", f"{shard}/{CORE_SHARD_COUNT}")
             .with_env_variable("SKYNET_TEST_DISPATCHED_OUT", f"dispatched-{shard}.txt")
-            .with_exec(["uv", "run", "pytest", "core/", "-q", "-n", "auto"])
+            .with_exec(["uv", "run", "pytest", "core/", "-q", "-rs", "-n", "auto"])
         )
 
     @function
@@ -137,6 +148,21 @@ class SkynetCi:
             The ``dispatched-<shard>.txt`` file.
         """
         return self._core_shard(shard).file(f"/src/backend/dispatched-{shard}.txt")
+
+    @function
+    async def summary(self, shard: int) -> str:
+        """Return the pytest output of one core shard, with the skip reasons.
+
+        CI prints this after ``dagger check`` ran the same shard, so the
+        engine serves it from cache and the log shows the pass and skip counts.
+
+        Args:
+            shard: The zero-based shard index.
+
+        Returns:
+            The pytest stdout of the shard.
+        """
+        return await self._core_shard(shard).stdout()
 
     @function
     @check

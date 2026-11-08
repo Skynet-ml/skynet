@@ -3,6 +3,6 @@ __pycache__/
 *.py[cod]
 node_modules/
 dist/
-# sdk/ and clients/ come from `dagger generate -y` and are not committed (CI
-# generates them). Do not add them here: the engine skips gitignored files
-# when it loads the module, and then the module fails to load.
+# sdk/, clients/ and uv.lock are committed. Run `dagger generate -y` after a
+# module change and commit the result. Do not add them here: the engine skips
+# gitignored files when it loads the module, and then the module fails to load.
