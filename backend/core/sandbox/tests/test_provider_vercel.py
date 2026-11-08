@@ -1503,20 +1503,20 @@ async def test_cancel_in_the_service_stop_reserves_no_snapshot_hold(client: Fake
     env = make_env(client, log, services=SERVICES)
     await env.start()
     reserved: list[str] = []
-    real_factory = env._snapshot_usage_factory
 
-    def factory(*args: Any, **kwargs: Any) -> Any:
-        """Record the hold and make it.
+    def factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Record the hold and make a fake one.
 
         Args:
-            args: The factory arguments.
-            kwargs: The factory keyword arguments.
+            budget: The budget runtime.
+            request: The usage request.
+            operation_key: The operation key.
 
         Returns:
             The fake reservation.
         """
         reserved.append("reserved")
-        return real_factory(*args, **kwargs)
+        return FakeUsage(log, budget, request, operation_key=operation_key)
 
     env._snapshot_usage_factory = factory
     real_exec = env.exec
@@ -1539,14 +1539,17 @@ async def test_cancel_in_the_service_stop_reserves_no_snapshot_hold(client: Fake
 
     env.exec = exec_
     task = asyncio.create_task(env.snapshot(run_deadline=DEADLINE, now=NOW))
-    await stopping.wait()
+    waiter = asyncio.ensure_future(stopping.wait())
+    await asyncio.wait({task, waiter}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+    waiter.cancel()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, 5)
+    assert stopping.is_set()
     assert reserved == []
     assert not env._halted
     env.exec = real_exec
-    await env.stop()
+    await asyncio.wait_for(env.stop(), 5)
 
 
 async def test_start_after_stop_is_refused(client: FakeClient, log: list[str]) -> None:

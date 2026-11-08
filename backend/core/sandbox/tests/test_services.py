@@ -116,6 +116,15 @@ def test_parse_reads_command_env_size_and_start_order() -> None:
     assert app.healthcheck is None
 
 
+def test_yaml_booleans_become_lowercase_text() -> None:
+    """Check that YAML booleans in a command and env read as compose writes them."""
+    (service,) = parse_compose(
+        "services:\n  s:\n    command: [app, --flag, true]\n    environment: {DEBUG: true, QUIET: false, N: 1}\n"
+    )
+    assert service.command == "app --flag true"
+    assert service.environment == (("DEBUG", "true"), ("QUIET", "false"), ("N", "1"))
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [

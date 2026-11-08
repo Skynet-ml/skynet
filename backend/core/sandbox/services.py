@@ -189,7 +189,7 @@ def _scalar(name: str, field: str, value: Any) -> str:
     """Turn one compose scalar into text.
 
     Only plain scalars pass, so YAML aliases cannot expand a nested list into
-    a huge string.
+    a huge string. A boolean becomes lowercase text, as compose writes it.
 
     Args:
         name: The service name, for the error.
@@ -202,6 +202,9 @@ def _scalar(name: str, field: str, value: Any) -> str:
     Raises:
         ComposeError: The value is not a string or a number.
     """
+    # bool is an int subclass, so it must come first or True becomes "True".
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if not isinstance(value, str | int | float):
         raise ComposeError(f"The {field} of compose service {name} has an item that is not a string or a number.")
     return str(value)
