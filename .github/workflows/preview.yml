@@ -10,9 +10,9 @@
 #
 # Fork PRs, Dependabot PRs and staging -> main promotion PRs get no preview:
 # the job does not run for them, and GitHub gives fork runs no OIDC token.
-# A PR whose files cannot change the running app (docs, droid-wiki/,
-# tools/reel-skynet/, tests, .github/ except the preview workflows) gets no
-# preview either, unless it has the label "preview".
+# A PR whose files cannot change the running app (docs, droid-wiki/, tests,
+# .github/ except the preview workflows) gets no preview either, unless it
+# has the label "preview".
 #
 # Auth: GitHub OIDC -> skynet-github-deploy-preview (infra/terraform/global),
 # which trusts only the GitHub environment aws-preview. That environment must
@@ -92,7 +92,7 @@ jobs:
           while IFS= read -r f; do
             case "$f" in
               .github/workflows/preview.yml | .github/workflows/preview-cleanup.yml) ;;
-              .github/* | droid-wiki/* | tools/reel-skynet/* | backend/tests/* | backend/load_tests/*) continue ;;
+              .github/* | droid-wiki/* | backend/tests/* | backend/load_tests/*) continue ;;
               */tests/* | */__tests__/* | *.test.ts | *.test.tsx | *.spec.ts | *.spec.tsx) continue ;;
               backend/* | frontend/*) ;;
               *.md) continue ;;
