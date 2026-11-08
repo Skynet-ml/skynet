@@ -100,7 +100,9 @@ class SandboxEnvironment(ABC):
         """
         validate_spec(spec, self.capabilities)
         self.spec = spec
-        self._network_policy = NetworkPolicy(disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts))
+        self._network_policy: NetworkPolicy | None = NetworkPolicy(
+            disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts)
+        )
 
     @abstractmethod
     async def start(self) -> None:
@@ -169,8 +171,14 @@ class SandboxEnvironment(ABC):
         """
 
     @property
-    def network_policy(self) -> NetworkPolicy:
-        """Return the egress policy that the sandbox applies now."""
+    def network_policy(self) -> NetworkPolicy | None:
+        """Return the egress policy that the sandbox applies now.
+
+        Returns:
+            The last policy that the provider confirmed, or ``None`` when the
+            last change failed or was cancelled and the provider state is
+            unknown. The next ``set_network_policy`` call then always applies.
+        """
         return self._network_policy
 
     async def set_network_policy(self, policy: NetworkPolicy) -> None:
@@ -196,6 +204,10 @@ class SandboxEnvironment(ABC):
         mode = network_mode(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts)
         if mode not in caps.network_modes:
             raise SandboxSpecError(f"The {caps.name} sandbox does not support the {mode.value} network mode.")
+        # The provider can change the policy before a cancel or an error
+        # reaches us, so a failed apply must not leave a cache that skips the
+        # next call. Otherwise a later disable_network() is a silent no-op.
+        self._network_policy = None
         await self._apply_network_policy(policy)
         self._network_policy = policy
 

@@ -12,6 +12,7 @@ Override ``make_spec`` when the provider needs other spec fields.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -235,14 +236,20 @@ def test_ignore_mode_skips_the_size_checks() -> None:
     validate_spec(_spec(cpus=3, memory_mb=10**6, mode=ResourceMode.IGNORE), VERCEL_CAPABILITIES)
 
 
+@pytest.mark.parametrize("lifetime", [1, 0.5, 300])
+def test_accepts_a_finite_positive_lifetime(lifetime: float) -> None:
+    """Accept an int or float lifetime above zero."""
+    validate_spec(SandboxSpec(lifetime_seconds=lifetime), VERCEL_CAPABILITIES)
+
+
 def test_resource_request_defaults_to_request_mode() -> None:
     """Use REQUEST as the default resource mode."""
     assert ResourceRequest().mode is ResourceMode.REQUEST
 
 
-@pytest.mark.parametrize("lifetime", [0, -1, float("inf"), float("nan")])
-def test_rejects_a_lifetime_that_is_not_finite_and_positive(lifetime: float) -> None:
-    """Reject zero, negative and infinite lifetimes."""
+@pytest.mark.parametrize("lifetime", [0, -1, float("inf"), float("nan"), True, "60", None])
+def test_rejects_a_lifetime_that_is_not_finite_and_positive(lifetime: object) -> None:
+    """Reject zero, negative, infinite, bool and non-number lifetimes."""
     with pytest.raises(SandboxSpecError, match="lifetime"):
         validate_spec(SandboxSpec(lifetime_seconds=lifetime), VERCEL_CAPABILITIES)
 
@@ -489,6 +496,55 @@ async def test_set_network_policy_needs_dynamic_policy_support() -> None:
     async with StaticPolicy(_spec()) as env:
         with pytest.raises(SandboxSpecError, match="cannot change"):
             await env.disable_network()
+
+
+async def test_disable_network_applies_after_a_cancelled_apply() -> None:
+    """Send deny-all to the provider after a cancelled apply left egress open."""
+
+    class SlowApply(InMemorySandbox):
+        async def _apply_network_policy(self, policy: NetworkPolicy) -> None:
+            """Record the policy as the provider does, then hang.
+
+            Args:
+                policy: The checked policy.
+            """
+            self.applied_policies.append(policy)
+            if not policy.disabled:
+                await asyncio.sleep(10)
+
+    async with SlowApply(SandboxSpec(lifetime_seconds=60, network_disabled=True)) as env:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(env.set_network_policy(NetworkPolicy()), 0.01)
+        assert env.network_policy is None
+        await env.disable_network()
+        assert env.applied_policies == [NetworkPolicy(), NetworkPolicy(disabled=True)]
+        assert env.network_policy == NetworkPolicy(disabled=True)
+
+
+async def test_disable_network_applies_after_a_failed_apply() -> None:
+    """Send deny-all to the provider after an apply raised past the change."""
+
+    class FailingApply(InMemorySandbox):
+        async def _apply_network_policy(self, policy: NetworkPolicy) -> None:
+            """Record the policy as the provider does, then fail the confirm.
+
+            Args:
+                policy: The checked policy.
+
+            Raises:
+                ConnectionError: For every policy that opens egress.
+            """
+            self.applied_policies.append(policy)
+            if not policy.disabled:
+                raise ConnectionError("confirm lost")
+
+    async with FailingApply(SandboxSpec(lifetime_seconds=60, network_disabled=True)) as env:
+        with pytest.raises(ConnectionError, match="confirm lost"):
+            await env.set_network_policy(NetworkPolicy())
+        assert env.network_policy is None
+        await env.disable_network()
+        assert env.applied_policies == [NetworkPolicy(), NetworkPolicy(disabled=True)]
+        assert env.network_policy == NetworkPolicy(disabled=True)
 
 
 def test_fake_capabilities_match_vercel_limits() -> None:

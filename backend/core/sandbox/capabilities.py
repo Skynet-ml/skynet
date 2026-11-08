@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from numbers import Real
 
 from .resources import ResourceMode, ResourceRequest, SandboxSpec
 
@@ -78,7 +79,9 @@ def validate_spec(spec: SandboxSpec, caps: EnvironmentCapabilities) -> None:
     Raises:
         SandboxSpecError: The spec breaks a lifetime, size or network rule.
     """
-    if not math.isfinite(spec.lifetime_seconds) or spec.lifetime_seconds <= 0:
+    lifetime = spec.lifetime_seconds
+    # bool is an int subclass, and a string makes math.isfinite raise TypeError.
+    if isinstance(lifetime, bool) or not isinstance(lifetime, Real) or not math.isfinite(lifetime) or lifetime <= 0:
         raise SandboxSpecError("The sandbox lifetime must be a finite, positive number of seconds.")
     _validate_resources(spec.resources, caps)
     _validate_network(spec, caps)
