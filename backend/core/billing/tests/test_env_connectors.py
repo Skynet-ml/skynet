@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import socket
@@ -707,6 +708,46 @@ def test_relay_records_a_timed_out_or_stopped_send(calls: PostgresRunCallStore, 
     assert record["status"] == "failed"
     assert record["failure_reason"].startswith(type(error).__name__)
     _assert_no_secret([record], "user-judge-key-321")
+
+
+def test_relay_records_no_encoded_form_of_a_secret_the_server_echoes(calls: PostgresRunCallStore) -> None:
+    """Mask a key the server echoes as base64, URL-safe base64, JSON-escaped, or as a decoded Basic credential."""
+    key = 'user-"judge"/key?~~>123'
+    basic = base64.b64encode(b"svc-user:basic-pass-456").decode()
+
+    def send(_url: str, _headers: dict[str, str], _body: bytes) -> bytes:
+        """Echo each encoded form of the filled secrets."""
+        echo = {
+            "b64": base64.b64encode(key.encode()).decode(),
+            "b64url": base64.urlsafe_b64encode(key.encode()).decode().rstrip("="),
+            "escaped": json.dumps(key),
+            "basic_token": basic,
+            "basic_decoded": "svc-user:basic-pass-456",
+            "basic_password": "basic-pass-456",
+        }
+        return json.dumps(echo).encode()
+
+    relay_request(
+        url="https://api.judge.example/v1",
+        headers={"X-Key": "${JUDGE_KEY}", "Authorization": "Basic ${BASIC_TOKEN}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": key, "BASIC_TOKEN": basic},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example", "BASIC_TOKEN": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"], "BASIC_TOKEN": ["api.judge.example"]},
+        send=send,
+        recorder=_recorder(calls),
+    )
+    [record] = _stored(calls)
+    _assert_no_secret(
+        [record],
+        key,
+        base64.b64encode(key.encode()).decode().rstrip("="),
+        base64.urlsafe_b64encode(key.encode()).decode().rstrip("="),
+        basic,
+        "basic-pass-456",
+    )
+    assert record["response"].count("[REDACTED]") == 6
 
 
 def test_relay_records_a_refused_call_with_its_reason(calls: PostgresRunCallStore) -> None:

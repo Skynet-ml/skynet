@@ -6,6 +6,8 @@ every secret the call could carry removed by the store (E52 rule 3).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import time
 from collections.abc import Collection
@@ -118,8 +120,9 @@ class CallRecorder:
             response: The answer body.
             failure_reason: Why the call failed or was refused.
             cost_usd: What the call cost the run, when known.
-            secrets: Every secret value the call could carry, so the store
-                removes their raw and JSON-escaped forms.
+            secrets: Every secret value the call could carry. The store
+                removes their raw and JSON-escaped forms, and their base64
+                and Basic-auth forms from :func:`_secret_forms`.
             duration_ms: The duration another process measured, such as the
                 egress proxy; None measures it from ``started``.
         """
@@ -137,10 +140,40 @@ class CallRecorder:
             "response": _text(response),
         }
         try:
-            self.sink.record_call(self.optimization_id, call, sorted({secret for secret in secrets if secret}))
+            forms = {form for secret in secrets if secret for form in _secret_forms(secret)}
+            self.sink.record_call(self.optimization_id, call, sorted(forms))
         except Exception:
             # The record must never break the run; the exception text could hold a body, so it is not logged.
             logger.warning("Could not record a %s call for run %s.", kind, self.optimization_id)
+
+
+def _secret_forms(secret: str) -> set[str]:
+    """List the forms of one secret that an echoing server can send back.
+
+    Besides the value itself, a server may echo it base64-encoded (standard
+    or URL-safe), and a Basic-auth token may come back decoded as
+    ``user:password`` or as the password alone. Padding is left off each
+    base64 form, so the padded form is masked too.
+
+    Args:
+        secret: One nonempty secret value.
+
+    Returns:
+        The value and its encoded and decoded forms; at most seven strings.
+    """
+    raw = secret.encode()
+    forms = {secret, *(encode(raw).decode().rstrip("=") for encode in (base64.b64encode, base64.urlsafe_b64encode))}
+    token = secret.partition(" ")[2] if secret[:6].lower() == "basic " else secret
+    forms.add(token)
+    try:
+        decoded = base64.b64decode(token, validate=True).decode()
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return forms
+    # Only a decoded "user:password" is a Basic credential; other base64 text is left alone.
+    _user, separator, password = decoded.partition(":")
+    if separator and password and decoded.isprintable():
+        forms |= {decoded, password}
+    return forms
 
 
 def _text(body: bytes | str) -> str:

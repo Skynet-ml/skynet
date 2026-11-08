@@ -147,7 +147,8 @@ def test_recorder_sends_the_call_fields_and_drops_empty_secrets() -> None:
     assert call["started_at"].tzinfo is not None
     assert call["duration_ms"] >= 0
     assert (call["request"], call["response"]) == ("{}", "\ufffd")
-    assert secrets == ["key"]
+    assert "key" in secrets
+    assert "" not in secrets
 
 
 def test_recorder_keeps_a_duration_another_process_measured() -> None:
@@ -211,3 +212,13 @@ def test_budget_service_exposes_its_engine() -> None:
     assert service.engine is engine
     with pytest.raises(AttributeError):
         service.engine = object()  # type: ignore[misc]
+
+
+def test_secret_forms_stay_bounded_and_decode_only_basic_credentials() -> None:
+    """Add at most seven forms for a secret, and decode only a ``user:password`` token."""
+    plain = scoped_relay._secret_forms("sk-live-abcdef123456")
+    assert plain == {"sk-live-abcdef123456", "c2stbGl2ZS1hYmNkZWYxMjM0NTY"}
+
+    basic = scoped_relay._secret_forms("Basic c3ZjOnB3LXNlY3JldC05")
+    assert {"c3ZjOnB3LXNlY3JldC05", "svc:pw-secret-9", "pw-secret-9"} <= basic
+    assert len(basic) <= 7
