@@ -61,7 +61,7 @@ LABEL_MAX_CHARS = 160
 # plumbing: the frames carry raw provider requests, headers included.
 _MAILBOX_FRAME = re.compile(r"APP_MODEL_[0-9a-f]{32}:")
 _MAILBOX_WRAPPER = re.compile(
-    r"python3 \.app-model-[0-9a-f]{32}/proxy\.py \.app-model-[0-9a-f]{32}/config\.json bash -lc (?P<inner>.+)",
+    r"python3 -I \.app-model-[0-9a-f]{32}/proxy\.py \.app-model-[0-9a-f]{32}/config\.json bash --noprofile --norc -c (?P<inner>.+)",
     re.DOTALL,
 )
 

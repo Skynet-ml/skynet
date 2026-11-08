@@ -557,8 +557,45 @@ def test_main_runs_the_file_contract_end_to_end(tmp_path: Path, interpreter: str
         "side_info": {"feedback": "f", "render": "data:image/png;base64,aGk="},
         "error": None,
         "usage": [],
+        "stopped": True,
     }
     assert not (call_dir / (runner.OUTPUT_FILE + ".part")).exists()
+
+
+def test_an_isolated_runner_imports_user_site_packages_without_their_pth_files(tmp_path: Path) -> None:
+    """Under ``python3 -I`` a metric still imports a user-site dependency, and no ``.pth`` file there runs (E38, E40)."""
+    base = getattr(sys, "_base_executable", sys.executable)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    folder = subprocess.run(
+        [base, "-c", "import site; print(site.getusersitepackages())"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout.strip()
+    user_site = Path(folder)
+    user_site.mkdir(parents=True)
+    (user_site / "userdep.py").write_text("VALUE = 0.5\n", encoding="utf-8")
+    marker = tmp_path / "pth-ran"
+    (user_site / "plant.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('x')\n")
+    call_dir = tmp_path / "calls" / "000001"
+    call_dir.mkdir(parents=True)
+    payload = {"code": "import userdep\ndef score(candidate, case=None):\n    return userdep.VALUE, 'ok'\n"}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps({**payload, "candidate": "x", "case": None}), encoding="utf-8")
+
+    completed = subprocess.run(
+        [base, "-I", "-B", runner.__file__, str(call_dir)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=tmp_path,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))["score"] == 0.5
+    assert not marker.exists()
 
 
 def test_main_wants_exactly_one_argument(capsys: pytest.CaptureFixture[str]) -> None:
@@ -805,3 +842,177 @@ def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> No
     connection.close()
     [message] = client.sent
     assert base64.b64decode(message["body"]) == b"hello chunked world"
+
+
+_CANDIDATE_CODE = """
+import json
+import subprocess
+import sys
+import time
+
+
+def echo(value):
+    return {"got": value}
+
+
+def leaves_a_sleeper(value):
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    return value
+
+
+def boom(value):
+    raise ValueError("boom")
+
+
+def not_json(value):
+    return object()
+
+
+def slow(value):
+    time.sleep(30)
+"""
+
+
+def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
+    """Run the ``[run]`` supervisor once in a fresh folder, as the scorer box does.
+
+    Args:
+        tmp_path: Scratch folder; the candidate's code lives in ``cand.py`` there.
+        entry: The ``[run]`` entry.
+        value: The case input.
+        timeout: The run timeout.
+
+    Returns:
+        The supervisor's output document.
+    """
+    (tmp_path / "cand.py").write_text(_CANDIDATE_CODE, encoding="utf-8")
+    call_dir = tmp_path / "call"
+    call_dir.mkdir(exist_ok=True)
+    payload = {"entry": entry, "input": value, "timeout": timeout, "token": "tok-test", "stages": None}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
+    subprocess.run(
+        [sys.executable, runner.__file__, runner.CANDIDATE_FLAG, str(call_dir)],
+        cwd=tmp_path,
+        check=True,
+        timeout=timeout + 60,
+    )
+    return json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+
+
+def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Path) -> None:
+    """A ``path.py:function`` entry gets the case input; its JSON return value is the output."""
+    assert _candidate(tmp_path, "cand.py:echo", {"a": 1}) == {
+        "output": {"got": {"a": 1}},
+        "error": None,
+        "stopped": True,
+    }
+
+
+def test_a_command_entry_reads_stdin_and_a_nonzero_exit_is_an_output(tmp_path: Path) -> None:
+    """A command gets the input as JSON on stdin; its exit code and stdout are the output, not a failure."""
+    ran = _candidate(tmp_path, ["sh", "-c", "cat; echo; exit 3"], {"a": 1})
+    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None, "stopped": True}
+
+
+def test_a_command_stdout_is_capped(tmp_path: Path) -> None:
+    """Keep at most 1 MB of a command's stdout."""
+    ran = _candidate(tmp_path, [sys.executable, "-c", "print('x' * 3_000_000)"])
+    assert len(ran["output"]["stdout"].encode()) <= runner.MAX_RUN_STDOUT_BYTES
+
+
+@pytest.mark.parametrize(
+    ("entry", "error"),
+    [
+        ("cand.py:boom", "boom"),
+        ("cand.py:not_json", "JSON"),
+        ("cand.py:slow", "timeout after 1 s"),
+        (["sh", "-c", "sleep 30"], "timeout after 1 s"),
+        (["no-such-command-e38"], "could not start"),
+        (["sh", "-c", "kill -9 $$"], "SIGKILL"),
+    ],
+)
+def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> None:
+    """A raise, a non-JSON return, a timeout, a command that cannot start and a signal kill are failures."""
+    # Only the timeout cases get the short limit; a loaded test host can
+    # take over a second just to start Python.
+    ran = _candidate(tmp_path, entry, timeout=1 if "timeout" in error else 30)
+    assert ran["output"] is None
+    assert error in ran["error"]
+    assert ran["stopped"] is True
+
+
+def test_the_supervisor_stops_every_process_the_candidate_left(tmp_path: Path) -> None:
+    """A background process in its own session still stops before the metric files go in."""
+    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
+    assert ran == {"output": 7, "error": None, "stopped": True}
+    assert _marked(runner.candidate_processes("tok-test"), "tok-test") == set()
+
+
+def _marked(pids: set[int], token: str) -> set[int]:
+    """Keep the processes that carry the run's marker.
+
+    On Linux ``candidate_processes`` also returns every child of the calling
+    process, which under xdist includes the shared worker's own children.
+
+    Args:
+        pids: Process ids to filter.
+        token: The run's marker.
+
+    Returns:
+        The ids whose environment holds the marker; on macOS, all of them,
+        because there the function finds processes by the marker only.
+    """
+    if not sys.platform.startswith("linux"):
+        return pids
+    marker = f"{runner.CANDIDATE_TOKEN_ENV}={token}".encode()
+    found: set[int] = set()
+    for pid in pids:
+        try:
+            if marker in Path(f"/proc/{pid}/environ").read_bytes():
+                found.add(pid)
+        except OSError:
+            continue
+    return found
+
+
+def test_accepts_output_counts_the_third_argument() -> None:
+    """Pass the output to ``score(repo_path, case, output)``, and to ``*args`` only after a run."""
+    assert runner.accepts_output(lambda repo, case, output: 0, ran=False)
+    assert not runner.accepts_output(lambda repo, case=None: 0, ran=True)
+    assert runner.accepts_output(lambda *args: 0, ran=True)
+    assert not runner.accepts_output(lambda *args: 0, ran=False)
+
+
+def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path) -> None:
+    """With an output in the input, the metric may start no process, even when it catches the refusal (E40)."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    code = (
+        "import subprocess\n"
+        "def score(repo_path, case, output):\n"
+        "    try:\n"
+        "        subprocess.run(['true'])\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    return 1.0\n"
+    )
+    document = {"code": code, "candidate": str(tmp_path), "case": None, "gateway": None, "output": {"x": 1}}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(document), encoding="utf-8")
+    subprocess.run([sys.executable, runner.__file__, str(call_dir)], cwd=tmp_path, check=True, timeout=60)
+    result = json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+    assert result["score"] is None
+    assert result["error"] == runner.RERUN_REFUSED
+
+
+def test_the_metric_gets_the_output_as_its_third_argument(tmp_path: Path) -> None:
+    """``score(repo_path, case, output)`` receives the run's output and the full case."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    code = "def score(repo_path, case, output):\n    return output['n'] / 10, {'feedback': case['expected']}\n"
+    case = {"input": 1, "expected": "e"}
+    document = {"code": code, "candidate": str(tmp_path), "case": case, "gateway": None, "output": {"n": 4}}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(document), encoding="utf-8")
+    subprocess.run([sys.executable, runner.__file__, str(call_dir)], cwd=tmp_path, check=True, timeout=60)
+    result = json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+    assert result["score"] == pytest.approx(0.4)
+    assert result["side_info"]["feedback"] == "e"
