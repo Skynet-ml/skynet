@@ -13,8 +13,9 @@ Usage (AWS profile ``skynet`` must be signed in):
 signs up through the normal register -> email code -> confirm path, with the
 code from the Resend receiving inbox, and sets the status to ``ready``. So a
 failed or killed ``create`` still leaves a secret that ``list`` shows.
-``delete`` finishes the email confirmation of a ``pending`` account, signs in,
-calls ``POST /account/delete`` and then removes the secret. ``forget`` removes
+``delete`` signs in, calls ``POST /account/delete`` and then removes the
+secret. If sign-in fails for a ``pending`` account, it first finishes the
+email confirmation and marks the secret ``ready``. ``forget`` removes
 only the secret, for an account that does not exist.
 Only ``env`` prints the password; run it only inside ``eval``. No command
 prints a token or an email code.
@@ -273,7 +274,7 @@ def env(ident):
 
 
 def verify_pending(ident, value):
-    """Finish the email confirmation of a pending account, so that it can sign in.
+    """Finish the email confirmation of an unverified account, then mark its secret ready.
 
     An unverified account cannot sign in, and so cannot delete itself.
 
@@ -283,25 +284,54 @@ def verify_pending(ident, value):
     """
     email, app = value["email"], value["app"]
     seen = set(mail_ids(email, inbox_auth()))
+    status = None
     if seen:
         status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": email_code(email)})
         print("confirm with the sign-up code: HTTP", status)
-        if status < 300:
-            return
-    # The resend route answers 200 but sends nothing within 60 s of the last code.
-    time.sleep(61)
-    status, _ = curl(f"{app}/api/email-verify/request", body={"email": email})
-    print("code request: HTTP", status)
-    code = email_code(email, seen)
-    if not code:
-        sys.exit(
-            "account: no new email code arrived. If register never succeeded, no account exists:"
-            f" run python3 account.py forget {ident}. Otherwise report the id."
-        )
-    status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": code})
-    print("confirm: HTTP", status)
-    if status >= 300:
-        sys.exit("account: confirm failed; the secret stays, report the id " + ident)
+    if status is None or status >= 300:
+        # The resend route answers 200 but sends nothing within 60 s of the last code.
+        time.sleep(61)
+        status, _ = curl(f"{app}/api/email-verify/request", body={"email": email})
+        print("code request: HTTP", status)
+        code = email_code(email, seen)
+        if not code:
+            # A verified account and an unknown address also get no code, so this alone never proves the account is gone.
+            sys.exit(
+                "account: sign-in failed and no new email code arrived; the secret stays."
+                " A verified account gets no new code, so the account may still exist."
+                " Use forget only if create printed no 'register: HTTP 2xx' line, or the preview"
+                f" database is gone. Otherwise report the id {ident}."
+            )
+        status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": code})
+        print("confirm: HTTP", status)
+        if status >= 300:
+            sys.exit("account: confirm failed; the secret stays, report the id " + ident)
+    write_secret(ident, {**value, "status": "ready"})
+
+
+def sign_in(value, tmp):
+    """Sign in through the app and return the backend access token.
+
+    Args:
+        value: Secret value of the account.
+        tmp: Private temporary directory for the cookie jar.
+
+    Returns:
+        The token, or an empty string when the sign-in fails.
+    """
+    app = value["app"]
+    jar = str(Path(tmp) / "jar")
+    Path(jar).unlink(missing_ok=True)
+    _, text = curl(f"{app}/api/auth/csrf", jar=jar)
+    csrf = json.loads(text)["csrfToken"]
+    curl(
+        f"{app}/api/auth/callback/credentials",
+        jar=jar,
+        form=True,
+        body={"email": value["email"], "password": value["password"], "csrfToken": csrf, "callbackUrl": app},
+    )
+    _, text = curl(f"{app}/api/auth/session", jar=jar)
+    return (json.loads(text) or {}).get("backendAccessToken", "")
 
 
 def delete(ident):
@@ -311,25 +341,17 @@ def delete(ident):
         ident: Account id that ``create`` printed.
     """
     value = read_secret(PREFIX + ident)
-    app, api = value["app"], value["api"]
-    if value.get("status") != "ready":
-        verify_pending(ident, value)
+    api = value["api"]
     with tempfile.TemporaryDirectory() as tmp:
-        jar = str(Path(tmp) / "jar")
-        _, text = curl(f"{app}/api/auth/csrf", jar=jar)
-        csrf = json.loads(text)["csrfToken"]
-        curl(
-            f"{app}/api/auth/callback/credentials",
-            jar=jar,
-            form=True,
-            body={"email": value["email"], "password": value["password"], "csrfToken": csrf, "callbackUrl": app},
-        )
-        _, text = curl(f"{app}/api/auth/session", jar=jar)
-        token = (json.loads(text) or {}).get("backendAccessToken", "")
+        # Sign in first: the secret can say pending for a verified account (create or delete died after confirm).
+        token = sign_in(value, tmp)
+        if not token and value.get("status") != "ready":
+            verify_pending(ident, value)
+            token = sign_in(value, tmp)
         if not token:
             sys.exit(
-                "account: sign-in failed; the secret stays. If the account is already gone"
-                f" (preview dropped), run python3 account.py forget {ident}. Otherwise report the id."
+                "account: sign-in failed after the email confirmation; the secret stays."
+                f" If the preview database is gone, run python3 account.py forget {ident}. Otherwise report the id."
             )
         header = Path(tmp) / "auth"
         header.touch(mode=0o600)

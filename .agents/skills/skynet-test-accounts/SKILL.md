@@ -113,13 +113,20 @@ exact status.
 python3 .agents/skills/skynet-test-accounts/account.py delete <id>
 ```
 
-If the status is `pending`, it first confirms the email, because an
-unverified account cannot sign in. It uses the sign-up code in the inbox.
-If that code fails, it waits out the 60-second resend cooldown and asks
-for a new code. Then it signs in,
-calls `POST $API/account/delete` with the password, and force-deletes the
-secret. Expect `account delete: HTTP 200` and `secret removed`. If it fails,
-it keeps the secret. Report the account id to the orchestrator.
+It signs in first. A `pending` secret can belong to a verified account,
+because `create` or an earlier `delete` can stop after the confirm. If
+sign-in fails and the status is `pending`, it confirms the email, because
+an unverified account cannot sign in. It uses the sign-up code in the
+inbox. If that code fails, it waits out the 60-second resend cooldown and
+asks for a new code. After a good confirm it sets the status to `ready` and
+signs in again. Then it calls `POST $API/account/delete` with the password,
+and force-deletes the secret. Expect `account delete: HTTP 200` and
+`secret removed`. If it fails, it keeps the secret. Report the account id
+to the orchestrator.
+
+"No new email code arrived" does not prove that the account is gone. A
+verified account gets no new code. Use `forget` only when `create` printed
+no `register: HTTP 2xx` line, or the preview database is gone.
 
 - `account.py list` prints the id, target, status and creation date of every
   check account that still has a secret. The orchestrator runs it after each
