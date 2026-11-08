@@ -34,9 +34,10 @@ Place = Literal["local", "cloud"]
 # The settings each place's sandbox runtime enforces. Staging strips the
 # metric files and the exploit folder from the agent's tree in both places,
 # and ``check_hidden`` proves it (SKY-353). The issue that enforces another
-# setting adds its kind here, and the gate stops refusing it.
-_METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
-ENFORCED: dict[Place, frozenset[str]] = {"local": _METRIC_HIDING, "cloud": _METRIC_HIDING}
+# setting adds its kind here, and the gate stops refusing it. The broker
+# grants the proposer's box its hosts and refuses any other (SKY-384).
+_ENFORCED_KINDS = frozenset({"metric.files", "metric.exploits", "proposer.network"})
+ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_KINDS, "cloud": _ENFORCED_KINDS}
 
 _UNENFORCED_CODE: dict[Place, I18nKey] = {
     "local": I18nKey.REPO_GATE_UNENFORCED_LOCAL,
@@ -112,11 +113,10 @@ def check_repository(
     constraints = read_constraints(archive) if raw is not None else None
     if raw is None or constraints is None:
         return []
-    specific = _specific_failures(constraints, place)
     failures = [
-        specific.get(key) or _failure(key, place, _UNENFORCED_CODE[place], key=key)
+        _failure(key, place, _UNENFORCED_CODE[place], key=key)
         for kind, key in _set_keys(raw, constraints.targets, constraints.services)
-        if key in specific or kind not in ENFORCED[place]
+        if kind not in ENFORCED[place]
     ]
     return failures + _secret_failures(constraints, secret_names, bindings or {}, allowed_hosts or {}, place)
 
@@ -316,31 +316,6 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     metric_keys = ("files", "exploits", "reference", "mcp", "services", "illegal")
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
     return keys
-
-
-def _specific_failures(constraints: RepoConstraints, place: Place) -> dict[str, GateFailure]:
-    """Find the settings that fail for a reason of their own, whatever ``ENFORCED`` holds.
-
-    The proposer gets no allowed hosts until the protected broker can give a
-    guest box an allowlist, so a non-empty ``[proposer] network`` fails even
-    when the place enforces the key.
-
-    Args:
-        constraints: The parsed file.
-        place: Where the run's sandbox runs.
-
-    Returns:
-        Each such setting's failure, by its label.
-    """
-    found: dict[str, GateFailure] = {}
-    if constraints.proposer.network:
-        found["[proposer] network"] = _failure(
-            "[proposer] network",
-            place,
-            I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED,
-            hosts=", ".join(constraints.proposer.network),
-        )
-    return found
 
 
 def _failure(setting: str, place: Place, code: I18nKey, **params: str) -> GateFailure:

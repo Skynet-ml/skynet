@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -67,6 +68,11 @@ PACKAGE_REGISTRY_HOSTS = tuple(
         }
     )
 )
+# The registries a proposer box reaches by default, so its agent can install
+# packages while it stays offline otherwise (E57). files.pythonhosted.org
+# serves the files that pypi.org's index points to.
+PROPOSER_REGISTRY_HOSTS = ("files.pythonhosted.org", "pypi.org", "registry.npmjs.org")
+_PYPI_HOSTS = frozenset({"files.pythonhosted.org", "pypi.org"})
 _MS_PER_HOUR = Decimal(3_600_000)
 _IMMUTABLE_IMAGE = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _SESSION_FIELDS = (
@@ -103,6 +109,28 @@ def vercel_sandbox_cost_range(request: Mapping[str, Any]) -> tuple[Decimal, Deci
     minimum_usd = _CREATION_USD + Decimal(vcpus * 2) * minimum_memory_rate / Decimal(60)
     minimum = ChargePolicy("sandbox").convert(minimum_usd).total
     return minimum, maximum
+
+
+def proposer_hosts(network: tuple[str, ...] | None, index_url: str | None = None) -> tuple[str, ...]:
+    """Return the hosts a proposer box may reach besides the relay.
+
+    Args:
+        network: The ``[proposer] network`` list, or None when the file sets none.
+        index_url: The account's saved package index; PyPI when None.
+
+    Returns:
+        Sorted hosts: the registries when ``network`` is None, nothing when it
+        is empty, and the registries plus its hosts otherwise.
+    """
+    if network is not None and not network:
+        return ()
+    registries = set(PROPOSER_REGISTRY_HOSTS)
+    index_host = urlsplit(index_url).hostname if index_url else None
+    if index_host and index_host not in _PYPI_HOSTS:
+        # A custom index names no file host, so the box reaches only the index;
+        # an index that serves its files from another host fails the install.
+        registries = (registries - _PYPI_HOSTS) | {index_host}
+    return tuple(sorted(registries | set(network or ())))
 
 
 def _integer(value: Any, name: str) -> int:

@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from core.billing.signals import BudgetReached
+from core.billing.vercel_usage import PROPOSER_REGISTRY_HOSTS, proposer_hosts
 from core.service_gateway.optimization.blackbox import repo_services
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     McpServer,
@@ -111,11 +112,12 @@ def _specs(names: tuple[str, ...]) -> Mapping[str, SandboxSpec]:
 
 
 def test_each_role_gets_only_its_listed_hosts_servers_and_services() -> None:
-    """The record names every role's plan; the proposer keeps its list, and every target is offline."""
-    plans = repo_services.plan_roles(parse_constraints(_FILE))
+    """The record names every role's plan; the proposer gets its effective hosts, and every target is offline."""
+    hosts = proposer_hosts(parse_constraints(_FILE).proposer.network)
+    plans = repo_services.plan_roles(parse_constraints(_FILE), proposer_hosts=hosts)
 
     assert plans == {
-        "proposer": {"allowed_hosts": ["pypi.org"], "mcp_servers": [], "services": ["maps"]},
+        "proposer": {"allowed_hosts": list(hosts), "mcp_servers": [], "services": ["maps"]},
         "targets": {
             "planner": {"allowed_hosts": [], "mcp_servers": [], "services": ["maps"]},
             "router": {"allowed_hosts": [], "mcp_servers": [], "services": []},
@@ -133,6 +135,16 @@ def test_a_role_gets_only_the_servers_of_its_own_mcp_file() -> None:
 
     assert repo_services.plan_role(constraints.proposer).mcp_servers == ()
     assert repo_services.plan_role(run).mcp_servers == ("grader",)
+
+
+def test_a_proposer_with_no_network_key_records_the_registries_not_null() -> None:
+    """With no ``[proposer] network`` key, the record shows the registry hosts it reaches, never null (E57)."""
+    constraints = parse_constraints(b'version = 1\n[target.web]\nentry = "a.py:f"\n')
+
+    plans = repo_services.plan_roles(constraints, proposer_hosts=proposer_hosts(constraints.proposer.network))
+
+    assert constraints.proposer.network is None
+    assert plans["proposer"]["allowed_hosts"] == list(PROPOSER_REGISTRY_HOSTS)
 
 
 @pytest.mark.parametrize(
@@ -197,7 +209,7 @@ def test_a_target_network_list_gives_its_box_no_host() -> None:
     raw = b'version = 1\n[target.web]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\n'
     constraints = parse_constraints(raw)
 
-    plans = repo_services.plan_roles(constraints)
+    plans = repo_services.plan_roles(constraints, proposer_hosts=())
     spec = repo_services.stage_spec(
         "web", constraints.targets["web"], evaluation_id="c1-e1", lifetime_seconds=60, tags={}
     )
