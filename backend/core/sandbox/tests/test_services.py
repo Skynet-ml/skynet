@@ -152,7 +152,7 @@ def test_interpolation_uses_an_empty_environment(tmp_path: Path) -> None:
         "    environment: {PASSWORD: '${PW:-postgres}', PRICE: 'a$$b'}\n"
         "    healthcheck: {test: [CMD-SHELL, pg_isready -U $$PASSWORD]}\n"
     )
-    assert db.command == "echo \\$HOME \"\\$HOME\" d || sh -c 'echo $0'"
+    assert db.command == "echo '$HOME' '$HOME' d '||' sh -c 'echo $0'"
     assert db.working_dir == "/srv"
     assert db.environment == (("PASSWORD", "postgres"), ("PRICE", "a$b"))
     assert db.healthcheck is not None
@@ -166,7 +166,32 @@ def test_interpolation_uses_an_empty_environment(tmp_path: Path) -> None:
         timeout=10,
         env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)},
     )
-    assert result.stdout.split("\n")[0] == "$HOME $HOME d"
+    assert result.stdout.strip() == "$HOME $HOME d || sh -c echo $0"
+
+
+def test_string_command_words_are_literal_as_in_compose(tmp_path: Path) -> None:
+    """Check that a string command gets no shell expansion or operators, because compose runs no shell."""
+    (tmp_path / "a.txt").write_text("")
+    (app,) = parse_compose("services:\n  app:\n    command: echo `id` *.txt {a,b} $$(pwd) ~ && echo no\n")
+    assert app.command == "echo '`id`' '*.txt' '{a,b}' '$(pwd)' '~' '&&' echo no"
+    result = subprocess.run(
+        ["bash", "-c", app.command],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert result.stdout == "`id` *.txt {a,b} $(pwd) ~ && echo no\n"
+    with pytest.raises(ComposeError, match="command of compose service app is not valid shell words"):
+        parse_compose("services:\n  app:\n    command: echo 'open\n")
+
+
+def test_unclosed_interpolation_is_an_invalid_format() -> None:
+    """Check that `${X` with no closing brace fails, as in compose."""
+    with pytest.raises(ComposeError, match="invalid interpolation format"):
+        parse_compose("services:\n  app:\n    command: echo ${X\n")
 
 
 @pytest.mark.parametrize("form", ["${PW:?set the password}", "${PW?set the password}"])
@@ -206,6 +231,20 @@ def test_profile_services_are_skipped() -> None:
             "services:\n  app:\n    command: x\n    depends_on: [debug]\n"
             "  debug:\n    command: y\n    profiles: [debug]\n"
         )
+
+
+def test_healthcheck_interval_zero_is_the_docker_default() -> None:
+    """Check that a healthcheck interval of 0 means Docker's 30 s default, not a busy poll."""
+    (db,) = parse_compose("services:\n  db:\n    command: x\n    healthcheck: {test: y, interval: 0s}\n")
+    assert db.healthcheck is not None
+    assert db.healthcheck.interval_sec == 30.0
+
+
+def test_healthcheck_start_interval_zero_is_the_docker_default() -> None:
+    """Check that a healthcheck start_interval of 0 means Docker's 5 s default, not a busy poll."""
+    (db,) = parse_compose("services:\n  db:\n    command: x\n    healthcheck: {test: y, start_interval: 0s}\n")
+    assert db.healthcheck is not None
+    assert db.healthcheck.start_interval_sec == 5.0
 
 
 def test_healthcheck_timeout_zero_is_the_docker_default() -> None:

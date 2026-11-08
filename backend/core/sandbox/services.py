@@ -52,7 +52,7 @@ _INTEGER = re.compile(r"^\d+$")
 _TRUE = ("true", "True", "TRUE")
 _KEPT_TAGS = ("tag:yaml.org,2002:null", "tag:yaml.org,2002:merge")
 # Compose interpolation: `$$`, `${...}` and `$NAME`. A `$` in any other form stays as written, as in compose.
-_INTERPOLATION = re.compile(r"\$(?:(\$)|\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_INTERPOLATION = re.compile(r"\$(?:(\$)|\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*)|(\{))")
 _BRACED = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])(.*))?$", re.DOTALL)
 _DEPENDS_CONDITIONS = ("service_started", "service_healthy")
 
@@ -185,8 +185,8 @@ def _interpolate(name: str, text: str) -> str:
         The interpolated string.
 
     Raises:
-        ComposeError: A ``${...}`` form is invalid or nested, or it is a
-            required variable (``${X:?msg}`` or ``${X?msg}``).
+        ComposeError: A ``${...}`` form is invalid, nested or not closed,
+            or it is a required variable (``${X:?msg}`` or ``${X?msg}``).
     """
 
     def replace(match: re.Match[str]) -> str:
@@ -199,15 +199,17 @@ def _interpolate(name: str, text: str) -> str:
             The replacement text.
 
         Raises:
-            ComposeError: The form is invalid, nested or required.
+            ComposeError: The form is invalid, nested, not closed or required.
         """
+        if match.group(4) is not None:
+            raise ComposeError(f"The compose service {name} has an invalid interpolation format: '${{' is not closed.")
         if match.group(1) is not None:
             return "$"
         if match.group(3) is not None:
             return ""
         braced = _BRACED.match(match.group(2))
         if braced is None or "${" in match.group(2):
-            raise ComposeError(f"The compose service {name} has an invalid interpolation {match.group(0)!r}.")
+            raise ComposeError(f"The compose service {name} has an invalid interpolation format {match.group(0)!r}.")
         variable, operator, word = braced.groups()
         if operator in ("-", ":-"):
             return _interpolate(name, word)
@@ -219,36 +221,6 @@ def _interpolate(name: str, text: str) -> str:
         return ""
 
     return _INTERPOLATION.sub(replace, text)
-
-
-def _literal_dollars(text: str) -> str:
-    """Escape each ``$`` of shell text so that bash keeps it as a literal.
-
-    After interpolation, every ``$`` that is left is a literal in compose,
-    because compose splits a string command into words and runs no shell.
-    A ``$`` in single quotes is already literal, and a backslash there
-    would stay in the word, so only a ``$`` outside single quotes changes.
-
-    Args:
-        text: The interpolated shell text.
-
-    Returns:
-        The text with ``\\$`` for each ``$`` outside single quotes.
-    """
-    out: list[str] = []
-    quote: str | None = None
-    escaped = False
-    for char in text:
-        if escaped:
-            escaped = False
-        elif char == "\\" and quote != "'":
-            escaped = True
-        elif char in "'\"" and quote in (None, char):
-            quote = char if quote is None else None
-        elif char == "$" and quote != "'":
-            char = "\\$"
-        out.append(char)
-    return "".join(out)
 
 
 def _service(name: str, body: Any) -> ComposeService:
@@ -366,13 +338,20 @@ def _command_text(name: str, field: str, value: Any) -> str:
         value: A string, or a list of scalar arguments.
 
     Returns:
-        The shell text.
+        The shell text, with each word quoted. A string is split into words
+        as compose does, so shell operators such as ``&&`` are literal words.
 
     Raises:
-        ComposeError: The value is neither a string nor a list of scalars.
+        ComposeError: The value is neither a string nor a list of scalars,
+            or a string has an unclosed quote.
     """
     if isinstance(value, str):
-        return _literal_dollars(value.strip())
+        # Compose splits a string command into words and runs no shell, so
+        # each word is quoted: `&&`, globs, backticks and `$` stay literal.
+        try:
+            return shlex.join(shlex.split(value))
+        except ValueError as error:
+            raise ComposeError(f"The {field} of compose service {name} is not valid shell words: {error}.") from error
     if isinstance(value, list):
         return shlex.join(_scalar(name, field, item) for item in value)
     raise ComposeError(f"The {field} of compose service {name} is not a string or a list.")
@@ -591,14 +570,14 @@ def _healthcheck(name: str, value: Any) -> HealthcheckConfig | None:
     else:
         raise ComposeError(f"The compose service {name} has an invalid healthcheck test.")
     defaults = HealthcheckConfig(command="")
-    # Docker reads a timeout of 0 as "use the default", not as "no time at all".
-    timeout = _duration(name, value.get("timeout"), defaults.timeout_sec) or defaults.timeout_sec
+    # Docker reads 0 as "use the default", not as "no time at all".
     return HealthcheckConfig(
         command=command,
-        interval_sec=_duration(name, value.get("interval"), 30.0),
-        timeout_sec=timeout,
+        interval_sec=_duration(name, value.get("interval"), 30.0) or 30.0,
+        timeout_sec=_duration(name, value.get("timeout"), defaults.timeout_sec) or defaults.timeout_sec,
         start_period_sec=_duration(name, value.get("start_period"), defaults.start_period_sec),
-        start_interval_sec=_duration(name, value.get("start_interval"), defaults.start_interval_sec),
+        start_interval_sec=_duration(name, value.get("start_interval"), defaults.start_interval_sec)
+        or defaults.start_interval_sec,
         retries=_retries(name, value.get("retries"), defaults.retries),
     )
 
