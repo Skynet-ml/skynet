@@ -856,6 +856,28 @@ async def test_download_not_found_answer_returns_none() -> None:
         assert await env.download_file("/tmp/missing") is None
 
 
+async def test_download_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a download whose answer runs past the size limit (SKY-535)."""
+    async with SbxEnvironment(_spec()) as env:
+        await env.upload_files({"/tmp/a.txt": "alpha"})
+        assert await env.download_file("/tmp/a.txt") == "alpha"
+        monkeypatch.setattr(sbx, "MAX_DOWNLOAD_BYTES", 16)
+        with pytest.raises(SandboxInfraError, match="above the 16 byte limit"):
+            await env.download_file("/tmp/a.txt")
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(503, SandboxTransientError), (403, SandboxFatalError), (404, SandboxInfraError)],
+)
+async def test_download_error_status(status: int, error: type[SandboxError]) -> None:
+    """Map a streamed download error status to the error of its group."""
+    async with SbxEnvironment(_spec()) as env:
+        CLOUD.failures[("GET", "/v1/files/download")] = (status, "otherError")
+        with pytest.raises(error, match=f"HTTP {status}, otherError"):
+            await env.download_file("/tmp/a.txt")
+
+
 @pytest.mark.parametrize(
     ("spec_fields", "body"),
     [
