@@ -8,6 +8,8 @@ Methods tested (no real subprocesses, no real multiprocessing.Queue):
   get_worker                                — singleton contract, pending IDs enqueued
   reset_worker_for_tests                    — clears the module-level singleton
   BackgroundWorker._process_job             — run_completed / run_failed telemetry facts
+  BackgroundWorker._sweep_terminal_job_sandboxes — terminal-job box sweep and its advisory lock
+  BackgroundWorker._sandbox_sweep_loop      — a failed sweep does not end the sweeper
 
 Methods intentionally NOT tested here:
   start() / _worker_loop()                  — require real threads + real mp.Process
@@ -18,15 +20,19 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from sqlalchemy import create_engine, insert
+from sqlalchemy.pool import StaticPool
 
 import core.worker.engine as engine_module
 from core.exceptions import INFRASTRUCTURE_INTERRUPTION
 from core.storage.base import JobStore
+from core.storage.models import JobModel
 from core.worker.constants import (
     EVENT_AGENT_RUN,
     EVENT_ERROR,
@@ -738,6 +744,156 @@ def test_stop_blackbox_sandboxes_in_local_mode_skips_the_availability_probe(
     worker._stop_blackbox_sandboxes("opt-1")
 
     assert runtime.swept == ["opt-1"]
+
+
+def test_sweep_stops_the_boxes_of_terminal_jobs_and_keeps_running_ones(
+    worker: BackgroundWorker, store: FakeJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep stops boxes only for recently finished jobs that are still terminal."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    JobModel.__table__.create(engine)
+    now = datetime.now(UTC)
+    rows = {
+        "done": ("success", now),
+        "cancelled": ("cancelled", now),
+        "live": ("running", None),
+        "paused": ("paused", now),
+        "resumed": ("failed", now),
+        "old": ("success", now - timedelta(days=3)),
+    }
+    with engine.begin() as conn:
+        conn.execute(
+            insert(JobModel),
+            [
+                {"optimization_id": job_id, "status": status, "completed_at": ended}
+                for job_id, (status, ended) in rows.items()
+            ],
+        )
+    for job_id, (status, _) in rows.items():
+        store.seed_job(job_id, status=status)
+    store.update_job("resumed", status="running")
+    store.engine = engine  # type: ignore[attr-defined]
+    runtime = _SweepRuntime(1)
+    monkeypatch.setattr(engine_module.settings, "local_mode", False)
+    monkeypatch.setattr(engine_module, "sandbox_runtime_from_settings", lambda settings: runtime)
+
+    swept = worker._sweep_terminal_job_sandboxes()
+
+    assert sorted(runtime.swept) == ["cancelled", "done"]
+    assert swept == 2
+
+
+class _FakePgResult:
+    """Fake SQLAlchemy result for the lock probe and the job id query."""
+
+    def __init__(self, value: Any) -> None:
+        """Remember the value the caller reads back."""
+        self._value = value
+
+    def scalar(self) -> Any:
+        """Return the lock probe outcome."""
+        return self._value
+
+    def scalars(self) -> _FakePgResult:
+        """Return self so ``.all()`` reads the id list."""
+        return self
+
+    def all(self) -> Any:
+        """Return the job id list."""
+        return self._value
+
+
+class _FakePgEngine:
+    """Fake Postgres engine whose transaction-scoped advisory locks are shared by every caller."""
+
+    class dialect:  # noqa: N801 - mirrors ``Engine.dialect.name``
+        """Dialect stub."""
+
+        name = "postgresql"
+
+    def __init__(self, job_ids: list[str]) -> None:
+        """Hold the terminal job ids and the set of held lock keys."""
+        self._job_ids = job_ids
+        self.held: set[int] = set()
+
+    @contextmanager
+    def begin(self) -> Iterator[Any]:
+        """Open a fake transaction that releases its locks on exit."""
+        mine: set[int] = set()
+        engine = self
+
+        class _Conn:
+            """Fake connection bound to this transaction."""
+
+            def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakePgResult:
+                """Grant the lock if free, or return the job ids."""
+                if params is None:
+                    return _FakePgResult(list(engine._job_ids))
+                key = params["k"]
+                if key in engine.held:
+                    return _FakePgResult(False)
+                engine.held.add(key)
+                mine.add(key)
+                return _FakePgResult(True)
+
+        try:
+            yield _Conn()
+        finally:
+            self.held -= mine
+
+
+def test_sweep_runs_on_only_one_worker_at_a_time(store: FakeJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second worker skips the sweep while a peer holds the advisory lock."""
+    store.seed_job("done", status="success")
+    store.engine = _FakePgEngine(["done"])  # type: ignore[attr-defined]
+    first = BackgroundWorker(job_store=cast(JobStore, store), _allow_unprotected_test_execution=True)
+    second = BackgroundWorker(job_store=cast(JobStore, store), _allow_unprotected_test_execution=True)
+    peer_results: list[int] = []
+
+    class _PeerRuntime(_SweepRuntime):
+        """Runtime that starts the peer's sweep from inside the first sweep."""
+
+        def stop_job_sandboxes(self, job_id: str) -> int:
+            """Run the peer's sweep while the first worker holds the lock."""
+            peer_results.append(second._sweep_terminal_job_sandboxes())
+            return super().stop_job_sandboxes(job_id)
+
+    runtime = _PeerRuntime(1)
+    monkeypatch.setattr(engine_module.settings, "local_mode", False)
+    monkeypatch.setattr(engine_module, "sandbox_runtime_from_settings", lambda settings: runtime)
+
+    assert first._sweep_terminal_job_sandboxes() == 1
+    assert peer_results == [0]
+    assert runtime.swept == ["done"]
+    assert second._sweep_terminal_job_sandboxes() == 1
+
+
+def test_a_failed_sweep_does_not_end_the_sweeper(worker: BackgroundWorker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweeper logs a sweep error, sweeps again on the next tick, and ends only on stop."""
+    calls: list[int] = []
+    swept_again = threading.Event()
+
+    def _sweep() -> int:
+        """Fail on the first tick and signal the second."""
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("database down")
+        swept_again.set()
+        return 0
+
+    monkeypatch.setattr(engine_module, "_SANDBOX_SWEEP_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(worker, "_sweep_terminal_job_sandboxes", _sweep)
+    stop_event = threading.Event()
+    sweeper = threading.Thread(target=worker._sandbox_sweep_loop, args=(stop_event,), daemon=True)
+    sweeper.start()
+    try:
+        assert swept_again.wait(5.0)
+        assert sweeper.is_alive()
+    finally:
+        stop_event.set()
+        sweeper.join(timeout=5.0)
+    assert not sweeper.is_alive()
+    assert len(calls) >= 2
 
 
 def test_renewing_lease_touches_activity_while_a_blocking_step_runs(

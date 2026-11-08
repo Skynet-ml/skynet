@@ -24,9 +24,11 @@ import time
 import traceback
 from collections.abc import Iterator
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import select, text
 
 from .. import run_log
 from ..api.errors import DomainError, domain_service_error
@@ -83,7 +85,7 @@ from ..constants import (
 )
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
-from ..models import BlackboxRunRequest, ModelConfig, RunRequest, UnifiedRunRequest
+from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus, RunRequest, UnifiedRunRequest
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
@@ -100,6 +102,7 @@ from ..service_gateway.optimization.blackbox.service import validate_blackbox_pa
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
 from ..service_gateway.optimization.unified.contract import validate_unified_payload
 from ..storage import JobStore
+from ..storage.models import JobModel
 from ..telemetry import record_server_event
 from ..telemetry.run_outcome import completed_properties, failed_properties
 from .budget_probe import (
@@ -145,6 +148,19 @@ from .unified_aliases import alias_blackbox_metric_model, alias_unified_model_ro
 from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
+
+# Continues the 7421370000xx advisory-lock series (issuing_float uses ...06).
+_SANDBOX_SWEEP_LOCK_KEY = 742137000007
+_SANDBOX_SWEEP_INTERVAL_SECONDS = 300.0
+# Paused is excluded: a paused run keeps its boxes for an in-place resume.
+_SANDBOX_SWEEP_STATUSES = frozenset(
+    {
+        OptimizationStatus.success,
+        OptimizationStatus.failed,
+        OptimizationStatus.cancelled,
+        OptimizationStatus.stopped,
+    }
+)
 
 GRID_SEARCH_RETIRED_MESSAGE = "Grid search is no longer supported. Submit this optimization again as a single run."
 
@@ -397,6 +413,7 @@ class BackgroundWorker:
 
         self._last_activity: dict[int, float] = {}
         self._activity_lock = threading.Lock()
+        self._sweep_stop = threading.Event()
         # Per-thread current job for lease heartbeats.
         self._thread_current_job: dict[int, str] = {}
         # Rate-limits the memory-pressure deferral warning across all threads.
@@ -1646,6 +1663,11 @@ class BackgroundWorker:
             )
             thread.start()
             self._threads.append(thread)
+        # A fresh event per start, so a sweeper from an earlier start cannot miss its stop.
+        self._sweep_stop = threading.Event()
+        threading.Thread(
+            target=self._sandbox_sweep_loop, args=(self._sweep_stop,), name="sandbox-sweeper", daemon=True
+        ).start()
 
         logger.info("Started %d background workers", self._num_workers)
 
@@ -1663,6 +1685,7 @@ class BackgroundWorker:
             return
 
         self._running = False
+        self._sweep_stop.set()
 
         # Request cooperative cancellation for pending/running jobs so workers
         # can terminate subprocess execution promptly during shutdown.
@@ -2190,6 +2213,63 @@ class BackgroundWorker:
             logger.error("Optimization %s subprocess did not terminate cleanly", optimization_id)
         else:
             logger.info("Optimization %s subprocess terminated", optimization_id)
+
+    def _sandbox_sweep_loop(self, stop_event: threading.Event) -> None:
+        """Sweep the boxes of terminal jobs every interval until the worker stops.
+
+        Args:
+            stop_event: Set by ``stop`` to end this loop.
+        """
+        while not stop_event.wait(_SANDBOX_SWEEP_INTERVAL_SECONDS):
+            try:
+                self._sweep_terminal_job_sandboxes()
+            except Exception:  # isolation boundary: a failed sweep must not end the sweeper
+                logger.warning("Terminal job sandbox sweep failed", exc_info=True)
+
+    def _sweep_terminal_job_sandboxes(self) -> int:
+        """Stop the boxes that recently finished jobs still have running.
+
+        Covers boxes that the per-job stop missed, for example when a worker
+        died before it ran. Only jobs that ended within the box lifetime
+        ceiling can still own a running box. The sweep stops boxes and never
+        deletes snapshots.
+
+        Returns:
+            The number of jobs whose boxes the sweep tried to stop, or ``0``
+            when the store has no engine or a peer holds the sweep lock.
+        """
+        engine = getattr(self._job_store, "engine", None)
+        if engine is None:
+            return 0
+        cutoff = datetime.now(UTC) - timedelta(seconds=settings.vercel_sandbox_max_lifetime_seconds)
+        swept = 0
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                acquired = conn.execute(
+                    text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": _SANDBOX_SWEEP_LOCK_KEY}
+                ).scalar()
+                if not acquired:
+                    return 0
+            job_ids = (
+                conn.execute(
+                    select(JobModel.optimization_id).where(
+                        JobModel.status.in_([str(status) for status in _SANDBOX_SWEEP_STATUSES]),
+                        JobModel.completed_at >= cutoff,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for optimization_id in job_ids:
+                # A failed, cancelled or stopped run can resume in place after the query.
+                try:
+                    if self._persisted_status(optimization_id) not in _SANDBOX_SWEEP_STATUSES:
+                        continue
+                except KeyError:
+                    continue
+                self._stop_blackbox_sandboxes(optimization_id)
+                swept += 1
+        return swept
 
     def _stop_blackbox_sandboxes(self, optimization_id: str) -> None:
         """Stop the sandboxes a killed black-box job left running on Vercel or local Docker.
