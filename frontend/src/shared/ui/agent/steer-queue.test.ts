@@ -84,6 +84,22 @@ test("Stop waits for withdrawal, skips delivered steers, and keeps tray order", 
   assert.deepEqual(queue.getSnapshot().queued, []);
 });
 
+test("Stop puts two quick steers and queued input after the Hebrew draft, in order", async () => {
+  const { queue, sent } = setup();
+  queue.openTurn(fakeChannel());
+  queue.steer("תשתמש בכחול");
+  queue.steer("והוסף כותרת");
+  queue.enqueue("queued");
+  await flush();
+  queue.hold();
+  queue.setBusy(false);
+  await flush();
+  const held = queue.takeHeld();
+  assert.equal(held, "תשתמש בכחול\n\nוהוסף כותרת\n\nqueued");
+  assert.equal(appendToDraft("טיוטה ", held ?? ""), "טיוטה\nתשתמש בכחול\n\nוהוסף כותרת\n\nqueued");
+  assert.deepEqual(sent, []);
+});
+
 test("takeHeld returns nothing when no input is held", () => {
   const { queue, sent } = setup();
   assert.equal(queue.takeHeld(), null);

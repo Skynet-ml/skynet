@@ -215,6 +215,43 @@ def test_steer_reaches_the_next_step_as_the_newest_user_message() -> None:
     assert not any(m["role"] == "assistant" and not m.get("tool_calls") for m in lm.requests[2]["messages"])
 
 
+def test_two_quick_steers_reach_the_next_step_in_order() -> None:
+    """Two messages posted during one tool call both reach the next step, oldest first."""
+    store = SteerStore()
+    events: list[dict[str, Any]] = []
+
+    def lookup(name: str) -> str:
+        """Post two steers in a row, as a user who sends twice quickly.
+
+        Args:
+            name: The thing to look up.
+
+        Returns:
+            A constant string.
+        """
+        if name == "a":
+            store.post(_OWNER, _KEY, "use blue instead")
+            store.post(_OWNER, _KEY, "and add a title")
+        return f"value of {name}"
+
+    signature = dspy.Signature("user_message: str -> reply: str", "Be helpful.")
+    program = ActingReActV2(signature, tools=[lookup], max_iters=5)
+    attach_steering(
+        program,
+        SteerInbox(owner=_OWNER, steer_key=_KEY, input_field="user_message", emit=events.append, store=store),
+    )
+    lm = _ScriptedLM([("lookup", {"name": "a"}), ("submit", {"reply": "done"})])
+
+    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
+        program(user_message="make it red")
+
+    newest = str(lm.requests[1]["messages"][-1]["content"])
+    assert newest.index("use blue instead") < newest.index("and add a title")
+    assert [e["event"] for e in events] == [STEER_APPLIED_EVENT]
+    assert len(events[0]["data"]["ids"]) == 2
+    assert store.take(_OWNER, _KEY) == []
+
+
 class _SteerableLM(_ScriptedLM):
     """A scripted LM whose second step follows the newest user message."""
 
