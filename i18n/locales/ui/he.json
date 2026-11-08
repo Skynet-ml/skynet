@@ -38,7 +38,6 @@
   "agent.composer.transcribing": "מתמלל...",
   "agent.pending.list_label": "הודעות ממתינות",
   "agent.pending.paused": "התור מושהה",
-  "agent.pending.send_now": "שליחה עכשיו",
   "agent.pending.uncertain": "לא אומת",
   "agent.pending.too_long": "ההודעה ארוכה מדי ({count} מתוך {max} תווים). קצרו אותה לפני השליחה.",
   "agent.pending.uncertain_description": "ייתכן שההודעה כבר הגיעה לסוכן.",

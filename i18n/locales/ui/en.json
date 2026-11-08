@@ -38,7 +38,6 @@
   "agent.composer.transcribing": "Transcribing...",
   "agent.pending.list_label": "Pending messages",
   "agent.pending.paused": "Queue paused",
-  "agent.pending.send_now": "Send now",
   "agent.pending.uncertain": "Not confirmed",
   "agent.pending.too_long": "This message is too long ({count} of {max} characters). Shorten it before sending.",
   "agent.pending.uncertain_description": "This message may already have reached the agent.",

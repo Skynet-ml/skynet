@@ -1662,7 +1662,6 @@
   "agent.composer.transcribing": "Транскрибування…",
   "agent.pending.list_label": "Повідомлення в очікуванні",
   "agent.pending.paused": "Чергу призупинено",
-  "agent.pending.send_now": "Надіслати зараз",
   "agent.pending.uncertain": "Не підтверджено",
   "agent.pending.too_long": "Повідомлення задовге ({count} із {max} символів). Скоротіть його перед надсиланням.",
   "agent.pending.uncertain_description": "Можливо, це повідомлення вже дійшло до агента.",

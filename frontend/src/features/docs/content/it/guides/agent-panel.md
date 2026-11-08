@@ -19,9 +19,9 @@ Mentre l’agente lavora, il campo del messaggio resta disponibile:
 
 - **Invio** indirizza il lavoro corrente, dove supportato. L’agente legge il messaggio al passo successivo. **Tab** accoda un nuovo turno. Se non è possibile indirizzare, anche Invio accoda il messaggio.
 - In **Messaggi in attesa** puoi modificare, eliminare e trascinare i messaggi per riordinarli. **Indirizza**, quando disponibile, passa un messaggio dalla coda al lavoro corrente.
-- Un messaggio contrassegnato come **Non confermato** potrebbe aver già raggiunto l'agente. Quando è inattivo, usa il menu del messaggio per inviarlo esplicitamente. Puoi modificarlo o eliminarlo in qualsiasi momento. Gli altri messaggi in coda possono procedere prima.
+- Un messaggio contrassegnato come **Non confermato** potrebbe aver già raggiunto l'agente. Puoi modificarlo o eliminarlo in qualsiasi momento. Gli altri messaggi in coda possono procedere prima.
 - **Interrompi** ferma il turno e mette in pausa la coda. Le istruzioni non lette tornano nell’elenco. Nulla parte automaticamente. **Esc** nel campo fa lo stesso, salvo con un menu aperto o durante la composizione con IME. Esc chiude prima un suggerimento o un menu di questo campo.
-- Senza un turno attivo, **Invia ora** invia il primo messaggio della coda in pausa. Gli altri proseguono in ordine. Anche la conclusione normale di un turno avvia il messaggio successivo.
+- Con la coda in pausa e senza un turno attivo, **Indirizza** invia quel messaggio. Poi la coda prosegue in ordine. Anche la conclusione normale di un turno avvia il messaggio successivo.
 - Dopo l'accesso, **Invio** guida l'assistente della documentazione quando annuncia un confine di passo sicuro. Legge il messaggio al prossimo passo del modello già previsto. **Tab** accoda sempre. Prima dell'annuncio, senza accesso e nella chat protetta dei programmi distribuiti, Invio e Tab accodano i messaggi. L'assistente della documentazione mette in pausa quelli restanti dopo un limite di richieste.
 
 ## Che cosa può fare l'agente

@@ -1662,7 +1662,6 @@
   "agent.composer.transcribing": "Yazıya dökülüyor...",
   "agent.pending.list_label": "Bekleyen mesajlar",
   "agent.pending.paused": "Kuyruk duraklatıldı",
-  "agent.pending.send_now": "Şimdi gönder",
   "agent.pending.uncertain": "Doğrulanmadı",
   "agent.pending.too_long": "Bu mesaj çok uzun ({max} karakterden {count}). Göndermeden önce kısaltın.",
   "agent.pending.uncertain_description": "Bu mesaj aracıya zaten ulaşmış olabilir.",

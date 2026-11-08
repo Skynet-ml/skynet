@@ -19,9 +19,9 @@ While the agent works, the composer stays available:
 
 - **Enter** steers the current work where supported. The agent reads the message at its next step. **Tab** queues a new turn. Where steering is unavailable, Enter also queues.
 - The **Pending messages** tray lets you edit, delete and drag messages to reorder them. **Steer**, when available, moves a queued message into the current work.
-- A message marked **Not confirmed** may already have reached the agent. When idle, use its menu to send it explicitly. You can edit or delete it at any time. Other queued messages can continue first.
+- A message marked **Not confirmed** may already have reached the agent. You can edit or delete it at any time. Other queued messages can continue first.
 - **Stop** pauses the queue and stops the current turn. Unread steers return to the tray. Nothing starts automatically. **Esc** in the composer does the same. It first dismisses a composer suggestion or menu, and does not stop during IME composition.
-- When idle and paused, **Send now** sends the first queued message. Later messages continue in order. A normal turn completion also starts the next queued message.
+- When the queue is paused and no turn runs, **Steer** sends that message. The queue then continues in order. A normal turn completion also starts the next queued message.
 - When signed in, the docs assistant accepts **Enter** as steering after it announces a safe step boundary. It reads the message at the next existing model step. **Tab** always queues. Before that announcement, when signed out, and in protected served chat, Enter and Tab both queue. The docs assistant pauses remaining messages after a rate limit.
 
 ## What the agent can do

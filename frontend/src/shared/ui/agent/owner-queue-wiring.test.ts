@@ -43,34 +43,6 @@ test("PR929 F5 unmount disables the sender during settlement", async () => {
   assert.equal(store.getSnapshot().queued[0]?.text, "unseen");
 });
 
-test("PR929 F4 a delayed joined send stops its clicked session", async () => {
-  const file = "src/features/agent-panel/hooks/use-generalist-agent.ts";
-  const activeKeyRef = { current: "A" };
-  const aborted: string[] = [];
-  let resolve!: (result: { ids: string[]; delivered: string[] }) => void;
-  const store = new SteerQueue(() => true);
-  store.openTurn({ post: async () => "id", withdraw: () => new Promise((done) => { resolve = done; }) });
-  store.steer("A"); store.enqueue("B");
-  await flush();
-  const context = {
-    activeKeyRef, steerQueueFor: () => store, sessionsRef: { current: new Map() },
-    abortSession: (key: string) => { aborted.push(key); store.setBusy(false); },
-    patchSession: () => {}, patchThinking: () => {}, patchMessages: () => {}, closeThinking,
-  };
-  const hasStopSession = readFileSync(new URL(`../../../../${file}`, import.meta.url), "utf8").includes("const stopSession");
-  const stopSession = hasStopSession ? expression(file, "stopSession", context) : undefined;
-  const stop = expression(file, "stop", { ...context, stopSession });
-  const midTurn = expression(file, "midTurn", {
-    midTurnOf, activeSteerQueue: store, steerSnapshot: store.getSnapshot(), activeKey: "A", stopSession,
-  })();
-  midTurn.stopAndSendNow(stop);
-  await flush();
-  activeKeyRef.current = "B";
-  resolve({ ids: ["id"], delivered: [] });
-  await flush();
-  assert.deepEqual(aborted, ["A"]);
-});
-
 for (const thinking of [false, true]) {
   test(`PR929 F6 late docs proofs preserve completed history thinking=${thinking}`, async () => {
     const store = new SteerQueue();
@@ -206,30 +178,6 @@ function expression(file: string, name: string, context: Record<string, unknown>
   const text = found.getText(source).replace(/^export /, "");
   const code = ts.transpileModule(`(${text})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   return new Function(...Object.keys(context), `return ${code}`)(...Object.values(context));
-}
-
-for (const [file, limit] of [
-  [docs, 8000],
-] as const) {
-  test(`${file} preserves an over-limit Stop and send now join`, async () => {
-    const noop = () => {};
-    const options = expression(file, "useSteerQueue", {
-      streaming: true, status: "streaming", sendQueued: noop, stopAnswer: noop, stopTurn: noop,
-      MAX_QUESTION_CHARS,
-    });
-    const sent: string[] = [];
-    const queue = new SteerQueue((text) => { sent.push(text); });
-    if (options.maxLength !== undefined) queue.setMaxLength(options.maxLength);
-    queue.setBusy(true);
-    const text = "x".repeat(limit / 2);
-    queue.enqueue(text);
-    queue.enqueue(text);
-    queue.stopAndSendNow(() => queue.setBusy(false));
-    await flush();
-    assert.deepEqual(sent, []);
-    assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), [text, text]);
-    assert.equal(queue.getSnapshot().paused, false);
-  });
 }
 
 for (const reason of ["stopped", "superseded"]) {

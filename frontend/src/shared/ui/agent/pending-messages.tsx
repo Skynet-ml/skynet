@@ -4,7 +4,6 @@ import * as React from "react";
 import { Reorder, useDragControls } from "framer-motion";
 import {
   ArrowBendDownRight,
-  ArrowRight,
   DotsSixVertical,
   DotsThree,
   PencilSimple,
@@ -21,7 +20,6 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/primitives/dropdown-menu";
 import { cn } from "@/shared/lib/utils";
-import { Button } from "@/shared/ui/primitives/button";
 
 import type { PendingMessage } from "./steer-queue";
 
@@ -29,10 +27,9 @@ interface PendingMessagesProps {
   sendNowReason?: string;
   paused: boolean;
   streaming: boolean;
-  onSendNow: (id?: string) => void;
   queued: readonly PendingMessage[];
   steering: readonly PendingMessage[];
-  /** Queued follow-ups can be moved into the running turn right now. */
+  /** Queued follow-ups can be steered now: into the running turn, or sent from a paused idle queue. */
   canPromote: boolean;
   onPromote: (id: string) => void;
   onEdit: (id: string) => void;
@@ -68,8 +65,6 @@ function PendingRow({
   onEdit,
   onRemove,
   onDragEnd,
-  onSendNow,
-  canSendNow,
 }: {
   item: PendingMessage;
   steering: boolean;
@@ -78,8 +73,6 @@ function PendingRow({
   onEdit: (id: string) => void;
   onRemove: (id: string) => void;
   onDragEnd: () => void;
-  onSendNow: (id?: string) => void;
-  canSendNow: boolean;
 }) {
   const controls = useDragControls();
   const removeLabel = msg("agent.pending.remove");
@@ -152,12 +145,6 @@ function PendingRow({
           </DropdownMenuTrigger>
         </TooltipButton>
         <DropdownMenuContent align="end" side="top">
-          {item.uncertain && canSendNow && (
-            <DropdownMenuItem onSelect={() => onSendNow(item.id)} className="[@media(pointer:coarse)]:min-h-[44px]">
-              <ArrowRight className="size-4 rtl:-scale-x-100" />
-              {msg("agent.pending.send_now")}
-            </DropdownMenuItem>
-          )}
           <DropdownMenuItem onSelect={() => onEdit(item.id)} className="[@media(pointer:coarse)]:min-h-[44px]">
             <PencilSimple className="size-4" />
             {msg("agent.pending.edit")}
@@ -188,7 +175,7 @@ function PendingSection({
   onReorder: (ids: string[]) => void;
   rowProps: Pick<
     React.ComponentProps<typeof PendingRow>,
-    "canPromote" | "onPromote" | "onEdit" | "onRemove" | "onSendNow" | "canSendNow"
+    "canPromote" | "onPromote" | "onEdit" | "onRemove"
   >;
 }) {
   const [dragOrder, setDragOrder] = React.useState<string[] | null>(null);
@@ -226,7 +213,6 @@ export function PendingMessages({
   sendNowReason,
   paused,
   streaming,
-  onSendNow,
   queued,
   steering,
   canPromote,
@@ -237,7 +223,7 @@ export function PendingMessages({
   onReorderSteering,
 }: PendingMessagesProps) {
   if (queued.length === 0 && steering.length === 0) return null;
-  const rowProps = { canPromote, onPromote, onEdit, onRemove, onSendNow, canSendNow: !streaming };
+  const rowProps = { canPromote, onPromote, onEdit, onRemove };
   return (
     <div
       aria-label={msg("agent.pending.list_label")}
@@ -247,11 +233,6 @@ export function PendingMessages({
       {paused && (
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 px-2 py-1 text-xs text-muted-foreground">
           <span role="status" className="me-auto">{msg("agent.pending.paused")}</span>
-          {!streaming && (
-            <Button type="button" variant="ghost" size="sm" disabled={Boolean(sendNowReason) || (!queued.some((item) => !item.uncertain) && steering.length === 0)} title={sendNowReason} className="h-auto max-w-full whitespace-normal py-2 [@media(pointer:coarse)]:min-h-[44px]" onClick={() => onSendNow()}>
-              {msg("agent.pending.send_now")}
-            </Button>
-          )}
         </div>
       )}
       {!streaming && sendNowReason && <p role="status" className="px-2 py-1 text-xs text-destructive">{sendNowReason}</p>}

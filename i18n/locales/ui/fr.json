@@ -1662,7 +1662,6 @@
   "agent.composer.transcribing": "Transcription…",
   "agent.pending.list_label": "Messages en attente",
   "agent.pending.paused": "File d'attente en pause",
-  "agent.pending.send_now": "Envoyer maintenant",
   "agent.pending.uncertain": "Non confirmé",
   "agent.pending.too_long": "Ce message est trop long ({count} caractères sur {max}). Raccourcissez-le avant de l'envoyer.",
   "agent.pending.uncertain_description": "Ce message est peut-être déjà parvenu à l'agent.",

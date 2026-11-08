@@ -1662,7 +1662,6 @@
   "agent.composer.transcribing": "文字起こし中…",
   "agent.pending.list_label": "保留中のメッセージ",
   "agent.pending.paused": "キューは一時停止中",
-  "agent.pending.send_now": "今すぐ送信",
   "agent.pending.uncertain": "未確認",
   "agent.pending.too_long": "このメッセージは長すぎます（{max}文字中{count}文字）。送信前に短くしてください。",
   "agent.pending.uncertain_description": "このメッセージはすでにエージェントに届いている可能性があります。",

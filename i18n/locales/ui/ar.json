@@ -1662,7 +1662,6 @@
   "agent.composer.transcribing": "جارٍ النسخ النصّي...",
   "agent.pending.list_label": "رسائل معلّقة",
   "agent.pending.paused": "قائمة الانتظار متوقفة مؤقتًا",
-  "agent.pending.send_now": "إرسال الآن",
   "agent.pending.uncertain": "غير مؤكد",
   "agent.pending.too_long": "هذه الرسالة طويلة جدًا ({count} من {max} حرفًا). اختصرها قبل الإرسال.",
   "agent.pending.uncertain_description": "قد تكون هذه الرسالة قد وصلت إلى الوكيل بالفعل.",

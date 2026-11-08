@@ -1662,7 +1662,6 @@
   "agent.composer.transcribing": "텍스트 변환 중...",
   "agent.pending.list_label": "대기 중인 메시지",
   "agent.pending.paused": "대기열 일시 중지됨",
-  "agent.pending.send_now": "지금 보내기",
   "agent.pending.uncertain": "확인되지 않음",
   "agent.pending.too_long": "메시지가 너무 깁니다({max}자 중 {count}자). 보내기 전에 줄여 주세요.",
   "agent.pending.uncertain_description": "이 메시지가 이미 에이전트에 도착했을 수 있습니다.",

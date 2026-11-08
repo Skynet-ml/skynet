@@ -1662,7 +1662,6 @@
   "agent.composer.transcribing": "Расшифровка...",
   "agent.pending.list_label": "Ожидающие сообщения",
   "agent.pending.paused": "Очередь приостановлена",
-  "agent.pending.send_now": "Отправить сейчас",
   "agent.pending.uncertain": "Не подтверждено",
   "agent.pending.too_long": "Сообщение слишком длинное ({count} из {max} символов). Сократите его перед отправкой.",
   "agent.pending.uncertain_description": "Возможно, это сообщение уже дошло до агента.",
