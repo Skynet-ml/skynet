@@ -9,6 +9,9 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
+from core.api import preflight_execution
+from core.billing.budgets import BudgetError
+from core.billing.runtime import UsagePendingError
 from core.config import Settings
 from core.config import settings as global_settings
 from core.sandbox import bridge
@@ -297,6 +300,160 @@ def test_async_cancel_during_create_releases_the_reservation(monkeypatch: pytest
 
     (usage,) = wiring.usages
     assert usage.calls.count("fail") + usage.calls.count("settle") == 1
+
+
+def _fail_settle(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Make every fake settle log its call and then raise ``error``.
+
+    Args:
+        monkeypatch: Pytest fixture.
+        error: The settle failure.
+    """
+
+    def settle(self: FakeUsage) -> None:
+        """Log the settlement, then fail it.
+
+        Raises:
+            Exception: Always ``error``.
+        """
+        self._record("settle")
+        raise error
+
+    monkeypatch.setattr(FakeUsage, "settle", settle)
+
+
+@pytest.mark.parametrize(
+    ("error", "raised"),
+    [
+        (UsagePendingError("pending"), UsagePendingError),
+        (BudgetError("bad bounds"), BudgetError),
+        (RuntimeError("db down"), UsagePendingError),
+    ],
+)
+def test_async_close_raises_a_failed_settle_once(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, raised: type[Exception]
+) -> None:
+    """Check that close raises a settle failure like the legacy close, and settles once."""
+    wiring = _Wiring(monkeypatch)
+    _fail_settle(monkeypatch, error)
+    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    session = runtime.open(_spec(lifetime_seconds=60))
+    box = next(iter(wiring.client.boxes.values()))
+
+    with pytest.raises(raised) as caught:
+        session.close()
+    session.close()
+
+    if raised is not type(error):
+        assert caught.value.__cause__ is error
+    (usage,) = wiring.usages
+    assert usage.calls.count("settle") == 1
+    assert "fail" not in usage.calls
+    assert box.stops == 1
+
+
+def test_async_close_retry_after_a_bridge_timeout_still_raises_the_settle_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check that a close retried after a bridge timeout reports the settle failure and settles once."""
+    wiring = _Wiring(monkeypatch)
+    _fail_settle(monkeypatch, UsagePendingError("pending"))
+    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    session = runtime.open(_spec(lifetime_seconds=60))
+    inner = session._session
+    original = inner.close
+    calls = {"n": 0}
+
+    def timed_out_once() -> None:
+        """Time out the first bridge call before the stop runs, then close for real.
+
+        Raises:
+            TimeoutError: On the first call.
+        """
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError
+        original()
+
+    monkeypatch.setattr(inner, "close", timed_out_once)
+    with pytest.raises(UsagePendingError):
+        session.close()
+
+    (usage,) = wiring.usages
+    assert calls["n"] == 2
+    assert usage.calls.count("settle") == 1
+
+
+def test_preflight_reports_pending_when_the_async_settle_stays_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a pending settle at close turns a passed async preflight into "pending"."""
+    wiring = _Wiring(monkeypatch)
+    _fail_settle(monkeypatch, UsagePendingError("pending"))
+    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+
+    class _Gateway:
+        """Hold the bound box and close it the way the model gateway closes its sandbox."""
+
+        def __init__(self, budget: Any) -> None:
+            """Start with no box.
+
+            Args:
+                budget: Unused.
+            """
+            self.session: Any = None
+
+        def protect_payload(self, payload: dict[str, Any], **options: Any) -> dict[str, Any]:
+            """Return the payload unchanged.
+
+            Args:
+                payload: The setup payload.
+                **options: Unused.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def close(self) -> None:
+            """Close the bound box."""
+            self.session.close()
+
+    def bind(gateway: _Gateway, settings: Any, **options: Any) -> None:
+        """Open one async box for the gateway.
+
+        Args:
+            gateway: The fake gateway.
+            settings: Unused.
+            **options: Unused.
+        """
+        gateway.session = runtime.open(_spec(lifetime_seconds=60))
+
+    monkeypatch.setattr(preflight_execution, "ModelGateway", _Gateway)
+    monkeypatch.setattr(preflight_execution, "BudgetRuntime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(preflight_execution, "bind_protected_sandbox", bind)
+    monkeypatch.setattr(preflight_execution, "payload_uses_token_source", lambda *args, **kwargs: False)
+    monkeypatch.setattr(preflight_execution, "preflight_lifetime_seconds", lambda payload: 60)
+    monkeypatch.setattr(preflight_execution, "report_preflight_phase", lambda phase: None)
+    monkeypatch.setattr(
+        preflight_execution,
+        "_verify_anything",
+        lambda gateway, payload, **options: {"checks": [preflight_execution._check("setup", "succeeded")]},
+    )
+    request = SimpleNamespace(payload={}, workflow="anything", scope="evaluation", execution_budget_id="budget-1")
+
+    status, result = preflight_execution._perform_preflight(
+        request,  # type: ignore[arg-type]
+        SimpleNamespace(username="user"),
+        None,  # type: ignore[arg-type]
+        SimpleNamespace(id="budget-1", generation=3),
+        {"id": "preflight-1"},
+        attempt=1,
+        engine=None,
+    )
+
+    assert status == "pending"
+    assert result["pending_reason"]
+    (usage,) = wiring.usages
+    assert usage.calls.count("settle") == 1
 
 
 def test_legacy_unavailable_reason_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
