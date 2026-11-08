@@ -398,3 +398,118 @@ def test_unpack_maps_link_chain_errors_to_unsafe(
 
     with pytest.raises(UnsafeArchiveError):
         unpack(_archive(_member("ok.txt")), tmp_path / "out")
+
+
+def _variant_chain(variant: str) -> bytes:
+    """Build a ``PATH_MAX`` symlink chain that names its links in another case or Unicode form.
+
+    Args:
+        variant: ``case`` to name each link in upper case, or ``unicode`` to
+            name it in NFD where the link was made in NFC.
+
+    Returns:
+        The tar archive bytes.
+    """
+    made = list("abcdefghijklmnop") if variant == "case" else ["\u00e9" + step for step in "abcdefghijklmnop"]
+    named = [step.upper() for step in made] if variant == "case" else ["e\u0301" + step[1:] for step in made]
+    comp = "d" * 50
+    path = ""
+    members = []
+    for step in made:
+        members.append(_member(str(Path(path, comp)), tarfile.DIRTYPE))
+        members.append(_member(str(Path(path, step)), tarfile.SYMTYPE, comp))
+        path = str(Path(path, comp))
+    last, last_named = ("l" * 254, "L" * 254) if variant == "case" else ("l" * 253 + "l\u0301", "l" * 253 + "\u013a")
+    members.append(_member(str(Path(*named, last)), tarfile.SYMTYPE, "../" * len(made)))
+    escape, escape_named = ("escape", "ESCAPE") if variant == "case" else ("\u00e9scape", "e\u0301scape")
+    members.append(_member(escape, tarfile.SYMTYPE, str(Path(*named, last_named)) + "/.."))
+    members.append(_member(f"{escape_named}/PWNED.txt"))
+    return _archive(*members)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("variant", ["case", "unicode"])
+def test_unpack_refuses_chain_through_name_variants(variant: str, tmp_path: Path, extract_path: str) -> None:
+    """Link names that differ only in case or Unicode form cannot build an escape on any filesystem."""
+    dest = tmp_path / "box" / "out"
+
+    with pytest.raises(UnsafeArchiveError):
+        unpack(_variant_chain(variant), dest)
+
+    assert _outside(tmp_path, dest) == []
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "member",
+    [_member("inner/x.txt"), _member("inner/x", tarfile.DIRTYPE), _member("x", tarfile.LNKTYPE, "inner/f.txt")],
+    ids=["file", "directory", "hardlink-target"],
+)
+def test_unpack_refuses_writes_through_symlink_on_disk(
+    member: tarfile.TarInfo, tmp_path: Path, extract_path: str
+) -> None:
+    """A member never goes through a symlink already on disk, even one that points inside ``dest``."""
+    dest = tmp_path / "out"
+    (dest / "sub").mkdir(parents=True)
+    (dest / "sub" / "f.txt").write_text("f")
+    (dest / "inner").symlink_to("sub")
+
+    with pytest.raises(UnsafeArchiveError, match="symlink on disk"):
+        unpack(_archive(member), dest)
+
+    assert sorted(path.name for path in (dest / "sub").iterdir()) == ["f.txt"]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_unpack_refuses_file_over_symlink_on_disk(tmp_path: Path, extract_path: str) -> None:
+    """A regular file member is not written through a symlink of the same name."""
+    dest = tmp_path / "box" / "out"
+    dest.mkdir(parents=True)
+    (dest / "f.txt").symlink_to("../f.txt")
+
+    with pytest.raises(UnsafeArchiveError):
+        unpack(_archive(_member("f.txt")), dest)
+
+    assert not (tmp_path / "box" / "f.txt").exists()
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_unpack_refuses_sparse_member(tmp_path: Path, extract_path: str) -> None:
+    """A sparse member that would expand far past the archive size fails before any write."""
+    body = b"hello"
+    info = tarfile.TarInfo("big.bin")
+    info.size = len(body)
+    info.pax_headers = {"GNU.sparse.map": "0,5", "GNU.sparse.realsize": str(10**12), "GNU.sparse.name": "big.bin"}
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        tar.addfile(info, io.BytesIO(body))
+    dest = tmp_path / "out"
+
+    with pytest.raises(UnsafeArchiveError, match="sparse"):
+        unpack(buffer.getvalue(), dest)
+
+    assert list(dest.iterdir()) == []
+
+
+def test_pack_writes_hardlink_twin_of_excluded_file_as_regular_file(tmp_path: Path) -> None:
+    """A hardlink twin of an excluded file is packed with its contents and unpacks."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.env").write_text("shared\n")
+    os.link(root / "a.env", root / "b.txt")
+    dest = tmp_path / "out"
+
+    unpack(pack([root], exclude=["*.env"]), dest)
+
+    assert sorted(path.name for path in (dest / "repo").iterdir()) == ["b.txt"]
+    assert (dest / "repo" / "b.txt").read_text() == "shared\n"
+
+
+def test_pack_refuses_two_paths_with_one_base_name(tmp_path: Path) -> None:
+    """Two paths with the same base name would overwrite each other, so pack refuses them."""
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "cfg.txt").write_text(folder)
+
+    with pytest.raises(ValueError, match="same base name"):
+        pack([tmp_path / "a" / "cfg.txt", tmp_path / "b" / "cfg.txt"])
