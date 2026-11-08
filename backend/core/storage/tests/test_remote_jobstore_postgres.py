@@ -1,4 +1,4 @@
-"""Live-Postgres concurrency tests for ``RemoteDBJobStore.claim_next_job``.
+"""Live-Postgres concurrency tests for ``RemoteDBJobStore.claim_next_job`` and the sandbox trial rows.
 
 These tests verify that ``FOR UPDATE SKIP LOCKED`` actually serializes
 concurrent claimers — something SQLite cannot exercise because it lacks
@@ -17,19 +17,31 @@ unaffected.
 
 from __future__ import annotations
 
+import asyncio
+import pickle
+import random
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
+from gepa.core.state import GEPAState, ValsetEvaluation
 from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
+import core.storage.remote as remote_mod
 from alembic import command
+from core.billing.budgets import BudgetService
 from core.config import app_env
+from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
+from core.sandbox.pool import BoxOutcome, BoxWork, DurableTrials, SandboxPool, TrialFingerprintError, TrialStatus
+from core.sandbox.tests.fake_provider import InMemorySandbox
+from core.storage.models import BillingCustomerModel
 from core.storage.remote import RemoteDBJobStore
+from core.worker.checkpoint_compat import checkpoint_manifest
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
 BACKEND_DIR = Path(__file__).resolve().parents[3]
@@ -241,3 +253,304 @@ def test_claim_orders_by_user_in_flight_then_age(store: RemoteDBJobStore) -> Non
         assert claimed == [f"{prefix}-a1", f"{prefix}-b1", f"{prefix}-a2"]
     finally:
         store.delete_jobs(ids)
+
+
+@pytest.fixture
+def trial_job(store: RemoteDBJobStore) -> Iterator[str]:
+    """Create one job for trial rows and delete it, with its rows, after the test.
+
+    Args:
+        store: The live store.
+
+    Yields:
+        The job id.
+    """
+    job_id = f"trials-test-{uuid.uuid4().hex[:8]}"
+    store.create_job(job_id)
+    try:
+        yield job_id
+    finally:
+        store.delete_jobs([job_id])
+
+
+async def _keys(keys: list[str]) -> AsyncIterator[str]:
+    """Yield the trial keys in order.
+
+    Args:
+        keys: The trial keys.
+
+    Yields:
+        The next key.
+    """
+    for key in keys:
+        yield key
+
+
+def _trial_work(ran: list[str]) -> BoxWork[str, str]:
+    """Build box work that makes in-memory boxes and records each trial that runs.
+
+    Args:
+        ran: The list that gets each trial key that runs.
+
+    Returns:
+        The box work.
+    """
+
+    async def run(env: SandboxEnvironment, key: str) -> str:
+        """Record the trial and return its result.
+
+        Args:
+            env: The box.
+            key: The trial key.
+
+        Returns:
+            The result.
+        """
+        ran.append(key)
+        return f"result-{key}"
+
+    return BoxWork(
+        create=lambda _key: InMemorySandbox(SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=1))),
+        run=run,
+    )
+
+
+async def _ignore(outcome: BoxOutcome[str, str]) -> None:
+    """Drop the outcome.
+
+    Args:
+        outcome: The outcome of one box.
+    """
+
+
+def test_restart_runs_only_the_trials_that_are_not_done(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Register 6 trials, finish 3, then resume: the second run starts only the other 3."""
+    keys = [f"trial-{i}" for i in range(6)]
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [(key, "fp-1") for key in keys])
+    binding: DurableTrials[str, str] = DurableTrials(
+        trials, trial_job, "worker-a", fingerprint=lambda _key: "fp-1", result_ref=lambda result: {"ref": result}
+    )
+    first: list[str] = []
+    # The first run stops after 3 trials, as a worker crash would.
+    asyncio.run(SandboxPool({"fake": 2}).run(_keys(keys[:3]), _trial_work(first), _ignore, key=str, trials=binding))
+    trials.register_trials(trial_job, [(key, "fp-1") for key in keys])
+    second: list[str] = []
+    asyncio.run(SandboxPool({"fake": 2}).run(_keys(keys), _trial_work(second), _ignore, key=str, trials=binding))
+
+    assert sorted(first) == keys[:3]
+    assert sorted(second) == keys[3:]
+    rows = trials.list_trials(trial_job)
+    assert [(row["status"], row["attempt"]) for row in rows] == [(TrialStatus.SUCCEEDED.value, 1)] * 6
+    assert rows[0]["result_ref"] == {"ref": "result-trial-0"}
+    assert rows[0]["claimed_by"] == "worker-a"
+
+
+def test_two_workers_claim_each_trial_exactly_once(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Let ten workers claim 30 trials in random orders: each trial gets exactly one claim."""
+    keys = [f"trial-{i:02d}" for i in range(30)]
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [(key, "fp") for key in keys])
+
+    def claim_all(worker: int) -> list[str]:
+        """Try to claim every trial in a random order.
+
+        Args:
+            worker: The worker number.
+
+        Returns:
+            The keys that this worker claimed.
+        """
+        order = random.Random(worker).sample(keys, len(keys))
+        return [key for key in order if trials.claim_trial(trial_job, key, "fp", f"worker-{worker}") is not None]
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        claimed = [key for keys_of_worker in pool.map(claim_all, range(10)) for key in keys_of_worker]
+
+    assert sorted(claimed) == keys
+    assert {row["status"] for row in trials.list_trials(trial_job)} == {TrialStatus.RUNNING.value}
+
+
+def test_fingerprint_mismatch_fails_loud(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Raise on register and on claim when a trial's config changes, and save no new rows."""
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [("trial-0", "fp-old")])
+
+    with pytest.raises(TrialFingerprintError):
+        trials.register_trials(trial_job, [("trial-0", "fp-new"), ("trial-1", "fp-new")])
+    with pytest.raises(TrialFingerprintError):
+        trials.claim_trial(trial_job, "trial-0", "fp-new", "worker-a")
+    with pytest.raises(LookupError):
+        trials.claim_trial(trial_job, "trial-9", "fp-new", "worker-a")
+
+    rows = trials.list_trials(trial_job)
+    assert [(row["trial_key"], row["status"], row["attempt"]) for row in rows] == [("trial-0", "pending", 0)]
+
+
+def test_retryable_failed_trial_is_claimed_again_with_the_next_attempt(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Claim a retryable_failed row again with attempt 2, and never claim a failed or succeeded row."""
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [("retry", "fp"), ("failed", "fp"), ("done", "fp")])
+    for key in ("retry", "failed", "done"):
+        assert trials.claim_trial(trial_job, key, "fp", "worker-a").attempt == 1
+    assert trials.finish_trial(trial_job, "retry", 1, TrialStatus.RETRYABLE_FAILED, error="flake")
+    assert trials.finish_trial(trial_job, "failed", 1, TrialStatus.FAILED, error="broken")
+    assert trials.finish_trial(trial_job, "done", 1, TrialStatus.SUCCEEDED, result_ref={"ref": "r"})
+    # A late write from an old attempt must not change the row.
+    assert not trials.finish_trial(trial_job, "done", 1, TrialStatus.FAILED, error="late")
+
+    assert trials.claim_trial(trial_job, "retry", "fp", "worker-b").attempt == 2
+    assert trials.claim_trial(trial_job, "failed", "fp", "worker-b") is None
+    assert trials.claim_trial(trial_job, "done", "fp", "worker-b") is None
+    rows = {row["trial_key"]: row for row in trials.list_trials(trial_job)}
+    assert rows["done"]["status"] == "succeeded"
+    assert rows["done"]["result_ref"] == {"ref": "r"}
+    assert rows["failed"]["error"] == "broken"
+
+
+def test_deleting_the_job_deletes_its_trial_rows(store: RemoteDBJobStore) -> None:
+    """Delete the trial rows with their job."""
+    job_id = f"trials-test-{uuid.uuid4().hex[:8]}"
+    store.create_job(job_id)
+    store.sandbox_trials.register_trials(job_id, [("trial-0", "fp")])
+    store.delete_jobs([job_id])
+    assert store.sandbox_trials.list_trials(job_id) == []
+
+
+def test_cancel_mid_trial_returns_it_and_resume_runs_exactly_it(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Cancel a run while one trial runs: the row goes back to the queue and the resume runs only it."""
+    keys = ["t0", "t1", "t2"]
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [(key, "fp") for key in keys])
+    binding: DurableTrials[str, str] = DurableTrials(trials, trial_job, "worker-a", fingerprint=lambda _key: "fp")
+    done: list[str] = []
+
+    async def cancel_mid_trial() -> None:
+        """Start the run, then cancel it once t0 and t2 are done and t1 runs."""
+        t1_runs = asyncio.Event()
+        others_done = asyncio.Event()
+
+        async def hang_on_t1(env: SandboxEnvironment, key: str) -> str:
+            """Return the result, and wait for ever on ``t1``.
+
+            Args:
+                env: The box.
+                key: The trial key.
+
+            Returns:
+                The result.
+            """
+            if key == "t1":
+                t1_runs.set()
+                await asyncio.Event().wait()
+            return f"result-{key}"
+
+        async def record(outcome: BoxOutcome[str, str]) -> None:
+            """Record a finished trial, and say when both other trials are done.
+
+            Args:
+                outcome: The outcome of one box.
+            """
+            done.append(outcome.candidate)
+            if len(done) == 2:
+                others_done.set()
+
+        work = BoxWork(
+            create=lambda _key: InMemorySandbox(SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=1))),
+            run=hang_on_t1,
+        )
+        run = asyncio.create_task(SandboxPool({"fake": 3}).run(_keys(keys), work, record, key=str, trials=binding))
+        async with asyncio.timeout(10):
+            await t1_runs.wait()
+            await others_done.wait()
+            run.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run
+
+    asyncio.run(cancel_mid_trial())
+    assert sorted(done) == ["t0", "t2"]
+    rows = {row["trial_key"]: row for row in trials.list_trials(trial_job)}
+    assert (rows["t1"]["status"], rows["t1"]["attempt"], rows["t1"]["interrupted"]) == ("retryable_failed", 1, 1)
+
+    second: list[str] = []
+    asyncio.run(SandboxPool({"fake": 3}).run(_keys(keys), _trial_work(second), _ignore, key=str, trials=binding))
+    assert second == ["t1"]
+    rows = {row["trial_key"]: row for row in trials.list_trials(trial_job)}
+    assert {key: (row["status"], row["attempt"]) for key, row in rows.items()} == {
+        "t0": ("succeeded", 1),
+        "t1": ("succeeded", 2),
+        "t2": ("succeeded", 1),
+    }
+
+
+def _fund_checkpoint(store: RemoteDBJobStore, job_id: str, monkeypatch: pytest.MonkeyPatch) -> BudgetService:
+    """Attach a funded budget and a real checkpoint to a job, so a resume admits it.
+
+    Args:
+        store: The live store.
+        job_id: The job to make recoverable.
+        monkeypatch: Binds the current sandbox profile.
+
+    Returns:
+        The budget service for the resume.
+    """
+    monkeypatch.setattr(remote_mod.settings, "dspy_sandbox_image", "fixture@sha256:" + "a" * 64)
+    monkeypatch.setattr(remote_mod.settings, "vercel_sandbox_max_lifetime_seconds", 60.0)
+    username = f"trials-owner-{uuid.uuid4().hex[:8]}"
+    with Session(store.engine) as session:
+        session.add(
+            BillingCustomerModel(
+                username=username, stripe_customer_id=f"local-{username}", balance_cents=50, grant_remaining=0
+            )
+        )
+        session.commit()
+    service = BudgetService(engine=store.engine)
+    budget = service.create(username, 20, idempotency_key=job_id)
+    service.attach_to_job(budget.id, username, job_id, expected_revision=budget.revision)
+    payload = {
+        "optimizer_name": "GEPA",
+        "dataset": [{"x": "sample"}],
+        "execution_runtime": "vercel",
+        "execution_budget_id": budget.id,
+        "execution_budget_generation": 0,
+    }
+    store.update_job(
+        job_id, username=username, payload=payload, execution_budget_id=budget.id, execution_budget_generation=0
+    )
+    state = GEPAState({"predict": "seed"}, ValsetEvaluation({0: "answer"}, {0: 0.5}))
+    state.i = 3
+    state.total_num_evals = 12
+    data = pickle.dumps(state.__dict__)
+    manifest = checkpoint_manifest(data, payload, store.get_job(job_id)["code_version"])
+    store.save_gepa_checkpoint(job_id, data, 3, manifest=manifest)
+    return service
+
+
+def test_resume_claims_a_trial_that_a_crash_left_running(
+    store: RemoteDBJobStore, trial_job: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reset a row that a hard crash left running, so the resume runs exactly that trial again."""
+    keys = ["t0", "t1", "t2"]
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [(key, "fp") for key in keys])
+    for key in keys:
+        assert trials.claim_trial(trial_job, key, "fp", "worker-old").attempt == 1
+    assert trials.finish_trial(trial_job, "t0", 1, TrialStatus.SUCCEEDED)
+    assert trials.finish_trial(trial_job, "t2", 1, TrialStatus.SUCCEEDED)
+    # The worker dies here: t1 stays running and no cancel handler writes it back.
+    service = _fund_checkpoint(store, trial_job, monkeypatch)
+    store.update_job(trial_job, status="failed")
+
+    assert store.requeue_for_resume(trial_job, budget_service=service) is not None
+    rows = {row["trial_key"]: row for row in trials.list_trials(trial_job)}
+    assert (rows["t1"]["status"], rows["t1"]["attempt"], rows["t1"]["interrupted"]) == ("retryable_failed", 1, 1)
+    assert rows["t0"]["status"] == rows["t2"]["status"] == "succeeded"
+    # A late write of the old attempt cannot land after the reset.
+    assert not trials.finish_trial(trial_job, "t1", 1, TrialStatus.SUCCEEDED)
+
+    binding: DurableTrials[str, str] = DurableTrials(trials, trial_job, "worker-new", fingerprint=lambda _key: "fp")
+    ran: list[str] = []
+    asyncio.run(SandboxPool({"fake": 3}).run(_keys(keys), _trial_work(ran), _ignore, key=str, trials=binding))
+    assert ran == ["t1"]
+    row = {row["trial_key"]: row for row in trials.list_trials(trial_job)}["t1"]
+    assert (row["status"], row["attempt"], row["claimed_by"]) == ("succeeded", 2, "worker-new")

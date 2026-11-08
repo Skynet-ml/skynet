@@ -11,6 +11,12 @@ SBX-2 retry policy, which never retries by default (SKY-406 D3, D10).
 
 No engine uses the pool yet. SKY-406 phase 2 moves the engines one by one.
 Limits hold inside one process; cross-pod limits come in SBX-23.
+
+Durable trials (SBX-22, SKY-420) are opt-in: a run that gets a
+``DurableTrials`` claims each candidate's row in a ``TrialStore`` before its
+box starts and writes the attempt's status when it ends, so a resume runs
+only the trials that are not done. A trial whose saved config fingerprint
+differs fails loud and runs no box.
 """
 
 from __future__ import annotations
@@ -23,12 +29,15 @@ import logging
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from enum import StrEnum
+from typing import Any, Generic, Protocol, TypeVar
+
+from tenacity import AsyncRetrying, RetryCallState
 
 from .environment import SandboxEnvironment
 from .errors import SandboxFatalError
 from .hooks import PHASE_ENDED, PHASE_STARTED, BoxEvent, BoxEventInfo, BoxHooks
-from .retry import DEFAULT_RETRY_POLICY, RetryPolicy, run_with_retry
+from .retry import DEFAULT_RETRY_POLICY, RetryPolicy, attempt_key, run_with_retry
 from .timeouts import Phase, PhaseTimeouts
 
 logger = logging.getLogger(__name__)
@@ -42,7 +51,106 @@ POOL_PHASES = (Phase.SETUP, Phase.RUN, Phase.SCORE)
 # block the pool, or a cancel of it, forever.
 STOP_TIMEOUT_SECONDS = 60.0
 
+# The longest wait for the write that returns a cancelled trial to the
+# queue. A database write that hangs must not block a cancel forever.
+INTERRUPT_WRITE_TIMEOUT_SECONDS = 60.0
+
+TRIAL_ERROR_MAX_CHARS = 2000
+
 _DONE = object()
+
+
+class TrialStatus(StrEnum):
+    """Name the states of a durable trial row."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    RETRYABLE_FAILED = "retryable_failed"
+    FAILED = "failed"
+
+
+# A claim takes only these rows, so a resume never runs a trial that
+# succeeded, failed for good, or is running on another worker.
+CLAIMABLE_TRIAL_STATUSES = (TrialStatus.PENDING, TrialStatus.RETRYABLE_FAILED)
+
+
+class TrialFingerprintError(RuntimeError):
+    """Say that a trial's config differs from the config saved for its key."""
+
+
+@dataclass(frozen=True)
+class TrialClaim:
+    """Give the attempt number of a claim and the earlier attempts that an interruption ended."""
+
+    attempt: int
+    interrupted: int = 0
+
+
+class TrialStore(Protocol):
+    """Store the durable trial rows of a job. The pool calls it from a thread."""
+
+    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> TrialClaim | None:
+        """Claim a registered trial row when it is pending or retryable_failed.
+
+        Args:
+            job_id: The job that owns the trial.
+            trial_key: The trial's operation key.
+            fingerprint: The fingerprint of the trial's current config.
+            worker_id: The worker that claims the row.
+
+        Returns:
+            The new attempt number and the row's count of interrupted
+            attempts, or None when the row is not claimable.
+
+        Raises:
+            TrialFingerprintError: The saved fingerprint differs.
+            LookupError: The job has no row for the key.
+        """
+        ...
+
+    def finish_trial(
+        self,
+        job_id: str,
+        trial_key: str,
+        attempt: int,
+        status: TrialStatus,
+        *,
+        result_ref: Any = None,
+        error: str | None = None,
+        interrupted: bool = False,
+    ) -> bool:
+        """Write the end state of a running attempt.
+
+        Args:
+            job_id: The job that owns the trial.
+            trial_key: The trial's operation key.
+            attempt: The attempt number that the claim gave.
+            status: ``succeeded``, ``retryable_failed`` or ``failed``.
+            result_ref: A JSON value that points to the result.
+            error: The error text of a failed attempt.
+            interrupted: Whether a cancel ended the attempt; the row then
+                counts one more interrupted attempt.
+
+        Returns:
+            True when the row was running this attempt and now has the status.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class DurableTrials(Generic[T, R]):
+    """Bind a pool run to the durable trial rows of one job.
+
+    The caller registers every trial with its fingerprint before the run,
+    so a changed config fails before any box starts.
+    """
+
+    store: TrialStore
+    job_id: str
+    worker_id: str
+    fingerprint: Callable[[T], str]
+    result_ref: Callable[[R], Any] | None = None
 
 
 def _check_limit(name: str, value: object) -> int:
@@ -160,6 +268,7 @@ class SandboxPool:
         workers: int | None = None,
         queue_size: int | None = None,
         key: Callable[[T], str] | None = None,
+        trials: DurableTrials[T, R] | None = None,
     ) -> None:
         """Run each candidate in its own box until the candidates run out.
 
@@ -177,11 +286,18 @@ class SandboxPool:
                 worker. The default is ``workers``.
             key: Gives the operation key of a candidate. The default is a
                 key that is unique in this pool.
+            trials: The durable trial rows of the job, or None to keep no
+                rows. With rows, a candidate whose row is not claimable is
+                skipped and gets no outcome, and each attempt claims the row
+                again, so its number continues across restarts.
 
         Raises:
             RuntimeError: The pool already ran on another event loop.
             TypeError: ``workers`` or ``queue_size`` is not an int.
-            ValueError: ``workers`` or ``queue_size`` is below 1.
+            ValueError: ``workers`` or ``queue_size`` is below 1, or
+                ``trials`` is set without ``key``.
+            TrialFingerprintError: A candidate's config differs from the
+                config saved for its key; its box does not start.
             SandboxFatalError: The candidate iterator, its ``aclose`` or
                 ``on_outcome`` raised a cancel that nobody asked for.
             Exception: The first error of the candidate iterator or of
@@ -194,6 +310,10 @@ class SandboxPool:
             self._loop = loop
         elif self._loop is not loop:
             raise RuntimeError("a SandboxPool runs on one event loop only; make one pool for each event loop")
+        if trials is not None and key is None:
+            # The default keys count up in this process, so a restart would
+            # give the same candidate another key and run it again.
+            raise ValueError("durable trials need a key function with keys that are stable across restarts")
         workers = _check_limit("workers", self._max_provider_limit if workers is None else workers)
         queue_size = _check_limit("queue_size", workers if queue_size is None else queue_size)
         # The producer takes a slot before it reads a candidate and a worker
@@ -284,7 +404,12 @@ class SandboxPool:
                     return
                 slots.release()
                 box_key, candidate = item  # type: ignore[misc]
-                outcome = await self._box(box_key, candidate, work)
+                if trials is None:
+                    outcome: BoxOutcome[T, R] | None = await self._box(box_key, candidate, work)
+                else:
+                    outcome = await self._trial_box(box_key, candidate, work, trials)
+                if outcome is None:
+                    continue
                 try:
                     await on_outcome(outcome)
                 except asyncio.CancelledError as cancel:
@@ -342,6 +467,163 @@ class SandboxPool:
         except Exception as exc:
             return BoxOutcome(box_key, candidate, error=exc)
         return BoxOutcome(box_key, candidate, result=result)
+
+    async def _trial_box(
+        self, box_key: str, candidate: T, work: BoxWork[T, R], trials: DurableTrials[T, R]
+    ) -> BoxOutcome[T, R] | None:
+        """Run one candidate's box through its durable trial row.
+
+        Each attempt claims the row first, so the attempt number comes from
+        the row and matches the ``:attempt-N`` key across restarts. A failed
+        attempt goes to ``retryable_failed`` only when the retry policy
+        retries its error and attempts are left; the default policy never
+        retries, so the row goes to ``failed`` (SKY-406 D3, D10). A cancelled
+        attempt goes to ``retryable_failed`` under every policy, so a resume
+        runs it again.
+
+        Args:
+            box_key: The candidate's operation key, which is the trial key.
+            candidate: The candidate.
+            work: How to make the box and what each phase does.
+            trials: The durable trial rows of the job.
+
+        Returns:
+            The outcome, or None when the row is not claimable.
+
+        Raises:
+            TrialFingerprintError: The saved fingerprint differs.
+            LookupError: The job has no row for the key.
+            asyncio.CancelledError: The run was cancelled; the row is back in
+                the queue first.
+        """
+        fingerprint = trials.fingerprint(candidate)
+        while True:
+            # A cancel during the claim can leave the row running with no
+            # attempt here to write back; requeue_for_resume resets it.
+            claim = await asyncio.to_thread(
+                trials.store.claim_trial, trials.job_id, box_key, fingerprint, trials.worker_id
+            )
+            if claim is None:
+                return None
+            attempt = claim.attempt
+            try:
+                result = await self._attempt(attempt_key(box_key, attempt), candidate=candidate, work=work)
+                result_ref = trials.result_ref(result) if trials.result_ref is not None else None
+            except asyncio.CancelledError:
+                # A pod shutdown, a user cancel or a failed sibling is a Skynet
+                # interruption, not a failure of the trial, and Skynet pays for
+                # it (SKY-406 D3). So the row goes back to the queue under every
+                # policy and the attempt does not use a retry of the policy.
+                await self._return_interrupted(trials, box_key, attempt)
+                raise
+            except Exception as exc:
+                used = attempt - claim.interrupted
+                retry = used < self.retry_policy.max_attempts and self.retry_policy.should_retry(exc)
+                status = TrialStatus.RETRYABLE_FAILED if retry else TrialStatus.FAILED
+                error = f"{type(exc).__name__}: {exc}"[:TRIAL_ERROR_MAX_CHARS]
+                await self._finish_trial(trials, box_key, attempt, status, error=error)
+                if not retry:
+                    return BoxOutcome(box_key, candidate, error=exc)
+                await asyncio.sleep(self._retry_wait(attempt))
+                continue
+            await self._finish_trial(trials, box_key, attempt, TrialStatus.SUCCEEDED, result_ref=result_ref)
+            return BoxOutcome(box_key, candidate, result=result)
+
+    async def _return_interrupted(self, trials: DurableTrials[T, R], box_key: str, attempt: int) -> None:
+        """Write a cancelled attempt as ``retryable_failed``; log a write that fails or hangs.
+
+        A cancel that arrives during the write waits until the write ends,
+        so the row goes back to the queue. The wait ends after
+        ``INTERRUPT_WRITE_TIMEOUT_SECONDS``, so a hung write cannot block the
+        cancel forever. A row that the write misses stays ``running``;
+        ``requeue_for_resume`` resets it, and the attempt fence refuses a
+        late write after that reset.
+
+        Args:
+            trials: The durable trial rows of the job.
+            box_key: The trial key.
+            attempt: The attempt number.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + INTERRUPT_WRITE_TIMEOUT_SECONDS
+        write = asyncio.ensure_future(
+            self._finish_trial(
+                trials,
+                box_key,
+                attempt,
+                TrialStatus.RETRYABLE_FAILED,
+                error="interrupted before the attempt ended",
+                interrupted=True,
+            )
+        )
+        while not write.done() and loop.time() < deadline:
+            # wait() does not cancel the write when this task is cancelled;
+            # the caller raises the cancel after the write.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({write}, timeout=deadline - loop.time())
+        if not write.done():
+            write.cancel()
+            logger.error(
+                "Could not return interrupted trial %s to the queue within %s seconds; a resume resets it",
+                box_key,
+                INTERRUPT_WRITE_TIMEOUT_SECONDS,
+            )
+        elif not write.cancelled() and (exc := write.exception()) is not None:
+            logger.error(
+                "Could not return interrupted trial %s to the queue; a resume resets it", box_key, exc_info=exc
+            )
+
+    async def _finish_trial(
+        self,
+        trials: DurableTrials[T, R],
+        box_key: str,
+        attempt: int,
+        status: TrialStatus,
+        *,
+        result_ref: Any = None,
+        error: str | None = None,
+        interrupted: bool = False,
+    ) -> None:
+        """Write the end state of an attempt; log when the row was not this attempt's.
+
+        Args:
+            trials: The durable trial rows of the job.
+            box_key: The trial key.
+            attempt: The attempt number.
+            status: The end state.
+            result_ref: A JSON value that points to the result.
+            error: The error text of a failed attempt.
+            interrupted: Whether a cancel ended the attempt.
+        """
+        written = await asyncio.to_thread(
+            functools.partial(
+                trials.store.finish_trial,
+                trials.job_id,
+                box_key,
+                attempt,
+                status,
+                result_ref=result_ref,
+                error=error,
+                interrupted=interrupted,
+            )
+        )
+        if not written:
+            logger.warning(
+                "Trial %s attempt %s was not running, so its %s state was not saved", box_key, attempt, status
+            )
+
+    def _retry_wait(self, attempt: int) -> float:
+        """Return the wait before the attempt after ``attempt``, as the retry policy sets it.
+
+        Args:
+            attempt: The number of the attempt that failed.
+
+        Returns:
+            The wait in seconds.
+        """
+        state = RetryCallState(AsyncRetrying(), None, (), {})
+        state.attempt_number = attempt
+        return self.retry_policy.wait_strategy()(state)
 
     async def _attempt(self, box_id: str, *, candidate: T, work: BoxWork[T, R]) -> R:
         """Run one attempt: make and start a box, run its phases, then stop it.
