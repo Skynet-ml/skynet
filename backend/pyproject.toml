@@ -141,6 +141,11 @@ runloop = [
     # The 3.x floor is the tested line; the provider passes allow_runloop_mirrors.
     "runloop-api-client>=3.0.0,<4",
 ]
+sbx = [
+    # Docker sbx Cloud provider (SKY-482): parses the multipart file downloads.
+    # The factory refuses this provider in production.
+    "python-multipart>=0.0.31",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
