@@ -146,7 +146,7 @@ class PostgresRunCallStore:
 
         Secrets are removed before the cut, so a cut cannot split a secret and
         leave part of it in the stored body. The candidate is marked
-        ``running`` when it has no state yet or is ``done``.
+        ``running`` only when it has no state yet; a finished state never changes.
 
         Args:
             optimization_id: Owning job id.

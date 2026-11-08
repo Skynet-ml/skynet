@@ -1703,6 +1703,43 @@ def test_each_model_call_writes_one_run_call_that_holds_no_secret(gateway: Model
         assert secret not in stored
     assert all("[REDACTED]" in call["request"] and "[REDACTED]" in call["response"] for call in calls)
     assert all(call["duration_ms"] >= 0 and call["started_at"] for call in calls)
+    spent = gateway.runtime.service.get(gateway.runtime.budget_id, "alice").setup_spent_cents
+    assert spent > 0
+    assert all(call["cost_usd"] > 0 for call in calls)
+    assert sum(call["cost_usd"] for call in calls) == pytest.approx(float(spent) / 100)
+
+
+def test_a_byok_model_call_is_recorded_with_no_cost(gateway: ModelGateway) -> None:
+    """Leave the cost of a BYOK call empty, because the provider bills the user's own key.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Answer a BYOK call with the provider's own usage, which Skynet does not charge.
+
+        Args:
+            request: The provider request.
+
+        Returns:
+            The model answer.
+        """
+        return httpx.Response(
+            200, json={"id": "byok-generation", "usage": {"cost": "0.001"}, "choices": [{"message": {"content": "OK"}}]}
+        )
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    store = _record_calls(gateway)
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    body = {"model": "fixture/text", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+
+    reply = gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
+
+    assert reply.status == 200
+    (call,) = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (call["kind"], call["status"], call["cost_usd"]) == ("model", "ok", None)
 
 
 def test_each_call_is_recorded_under_the_candidate_its_usage_tags_name(gateway: ModelGateway) -> None:
@@ -1829,11 +1866,57 @@ def test_tool_and_evaluator_calls_are_recorded_without_their_bound_secrets(gatew
 
     assert reply.status_code == 200
     tool, scored = store.list_calls("job-1", NO_CANDIDATE_ID)
-    assert (tool["kind"], tool["target"], tool["status"]) == ("mcp", "lookup", "ok")
+    assert (tool["kind"], tool["target"], tool["status"], tool["cost_usd"]) == (
+        "mcp",
+        "tools.example/lookup",
+        "ok",
+        None,
+    )
+    assert scored["cost_usd"] is None
     assert (scored["kind"], scored["status"], scored["failure_reason"]) == ("evaluator", "500", "HTTP 500")
     stored = json.dumps([tool, scored])
     for secret in ("tool-secret", "endpoint-secret", gateway._tool_token, evaluator["token"]):
         assert secret not in stored
+
+
+def test_two_servers_with_the_same_tool_name_get_two_targets(gateway: ModelGateway) -> None:
+    """Name the server host in each tool call's target, so two ``lookup`` tools stay apart (E49 item 4).
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Tools:
+        """Answer every tool call."""
+
+        headers = None
+
+        def __init__(self, url: str) -> None:
+            """Keep the server endpoint.
+
+            Args:
+                url: The MCP endpoint.
+            """
+            self.url = url
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with an empty result."""
+            return ModelHTTPResult(200, "application/json", b"{}")
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools("https://tools.example/mcp")  # type: ignore[assignment]
+    gateway._connectors["connector-token"] = _Tools("https://docs.example:8443/v1/mcp/path-key")  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {})
+    gateway.dispatch_guest("connector-token", "/v1/_mcp", call, {})
+    gateway.dispatch_guest("connector-token", "/v1/_mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, {})
+
+    assert [call["target"] for call in store.list_calls("job-1", NO_CANDIDATE_ID)] == [
+        "tools.example/lookup",
+        "docs.example:8443/lookup",
+        "docs.example:8443/tools/list",
+    ]
 
 
 def test_a_tool_that_echoes_bare_credential_parts_leaks_none_of_them(gateway: ModelGateway) -> None:

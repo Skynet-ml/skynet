@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
@@ -23,7 +24,7 @@ from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, Inf
 from ..i18n_en import t_en
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
 from ..storage.run_call_store import call_candidate_key
-from .budgets import BudgetError, BudgetInsufficientError
+from .budgets import BudgetError, BudgetInsufficientError, settled_charges
 from .byok_upstreams import (
     OPENROUTER,
     ProviderUpstream,
@@ -93,19 +94,45 @@ _TRANSIENT_SANDBOX_ERROR_TYPES = frozenset(
 )
 
 
-def _tool_target(body: Mapping[str, Any]) -> str:
-    """Name the tool a JSON-RPC tool request calls, for its run-call target.
+def _tool_target(url: str, body: Mapping[str, Any]) -> str:
+    """Name the server and the tool a JSON-RPC tool request calls, for its run-call target.
+
+    Two servers can expose a tool of the same name, so the server host comes
+    first (E49 item 4). Only the host and port are kept: a server path or
+    query can hold a key.
 
     Args:
+        url: The MCP endpoint the broker sends to.
         body: The MCP JSON-RPC request.
 
     Returns:
-        The tool name for ``tools/call``, otherwise the JSON-RPC method.
+        ``host/tool`` for ``tools/call``, otherwise ``host/method``.
     """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
     params = body.get("params")
     if body.get("method") == "tools/call" and isinstance(params, Mapping) and params.get("name"):
-        return str(params["name"])
-    return str(body.get("method") or "")
+        return f"{host}/{params['name']}"
+    return f"{host}/{body.get('method') or ''}"
+
+
+def _call_cost(route: OpenRouterDispatcher | CliDispatcher | None, charges: Mapping[str, Decimal]) -> float | None:
+    """Return what one model call cost the run, in dollars, for its run-call record (E28).
+
+    Args:
+        route: The model route, or None for a tool or evaluator call.
+        charges: The charge each operation of the call settled, in cents.
+
+    Returns:
+        The settled total, or None for a tool or evaluator call, a BYOK call
+        (the provider bills the user's own key) and a call that settled nothing.
+    """
+    # A tool or evaluator call settles the nested model calls it makes, which have records of their own.
+    if route is None or not charges or route.policy.kind == "byok_model":
+        return None
+    return float(sum(charges.values(), Decimal(0)) / 100)
 
 
 def _unbound_capability(path: str, capabilities: Mapping[str, Any]) -> bool:
@@ -938,7 +965,7 @@ class ModelGateway:
         if route is not None:
             kind, target, recorder = "model", route.model, recorder.bind(role=route.role)
         elif tools is not None:
-            kind, target = "mcp", _tool_target(body)
+            kind, target = "mcp", _tool_target(tools.url, body)
             # A bound header is often "Bearer <key>", and a tool may echo the bare key.
             for value in (tools.headers or {}).values():
                 secret_values += credential_fragments(value)
@@ -949,30 +976,33 @@ class ModelGateway:
             kind, target = "evaluator", "evaluator"
         request = json.dumps(dict(body), default=str)
         started = recorder.start()
-        try:
-            response = dispatch()
-        except (BudgetReached, BudgetInsufficientError) as error:
-            recorder.record(
-                started,
-                kind=kind,
-                target=target,
-                status="refused",
-                request=request,
-                failure_reason=type(error).__name__,
-                secrets=secret_values,
-            )
-            raise
-        except BaseException as error:  # a worker stop or cancel must still leave the call in the record
-            recorder.record(
-                started,
-                kind=kind,
-                target=target,
-                status="failed",
-                request=request,
-                failure_reason=f"{type(error).__name__}: {error}",
-                secrets=secret_values,
-            )
-            raise
+        with settled_charges() as charges:
+            try:
+                response = dispatch()
+            except (BudgetReached, BudgetInsufficientError) as error:
+                recorder.record(
+                    started,
+                    kind=kind,
+                    target=target,
+                    status="refused",
+                    request=request,
+                    failure_reason=type(error).__name__,
+                    cost_usd=_call_cost(route, charges),
+                    secrets=secret_values,
+                )
+                raise
+            except BaseException as error:  # a worker stop or cancel must still leave the call in the record
+                recorder.record(
+                    started,
+                    kind=kind,
+                    target=target,
+                    status="failed",
+                    request=request,
+                    failure_reason=f"{type(error).__name__}: {error}",
+                    cost_usd=_call_cost(route, charges),
+                    secrets=secret_values,
+                )
+                raise
         ok = 200 <= response.status < 300
         recorder.record(
             started,
@@ -982,6 +1012,7 @@ class ModelGateway:
             request=request,
             response=response.body,
             failure_reason=None if ok else f"HTTP {response.status}",
+            cost_usd=_call_cost(route, charges),
             secrets=secret_values,
         )
         return response
