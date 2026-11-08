@@ -27,7 +27,7 @@ from core.billing.model_gateway import ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
-from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
@@ -42,7 +42,7 @@ from core.service_gateway.optimization.blackbox.rule_judge import (
     WITHHELD_STEP,
 )
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
-from core.storage.models import Base
+from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.worker import repo_staging
 
 
@@ -101,6 +101,7 @@ def _stage_with(
     """
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {"API_KEY": "secret-value"})
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
+    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
     monkeypatch.setattr(
         repo_staging,
         "fetch_snapshot",
@@ -138,13 +139,64 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
     assert environment["secret_names"] == ["API_KEY"]
     assert environment["services"] == []
     assert environment["roles"] == {
-        "proposer": {"allowed_hosts": None, "mcp_servers": [], "services": []},
+        "proposer": {"allowed_hosts": list(PROPOSER_REGISTRY_HOSTS), "mcp_servers": [], "services": []},
         "targets": {},
     }
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["proposer_hosts"] == list(PROPOSER_REGISTRY_HOSTS)
     assert environment["constraints_file"]["path"] == "optimize.toml"
     assert "secret-value" not in repr(staged_payload)
     assert "Pick the place the sender means." in staged_payload["background"]
     assert "`src/geocode/eval`" in staged_payload["background"]
+    staged.cleanup()
+
+
+def test_the_saved_index_is_the_account_setting_or_pypi() -> None:
+    """An account with no saved index installs from PyPI; a saved one replaces it."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[PackageRegistryPreferenceModel.__table__])  # type: ignore[list-item]
+    with Session(engine) as session:
+        session.add(PackageRegistryPreferenceModel(username="bob", index_url="https://pkgs.example.com/simple"))
+        session.commit()
+
+    assert repo_staging.saved_index_url(engine, "alice") == "https://pypi.org/simple"
+    assert repo_staging.saved_index_url(engine, "bob") == "https://pkgs.example.com/simple"
+
+
+@pytest.mark.parametrize(
+    ("proposer", "index_url", "hosts"),
+    [
+        ("", "https://pypi.org/simple", list(PROPOSER_REGISTRY_HOSTS)),
+        ("\n[proposer]\nnetwork = []\n", "https://pypi.org/simple", []),
+        (
+            '\n[proposer]\nnetwork = ["docs.python.org"]\n',
+            "https://pypi.org/simple",
+            sorted({*PROPOSER_REGISTRY_HOSTS, "docs.python.org"}),
+        ),
+        ("", "https://pkgs.example.com/simple", ["pkgs.example.com", "registry.npmjs.org"]),
+    ],
+)
+def test_staging_records_the_hosts_the_proposer_box_reaches(
+    proposer: str, index_url: str, hosts: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot and the record both carry the proposer's effective hosts, from the saved index (E57)."""
+    files = {**_FILES, "optimize.toml": _CONSTRAINTS + proposer}
+    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: index_url)
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
+    monkeypatch.setattr(
+        repo_staging,
+        "fetch_snapshot",
+        lambda repository, pinned, token, workdir: RepoSnapshot(
+            commit=pinned, archive=_tree(workdir, files), readonly_paths=(), size_bytes=1
+        ),
+    )
+
+    staged_payload, staged = repo_staging.stage_repository(
+        _payload("c" * 40), username="alice", binding_id="b", engine=None
+    )
+
+    assert staged_payload[repo_staging.REPO_SNAPSHOT_KEY]["proposer_hosts"] == hosts
+    assert staged_payload["target"]["repo"]["environment"]["roles"]["proposer"]["allowed_hosts"] == hosts
     staged.cleanup()
 
 
@@ -264,6 +316,7 @@ def test_staging_pins_the_commit_and_keeps_secrets_in_the_parent(
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
     monkeypatch.setattr(repo_staging, "resolve_commit", lambda token, repository, branch: "a" * 40)
     monkeypatch.setattr(repo_staging, "fetch_snapshot", fetch)
+    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
     original = _payload(commit)
 
     staged_payload, staged = repo_staging.stage_repository(original, username="alice", binding_id="b", engine=None)
@@ -275,6 +328,7 @@ def test_staging_pins_the_commit_and_keeps_secrets_in_the_parent(
     assert staged_payload["_repo_snapshot"]["secret_names"] == ["API_KEY"]
     assert staged_payload["_repo_snapshot"]["readonly_paths"] == ["vendor/lib"]
     assert staged_payload["_repo_snapshot"]["constrained"] is False
+    assert staged_payload["_repo_snapshot"]["proposer_hosts"] == list(PROPOSER_REGISTRY_HOSTS)
     assert "secret-value" not in repr(staged_payload)
     assert not has_exposed_execution_credentials(staged_payload)
     assert staged.secrets == {"API_KEY": "secret-value"}

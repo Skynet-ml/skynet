@@ -22,10 +22,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
+from ..api.routers.package_registry import package_registry_for
 from ..billing.model_gateway import ROUTE_KEY
 from ..billing.operation_pricing import ChargePolicy
 from ..billing.protected_credentials import ProtectedCredentialVault, resolve_repo_secrets
-from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, proposer_hosts
 from ..brand import APP_NAME
 from ..config import settings
 from ..connectors.github_publish import (
@@ -144,6 +145,20 @@ def is_repo_payload(payload: dict[str, Any]) -> bool:
     return isinstance(target, dict) and target.get("kind") == "repo" and isinstance(target.get("repo"), dict)
 
 
+def saved_index_url(engine: Any, username: str) -> str:
+    """Read the package index the account saved, or the PyPI default.
+
+    Args:
+        engine: SQLAlchemy engine for the account settings.
+        username: Owner of the run.
+
+    Returns:
+        The index URL the proposer's box may install from.
+    """
+    with Session(engine) as session:
+        return package_registry_for(session, username).index_url
+
+
 def stage_repository(
     payload: dict[str, Any],
     *,
@@ -195,8 +210,12 @@ def stage_repository(
             readonly_paths=snapshot.readonly_paths,
             secret_names=secrets,
         )
+        hosts = proposer_hosts(
+            environment.constraints.proposer.network if environment.constraints is not None else None,
+            saved_index_url(engine, username),
+        )
         if environment.constraints is not None:
-            record["roles"] = plan_roles(environment.constraints)
+            record["roles"] = plan_roles(environment.constraints, proposer_hosts=hosts)
         _ensure_unchanged(repo.get(ENVIRONMENT_KEY), record)
         # The guest's workspace (Vercel or local Docker) unpacks this copy; the
         # parent's scorer box keeps the full tree, so it scores with the base
@@ -231,6 +250,7 @@ def stage_repository(
         "readonly_paths": list(snapshot.readonly_paths),
         "secret_names": sorted(secrets),
         "constrained": environment.constraints is not None,
+        "proposer_hosts": list(hosts),
     }
     return result, StagedRepository(
         snapshot=snapshot,

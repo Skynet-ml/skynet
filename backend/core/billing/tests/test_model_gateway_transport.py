@@ -43,7 +43,7 @@ from core.billing.protected_credentials import (
 )
 from core.billing.runtime import BudgetRuntime, OperationCompletedError
 from core.billing.usage_tags import CALLER_PROPOSER, KIND_EMBEDDING, USAGE_TAGS_HEADER, encode_tags
-from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.provider_registry import BYOK_PROVIDER_SLUGS
@@ -1335,6 +1335,28 @@ def test_parent_registry_box_is_funded_but_unreachable_from_the_guest_route(gate
     with pytest.raises(ServiceError, match="network access"):
         remote.open(SandboxSpec(lifetime_seconds=20, image=IMAGE, allowed_hosts=("pypi.org",)))
     gateway.parent_sandbox_runtime()
+
+
+def test_a_guest_box_reaches_only_the_hosts_the_gateway_granted(gateway: ModelGateway) -> None:
+    """Refuse guest hosts before the grant and outside it, and open a box to a granted registry (E57)."""
+    with pytest.raises(ValueError, match="no sandbox broker"):
+        gateway.allow_guest_hosts(PROPOSER_REGISTRY_HOSTS)
+    gateway.bind_sandbox(
+        SandboxBroker(LocalSubprocessRuntime(), image=IMAGE, max_lifetime_seconds=20),
+        image=IMAGE,
+        lifetime_seconds=20,
+    )
+    protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
+    descriptor = protected["_budget_gateway_descriptor"]
+    remote = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
+    with pytest.raises(ServiceError, match="network access"):
+        remote.open(SandboxSpec(lifetime_seconds=20, image=IMAGE, allowed_hosts=("pypi.org",)))
+
+    gateway.allow_guest_hosts(PROPOSER_REGISTRY_HOSTS)
+
+    remote.open(SandboxSpec(lifetime_seconds=20, image=IMAGE, allowed_hosts=("pypi.org",))).close()
+    with pytest.raises(ServiceError, match="network access"):
+        remote.open(SandboxSpec(lifetime_seconds=20, image=IMAGE, allowed_hosts=("raw.githubusercontent.com",)))
 
 
 EMBEDDING_CATALOG = {

@@ -20,9 +20,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.api.errors import DomainError
+from core.billing.vercel_usage import PROPOSER_REGISTRY_HOSTS
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.i18n import CANCELLATION_REASON
 from core.models.blackbox import BlackboxRunRequest
+from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from core.storage.base import JobStore
 
 from .. import engine as engine_module
@@ -912,10 +914,19 @@ def test_gateway_domain_failure_has_plain_detail(worker: BackgroundWorker, store
     assert store._jobs["gateway-domain"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
 
 
-def test_repository_run_hands_its_hardening_job_id_to_the_publish(
-    worker: BackgroundWorker, store: FakeJobStore
-) -> None:
-    """The setup's hardening job id goes from the stored run request to the PR publish (SKY-356)."""
+def _run_repository_job(
+    worker: BackgroundWorker, store: FakeJobStore, snapshot: dict
+) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """Run one stored repository job with staging that leaves ``snapshot`` on the payload.
+
+    Args:
+        worker: The worker under test.
+        store: Its job store.
+        snapshot: What staging records under the repository snapshot key.
+
+    Returns:
+        The budget gateway, the publish step and the staged repository.
+    """
     request = BlackboxRunRequest(
         username="alice",
         recipe="repo",
@@ -941,6 +952,7 @@ def test_repository_run_hands_its_hardening_job_id_to_the_publish(
     def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
         """Stage the repository the way the real step leaves the payload."""
         payload["target"]["repo"][engine_module.ENVIRONMENT_KEY] = {}
+        payload[REPO_SNAPSHOT_KEY] = snapshot
         return payload, staged
 
     ctx, _proc = make_mp_context(exitcode=0, result_events=[make_result_event()])
@@ -970,11 +982,37 @@ def test_repository_run_hands_its_hardening_job_id_to_the_publish(
         stack.enter_context(patch.object(worker, "_record_repo_environment", return_value=None))
         stack.enter_context(patch.object(worker, "_close_budget_gateway", return_value=(None, None)))
         worker._process_job("repo-hardened", 0)
+    return gateway, publish, staged
+
+
+def test_repository_run_hands_its_hardening_job_id_to_the_publish(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """The setup's hardening job id goes from the stored run request to the PR publish (SKY-356)."""
+    _gateway, publish, staged = _run_repository_job(worker, store, {})
+
     publish.assert_called_once()
     published_payload = publish.call_args.args[1]
     assert published_payload["hardening_job_id"] == "hardening-1"
     assert publish.call_args.args[2] is staged
     assert publish.call_args.kwargs["username"] == "alice"
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "granted"),
+    [
+        ({"proposer_hosts": list(PROPOSER_REGISTRY_HOSTS)}, PROPOSER_REGISTRY_HOSTS),
+        ({"proposer_hosts": []}, ()),
+        ({}, ()),
+    ],
+)
+def test_repository_run_grants_the_staged_proposer_hosts(
+    snapshot: dict, granted: tuple[str, ...], worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """The guest's boxes get the hosts staging worked out, and none when it names none (E57)."""
+    gateway, _publish, _staged = _run_repository_job(worker, store, snapshot)
+
+    gateway.allow_guest_hosts.assert_called_once_with(granted)
 
 
 def test_unified_byok_injection_domain_error_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
