@@ -24,8 +24,6 @@ OPENAI_COMPATIBLE_VERSION = "3.0.87"
 ZOD_VERSION = "4.6.7"
 EVE_PROJECT_DIR = ".app/eve"
 EVE_INSTRUCTIONS_FILE = f"{EVE_PROJECT_DIR}/agent/instructions.md"
-_RUNNER_FILE = f"{EVE_PROJECT_DIR}/runner.mjs"
-_PACKAGE_FILE = f"{EVE_PROJECT_DIR}/package.json"
 _AGENT_FILE = f"{EVE_PROJECT_DIR}/agent/agent.ts"
 _NPM_FLAGS = "--no-fund --no-audit --loglevel=error --progress=false"
 _ENV = {
@@ -41,9 +39,14 @@ _PROTECTED_ENV = {
 }
 
 # The runner starts ``eve start``, sends the case prompt as one session turn
-# and prints Pi's ``tool_execution_start`` and ``message_end`` events. It drops
-# every direct provider credential from the server env, so the AI SDK can only
-# reach the model through the Skynet gateway that agent.ts names.
+# and prints Pi's ``tool_execution_start`` and ``message_end`` events as the
+# session streams them, so the bridge's tool-call and cost caps can stop a
+# running session. It accepts both the older event names (``actions.requested``,
+# ``step.completed``) and the newer ones (``call.requested``,
+# ``usage.recorded``), and counts only the first name family it sees so a
+# stream that sends both is not counted twice. It drops every direct provider
+# credential from the server env, so the AI SDK can only reach the model
+# through the Skynet gateway that agent.ts names.
 EVE_RUNNER = r"""import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -65,6 +68,12 @@ const port = 3024;
 const serverUrl = `http://${host}:${port}`;
 const startupTimeoutMs = 60000;
 
+const FAILURE_TYPES = new Set(["turn.failed", "session.failed"]);
+const INPUT_TYPES = new Set(["input.requested", "interaction.opened"]);
+const SETTLED_TYPES = new Set(["turn.settled", "session.ended"]);
+const counted = { calls: null, usage: null };
+let failure = null;
+
 let server;
 try {
   server = startServer();
@@ -73,24 +82,47 @@ try {
   const require = createRequire(join(projectDir, "package.json"));
   const { Client } = await import(pathToFileURL(require.resolve("eve/client")).href);
   const response = await new Client({ host: serverUrl }).session().send(prompt);
-  const result = await response.result();
-  const events = result.events ?? [];
-  for (const event of events) {
-    if (event.type !== "actions.requested") continue;
-    for (const action of actionsOf(event.data ?? {})) {
-      const id = action.id ?? action.callId ?? action.toolCallId ?? action.actionId ?? "";
-      console.log(JSON.stringify({ type: "tool_execution_start", toolCallId: String(id) }));
-    }
+  const streamed = typeof response.stream === "function";
+  if (streamed) {
+    for await (const event of response.stream()) handleEvent(event);
   }
-  const usage = summarizeUsage(events);
-  console.log(JSON.stringify({
-    type: "message_end",
-    message: { role: "assistant", content: [{ type: "text", text: messageText(result.message) }], usage },
-  }));
-  const failure = failureFromEvents(events) ?? (OK_STATUSES.has(result.status) ? null : `eve run ended with status ${result.status ?? "unknown"}`);
+  const result = await response.result();
+  if (!streamed) for (const event of result.events ?? []) handleEvent(event);
+  printMessage(messageText(result.message), { input: 0, output: 0 });
+  failure ??= OK_STATUSES.has(result.status) ? null : `eve run ended with status ${result.status ?? "unknown"}`;
   if (failure) throw new Error(failure);
 } finally {
   if (server) await stopServer(server);
+}
+
+function handleEvent(event) {
+  const type = event?.type;
+  const data = event?.data ?? {};
+  if (type === "actions.requested" || type === "call.requested") {
+    counted.calls ??= type;
+    if (type !== counted.calls) return;
+    const calls = type === "call.requested" ? [data] : actionsOf(data);
+    for (const call of calls) {
+      const id = call.callId ?? call.id ?? call.toolCallId ?? call.actionId ?? "";
+      console.log(JSON.stringify({ type: "tool_execution_start", toolCallId: String(id) }));
+    }
+  } else if (type === "step.completed" || type === "usage.recorded") {
+    counted.usage ??= type;
+    if (type !== counted.usage) return;
+    const source = data.usage ?? data;
+    printMessage("", {
+      input: firstNumber(source.inputTokens, source.input_tokens, source.promptTokens, source.prompt_tokens),
+      output: firstNumber(source.outputTokens, source.output_tokens, source.completionTokens, source.completion_tokens),
+    });
+  } else if (INPUT_TYPES.has(type)) {
+    failure ??= "eve asked for human input during a non-interactive run";
+  } else if (FAILURE_TYPES.has(type) || (SETTLED_TYPES.has(type) && ["failed", "cancelled"].includes(data.outcome))) {
+    failure ??= data.message ?? data.error?.message ?? `${type} during the eve run`;
+  }
+}
+
+function printMessage(text, usage) {
+  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage } }));
 }
 
 function startServer() {
@@ -135,28 +167,6 @@ function messageText(message) {
   if (Array.isArray(message)) return message.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("\n");
   if (message && typeof message === "object") return messageText(message.text ?? message.content ?? "");
   return "";
-}
-
-function failureFromEvents(events) {
-  for (const event of events) {
-    if (event.type === "input.requested") return "eve asked for human input during a non-interactive run";
-    if (event.type === "turn.failed" || event.type === "session.failed") {
-      return event.data?.message ?? event.data?.error?.message ?? `${event.type} during the eve run`;
-    }
-  }
-  return null;
-}
-
-function summarizeUsage(events) {
-  let input = 0;
-  let output = 0;
-  for (const event of events) {
-    if (event.type !== "step.completed") continue;
-    const source = event.data?.usage ?? event.data ?? {};
-    input += firstNumber(source.inputTokens, source.input_tokens, source.promptTokens, source.prompt_tokens);
-    output += firstNumber(source.outputTokens, source.output_tokens, source.completionTokens, source.completion_tokens);
-  }
-  return { input, output };
 }
 
 function firstNumber(...values) {
@@ -225,9 +235,11 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
     """Build the launch for eve (npm ``eve``, pinned to :data:`EVE_VERSION`).
 
     The version under optimization becomes the agent's ``instructions.md``.
-    The run installs and builds the project after the box files land, since
-    ``eve build`` compiles those instructions, then the runner sends the case
-    prompt.
+    The run copies agent.ts and the instructions into a fresh ``mktemp -d``
+    project outside the workspace, then installs and builds it there, since
+    ``eve build`` compiles those instructions. So package.json, the runner,
+    node_modules and the build output never reach the version patch. The
+    runner then sends the case prompt.
 
     Args:
         model: Target model id.
@@ -241,20 +253,23 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
     del reasoning_effort
     env = _base_env(model, gateway)
     env.update(_ENV)
-    # Launch files are the gateway-bearing config that a protected run's relay
-    # rewrite edits, so the fixed package.json and runner are written here.
-    write_fixed = (
-        f"printf '%s' {shlex.quote(_package_json())} > {_PACKAGE_FILE} && "
-        f"printf '%s' {shlex.quote(EVE_RUNNER)} > {_RUNNER_FILE}"
+    # agent.ts is a launch file because a protected run's relay rewrite edits
+    # it in the workspace; the copy runs after that rewrite, so the build
+    # directory gets the relay URL.
+    setup = (
+        'EVE_DIR="$(mktemp -d)" && mkdir -p "$EVE_DIR/agent" && '
+        f'cp {_AGENT_FILE} {EVE_INSTRUCTIONS_FILE} "$EVE_DIR/agent/" && '
+        f"printf '%s' {shlex.quote(_package_json())} > \"$EVE_DIR/package.json\" && "
+        f"printf '%s' {shlex.quote(EVE_RUNNER)} > \"$EVE_DIR/runner.mjs\""
     )
     return HarnessLaunch(
         instructions_file=EVE_INSTRUCTIONS_FILE,
         install_command=_npm_install("eve", "eve", EVE_VERSION),
         files={_AGENT_FILE: _agent_source(model, gateway)},
         run_command=(
-            f"{write_fixed} && "
-            f"(cd {EVE_PROJECT_DIR} && npm install {_NPM_FLAGS} && node_modules/.bin/eve build) >&2 && "
-            f'EVE_PROJECT_DIR="$PWD/{EVE_PROJECT_DIR}" node {_RUNNER_FILE}'
+            f"{setup} && "
+            f'(cd "$EVE_DIR" && npm install {_NPM_FLAGS} && node_modules/.bin/eve build) >&2 && '
+            'EVE_PROJECT_DIR="$EVE_DIR" node "$EVE_DIR/runner.mjs"'
         ),
         env=env,
         parse_output=parse_pi_output,
@@ -269,6 +284,6 @@ SPEC = register(
         version=EVE_VERSION,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
-        position=60,
+        position=66,
     )
 )
