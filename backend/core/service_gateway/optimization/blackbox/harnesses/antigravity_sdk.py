@@ -5,6 +5,7 @@ Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/antigravity_sdk.
 
 from __future__ import annotations
 
+import shlex
 from urllib.parse import urlsplit
 
 from .....exceptions import ServiceError
@@ -24,9 +25,23 @@ _SCRIPT_PINS = (
 )
 # The same uv release the native engines install, so one pin covers the box.
 _UV_PIN = "uv==0.9.13"
+_REQUIRES_PYTHON = ">=3.12,<3.15"
 RUNNER_FILE = ".app/antigravity/run_agent.py"
 _UV_PATH = 'PATH="$HOME/.local/bin:$PATH"'
 _RUNNER = f"uv run --quiet --script {RUNNER_FILE}"
+# The native proposer bootstrap checks and installs the harness before any
+# launch file is in the workspace, so the probe resolves the script's pins
+# without the runner file. ``--version`` lands in ``sys.argv`` and is ignored.
+_SDK_ENV = (
+    f"--no-project --python {shlex.quote(_REQUIRES_PYTHON)} "
+    + " ".join(f"--with {pin}" for pin in _SCRIPT_PINS)
+    + " python -c "
+    + shlex.quote('import importlib.metadata as m; print(m.version("google-antigravity"))')
+)
+# The check never downloads: in open mode the install has warmed the uv cache,
+# and a protected image must already carry it.
+_PROBE = f"uv run --quiet --offline {_SDK_ENV}"
+_WARM = f"uv run --quiet {_SDK_ENV}"
 ENV_THINKING_LEVEL = "ANTIGRAVITY_THINKING_LEVEL"
 # Gemini has no thinking-off switch, so ``none`` maps to the lowest level.
 _THINKING_LEVELS = {
@@ -48,7 +63,7 @@ _URL_FORBIDDEN = frozenset("\"'\\")
 
 _RUNNER_SCRIPT = """#!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.12,<3.15"
+# requires-python = "{requires_python}"
 # dependencies = [
 {dependencies}
 # ]
@@ -63,7 +78,6 @@ import json
 import logging
 import os
 import sys
-from importlib.metadata import version
 from pathlib import Path
 
 from google.antigravity import Agent, LocalAgentConfig
@@ -126,10 +140,7 @@ async def _run():
 
 
 def main():
-    \"\"\"Print the SDK version for ``--version``; otherwise run the agent.\"\"\"
-    if sys.argv[1:] == ["--version"]:
-        print(version("google-antigravity"))
-        return
+    \"\"\"Run the agent.\"\"\"
     logging.basicConfig(stream=sys.stderr, level=logging.ERROR)
     asyncio.run(_run())
 
@@ -184,6 +195,7 @@ def _runner_script(gateway_url: str) -> str:
     """
     return _RUNNER_SCRIPT.format(
         dependencies="\n".join(f'#   "{pin}",' for pin in _SCRIPT_PINS),
+        requires_python=_REQUIRES_PYTHON,
         gateway_url=gateway_url,
         state_dir=".app/antigravity",
         env_api_key=ENV_API_KEY,
@@ -194,16 +206,16 @@ def _runner_script(gateway_url: str) -> str:
 
 
 def _antigravity_install() -> str:
-    """Return the command that installs uv if needed and warms the pinned script environment.
+    """Return the command that installs uv if needed and warms the pinned SDK environment.
 
     Returns:
         The shell command.
     """
     return (
-        f"export {_UV_PATH}; {_version_check(_RUNNER, ANTIGRAVITY_SDK_VERSION)} || "
+        f"export {_UV_PATH}; {_version_check(_PROBE, ANTIGRAVITY_SDK_VERSION)} || "
         "{ command -v uv > /dev/null 2>&1 || "
         f"python3 -m pip install --disable-pip-version-check --no-deps --user {_UV_PIN}; "
-        f"{_RUNNER} --version; }}"
+        f"{_WARM} > /dev/null; }}"
     )
 
 
@@ -238,7 +250,7 @@ SPEC = register(
     HarnessSpec(
         id=HARNESS_ID,
         launch=_antigravity_launch,
-        binary=_RUNNER,
+        binary=_PROBE,
         version=ANTIGRAVITY_SDK_VERSION,
         output_format="pi",
         protected_env=_PROTECTED_ENV,

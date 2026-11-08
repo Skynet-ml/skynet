@@ -258,7 +258,12 @@ def test_registry_keeps_the_catalog_order() -> None:
         "codex": ("codex", "0.153.0"),
         "opencode": ("opencode", "1.18.27"),
         "prime": ("prime-agent", "0.9.7"),
-        "antigravity_sdk": ("uv run --quiet --script .app/antigravity/run_agent.py", "0.1.20"),
+        "antigravity_sdk": (
+            "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with google-antigravity==0.1.20"
+            " --with cryptography==46.0.7 --with fastapi==0.136.3 python -c"
+            """ 'import importlib.metadata as m; print(m.version("google-antigravity"))'""",
+            "0.1.20",
+        ),
     }
 
 
