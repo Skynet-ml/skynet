@@ -1473,17 +1473,6 @@ class RemoteDBJobStore:
         """
         return self._run_calls.record_call(optimization_id, call, secrets)
 
-    def set_run_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
-        """Insert or update one candidate's role and lifecycle state.
-
-        Args:
-            optimization_id: Owning job id.
-            candidate_id: The candidate within the run.
-            role: The candidate's role or stage.
-            state: ``running``, ``done`` or ``failed``.
-        """
-        self._run_calls.set_candidate_state(optimization_id, candidate_id, role, state)
-
     def list_run_calls(
         self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
     ) -> list[dict]:

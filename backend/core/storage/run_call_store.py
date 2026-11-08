@@ -191,11 +191,9 @@ class PostgresRunCallStore:
         }
         with Session(self._engine) as session:
             candidate = self._lock_candidate(session, optimization_id, candidate_id, role, "running")
-            # A re-evaluation of a scored candidate (AutoResearch, Meta-Harness repeats) runs it again;
-            # a failed candidate stays failed, because a crashed case keeps it out of final selection.
-            if candidate.state == "done":
-                candidate.state = "running"
-                candidate.updated_at = datetime.now(UTC)
+            # A call never changes a finished state: a partial re-evaluation of a scored version
+            # (AutoResearch) logs no new progress event, so nothing would set it done again, and a
+            # failed candidate stays failed, because a crashed case keeps it out of final selection.
             candidate.last_seq += 1
             seq = candidate.last_seq
             session.add(RunCallModel(seq=seq, **fields))

@@ -237,8 +237,8 @@ def test_set_candidate_state_creates_a_candidate_and_rejects_an_unknown_state(st
         store.set_candidate_state("job-1", "cand-9", "solver", "paused")
 
 
-def test_a_new_call_runs_a_done_candidate_again_and_keeps_a_failed_one_failed(store: PostgresRunCallStore) -> None:
-    """A re-evaluation call shows a scored candidate as running; a crashed candidate stays failed."""
+def test_a_new_call_keeps_a_done_candidate_done_and_a_failed_one_failed(store: PostgresRunCallStore) -> None:
+    """A re-evaluation call is recorded, but a finished candidate keeps its state."""
     store.record_call("job-1", _call(candidate_id="cand-1"), [])
     store.record_call("job-1", _call(candidate_id="cand-2"), [])
     assert store.finish_candidate("job-1", "cand-1", "done")
@@ -247,8 +247,9 @@ def test_a_new_call_runs_a_done_candidate_again_and_keeps_a_failed_one_failed(st
     store.record_call("job-1", _call(candidate_id="cand-1"), [])
     store.record_call("job-1", _call(candidate_id="cand-2"), [])
 
-    assert store.get_candidate("job-1", "cand-1")["state"] == "running"
+    assert store.get_candidate("job-1", "cand-1")["state"] == "done"
     assert store.get_candidate("job-1", "cand-2")["state"] == "failed"
+    assert len(store.list_calls("job-1", "cand-1")) == 2
 
 
 def test_finish_candidate_changes_only_a_recorded_candidate(store: PostgresRunCallStore) -> None:
