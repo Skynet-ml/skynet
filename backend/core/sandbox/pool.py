@@ -51,6 +51,10 @@ POOL_PHASES = (Phase.SETUP, Phase.RUN, Phase.SCORE)
 # block the pool, or a cancel of it, forever.
 STOP_TIMEOUT_SECONDS = 60.0
 
+# The longest wait for the write that returns a cancelled trial to the
+# queue. A database write that hangs must not block a cancel forever.
+INTERRUPT_WRITE_TIMEOUT_SECONDS = 60.0
+
 TRIAL_ERROR_MAX_CHARS = 2000
 
 _DONE = object()
@@ -509,21 +513,8 @@ class SandboxPool:
                 # A pod shutdown, a user cancel or a failed sibling is a Skynet
                 # interruption, not a failure of the trial, and Skynet pays for
                 # it (SKY-406 D3). So the row goes back to the queue under every
-                # policy and the attempt does not use a retry of the policy. The
-                # shield lets the write end while the cancel goes on.
-                try:
-                    await asyncio.shield(
-                        self._finish_trial(
-                            trials,
-                            box_key,
-                            attempt,
-                            TrialStatus.RETRYABLE_FAILED,
-                            error="interrupted before the attempt ended",
-                            interrupted=True,
-                        )
-                    )
-                except Exception:
-                    logger.exception("Could not return interrupted trial %s to the queue; a resume resets it", box_key)
+                # policy and the attempt does not use a retry of the policy.
+                await self._return_interrupted(trials, box_key, attempt)
                 raise
             except Exception as exc:
                 used = attempt - claim.interrupted
@@ -537,6 +528,50 @@ class SandboxPool:
                 continue
             await self._finish_trial(trials, box_key, attempt, TrialStatus.SUCCEEDED, result_ref=result_ref)
             return BoxOutcome(box_key, candidate, result=result)
+
+    async def _return_interrupted(self, trials: DurableTrials[T, R], box_key: str, attempt: int) -> None:
+        """Write a cancelled attempt as ``retryable_failed``; log a write that fails or hangs.
+
+        A cancel that arrives during the write waits until the write ends,
+        so the row goes back to the queue. The wait ends after
+        ``INTERRUPT_WRITE_TIMEOUT_SECONDS``, so a hung write cannot block the
+        cancel forever. A row that the write misses stays ``running``;
+        ``requeue_for_resume`` resets it, and the attempt fence refuses a
+        late write after that reset.
+
+        Args:
+            trials: The durable trial rows of the job.
+            box_key: The trial key.
+            attempt: The attempt number.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + INTERRUPT_WRITE_TIMEOUT_SECONDS
+        write = asyncio.ensure_future(
+            self._finish_trial(
+                trials,
+                box_key,
+                attempt,
+                TrialStatus.RETRYABLE_FAILED,
+                error="interrupted before the attempt ended",
+                interrupted=True,
+            )
+        )
+        while not write.done() and loop.time() < deadline:
+            # wait() does not cancel the write when this task is cancelled;
+            # the caller raises the cancel after the write.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({write}, timeout=deadline - loop.time())
+        if not write.done():
+            write.cancel()
+            logger.error(
+                "Could not return interrupted trial %s to the queue within %s seconds; a resume resets it",
+                box_key,
+                INTERRUPT_WRITE_TIMEOUT_SECONDS,
+            )
+        elif not write.cancelled() and (exc := write.exception()) is not None:
+            logger.error(
+                "Could not return interrupted trial %s to the queue; a resume resets it", box_key, exc_info=exc
+            )
 
     async def _finish_trial(
         self,

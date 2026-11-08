@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import AsyncIterator
 
 import pytest
@@ -1546,3 +1547,63 @@ async def test_durable_trials_cancel_returns_the_trial_and_resume_runs_only_it()
         ("t-1", 3, TrialStatus.FAILED),
     ]
     assert tracker.created == 2
+
+
+async def test_durable_trials_cancel_ends_when_the_interrupt_write_hangs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """End a cancel after the write limit when the write that returns the trial hangs, and log it."""
+    monkeypatch.setattr(pool_module, "INTERRUPT_WRITE_TIMEOUT_SECONDS", 0.05)
+    hung = asyncio.Event()
+
+    async def hang(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait for ever.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            Never returns.
+        """
+        hung.set()
+        await asyncio.Event().wait()
+        return candidate
+
+    store = _MemoryTrials({"t-0": ("fp", TrialStatus.PENDING)})
+    release = threading.Event()
+    finish = store.finish_trial
+
+    def hung_write(*args: object, **kwargs: object) -> bool:
+        """Block the interrupt write until the test ends, then write it.
+
+        Args:
+            *args: The ``finish_trial`` arguments.
+            **kwargs: The ``finish_trial`` keyword arguments.
+
+        Returns:
+            True when the row was running this attempt.
+        """
+        if kwargs.get("interrupted"):
+            release.wait(DEADLINE * 5)
+        return finish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "finish_trial", hung_write)
+    run = asyncio.create_task(
+        SandboxPool({"fake": 1}).run(
+            _numbers(1), _work(_Tracker(), run=hang), _Outcomes(), key=lambda n: f"t-{n}", trials=_trials(store)
+        )
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"):
+            async with asyncio.timeout(DEADLINE):
+                await hung.wait()
+                run.cancel()
+                await _settle()
+                run.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await run
+    finally:
+        release.set()
+    assert any("within 0.05 seconds" in record.getMessage() for record in caplog.records)
+    assert store.rows["t-0"]["status"] == TrialStatus.RUNNING
