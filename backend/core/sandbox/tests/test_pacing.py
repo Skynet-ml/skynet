@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import random
+import weakref
 from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
@@ -214,6 +216,26 @@ def test_bucket_works_from_a_second_event_loop() -> None:
     asyncio.run(burst())
     assert len(clock.sleeps) == 9
     assert bucket._tokens < 1
+
+
+def test_bucket_keeps_no_closed_event_loop() -> None:
+    """Free each closed loop after ``asyncio.run`` calls with waiting callers."""
+    bucket = TokenBucket(rate=10, burst=1, clock=FakeClock())
+    loops: list[weakref.ref[asyncio.AbstractEventLoop]] = []
+
+    async def burst() -> None:
+        """Make three callers wait for the one-token bucket, and record the loop."""
+        loops.append(weakref.ref(asyncio.get_running_loop()))
+        await asyncio.gather(*(bucket.acquire() for _ in range(3)))
+
+    for _ in range(5):
+        asyncio.run(burst())
+    gc.collect()
+    assert [ref() for ref in loops[:-1]] == [None] * 4
+
+    bucket._lock_obj = bucket._lock_loop = None
+    gc.collect()
+    assert loops[-1]() is None
 
 
 def test_provider_pacing_has_separate_buckets() -> None:

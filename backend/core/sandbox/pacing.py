@@ -21,7 +21,6 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
-from weakref import WeakKeyDictionary
 
 from .errors import SandboxTransientError
 
@@ -105,12 +104,13 @@ class TokenBucket:
     while it sleeps, so the callers behind it wait in a queue and do not all
     wake at the same time.
 
-    One bucket can serve more than one event loop, for example a process-wide
-    bucket that sync code uses through ``asyncio.run``. All loops share the
-    token count. Each loop gets its own lock, because an ``asyncio.Lock`` is
-    bound to one loop, so the arrival-order queue holds only within a loop.
-    The bucket is not thread-safe: do not use it from loops that run at the
-    same time in different threads.
+    One bucket can serve more than one event loop, one after the other, for
+    example a process-wide bucket that sync code uses through ``asyncio.run``.
+    All loops share the token count. An ``asyncio.Lock`` is bound to one loop,
+    so the bucket keeps one lock and makes a new one when the running loop
+    changes. It keeps no lock or loop from an earlier loop. The bucket is not
+    thread-safe: do not use it from loops that run at the same time in
+    different threads.
     """
 
     def __init__(self, rate: float, burst: float, clock: Clock | None = None) -> None:
@@ -132,19 +132,23 @@ class TokenBucket:
         self._clock = clock or SYSTEM_CLOCK
         self._tokens = self.burst
         self._updated = self._clock.monotonic()
-        self._locks: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+        self._lock_obj: asyncio.Lock | None = None
 
     def _lock(self) -> asyncio.Lock:
-        """Return the lock of the running event loop, and make it on first use.
+        """Return the lock of the running event loop, and replace it when the loop changes.
 
         Returns:
             The lock that queues the callers on the running loop.
         """
         loop = asyncio.get_running_loop()
-        lock = self._locks.get(loop)
-        if lock is None:
-            lock = self._locks[loop] = asyncio.Lock()
-        return lock
+        # Without threads, an earlier loop cannot run while this one runs, so
+        # no caller still waits on the old lock. Dropping it frees the old loop,
+        # which a used lock holds a strong reference to.
+        if self._lock_obj is None or self._lock_loop is not loop:
+            self._lock_loop = loop
+            self._lock_obj = asyncio.Lock()
+        return self._lock_obj
 
     def _refill(self) -> None:
         """Add the tokens that the time since the last update earned."""
