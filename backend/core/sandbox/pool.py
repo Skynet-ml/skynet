@@ -257,15 +257,13 @@ class SandboxPool:
             try:
                 try:
                     await read(iterator)
-                except BaseException as exc:
+                except BaseException:
                     try:
                         await close(iterator)
                     except Exception:
-                        if not isinstance(exc, asyncio.CancelledError):
-                            raise
-                        # An aclose error must not replace the caller's cancel,
-                        # or the caller sees an error and not a cancelled run.
-                        logger.exception("The candidate iterator's aclose failed during a cancel")
+                        # An aclose error must not replace the iterator's own
+                        # error or the caller's cancel, so it is only logged.
+                        logger.exception("The candidate iterator's aclose failed after an error or a cancel")
                     raise
                 try:
                     await close(iterator)

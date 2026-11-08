@@ -1094,4 +1094,40 @@ async def test_cancel_during_anext_with_a_failing_aclose_stays_a_cancel(caplog: 
             async with asyncio.timeout(DEADLINE):
                 await run
     assert run.cancelled()
-    assert any("aclose failed during a cancel" in record.getMessage() for record in caplog.records)
+    assert any("aclose failed after an error or a cancel" in record.getMessage() for record in caplog.records)
+
+
+async def test_iterator_error_with_a_failing_aclose_keeps_the_iterator_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Raise the iterator's own error when aclose also fails, and log the aclose error."""
+
+    class _FailThenCloseFails:
+        """Fail on the first candidate, and fail in ``aclose``."""
+
+        def __aiter__(self) -> _FailThenCloseFails:
+            """Return the iterator itself.
+
+            Returns:
+                The iterator.
+            """
+            return self
+
+        async def __anext__(self) -> int:
+            """Fail with a ValueError.
+
+            Raises:
+                ValueError: Always.
+            """
+            raise ValueError("iterator failed")
+
+        async def aclose(self) -> None:
+            """Fail with a RuntimeError.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("close failed")
+
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"), pytest.raises(ValueError, match="iterator failed"):
+        async with asyncio.timeout(DEADLINE):
+            await SandboxPool({"fake": 1}).run(_FailThenCloseFails(), _work(_Tracker()), _Outcomes())
+    assert any("aclose failed after an error or a cancel" in record.getMessage() for record in caplog.records)
