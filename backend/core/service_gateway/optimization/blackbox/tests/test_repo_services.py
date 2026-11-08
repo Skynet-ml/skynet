@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+import threading
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from core.billing.env_connectors import relay_request
 from core.billing.signals import BudgetReached
 from core.service_gateway.optimization.blackbox import repo_services
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     McpServer,
+    RoleEnvironment,
     ServiceSpec,
     parse_constraints,
 )
@@ -352,3 +357,189 @@ def test_any_failed_open_closes_the_boxes_that_opened() -> None:
         repo_services.open_stage_boxes(runtime, _specs(("planner", "router")))
 
     assert runtime.sessions[0].closed
+
+
+_JUDGE_FILE = b"""
+version = 1
+
+[run]
+entry = "run.py:main"
+services = ["judge"]
+
+[metric]
+files = ["score.py"]
+
+[target.planner]
+entry = "agents/planner.py:plan"
+services = ["maps"]
+
+[services.judge]
+url = "https://judge.example.com/v1"
+headers = { Authorization = "Bearer ${JUDGE_KEY}" }
+
+[services.maps]
+url = "https://mapstools.googleapis.com/mcp"
+headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }
+"""
+
+
+def _with_servers(role: RoleEnvironment, *servers: McpServer) -> RoleEnvironment:
+    """Give a role an MCP file that holds ``servers``.
+
+    Args:
+        role: The role to copy.
+        servers: The servers its file holds.
+
+    Returns:
+        The role with ``mcp`` set and its servers filled.
+    """
+    return replace(role, mcp=".mcp.json", mcp_servers=servers)
+
+
+def test_the_box_mcp_file_points_at_the_relay_and_holds_no_secret() -> None:
+    """Each entry is an http url on the relay; no header, secret or placeholder enters the box (E49, E53)."""
+    constraints = parse_constraints(_FILE)
+    server = McpServer(
+        name="maps", url="https://mapstools.googleapis.com/mcp", headers=(("X-Key", "${GOOGLE_MAPS_API_KEY}"),)
+    )
+    proposer = _with_servers(constraints.proposer, server)
+
+    config = repo_services.box_mcp_config(proposer, "http://relay.internal:9000/")
+
+    assert config == {"mcpServers": {"maps": {"type": "http", "url": "http://relay.internal:9000/mcp/maps"}}}
+    text = json.dumps(config)
+    assert "GOOGLE_MAPS_API_KEY" not in text
+    assert "googleapis" not in text
+    assert repo_services.box_mcp_config(constraints.targets["router"], "http://relay.internal:9000") == {
+        "mcpServers": {}
+    }
+
+
+def test_a_metric_with_no_services_key_cannot_reach_the_judge() -> None:
+    """The ``[metric]`` role does not inherit ``[run]`` services, and the error names the fix (E55)."""
+    constraints = parse_constraints(_JUDGE_FILE)
+
+    with pytest.raises(repo_services.RoleRelayError, match=r'\[metric\] services = \["judge"\]'):
+        repo_services.service_endpoint("[metric]", constraints.metric_role, constraints.services, "judge")
+
+    url, headers = repo_services.service_endpoint("[run]", constraints.run_role, constraints.services, "judge")
+    assert url == "https://judge.example.com/v1"
+    assert headers == {"Authorization": "Bearer ${JUDGE_KEY}"}
+
+
+def test_a_target_reaches_only_the_services_it_lists() -> None:
+    """``[target.planner]`` reaches ``maps``, not ``judge``; an unknown service names the table to add."""
+    constraints = parse_constraints(_JUDGE_FILE)
+    planner = constraints.targets["planner"]
+
+    with pytest.raises(repo_services.RoleRelayError, match=r'\[target\.planner\] services = \["maps", "judge"\]'):
+        repo_services.service_endpoint("[target.planner]", planner, constraints.services, "judge")
+    with pytest.raises(repo_services.RoleRelayError, match=r"Add a \[services\.search\] table"):
+        repo_services.service_endpoint("[target.planner]", planner, constraints.services, "search")
+    assert repo_services.service_endpoint("[target.planner]", planner, constraints.services, "maps")[0] == (
+        "https://mapstools.googleapis.com/mcp"
+    )
+
+
+def test_each_role_reaches_only_the_servers_in_its_own_mcp_file() -> None:
+    """A proposer server is not reachable from a target, and each error names the file to change (E49)."""
+    constraints = parse_constraints(_FILE)
+    server = McpServer(name="docs", url="https://docs.example.com/mcp", headers=(("Authorization", "Bearer ${DOCS}"),))
+    proposer = _with_servers(constraints.proposer, server)
+    planner = _with_servers(constraints.targets["planner"])
+
+    assert repo_services.mcp_endpoint("[proposer]", proposer, "docs") == (
+        "https://docs.example.com/mcp",
+        {"Authorization": "Bearer ${DOCS}"},
+    )
+    with pytest.raises(repo_services.RoleRelayError, match=r"not in \.mcp\.json, the \[target\.planner\] MCP file"):
+        repo_services.mcp_endpoint("[target.planner]", planner, "docs")
+    with pytest.raises(repo_services.RoleRelayError, match=r'set \[target\.router\] mcp = "\.mcp\.json"'):
+        repo_services.mcp_endpoint("[target.router]", constraints.targets["router"], "docs")
+
+
+class _EchoHandler(BaseHTTPRequestHandler):
+    """Echo the request headers back, or redirect ``/redirect`` to ``/leak``."""
+
+    hits: list[str] = []
+
+    def do_POST(self) -> None:
+        """Answer one POST and record its path."""
+        type(self).hits.append(self.path)
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/leak")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = json.dumps({"echo": dict(self.headers.items())}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Keep the test output quiet."""
+
+
+@pytest.fixture
+def echo_server() -> Iterator[str]:
+    """Run a local echo server on a free port.
+
+    Yields:
+        The server's base url.
+    """
+    _EchoHandler.hits = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _EchoHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _relay(url: str) -> bytes:
+    """Send one relay request with a user secret bound to 127.0.0.1.
+
+    Args:
+        url: The echo server url to call.
+
+    Returns:
+        The answer the box gets.
+    """
+    return relay_request(
+        url=url,
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": _SECRET},
+        bindings={"JUDGE_KEY": "user"},
+        secret_hosts={"JUDGE_KEY": "127.0.0.1"},
+        allowed_hosts={"JUDGE_KEY": ("127.0.0.1",)},
+        send=lambda target, headers, body: repo_services.send_once(target, headers, body, allow_private=True),
+    )
+
+
+def test_the_relay_hides_a_secret_that_the_server_echoes(echo_server: str) -> None:
+    """The server sees the filled header; the box gets the answer without the secret (E53)."""
+    answer = _relay(f"{echo_server}/mcp")
+
+    assert _EchoHandler.hits == ["/mcp"]
+    assert b"echo" in answer
+    assert _SECRET.encode() not in answer
+
+
+def test_the_relay_does_not_follow_a_redirect(echo_server: str) -> None:
+    """A 302 comes back to the box as the answer; the secret never goes to the new location."""
+    _relay(f"{echo_server}/redirect")
+
+    assert _EchoHandler.hits == ["/redirect"]
+
+
+def test_the_relay_refuses_a_private_address_by_default() -> None:
+    """Without the test opt-in, a url that resolves to a private address is refused before any connection."""
+    with pytest.raises(ValueError, match="private"):
+        repo_services.send_once("http://127.0.0.1:9/mcp", {}, b"{}")

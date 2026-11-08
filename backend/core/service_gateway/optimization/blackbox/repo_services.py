@@ -10,10 +10,15 @@ values it names (D28).
 from __future__ import annotations
 
 import contextlib
+import json
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
+from urllib.parse import quote
+
+import httpx
 
 from ....billing.env_connectors import CONNECTORS, connector_endpoint
+from ....billing.mcp_broker import _pinned_address, _PinnedTransport
 from .docker_egress_proxy import target_allowed
 from .repo_constraints import RepoConstraints, RoleEnvironment, ServiceSpec, TargetStage
 from .sandbox_contract import SandboxRuntime, SandboxSession, SandboxSpec
@@ -46,6 +51,14 @@ class RolePlan:
 
 class ServiceSecretError(ValueError):
     """A service names a secret that has no value; the message names the service and the secret."""
+
+
+class RoleRelayError(ValueError):
+    """A role asks the relay for a service or MCP server it does not list; the message names the fix."""
+
+
+RELAY_TIMEOUT_SECONDS = 120.0
+RELAY_BODY_BYTES = 4 * 1024 * 1024
 
 
 def plan_role(role: RoleEnvironment) -> RolePlan:
@@ -258,3 +271,123 @@ def open_stage_boxes(runtime: SandboxRuntime, specs: Mapping[str, SandboxSpec]) 
                 session.close()
         raise
     return opened
+
+
+def box_mcp_config(role: RoleEnvironment, relay_url: str) -> dict[str, object]:
+    """Build the ``.mcp.json`` a role's box gets, from the role's checked servers only.
+
+    The box never gets the repository's own file: a raw copy could carry a
+    duplicate key or a header value that the check did not see. Each entry
+    points at the relay, which holds the real url and headers, so no secret
+    and no placeholder enters the box (E49, E53).
+
+    Args:
+        role: The role, with its MCP servers filled from its own file.
+        relay_url: The base url the box reaches the relay on.
+
+    Returns:
+        ``{"mcpServers": {name: {"type": "http", "url": <relay url>/mcp/<name>}}}``.
+    """
+    base = relay_url.rstrip("/")
+    return {
+        "mcpServers": {
+            server.name: {"type": "http", "url": f"{base}/mcp/{quote(server.name, safe='')}"}
+            for server in role.mcp_servers
+        }
+    }
+
+
+def service_endpoint(
+    label: str, role: RoleEnvironment, services: Mapping[str, ServiceSpec], name: str
+) -> tuple[str, dict[str, str]]:
+    """Return the url and placeholder headers of one service a role may call (E55).
+
+    Args:
+        label: The role's label, such as ``[metric]`` or ``[target.planner]``.
+        role: The role's environment.
+        services: The file's ``[services]`` tables.
+        name: The service the box asks for.
+
+    Returns:
+        The declared url and the headers with ``${NAME}`` placeholders.
+
+    Raises:
+        RoleRelayError: When the file has no such service, the role does not
+            list it, or it has no url. The message names the fix.
+    """
+    spec = services.get(name)
+    if spec is None:
+        raise RoleRelayError(f"Service {name!r} is not in optimize.toml. Add a [services.{name}] table.")
+    if name not in role.services:
+        raise RoleRelayError(
+            f"Service {name!r} is not listed for the {label} role."
+            f" Add it: {label} services = {json.dumps([*role.services, name])}"
+        )
+    if spec.url is None:
+        raise RoleRelayError(f"Service {name!r} has no url; only services with a url go through the relay.")
+    return spec.url, spec.request_headers
+
+
+def mcp_endpoint(label: str, role: RoleEnvironment, name: str) -> tuple[str, dict[str, str]]:
+    """Return the url and placeholder headers of one server in a role's own MCP file (E49, E55).
+
+    Args:
+        label: The role's label, such as ``[proposer]`` or ``[target.planner]``.
+        role: The role, with its MCP servers filled from its own file.
+        name: The server the box asks for.
+
+    Returns:
+        The declared url and the headers with ``${NAME}`` placeholders.
+
+    Raises:
+        RoleRelayError: When the role's MCP file does not hold the server.
+            The message names the fix.
+    """
+    for server in role.mcp_servers:
+        if server.name == name:
+            return server.url, dict(server.headers)
+    if role.mcp is None:
+        raise RoleRelayError(
+            f"MCP server {name!r} is not available to the {label} role."
+            f' Add it to a .mcp.json file and set {label} mcp = ".mcp.json".'
+        )
+    raise RoleRelayError(f"MCP server {name!r} is not in {role.mcp}, the {label} MCP file. Add it there.")
+
+
+def send_once(url: str, headers: Mapping[str, str], body: bytes, *, allow_private: bool = False) -> bytes:
+    """POST one relay request to its declared url and return the answer body.
+
+    The connection stays on the address the host resolved to, and a redirect
+    is not followed: its body comes back as the answer, so a server cannot
+    send a filled secret on to another host.
+
+    Args:
+        url: The declared https url.
+        headers: The filled headers.
+        body: The request body from the box.
+        allow_private: Allow a private address; only tests set it.
+
+    Returns:
+        The answer body.
+
+    Raises:
+        ValueError: When the host resolves to a private address, or the
+            answer is larger than :data:`RELAY_BODY_BYTES`.
+        httpx.HTTPError: When the server cannot be reached.
+    """
+    transport = _PinnedTransport(url, _pinned_address(url, allow_private, label="relay url"))
+    try:
+        with (
+            httpx.Client(
+                transport=transport, follow_redirects=False, trust_env=False, timeout=RELAY_TIMEOUT_SECONDS
+            ) as client,
+            client.stream("POST", url, headers=dict(headers), content=body) as response,
+        ):
+            content = bytearray()
+            for chunk in response.iter_bytes():
+                content.extend(chunk)
+                if len(content) > RELAY_BODY_BYTES:
+                    raise ValueError(f"The answer from {url} is larger than 4 MiB.")
+            return bytes(content)
+    finally:
+        transport.close()
