@@ -10,6 +10,7 @@ the number of boxes in each state from the events alone.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter
 from collections.abc import Awaitable, Callable
@@ -87,16 +88,34 @@ class BoxHooks:
     async def emit(self, info: BoxEventInfo) -> None:
         """Call each matching hook in turn; log a hook that fails and go on.
 
+        A cancel of the emitting task does not skip the later hooks: every
+        matching hook gets the event, then the cancel goes on. Otherwise a
+        hook could see ``STARTED`` and never see ``ENDED`` or ``CANCELLED``.
+
         Args:
             info: The event to send.
+
+        Raises:
+            asyncio.CancelledError: The emitting task was cancelled during a hook.
         """
+        cancel: asyncio.CancelledError | None = None
         for hook, events in self._hooks:
             if events and info.event not in events:
                 continue
             try:
                 await hook(info)
+            except asyncio.CancelledError as exc:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    cancel = exc
+                else:
+                    logger.exception(
+                        "Sandbox hook %r raised a stray cancel on %s for box %s", hook, info.event, info.box_id
+                    )
             except Exception:
                 logger.exception("Sandbox hook %r failed on %s for box %s", hook, info.event, info.box_id)
+        if cancel is not None:
+            raise cancel
 
 
 class BoxState(StrEnum):

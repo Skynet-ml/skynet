@@ -178,6 +178,7 @@ class SandboxPool:
             RuntimeError: The pool already ran on another event loop.
             TypeError: ``workers`` or ``queue_size`` is not an int.
             ValueError: ``workers`` or ``queue_size`` is below 1.
+            SandboxFatalError: ``on_outcome`` raised a cancel that nobody asked for.
             Exception: The first error of the candidate iterator or of
                 ``on_outcome``, after the other tasks stop.
         """
@@ -220,7 +221,18 @@ class SandboxPool:
                     return
                 slots.release()
                 box_key, candidate = item  # type: ignore[misc]
-                await on_outcome(await self._box(box_key, candidate, work))
+                outcome = await self._box(box_key, candidate, work)
+                try:
+                    await on_outcome(outcome)
+                except asyncio.CancelledError as cancel:
+                    task = asyncio.current_task()
+                    if task is None or task.cancelling():
+                        raise
+                    # The TaskGroup drops a cancelled worker without an error,
+                    # so with one worker run() would wait forever.
+                    raise SandboxFatalError(
+                        f"on_outcome raised a cancel that nobody asked for on box {box_key}"
+                    ) from cancel
 
         try:
             async with asyncio.TaskGroup() as group:
@@ -267,8 +279,10 @@ class SandboxPool:
                 nobody asked for, so the box gets an outcome.
             Exception: The error of the start or of a phase.
         """
-        await self.hooks.emit(BoxEventInfo(BoxEvent.STARTED, box_id))
         try:
+            # Inside the try, so a cancel during this emit still ends the box
+            # with CANCELLED for the hooks that saw STARTED.
+            await self.hooks.emit(BoxEventInfo(BoxEvent.STARTED, box_id))
             env = work.create(candidate)
             provider = env.capabilities.name
             slot = self._provider_slots.get(provider)

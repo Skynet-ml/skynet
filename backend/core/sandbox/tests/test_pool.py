@@ -596,6 +596,91 @@ async def test_stray_cancel_in_a_phase_is_a_box_outcome() -> None:
     assert tracker.live == 0
 
 
+@pytest.mark.parametrize("slow_event", [BoxEvent.STARTED, BoxEvent.ENDED])
+async def test_cancel_during_a_hook_still_ends_the_box_once_for_every_hook(slow_event: BoxEvent) -> None:
+    """Give every hook that saw STARTED exactly one ENDED or CANCELLED when a cancel hits an emit.
+
+    Args:
+        slow_event: The event on which a hook blocks until the cancel.
+    """
+    tracker = _Tracker()
+    before = LiveCounts()
+    after = LiveCounts()
+    seen: dict[str, list[BoxEvent]] = {"before": [], "after": []}
+    blocked = asyncio.Event()
+
+    def recorder(name: str) -> object:
+        """Build a hook that records the events it receives.
+
+        Args:
+            name: The key of the record.
+
+        Returns:
+            The hook.
+        """
+
+        async def record(info: BoxEventInfo) -> None:
+            """Record one event.
+
+            Args:
+                info: The box event.
+            """
+            seen[name].append(info.event)
+
+        return record
+
+    async def slow(info: BoxEventInfo) -> None:
+        """Block on the slow event until the run is cancelled.
+
+        Args:
+            info: The box event.
+        """
+        if info.event == slow_event:
+            blocked.set()
+            await asyncio.Event().wait()
+
+    hooks = BoxHooks()
+    for hook in (before, recorder("before"), slow, recorder("after"), after):
+        hooks.add(hook)  # type: ignore[arg-type]
+    pool = SandboxPool({"fake": 1}, hooks=hooks)
+    task = asyncio.create_task(pool.run(_numbers(1), _work(tracker), _Outcomes()))
+    async with asyncio.timeout(DEADLINE):
+        await blocked.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(DEADLINE):
+            await task
+    assert before.active == 0
+    assert after.active == 0
+    for events in seen.values():
+        assert events.count(BoxEvent.STARTED) == 1
+        assert sum(event in (BoxEvent.ENDED, BoxEvent.CANCELLED) for event in events) == 1
+        assert events[-1] in (BoxEvent.ENDED, BoxEvent.CANCELLED)
+    assert tracker.live == 0
+
+
+async def test_stray_cancel_in_on_outcome_reaches_the_caller() -> None:
+    """Raise a fatal error from run() when on_outcome raises a stray cancel, so one worker does not hang."""
+    tracker = _Tracker()
+
+    async def stray_cancel(_outcome: BoxOutcome[int, object]) -> None:
+        """Await a cancelled inner task.
+
+        Args:
+            _outcome: The outcome of one box.
+        """
+        inner = asyncio.create_task(asyncio.sleep(10))
+        await asyncio.sleep(0)
+        inner.cancel()
+        await inner
+
+    pool = SandboxPool({"fake": 1})
+    with pytest.raises(SandboxFatalError, match="on_outcome"):
+        async with asyncio.timeout(DEADLINE):
+            await pool.run(_numbers(3), _work(tracker), stray_cancel, workers=1)
+    assert tracker.live == 0
+
+
 async def test_on_outcome_error_reaches_the_caller_and_releases_permits() -> None:
     """Raise the callback's own error, stop the other boxes, then reuse every permit."""
     tracker = _Tracker()
