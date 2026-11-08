@@ -2158,6 +2158,52 @@ def test_an_mcp_event_stream_stops_when_the_box_side_leaves(echo: _Echo) -> None
     assert not relay._abandoned
 
 
+@pytest.mark.parametrize("endpoint", ["events", "large", "big"])
+def test_an_mcp_listener_frees_its_stream_place_when_it_ends(echo: _Echo, endpoint: str) -> None:
+    """A GET listener frees its place on a normal end, on the 4 MiB cap mid-stream, and on the cap before the head."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, endpoint))
+    if endpoint == "big":
+        assert _mcp_answer(relay, workspace, "search")["status"] == 502
+    else:
+        assert _mcp_stream(relay, workspace, echo, first=1)[-1]["more"] is False
+    assert not relay._open_streams
+    assert not relay._abandoned
+
+
+def test_an_mcp_listener_frees_its_stream_place_when_the_answer_fails(
+    echo: _Echo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A box error while the listener's first answer is written still frees its place for later listeners."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"))
+    tried = threading.Event()
+
+    def fail(path: str, text: str) -> tuple[str, ...] | None:
+        """Fail like a box whose write broke.
+
+        Args:
+            path: Where the answer goes.
+            text: The answer.
+
+        Raises:
+            ServiceError: Always.
+        """
+        tried.set()
+        raise ServiceError("The box could not write the answer.")
+
+    monkeypatch.setattr(workspace, "answer", fail)
+    frame = {"id": "e" * 32, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    assert tried.wait(10)
+    deadline = time.monotonic() + 2
+    while relay._open_streams and time.monotonic() < deadline:
+        time.sleep(0.01)
+    echo.release.set()
+    relay.close()
+    assert not relay._open_streams
+
+
 @pytest.mark.parametrize("path", ["//evil.example.test/x", "http://evil.example.test/x", "@evil.example.test/x"])
 def test_an_mcp_path_that_names_another_host_stays_on_the_declared_host(echo: _Echo, path: str) -> None:
     """A guest path is joined under the declared url, so a path that names another host still goes to the judge.

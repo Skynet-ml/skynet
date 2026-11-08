@@ -1125,13 +1125,18 @@ class _StageRelay:
                     self._abandoned.discard(identity)
             self._answer(identity, response)
             return
+        submitted = False
         try:
             if self._answer(identity, response):
                 self._stream_pool.submit(self._stream_parts, name, identity, stream)
-                return
+                submitted = True
         except RuntimeError:
             pass  # The relay closed between the answer and the submit.
-        self._end_stream(identity, stream)
+        finally:
+            # A failed answer (a ServiceError from the box, say) must still free the place, or
+            # four such failures refuse every later listener until the relay closes.
+            if not submitted:
+                self._end_stream(identity, stream)
 
     def _end_stream(self, identity: str, stream: Generator[bytes, None, None]) -> None:
         """Close an MCP event stream and free its place.
