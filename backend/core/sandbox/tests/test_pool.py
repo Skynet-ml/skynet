@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
+from core.sandbox import pool as pool_module
 from core.sandbox.errors import SandboxFatalError, SandboxTransientError
 from core.sandbox.hooks import BoxEvent, BoxEventInfo, BoxHooks, BoxState, LiveCounts
 from core.sandbox.pool import BoxOutcome, BoxWork, SandboxPool
@@ -855,3 +856,157 @@ async def test_invalid_queue_size_raises() -> None:
     """Reject a queue size below 1 before reading any candidate."""
     with pytest.raises(ValueError):
         await SandboxPool({"fake": 1}).run(_numbers(1), _work(_Tracker()), _Outcomes(), queue_size=0)
+
+
+class _CloseFails:
+    """Yield the given numbers, then raise from ``aclose`` with a stray cancel or an error."""
+
+    def __init__(self, numbers: list[int], *, stray_cancel: bool) -> None:
+        """Store the numbers and the kind of ``aclose`` failure.
+
+        Args:
+            numbers: The numbers to yield.
+            stray_cancel: True for a stray cancel, False for a RuntimeError.
+        """
+        self.numbers = list(numbers)
+        self.stray_cancel = stray_cancel
+
+    def __aiter__(self) -> _CloseFails:
+        """Return the iterator itself.
+
+        Returns:
+            The iterator.
+        """
+        return self
+
+    async def __anext__(self) -> int:
+        """Return the next number.
+
+        Returns:
+            The next number.
+
+        Raises:
+            StopAsyncIteration: No numbers are left.
+        """
+        if not self.numbers:
+            raise StopAsyncIteration
+        return self.numbers.pop(0)
+
+    async def aclose(self) -> None:
+        """Fail with a stray cancel or a RuntimeError.
+
+        Raises:
+            RuntimeError: When ``stray_cancel`` is False.
+        """
+        if self.stray_cancel:
+            inner = asyncio.create_task(asyncio.sleep(10))
+            await asyncio.sleep(0)
+            inner.cancel()
+            await inner
+        raise RuntimeError("close failed")
+
+
+@pytest.mark.parametrize(
+    ("stray_cancel", "error", "match"),
+    [(True, SandboxFatalError, "aclose"), (False, RuntimeError, "close failed")],
+)
+async def test_aclose_failure_lets_boxes_in_flight_finish_then_reaches_the_caller(
+    stray_cancel: bool, error: type[Exception], match: str
+) -> None:
+    """Finish the boxes in flight when the iterator's aclose fails, then raise its error; never hang.
+
+    Args:
+        stray_cancel: True when aclose raises a stray cancel, False for a RuntimeError.
+        error: The error that run() raises.
+        match: A part of the error message.
+    """
+    tracker = _Tracker()
+    release = asyncio.Event()
+
+    async def slow(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait for the release, then return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await release.wait()
+        return candidate
+
+    outcomes = _Outcomes()
+    pool = SandboxPool({"fake": 2})
+    run = asyncio.create_task(
+        pool.run(_CloseFails([0, 1], stray_cancel=stray_cancel), _work(tracker, run=slow), outcomes)
+    )
+    await _settle()
+    release.set()
+    with pytest.raises(error, match=match):
+        async with asyncio.timeout(DEADLINE):
+            await run
+    assert sorted(outcome.result for outcome in outcomes.items) == [0, 1]
+    assert tracker.live == 0
+
+
+async def test_stray_cancel_in_stop_keeps_the_box_outcome(caplog: pytest.LogCaptureFixture) -> None:
+    """Log a stop that raises a stray cancel and keep the box's own result."""
+    tracker = _Tracker()
+
+    class _StrayCancelStop(_TrackedSandbox):
+        """Act as a tracked box whose stop raises a stray cancel."""
+
+        async def stop(self) -> None:
+            """Stop the box, then await a cancelled inner task."""
+            await super().stop()
+            inner = asyncio.create_task(asyncio.sleep(10))
+            await asyncio.sleep(0)
+            inner.cancel()
+            await inner
+
+    work = BoxWork(create=lambda _candidate: _StrayCancelStop(tracker), run=_work(tracker).run)
+    outcomes = _Outcomes()
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"):
+        async with asyncio.timeout(DEADLINE):
+            await SandboxPool({"fake": 1}).run(_numbers(1), work, outcomes)
+    assert outcomes.items[0].ok
+    assert outcomes.items[0].result == 0
+    assert any("did not stop" in record.getMessage() for record in caplog.records)
+
+
+async def test_hung_stop_ends_after_the_stop_timeout(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """End the wait for a hung stop after the limit: keep the outcome, and let a cancel go through."""
+    monkeypatch.setattr(pool_module, "STOP_TIMEOUT_SECONDS", 0.05)
+    tracker = _Tracker()
+    stop_cancelled = asyncio.Event()
+
+    class _HungStop(_TrackedSandbox):
+        """Act as a tracked box whose stop never ends."""
+
+        async def stop(self) -> None:
+            """Wait forever, and note when the pool cancels the stop."""
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                stop_cancelled.set()
+                raise
+
+    work = BoxWork(create=lambda _candidate: _HungStop(tracker), run=_work(tracker).run)
+    outcomes = _Outcomes()
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"):
+        async with asyncio.timeout(DEADLINE):
+            await SandboxPool({"fake": 1}).run(_numbers(1), work, outcomes)
+    assert outcomes.items[0].result == 0
+    assert any("did not stop within" in record.getMessage() for record in caplog.records)
+    await _settle()
+    assert stop_cancelled.is_set()
+
+    run = asyncio.create_task(SandboxPool({"fake": 1}).run(_numbers(1), work, _Outcomes()))
+    await _settle()
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(DEADLINE):
+            await run

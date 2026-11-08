@@ -20,7 +20,7 @@ import contextlib
 import functools
 import itertools
 import logging
-from collections.abc import AsyncIterable, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Generic, TypeVar
@@ -37,6 +37,10 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 POOL_PHASES = (Phase.SETUP, Phase.RUN, Phase.SCORE)
+
+# The longest wait for a box stop. A provider stop that hangs must not
+# block the pool, or a cancel of it, forever.
+STOP_TIMEOUT_SECONDS = 60.0
 
 _DONE = object()
 
@@ -178,10 +182,12 @@ class SandboxPool:
             RuntimeError: The pool already ran on another event loop.
             TypeError: ``workers`` or ``queue_size`` is not an int.
             ValueError: ``workers`` or ``queue_size`` is below 1.
-            SandboxFatalError: The candidate iterator or ``on_outcome`` raised
-                a cancel that nobody asked for.
+            SandboxFatalError: The candidate iterator, its ``aclose`` or
+                ``on_outcome`` raised a cancel that nobody asked for.
             Exception: The first error of the candidate iterator or of
-                ``on_outcome``, after the other tasks stop.
+                ``on_outcome``, after the other tasks stop. An error of the
+                iterator's ``aclose`` after the last candidate comes after
+                the boxes in flight finish.
         """
         loop = asyncio.get_running_loop()
         if self._loop is None:
@@ -195,10 +201,39 @@ class SandboxPool:
         # wait. The queue itself is unbounded so the end markers never block.
         slots = asyncio.Semaphore(queue_size)
         queue: asyncio.Queue[object] = asyncio.Queue()
+        close_error: Exception | None = None
 
-        async def produce() -> None:
-            """Read candidates into the queue, then put one end marker for each worker."""
-            iterator = aiter(candidates)
+        async def close(iterator: AsyncIterator[T]) -> None:
+            """Close the candidate iterator when it has an ``aclose``.
+
+            Args:
+                iterator: The candidate iterator.
+
+            Raises:
+                SandboxFatalError: ``aclose`` raised a cancel that nobody asked for.
+            """
+            aclose = getattr(iterator, "aclose", None)
+            if aclose is None:
+                return
+            try:
+                await aclose()
+            except asyncio.CancelledError as cancel:
+                task = asyncio.current_task()
+                if task is None or task.cancelling():
+                    raise
+                raise SandboxFatalError(
+                    "the candidate iterator's aclose raised a cancel that nobody asked for"
+                ) from cancel
+
+        async def read(iterator: AsyncIterator[T]) -> None:
+            """Read candidates into the queue until the iterator ends.
+
+            Args:
+                iterator: The candidate iterator.
+
+            Raises:
+                SandboxFatalError: The iterator raised a cancel that nobody asked for.
+            """
             try:
                 while True:
                     await slots.acquire()
@@ -214,10 +249,25 @@ class SandboxPool:
                 # The TaskGroup drops a cancelled producer without an error,
                 # so run() would return as if the candidates ran out.
                 raise SandboxFatalError("the candidate iterator raised a cancel that nobody asked for") from cancel
+
+        async def produce() -> None:
+            """Read candidates into the queue, then put one end marker for each worker."""
+            nonlocal close_error
+            iterator = aiter(candidates)
+            try:
+                try:
+                    await read(iterator)
+                except BaseException:
+                    await close(iterator)
+                    raise
+                try:
+                    await close(iterator)
+                except Exception as exc:
+                    # Raising here would make the TaskGroup cancel the boxes in
+                    # flight and lose their outcomes, so run() raises it at the end.
+                    close_error = exc
             finally:
-                aclose = getattr(iterator, "aclose", None)
-                if aclose is not None:
-                    await aclose()
+                # Always put the end markers, or the workers wait forever.
                 for _ in range(workers):
                     queue.put_nowait(_DONE)
 
@@ -251,6 +301,8 @@ class SandboxPool:
             # Callers expect the error itself, not a group. Boxes catch their
             # own errors, so the group holds the producer or callback error.
             raise errors.exceptions[0] from None
+        if close_error is not None:
+            raise close_error
 
     async def _box(self, box_key: str, candidate: T, work: BoxWork[T, R]) -> BoxOutcome[T, R]:
         """Run one candidate's box under the retry policy.
@@ -371,7 +423,9 @@ class SandboxPool:
         """Stop a box; log a stop that fails so that the box keeps its own outcome.
 
         A cancel that arrives during the stop waits until the stop finishes,
-        then goes on, so that a cancelled pool leaves no box running.
+        then goes on, so that a cancelled pool leaves no box running. The
+        wait ends after ``STOP_TIMEOUT_SECONDS``, so a stop that hangs cannot
+        block the pool or a cancel forever.
 
         Args:
             env: The box.
@@ -380,18 +434,29 @@ class SandboxPool:
         Raises:
             asyncio.CancelledError: The pool was cancelled during the stop.
         """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + STOP_TIMEOUT_SECONDS
         stop = asyncio.ensure_future(env.stop())
         cancel: asyncio.CancelledError | None = None
-        while not stop.done():
+        while not stop.done() and loop.time() < deadline:
             try:
                 # wait() does not cancel the stop when this task is cancelled,
                 # and it raises only for a cancel of this task.
-                await asyncio.wait({stop})
+                await asyncio.wait({stop}, timeout=deadline - loop.time())
             except asyncio.CancelledError as exc:
                 cancel = exc
-        try:
-            stop.result()
-        except Exception:
-            logger.exception("Sandbox box %s did not stop", box_id)
+        if not stop.done():
+            # Cancel the hung stop rather than leave it running: a task left
+            # behind can outlive run() and the event loop. The box's own
+            # lifetime still ends it at the provider.
+            stop.cancel()
+            logger.error("Sandbox box %s did not stop within %s seconds", box_id, STOP_TIMEOUT_SECONDS)
+        else:
+            try:
+                stop.result()
+            except (Exception, asyncio.CancelledError):
+                # The pool cancels a stop only after the time limit, so a
+                # cancel here comes from the provider and is a stop failure.
+                logger.exception("Sandbox box %s did not stop", box_id)
         if cancel is not None:
             raise cancel
