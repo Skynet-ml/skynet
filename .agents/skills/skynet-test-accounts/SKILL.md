@@ -126,17 +126,18 @@ to the orchestrator.
 
 "No new email code arrived" does not prove that the account is gone. A
 verified account gets no new code. Use `forget` only when `create` printed
-no `register: HTTP 2xx` line, or the preview database is gone. If an
-earlier `delete` printed `account delete: HTTP 200` but kept the secret,
-run `forget`. A `delete` of an id with no secret changes nothing and exits 0.
+no `register: HTTP 2xx` line, the preview database is gone, or an earlier
+`delete` printed `account delete: HTTP 200` but kept the secret. A `delete`
+of an id with no secret changes nothing and exits 0.
 
 - `account.py list` prints the id, target, status and creation date of every
   check account that still has a secret. The orchestrator runs it after each
   batch and deletes the leftovers. A deleted secret can still show for about
   a minute.
 - `account.py forget <id>` removes only the secret. Use it only when the
-  account does not exist in the app: `register` never succeeded, or the
-  preview database is gone (PR closed or 48 hours idle). The `delete` error
+  account does not exist in the app: `register` never succeeded, the
+  preview database is gone (PR closed or 48 hours idle), or an earlier
+  `delete` printed `account delete: HTTP 200`. The `delete` error
   says when to use it. Never use `forget` while the account still exists.
 - On a preview, the whole database is also dropped when the PR closes, or
   after 48 hours with no push. This is a backstop, not the delete step.

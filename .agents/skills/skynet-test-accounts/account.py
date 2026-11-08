@@ -314,8 +314,9 @@ def verify_pending(ident, value):
             sys.exit(
                 "account: sign-in failed and no new email code arrived; the secret stays."
                 " A verified account gets no new code, so the account may still exist."
-                " Use forget only if create printed no 'register: HTTP 2xx' line, or the preview"
-                f" database is gone. Otherwise report the id {ident}."
+                " Use forget only if create printed no 'register: HTTP 2xx' line, the preview"
+                " database is gone, or an earlier delete printed 'account delete: HTTP 200'."
+                f" Otherwise report the id {ident}."
             )
         status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": code})
         print("confirm: HTTP", status)
