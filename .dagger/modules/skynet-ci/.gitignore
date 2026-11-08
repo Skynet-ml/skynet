@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+node_modules/
+dist/
+# sdk/ and clients/ come from `dagger generate -y` and are not committed (CI
+# generates them). Do not add them here: the engine skips gitignored files
+# when it loads the module, and then the module fails to load.

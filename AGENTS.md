@@ -32,7 +32,15 @@ cd frontend && npm run build                                   # production buil
 
 # i18n: catalog drift.
 just check-i18n
+
+# The same CI checks in Docker, as GitHub Actions runs them (Dagger v1.0.0-beta.25).
+dagger generate -y                          # once per clone, and after a module change
+dagger check -l                             # list the checks
+dagger check skynet-ci/backend-gates        # one check; `dagger check 'skynet-ci/*'` runs all
 ```
+
+- CI jobs call `dagger check skynet-ci/<name>`. The module is in
+  `.dagger/modules/skynet-ci/`. Add a new CI gate there, not only in `ci.yml`.
 
 - New UI strings go into the source catalogs: `i18n/locales/ui/he.json` (base)
   **and** `en.json`. Then run `python3 scripts/generate_i18n.py`.
