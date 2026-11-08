@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "登录表单",
   "auth.login.invalid_credentials": "邮箱或密码不正确",
   "auth.login.loading": "正在登录…",
-  "auth.login.meta_description": "登录 {term.appName}，一个提示词优化平台",
+  "auth.login.meta_description": "登录 {term.appName}，一个代码优化平台",
   "auth.login.password": "密码",
   "auth.login.password_hint": "至少 8 个字符",
   "auth.login.password_placeholder": "你的密码",

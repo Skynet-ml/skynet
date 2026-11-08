@@ -19,7 +19,7 @@ export const PRIVACY_POLICY: LegalDocument = {
   intro:
     `This Privacy Policy explains how ${C.legalEntity} ("${C.serviceName}", "we", "us", or "our") ` +
     `collects, uses, and shares personal information when you use ${C.serviceName}, the ` +
-    `prompt-optimization service at ${C.websiteLabel} (the "Service"). It also describes the ` +
+    `code-optimization service at ${C.websiteLabel} (the "Service"). It also describes the ` +
     `choices and rights you have. For the purposes of the GDPR, we are the controller of the ` +
     `personal information described here, except where we act as a processor for content you submit.`,
   sections: [

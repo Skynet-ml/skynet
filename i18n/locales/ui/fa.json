@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "فرم ورود",
   "auth.login.invalid_credentials": "ایمیل یا گذرواژه نادرست است",
   "auth.login.loading": "در حال ورود…",
-  "auth.login.meta_description": "به {term.appName} وارد شوید، یک پلتفرم بهینه‌سازی پرامپت",
+  "auth.login.meta_description": "به {term.appName} وارد شوید، یک پلتفرم بهینه‌سازی کد",
   "auth.login.password": "گذرواژه",
   "auth.login.password_hint": "حداقل ۸ نویسه",
   "auth.login.password_placeholder": "گذرواژه شما",

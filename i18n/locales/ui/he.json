@@ -183,7 +183,7 @@
   "auth.login.form_aria": "טופס התחברות",
   "auth.login.invalid_credentials": "האימייל או הסיסמה שגויים",
   "auth.login.loading": "מתחבר/ת…",
-  "auth.login.meta_description": "התחברות ל-{term.appName}, מערכת לאופטימיזציית פרומפטים",
+  "auth.login.meta_description": "התחברות ל-{term.appName}, מערכת לאופטימיזציית קוד",
   "auth.login.passkey": "התחברות עם מפתח גישה",
   "auth.login.passkey_failed": "ההתחברות עם מפתח הגישה נכשלה — נסו שוב",
   "auth.login.passkey_none": "לא נמצא מפתח גישה במכשיר הזה. היכנסו בדרך אחרת והוסיפו מפתח גישה בהגדרות האבטחה.",

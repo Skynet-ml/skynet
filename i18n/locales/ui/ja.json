@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "サインインフォーム",
   "auth.login.invalid_credentials": "メールアドレスまたはパスワードが正しくありません",
   "auth.login.loading": "サインインしています…",
-  "auth.login.meta_description": "プロンプト最適化プラットフォームの{term.appName}にサインインします",
+  "auth.login.meta_description": "コード最適化プラットフォームの{term.appName}にサインインします",
   "auth.login.password": "パスワード",
   "auth.login.password_hint": "8文字以上",
   "auth.login.password_placeholder": "パスワード",

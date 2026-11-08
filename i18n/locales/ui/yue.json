@@ -3567,7 +3567,7 @@
   "auth.login.form_aria": "登入表格",
   "auth.login.invalid_credentials": "電郵或密碼唔正確",
   "auth.login.loading": "登入緊…",
-  "auth.login.meta_description": "登入 {term.appName}，一個 prompt 最佳化平台",
+  "auth.login.meta_description": "登入 {term.appName}，一個程式碼最佳化平台",
   "auth.login.register_failed": "建立帳戶失敗。請再試一次",
   "auth.login.signin_submit": "登入",
   "auth.login.signup_submit": "建立帳戶",

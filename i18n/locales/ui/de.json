@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "Anmeldeformular",
   "auth.login.invalid_credentials": "E-Mail oder Passwort falsch",
   "auth.login.loading": "Anmeldung läuft…",
-  "auth.login.meta_description": "Melde dich bei {term.appName} an, einer Plattform für Prompt-Optimierung",
+  "auth.login.meta_description": "Melde dich bei {term.appName} an, einer Plattform für Code-Optimierung",
   "auth.login.password": "Passwort",
   "auth.login.password_hint": "Mindestens 8 Zeichen",
   "auth.login.password_placeholder": "Dein Passwort",

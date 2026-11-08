@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "Formulaire de connexion",
   "auth.login.invalid_credentials": "E-mail ou mot de passe incorrect",
   "auth.login.loading": "Connexion en cours…",
-  "auth.login.meta_description": "Connectez-vous à {term.appName}, une plateforme d'optimisation de prompts",
+  "auth.login.meta_description": "Connectez-vous à {term.appName}, une plateforme d'optimisation de code",
   "auth.login.password": "Mot de passe",
   "auth.login.password_hint": "Au moins 8 caractères",
   "auth.login.password_placeholder": "Votre mot de passe",

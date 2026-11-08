@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "Modulo di accesso",
   "auth.login.invalid_credentials": "Email o password errati",
   "auth.login.loading": "Accesso in corso…",
-  "auth.login.meta_description": "Accedi a {term.appName}, una piattaforma di ottimizzazione dei prompt",
+  "auth.login.meta_description": "Accedi a {term.appName}, una piattaforma di ottimizzazione del codice",
   "auth.login.password": "Password",
   "auth.login.password_hint": "Almeno 8 caratteri",
   "auth.login.password_placeholder": "La tua password",

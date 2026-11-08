@@ -272,7 +272,7 @@
 
 > I want to optimize this prompt in black-box mode:
 > 
-> Write a one-line tagline for Skynet, a prompt-optimization platform.
+> Write a one-line tagline for Skynet, a code-optimization platform.
 > 
 > Here is my scorer:
 > 

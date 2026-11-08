@@ -186,7 +186,7 @@
   "auth.login.form_aria": "Sign-in form",
   "auth.login.invalid_credentials": "Incorrect email or password",
   "auth.login.loading": "Signing in…",
-  "auth.login.meta_description": "Sign in to {term.appName}, a prompt-optimization platform",
+  "auth.login.meta_description": "Sign in to {term.appName}, a code-optimization platform",
   "auth.login.passkey": "Sign in with a passkey",
   "auth.login.passkey_failed": "Passkey sign-in didn't work — try again",
   "auth.login.passkey_none": "No passkey found on this device. Sign in another way, then add a passkey in your security settings.",

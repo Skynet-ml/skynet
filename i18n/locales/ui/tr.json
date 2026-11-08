@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "Oturum açma formu",
   "auth.login.invalid_credentials": "Yanlış e-posta veya parola",
   "auth.login.loading": "Oturum açılıyor…",
-  "auth.login.meta_description": "Prompt optimizasyon platformu {term.appName}'de oturum açın",
+  "auth.login.meta_description": "Kod optimizasyon platformu {term.appName}'de oturum açın",
   "auth.login.password": "Parola",
   "auth.login.password_hint": "En az 8 karakter",
   "auth.login.password_placeholder": "Parolanız",

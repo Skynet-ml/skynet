@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "Форма входа",
   "auth.login.invalid_credentials": "Неверная электронная почта или пароль",
   "auth.login.loading": "Выполняется вход…",
-  "auth.login.meta_description": "Войдите в {term.appName} — платформу для оптимизации промптов",
+  "auth.login.meta_description": "Войдите в {term.appName} — платформу для оптимизации кода",
   "auth.login.password": "Пароль",
   "auth.login.password_hint": "Не менее 8 символов",
   "auth.login.password_placeholder": "Ваш пароль",

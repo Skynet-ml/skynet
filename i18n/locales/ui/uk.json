@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "Форма входу",
   "auth.login.invalid_credentials": "Неправильна електронна пошта або пароль",
   "auth.login.loading": "Виконується вхід…",
-  "auth.login.meta_description": "Увійдіть до {term.appName} — платформи для оптимізації промптів",
+  "auth.login.meta_description": "Увійдіть до {term.appName} — платформи для оптимізації коду",
   "auth.login.password": "Пароль",
   "auth.login.password_hint": "Щонайменше 8 символів",
   "auth.login.password_placeholder": "Ваш пароль",

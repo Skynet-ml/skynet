@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "Formulario de inicio de sesión",
   "auth.login.invalid_credentials": "Correo electrónico o contraseña incorrectos",
   "auth.login.loading": "Iniciando sesión…",
-  "auth.login.meta_description": "Inicia sesión en {term.appName}, una plataforma de optimización de prompts",
+  "auth.login.meta_description": "Inicia sesión en {term.appName}, una plataforma de optimización de código",
   "auth.login.password": "Contraseña",
   "auth.login.password_hint": "Al menos 8 caracteres",
   "auth.login.password_placeholder": "Tu contraseña",

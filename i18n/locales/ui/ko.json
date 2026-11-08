@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "로그인 양식",
   "auth.login.invalid_credentials": "이메일 또는 비밀번호가 올바르지 않습니다",
   "auth.login.loading": "로그인 중…",
-  "auth.login.meta_description": "프롬프트 최적화 플랫폼인 {term.appName}에 로그인하세요",
+  "auth.login.meta_description": "코드 최적화 플랫폼인 {term.appName}에 로그인하세요",
   "auth.login.password": "비밀번호",
   "auth.login.password_hint": "최소 8자",
   "auth.login.password_placeholder": "비밀번호",

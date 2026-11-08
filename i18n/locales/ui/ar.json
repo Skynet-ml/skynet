@@ -1775,7 +1775,7 @@
   "auth.login.form_aria": "نموذج تسجيل الدخول",
   "auth.login.invalid_credentials": "البريد الإلكتروني أو كلمة المرور غير صحيحة",
   "auth.login.loading": "جارٍ تسجيل الدخول…",
-  "auth.login.meta_description": "سجّل الدخول إلى {term.appName}، منصّة تحسين الموجّهات",
+  "auth.login.meta_description": "سجّل الدخول إلى {term.appName}، منصّة تحسين الكود",
   "auth.login.password": "كلمة المرور",
   "auth.login.password_hint": "8 أحرف على الأقل",
   "auth.login.password_placeholder": "كلمة المرور",
