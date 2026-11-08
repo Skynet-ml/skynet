@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -147,7 +148,7 @@ def test_interpolation_uses_an_empty_environment(tmp_path: Path) -> None:
     """Check that variables get their defaults or empty text, and that `$$` reaches bash as a literal `$`."""
     (db,) = parse_compose(
         "services:\n  db:\n"
-        "    command: echo $$HOME \"$$HOME\" ${X:-d} ${X}|$X|${X:+y} sh -c 'echo $$0'\n"
+        "    command: echo $$HOME \"$$HOME\" ${X:-d} '${X}|$X|${X:+y}' sh -c 'echo $$0'\n"
         "    working_dir: ${DIR:-/srv}\n"
         "    environment: {PASSWORD: '${PW:-postgres}', PRICE: 'a$$b'}\n"
         "    healthcheck: {test: [CMD-SHELL, pg_isready -U $$PASSWORD]}\n"
@@ -170,9 +171,9 @@ def test_interpolation_uses_an_empty_environment(tmp_path: Path) -> None:
 
 
 def test_string_command_words_are_literal_as_in_compose(tmp_path: Path) -> None:
-    """Check that a string command gets no shell expansion or operators, because compose runs no shell."""
+    """Check that a string command gets no shell expansion, because compose runs no shell."""
     (tmp_path / "a.txt").write_text("")
-    (app,) = parse_compose("services:\n  app:\n    command: echo `id` *.txt {a,b} $$(pwd) ~ && echo no\n")
+    (app,) = parse_compose("services:\n  app:\n    command: echo `id` *.txt {a,b} $$(pwd) ~ '&&' echo no\n")
     assert app.command == "echo '`id`' '*.txt' '{a,b}' '$(pwd)' '~' '&&' echo no"
     result = subprocess.run(
         ["bash", "-c", app.command],
@@ -186,6 +187,33 @@ def test_string_command_words_are_literal_as_in_compose(tmp_path: Path) -> None:
     assert result.stdout == "`id` *.txt {a,b} $(pwd) ~ && echo no\n"
     with pytest.raises(ComposeError, match="command of compose service app is not valid shell words"):
         parse_compose("services:\n  app:\n    command: echo 'open\n")
+
+
+@pytest.mark.parametrize(("command", "operator"), [("a && b", "&"), ("a; b", ";"), ("a | b", "|"), ("a &", "&")])
+def test_unquoted_shell_operator_fails_the_parse(command: str, operator: str) -> None:
+    """Check that an unquoted operator fails, because compose silently drops everything after it."""
+    with pytest.raises(ComposeError, match=rf"unquoted '\{operator}'.*drops everything after it.*sh -c"):
+        parse_compose(f"services:\n  app:\n    command: {command}\n")
+
+
+@pytest.mark.parametrize(
+    ("command", "words"),
+    [
+        ('sh -c "a && b"', ["sh", "-c", "a && b"]),
+        ("echo 'x;y'", ["echo", "x;y"]),
+        ("echo a\\;b", ["echo", "a;b"]),
+    ],
+)
+def test_quoted_shell_operator_is_a_literal_word(command: str, words: list[str]) -> None:
+    """Check that a quoted or escaped operator stays inside its word."""
+    (app,) = parse_compose(f"services:\n  app:\n    command: {command}\n")
+    assert shlex.split(app.command) == words
+
+
+def test_nested_interpolation_is_not_supported() -> None:
+    """Check that a nested default fails with a clear not-supported message."""
+    with pytest.raises(ComposeError, match=r"nested interpolation .* not supported"):
+        parse_compose("services:\n  app:\n    command: echo ${X:-${Y:-deep}}\n")
 
 
 def test_unclosed_interpolation_is_an_invalid_format() -> None:

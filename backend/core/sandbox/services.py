@@ -207,8 +207,13 @@ def _interpolate(name: str, text: str) -> str:
             return "$"
         if match.group(3) is not None:
             return ""
+        if "${" in match.group(2):
+            raise ComposeError(
+                f"The compose service {name} uses nested interpolation {match.group(0)!r}, which is not supported. "
+                "Write the default value directly."
+            )
         braced = _BRACED.match(match.group(2))
-        if braced is None or "${" in match.group(2):
+        if braced is None:
             raise ComposeError(f"The compose service {name} has an invalid interpolation format {match.group(0)!r}.")
         variable, operator, word = braced.groups()
         if operator in ("-", ":-"):
@@ -329,6 +334,35 @@ def _scalar(name: str, field: str, value: Any) -> str:
     return str(value)
 
 
+def _unquoted_operator(text: str) -> str | None:
+    """Find the first shell operator character outside quotes and escapes.
+
+    Args:
+        text: The string command, after interpolation.
+
+    Returns:
+        The first unquoted ``;``, ``&`` or ``|``, or ``None``.
+    """
+    quote = None
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "\\":
+            escaped = True
+        elif quote == '"':
+            if char == '"':
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char in ";&|":
+            return char
+    return None
+
+
 def _command_text(name: str, field: str, value: Any) -> str:
     """Turn a compose ``command`` or ``entrypoint`` into shell text.
 
@@ -339,15 +373,24 @@ def _command_text(name: str, field: str, value: Any) -> str:
 
     Returns:
         The shell text, with each word quoted. A string is split into words
-        as compose does, so shell operators such as ``&&`` are literal words.
+        as compose does, so globs, backticks and ``$`` are literal.
 
     Raises:
         ComposeError: The value is neither a string nor a list of scalars,
-            or a string has an unclosed quote.
+            a string has an unclosed quote, or a string has an unquoted
+            ``;``, ``&`` or ``|``.
     """
     if isinstance(value, str):
-        # Compose splits a string command into words and runs no shell, so
-        # each word is quoted: `&&`, globs, backticks and `$` stay literal.
+        # Compose runs no shell: it splits the string into words and silently
+        # drops everything after the first unquoted `;`, `&` or `|`. A command
+        # that quietly loses its second half is worse than a parse error.
+        operator = _unquoted_operator(value)
+        if operator is not None:
+            raise ComposeError(
+                f"The {field} of compose service {name} has an unquoted {operator!r}. "
+                "Compose runs no shell and drops everything after it. "
+                f'Write the {field} as sh -c "..." instead.'
+            )
         try:
             return shlex.join(shlex.split(value))
         except ValueError as error:
