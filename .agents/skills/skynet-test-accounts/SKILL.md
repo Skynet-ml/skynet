@@ -1,6 +1,6 @@
 ---
 name: skynet-test-accounts
-description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, UI evidence or API calls with a user token. It says which target to use, how to confirm the served commit with /api/version and /health, how agents read the pool accounts from AWS Secrets Manager and sign in with login.sh, the DNS-over-HTTPS fallback, and the rules for secrets and test data.
+description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, UI evidence or API calls with a user token. It says which target to use, how to confirm the served commit with /api/version and /health, how agents create a fresh test account for each check with account.py, sign in with login.sh and delete the account after the check, the DNS-over-HTTPS fallback, and the rules for secrets and test data.
 ---
 
 # Skynet test accounts and targets
@@ -22,7 +22,7 @@ skill.
   See section 5 of the `skynet-pr-workflow` skill.
 - Shared staging runs merged code only. It does not hold your PR's change.
 - A preview has its own empty database. Staging accounts do not exist there.
-  It needs its own account.
+  Create the account on the target you test.
 - Never test against production. Railway is deleted; never use it.
 
 ## 2. Confirm the served commit
@@ -51,28 +51,37 @@ The DNS lookup for `skynetml.com` can time out on some networks. Add
 sign-in script does this). For a browser, turn on secure DNS, or report the
 failure.
 
-## 4. Sign in with the staging account pool
+## 4. Create a fresh account for each check
 
-The credentials for `pool-1` to `pool-4` are in AWS Secrets Manager:
-`skynet/staging/test-accounts` (account 669242775630, region `us-east-2`,
-profile `skynet`). It is a JSON object keyed by slot. Each slot has
-`email`, `password`, `name`, `target`, `app`, `api` and `status`
-(`verified` means the account can sign in).
+Test accounts are ephemeral. Each signed-in check creates its own account
+and deletes it when the check ends, also after a failure. No check uses a
+fixed, shared or long-lived account. A fixed account collects data from
+many agents, and its access can get lost.
 
-- The orchestrator gives you one slot. Use only that slot. If you did not
-  get a slot and your task needs a signed-in check, stop and report "no test
-  account was handed over".
 - Check your AWS login first: `aws sts get-caller-identity --profile skynet`.
-  If it fails, report it. Do not run the sign-in.
-- Read only your slot, inside your own script. Load it without printing, and
-  sign in with `login.sh` in this folder. Set `SLOT` to your slot:
+  If it fails, report it and record the signed-in check as a coverage gap.
+- Create the account on the target that you test. `--target` is `staging`
+  or `pr-<n>`. `--label` is your issue or PR, for example `SKY-123`:
 
 ```bash
-export SLOT="pool-<n>"   # your slot, for example pool-2
-eval "$(aws secretsmanager get-secret-value --profile skynet --region us-east-2 \
-  --secret-id skynet/staging/test-accounts --query SecretString --output text |
-  python3 -c 'import json,os,shlex,sys;a=json.load(sys.stdin)[os.environ["SLOT"]];print("export SKYNET_POOL_EMAIL=%s SKYNET_POOL_PASSWORD=%s" % (shlex.quote(a["email"]), shlex.quote(a["password"])))')"
-export PREFIX=SKYNET_POOL APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
+python3 .agents/skills/skynet-test-accounts/account.py create --target pr-<n> --label SKY-123
+```
+
+`account.py` first writes the secret `skynet/staging/check-account/<id>`
+(account 669242775630, region `us-east-2`, profile `skynet`) with the email,
+password, app, API and status `pending`. Then it signs up through the normal
+app flow: `POST /api/register`, then it reads the 6-digit code from the owned
+Resend receiving inbox, then `POST /api/email-verify/confirm`. Then it sets
+the status to `ready`. It prints only HTTP status codes and the lines
+`id=<id> status=pending` and `id=<id> status=ready`. Keep the id for the
+delete step. If `create` fails or stops after the first line, the secret
+stays `pending`: run the delete step for that id.
+
+- Sign in with `login.sh`. `account.py env` prints the exports for it; use
+  it only inside `eval`, never print its output:
+
+```bash
+eval "$(python3 .agents/skills/skynet-test-accounts/account.py env <id>)"
 . .agents/skills/skynet-test-accounts/login.sh
 ```
 
@@ -94,28 +103,68 @@ printf 'authorization: Bearer %s\n' "$TOKEN" | curl -s --doh-url https://cloudfl
 is not 200, run the script once more. If it still fails, stop and report the
 exact status.
 
-- The pool accounts exist on shared staging only. A PR preview has an empty
-  database, so it needs its own account. If the orchestrator gives you one,
-  export it as `SKYNET_PR_<n>_EMAIL` and `SKYNET_PR_<n>_PASSWORD`, set
-  `PREFIX=SKYNET_PR_<n>` and the preview `APP` and `API`, and source
-  `login.sh`. If you get none, record the signed-in check as a coverage gap.
-- **Never sign up on shared staging or on a preview** for a normal check
-  (see the exceptions below). **Do not ask Gilad to create an account.**
-- When you finish, also after a failed check, tell the orchestrator, so it
-  can give the slot to another agent.
+### Delete the account when the check ends
 
-### Sign-up exceptions
+1. Cancel the account's running optimizations, or wait until they end.
+   The delete removes job rows but does not stop a running job or sandbox.
+2. Run the delete, also after a failed check:
 
-The sign-up ban covers normal checks. It has two exceptions:
+```bash
+python3 .agents/skills/skynet-test-accounts/account.py delete <id>
+```
 
-1. **Acceptance checks of an authentication change** (sign-up, email
-   verification, login). These need fresh accounts and real email codes, so
-   a sign-up is part of the test. Do it only when the issue covers an auth
-   change. Put the issue label in the account name, and record each account
-   you create in the PR.
-2. **Sign-ups by the orchestrator**: the setup of the staging pool
-   accounts, and the preview merger, which signs up and runs a real
-   optimization in each preview (`docs/agents/pr-previews.md`).
+It signs in first. A `pending` secret can belong to a verified account,
+because `create` or an earlier `delete` can stop after the confirm. If
+sign-in fails and the status is `pending`, it confirms the email, because
+an unverified account cannot sign in. It uses the sign-up code in the
+inbox. If that code fails, it waits out the 60-second resend cooldown and
+asks for a new code. After a good confirm it sets the status to `ready` and
+signs in again. Then it calls `POST $API/account/delete` with the password,
+and force-deletes the secret. Expect `account delete: HTTP 200` and
+`secret removed`. If it fails, it keeps the secret. Report the account id
+to the orchestrator.
+
+"No new email code arrived" does not prove that the account is gone. A
+verified account gets no new code. Use `forget` only when `create` printed
+no `register: HTTP 2xx` line, the preview database is gone, or an earlier
+`delete` printed `account delete: HTTP 200` but kept the secret. A `delete`
+of an id with no secret changes nothing and exits 0.
+
+- `account.py list` prints the id, target, status and creation date of every
+  check account that still has a secret. The orchestrator runs it after each
+  batch and deletes the leftovers. A deleted secret can still show for about
+  a minute.
+- `account.py forget <id>` removes only the secret. Use it only when the
+  account does not exist in the app: `register` never succeeded, the
+  preview database is gone (PR closed or 48 hours idle), or an earlier
+  `delete` printed `account delete: HTTP 200`. The `delete` error
+  says when to use it. Never use `forget` while the account still exists.
+- On a preview, the whole database is also dropped when the PR closes, or
+  after 48 hours with no push. This is a backstop, not the delete step.
+- **Do not ask Gilad to create an account.** Never borrow a personal
+  session or another agent's account.
+
+### What the delete does not remove
+
+- The delete makes no call to an upstream provider. A Stripe customer (made
+  only by a checkout) and an OpenRouter runtime key (made only when the
+  environment sets `OPENROUTER_PROVISIONING_KEY`) stay at the provider.
+  Do not start a checkout for a normal check.
+- Billing, ledger and audit rows stay as anonymized records, by design.
+- The confirmation email stays in the Resend receiving inbox.
+
+### Credit on new accounts
+
+- A new staging account gets no credit. A new preview account gets
+  `PREVIEW_GRANT_CENTS` (see `docs/agents/pr-previews.md`). Run checks
+  that need a paid run on the preview, or record the gap. Never add funds.
+- Staging keeps the setup intake for new accounts. Previews skip it.
+
+### Authentication changes
+
+A check of sign-up, email verification or login uses the same fresh
+account flow. The sign-up and the real email code are part of that test.
+Record in the PR that you used fresh accounts and real codes.
 
 ## 5. Secrets
 
@@ -123,29 +172,26 @@ The sign-up ban covers normal checks. It has two exceptions:
   Secrets Manager secret). Never print, `cat` or echo them.
 - Never put passwords, tokens, cookies or email codes in prompts, logs,
   screenshots, videos, commits, PR text or Linear.
-- In evidence, name the account by slot (`pool-2`, `pr-827`) and
-  by email domain only.
+- In evidence, name the account by its target and label (for example
+  `pr-827 SKY-123 check account`) and by email domain only.
 - In a browser, sign in through the normal login page. Keep the password out
   of recordings.
 - A test-account login is access setup, not proof of email verification.
-  Test authentication changes with fresh accounts and real codes (sign-up
-  exception 1 in section 4).
+  Test authentication changes with fresh accounts and real codes (section 4).
 
 ## 6. Test data
 
-- Slots keep their data between agents. Put your label (the issue or PR, for
-  example `SKY-123`) in every name you create: projects, runs, files, keys.
-- Do not depend on an empty account. Change or delete only data that your
-  label made. Delete your fixtures when the PR's evidence does not need them.
+- Your account starts empty and is deleted after the check. Put your label
+  (the issue or PR, for example `SKY-123`) in every name you create:
+  projects, runs, files, keys.
 - Create data through normal app flows when you can. Use realistic synthetic
   values, never real personal data.
 - Never add funds, grant credits, change billing or change balances. Use only
   test allowances that already exist.
 - Do not start expensive or scheduled runs only to see their UI. Follow the
   costly-workflow rule in the `skynet-pr-workflow` skill.
-- Never borrow another agent's slot, Gilad's session or a personal account.
-  Never create extra one-off accounts, except for the sign-up exceptions in
-  section 4.
+- Never borrow another agent's account, Gilad's session or a personal
+  account.
 
 ## 7. What to write in the PR
 
@@ -153,7 +199,8 @@ In the test-scope section, add:
 
 - The target (staging or the `pr-<n>` preview), its URL, and the commit you
   confirmed.
-- The slot you used. Never the email address or any secret.
+- That you used a fresh check account, and that its delete returned
+  HTTP 200. Never the email address or any secret.
 - Each check you ran and its result.
 - Gaps, for example "checked on staging, not on the preview" or "simulated
   state for the expensive run".
