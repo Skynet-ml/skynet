@@ -22,7 +22,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, quote_plus, urlencode, urlsplit
 
 from ..config import settings
 from .credential_safety import credential_fragments, redact_secret_bytes
@@ -35,6 +35,9 @@ if TYPE_CHECKING:
     from ..worker.scoped_relay import CallRecorder
 
 CONNECTOR_PRICE_VERSION = "env-connectors-2026-11-06"
+# The base64 form of a 1-3 character secret is 2-4 common characters; hiding it would mangle unrelated answer text.
+_MIN_ENCODED_FRAGMENT = 4
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-F]{2}")
 CONNECTOR_COST_KIND = "tool"
 # Payload key listing the owner's OAuth MCP connections, by name, that a run asks for.
 CONNECTORS_KEY = "env_connectors"
@@ -394,10 +397,16 @@ def encoded_forms(fragment: str) -> set[str]:
 
     Returns:
         The standard and URL-safe base64 forms, each with and without ``=``
-        padding, and the percent-encoded form.
+        padding, and the ``quote`` and ``quote_plus`` forms with upper- and
+        lower-case escapes; no forms for a fragment shorter than
+        ``_MIN_ENCODED_FRAGMENT``.
     """
+    if len(fragment) < _MIN_ENCODED_FRAGMENT:
+        return set()
     raw = fragment.encode()
-    forms = {quote(fragment, safe="")}
+    forms: set[str] = set()
+    for encoded in (quote(fragment, safe=""), quote_plus(fragment, safe="")):
+        forms |= {encoded, _PERCENT_ESCAPE.sub(lambda match: match.group().lower(), encoded)}
     for encoded in (base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()):
         forms |= {encoded, encoded.rstrip("=")}
     return forms

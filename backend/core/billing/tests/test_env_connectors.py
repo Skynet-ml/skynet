@@ -26,6 +26,7 @@ from core.billing.budgets import BudgetFencedError, BudgetInsufficientError, Bud
 from core.billing.env_connectors import (
     CONNECTORS,
     connector_endpoint,
+    encoded_forms,
     host_allowed,
     offered_connectors,
     relay_request,
@@ -562,11 +563,14 @@ def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
 
 
 def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:
-    """Hide the secret when the server echoes it base64-encoded, with or without padding, or percent-encoded."""
-    secret = "key>>>???~~"
+    """Hide a base64 echo, with or without padding, and a percent or ``quote_plus`` echo with either escape case."""
+    secret = "key>>>???~~ /x"
     raw = secret.encode()
     standard, urlsafe = base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()
-    forms = [standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("="), quote(secret, safe="")]
+    percent, plus = quote(secret, safe=""), quote_plus(secret, safe="")
+    forms = [standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("="), percent, percent.lower(), plus, plus.lower()]
+    assert "+" in plus
+    assert "%2f" in percent.lower()
     assert standard != urlsafe
     assert standard.endswith("=")
     answer = relay_request(
@@ -581,6 +585,27 @@ def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:
     ).decode()
     assert all(form not in answer for form in forms)
     assert json.loads(answer)["echo"] == ["[REDACTED]"] * len(forms)
+
+
+@pytest.mark.parametrize("secret", ["", "a", "ab", "abc"])
+def test_encoded_forms_skip_a_secret_shorter_than_four_characters(secret: str) -> None:
+    """Give no encoded form for an empty or 1-3 character secret, so common short text stays intact."""
+    assert encoded_forms(secret) == set()
+
+
+def test_relay_keeps_short_base64_text_for_a_three_character_secret() -> None:
+    """Hide a 3-character secret itself, but not its 4-character base64 form, which can be ordinary text."""
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"X-Key": "${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": "k3y"},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: b'{"echo": "k3y", "note": "azN5"}',
+    ).decode()
+    assert json.loads(answer) == {"echo": "[REDACTED]", "note": "azN5"}
 
 
 def test_relay_refuses_a_shared_file_that_sends_a_user_key_to_another_host() -> None:
