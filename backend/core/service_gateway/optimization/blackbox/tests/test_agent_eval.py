@@ -8,9 +8,20 @@ from typing import Any
 
 import pytest
 
+from core.billing.runtime import UsagePendingError
 from core.config import Settings
-from core.exceptions import ServiceError
+from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_TARGET_AGENT, BlackboxTarget
+from core.sandbox.environment import HealthcheckConfig
+from core.sandbox.errors import (
+    ErrorGroup,
+    SandboxFatalError,
+    SandboxInfraError,
+    SandboxRejectedError,
+    SandboxRunOutcomeError,
+    SandboxTransientError,
+)
+from core.sandbox.retry import DEFAULT_RETRY_POLICY, RetryPolicy
 
 from .. import agent_eval as agent_eval_mod
 from ..agent_eval import (
@@ -21,8 +32,10 @@ from ..agent_eval import (
     candidate_files,
     case_files,
     case_prompt,
+    error_group,
     gateway_from_settings,
     safe_relative_path,
+    should_retry,
 )
 from ..agent_runs import PHASE_BASELINE, AgentRunRecorder, run_scope
 from ..harness import ANSWER_FILE, PROMPT_FILE, GatewayConfig
@@ -102,10 +115,11 @@ def test_seedless_agent_readiness_uses_real_runtime_without_candidate(harness: s
     session = runtime.sessions[0]
     assert runtime.specs[0].network_disabled is True
     assert session.closed
-    assert len(session.commands) == 1
-    assert "bash -n .app/readiness-0.sh" in session.commands[0]
-    assert "--version" in session.commands[0] or harness == "custom"
-    assert "npm install" not in session.commands[0]
+    assert session.commands[0] == "true"
+    assert len(session.commands) == 2
+    assert "bash -n .app/readiness-0.sh" in session.commands[1]
+    assert "--version" in session.commands[1] or harness == "custom"
+    assert "npm install" not in session.commands[1]
     assert not any(name in session.files for name in (PROMPT_FILE, "AGENTS.md"))
     assert result["candidate_execution"] == "awaiting_first_generated_candidate"
     assert result["readiness"] == (
@@ -115,11 +129,138 @@ def test_seedless_agent_readiness_uses_real_runtime_without_candidate(harness: s
 
 def test_agent_readiness_rejects_invalid_bootstrap_and_closes() -> None:
     """Retain an explicit setup failure when a real sandbox version or syntax check fails."""
-    session = FakeSandboxSession(script=lambda _command: CommandResult(exit_code=2))
+    session = FakeSandboxSession(script=lambda command: CommandResult(exit_code=0 if command == "true" else 2))
     runtime = _runtime_of(session)
     runtime.protected = True
     with pytest.raises(ServiceError, match="offline version or command syntax"):
         _scorer_of(runtime, _target()).check_ready()
+    assert session.closed
+
+
+_FAST_HEALTHCHECK = HealthcheckConfig(
+    command="probe", interval_sec=0.0, timeout_sec=5.0, start_interval_sec=0.0, retries=3
+)
+
+
+def _ready_scorer(session: FakeSandboxSession) -> tuple[SandboxAgentScorer, FakeSandboxRuntime]:
+    """Return a protected scorer whose readiness box is ``session``, with a zero-wait healthcheck.
+
+    Args:
+        session: The readiness box.
+
+    Returns:
+        The scorer and its runtime.
+    """
+    runtime = _runtime_of(session)
+    runtime.protected = True
+    scorer = SandboxAgentScorer(
+        lambda candidate, case: (0.0, {}),
+        runtime=runtime,
+        target=_target(),
+        gateway=_GATEWAY,
+        healthcheck=_FAST_HEALTHCHECK,
+    )
+    return scorer, runtime
+
+
+class _SlowStartSession(FakeSandboxSession):
+    """Box whose first probes raise or fail before the healthcheck passes."""
+
+    def __init__(self, outcomes: list[BaseException | int]) -> None:
+        """Create the session.
+
+        Args:
+            outcomes: For each early probe, an error to raise or an exit code; later probes pass.
+        """
+        super().__init__()
+        self._outcomes = list(outcomes)
+
+    def run(
+        self,
+        command: str,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+        on_output: OutputSink | None = None,
+    ) -> CommandResult:
+        """Play the next probe outcome, then defer to the fake for other commands.
+
+        Args:
+            command: The command line.
+            env: Passed through.
+            timeout_seconds: Passed through.
+            on_output: Passed through.
+
+        Returns:
+            The probe result.
+
+        Raises:
+            BaseException: When the next outcome is an error.
+        """
+        if command == "probe" and self._outcomes:
+            self.commands.append(command)
+            outcome = self._outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return CommandResult(exit_code=outcome)
+        return super().run(command, env=env, timeout_seconds=timeout_seconds, on_output=on_output)
+
+
+def test_readiness_healthcheck_waits_for_a_slow_box_within_the_retry_limit() -> None:
+    """Probes that fail or raise below the limit do not fail readiness; the first passing probe ends the poll."""
+    session = _SlowStartSession([TimeoutError("not up"), 1])
+    scorer, _runtime = _ready_scorer(session)
+
+    result = scorer.check_ready()
+
+    assert session.commands[:3] == ["probe", "probe", "probe"]
+    assert "probe" not in session.commands[3:]
+    assert result["readiness"] == "command_syntax_verified"
+    assert session.closed
+
+
+def test_readiness_healthcheck_gives_up_after_the_retry_limit_and_closes() -> None:
+    """A box that never answers fails readiness after exactly ``retries`` probes, and the box is closed."""
+    session = _SlowStartSession([1, ConnectionError("refused"), 1, 1, 1])
+    scorer, _runtime = _ready_scorer(session)
+
+    with pytest.raises(ServiceError, match=r"readiness healthcheck 3 times in a row \(exit code 1\)"):
+        scorer.check_ready()
+
+    assert session.commands == ["probe", "probe", "probe"]
+    assert session.closed
+
+
+def test_readiness_healthcheck_does_not_count_failures_in_the_start_period(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failures inside the start period are free, so a slow first boot does not use up the retries."""
+    clock = iter([0.0, 0.0, 1.0, 2.0, 100.0, 101.0, 102.0, 103.0])
+    monkeypatch.setattr(agent_eval_mod.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(agent_eval_mod.time, "sleep", lambda _seconds: None)
+    session = _SlowStartSession([1, 1, 1, 1])
+    runtime = _runtime_of(session)
+    runtime.protected = True
+    scorer = SandboxAgentScorer(
+        lambda candidate, case: (0.0, {}),
+        runtime=runtime,
+        target=_target(),
+        gateway=_GATEWAY,
+        healthcheck=HealthcheckConfig(command="probe", interval_sec=0.0, start_period_sec=10.0, retries=2),
+    )
+
+    scorer.check_ready()
+
+    assert session.commands[:5] == ["probe"] * 5
+
+
+def test_readiness_healthcheck_lets_a_billing_error_through() -> None:
+    """A budget error during a probe is not a failed probe; it stops readiness at once."""
+    session = _SlowStartSession([UsagePendingError("usage pending")])
+    scorer, _runtime = _ready_scorer(session)
+
+    with pytest.raises(UsagePendingError):
+        scorer.check_ready()
+
+    assert session.commands == ["probe"]
     assert session.closed
 
 
@@ -269,44 +410,226 @@ class _DyingSession(FakeSandboxSession):
         raise TimeoutError("The read operation timed out")
 
 
-def test_run_retries_once_in_a_fresh_box_when_the_sandbox_transport_fails() -> None:
-    """A box that dies mid-run is closed and the run repeated in a fresh one under a new name."""
+_RETRY_ONCE = RetryPolicy(max_retries=1, wait_min=0.0, wait_max=0.0)
+
+
+def _flaky_runtime(error: BaseException, failures: int = 1) -> FakeSandboxRuntime:
+    """Return a runtime whose first ``failures`` boxes raise ``error`` on their first command.
+
+    Args:
+        error: What the failing boxes raise.
+        failures: How many boxes fail before healthy ones.
+
+    Returns:
+        The runtime.
+    """
     boxes: list[FakeSandboxSession] = []
 
     def factory() -> FakeSandboxSession:
-        """Hand out a dying box first, then a healthy one."""
-        session = (
-            _DyingSession() if not boxes else FakeSandboxSession(produces={"run-agent": {"output/answer.txt": "done"}})
-        )
+        """Hand out failing boxes first, then healthy ones."""
+        if len(boxes) < failures:
+            session: FakeSandboxSession = _RaisingSession(error)
+        else:
+            session = FakeSandboxSession(produces={"run-agent": {"output/answer.txt": "done"}})
         boxes.append(session)
         return session
 
-    runtime = FakeSandboxRuntime(session_factory=factory)
-    scorer = _scorer_of(runtime, _target(), job_id="job-1")
+    return FakeSandboxRuntime(session_factory=factory)
+
+
+class _RaisingSession(FakeSandboxSession):
+    """Box whose first command raises a given error."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Create the session.
+
+        Args:
+            error: What :meth:`run` raises.
+        """
+        super().__init__()
+        self._error = error
+
+    def run(
+        self,
+        command: str,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+        on_output: OutputSink | None = None,
+    ) -> CommandResult:
+        """Raise the configured error.
+
+        Args:
+            command: The command line.
+            env: Ignored.
+            timeout_seconds: Ignored.
+            on_output: Ignored.
+
+        Raises:
+            BaseException: Always.
+        """
+        self.commands.append(command)
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        SandboxInfraError("host recycled"),
+        SandboxTransientError("rate limited"),
+        SandboxRejectedError("bad spec"),
+        SandboxFatalError("cancelled"),
+        SandboxRunOutcomeError("agent timed out"),
+        InfrastructureInterruptionError("transport broke"),
+        TimeoutError("The read operation timed out"),
+        RuntimeError("unknown"),
+    ],
+)
+def test_default_policy_never_retries_any_error_class(error: BaseException) -> None:
+    """D3/D10: with the default policy, every error class ends the run after one box."""
+    runtime = _flaky_runtime(error)
+
+    with pytest.raises(ServiceError):
+        _scorer_of(runtime, _target()).run("v", {"prompt": "p"})
+
+    assert len(runtime.sessions) == 1
+    assert runtime.sessions[0].closed is True
+
+
+@pytest.mark.parametrize(
+    ("error", "group", "retries"),
+    [
+        (SandboxInfraError("host recycled"), ErrorGroup.INFRA, True),
+        (InfrastructureInterruptionError("transport broke"), ErrorGroup.INFRA, True),
+        (SandboxTransientError("rate limited"), ErrorGroup.TRANSIENT, True),
+        (TimeoutError("The read operation timed out"), ErrorGroup.TRANSIENT, True),
+        (ConnectionResetError("reset"), ErrorGroup.TRANSIENT, True),
+        (SandboxRejectedError("bad spec"), ErrorGroup.REJECTED, False),
+        (ServiceError("bad case"), ErrorGroup.REJECTED, False),
+        (SandboxFatalError("cancelled"), ErrorGroup.FATAL, False),
+        (SandboxRunOutcomeError("agent timed out"), ErrorGroup.RUN_OUTCOME, False),
+        (RuntimeError("unknown"), None, False),
+    ],
+)
+def test_error_class_table_retries_only_infra_and_transient(
+    error: BaseException, group: ErrorGroup | None, retries: bool
+) -> None:
+    """The table follows Harbor's groups: only infra and transient errors open a retry."""
+    assert error_group(error) is group
+    assert should_retry(_RETRY_ONCE, error) is retries
+    assert should_retry(DEFAULT_RETRY_POLICY, error) is False
+
+
+def test_policy_include_opens_an_unknown_class_but_never_a_no_retry_group() -> None:
+    """Advanced mode names classes: an unknown one can retry, a rejected one never does."""
+    policy = RetryPolicy(max_retries=1, include=(RuntimeError, ServiceError), wait_min=0.0, wait_max=0.0)
+    assert should_retry(policy, RuntimeError("unknown")) is True
+    assert should_retry(policy, ServiceError("bad case")) is False
+    assert should_retry(policy, TimeoutError("slow")) is False
+    narrowed = RetryPolicy(max_retries=1, exclude=(TimeoutError,), wait_min=0.0, wait_max=0.0)
+    assert should_retry(narrowed, TimeoutError("slow")) is False
+    assert should_retry(narrowed, SandboxInfraError("host")) is True
+
+
+def test_billing_errors_never_retry_even_when_included() -> None:
+    """A budget error stops the run at once, whatever the policy says."""
+    policy = RetryPolicy(max_retries=3, include=(Exception,), wait_min=0.0, wait_max=0.0)
+    runtime = _flaky_runtime(UsagePendingError("usage pending"))
+
+    with pytest.raises(UsagePendingError):
+        SandboxAgentScorer(
+            lambda candidate, case: (0.0, {}),
+            runtime=runtime,
+            target=_target(),
+            gateway=_GATEWAY,
+            retry_policy=policy,
+        ).run("v", {"prompt": "p"})
+
+    assert should_retry(policy, UsagePendingError("usage pending")) is False
+    assert len(runtime.sessions) == 1
+
+
+def test_advanced_policy_retries_in_a_fresh_box_with_its_own_attempt_key() -> None:
+    """Each attempt gets its own ``:attempt-N`` key and box name, so no attempt is charged twice."""
+    runtime = _flaky_runtime(SandboxInfraError("host recycled"), failures=2)
+    scorer = SandboxAgentScorer(
+        lambda candidate, case: (0.0, {}),
+        runtime=runtime,
+        target=_target(),
+        gateway=_GATEWAY,
+        job_id="job-1",
+        retry_policy=RetryPolicy(max_retries=2, wait_min=0.0, wait_max=0.0),
+    )
 
     record = scorer.run("v", {"prompt": "p"})
 
     assert record["output"] == "done"
     assert record["error"] is None
-    first, second = runtime.sessions
-    assert first.closed is True
-    assert second.closed is True
-    assert second.files[PROMPT_FILE].startswith("p")
-    assert len({spec.name for spec in runtime.specs}) == 2
+    assert len(runtime.sessions) == 3
+    assert all(session.closed for session in runtime.sessions)
+    keys = [spec.operation_key for spec in runtime.specs]
+    assert len(set(keys)) == 3
+    base = keys[0].removesuffix(":attempt-1")
+    assert keys == [f"{base}:attempt-{n}" for n in (1, 2, 3)]
+    assert len({spec.name for spec in runtime.specs}) == 3
+    assert record["attempts"] == [
+        {"attempt": 1, "operation_key": keys[0], "error_group": "infra", "cost_owner": "skynet"},
+        {"attempt": 2, "operation_key": keys[1], "error_group": "infra", "cost_owner": "skynet"},
+        {"attempt": 3, "operation_key": keys[2], "error_group": None, "cost_owner": "user"},
+    ]
 
 
-def test_run_reports_a_sandbox_that_dies_twice_as_a_sandbox_failure() -> None:
-    """Two dead boxes in a row surface as a sandbox error, not as the raw transport exception."""
+def test_retry_count_bounds_the_attempts_and_reports_a_sandbox_failure() -> None:
+    """When every allowed attempt dies, the run ends as a sandbox error after ``max_retries + 1`` boxes."""
     runtime = FakeSandboxRuntime(session_factory=_DyingSession)
-    scorer = _scorer_of(runtime, _target())
+    scorer = SandboxAgentScorer(
+        lambda candidate, case: (0.0, {}),
+        runtime=runtime,
+        target=_target(),
+        gateway=_GATEWAY,
+        retry_policy=_RETRY_ONCE,
+    )
 
     with pytest.raises(
-        ServiceError, match=r"agent sandbox failed twice \(TimeoutError\): The read operation timed out"
+        ServiceError, match=r"agent sandbox failed after 2 attempts \(TimeoutError\): The read operation timed out"
     ):
         scorer.run("v", {"prompt": "p"})
 
     assert len(runtime.sessions) == 2
     assert all(session.closed for session in runtime.sessions)
+    assert len({spec.operation_key for spec in runtime.specs}) == 2
+
+
+def test_run_reports_a_dead_box_as_a_sandbox_failure_without_a_retry() -> None:
+    """A dead box surfaces as a sandbox error, not as the raw transport exception, after one attempt."""
+    runtime = FakeSandboxRuntime(session_factory=_DyingSession)
+    scorer = _scorer_of(runtime, _target())
+
+    with pytest.raises(
+        ServiceError, match=r"agent sandbox failed after 1 attempt \(TimeoutError\): The read operation timed out"
+    ):
+        scorer.run("v", {"prompt": "p"})
+
+    assert len(runtime.sessions) == 1
+    assert runtime.specs[0].operation_key.endswith(":attempt-1")
+
+
+def test_protected_runtime_raises_the_raw_error_of_its_last_attempt() -> None:
+    """A protected runtime keeps the original error so the parent can handle the interruption."""
+    runtime = _flaky_runtime(InfrastructureInterruptionError("transport broke"), failures=5)
+    runtime.protected = True
+    scorer = SandboxAgentScorer(
+        lambda candidate, case: (0.0, {}),
+        runtime=runtime,
+        target=_target(),
+        gateway=_GATEWAY,
+        retry_policy=_RETRY_ONCE,
+    )
+
+    with pytest.raises(InfrastructureInterruptionError):
+        scorer.run("v", {"prompt": "p"})
+
+    assert len(runtime.sessions) == 2
 
 
 class _StuckSession(FakeSandboxSession):
@@ -620,8 +943,8 @@ def test_run_streams_box_output_into_the_transcript_and_redacts_the_key() -> Non
     assert runs.rows[-1]["output"] == "the answer"
 
 
-def test_run_marks_the_record_failed_when_the_sandbox_dies_twice() -> None:
-    """A run whose boxes both die is closed as failed with the sandbox error, not left running."""
+def test_run_marks_the_record_failed_when_every_attempt_dies() -> None:
+    """A run whose boxes all die is closed as failed with the sandbox error, not left running."""
     runs = _RecordedRuns()
     scorer = SandboxAgentScorer(
         lambda candidate, case: (0.0, {}),
@@ -630,6 +953,7 @@ def test_run_marks_the_record_failed_when_the_sandbox_dies_twice() -> None:
         gateway=_GATEWAY,
         job_id="job-1",
         recorder=runs.recorder,
+        retry_policy=_RETRY_ONCE,
     )
 
     with pytest.raises(ServiceError):
@@ -637,8 +961,9 @@ def test_run_marks_the_record_failed_when_the_sandbox_dies_twice() -> None:
 
     last = runs.rows[-1]
     assert last["status"] == "failed"
-    assert last["error"].startswith("agent sandbox failed twice")
-    assert "[sandbox] the box died; retrying in a fresh one" in last["transcript"]
+    assert last["error"].startswith("agent sandbox failed after 2 attempts")
+    assert "[sandbox] attempt 1 failed (transient); retrying in a fresh box" in last["transcript"]
+    assert "attempt 2 failed" not in last["transcript"]
     assert runs.progress[-1][1]["status"] == "failed"
 
 
