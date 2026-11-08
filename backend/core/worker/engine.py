@@ -152,13 +152,15 @@ logger = logging.getLogger(__name__)
 # Continues the 7421370000xx advisory-lock series (issuing_float uses ...06).
 _SANDBOX_SWEEP_LOCK_KEY = 742137000007
 _SANDBOX_SWEEP_INTERVAL_SECONDS = 300.0
-# Paused is excluded: a paused run keeps its boxes for an in-place resume.
+# Paused is included: pause kills the child like a cancel does, and resume
+# resets the row to pending and starts new boxes, so no paused box is reused.
 _SANDBOX_SWEEP_STATUSES = frozenset(
     {
         OptimizationStatus.success,
         OptimizationStatus.failed,
         OptimizationStatus.cancelled,
         OptimizationStatus.stopped,
+        OptimizationStatus.paused,
     }
 )
 
@@ -2261,7 +2263,7 @@ class BackgroundWorker:
                 .all()
             )
             for optimization_id in job_ids:
-                # A failed, cancelled or stopped run can resume in place after the query.
+                # A failed, cancelled, stopped or paused run can resume in place after the query.
                 try:
                     if self._persisted_status(optimization_id) not in _SANDBOX_SWEEP_STATUSES:
                         continue

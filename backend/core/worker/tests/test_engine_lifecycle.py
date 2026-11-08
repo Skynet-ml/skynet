@@ -779,8 +779,8 @@ def test_sweep_stops_the_boxes_of_terminal_jobs_and_keeps_running_ones(
 
     swept = worker._sweep_terminal_job_sandboxes()
 
-    assert sorted(runtime.swept) == ["cancelled", "done"]
-    assert swept == 2
+    assert sorted(runtime.swept) == ["cancelled", "done", "paused"]
+    assert swept == 3
 
 
 class _FakePgResult:
