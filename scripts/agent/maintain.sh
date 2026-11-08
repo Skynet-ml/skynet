@@ -47,27 +47,37 @@ echo "--> pip-audit (backend, from uv.lock)"
 reqs="$(mktemp)"
 pip_out=""
 pip_failed=0
+pip_gaps=""
+adv_re='^[A-Za-z0-9_.-]+ +[0-9][^ ]* +(GHSA|PYSEC|CVE)-'
 # pyproject.toml declares the `prime` and `e2b` extras as a uv conflict, so
 # one `--all-extras` export fails. Audit every other extra, then `prime`.
 for extras in "--all-extras --no-extra prime" "--extra prime"; do
   out=""
   # shellcheck disable=SC2086  # $extras holds several flags on purpose.
-  if ! (cd backend && uv export --frozen $extras --no-hashes --no-emit-project -q >"$reqs") ||
-     ! out="$(uvx --quiet pip-audit -r "$reqs" --no-deps --disable-pip --progress-spinner off 2>&1)"; then
+  if ! (cd backend && uv export --frozen $extras --no-hashes --no-emit-project -q >"$reqs"); then
     pip_failed=1
-    pip_out+="${out:-export failed ($extras)}"$'\n'
+    pip_gaps+="${pip_gaps:+; }could not export $extras"
+  elif ! out="$(uvx --quiet pip-audit -r "$reqs" --no-deps --disable-pip --progress-spinner off 2>&1)"; then
+    pip_failed=1
+    pip_out+="$out"$'\n'
+    # pip-audit also exits non-zero when it finds advisories; only a run
+    # without advisory rows is a failure to audit.
+    if ! printf '%s' "$out" | grep -qE "$adv_re"; then
+      last="$(printf '%s' "$out" | grep . | tail -1)"
+      pip_gaps+="${pip_gaps:+; }could not audit $extras (${last:-no output})"
+    fi
   fi
 done
 rm -f "$reqs"
 if [ "$pip_failed" -eq 0 ]; then
   record OK "pip-audit" "no known vulnerabilities"
 else
-  vulns="$(printf '%s' "$pip_out" | grep -E '^[A-Za-z0-9_.-]+ +[0-9][^ ]* +(GHSA|PYSEC|CVE)-' | sort -u | grep -c . || true)"
+  vulns="$(printf '%s' "$pip_out" | grep -E "$adv_re" | sort -u | grep -c . || true)"
   if [ "${vulns:-0}" -gt 0 ]; then
-    record WARN "pip-audit" "$vulns advisories — see list below"
+    record WARN "pip-audit" "$vulns advisories${pip_gaps:+; $pip_gaps} — see list below"
     printf '%s' "$pip_out" | grep -E '(GHSA|PYSEC|CVE)-' | sort -u | sed 's/^/    /'
   else
-    record WARN "pip-audit" "could not run: $(printf '%s' "$pip_out" | grep . | tail -1)"
+    record WARN "pip-audit" "$pip_gaps"
   fi
 fi
 
