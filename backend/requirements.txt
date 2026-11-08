@@ -11,7 +11,7 @@ aiofile==3.9.0
     # via py-key-value-aio
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.14.4
+aiohttp==3.14.5
     # via
     #   litellm
     #   pywebpush
@@ -309,7 +309,7 @@ pyasn1-modules==0.4.2
     # via webauthn
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
-pydantic==2.12.5
+pydantic==2.14.3
     # via
     #   dspy
     #   fastapi
@@ -321,7 +321,7 @@ pydantic==2.12.5
     #   pydantic-settings
     #   skynet
     #   vercel-sandbox
-pydantic-core==2.41.5
+pydantic-core==2.50.4
     # via pydantic
 pydantic-settings==2.14.2
     # via
@@ -450,7 +450,7 @@ truststore==0.10.5 ; sys_platform != 'emscripten'
     #   httpx2
 typer==0.23.1
     # via huggingface-hub
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via
     #   aiohttp
     #   aiosignal
@@ -474,7 +474,7 @@ typing-extensions==4.15.0
     #   stripe
     #   typing-inspection
     #   vercel-internal-core
-typing-inspection==0.4.2
+typing-inspection==0.4.5
     # via
     #   fastapi
     #   mcp
