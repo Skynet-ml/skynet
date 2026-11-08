@@ -89,6 +89,10 @@ class _SkippedError(Exception):
     """Mark a call that the pool read before an earlier call failed, so it never ran."""
 
 
+class _KeptError(Exception):
+    """Mark a call whose own error is already kept for the caller."""
+
+
 class _SlotBox(SandboxEnvironment):
     """Hold one pool permit while a sync scorer call runs; it opens no sandbox.
 
@@ -171,8 +175,11 @@ def run_on_pool(phase: Phase, calls: Sequence[Callable[[], R]], workers: int) ->
     call runs in its own thread with a copy of the caller's context, so run
     and usage scopes reach it. After the first failure no further call
     starts, and the failure of the earliest call is raised once the calls
-    in flight end. A cancel waits for the calls in flight, then releases
-    every permit.
+    in flight end. A failure can be any exception, also a ``BaseException``
+    such as ``BudgetReached``; it is raised in the caller's thread, not on
+    the shared portal loop. A cancel waits for the calls in flight, then
+    releases every permit. Do not call this from inside a pooled call: the
+    nested call can wait forever for a permit at the box limit.
 
     Args:
         phase: ``Phase.RUN`` for final-run cases, ``Phase.SCORE`` for scorer cases.
@@ -184,14 +191,17 @@ def run_on_pool(phase: Phase, calls: Sequence[Callable[[], R]], workers: int) ->
 
     Raises:
         ValueError: The phase is neither run nor score.
-        Exception: The error of the earliest call that failed, unchanged.
+        BaseException: The error of the earliest call that failed, unchanged.
     """
     if phase not in (Phase.RUN, Phase.SCORE):
         raise ValueError(f"pooled calls run in the run or score phase, not {phase}")
     if not calls:
         return []
     items = [(contextvars.copy_context(), call) for call in calls]
-    return sync_bridge.run(_run_on_pool, phase, items, max(1, min(workers, len(items))))
+    results, error = sync_bridge.run(_run_on_pool, phase, items, max(1, min(workers, len(items))))
+    if error is not None:
+        raise error
+    return results
 
 
 def _pool() -> tuple[SandboxPool, anyio.CapacityLimiter]:
@@ -216,8 +226,13 @@ def _pool() -> tuple[SandboxPool, anyio.CapacityLimiter]:
     return _pool_state[1], _pool_state[2]
 
 
-async def _run_on_pool(phase: Phase, items: list[tuple[contextvars.Context, Callable[[], R]]], workers: int) -> list[R]:
+async def _run_on_pool(
+    phase: Phase, items: list[tuple[contextvars.Context, Callable[[], R]]], workers: int
+) -> tuple[list[R], BaseException | None]:
     """Run each call in a slot box on the pool and gather the results by position.
+
+    A call's error is returned, not raised: a ``BaseException`` that leaves
+    a portal task crashes the shared portal loop and every call on it.
 
     Args:
         phase: The pool phase the calls run in.
@@ -225,14 +240,12 @@ async def _run_on_pool(phase: Phase, items: list[tuple[contextvars.Context, Call
         workers: The most calls in flight at once.
 
     Returns:
-        Each call's result, in the items' order.
-
-    Raises:
-        Exception: The error of the earliest call that failed.
+        Each call's result in the items' order and no error, or no results
+        and the error of the earliest call that failed.
     """
     pool, limiter = _pool()
     results: dict[int, R] = {}
-    errors: dict[int, Exception] = {}
+    errors: dict[int, BaseException] = {}
 
     async def candidates() -> AsyncIterator[int]:
         """Yield each call's position until a call fails.
@@ -257,16 +270,20 @@ async def _run_on_pool(phase: Phase, items: list[tuple[contextvars.Context, Call
 
         Raises:
             _SkippedError: An earlier call failed, so this one does not start.
-            Exception: The call's own error.
+            _KeptError: The call failed; its error is kept in ``errors``.
         """
         if errors:
             raise _SkippedError
         context, func = items[index]
         try:
             return await _in_thread(context, func, limiter)
-        except Exception as exc:
-            errors.setdefault(index, exc)
+        except anyio.get_cancelled_exc_class():
             raise
+        except BaseException as exc:
+            # The pool handles only Exception, so BudgetReached or
+            # KeyboardInterrupt would escape its TaskGroup and crash the portal.
+            errors.setdefault(index, exc)
+            raise _KeptError from exc
 
     async def no_run(env: SandboxEnvironment, index: int) -> None:
         """Do nothing: a scorer case does all its work in the score phase.
@@ -284,7 +301,7 @@ async def _run_on_pool(phase: Phase, items: list[tuple[contextvars.Context, Call
         """
         if outcome.error is None:
             results[outcome.candidate] = outcome.result  # type: ignore[assignment]
-        elif not isinstance(outcome.error, _SkippedError):
+        elif not isinstance(outcome.error, (_SkippedError, _KeptError)):
             errors.setdefault(outcome.candidate, outcome.error)  # type: ignore[arg-type]
 
     work: BoxWork[int, Any] = (
@@ -294,8 +311,8 @@ async def _run_on_pool(phase: Phase, items: list[tuple[contextvars.Context, Call
     )
     await pool.run(candidates(), work, collect, workers=workers)
     if errors:
-        raise errors[min(errors)]
-    return [results[index] for index in range(len(items))]
+        return [], errors[min(errors)]
+    return [results[index] for index in range(len(items))], None
 
 
 def _slot_box(index: int) -> SandboxEnvironment:
@@ -327,9 +344,9 @@ async def _in_thread(context: contextvars.Context, func: Callable[[], R], limite
 
     Raises:
         asyncio.CancelledError: The pool was cancelled while the call ran.
-        Exception: The call's own error.
+        BaseException: The call's own error.
     """
-    thread = asyncio.ensure_future(anyio.to_thread.run_sync(context.run, func, limiter=limiter))
+    thread = asyncio.ensure_future(anyio.to_thread.run_sync(_call_in_context, context, func, limiter=limiter))
     cancel: asyncio.CancelledError | None = None
     while not thread.done():
         try:
@@ -342,7 +359,29 @@ async def _in_thread(context: contextvars.Context, func: Callable[[], R], limite
             # Read the call's error so asyncio does not log it as never retrieved.
             thread.exception()
         raise cancel
-    return thread.result()
+    result, error = thread.result()
+    if error is not None:
+        raise error
+    return result  # type: ignore[return-value]
+
+
+def _call_in_context(context: contextvars.Context, func: Callable[[], R]) -> tuple[R | None, BaseException | None]:
+    """Run a sync call in a context and return its error instead of raising it.
+
+    An asyncio task that raises ``KeyboardInterrupt`` or ``SystemExit`` stops
+    its event loop, so the thread task must never raise one.
+
+    Args:
+        context: The caller's context copy to run the call in.
+        func: The call.
+
+    Returns:
+        The call's result and no error, or no result and the call's error.
+    """
+    try:
+        return context.run(func), None
+    except BaseException as exc:
+        return None, exc
 
 
 @dataclass(frozen=True)
