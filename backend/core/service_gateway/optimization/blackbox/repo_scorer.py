@@ -319,10 +319,10 @@ class RepoScorer:
             # bash --noprofile --norc, and the runners and the model mailbox
             # wrapper start python3 -I, so a profile or user-site .pth that a
             # version plants does not run in a later step. A .pth or module in a
-            # writable venv or system site-packages still runs (SKY-387).
+            # writable venv or system site-packages still runs (SKY-398).
             # stop_candidates kills the processes that keep the run's marker or
             # stay its descendants; a process that drops both can still wait
-            # here. Separate boxes close this (SKY-387). No same-uid sweep: it
+            # here. Separate boxes close this (SKY-398). No same-uid sweep: it
             # would kill the supervisor.
             not_installed = self._workspace.install_metric_files()
             if not_installed:
