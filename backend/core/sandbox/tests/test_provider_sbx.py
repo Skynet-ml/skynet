@@ -24,6 +24,7 @@ from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import (
     RunTimeoutError,
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -77,6 +78,11 @@ class FakeCloud:
     failures: dict[tuple[str, str], tuple[int, str]] = field(default_factory=dict)
     final_status: str = "running"
     create_hangs: bool = False
+    create_fails: int | None = None
+    list_hides: int = 0
+    hidden: set[str] = field(default_factory=set)
+    delete_answers: list[int] = field(default_factory=list)
+    process_create_hangs: bool = False
     exec_hangs: bool = False
     credential_token: str = "runtime-token"
     files_written: object = 1
@@ -275,8 +281,13 @@ async def _management(request: httpx.Request) -> httpx.Response:
         CLOUD.boxes[box.id] = box
         if CLOUD.create_hangs:
             await asyncio.Event().wait()
+        if CLOUD.create_fails is not None:
+            return _json(CLOUD.create_fails, {"code": "internal"})
         return _json(200, _sandbox(box))
     if request.method == "GET" and path == "/sandboxes/v1/sandboxes":
+        if CLOUD.list_hides:
+            CLOUD.list_hides -= 1
+            return _json(200, {"sandboxes": []})
         return _json(200, {"sandboxes": [_sandbox(box) for box in CLOUD.boxes.values()]})
     parts = path.split("/")
     box = CLOUD.boxes.get(parts[4]) if len(parts) > 4 else None
@@ -286,6 +297,8 @@ async def _management(request: httpx.Request) -> httpx.Response:
         if box.status == "deleting":
             del CLOUD.boxes[box.id]
             return _not_found()
+        if box.id in CLOUD.hidden:
+            return _not_found()
         if box.status == "creating":
             box.status = CLOUD.final_status
             return _json(200, {**_sandbox(box), "core": {**_sandbox(box)["core"], "status": "starting"}})
@@ -293,6 +306,13 @@ async def _management(request: httpx.Request) -> httpx.Response:
     if request.method == "DELETE":
         if request.headers.get("if-match") != box.etag or "idempotency-key" not in request.headers:
             return _json(412, {"code": "failedPrecondition"})
+        if CLOUD.delete_answers:
+            status = CLOUD.delete_answers.pop(0)
+            if status == 412:
+                box.etag = "etag-2"
+            else:
+                box.status = "deleting"
+            return _json(status, {"code": "failedPrecondition" if status == 412 else "aborted"})
         box.status = "deleting"
         return _json(200, _sandbox(box))
     if path.endswith("/endpoint-credentials"):
@@ -320,6 +340,8 @@ async def _runtime(request: httpx.Request, box: Box) -> httpx.Response:
     if request.method == "POST" and path == "/v1/processes":
         body = json.loads(request.content)
         assert request.headers["idempotency-key"] == body["session"]
+        if CLOUD.process_create_hangs:
+            await asyncio.Event().wait()
         name = f"p{next(CLOUD.ids)}"
         if CLOUD.exec_hangs:
             CLOUD.processes[name] = Process(chunks=[], exit_code=None, hangs=True)
@@ -390,6 +412,7 @@ def fake_cloud(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
     monkeypatch.setattr(sbx, "_LIVE", set())
     monkeypatch.setattr(sbx, "POLL_INTERVAL", 0.0)
     monkeypatch.setattr(sbx, "STOP_TIMEOUT", 1.0)
+    monkeypatch.setattr(sbx, "ORPHAN_WAIT", 0.3)
     monkeypatch.setattr(sbx, "KILL_TIMEOUT", 1.0)
     monkeypatch.setenv("SBX_TOKEN", "management-token")
     monkeypatch.delenv("SBX_TOKEN_FILE", raising=False)
@@ -427,12 +450,19 @@ async def test_start_sends_the_create_body_once() -> None:
         assert body["features"]["timeouts"] == {"timeout": "100s", "onTimeout": "delete"}
 
 
-async def test_default_image_and_lifetime_cap() -> None:
-    """Use the shell template image and cap the lifetime at 12 hours."""
+async def test_default_image_and_lifetime_cap(caplog: pytest.LogCaptureFixture) -> None:
+    """Use the shell template image, and cap the lifetime at 12 hours with a warning."""
     async with SbxEnvironment(_spec(lifetime_seconds=10**6)):
         body = json.loads(CLOUD.calls("POST", "/v1/sandboxes")[0].content)
         assert body["imageRef"] == sbx.DEFAULT_IMAGE
         assert body["features"]["timeouts"]["timeout"] == "43200s"
+    assert "caps the sandbox lifetime at 43200 seconds; the spec asks for 1000000" in caplog.text
+
+
+def test_lifetime_within_the_limit_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """Log no cap warning for a lifetime of exactly 12 hours."""
+    SbxEnvironment(_spec(lifetime_seconds=43_200))
+    assert "caps the sandbox lifetime" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -511,6 +541,67 @@ async def test_start_timeout_deletes_the_lost_sandbox() -> None:
     assert CLOUD.calls("DELETE", "")
 
 
+async def test_lost_create_finds_a_sandbox_the_list_shows_late() -> None:
+    """Poll the list until the sandbox of a timed-out create shows, then delete it."""
+    CLOUD.create_hangs = True
+    CLOUD.list_hides = 3
+    env = SbxEnvironment(_spec(), timeouts=PhaseTimeouts(start=0.2, setup=30, run=30, score=30))
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    # Three empty polls, the poll that finds it, and the list check of the final 404.
+    assert len(CLOUD.calls("GET", "/v1/sandboxes")) == 5
+    assert CLOUD.boxes == {}
+    assert len(CLOUD.calls("DELETE", "")) == 1
+
+
+@pytest.mark.parametrize("status", [500, 503])
+async def test_create_5xx_deletes_the_sandbox_it_made(status: int) -> None:
+    """Treat a 5xx create answer as unknown, and delete the sandbox the list shows late."""
+    CLOUD.create_fails = status
+    CLOUD.list_hides = 2
+    with pytest.raises(SandboxTransientError):
+        await SbxEnvironment(_spec()).start()
+    assert len(CLOUD.calls("POST", "/v1/sandboxes")) == 1
+    assert CLOUD.boxes == {}
+    assert len(CLOUD.calls("DELETE", "")) == 1
+
+
+async def test_cancelled_create_deletes_the_sandbox_it_made() -> None:
+    """Delete the sandbox of a cancelled create, also when the list shows it late."""
+    CLOUD.create_hangs = True
+    CLOUD.list_hides = 2
+    env = SbxEnvironment(_spec())
+    task = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert CLOUD.boxes == {}
+    assert len(CLOUD.calls("DELETE", "")) == 1
+
+
+@pytest.mark.parametrize("status", [400, 409, 422, 429])
+async def test_definite_4xx_create_looks_for_no_sandbox(status: int) -> None:
+    """Send no list and no delete after a 4xx create answer."""
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (status, "someCode")
+    env = SbxEnvironment(_spec())
+    with pytest.raises(SandboxError):
+        await env.start()
+    await env.stop()
+    assert CLOUD.calls("GET", "/v1/sandboxes") == []
+    assert CLOUD.calls("DELETE", "") == []
+
+
+async def test_lost_create_with_no_sandbox_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """Stop polling after ORPHAN_WAIT and log that the sandbox may leak."""
+    CLOUD.failures[("POST", "/v1/sandboxes")] = (503, "unavailable")
+    with pytest.raises(SandboxTransientError):
+        await SbxEnvironment(_spec()).start()
+    assert "found no sandbox of the lost create" in caplog.text
+    assert CLOUD.calls("DELETE", "") == []
+
+
 async def test_start_fails_when_the_sandbox_does_not_run() -> None:
     """Raise SandboxInfraError for a failed sandbox and delete it."""
     CLOUD.final_status = "failed"
@@ -550,6 +641,60 @@ async def test_stop_deletes_with_the_etag() -> None:
         await env.exec("true")
 
 
+async def test_stop_checks_a_not_found_read_against_the_list() -> None:
+    """Delete a sandbox that the list shows while its own route answers 404."""
+    env = SbxEnvironment(_spec())
+    await env.start()
+    (box,) = CLOUD.boxes.values()
+    CLOUD.hidden.add(box.id)
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+
+
+async def test_stop_refreshes_the_etag_after_a_412() -> None:
+    """Read the sandbox again after a 412 and delete it with the new ETag."""
+    env = SbxEnvironment(_spec())
+    await env.start()
+    CLOUD.delete_answers = [412]
+    await env.stop()
+    first, second = CLOUD.calls("DELETE", "")
+    assert (first.headers["if-match"], second.headers["if-match"]) == ("etag-1", "etag-2")
+    assert CLOUD.boxes == {}
+
+
+async def test_stop_waits_when_a_409_shows_another_delete() -> None:
+    """Wait for the sandbox to go when a 409 answer shows that it is deleting."""
+    env = SbxEnvironment(_spec())
+    await env.start()
+    CLOUD.delete_answers = [409]
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 1
+    assert CLOUD.boxes == {}
+
+
+async def test_stop_logs_a_second_precondition_failure(caplog: pytest.LogCaptureFixture) -> None:
+    """Log the delete as failed when the refreshed delete also gets a 412."""
+    env = SbxEnvironment(_spec())
+    await env.start()
+    CLOUD.delete_answers = [412, 412]
+    await env.stop()
+    assert len(CLOUD.calls("DELETE", "")) == 2
+    assert "could not delete the sandbox: SandboxInfraError" in caplog.text
+
+
+async def test_undecodable_answer_is_an_infra_error() -> None:
+    """Map an answer body that httpx cannot decode to the infra group."""
+
+    def broken(_: httpx.Request) -> httpx.Response:
+        """Answer with a gzip header and a body that is not gzip."""
+        return httpx.Response(200, content=b"not gzip", headers={"content-encoding": "gzip"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(broken)) as client:
+        with pytest.raises(SandboxInfraError, match="DecodingError"):
+            await sbx._call(client, "GET", "https://x.test/", action="read")
+
+
 async def test_stop_logs_a_failed_delete(caplog: pytest.LogCaptureFixture) -> None:
     """Log, not raise, a delete that the API refuses."""
     env = SbxEnvironment(_spec())
@@ -566,6 +711,15 @@ async def test_run_timeout_kills_the_command() -> None:
         with pytest.raises(RunTimeoutError):
             await env.exec("sleep 100", timeout_sec=0.1)
         assert CLOUD.killed == list(CLOUD.processes)
+
+
+async def test_run_timeout_bounds_a_hanging_command_start() -> None:
+    """Raise RunTimeoutError when the process create call does not answer."""
+    async with SbxEnvironment(_spec()) as env:
+        CLOUD.process_create_hangs = True
+        with pytest.raises(RunTimeoutError):
+            await env.exec("sleep 100", timeout_sec=0.1)
+        assert CLOUD.killed == []
 
 
 async def test_cancelled_exec_kills_the_command() -> None:

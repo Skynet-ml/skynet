@@ -12,16 +12,24 @@ policy bodies come from there. Changes:
   never the response body.
 - The start and run phase timeouts bound the create and each command. A
   command that runs past its limit or whose ``exec`` is cancelled is killed.
-- A stop during the create, or after a create that timed out, finds the
-  sandbox by its unique display name and deletes it, so a lost create does
-  not leak a sandbox.
+- A stop during the create, or after a create whose outcome is unknown (a
+  cancel, a timeout, a transport error, a 5xx or an invalid 2xx answer),
+  polls the sandbox list by the unique display name for up to
+  ``ORPHAN_WAIT`` seconds and deletes the sandbox it finds. A 4xx answer is
+  definite, so a stop after it looks for nothing. A sandbox that shows in the
+  list only after ``ORPHAN_WAIT`` leaks until its sbx lifetime ends.
+- A lifetime above the sbx limit of 12 hours is capped, with a warning.
 - The spec sizes map to the first sbx shape that is large enough. The sbx
   shapes have no disk size, so ``disk_mb`` has no effect.
 - ``stop_job_sandboxes`` stops the live sandboxes of this process that carry
   the job tag, because the sbx create body has no labels.
 - Harbor's local ``sbx`` CLI target, the Docker PAT exchange, credential
-  renewal, retries, archive transfer and compose support are left out. The
-  delete flow does not list the sandboxes to confirm a not-found answer.
+  renewal, retries, archive transfer and compose support are left out.
+- As in Harbor, the delete flow checks a not-found answer against the
+  sandbox list, and a 409 or 412 delete answer reads the sandbox once more
+  for its current state and ETag.
+- A command whose create answer is lost to a timeout or a cancel has no
+  process name, so it cannot be killed. It ends when the sandbox does.
 """
 
 from __future__ import annotations
@@ -38,7 +46,7 @@ import os
 import re
 import shlex
 import uuid
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -72,6 +80,7 @@ MANAGEMENT_URL = "https://connect.docker.com/sandboxes"
 POLICY_URL = "https://api.sandboxes-cloud.docker.com"
 DEFAULT_IMAGE = "docker/sandbox-templates:shell-docker"
 STOP_TIMEOUT = 60.0
+ORPHAN_WAIT = 30.0
 KILL_TIMEOUT = 30.0
 POLL_INTERVAL = 2.0
 RPC_TIMEOUT = 30.0
@@ -83,6 +92,8 @@ _FILE_MODE = 0o644
 _INT32 = (-(2**31), 2**31 - 1)
 _UINT64_MAX = 2**64 - 1
 _STARTING_STATUSES = frozenset({"creating", "starting"})
+_CLIENT_ERRORS = frozenset(range(400, 500))
+_PRECONDITION_FAILED = frozenset({409, 412})
 _SAFE_CODE = re.compile(r"[A-Za-z_]+")
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -233,6 +244,7 @@ async def _call(
     *,
     action: str,
     allow_not_found: bool = False,
+    accept: frozenset[int] = frozenset(),
     **kwargs: Any,
 ) -> httpx.Response | None:
     """Send one request with no retry and check its status.
@@ -243,20 +255,25 @@ async def _call(
         url: The path, or a full URL.
         action: What the request does, for error messages.
         allow_not_found: Return ``None`` for a ``notFound`` 404 instead of raising.
+        accept: Error statuses to return to the caller instead of raising.
         **kwargs: More ``httpx`` request arguments.
 
     Returns:
-        The 2xx answer, or ``None`` for an allowed not-found answer.
+        The 2xx or accepted answer, or ``None`` for an allowed not-found answer.
 
     Raises:
         SandboxTransientError: The connection failed or timed out.
+        SandboxInfraError: ``httpx`` could not read the answer, for example
+            a body that does not decode.
         SandboxError: The answer is not 2xx; see ``_status_error``.
     """
     try:
         response = await client.request(method, url, **kwargs)
     except httpx.TransportError as error:
         raise SandboxTransientError(f"sbx could not {action}: {type(error).__name__}.") from None
-    if response.is_success:
+    except httpx.HTTPError as error:
+        raise SandboxInfraError(f"sbx could not {action}: {type(error).__name__}.") from None
+    if response.is_success or response.status_code in accept:
         return response
     if allow_not_found and _not_found(response):
         return None
@@ -434,43 +451,131 @@ async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
     return True
 
 
-async def _delete(client: httpx.AsyncClient, path: str) -> None:
+def _is_sandbox(sandbox: dict[str, Any], path: str, uid: str | None) -> bool:
+    """Tell whether a listed sandbox is the one at this path or with this uid.
+
+    Args:
+        sandbox: One item of the sandbox list.
+        path: The API path of the sandbox.
+        uid: The uid of the sandbox, when known.
+
+    Returns:
+        True when the name maps to the path or the uid matches.
+    """
+    if uid is not None and sandbox.get("uid") == uid:
+        return True
+    try:
+        return _resource_path(sandbox.get("name"), "sandboxes") == path
+    except SandboxInfraError:
+        return False
+
+
+async def _find(client: httpx.AsyncClient, match: Callable[[dict[str, Any]], bool]) -> dict[str, Any] | None:
+    """Look through every page of the sandbox list for one sandbox.
+
+    Args:
+        client: The management client.
+        match: Tells whether a listed sandbox is the one to find.
+
+    Returns:
+        The first listed sandbox that matches, or ``None``.
+
+    Raises:
+        SandboxInfraError: The sandbox list is invalid.
+        SandboxError: A request failed; see ``_call``.
+    """
+    token = ""
+    seen: set[str] = set()
+    for _ in range(_MAX_LIST_PAGES):
+        response = await _call(
+            client,
+            "GET",
+            "/v1/sandboxes",
+            action="list the sandboxes",
+            params={"pageToken": token} if token else None,
+        )
+        page = _json(response, "list the sandboxes")
+        sandboxes = page.get("sandboxes", [])
+        if not isinstance(sandboxes, list):
+            raise SandboxInfraError("sbx gave an invalid sandbox list.")
+        for sandbox in sandboxes:
+            if isinstance(sandbox, dict) and match(sandbox):
+                return sandbox
+        token = page.get("nextPageToken", "")
+        if not isinstance(token, str) or token in seen:
+            raise SandboxInfraError("sbx gave an invalid sandbox list.")
+        if not token:
+            return None
+        seen.add(token)
+    raise SandboxInfraError("sbx gave an invalid sandbox list.")
+
+
+async def _read(client: httpx.AsyncClient, path: str, uid: str | None) -> dict[str, Any] | None:
+    """Read one sandbox, and check a not-found answer against the list.
+
+    Args:
+        client: The management client.
+        path: The API path of the sandbox.
+        uid: The uid of the sandbox, when known.
+
+    Returns:
+        The sandbox resource, its list entry when only the list still has it,
+        or ``None`` when neither has it.
+
+    Raises:
+        SandboxError: A request failed; see ``_call``.
+    """
+    response = await _call(client, "GET", path, action="read the sandbox", allow_not_found=True)
+    if response is not None:
+        return _json(response, "read the sandbox")
+    # As in Harbor, a not-found read can be a routing miss, so the sandbox is
+    # gone only when the list does not show it either.
+    return await _find(client, lambda sandbox: _is_sandbox(sandbox, path, uid))
+
+
+async def _delete(client: httpx.AsyncClient, path: str, uid: str | None = None) -> None:
     """Delete one sandbox with its current ETag and wait until it is gone.
 
     Args:
         client: The management client.
         path: The API path of the sandbox.
+        uid: The uid of the sandbox, when known, to find it in the list.
 
     Raises:
         SandboxInfraError: The sandbox has no ETag or stopped deleting.
         SandboxError: A request failed; see ``_call``.
     """
-    response = await _call(client, "GET", path, action="read the sandbox", allow_not_found=True)
-    if response is None:
-        return
-    sandbox = _json(response, "read the sandbox")
-    if _status(sandbox) != "deleting":
-        etag = _core(sandbox).get("etag")
-        if not isinstance(etag, str) or not etag:
-            raise SandboxInfraError("sbx gave no ETag for the sandbox delete.")
-        response = await _call(
-            client,
-            "DELETE",
-            path,
-            action="delete the sandbox",
-            allow_not_found=True,
-            headers={"If-Match": etag, "Idempotency-Key": str(uuid.uuid4())},
-        )
-        if response is None:
-            return
+    sent = refreshed = False
     while True:
-        await asyncio.sleep(POLL_INTERVAL)
-        response = await _call(client, "GET", path, action="read the sandbox", allow_not_found=True)
-        if response is None:
+        sandbox = await _read(client, path, uid)
+        if sandbox is None:
             return
-        status = _status(_json(response, "read the sandbox"))
+        status = _status(sandbox)
         if status != "deleting":
-            raise SandboxInfraError(f"The sbx sandbox stopped deleting: {status}.")
+            if sent:
+                raise SandboxInfraError(f"The sbx sandbox stopped deleting: {status}.")
+            etag = _core(sandbox).get("etag")
+            if not isinstance(etag, str) or not etag:
+                raise SandboxInfraError("sbx gave no ETag for the sandbox delete.")
+            response = await _call(
+                client,
+                "DELETE",
+                path,
+                action="delete the sandbox",
+                allow_not_found=True,
+                accept=_PRECONDITION_FAILED,
+                headers={"If-Match": etag, "Idempotency-Key": str(uuid.uuid4())},
+            )
+            if response is not None and response.status_code in _PRECONDITION_FAILED:
+                if refreshed:
+                    raise _status_error(response, "delete the sandbox")
+                # The ETag changed or another delete runs: read the sandbox once
+                # more for its state and ETag. This refreshes the precondition;
+                # it does not retry a failed call blindly.
+                refreshed = True
+                continue
+            sent = True
+        await asyncio.sleep(POLL_INTERVAL)
 
 
 async def _kill(client: httpx.AsyncClient, process_path: str) -> None:
@@ -748,6 +853,11 @@ class SbxEnvironment(SandboxEnvironment):
         tag = uuid.uuid4().hex
         self._create_key = tag
         cpus, memory_mib = _shape(spec)
+        lifetime = math.ceil(spec.lifetime_seconds)
+        if lifetime > _MAX_LIFETIME_SECONDS:
+            logger.warning(
+                "sbx caps the sandbox lifetime at %d seconds; the spec asks for %d.", _MAX_LIFETIME_SECONDS, lifetime
+            )
         # The tag makes the name unique, so a stop can find a sandbox whose
         # create answer was lost.
         self._display_name = f"{spec.name or 'skynet'}-{tag[:12]}"
@@ -758,7 +868,7 @@ class SbxEnvironment(SandboxEnvironment):
             "platform": {"os": "linux", "architecture": "amd64"},
             "features": {
                 "timeouts": {
-                    "timeout": f"{min(math.ceil(spec.lifetime_seconds), _MAX_LIFETIME_SECONDS)}s",
+                    "timeout": f"{min(lifetime, _MAX_LIFETIME_SECONDS)}s",
                     "onTimeout": "delete",
                 }
             },
@@ -834,9 +944,15 @@ class SbxEnvironment(SandboxEnvironment):
                     "POST",
                     "/v1/sandboxes",
                     action="create the sandbox",
+                    accept=_CLIENT_ERRORS,
                     json=self._create_body,
                     headers={"Idempotency-Key": self._create_key},
                 )
+                if not response.is_success:
+                    # A 4xx answer is definite: sbx made no sandbox, so a stop
+                    # has no lost sandbox to look for.
+                    self._create_dispatched = False
+                    raise _status_error(response, "create the sandbox")
                 sandbox = _json(response, "create the sandbox")
                 # Kept here, not in start(), so a stop that cancels the start
                 # right after the create still deletes the sandbox.
@@ -957,20 +1073,21 @@ class SbxEnvironment(SandboxEnvironment):
             "user": "root" if sudo else "",
             "session": session,
         }
-        response = await _call(
-            runtime,
-            "POST",
-            "/v1/processes",
-            action="start the command",
-            json=body,
-            headers={"Idempotency-Key": session},
-        )
-        process_path = _resource_path(_json(response, "start the command").get("name"), "processes")
         capture = _Capture(on_output)
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
+        process_path: str | None = None
         finished = False
         try:
             async with asyncio.timeout(limit) as deadline:
+                response = await _call(
+                    runtime,
+                    "POST",
+                    "/v1/processes",
+                    action="start the command",
+                    json=body,
+                    headers={"Idempotency-Key": session},
+                )
+                process_path = _resource_path(_json(response, "start the command").get("name"), "processes")
                 exit_code = await self._wait(runtime, process_path, capture)
             finished = True
         except TimeoutError:
@@ -978,8 +1095,9 @@ class SbxEnvironment(SandboxEnvironment):
                 raise
             raise RunTimeoutError(limit) from None
         finally:
-            if not finished:
-                # A timeout, a cancel or a lost wait must not leave the command running.
+            # A timeout, a cancel or a lost wait must not leave the command
+            # running. With no process name yet there is nothing to kill.
+            if not finished and process_path is not None:
                 await asyncio.shield(_kill(runtime, process_path))
         return capture.result(exit_code)
 
@@ -1124,7 +1242,7 @@ class SbxEnvironment(SandboxEnvironment):
             self._starting.cancel()
             with contextlib.suppress(BaseException):
                 await self._starting
-        management, runtime, path = self._management, self._runtime, self._path
+        management, runtime, path, uid = self._management, self._runtime, self._path, self._uid
         self._management = self._runtime = None
         self._path = self._uid = None
         _LIVE.discard(self)
@@ -1132,7 +1250,7 @@ class SbxEnvironment(SandboxEnvironment):
             return
         try:
             if path is not None:
-                await _bounded(_delete(management, path), "delete the sandbox")
+                await _bounded(_delete(management, path, uid), "delete the sandbox")
             elif self._create_dispatched:
                 await _bounded(self._delete_orphan(management), "delete the lost sandbox")
         finally:
@@ -1141,38 +1259,32 @@ class SbxEnvironment(SandboxEnvironment):
             await _bounded(management.aclose(), "close the management client")
 
     async def _delete_orphan(self, client: httpx.AsyncClient) -> None:
-        """Delete the sandbox of a create that ended before it answered.
+        """Delete the sandbox of a create whose outcome is unknown.
+
+        The list can show a new sandbox late, and a cancelled create can still
+        finish on the server, so the list is polled for up to ``ORPHAN_WAIT``.
 
         Args:
             client: The management client.
 
         Raises:
             SandboxInfraError: The sandbox list is invalid.
+            SandboxError: A request failed; see ``_call``.
         """
-        token = ""
-        seen: set[str] = set()
-        for _ in range(_MAX_LIST_PAGES):
-            response = await _call(
-                client,
-                "GET",
-                "/v1/sandboxes",
-                action="list the sandboxes",
-                params={"pageToken": token} if token else None,
-            )
-            page = _json(response, "list the sandboxes")
-            sandboxes = page.get("sandboxes", [])
-            if not isinstance(sandboxes, list):
-                raise SandboxInfraError("sbx gave an invalid sandbox list.")
-            for sandbox in sandboxes:
-                if isinstance(sandbox, dict) and sandbox.get("displayName") == self._display_name:
-                    await _delete(client, _resource_path(sandbox.get("name"), "sandboxes"))
-                    return
-            token = page.get("nextPageToken", "")
-            if not isinstance(token, str) or token in seen:
-                raise SandboxInfraError("sbx gave an invalid sandbox list.")
-            if not token:
-                return
-            seen.add(token)
+        try:
+            async with asyncio.timeout(ORPHAN_WAIT):
+                while True:
+                    sandbox = await _find(client, lambda item: item.get("displayName") == self._display_name)
+                    if sandbox is not None:
+                        break
+                    await asyncio.sleep(POLL_INTERVAL)
+        except TimeoutError:
+            logger.warning("sbx found no sandbox of the lost create in %s seconds.", ORPHAN_WAIT)
+            return
+        uid = sandbox.get("uid")
+        await _delete(
+            client, _resource_path(sandbox.get("name"), "sandboxes"), uid if isinstance(uid, str) and uid else None
+        )
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
