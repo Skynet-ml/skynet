@@ -2338,6 +2338,23 @@ wheels = [
 ]
 
 [[package]]
+name = "kernel"
+version = "0.143.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/fb/31543fabc6341f72a823015729d182e7403680f477ac060fd66dad4bc623/kernel-0.143.0.tar.gz", hash = "sha256:d993497c9e4ce864fdfbbda0c7357f11432d3f55b7a095e4480b890cc04f0f1c", size = 487138, upload-time = "2026-11-07T16:34:30.394Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/09/2e7aecccd6855b2fce379c488f68fc7d48861bfe88c9b464ccaa05c0e772/kernel-0.143.0-py3-none-any.whl", hash = "sha256:24291bc85bff6495097947dda590c614e91cccf700b29d33705c2fdc71404d2a", size = 676156, upload-time = "2026-11-07T16:34:28.793Z" },
+]
+
+[[package]]
 name = "keyring"
 version = "25.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5105,6 +5122,9 @@ dev = [
 e2b = [
     { name = "e2b" },
 ]
+kernel = [
+    { name = "kernel" },
+]
 langsmith = [
     { name = "langsmith" },
 ]
@@ -5141,6 +5161,7 @@ requires-dist = [
     { name = "gepa", git = "https://github.com/gepa-ai/gepa?rev=0632cdb5dcc052e690eab439e1b4a7e3e9cfe407" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25" },
     { name = "httpx", marker = "extra == 'training'", specifier = ">=0.25" },
+    { name = "kernel", marker = "extra == 'kernel'", specifier = ">=0.123.0" },
     { name = "langsmith", marker = "extra == 'langsmith'", specifier = ">=0.14.17" },
     { name = "ldap3", specifier = ">=2.9" },
     { name = "litellm", specifier = ">=1.88.6" },
@@ -5183,7 +5204,7 @@ requires-dist = [
     { name = "webauthn", specifier = ">=2.5,<3" },
     { name = "xlrd", specifier = ">=2" },
 ]
-provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "runloop"]
+provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "runloop", "kernel"]
 
 [[package]]
 name = "sniffio"

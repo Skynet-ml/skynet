@@ -45,6 +45,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "modal": ProviderEntry("core.sandbox.providers.modal", "ModalEnvironment", "modal", False),
     "runloop": ProviderEntry("core.sandbox.providers.runloop", "RunloopEnvironment", "runloop", False),
     "langsmith": ProviderEntry("core.sandbox.providers.langsmith", "LangSmithEnvironment", "langsmith", False),
+    "kernel": ProviderEntry("core.sandbox.providers.kernel", "KernelEnvironment", "kernel", False),
     "apple_container": ProviderEntry(
         "core.sandbox.providers.apple_container", "AppleContainerEnvironment", None, False
     ),
