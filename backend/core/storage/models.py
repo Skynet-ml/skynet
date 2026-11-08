@@ -1524,6 +1524,45 @@ class RunCandidateModel(Base):
     )
 
 
+class SandboxTrialModel(Base):
+    """One sandbox trial of a job, stored so a resume never repeats a paid trial (SKY-420).
+
+    ``SandboxPool`` claims a ``pending`` or ``retryable_failed`` row before it
+    runs the trial's box and writes ``succeeded``, ``retryable_failed`` or
+    ``failed`` when the attempt ends. ``attempt`` is the number of the last
+    claimed attempt, the ``N`` of the ``<trial_key>:attempt-N`` operation key.
+    ``fingerprint`` identifies the trial's config: a resume with another
+    config for the same key fails. Rows go with their job via the cascading
+    foreign key.
+    """
+
+    __tablename__ = "sandbox_trials"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'retryable_failed', 'failed')",
+            name="ck_sandbox_trials_status",
+        ),
+        Index("ix_sandbox_trials_job_status", "optimization_id", "status"),
+    )
+
+    optimization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), primary_key=True
+    )
+    trial_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_ref: Mapped[Any | None] = mapped_column(JSON_STORE, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
 class UserQuotaOverrideModel(Base):
     """SQLAlchemy model for live per-user quota overrides."""
 

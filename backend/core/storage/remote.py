@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import threading
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -40,6 +41,7 @@ from ..constants import (
     TQDM_KEY_PREFIX,
     WORKER_RESTART_CAUSE,
 )
+from ..sandbox.pool import CLAIMABLE_TRIAL_STATUSES, TrialFingerprintError, TrialStatus
 from ..worker.checkpoint_compat import CheckpointCompatibilityError, validate_checkpoint
 from .agent_run_store import PostgresAgentRunStore
 from .base import JobRecord, LogEntryRecord, ProgressEventRecord
@@ -64,6 +66,7 @@ from .models import (
     RunCallModel,
     RunCandidateModel,
     RunFolderItemModel,
+    SandboxTrialModel,
     UserModel,
     UserQuotaAuditModel,
     UserQuotaOverrideModel,
@@ -508,6 +511,196 @@ def _local_postgres_free_bytes() -> int | None:
     return int(lines[-1])
 
 
+class PostgresSandboxTrialStore:
+    """Store the durable sandbox trial rows of each job (SKY-420).
+
+    It implements the sandbox pool's ``TrialStore``. A resume calls
+    ``register_trials`` first, so a changed trial config fails before any
+    paid box starts.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        """Keep the engine that the store opens its sessions on.
+
+        Args:
+            engine: The job store's SQLAlchemy engine.
+        """
+        self._engine = engine
+        self._session_factory = sessionmaker(bind=engine)
+
+    def register_trials(self, job_id: str, trials: Sequence[tuple[str, str]]) -> None:
+        """Add a pending row for each new trial and check the fingerprints of saved ones.
+
+        The inserts and the check share one transaction, so a mismatch saves
+        no new rows.
+
+        Args:
+            job_id: The job that owns the trials.
+            trials: ``(trial_key, fingerprint)`` pairs.
+
+        Raises:
+            TrialFingerprintError: A saved row has another fingerprint.
+        """
+        if not trials:
+            return
+        now = datetime.now(UTC)
+        wanted = dict(trials)
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                text(
+                    "INSERT INTO sandbox_trials "
+                    "(optimization_id, trial_key, fingerprint, status, attempt, created_at, updated_at) "
+                    "VALUES (:job, :key, :fingerprint, :status, 0, :now, :now) "
+                    "ON CONFLICT (optimization_id, trial_key) DO NOTHING"
+                ),
+                [
+                    {"job": job_id, "key": key, "fingerprint": fp, "status": TrialStatus.PENDING.value, "now": now}
+                    for key, fp in wanted.items()
+                ],
+            )
+            saved = session.query(SandboxTrialModel.trial_key, SandboxTrialModel.fingerprint).filter(
+                SandboxTrialModel.optimization_id == job_id, SandboxTrialModel.trial_key.in_(list(wanted))
+            )
+            changed = sorted(key for key, fp in saved if fp != wanted[key])
+            if changed:
+                raise TrialFingerprintError(
+                    f"job {job_id}: the config of trials {changed} differs from the saved config"
+                )
+
+    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> int | None:
+        """Claim a pending or retryable_failed row and count one more attempt.
+
+        Args:
+            job_id: The job that owns the trial.
+            trial_key: The trial's operation key.
+            fingerprint: The fingerprint of the trial's current config.
+            worker_id: The worker that claims the row.
+
+        Returns:
+            The new attempt number, or None when the row is not claimable.
+
+        Raises:
+            TrialFingerprintError: The saved fingerprint differs.
+            LookupError: The job has no row for the key.
+        """
+        match = (
+            "optimization_id = :job AND trial_key = :key AND fingerprint = :fingerprint "
+            "AND status IN (:pending, :retryable)"
+        )
+        if self._engine.dialect.name == "postgresql":
+            # SKIP LOCKED lets a second worker pass a row that the first one
+            # claims at the same time, instead of waiting for its lock.
+            match = (
+                "optimization_id = :job AND trial_key = "
+                f"(SELECT trial_key FROM sandbox_trials WHERE {match} FOR UPDATE SKIP LOCKED)"
+            )
+        pending, retryable = CLAIMABLE_TRIAL_STATUSES
+        params = {
+            "job": job_id,
+            "key": trial_key,
+            "fingerprint": fingerprint,
+            "pending": pending.value,
+            "retryable": retryable.value,
+            "running": TrialStatus.RUNNING.value,
+            "worker": worker_id,
+            "now": datetime.now(UTC),
+        }
+        with self._session_factory() as session, session.begin():
+            attempt = session.execute(
+                text(
+                    "UPDATE sandbox_trials SET status = :running, attempt = attempt + 1, "
+                    f"claimed_by = :worker, updated_at = :now WHERE {match} RETURNING attempt"
+                ),
+                params,
+            ).scalar_one_or_none()
+            if attempt is not None:
+                return int(attempt)
+            saved_fingerprint = session.execute(
+                text("SELECT fingerprint FROM sandbox_trials WHERE optimization_id = :job AND trial_key = :key"),
+                params,
+            ).scalar_one_or_none()
+        if saved_fingerprint is None:
+            raise LookupError(f"job {job_id} has no sandbox trial {trial_key!r}; register it first")
+        if saved_fingerprint != fingerprint:
+            raise TrialFingerprintError(
+                f"job {job_id}: the config of trial {trial_key!r} differs from the saved config"
+            )
+        return None
+
+    def finish_trial(
+        self,
+        job_id: str,
+        trial_key: str,
+        attempt: int,
+        status: TrialStatus,
+        *,
+        result_ref: Any = None,
+        error: str | None = None,
+    ) -> bool:
+        """Write the end state of a running attempt.
+
+        Args:
+            job_id: The job that owns the trial.
+            trial_key: The trial's operation key.
+            attempt: The attempt number that the claim gave.
+            status: ``succeeded``, ``retryable_failed`` or ``failed``.
+            result_ref: A JSON value that points to the result.
+            error: The error text of a failed attempt.
+
+        Returns:
+            True when the row was running this attempt and now has the status.
+        """
+        with self._session_factory() as session, session.begin():
+            updated = (
+                session.query(SandboxTrialModel)
+                .filter(
+                    SandboxTrialModel.optimization_id == job_id,
+                    SandboxTrialModel.trial_key == trial_key,
+                    SandboxTrialModel.attempt == attempt,
+                    SandboxTrialModel.status == TrialStatus.RUNNING.value,
+                )
+                .update(
+                    {
+                        SandboxTrialModel.status: TrialStatus(status).value,
+                        SandboxTrialModel.result_ref: result_ref,
+                        SandboxTrialModel.error: error,
+                        SandboxTrialModel.updated_at: datetime.now(UTC),
+                    },
+                    synchronize_session=False,
+                )
+            )
+        return updated == 1
+
+    def list_trials(self, job_id: str) -> list[dict[str, Any]]:
+        """Return the trial rows of a job, so a resume can read the saved results.
+
+        Args:
+            job_id: The job that owns the trials.
+
+        Returns:
+            One dict for each row, ordered by trial key.
+        """
+        with self._session_factory() as session:
+            rows = (
+                session.query(SandboxTrialModel)
+                .filter(SandboxTrialModel.optimization_id == job_id)
+                .order_by(SandboxTrialModel.trial_key)
+                .all()
+            )
+            return [
+                {
+                    "trial_key": row.trial_key,
+                    "fingerprint": row.fingerprint,
+                    "status": row.status,
+                    "attempt": row.attempt,
+                    "result_ref": row.result_ref,
+                    "error": row.error,
+                    "claimed_by": row.claimed_by,
+                }
+                for row in rows
+            ]
+
+
 class RemoteDBJobStore:
     """PostgreSQL-backed job storage using SQLAlchemy.
 
@@ -593,6 +786,7 @@ class RemoteDBJobStore:
         self._grid_pair_results = PostgresGridPairResultStore(self._engine)
         self._agent_runs = PostgresAgentRunStore(self._engine)
         self._run_calls = PostgresRunCallStore(self._engine)
+        self.sandbox_trials = PostgresSandboxTrialStore(self._engine)
         parsed_url = urlparse(db_url)
         db_location = parsed_url.hostname or "<masked>"
         if parsed_url.port:
@@ -1249,6 +1443,7 @@ class RemoteDBJobStore:
                 session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id == optimization_id).delete()
             session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id == optimization_id).delete()
             session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id == optimization_id).delete()
+            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id == optimization_id).delete()
             session.query(BlackboxAgentRunModel).filter(
                 BlackboxAgentRunModel.optimization_id == optimization_id
             ).delete()
@@ -1307,6 +1502,9 @@ class RemoteDBJobStore:
             synchronize_session=False
         )
         session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id.in_(child_ids)).delete(
+            synchronize_session=False
+        )
+        session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id.in_(child_ids)).delete(
             synchronize_session=False
         )
         session.query(BlackboxAgentRunModel).filter(BlackboxAgentRunModel.optimization_id.in_(child_ids)).delete(
@@ -1401,6 +1599,9 @@ class RemoteDBJobStore:
                 synchronize_session=False
             )
             session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id.in_(optimization_ids)).delete(
+                synchronize_session=False
+            )
+            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id.in_(optimization_ids)).delete(
                 synchronize_session=False
             )
             session.query(BlackboxAgentRunModel).filter(
@@ -2165,6 +2366,7 @@ class RemoteDBJobStore:
                 session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id == optimization_id).delete()
             session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id == optimization_id).delete()
             session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id == optimization_id).delete()
+            session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id == optimization_id).delete()
             session.query(BlackboxAgentRunModel).filter(
                 BlackboxAgentRunModel.optimization_id == optimization_id
             ).delete()

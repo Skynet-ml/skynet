@@ -1,4 +1,4 @@
-"""Live-Postgres concurrency tests for ``RemoteDBJobStore.claim_next_job``.
+"""Live-Postgres concurrency tests for ``RemoteDBJobStore.claim_next_job`` and the sandbox trial rows.
 
 These tests verify that ``FOR UPDATE SKIP LOCKED`` actually serializes
 concurrent claimers — something SQLite cannot exercise because it lacks
@@ -17,9 +17,11 @@ unaffected.
 
 from __future__ import annotations
 
+import asyncio
+import random
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,6 +31,9 @@ from sqlalchemy import create_engine, text
 
 from alembic import command
 from core.config import app_env
+from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
+from core.sandbox.pool import BoxOutcome, BoxWork, DurableTrials, SandboxPool, TrialFingerprintError, TrialStatus
+from core.sandbox.tests.fake_provider import InMemorySandbox
 from core.storage.remote import RemoteDBJobStore
 
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
@@ -241,3 +246,165 @@ def test_claim_orders_by_user_in_flight_then_age(store: RemoteDBJobStore) -> Non
         assert claimed == [f"{prefix}-a1", f"{prefix}-b1", f"{prefix}-a2"]
     finally:
         store.delete_jobs(ids)
+
+
+@pytest.fixture
+def trial_job(store: RemoteDBJobStore) -> Iterator[str]:
+    """Create one job for trial rows and delete it, with its rows, after the test.
+
+    Args:
+        store: The live store.
+
+    Yields:
+        The job id.
+    """
+    job_id = f"trials-test-{uuid.uuid4().hex[:8]}"
+    store.create_job(job_id)
+    try:
+        yield job_id
+    finally:
+        store.delete_jobs([job_id])
+
+
+async def _keys(keys: list[str]) -> AsyncIterator[str]:
+    """Yield the trial keys in order.
+
+    Args:
+        keys: The trial keys.
+
+    Yields:
+        The next key.
+    """
+    for key in keys:
+        yield key
+
+
+def _trial_work(ran: list[str]) -> BoxWork[str, str]:
+    """Build box work that makes in-memory boxes and records each trial that runs.
+
+    Args:
+        ran: The list that gets each trial key that runs.
+
+    Returns:
+        The box work.
+    """
+
+    async def run(env: SandboxEnvironment, key: str) -> str:
+        """Record the trial and return its result.
+
+        Args:
+            env: The box.
+            key: The trial key.
+
+        Returns:
+            The result.
+        """
+        ran.append(key)
+        return f"result-{key}"
+
+    return BoxWork(
+        create=lambda _key: InMemorySandbox(SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=1))),
+        run=run,
+    )
+
+
+async def _ignore(outcome: BoxOutcome[str, str]) -> None:
+    """Drop the outcome.
+
+    Args:
+        outcome: The outcome of one box.
+    """
+
+
+def test_restart_runs_only_the_trials_that_are_not_done(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Register 6 trials, finish 3, then resume: the second run starts only the other 3."""
+    keys = [f"trial-{i}" for i in range(6)]
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [(key, "fp-1") for key in keys])
+    binding: DurableTrials[str, str] = DurableTrials(
+        trials, trial_job, "worker-a", fingerprint=lambda _key: "fp-1", result_ref=lambda result: {"ref": result}
+    )
+    first: list[str] = []
+    # The first run stops after 3 trials, as a worker crash would.
+    asyncio.run(SandboxPool({"fake": 2}).run(_keys(keys[:3]), _trial_work(first), _ignore, key=str, trials=binding))
+    trials.register_trials(trial_job, [(key, "fp-1") for key in keys])
+    second: list[str] = []
+    asyncio.run(SandboxPool({"fake": 2}).run(_keys(keys), _trial_work(second), _ignore, key=str, trials=binding))
+
+    assert sorted(first) == keys[:3]
+    assert sorted(second) == keys[3:]
+    rows = trials.list_trials(trial_job)
+    assert [(row["status"], row["attempt"]) for row in rows] == [(TrialStatus.SUCCEEDED.value, 1)] * 6
+    assert rows[0]["result_ref"] == {"ref": "result-trial-0"}
+    assert rows[0]["claimed_by"] == "worker-a"
+
+
+def test_two_workers_claim_each_trial_exactly_once(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Let ten workers claim 30 trials in random orders: each trial gets exactly one claim."""
+    keys = [f"trial-{i:02d}" for i in range(30)]
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [(key, "fp") for key in keys])
+
+    def claim_all(worker: int) -> list[str]:
+        """Try to claim every trial in a random order.
+
+        Args:
+            worker: The worker number.
+
+        Returns:
+            The keys that this worker claimed.
+        """
+        order = random.Random(worker).sample(keys, len(keys))
+        return [key for key in order if trials.claim_trial(trial_job, key, "fp", f"worker-{worker}") is not None]
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        claimed = [key for keys_of_worker in pool.map(claim_all, range(10)) for key in keys_of_worker]
+
+    assert sorted(claimed) == keys
+    assert {row["status"] for row in trials.list_trials(trial_job)} == {TrialStatus.RUNNING.value}
+
+
+def test_fingerprint_mismatch_fails_loud(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Raise on register and on claim when a trial's config changes, and save no new rows."""
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [("trial-0", "fp-old")])
+
+    with pytest.raises(TrialFingerprintError):
+        trials.register_trials(trial_job, [("trial-0", "fp-new"), ("trial-1", "fp-new")])
+    with pytest.raises(TrialFingerprintError):
+        trials.claim_trial(trial_job, "trial-0", "fp-new", "worker-a")
+    with pytest.raises(LookupError):
+        trials.claim_trial(trial_job, "trial-9", "fp-new", "worker-a")
+
+    rows = trials.list_trials(trial_job)
+    assert [(row["trial_key"], row["status"], row["attempt"]) for row in rows] == [("trial-0", "pending", 0)]
+
+
+def test_retryable_failed_trial_is_claimed_again_with_the_next_attempt(store: RemoteDBJobStore, trial_job: str) -> None:
+    """Claim a retryable_failed row again with attempt 2, and never claim a failed or succeeded row."""
+    trials = store.sandbox_trials
+    trials.register_trials(trial_job, [("retry", "fp"), ("failed", "fp"), ("done", "fp")])
+    for key in ("retry", "failed", "done"):
+        assert trials.claim_trial(trial_job, key, "fp", "worker-a") == 1
+    assert trials.finish_trial(trial_job, "retry", 1, TrialStatus.RETRYABLE_FAILED, error="flake")
+    assert trials.finish_trial(trial_job, "failed", 1, TrialStatus.FAILED, error="broken")
+    assert trials.finish_trial(trial_job, "done", 1, TrialStatus.SUCCEEDED, result_ref={"ref": "r"})
+    # A late write from an old attempt must not change the row.
+    assert not trials.finish_trial(trial_job, "done", 1, TrialStatus.FAILED, error="late")
+
+    assert trials.claim_trial(trial_job, "retry", "fp", "worker-b") == 2
+    assert trials.claim_trial(trial_job, "failed", "fp", "worker-b") is None
+    assert trials.claim_trial(trial_job, "done", "fp", "worker-b") is None
+    rows = {row["trial_key"]: row for row in trials.list_trials(trial_job)}
+    assert rows["done"]["status"] == "succeeded"
+    assert rows["done"]["result_ref"] == {"ref": "r"}
+    assert rows["failed"]["error"] == "broken"
+
+
+def test_deleting_the_job_deletes_its_trial_rows(store: RemoteDBJobStore) -> None:
+    """Delete the trial rows with their job."""
+    job_id = f"trials-test-{uuid.uuid4().hex[:8]}"
+    store.create_job(job_id)
+    store.sandbox_trials.register_trials(job_id, [("trial-0", "fp")])
+    store.delete_jobs([job_id])
+    assert store.sandbox_trials.list_trials(job_id) == []
