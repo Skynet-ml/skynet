@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,7 +20,8 @@ from core.sandbox.environment import NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
 from core.sandbox.providers import vercel
 from core.sandbox.providers.vercel import VercelEnvironment, box_name, policy_confirmed
-from core.sandbox.resources import SandboxSpec
+from core.sandbox.resources import ResourceRequest, SandboxSpec
+from core.sandbox.services import ComposeService, ServicesTooLargeError
 from core.sandbox.telemetry import use_output_sink
 
 _PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); echo \$\? > (\S+)$")
@@ -581,6 +582,7 @@ def make_env(
     lifetime: float = 300,
     protected: bool = True,
     clock: FakeClock | None = None,
+    services: tuple[ComposeService, ...] = (),
     **spec_fields: Any,
 ) -> VercelEnvironment:
     """Make a provider wired to the fakes.
@@ -591,6 +593,7 @@ def make_env(
         lifetime: The spec lifetime in seconds.
         protected: Fund the box from a fake budget.
         clock: The fake clock.
+        services: The compose services.
         spec_fields: Other spec fields.
 
     Returns:
@@ -631,6 +634,7 @@ def make_env(
         client_factory=client_factory,
         usage_factory=usage_factory,
         clock=clock or FakeClock(),
+        services=services,
     )
 
 
@@ -1164,7 +1168,7 @@ async def test_stop_during_reserve_creates_no_box(client: FakeClient, log: list[
     assert made[0].calls == ["fail"]
 
 
-async def test_cancelled_caller_still_sees_cancel_after_stop(client: FakeClient, log: list[str]) -> None:
+async def test_cancelled_caller_still_sees_cancel_and_box_stops(client: FakeClient, log: list[str]) -> None:
     """Check that a caller cancel during start stays a CancelledError."""
     client.hang = True
     env = make_env(client, log)
@@ -1391,3 +1395,228 @@ async def test_stop_job_sandboxes_bounds_a_hung_client_close(monkeypatch: pytest
 def test_sdk_import_is_present() -> None:
     """Check that the optional SDK loaded in the test environment."""
     assert vercel.SandboxClient is not None
+
+
+DEADLINE = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+NOW = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+SERVICES = (
+    ComposeService(name="db", command="postgres", cpus=1.0, memory_mb=1024),
+    ComposeService(name="cache", command="redis-server", cpus=0.5, memory_mb=512),
+)
+
+
+def _service_scripts(box: FakeBox, marker: str) -> list[str]:
+    """Return the service names in the box scripts that hold a marker, in order.
+
+    Args:
+        box: The fake box.
+        marker: A text that the scripts must hold.
+
+    Returns:
+        The service names.
+    """
+    found = []
+    for call in box.create_calls:
+        script = call["args"][-1]
+        match = re.search(r"\.svc-([\w-]+)\.pid", script)
+        if marker in script and match:
+            found.append(match.group(1))
+    return found
+
+
+async def test_services_start_in_order_after_the_create(client: FakeClient, log: list[str]) -> None:
+    """Check that each service launches in start order after the create, and the phase is timed."""
+    env = make_env(client, log, services=SERVICES, resources=ResourceRequest(cpus=2))
+    await env.start()
+    box = client.boxes[env.name]
+    assert _service_scripts(box, "setsid") == ["db", "cache"]
+    # Each launch is one timed run inside the services phase.
+    assert [record.phase for record in env.timings.records] == ["create", "run", "run", "services"]
+    await env.stop()
+
+
+async def test_services_grow_the_box_and_the_reservation(client: FakeClient, log: list[str]) -> None:
+    """Check that the created box size and the reserved vCPUs include each service."""
+    env = make_env(client, log, services=SERVICES, resources=ResourceRequest(cpus=2))
+    await env.start()
+    # 2 + 1 + 0.5 vCPUs round up to an even 4.
+    assert client.create_kwargs[-1]["resources"].vcpus == 4
+    assert env.usage.request["vcpus"] == 4
+    await env.stop()
+
+
+async def test_no_services_keep_the_box_size(client: FakeClient, log: list[str]) -> None:
+    """Check that a box without services keeps its size and runs no service script."""
+    env = make_env(client, log, resources=ResourceRequest(cpus=2))
+    await env.start()
+    assert client.create_kwargs[-1]["resources"].vcpus == 2
+    assert env.usage.request["vcpus"] == 2
+    assert client.boxes[env.name].create_calls == []
+    await env.stop()
+
+
+def test_services_too_large_fail_before_any_create(client: FakeClient, log: list[str]) -> None:
+    """Check that services past the largest box fail at setup with the fix, before a reserve or create."""
+    big = (ComposeService(name="big", command="sleep 1", cpus=31.0),)
+    with pytest.raises(ServicesTooLargeError, match="lower its 'cpus' or 'mem_limit'"):
+        make_env(client, log, services=big, resources=ResourceRequest(cpus=2))
+    assert log == []
+
+
+async def test_services_start_again_on_a_box_from_a_snapshot(client: FakeClient, log: list[str]) -> None:
+    """Check that a trial box from a snapshot starts its own services."""
+    env = make_env(client, log, services=SERVICES)
+    env.snapshot_id = "snap-1"
+    await env.start()
+    assert _service_scripts(client.boxes[env.name], "setsid") == ["db", "cache"]
+    await env.stop()
+
+
+async def test_snapshot_stops_the_services_first(client: FakeClient, log: list[str]) -> None:
+    """Check that the services stop in reverse order before the snapshot call."""
+    env = make_env(client, log, protected=False, services=SERVICES)
+    await env.start()
+    box = client.boxes[env.name]
+    session = box.current_session
+    seen: list[list[str]] = []
+
+    async def snapshot(*, expiration: Any = None) -> Any:
+        """Record the stops that ran before the snapshot.
+
+        Args:
+            expiration: Unused.
+
+        Returns:
+            The snapshot handle.
+        """
+        seen.append(_service_scripts(box, "kill -TERM"))
+        return SimpleNamespace(id="snap-1", status="created", expires_at=1_000)
+
+    session.snapshot = snapshot
+    await env.snapshot(run_deadline=DEADLINE, now=NOW)
+    assert seen == [["cache", "db"]]
+    await env.stop()
+
+
+async def test_cancel_in_the_service_stop_reserves_no_snapshot_hold(client: FakeClient, log: list[str]) -> None:
+    """Check that the service stop runs before the hold, so a cancel there leaves no hold without pending."""
+    env = make_env(client, log, services=SERVICES)
+    await env.start()
+    reserved: list[str] = []
+
+    def factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
+        """Record the hold and make a fake one.
+
+        Args:
+            budget: The budget runtime.
+            request: The usage request.
+            operation_key: The operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        reserved.append("reserved")
+        return FakeUsage(log, budget, request, operation_key=operation_key)
+
+    env._snapshot_usage_factory = factory
+    real_exec = env.exec
+    stopping = asyncio.Event()
+
+    async def exec_(command: str, **kwargs: Any) -> Any:
+        """Hang in the service stop.
+
+        Args:
+            command: The shell command.
+            kwargs: The exec keyword arguments.
+
+        Returns:
+            The result of the real exec.
+        """
+        if "kill -TERM" in command:
+            stopping.set()
+            await asyncio.sleep(3600)
+        return await real_exec(command, **kwargs)
+
+    env.exec = exec_
+    task = asyncio.create_task(env.snapshot(run_deadline=DEADLINE, now=NOW))
+    waiter = asyncio.ensure_future(stopping.wait())
+    await asyncio.wait({task, waiter}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+    waiter.cancel()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert stopping.is_set()
+    assert reserved == []
+    assert not env._halted
+    env.exec = real_exec
+    await asyncio.wait_for(env.stop(), 5)
+
+
+async def test_start_after_stop_is_refused(client: FakeClient, log: list[str]) -> None:
+    """Check that a stopped box never starts again or sends a second create."""
+    env = make_env(client, log)
+    await env.start()
+    await env.stop()
+    with pytest.raises(SandboxInfraError, match="cannot start again"):
+        await env.start()
+    assert log.count("create") == 1
+
+
+class SnapshotQueryClient(FakeClient):
+    """Add a snapshot query and a hung close to the fake SDK client."""
+
+    def __init__(self, log: list[str]) -> None:
+        """Hold one live snapshot.
+
+        Args:
+            log: The shared call log.
+        """
+        super().__init__(log)
+        self.snapshot = SimpleNamespace(id="snap-1", status="deleted", expires_at=None)
+
+    async def query_snapshots(self, **kwargs: Any) -> Any:
+        """Yield a live snapshot.
+
+        Args:
+            kwargs: Unused.
+
+        Yields:
+            The snapshot.
+        """
+        yield SimpleNamespace(id="snap-1", status="created", expires_at=None)
+
+    async def get_snapshot(self, *, snapshot_id: str) -> Any:
+        """Return a snapshot that is already deleted.
+
+        Args:
+            snapshot_id: Unused.
+
+        Returns:
+            The snapshot.
+        """
+        return self.snapshot
+
+    async def aclose(self) -> None:
+        """Never finish the close."""
+        await asyncio.Event().wait()
+
+
+async def test_find_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:
+    """Check that a hung close ends at the stop timeout and the found snapshot still returns."""
+    client = SnapshotQueryClient(log)
+    monkeypatch.setattr(vercel, "STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(lambda capture: client))
+    found = await asyncio.wait_for(VercelEnvironment.find_snapshot("builder"), 5)
+    assert found is not None
+    assert found.snapshot_id == "snap-1"
+
+
+async def test_delete_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:
+    """Check that a hung close of an owned client ends at the stop timeout after the delete."""
+    client = SnapshotQueryClient(log)
+    builder = client.boxes["builder"] = FakeBox("builder", FakeSession())
+    monkeypatch.setattr(vercel, "STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(lambda capture: client))
+    built = vercel.BuiltSnapshot(snapshot_id="snap-1", builder_name="builder")
+    await asyncio.wait_for(VercelEnvironment.delete_snapshot(built), 5)
+    assert builder.destroys == 1
