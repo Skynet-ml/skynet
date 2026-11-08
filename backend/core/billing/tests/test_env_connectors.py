@@ -680,6 +680,25 @@ def test_relay_records_a_failed_send_with_its_reason(calls: PostgresRunCallStore
     _assert_no_secret([record], secret)
 
 
+def test_relay_records_a_malformed_url_as_refused(calls: PostgresRunCallStore) -> None:
+    """Store a refused call with an empty target when the url cannot be parsed, then raise."""
+    with pytest.raises(ValueError):
+        relay_request(
+            url="https://[::1/v1",
+            headers={},
+            body=b"{}",
+            user_secrets={},
+            bindings={},
+            secret_hosts={},
+            allowed_hosts={},
+            send=lambda *_args: b"{}",
+            recorder=_recorder(calls),
+        )
+    [record] = _stored(calls)
+    assert (record["status"], record["target"]) == ("refused", "")
+    assert record["failure_reason"].startswith("ValueError")
+
+
 @pytest.mark.parametrize(
     "error",
     [httpx.ReadTimeout("read timed out"), KeyboardInterrupt(), SystemExit(1)],

@@ -21,7 +21,7 @@ from core.config import Settings
 from core.exceptions import ServiceError
 from core.i18n import t
 from core.worker import engine
-from core.worker.scoped_relay import CallRecorder
+from core.worker.scoped_relay import NO_CANDIDATE_ID, CallRecorder
 from core.worker.vercel_dspy import _require_image_protocol
 
 from .. import docker_sandbox
@@ -300,7 +300,14 @@ def test_closing_a_run_box_records_each_proxy_request_before_the_proxy_goes(
         + "not json\n"
         + json.dumps({"event": "other"})
         + "\n"
-        + _proxy_line(host="evil.example", status="refused", code=403, reason="host is not allowed", bytes_sent=0),
+        + _proxy_line(
+            host="evil.example",
+            status="refused",
+            code=403,
+            reason="host is not allowed",
+            bytes_sent=0,
+            started_at="2026-11-07T10:00:01.000+00:00",
+        ),
     )
     sink = _Sink()
     session = DockerSandboxRuntime(_IMAGE, docker_bin=binary, recorder=CallRecorder(sink, "job-7", "", "")).open(
@@ -331,6 +338,27 @@ def test_closing_a_run_box_records_each_proxy_request_before_the_proxy_goes(
     assert (refused["target"], refused["status"]) == ("evil.example", "refused")
     assert refused["failure_reason"] == "host is not allowed"
     assert json.loads(refused["response"])["code"] == 403
+
+
+def test_proxy_requests_are_recorded_in_start_order(
+    fake_docker: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long tunnel that ends last is still written before a later, shorter one."""
+    binary, _log = fake_docker
+    monkeypatch.setenv(
+        "FAKE_DOCKER_PROXY_LINES",
+        _proxy_line(host="short.example", started_at="2026-11-07T10:00:05.000+00:00")
+        + _proxy_line(host="long.example", started_at="2026-11-07T10:00:01.000+00:00", duration_ms=9000),
+    )
+    sink = _Sink()
+    session = DockerSandboxRuntime(_IMAGE, docker_bin=binary, recorder=CallRecorder(sink, "job-7", "", "")).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("long.example", "short.example"))
+    )
+
+    session.close()
+
+    assert [call["target"] for _, call, _ in sink.calls] == ["long.example", "short.example"]
+    assert {call["candidate_id"] for _, call, _ in sink.calls} == {NO_CANDIDATE_ID}
 
 
 def test_unreadable_proxy_output_records_nothing_and_still_drops_the_proxy(

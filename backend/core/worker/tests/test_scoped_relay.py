@@ -215,15 +215,36 @@ def test_budget_service_exposes_its_engine() -> None:
 
 
 def test_secret_forms_stay_bounded_and_decode_only_basic_credentials() -> None:
-    """Add at most ten forms for a secret, and decode only a ``user:password`` token."""
+    """Add at most forty forms for a secret, and decode only a ``user:password`` token."""
     plain = scoped_relay._secret_forms("sk-live-abcdef123456")
-    assert plain == {"sk-live-abcdef123456", "c2stbGl2ZS1hYmNkZWYxMjM0NTY"}
+    assert {"sk-live-abcdef123456", "c2stbGl2ZS1hYmNkZWYxMjM0NTY"} <= plain
 
     azure = scoped_relay._secret_forms("Zm9v+YmFy/YmF6PQ==")
     assert {"Zm9v%2BYmFy/YmF6PQ%3D%3D", "Zm9v%2BYmFy%2FYmF6PQ%3D%3D"} <= azure
-    assert len(azure) <= 10
+    assert len(azure) <= 40
 
     basic = scoped_relay._secret_forms("Basic c3ZjOnB3LXNlY3JldC05")
     assert {"c3ZjOnB3LXNlY3JldC05", "svc:pw-secret-9", "pw-secret-9"} <= basic
     assert "Basic+c3ZjOnB3LXNlY3JldC05" in basic
-    assert len(basic) <= 10
+    assert len(basic) <= 40
+
+
+def test_secret_forms_cover_php_and_go_escapes_of_each_derived_form() -> None:
+    """Mask the PHP ``\\/`` and Go ``\\u0026`` escapes of base64 and Basic forms too."""
+    azure = scoped_relay._secret_forms("Zm9v+YmFy/YmF6PQ==")
+    assert {"Zm9v+YmFy\\/YmF6PQ==", "Zm9v%2BYmFy\\/YmF6PQ%3D%3D"} <= azure
+    encoded = scoped_relay._secret_forms("ab/cd&ef?gh")
+    assert "YWIvY2QmZWY/Z2g" in encoded
+    assert "YWIvY2QmZWY\\/Z2g" in encoded
+    assert {"ab/cd\\u0026ef?gh", "ab\\/cd\\u0026ef?gh", "ab%2Fcd%26ef%3Fgh"} <= encoded
+
+    basic = scoped_relay._secret_forms("Basic dTpwYXNzL3dvcmQmeA==")
+    assert {"u:pass/word&x", "pass/word&x"} <= basic
+    assert "pass\\/word&x" in basic
+    assert {"pass/word\\u0026x", "u:pass\\/word\\u0026x"} <= basic
+
+
+def test_short_secret_adds_no_derived_form() -> None:
+    """Keep derived forms of at least eight characters, so a short value masks no common text."""
+    assert scoped_relay._secret_forms("1") == {"1"}
+    assert "MQ" not in scoped_relay._secret_forms("1")

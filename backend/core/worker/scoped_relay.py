@@ -18,14 +18,19 @@ from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
 
-from ..billing.env_connectors import CONNECTOR_ROUTES_KEY
+from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.model_dispatch import ModelHTTPResult
+from ..billing.usage_tags import current_tags
 from ..config import settings
 from ..models.blackbox import BLACKBOX_TARGET_REPO
 from ..service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
 
 logger = logging.getLogger(__name__)
+
+_MIN_DERIVED_FORM_CHARS = 8
+# Run calls that serve no candidate, such as proposer calls; the calls route needs a nonempty id.
+NO_CANDIDATE_ID = "run"
 
 
 class RunCallSink(Protocol):
@@ -111,6 +116,11 @@ class CallRecorder:
     ) -> None:
         """Write one call; a store failure is logged and never fails the call itself.
 
+        The write is synchronous: the caller waits for the row write and for
+        the lock on the call's candidate row, which keeps ``seq`` in commit
+        order. A recorder with no candidate id writes under the candidate of
+        the parent's open usage scope, else under ``NO_CANDIDATE_ID``.
+
         Args:
             started: When the call started.
             kind: ``model``, ``mcp``, ``stage``, ``evaluator`` or ``host``.
@@ -127,7 +137,7 @@ class CallRecorder:
                 egress proxy; None measures it from ``started``.
         """
         call = {
-            "candidate_id": self.candidate_id,
+            "candidate_id": self.candidate_id or current_tags().get("candidate") or NO_CANDIDATE_ID,
             "role": self.role,
             "kind": kind,
             "target": target,
@@ -154,29 +164,34 @@ def _secret_forms(secret: str) -> set[str]:
     or URL-safe) or percent-encoded (as in a URL query or a form body), and a
     Basic-auth token may come back decoded as ``user:password`` or as the
     password alone. Padding is left off each base64 form, so the padded form
-    is masked too.
+    is masked too. Each form is also listed JSON-escaped with ``\\/`` (PHP)
+    and with ``\\u0026``-style HTML escapes (Go), because a base64 form holds
+    ``/`` and a decoded password may hold ``&``, ``<`` or ``>``.
 
     Args:
         secret: One nonempty secret value.
 
     Returns:
-        The value and its encoded and decoded forms; at most ten strings.
+        The value and its derived forms, each with its escaped variants; at
+        most 40 strings.
     """
     raw = secret.encode()
-    forms = {secret, *(encode(raw).decode().rstrip("=") for encode in (base64.b64encode, base64.urlsafe_b64encode))}
+    derived = {encode(raw).decode().rstrip("=") for encode in (base64.b64encode, base64.urlsafe_b64encode)}
     # A standard base64 key holds "+", "/" and "=", which a URL or form encoder changes.
-    forms |= {quote(secret), quote(secret, safe=""), quote_plus(secret)}
+    derived |= {quote(secret), quote(secret, safe=""), quote_plus(secret)}
     token = secret.partition(" ")[2] if secret[:6].lower() == "basic " else secret
-    forms.add(token)
+    derived.add(token)
     try:
         decoded = base64.b64decode(token, validate=True).decode()
     except (binascii.Error, UnicodeDecodeError, ValueError):
-        return forms
+        decoded = ""
     # Only a decoded "user:password" is a Basic credential; other base64 text is left alone.
     _user, separator, password = decoded.partition(":")
     if separator and password and decoded.isprintable():
-        forms |= {decoded, password}
-    return forms
+        derived |= {decoded, password}
+    # A short derived form, such as the base64 "MQ" of "1", would mask ordinary text.
+    forms = {secret} | {form for form in derived if len(form) >= _MIN_DERIVED_FORM_CHARS}
+    return forms | {variant for form in forms for variant in escaped_forms(form)}
 
 
 def _text(body: bytes | str) -> str:

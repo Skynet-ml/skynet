@@ -221,6 +221,22 @@ def _record_proxy_line(recorder: CallRecorder, line: str) -> None:
     )
 
 
+def _proxy_line_start(line: str) -> str:
+    """Return the start time of one proxy JSON line, for sorting; other lines give an empty string.
+
+    Args:
+        line: One line of the proxy's output.
+
+    Returns:
+        The line's UTC ``started_at`` text, which sorts in time order.
+    """
+    try:
+        call = json.loads(line)
+    except ValueError:
+        return ""
+    return str(call.get("started_at") or "") if isinstance(call, dict) else ""
+
+
 def _label_args(labels: Mapping[str, str]) -> list[str]:
     """Turn labels into Docker ``--label`` arguments.
 
@@ -322,7 +338,10 @@ class DockerSandboxSession:
         if result.returncode != 0:
             logger.warning("could not read local sandbox egress calls of %s: %s", egress.proxy, _stderr_line(result))
             return
-        for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+        # The proxy prints a line when a tunnel ends, so a long tunnel comes
+        # after shorter ones that started later; write them in start order.
+        lines = result.stdout.decode("utf-8", errors="replace").splitlines()
+        for line in sorted(lines, key=_proxy_line_start):
             _record_proxy_line(self._recorder, line)
 
     def write_files(self, files: Mapping[str, str]) -> None:

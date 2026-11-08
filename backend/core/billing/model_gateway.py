@@ -56,7 +56,7 @@ from .protected_credentials import (
 from .remote_evaluator import RemoteEvaluatorBroker, RemoteEvaluatorTransportError
 from .runtime import BudgetRuntime, ProviderFailedError, UsagePendingError
 from .signals import BudgetReached
-from .usage_tags import USAGE_TAGS_HEADERS
+from .usage_tags import USAGE_TAGS_HEADERS, header_tags
 
 if TYPE_CHECKING:
     # Type-only: the worker relay imports billing modules, so a runtime import could cycle.
@@ -388,9 +388,13 @@ class ModelGateway:
                     response = (
                         gateway._packages.dispatch(body)
                         if is_packages
-                        else gateway._recorded(token, None, body, lambda: gateway._evaluator.dispatch(body))
+                        else gateway._recorded(
+                            token, None, body, lambda: gateway._evaluator.dispatch(body), headers=self.headers
+                        )
                         if is_evaluator
-                        else gateway._recorded(token, None, body, lambda: tools.dispatch(body), tools=tools)
+                        else gateway._recorded(
+                            token, None, body, lambda: tools.dispatch(body), tools=tools, headers=self.headers
+                        )
                         if tools is not None
                         else gateway._recorded(
                             token or self.headers.get("x-api-key", ""),
@@ -408,6 +412,7 @@ class ModelGateway:
                                     if name.lower() in {"anthropic-version", "anthropic-beta"} | USAGE_TAGS_HEADERS
                                 },
                             ),
+                            headers=self.headers,
                         )
                     )
                     self._reply(response)
@@ -815,11 +820,11 @@ class ModelGateway:
         if is_evaluator:
             if path != "/v1/_evaluator":
                 raise ValueError("The evaluator capability cannot dispatch models, tools, or sandbox commands.")
-            return self._recorded(token, None, body, lambda: self._evaluator.dispatch(body))
+            return self._recorded(token, None, body, lambda: self._evaluator.dispatch(body), headers=headers)
         if is_tools:
             if path != "/v1/_mcp":
                 raise ValueError("The tool capability cannot dispatch models or sandbox commands.")
-            return self._recorded(token, None, body, lambda: tools.dispatch(body), tools=tools)
+            return self._recorded(token, None, body, lambda: tools.dispatch(body), tools=tools, headers=headers)
         try:
             response = self._recorded(
                 token,
@@ -831,6 +836,7 @@ class ModelGateway:
                     operation_key=_model_attempt_key(headers),
                     protocol_headers=headers,
                 ),
+                headers=headers,
             )
         except BudgetInsufficientError as error:
             self.budget_refusal = error
@@ -899,8 +905,14 @@ class ModelGateway:
         dispatch: Callable[[], ModelHTTPResult],
         *,
         tools: McpToolsBroker | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> ModelHTTPResult:
         """Run one model, tool or evaluator call and write it as a run call.
+
+        The call is written under the candidate its usage tags name: the
+        request's tags header from a box, or the parent's open usage scope for
+        an in-process call. A call that serves no candidate, such as a
+        proposer call, goes to the recorder fallback, ``NO_CANDIDATE_ID``.
 
         Args:
             token: The scoped token the caller sent; it is a secret for the record.
@@ -909,6 +921,7 @@ class ModelGateway:
             dispatch: Serves the call.
             tools: The tool broker the call goes to, whose bound header and
                 URL query values are secrets for the record.
+            headers: The request headers, read only for the usage tags.
 
         Returns:
             The call's answer, unchanged.
@@ -916,6 +929,9 @@ class ModelGateway:
         recorder = self.recorder
         if recorder is None:
             return dispatch()
+        candidate = header_tags(headers).get("candidate")
+        if candidate:
+            recorder = recorder.bind(candidate_id=candidate)
         secret_values = [token, self._route_keys.get(token, "")]
         if route is not None:
             kind, target, recorder = "model", route.model, recorder.bind(role=route.role)

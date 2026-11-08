@@ -371,7 +371,7 @@ def _same_endpoint(url: str, connector: Connector) -> bool:
     )
 
 
-def _escaped_forms(fragment: str) -> set[str]:
+def escaped_forms(fragment: str) -> set[str]:
     """Return the JSON-escaped forms in which a server may echo a secret fragment.
 
     Args:
@@ -453,13 +453,17 @@ def relay_request(
     state = _RelayState(set(user_secrets.values()))
     started = recorder.start() if recorder is not None else None
     try:
+        target = (urlsplit(url).hostname or "").rstrip(".").lower()
+    except ValueError:  # a malformed url such as "http://[::1/x" is refused by _relay, and still recorded
+        target = ""
+    try:
         answer = _relay(url, headers, body, user_secrets, bindings, secret_hosts, allowed_hosts, send, runtime, state)
     except BaseException as error:  # a worker stop or cancel must still leave the call in the record
         if recorder is not None and started is not None:
             recorder.record(
                 started,
                 kind=kind,
-                target=(urlsplit(url).hostname or "").rstrip(".").lower(),
+                target=target,
                 # Only a refusal raised by the relay's own checks is "refused".
                 status="failed" if state.sent or not isinstance(error, Exception) else "refused",
                 request=body,
@@ -473,7 +477,7 @@ def relay_request(
         recorder.record(
             started,
             kind=kind,
-            target=(urlsplit(url).hostname or "").rstrip(".").lower(),
+            target=target,
             status="ok",
             request=body,
             response=answer,
@@ -535,7 +539,7 @@ def _relay(
         fragment for key, value in filled.items() if value != headers[key] for fragment in credential_fragments(value)
     }
     # A server can echo a value JSON-escaped (Go writes & as \u0026, PHP writes / as \/), so hide those forms too.
-    fragments |= {form for fragment in fragments for form in _escaped_forms(fragment)}
+    fragments |= {form for fragment in fragments for form in escaped_forms(fragment)}
     state.secrets |= set(values.values()) | fragments
     ordered = sorted(fragments, key=len, reverse=True)
     managed = any(bindings.get(name) == MANAGED_BINDING for name in names)
