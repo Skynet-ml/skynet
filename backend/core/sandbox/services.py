@@ -258,8 +258,9 @@ def _environment(name: str, value: Any) -> tuple[tuple[str, str], ...]:
         value: A mapping, a list of ``KEY=VALUE`` items, or ``None``.
 
     Returns:
-        The variables in file order. A list item with no value is left out,
-        because the box has no host environment to pass through.
+        The variables in file order. A list item with no value and a mapping
+        key with a null value are left out, because the box has no host
+        environment to pass through. An empty string stays an empty value.
 
     Raises:
         ComposeError: A key is not a valid variable name, or a value is not
@@ -269,8 +270,9 @@ def _environment(name: str, value: Any) -> tuple[tuple[str, str], ...]:
         return ()
     if isinstance(value, Mapping):
         pairs = [
-            (_scalar(name, "environment", key), "" if item is None else _scalar(name, "environment", item))
+            (_scalar(name, "environment", key), _scalar(name, "environment", item))
             for key, item in value.items()
+            if item is not None
         ]
     elif isinstance(value, list):
         items = [_scalar(name, "environment", item) for item in value]

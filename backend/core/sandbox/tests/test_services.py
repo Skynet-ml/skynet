@@ -135,6 +135,14 @@ def test_yaml_1_1_scalars_stay_as_written() -> None:
     assert service.environment == (("OFF", "x"), ("FEATURE", "on"), ("ZIP", "0123"), ("VERSION", "1.10"))
 
 
+def test_null_environment_values_are_left_out() -> None:
+    """Check that a null env value is left out, as in the list form, and an empty string stays empty."""
+    (service,) = parse_compose(
+        "services:\n  s:\n    command: x\n    environment:\n      E1:\n      E2: ~\n      E3: null\n      E4: ''\n"
+    )
+    assert service.environment == (("E4", ""),)
+
+
 def test_healthcheck_reads_disable_and_plain_numbers_from_text() -> None:
     """Check that disable, a unitless interval and retries still parse when plain scalars stay text."""
     off, on = parse_compose(
