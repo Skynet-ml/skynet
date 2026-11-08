@@ -104,8 +104,9 @@ class LocalEnvironment(SandboxEnvironment):
     async def stop(self) -> None:
         """Kill the running commands and remove the temp directory.
 
-        A cancel during the removal waits for the removal to finish, then
-        passes the cancel on, so the directory never outlives ``stop``.
+        A cancel during the removal, or a second cancel after it, waits for
+        the removal to finish, then passes the first cancel on, so the
+        directory never outlives ``stop``.
         """
         root = self._root
         if root is None:
@@ -122,11 +123,15 @@ class LocalEnvironment(SandboxEnvironment):
             _kill_group(pgid)
         self._groups.clear()
         cleanup = asyncio.ensure_future(asyncio.to_thread(_remove_tree, root))
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await cleanup
-            raise
+        cancelled: asyncio.CancelledError | None = None
+        while not cleanup.done():
+            try:
+                await asyncio.wait({cleanup})
+            except asyncio.CancelledError as error:
+                cancelled = cancelled or error
+        if cancelled is not None:
+            raise cancelled
+        cleanup.result()
 
     async def exec(
         self,

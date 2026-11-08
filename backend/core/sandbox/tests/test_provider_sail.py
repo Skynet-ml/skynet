@@ -528,6 +528,10 @@ async def test_ignore_mode_sends_no_size(fake_sdk: FakeCloud) -> None:
             {"allowed_hosts": ("a.example.com", "a.example.com", "*.b.example.com")},
             {"mode": "allow", "hosts": ["a.example.com", "*.b.example.com"]},
         ),
+        (
+            {"allowed_hosts": ("2001:db8::1", "192.0.2.10")},
+            {"mode": "allow", "hosts": ["2001:db8::1", "192.0.2.10"]},
+        ),
     ],
 )
 async def test_the_spec_network_maps_to_the_create_egress(
@@ -624,6 +628,51 @@ async def test_a_non_utf8_download_is_infra_without_the_bytes(fake_sdk: FakeClou
             await env.download_file("/tmp/b.bin")
     assert "secret" not in str(info.value)
     assert "xff" not in str(info.value)
+
+
+def test_mapped_turns_an_sdk_error_into_infra() -> None:
+    """Map an unknown SDK error to SandboxInfraError that names the action and keeps the cause."""
+    with (
+        pytest.raises(SandboxInfraError, match="Sail could not run a step: FakeSailError") as info,
+        sail._mapped("run a step"),
+    ):
+        raise FakeSailError("detail")
+    assert isinstance(info.value.__cause__, FakeSailError)
+    assert "detail" not in str(info.value)
+
+
+def test_mapped_keeps_a_sandbox_error_unchanged() -> None:
+    """Let a sandbox error pass through the mapping as the same object."""
+    error = SandboxFatalError("already mapped")
+    with pytest.raises(SandboxFatalError) as info, sail._mapped("run a step"):
+        raise error
+    assert info.value is error
+
+
+def test_mapped_does_not_catch_a_cancel() -> None:
+    """Let a cancel pass through the mapping, so it is never turned into an infra error."""
+    with pytest.raises(asyncio.CancelledError), sail._mapped("run a step"):
+        raise asyncio.CancelledError
+
+
+async def test_a_refused_egress_policy_is_infra(fake_sdk: FakeCloud) -> None:
+    """Map an SDK error from a policy change to SandboxInfraError."""
+
+    async def refuse(policy: Any) -> None:
+        """Refuse every policy change.
+
+        Args:
+            policy: The egress policy.
+
+        Raises:
+            FakeSailError: Always.
+        """
+        raise FakeSailError("refused")
+
+    async with SailEnvironment(_spec()) as env:
+        env._sailbox.set_egress_policy = _aio(refuse)
+        with pytest.raises(SandboxInfraError, match="change the egress policy: FakeSailError"):
+            await env.set_network_policy(NetworkPolicy(allowed_hosts=("api.example.com",)))
 
 
 async def test_a_create_error_is_infra_and_leaves_no_box(fake_sdk: FakeCloud) -> None:

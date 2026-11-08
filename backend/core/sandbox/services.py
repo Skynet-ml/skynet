@@ -355,7 +355,8 @@ def _compose_words(name: str, field: str, text: str) -> list[str]:
     Raises:
         ComposeError: The text has an unquoted ``;``, ``&``, ``|``, ``<`` or
             ``>``, which makes compose drop the rest; an unquoted ``(`` or
-            ``)`` that does not open or close ``$(...)``; or an unclosed
+            ``)`` that does not open or close ``$(...)``, which includes
+            a ``$(`` after a literal backslash; or an unclosed
             quote, backtick, ``$(`` or trailing backslash. Compose rejects
             the last two kinds too.
     """
@@ -394,7 +395,9 @@ def _compose_words(name: str, field: str, text: str) -> list[str]:
             backtick = not backtick
         elif backtick:
             pass
-        elif char == "(" and not dollar and word.endswith("$"):
+        elif char == "(" and not dollar and word.endswith("$") and not word.endswith("\\$"):
+            # go-shellwords refuses a $( after a literal backslash, so a
+            # backslash-dollar-paren falls through to the error below.
             dollar = True
         elif char == ")" and dollar:
             dollar = False

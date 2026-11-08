@@ -207,7 +207,7 @@ def _policy_name(hosts: list[str]) -> str:
     """Name the shared Runloop network policy for one set of hosts.
 
     Args:
-        hosts: The sorted allowed hosts; empty means no network.
+        hosts: The sorted, lower-case allowed hosts; empty means no network.
 
     Returns:
         A stable name, so boxes with the same egress share one policy.
@@ -228,8 +228,9 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
     Returns:
         True when the policy allows these hosts and nothing else.
     """
-    # Hostnames are case-insensitive, and Runloop may return them in another order.
-    wanted = sorted(host.lower() for host in hosts)
+    # Hostnames are case-insensitive, and Runloop may return them in another
+    # order or more than once.
+    wanted = {host.lower() for host in hosts}
     egress = getattr(policy, "egress", None)
     if egress is None:
         return False
@@ -240,7 +241,7 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
         and getattr(egress, "allow_mcp_gateway", False) is False
         and getattr(egress, "allow_runloop_mirrors", False) is False
         and not list(getattr(egress, "allowed_cidrs", None) or [])
-        and sorted(str(host).lower() for host in getattr(egress, "allowed_hostnames", None) or []) == wanted
+        and {str(host).lower() for host in getattr(egress, "allowed_hostnames", None) or []} == wanted
     )
 
 
@@ -389,7 +390,9 @@ class RunloopEnvironment(SandboxEnvironment):
         mode = network_mode(disabled=self.spec.network_disabled, allowed_hosts=tuple(self.spec.allowed_hosts))
         if mode is NetworkMode.OPEN:
             return None
-        hosts = [] if mode is NetworkMode.DENY_ALL else sorted(dict.fromkeys(self.spec.allowed_hosts))
+        # Hostnames are case-insensitive, so "A.example" and "a.example" share
+        # one policy name and one policy.
+        hosts = [] if mode is NetworkMode.DENY_ALL else sorted({host.lower() for host in self.spec.allowed_hosts})
         name = _policy_name(hosts)
         with _mapped("set up the network policy"):
             found = await self._find_policy(client, name, hosts)

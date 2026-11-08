@@ -622,6 +622,24 @@ async def test_allowlist_creates_then_reuses_one_policy(fake_sdk: FakeCloud) -> 
     ]
 
 
+async def test_allowlist_hosts_that_differ_only_in_case_share_one_policy(fake_sdk: FakeCloud) -> None:
+    """Lower-case the hosts before the policy name, so a case change reuses the policy."""
+    async with RunloopEnvironment(_spec(allowed_hosts=("A.Example", "a.example"))):
+        pass
+    async with RunloopEnvironment(_spec(allowed_hosts=("a.example",))):
+        pass
+    (policy,) = fake_sdk.policies
+    assert policy.name == runloop._policy_name(["a.example"])
+    assert policy.egress.allowed_hostnames == ["a.example"]
+
+
+def test_policy_with_a_repeated_host_still_matches() -> None:
+    """Match a Runloop policy that lists one allowed host twice."""
+    policy = SimpleNamespace(egress=_egress(allowed_hostnames=["a.example", "A.example"]))
+    assert runloop._policy_matches(policy, ["a.example"])
+    assert not runloop._policy_matches(policy, ["a.example", "b.example"])
+
+
 async def test_disabled_network_uses_the_no_network_policy(fake_sdk: FakeCloud) -> None:
     """Use an empty allowlist policy for deny-all egress."""
     async with RunloopEnvironment(_spec(network_disabled=True)):
