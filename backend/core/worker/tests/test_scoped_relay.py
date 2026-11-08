@@ -150,6 +150,15 @@ def test_recorder_sends_the_call_fields_and_drops_empty_secrets() -> None:
     assert secrets == ["key"]
 
 
+def test_recorder_keeps_a_duration_another_process_measured() -> None:
+    """Store the egress proxy's own duration instead of the time since ``start``."""
+    sink = _Sink()
+    recorder = scoped_relay.CallRecorder(sink, "job-1", "", "")
+    recorder.record(recorder.start(), kind="host", target="pypi.org", status="ok", duration_ms=4321)
+    [(_, call, _)] = sink.calls
+    assert call["duration_ms"] == 4321
+
+
 def test_recorder_bind_keeps_the_run_and_changes_the_candidate() -> None:
     """Bind a recorder to another candidate and role of the same run."""
     recorder = scoped_relay.CallRecorder(_Sink(), "job-1", "cand-1", "judge").bind(candidate_id="cand-2")

@@ -21,10 +21,11 @@ from core.config import Settings
 from core.exceptions import ServiceError
 from core.i18n import t
 from core.worker import engine
+from core.worker.scoped_relay import CallRecorder
 from core.worker.vercel_dspy import _require_image_protocol
 
 from .. import docker_sandbox
-from ..docker_egress_proxy import READY_MARKER
+from ..docker_egress_proxy import CALL_EVENT, READY_MARKER
 from ..docker_sandbox import (
     DOCKER_JOB_LABEL,
     DockerSandboxRuntime,
@@ -88,6 +89,7 @@ elif command == "inspect":
     print("null")
 elif command == "logs":
     print("{ready}")
+    sys.stdout.write(os.environ.get("FAKE_DOCKER_PROXY_LINES", ""))
 """
 
 
@@ -134,6 +136,7 @@ def fake_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, P
     log.touch()
     monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
     monkeypatch.delenv("FAKE_DOCKER_FAIL", raising=False)
+    monkeypatch.delenv("FAKE_DOCKER_PROXY_LINES", raising=False)
     return str(binary), log
 
 
@@ -242,6 +245,114 @@ def test_closing_a_setup_box_removes_it_then_its_proxy_and_network(fake_docker: 
         ["rm", "-f", egress.proxy],
         ["network", "rm", egress.network],
     ]
+
+
+class _Sink:
+    """Keep each run-call record the recorder writes."""
+
+    def __init__(self) -> None:
+        """Start with no records."""
+        self.calls: list[tuple[str, dict[str, Any], list[str]]] = []
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> None:
+        """Keep one record.
+
+        Args:
+            optimization_id: The run.
+            call: The record fields.
+            secrets: The values the store must remove.
+        """
+        self.calls.append((optimization_id, call, secrets))
+
+
+def _proxy_line(**fields: Any) -> str:
+    """Build one egress proxy call line, as the proxy prints it.
+
+    Args:
+        **fields: Fields that replace the defaults.
+
+    Returns:
+        The JSON line with its newline.
+    """
+    line = {
+        "event": CALL_EVENT,
+        "host": "pypi.org",
+        "port": 443,
+        "status": "ok",
+        "code": 200,
+        "reason": None,
+        "bytes_sent": 517,
+        "bytes_received": 4096,
+        "started_at": "2026-11-07T10:00:00.250+00:00",
+        "duration_ms": 87,
+    }
+    return json.dumps({**line, **fields}) + "\n"
+
+
+def test_closing_a_run_box_records_each_proxy_request_before_the_proxy_goes(
+    fake_docker: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each proxy line becomes one host record; other output lines are skipped."""
+    binary, log = fake_docker
+    monkeypatch.setenv(
+        "FAKE_DOCKER_PROXY_LINES",
+        _proxy_line()
+        + "not json\n"
+        + json.dumps({"event": "other"})
+        + "\n"
+        + _proxy_line(host="evil.example", status="refused", code=403, reason="host is not allowed", bytes_sent=0),
+    )
+    sink = _Sink()
+    session = DockerSandboxRuntime(_IMAGE, docker_bin=binary, recorder=CallRecorder(sink, "job-7", "", "")).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",))
+    )
+    assert isinstance(session, DockerSandboxSession)
+    egress = session.egress
+    assert egress is not None
+    log.write_text("")
+
+    session.close()
+    session.close()
+
+    assert _calls(log) == [
+        ["rm", "-f", session.container],
+        ["logs", egress.proxy],
+        ["rm", "-f", egress.proxy],
+        ["network", "rm", egress.network],
+    ]
+    (ok_id, ok, ok_secrets), (refused_id, refused, _) = sink.calls
+    assert (ok_id, refused_id, ok_secrets) == ("job-7", "job-7", [])
+    assert ok["kind"] == "host"
+    assert ok["target"] == "pypi.org"
+    assert (ok["status"], ok["failure_reason"], ok["duration_ms"]) == ("ok", None, 87)
+    assert ok["started_at"].isoformat() == "2026-11-07T10:00:00.250000+00:00"
+    assert json.loads(ok["request"]) == {"port": 443, "bytes_sent": 517}
+    assert json.loads(ok["response"]) == {"code": 200, "bytes_received": 4096}
+    assert (refused["target"], refused["status"]) == ("evil.example", "refused")
+    assert refused["failure_reason"] == "host is not allowed"
+    assert json.loads(refused["response"])["code"] == 403
+
+
+def test_unreadable_proxy_output_records_nothing_and_still_drops_the_proxy(
+    fake_docker: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``docker logs`` never blocks removing the proxy and network."""
+    binary, log = fake_docker
+    sink = _Sink()
+    session = DockerSandboxRuntime(_IMAGE, docker_bin=binary, recorder=CallRecorder(sink, "job-7", "", "")).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",))
+    )
+    assert isinstance(session, DockerSandboxSession)
+    egress = session.egress
+    assert egress is not None
+    log.write_text("")
+    monkeypatch.setenv("FAKE_DOCKER_FAIL", "logs")
+
+    session.disable_network()
+
+    assert sink.calls == []
+    assert ["rm", "-f", egress.proxy] in _calls(log)
+    assert ["network", "rm", egress.network] in _calls(log)
 
 
 def test_switching_a_setup_box_offline_drops_its_proxy(fake_docker: tuple[str, Path]) -> None:

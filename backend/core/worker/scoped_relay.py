@@ -105,6 +105,7 @@ class CallRecorder:
         failure_reason: str | None = None,
         cost_usd: float | None = None,
         secrets: Collection[str] = (),
+        duration_ms: int | None = None,
     ) -> None:
         """Write one call; a store failure is logged and never fails the call itself.
 
@@ -119,6 +120,8 @@ class CallRecorder:
             cost_usd: What the call cost the run, when known.
             secrets: Every secret value the call could carry, so the store
                 removes their raw and JSON-escaped forms.
+            duration_ms: The duration another process measured, such as the
+                egress proxy; None measures it from ``started``.
         """
         call = {
             "candidate_id": self.candidate_id,
@@ -126,7 +129,7 @@ class CallRecorder:
             "kind": kind,
             "target": target,
             "started_at": started.at,
-            "duration_ms": started.elapsed_ms(),
+            "duration_ms": started.elapsed_ms() if duration_ms is None else duration_ms,
             "status": status,
             "failure_reason": failure_reason,
             "cost_usd": cost_usd,
