@@ -15,10 +15,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from urllib.parse import quote
 
-import httpx
-
 from ....billing.env_connectors import CONNECTORS, connector_endpoint
-from ....billing.mcp_broker import _pinned_address, _PinnedTransport
 from .docker_egress_proxy import target_allowed
 from .repo_constraints import RepoConstraints, RoleEnvironment, ServiceSpec, TargetStage
 from .sandbox_contract import SandboxRuntime, SandboxSession, SandboxSpec
@@ -55,10 +52,6 @@ class ServiceSecretError(ValueError):
 
 class RoleRelayError(ValueError):
     """A role asks the relay for a service or MCP server it does not list; the message names the fix."""
-
-
-RELAY_TIMEOUT_SECONDS = 120.0
-RELAY_BODY_BYTES = 4 * 1024 * 1024
 
 
 def plan_role(role: RoleEnvironment) -> RolePlan:
@@ -276,10 +269,11 @@ def open_stage_boxes(runtime: SandboxRuntime, specs: Mapping[str, SandboxSpec]) 
 def box_mcp_config(role: RoleEnvironment, relay_url: str) -> dict[str, object]:
     """Build the ``.mcp.json`` a role's box gets, from the role's checked servers only.
 
-    The box never gets the repository's own file: a raw copy could carry a
-    duplicate key or a header value that the check did not see. Each entry
-    points at the relay, which holds the real url and headers, so no secret
-    and no placeholder enters the box (E49, E53).
+    ``repo_staging.relay_mcp_archive`` writes it over the role's own file in
+    the scorer box's tree. A raw copy could carry a duplicate key or a header
+    value that the check did not see. Each entry points at the relay, which
+    holds the real url and headers, so no secret and no placeholder enters
+    the box (E49, E53).
 
     Args:
         role: The role, with its MCP servers filled from its own file.
@@ -352,42 +346,3 @@ def mcp_endpoint(label: str, role: RoleEnvironment, name: str) -> tuple[str, dic
             f' Add it to a .mcp.json file and set {label} mcp = ".mcp.json".'
         )
     raise RoleRelayError(f"MCP server {name!r} is not in {role.mcp}, the {label} MCP file. Add it there.")
-
-
-def send_once(url: str, headers: Mapping[str, str], body: bytes, *, allow_private: bool = False) -> bytes:
-    """POST one relay request to its declared url and return the answer body.
-
-    The connection stays on the address the host resolved to, and a redirect
-    is not followed: its body comes back as the answer, so a server cannot
-    send a filled secret on to another host.
-
-    Args:
-        url: The declared https url.
-        headers: The filled headers.
-        body: The request body from the box.
-        allow_private: Allow a private address; only tests set it.
-
-    Returns:
-        The answer body.
-
-    Raises:
-        ValueError: When the host resolves to a private address, or the
-            answer is larger than :data:`RELAY_BODY_BYTES`.
-        httpx.HTTPError: When the server cannot be reached.
-    """
-    transport = _PinnedTransport(url, _pinned_address(url, allow_private, label="relay url"))
-    try:
-        with (
-            httpx.Client(
-                transport=transport, follow_redirects=False, trust_env=False, timeout=RELAY_TIMEOUT_SECONDS
-            ) as client,
-            client.stream("POST", url, headers=dict(headers), content=body) as response,
-        ):
-            content = bytearray()
-            for chunk in response.iter_bytes():
-                content.extend(chunk)
-                if len(content) > RELAY_BODY_BYTES:
-                    raise ValueError(f"The answer from {url} is larger than 4 MiB.")
-            return bytes(content)
-    finally:
-        transport.close()

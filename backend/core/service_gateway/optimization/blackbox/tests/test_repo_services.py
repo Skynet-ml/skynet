@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import json
-import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from core.billing.env_connectors import relay_request
 from core.billing.signals import BudgetReached
 from core.service_gateway.optimization.blackbox import repo_services
 from core.service_gateway.optimization.blackbox.repo_constraints import (
@@ -456,90 +453,3 @@ def test_each_role_reaches_only_the_servers_in_its_own_mcp_file() -> None:
         repo_services.mcp_endpoint("[target.planner]", planner, "docs")
     with pytest.raises(repo_services.RoleRelayError, match=r'set \[target\.router\] mcp = "\.mcp\.json"'):
         repo_services.mcp_endpoint("[target.router]", constraints.targets["router"], "docs")
-
-
-class _EchoHandler(BaseHTTPRequestHandler):
-    """Echo the request headers back, or redirect ``/redirect`` to ``/leak``."""
-
-    hits: list[str] = []
-
-    def do_POST(self) -> None:
-        """Answer one POST and record its path."""
-        type(self).hits.append(self.path)
-        self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        if self.path == "/redirect":
-            self.send_response(302)
-            self.send_header("Location", "/leak")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        body = json.dumps({"echo": dict(self.headers.items())}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: object) -> None:
-        """Keep the test output quiet."""
-
-
-@pytest.fixture
-def echo_server() -> Iterator[str]:
-    """Run a local echo server on a free port.
-
-    Yields:
-        The server's base url.
-    """
-    _EchoHandler.hits = []
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _EchoHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def _relay(url: str) -> bytes:
-    """Send one relay request with a user secret bound to 127.0.0.1.
-
-    Args:
-        url: The echo server url to call.
-
-    Returns:
-        The answer the box gets.
-    """
-    return relay_request(
-        url=url,
-        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
-        body=b"{}",
-        user_secrets={"JUDGE_KEY": _SECRET},
-        bindings={"JUDGE_KEY": "user"},
-        secret_hosts={"JUDGE_KEY": "127.0.0.1"},
-        allowed_hosts={"JUDGE_KEY": ("127.0.0.1",)},
-        send=lambda target, headers, body: repo_services.send_once(target, headers, body, allow_private=True),
-    )
-
-
-def test_the_relay_hides_a_secret_that_the_server_echoes(echo_server: str) -> None:
-    """The server sees the filled header; the box gets the answer without the secret (E53)."""
-    answer = _relay(f"{echo_server}/mcp")
-
-    assert _EchoHandler.hits == ["/mcp"]
-    assert b"echo" in answer
-    assert _SECRET.encode() not in answer
-
-
-def test_the_relay_does_not_follow_a_redirect(echo_server: str) -> None:
-    """A 302 comes back to the box as the answer; the secret never goes to the new location."""
-    _relay(f"{echo_server}/redirect")
-
-    assert _EchoHandler.hits == ["/redirect"]
-
-
-def test_the_relay_refuses_a_private_address_by_default() -> None:
-    """Without the test opt-in, a url that resolves to a private address is refused before any connection."""
-    with pytest.raises(ValueError, match="private"):
-        repo_services.send_once("http://127.0.0.1:9/mcp", {}, b"{}")

@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 
 from .. import runner
+from ..repo_constraints import McpServer, RoleEnvironment
+from ..repo_services import box_mcp_config
 from ..runner import (
     GatewayClient,
     Image,
@@ -844,8 +846,8 @@ def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> No
     assert base64.b64decode(message["body"]) == b"hello chunked world"
 
 
-def test_mcp_proxy_relays_each_server_and_writes_a_config_with_loopback_urls_only() -> None:
-    """``/mcp/<name>`` becomes one ``mcp`` message, and the MCP file the box gets holds no header or secret (E49, E55)."""
+def test_mcp_proxy_relays_each_server_and_names_the_role_mcp_file() -> None:
+    """``/mcp/<name>`` becomes one ``mcp`` message, and the box's MCP variable names the role's own file (E49, E55)."""
 
     class Client:
         """Answer each message the way the parent relay does."""
@@ -871,13 +873,14 @@ def test_mcp_proxy_relays_each_server_and_writes_a_config_with_loopback_urls_onl
             }
 
     client = Client()
-    env = runner.start_service_proxy(client, [], ["search tool"])  # type: ignore[arg-type]
+    env = runner.start_service_proxy(client, [], ["search tool"], mcp_file=".mcp.json")  # type: ignore[arg-type]
     assert set(env) == {"SKYNET_MCP_SEARCH_TOOL_URL", runner.MCP_CONFIG_ENV}
     url = env["SKYNET_MCP_SEARCH_TOOL_URL"]
     assert url.startswith("http://127.0.0.1:")
     assert url.endswith("/mcp/search%20tool")
-    config = json.loads(Path(env[runner.MCP_CONFIG_ENV]).read_text())
-    assert config == {"mcpServers": {"search tool": {"type": "http", "url": url}}}
+    assert env[runner.MCP_CONFIG_ENV] == str(Path(".mcp.json").resolve())
+    role = RoleEnvironment(mcp=".mcp.json", mcp_servers=(McpServer(name="search tool", url="https://x.test/mcp"),))
+    assert box_mcp_config(role, url.split("/mcp/")[0]) == {"mcpServers": {"search tool": {"type": "http", "url": url}}}
 
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(urllib.request.Request(url, data=b'{"jsonrpc":"2.0"}', method="POST")) as response:

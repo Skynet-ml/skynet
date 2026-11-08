@@ -288,10 +288,10 @@ class RepoScorer:
             RepoScoreError: When the version breaks the path rules or does not
                 apply, changes a protected file while it runs, or the scorer
                 fails or returns no score.
-            BudgetReached: When the run's budget stopped a model call.
-            BudgetError: When a model call had insufficient budget coverage.
-            UsagePendingError: When a model call needs reconciliation.
-            UnpricedOperationError: When the parent cannot bound a model call.
+            BudgetReached: When the run's budget stopped a model, service or MCP call.
+            BudgetError: When a model, service or MCP call had insufficient budget coverage.
+            UsagePendingError: When a model, service or MCP call needs reconciliation.
+            UnpricedOperationError: When the parent cannot bound a model, service or MCP call.
         """
         gateway = self._gateway
         secrets = list(self._workspace.secrets.values())
@@ -400,6 +400,7 @@ class RepoScorer:
             # or the next checkout; a new box is the only sure stop (E38).
             self._workspace.close()
         _raise_control(output)
+        _raise_control({"control": relay.control if relay is not None else None})
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
             raise RepoScoreError("The scorer raised an error, so the version has no score.")
@@ -447,6 +448,10 @@ class RepoScorer:
         Raises:
             RepoScoreError: When the version changed a protected file, or not
                 every process it started could be shown to have stopped.
+            BudgetReached: When the run's budget stopped a service or MCP call.
+            BudgetError: When a service or MCP call had insufficient budget coverage.
+            UsagePendingError: When a service or MCP call needs reconciliation.
+            UnpricedOperationError: When the parent cannot bound a service or MCP call.
         """
         supervisor = f"{call}/candidate"
         payload: dict[str, Any] = {
@@ -489,6 +494,7 @@ class RepoScorer:
             # version's metric files; a new box is the only sure stop.
             self._workspace.close()
             raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
+        _raise_control({"control": relay.control if relay is not None else None})
         return ran
 
     def _check_changes(self, relay: _StageRelay | None, secrets: list[str]) -> None:
@@ -759,6 +765,32 @@ class RepoScorer:
         self._workspace.close()
 
 
+def _control_answer(error: BaseException) -> dict[str, Any] | None:
+    """Return the control answer for a budget stop, the same codes as a stage call gets.
+
+    Args:
+        error: The exception a relayed call raised.
+
+    Returns:
+        ``{"status": 503, "error", "control"}``, or ``None`` when the error is not a budget stop.
+    """
+    if isinstance(error, BudgetReached):
+        code = "budget_reached"
+    elif isinstance(error, BudgetInsufficientError):
+        code = "budget_insufficient"
+    elif isinstance(error, UnpricedOperationError):
+        code = "unpriced_operation"
+    elif isinstance(error, BudgetError | UsagePendingError):
+        code = "usage_pending"
+    else:
+        return None
+    return {
+        "status": 503,
+        "error": f"The run's budget stopped the request: {code}.",
+        "control": {"code": code, "message": str(error)},
+    }
+
+
 class _StageRelay:
     """Answer one scorer call's ``call(name, input)``, service and MCP frames.
 
@@ -842,6 +874,9 @@ class _StageRelay:
         self.changes: list[str] = []
         # A failed check is not tampering, so it never reaches the rule judge.
         self.unchecked = False
+        # The first budget stop of a service or MCP call: the parent raises it after the call,
+        # whatever the box does with its 503.
+        self.control: dict[str, str] | None = None
 
     def config(self, root: str) -> dict[str, Any]:
         """Describe the relay to the runner in the scorer box.
@@ -850,9 +885,10 @@ class _StageRelay:
             root: The scorer box's working directory.
 
         Returns:
-            ``{"prefix", "response_dir", "names", "services", "mcp"}`` for
-            the call's input; ``services`` and ``mcp`` list what the role
-            may call, by name only.
+            ``{"prefix", "response_dir", "names", "services", "mcp", "mcp_file", "port"}``
+            for the call's input; ``services`` and ``mcp`` list what the role
+            may call, by name only. ``mcp_file`` is the role's own
+            ``.mcp.json``, which staging rewrote to loopback urls on ``port``.
         """
         return {
             "prefix": self._prefix,
@@ -860,6 +896,8 @@ class _StageRelay:
             "names": list(self._boxes),
             "services": [name for name in self._services if name in self._allowed],
             "mcp": [server.name for server in self._mcp.mcp_servers],
+            "mcp_file": self._mcp.mcp,
+            "port": runner.RELAY_PORT,
         }
 
     def output(self, stream: str, data: str) -> None:
@@ -924,12 +962,12 @@ class _StageRelay:
         Returns:
             The refusal answer, or ``None`` when the request may go out.
         """
-        if not isinstance(name, str) or name not in self._declared:
+        if not isinstance(name, str):
             return {"status": 404, "error": f"Unknown service {name!r}."}
         try:
             service_endpoint(f"[{self._role}]", RoleEnvironment(services=self._allowed), self._declared, name)
         except RoleRelayError as error:
-            return {"status": 403, "error": str(error)}
+            return {"status": 404 if name not in self._declared else 403, "error": str(error)}
         return None
 
     def _mcp_refusal(self, name: Any) -> dict[str, Any] | None:
@@ -961,9 +999,12 @@ class _StageRelay:
         try:
             url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
             response = self._request(url, headers, label, frame)
-        except Exception as error:
-            logger.warning("MCP server %s request failed in the parent: %s", name, error)
-            response = {"status": 502, "error": f"{label} could not be reached."}
+        except (BudgetReached, Exception) as error:
+            response = self._stopped(error)
+            if response is None:
+                # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
+                logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
+                response = {"status": 502, "error": f"{label} could not be reached."}
         self._answer(identity, response)
 
     def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
@@ -977,10 +1018,29 @@ class _StageRelay:
         try:
             spec = self._services[name]
             response = self._request(str(spec.url), spec.request_headers, f"Service {name!r}", frame)
-        except Exception as error:
-            logger.warning("Service %s request failed in the parent: %s", name, error)
-            response = {"status": 502, "error": f"Service {name!r} could not be reached."}
+        except (BudgetReached, Exception) as error:
+            response = self._stopped(error)
+            if response is None:
+                # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
+                logger.warning("Service %s request failed in the parent: %s", name, type(error).__name__)
+                response = {"status": 502, "error": f"Service {name!r} could not be reached."}
         self._answer(identity, response)
+
+    def _stopped(self, error: BaseException) -> dict[str, Any] | None:
+        """Keep the first budget stop of a service or MCP call and return its answer.
+
+        Args:
+            error: The exception the call raised.
+
+        Returns:
+            The control answer, or ``None`` when the error is not a budget stop.
+        """
+        response = _control_answer(error)
+        if response is None:
+            return None
+        with self._answer_lock:
+            self.control = self.control or response["control"]
+        return response
 
     def _request(
         self, origin: str, declared: Mapping[str, str], label: str, frame: Mapping[str, Any]
@@ -1088,6 +1148,9 @@ class _StageRelay:
             )
         except _AnswerTooLargeError:
             return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
+        except (BudgetError, UnpricedOperationError):
+            # These are ValueErrors too, but a budget stop, not a secret refusal.
+            raise
         except ValueError as error:
             # relay_request names the secret and the host, never a value.
             return {"status": 403, "error": f"{label} was refused: {error}"}

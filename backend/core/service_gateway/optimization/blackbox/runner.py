@@ -35,8 +35,9 @@ gets ``SKYNET_SERVICE_<NAME>_URL``, a loopback address in the box whose
 requests go through the same relay, so the service's key stays with the
 parent. Its optional ``mcp`` list names the http servers of the role's own
 MCP file: each gets ``SKYNET_MCP_<NAME>_URL`` on the same loopback port, and
-``SKYNET_MCP_CONFIG`` names a ``.mcp.json`` in the box that holds only those
-loopback urls, never a header or a secret. In a stage box,
+``SKYNET_MCP_CONFIG`` names the role's own ``.mcp.json`` in the checkout. The
+parent replaced that file before the box opened: each entry is a loopback url
+on ``RELAY_PORT``, never the real url, a header or a secret. In a stage box,
 ``python3 app_runner.py --stage <call_dir> <path/file.py:function>`` runs
 one stage call and writes ``{"output": ...}`` or ``{"error": ...}``.
 
@@ -67,7 +68,6 @@ import site
 import ssl
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import traceback
@@ -103,8 +103,11 @@ STAGE_FLAG = "--stage"
 SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
 # Each server of the role's own MCP file is at this variable's loopback address (E49).
 MCP_ENV_PREFIX = "SKYNET_MCP_"
-# Names a ``.mcp.json`` with only the loopback urls, for MCP clients that read a config file.
+# Names the role's own ``.mcp.json``, for MCP clients that read a config file.
 MCP_CONFIG_ENV = "SKYNET_MCP_CONFIG"
+# The box's loopback relay port. It is fixed because the parent writes each
+# role's .mcp.json with loopback urls before the box opens (E49, E53).
+RELAY_PORT = 47_311
 # ``app_runner.py --candidate <call_dir>`` runs the ``[run]`` entry and stops what it left (E38).
 CANDIDATE_FLAG = "--candidate"
 # ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
@@ -296,7 +299,9 @@ def _env_part(name: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in name.upper())
 
 
-def start_service_proxy(client: StageClient, names: Sequence[str], mcp: Sequence[str] = ()) -> dict[str, str]:
+def start_service_proxy(
+    client: StageClient, names: Sequence[str], mcp: Sequence[str] = (), *, port: int = 0, mcp_file: str | None = None
+) -> dict[str, str]:
     """Serve the run's services and MCP servers on a loopback port whose requests go through the parent's relay.
 
     The box is offline and never holds a key: the parent checks that the
@@ -307,10 +312,12 @@ def start_service_proxy(client: StageClient, names: Sequence[str], mcp: Sequence
         client: The relay client of this call.
         names: The services the role may reach.
         mcp: The servers of the role's own MCP file.
+        port: The loopback port; ``0`` picks a free one.
+        mcp_file: The role's ``.mcp.json``, relative to the working directory.
 
     Returns:
         ``SKYNET_SERVICE_<NAME>_URL`` for each service, ``SKYNET_MCP_<NAME>_URL``
-        for each server, and ``SKYNET_MCP_CONFIG`` when there is a server.
+        for each server, and ``SKYNET_MCP_CONFIG`` when there is a server and a file.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -378,17 +385,14 @@ def start_service_proxy(client: StageClient, names: Sequence[str], mcp: Sequence
         def log_message(self, format: str, *args: Any) -> None:
             """Keep the access log out of the scorer's stderr, where log() events travel."""
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, name="service-proxy", daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     env = {service_env_name(name): f"{base}/service/{urllib.parse.quote(name, safe='')}/" for name in names}
     servers = {name: f"{base}/mcp/{urllib.parse.quote(name, safe='')}" for name in mcp}
     env.update({mcp_env_name(name): url for name, url in servers.items()})
-    if servers:
-        handle, config = tempfile.mkstemp(prefix="skynet-mcp-", suffix=".json")
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"mcpServers": {name: {"type": "http", "url": url} for name, url in servers.items()}}, stream)
-        env[MCP_CONFIG_ENV] = config
+    if servers and mcp_file:
+        env[MCP_CONFIG_ENV] = str(Path(mcp_file).resolve())
     return env
 
 
@@ -404,7 +408,16 @@ def _relay_env(client: StageClient, stages: dict[str, Any]) -> dict[str, str]:
     """
     services = [str(name) for name in stages.get("services") or ()]
     mcp = [str(name) for name in stages.get("mcp") or ()]
-    return start_service_proxy(client, services, mcp) if services or mcp else {}
+    if not services and not mcp:
+        return {}
+    mcp_file = stages.get("mcp_file")
+    return start_service_proxy(
+        client,
+        services,
+        mcp,
+        port=int(stages.get("port") or 0),
+        mcp_file=mcp_file if isinstance(mcp_file, str) else None,
+    )
 
 
 def missing_stage(name: Any = None, input: Any = None) -> Any:

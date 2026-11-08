@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import io
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ from ..connectors.saved_secrets import SavedSecretStore
 from ..exceptions import ServiceError
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
+from ..service_gateway.optimization.blackbox import runner
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
@@ -57,7 +59,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     read_constraints,
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
-from ..service_gateway.optimization.blackbox.repo_services import plan_roles
+from ..service_gateway.optimization.blackbox.repo_services import box_mcp_config, plan_roles
 from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
 from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
@@ -129,6 +131,9 @@ class StagedRepository:
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = 60.0
     agent_archive: Path | None = None
+    # The scorer box's tree: the full tree with every role's MCP file replaced
+    # by loopback urls, so the box never holds a real upstream url (E49, E53).
+    scorer_archive: Path | None = None
     exploits_path: str = EXPLOITS_DIR
     # The relay fills a service's ${NAME} headers only for the secret's own
     # host and the run's allowed hosts, and meters a Skynet key (E49-E53).
@@ -239,6 +244,15 @@ def stage_repository(
         )
         if leaks:
             raise RepoGateError(leaks)
+        scorer_archive = (
+            relay_mcp_archive(
+                snapshot.archive,
+                tuple(environment.constraints.mcp_roles.values()),
+                workdir / "scorer-tree.tgz",
+            )
+            if environment.constraints is not None
+            else None
+        )
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
@@ -283,11 +297,46 @@ def stage_repository(
         run_entry=environment.constraints.run_entry if environment.constraints is not None else None,
         run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
         agent_archive=agent_archive,
+        scorer_archive=scorer_archive,
         exploits_path=metric.exploits,
         secret_bindings=secret_bindings,
         secret_hosts=environment.constraints.secret_hosts if environment.constraints is not None else {},
         secret_allowed_hosts=secret_allowed_hosts,
     )
+
+
+def relay_mcp_archive(archive: Path, roles: tuple[RoleEnvironment, ...], destination: Path) -> Path:
+    """Pack a copy of a tree with each role's MCP file pointed at the box's relay.
+
+    The protected check compares the box's files with this archive, so the
+    rewrite happens here and not in the box. Each entry gets the loopback url
+    of the runner's relay; the parent keeps the real url and headers (E49, E53).
+
+    Args:
+        archive: Packed full tree.
+        roles: Every role that may name an MCP file; [run] and [metric] call
+            through the relay, and the other files get loopback urls too.
+        destination: Where to write the copy.
+
+    Returns:
+        ``destination``.
+    """
+    relay = f"http://127.0.0.1:{runner.RELAY_PORT}"
+    files = {
+        posixpath.normpath(role.mcp): (json.dumps(box_mcp_config(role, relay), indent=2) + "\n").encode()
+        for role in roles
+        if role.mcp is not None
+    }
+    with tarfile.open(archive) as source, tarfile.open(destination, "w:gz") as target:
+        for member in source:
+            body = files.get(posixpath.normpath(member.name)) if member.isreg() else None
+            if body is not None:
+                member = copy.copy(member)
+                member.size = len(body)
+                target.addfile(member, io.BytesIO(body))
+            else:
+                target.addfile(member, source.extractfile(member) if member.isreg() else None)
+    return destination
 
 
 def _ensure_unchanged(previous: Any, current: dict[str, Any]) -> None:
@@ -580,7 +629,7 @@ def bind_repo_scorer(
                 allowed_hosts=hosts,
                 operation_key=f"repo-scorer:{owner_id}",
             ),
-            archive=staged.snapshot.archive,
+            archive=staged.scorer_archive or staged.snapshot.archive,
             editable_paths=target["repo"]["editable_paths"],
             readonly_paths=staged.snapshot.readonly_paths,
             setup_command=target.get("setup_command"),

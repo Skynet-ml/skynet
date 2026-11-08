@@ -18,12 +18,15 @@ from typing import Any
 
 import pytest
 
+from core.billing.budgets import BudgetError, BudgetInsufficientError
+from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
-from .. import repo_scorer
+from .. import repo_scorer, runner
 from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
 from ..repo_scorer import (
     _STAGE_LAYOUT_SECONDS,
@@ -66,6 +69,16 @@ def score(repo_path, case=None):
         },
     }
 """
+
+
+@pytest.fixture(autouse=True)
+def _free_relay_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let each test's runner bind a free port, so parallel workers never share the fixed one.
+
+    Args:
+        monkeypatch: Restores the fixed port after the test.
+    """
+    monkeypatch.setattr(runner, "RELAY_PORT", 0)
 
 
 @pytest.fixture
@@ -1483,6 +1496,7 @@ def _service_relay(
     services: Mapping[str, ServiceSpec],
     host: str = "judge.example.test",
     allowed_hosts: tuple[str, ...] | None = None,
+    secret: str = "judge-secret-value",
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the given services.
 
@@ -1493,6 +1507,7 @@ def _service_relay(
         services: The run's services.
         host: The host ``JUDGE_KEY`` belongs to.
         allowed_hosts: The run's allowed hosts for ``JUDGE_KEY``; ``None`` allows ``host``.
+        secret: The value of ``JUDGE_KEY``.
 
     Returns:
         The relay.
@@ -1507,7 +1522,7 @@ def _service_relay(
         services=services,
         role=role,
         allowed=allowed,
-        secrets={"JUDGE_KEY": "judge-secret-value"},
+        secrets={"JUDGE_KEY": secret},
         secret_hosts={"JUDGE_KEY": host},
         allowed_hosts={"JUDGE_KEY": (host,) if allowed_hosts is None else allowed_hosts},
     )
@@ -1553,7 +1568,7 @@ def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -
 @pytest.mark.parametrize(
     ("name", "status", "message"),
     [
-        ("nope", 404, "Unknown service 'nope'."),
+        ("nope", 404, "Service 'nope' is not in optimize.toml. Add a [services.nope] table."),
         ("github", 403, "only services with a url go through the relay"),
     ],
 )
@@ -1639,7 +1654,7 @@ def _echo_relay(workspace: _Workspace, port: int, **hosts: Any) -> _StageRelay:
     Args:
         workspace: Records the answers.
         port: The upstream's port.
-        **hosts: ``host`` and ``allowed_hosts`` overrides for ``_service_relay``.
+        **hosts: ``host``, ``allowed_hosts`` and ``secret`` overrides for ``_service_relay``.
 
     Returns:
         The relay.
@@ -1710,13 +1725,22 @@ def test_a_metric_that_does_not_list_the_service_gets_the_fix_in_the_error(echo:
     assert echo.paths == []
 
 
-def _mcp_relay(workspace: _Workspace, role: str, mcp: RoleEnvironment) -> _StageRelay:
-    """Build a relay with no stage boxes and no services that forwards to the role's MCP servers.
+def _mcp_relay(
+    workspace: _Workspace,
+    role: str,
+    mcp: RoleEnvironment,
+    *,
+    services: Mapping[str, ServiceSpec] | None = None,
+    secret: str = "judge-secret-value",
+) -> _StageRelay:
+    """Build a relay with no stage boxes that forwards to the role's MCP servers.
 
     Args:
         workspace: Records the answers.
         role: The calling role.
         mcp: The role with the servers of its own MCP file.
+        services: The run's services, which the role also lists.
+        secret: The value of ``JUDGE_KEY``.
 
     Returns:
         The relay.
@@ -1728,9 +1752,11 @@ def _mcp_relay(workspace: _Workspace, role: str, mcp: RoleEnvironment) -> _Stage
         max_concurrency=2,
         env={},
         workspace=workspace,  # type: ignore[arg-type]
+        services=services,
         role=role,
+        allowed=tuple(services or ()),
         mcp=mcp,
-        secrets={"JUDGE_KEY": "judge-secret-value"},
+        secrets={"JUDGE_KEY": secret},
         secret_hosts={"JUDGE_KEY": "judge.example.test"},
         allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
     )
@@ -1781,6 +1807,7 @@ def test_an_mcp_server_gets_the_key_and_the_box_gets_only_the_redacted_form(echo
     workspace = _Workspace()
     relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
     assert relay.config("/work")["mcp"] == ["search"]
+    assert relay.config("/work")["mcp_file"] == ".mcp.json"
 
     answer = _mcp_answer(relay, workspace, "search")
 
@@ -1822,6 +1849,131 @@ def test_a_role_reaches_only_the_servers_of_its_own_mcp_file(echo: _Echo, mcp: R
     assert answer["status"] == 403
     assert answer["error"].endswith(message)
     assert echo.paths == []
+
+
+def test_an_mcp_name_and_a_service_name_never_cross(echo: _Echo) -> None:
+    """``/mcp/judge`` cannot reach the ``judge`` service, and ``/service/search`` cannot reach the MCP server (E55)."""
+    judge = ServiceSpec(
+        secrets=("JUDGE_KEY",),
+        url=f"http://judge.example.test:{echo.port}/",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+    )
+    workspace = _Workspace()
+    mcp = _mcp_answer(_mcp_relay(workspace, "run", _mcp_role(echo.port), services={"judge": judge}), workspace, "judge")
+    workspace = _Workspace()
+    service = _service_answer(
+        _mcp_relay(workspace, "run", _mcp_role(echo.port), services={"judge": judge}), workspace, "search", path="echo"
+    )
+
+    assert mcp["status"] == 403
+    assert mcp["error"].endswith("MCP server 'judge' is not in .mcp.json, the [run] MCP file. Add it there.")
+    assert service == {
+        "status": 404,
+        "error": "Service 'search' is not in optimize.toml. Add a [services.search] table.",
+    }
+    assert echo.paths == []
+
+
+@pytest.mark.parametrize("kind", ["mcp", "service"])
+def test_a_secret_the_http_library_rejects_never_reaches_the_log(
+    echo: _Echo, kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A filled header that h11 refuses gives a plain 502, and the log holds the error type, not the value."""
+    workspace = _Workspace()
+    secret = "judge-secret-value\nX-Injected: 1"
+    with caplog.at_level(logging.WARNING, logger=repo_scorer.logger.name):
+        if kind == "mcp":
+            answer = _mcp_answer(_mcp_relay(workspace, "run", _mcp_role(echo.port), secret=secret), workspace, "search")
+        else:
+            relay = _echo_relay(workspace, echo.port, secret=secret)
+            answer = _service_answer(relay, workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 502
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert "LocalProtocolError" in caplog.text
+    assert "judge-secret-value" not in caplog.text
+    assert echo.paths == []
+
+
+@pytest.mark.parametrize("kind", ["mcp", "service"])
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (BudgetReached("spent"), "budget_reached"),
+        (BudgetInsufficientError("short"), "budget_insufficient"),
+        (UnpricedOperationError("no price"), "unpriced_operation"),
+        (BudgetError("no cover"), "usage_pending"),
+        (UsagePendingError("pending"), "usage_pending"),
+    ],
+)
+def test_a_budget_stop_in_a_relayed_call_answers_the_box_at_once_and_stops_the_call(
+    echo: _Echo, monkeypatch: pytest.MonkeyPatch, kind: str, error: BaseException, code: str
+) -> None:
+    """A budget stop gets the stage call's control code within 1 s, never a 403 or a lost answer, and the parent keeps it."""
+
+    def stop(**_: Any) -> bytes:
+        """Raise the budget stop as the metered relay does.
+
+        Raises:
+            BaseException: The parametrized stop.
+        """
+        raise error
+
+    monkeypatch.setattr(repo_scorer, "relay_request", stop)
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port)) if kind == "mcp" else _echo_relay(workspace, echo.port)
+    started = time.monotonic()
+    if kind == "mcp":
+        answer = _mcp_answer(relay, workspace, "search")
+    else:
+        answer = _service_answer(relay, workspace, "judge", path="echo", method="GET")
+
+    assert time.monotonic() - started < 1
+    assert answer["status"] == 503
+    assert answer["control"] == {"code": code, "message": str(error)}
+    assert relay.control == {"code": code, "message": str(error)}
+    with pytest.raises(UsagePendingError if code == "usage_pending" else type(error)):
+        repo_scorer._raise_control({"control": relay.control})
+
+
+def test_the_scorer_gives_each_role_only_the_servers_of_its_own_mcp_file(tmp_path: Path) -> None:
+    """The [run] relay holds only the [run] file's servers, and the [metric] relay only the [metric] file's (E55)."""
+    run = RoleEnvironment(
+        mcp=".mcp.json", mcp_servers=(McpServer(name="search", url="https://search.example.test/mcp", headers={}),)
+    )
+    metric = RoleEnvironment(
+        mcp="eval/.mcp.json",
+        mcp_servers=(McpServer(name="grader", url="https://grader.example.test/mcp", headers={}),),
+    )
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=_archive(tmp_path, {"src/app.py": "x = 1\n"}),
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        SERVICE_SCORER,
+        timeout_seconds=60,
+        mcp_roles={"run": run, "metric": metric},
+    )
+    seen = {}
+    for role, other in (("run", "grader"), ("metric", "search")):
+        with scorer._service_relay(role, "calls/000001/stages") as relay:
+            assert relay is not None
+            seen[role] = (relay.config("/work")["mcp"], relay._mcp_refusal(other))
+
+    assert seen["run"][0] == ["search"]
+    assert seen["metric"][0] == ["grader"]
+    assert seen["run"][1]["status"] == seen["metric"][1]["status"] == 403
+    assert seen["run"][1]["error"].endswith(
+        "MCP server 'grader' is not in .mcp.json, the [run] MCP file. Add it there."
+    )
+    assert seen["metric"][1]["error"].endswith(
+        "MCP server 'search' is not in eval/.mcp.json, the [metric] MCP file. Add it there."
+    )
 
 
 _PROBE_CANDIDATE = """
