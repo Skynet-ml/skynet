@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -37,7 +38,12 @@ def _archive(root: Path, files: dict[str, str]) -> Path:
         (source / name).parent.mkdir(parents=True, exist_ok=True)
         (source / name).write_text(text)
     archive = root / "tree.tgz"
-    subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "."], check=True)
+    # macOS tar would add AppleDouble ``._*`` members, which no real snapshot holds.
+    subprocess.run(
+        ["tar", "-czf", str(archive), "-C", str(source), "."],
+        check=True,
+        env={**os.environ, "COPYFILE_DISABLE": "1"},
+    )
     return archive
 
 

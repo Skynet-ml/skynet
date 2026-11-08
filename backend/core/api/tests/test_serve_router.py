@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -286,10 +287,11 @@ def repo_serve(
     state["fetches"] = []
 
     def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
-        """Record one fetch and write a placeholder archive."""
+        """Record one fetch and write an empty packed tree."""
         state["fetches"].append({"repository": repository, "commit": commit, "token": token})
         archive = workdir / "tree.tgz"
-        archive.write_bytes(b"tgz")
+        with tarfile.open(archive, "w:gz"):
+            pass
         return SimpleNamespace(archive=archive, commit=commit)
 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: f"token-of-{owner}")
