@@ -47,6 +47,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "apple_container": ProviderEntry(
         "core.sandbox.providers.apple_container", "AppleContainerEnvironment", None, False
     ),
+    "podman": ProviderEntry("core.sandbox.providers.podman", "PodmanEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
 }
 
