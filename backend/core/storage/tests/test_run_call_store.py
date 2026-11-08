@@ -402,6 +402,44 @@ def test_dspy_seed_zero_does_not_mark_iteration_zero(store: PostgresRunCallStore
     assert store.get_candidate("job-1", "1")["state"] == "done"
 
 
+def test_a_candidate_id_with_a_colon_reads_back_as_one_key(store: PostgresRunCallStore) -> None:
+    """Treat ``<lane>:<candidate>`` as one opaque key, so a ``":"`` inside the candidate id is safe."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    recorder = CallRecorder(store, "job-1", "", "")
+    with usage_scope(candidate="a:b", lane="explore-gepa"):
+        recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    jobs = _job_store(store)
+
+    assert [c["candidate_id"] for c in store.list_calls("job-1", "explore-gepa:a:b")] == ["explore-gepa:a:b"]
+    assert store.list_calls("job-1", "a:b") == []
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "a:b", "score": 0.5, "lane": "explore-gepa"})
+
+    assert store.get_candidate("job-1", "explore-gepa:a:b")["state"] == "done"
+
+
+def test_an_untagged_candidate_and_a_lane_candidate_with_the_same_id_stay_apart(store: PostgresRunCallStore) -> None:
+    """An untagged candidate "3" and a lane's candidate "3" get separate keys, and each event marks only its own."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    recorder = CallRecorder(store, "job-1", "", "")
+    with usage_scope(candidate="3"):
+        recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    with usage_scope(candidate="3", lane="explore-gepa"):
+        recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    jobs = _job_store(store)
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "3", "score": 0.5})
+    assert store.get_candidate("job-1", "3")["state"] == "done"
+    assert store.get_candidate("job-1", "explore-gepa:3")["state"] == "running"
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "3", "score": 0.1, "lane": "explore-gepa"})
+    assert store.get_candidate("job-1", "explore-gepa:3")["state"] == "done"
+
+
 @pytest.fixture
 def postgres() -> Iterator[Engine]:
     """Return an engine on a fresh schema of the test database, with one job row."""
