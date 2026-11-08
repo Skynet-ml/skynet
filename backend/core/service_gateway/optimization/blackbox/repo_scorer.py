@@ -75,8 +75,7 @@ from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, servi
 from .repo_tree import archive_chunks, drop_paths
 from .repo_workspace import GIT, HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
-from .sandbox import SandboxSession
-from .sandbox_contract import SandboxRuntime
+from .sandbox_contract import SandboxRuntime, SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
 
 if TYPE_CHECKING:
