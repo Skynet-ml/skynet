@@ -57,7 +57,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 APP_NAME = "skynet"
-DEFAULT_IMAGE = "python:3.12-slim"
+DEFAULT_IMAGE = "python:3.12.15-slim"
 STOP_TIMEOUT = 60.0
 # Harbor waits this long for a cancelled create, so a box made during the
 # request still has a handle to terminate.

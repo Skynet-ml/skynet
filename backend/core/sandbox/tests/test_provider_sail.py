@@ -486,7 +486,7 @@ async def test_create_sends_the_name_image_lifetime_and_open_egress(fake_sdk: Fa
     assert fake_sdk.apps == [(sail.APP_NAME, True)]
     params = fake_sdk.boxes[0].params
     assert params["name"] == "box-a"
-    assert params["image"].ref == sail.DEFAULT_IMAGE
+    assert params["image"].ref == sail.DEFAULT_IMAGE == "python:3.12.15-slim"
     assert params["max_lifetime_seconds"] == 301
     assert params["image_build_timeout"] == 13
     assert params["egress_policy"] == {"mode": "all"}

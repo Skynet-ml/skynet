@@ -85,7 +85,7 @@ DAYTONA_CAPABILITIES = EnvironmentCapabilities(
     dynamic_network_policy=True,
 )
 
-DEFAULT_IMAGE = "python:3.12-slim"
+DEFAULT_IMAGE = "python:3.12.15-slim"
 CREATE_TIMEOUT_SEC = 300.0
 DELETE_TIMEOUT_SEC = 60.0
 

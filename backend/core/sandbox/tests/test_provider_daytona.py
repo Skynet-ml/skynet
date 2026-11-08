@@ -464,7 +464,7 @@ async def test_start_uses_the_default_image_and_no_sizes_in_ignore_mode(fake_sdk
     async with DaytonaEnvironment(spec):
         pass
     (params,) = fake_sdk.created
-    assert params.image == daytona.DEFAULT_IMAGE
+    assert params.image == daytona.DEFAULT_IMAGE == "python:3.12.15-slim"
     assert params.resources is None
     assert params.network_block_all is True
     assert params.domain_allow_list is None
