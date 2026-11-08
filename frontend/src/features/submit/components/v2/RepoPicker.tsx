@@ -11,6 +11,7 @@ import { Bitbucket, GitLab } from "@/shared/ui/brand-marks";
 import { listGithubRepositories, type GithubRepository, type RepoHost } from "@/shared/lib/api";
 import { formatRelativeTime } from "@/shared/lib/formatters";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
 
 import { isRepoPath } from "../../lib/wizard-v2";
@@ -27,6 +28,13 @@ export function HostMark({ host, size, className }: { host: RepoHost; size: numb
       <Mark size={size} />
     </span>
   );
+}
+
+/** The reason a typed repository lookup failed, read from the API error's code and params. */
+export function RepoLookupError({ error }: { error: unknown }) {
+  // userErrorMessage logs the raw error, so it runs once per error, not per render.
+  const message = useMemo(() => userErrorMessage(error), [error]);
+  return <InlineErrorRow message={message} />;
 }
 
 function VisibilityBadge({ repo }: { repo: GithubRepository }) {
@@ -119,6 +127,7 @@ export function RepoPicker({
   const [attempt, setAttempt] = useState(0);
   const [search, setSearch] = useState("");
   const [offer, setOffer] = useState<GithubRepository | null>(null);
+  const [lookupError, setLookupError] = useState<unknown>(null);
   // A chosen repository folds the list away until the user asks to change it.
   const [browsing, setBrowsing] = useState(() => !isRepoPath(value.trim(), host));
 
@@ -148,6 +157,7 @@ export function RepoPicker({
 
   useEffect(() => {
     setOffer(null);
+    setLookupError(null);
     if (!lookup) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
@@ -156,8 +166,9 @@ export function RepoPicker({
           const found = res.repositories.find((repo) => repo.full_name.toLowerCase() === needle);
           if (!cancelled) setOffer(found ?? null);
         })
-        .catch(() => {
-          // The list still works; only the typed repository goes unoffered.
+        .catch((err: unknown) => {
+          // The list still works; the row tells why the typed repository is not offered.
+          if (!cancelled) setLookupError(err);
         });
     }, LOOKUP_DELAY_MS);
     return () => {
@@ -227,6 +238,8 @@ export function RepoPicker({
         />
       ) : repos === null ? (
         <RepoRowsSkeleton />
+      ) : lookupError !== null && rows.length === 0 ? (
+        <RepoLookupError error={lookupError} />
       ) : rows.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
           {lookup

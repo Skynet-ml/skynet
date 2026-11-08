@@ -129,6 +129,7 @@
     "connectors.import_too_large": "파일이 너무 커서 가져올 수 없습니다(제한 용량: {max_mb}MB).",
     "connectors.invalid_credentials": "인증 정보가 거부되었습니다. 확인 후 다시 시도해 주세요.",
     "connectors.invalid_ref": "위치가 올바르지 않습니다. 목록에서 파일을 선택해 주세요.",
+    "connectors.other_repo_host": "{host}은(는) {expected}이(가) 아닙니다. Skynet은 gitlab.com과 Bitbucket Cloud에만 연결하며, 자체 관리 서버에는 연결하지 않습니다. 저장소의 {expected} 주소를 사용하거나 저장소를 {expected}(으)로 옮기세요.",
     "connectors.not_connected": "먼저 {provider} 계정을 연결해 주세요.",
     "connectors.not_found": "{provider}에서 해당 항목을 찾을 수 없거나 계정에 접근 권한이 없습니다.",
     "connectors.oauth_failed": "{provider} 로그인이 완료되지 않았습니다. 다시 시도해 주세요.",

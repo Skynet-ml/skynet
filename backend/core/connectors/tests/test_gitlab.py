@@ -292,6 +292,9 @@ def test_oauth_app_uses_gitlab_endpoints() -> None:
         ("https://gitlab.com/team/bot/", "team/bot"),
         ("team/bot/", "team/bot"),
         ("https://gitlab.com/team/my%2Dbot", "team/my-bot"),
+        ("https://gitlab.com/team/bot.git/?ref=main", "team/bot"),
+        ("https://gitlab.com/a/b/c/d/repo", "a/b/c/d/repo"),
+        ("https://gitlab.com/a/b/c/repo/-/tree/main?x=1", "a/b/c/repo"),
     ],
 )
 def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:
@@ -350,6 +353,9 @@ def test_self_managed_gitlab_host_is_refused_by_name(monkeypatch: pytest.MonkeyP
         "team/../bot",
         "https://gitlab.com/team/%2e%2e/admin",
         "team/./bot",
+        "https://gitlab.com/צוות/bot",
+        "https://gitlab.com/%D7%A6/bot",
+        "https://gitlab.com/café/bot",
     ],
 )
 def test_project_url_refuses_an_unusable_url_with_400(value: str) -> None:
@@ -364,4 +370,13 @@ def test_dot_search_lists_without_a_direct_lookup(monkeypatch: pytest.MonkeyPatc
     """A search with a ``.`` or ``..`` segment filters the list and skips the direct project lookup."""
     seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json=[]))
     assert gitlab.list_repositories(_secret(), search) == []
+    assert [r.url.path for r in seen] == ["/api/v4/projects"]
+
+
+def test_hebrew_search_matches_the_description_without_a_direct_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitLab paths are ASCII, so a Hebrew search filters by description and never builds a project URL."""
+    projects = [_project("team/bot", description="בוט שירות"), _project("team/other")]
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json=projects))
+    found = gitlab.list_repositories(_secret(), "בוט")
+    assert [repo["full_name"] for repo in found] == ["team/bot"]
     assert [r.url.path for r in seen] == ["/api/v4/projects"]

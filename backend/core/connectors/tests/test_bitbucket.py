@@ -283,6 +283,7 @@ def test_list_commits_names_the_branch_in_the_query(monkeypatch: pytest.MonkeyPa
         ("ssh://git@bitbucket.org/team/bot.git", "team/bot"),
         ("https://bitbucket.org/team/bot?at=main#readme", "team/bot"),
         ("team/bot/", "team/bot"),
+        ("https://bitbucket.org/team/bot.git/?at=main", "team/bot"),
     ],
 )
 def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:
@@ -313,6 +314,8 @@ def test_other_host_is_refused_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
         "../bot",
         "team/..",
         "https://bitbucket.org/team/../other/bot",
+        "https://bitbucket.org/צוות/bot",
+        "https://bitbucket.org/café/bot",
     ],
 )
 def test_repo_url_refuses_an_unusable_url_with_400(value: str) -> None:

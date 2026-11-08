@@ -129,6 +129,7 @@
     "connectors.import_too_large": "该文件过大，无法导入（上限为 {max_mb} MB）。",
     "connectors.invalid_credentials": "凭据未通过验证，请检查后重试。",
     "connectors.invalid_ref": "该位置无效，请从列表中选择一个文件。",
+    "connectors.other_repo_host": "{host} 不是 {expected}。Skynet 只连接 gitlab.com 和 Bitbucket Cloud，不连接自托管服务器。请使用仓库在 {expected} 上的地址，或将仓库迁移到 {expected}。",
     "connectors.not_connected": "请先连接您的 {provider} 账户。",
     "connectors.not_found": "在 {provider} 上未找到该项目，或您的账户无权访问。",
     "connectors.oauth_failed": "{provider} 登录未完成，请重试。",
