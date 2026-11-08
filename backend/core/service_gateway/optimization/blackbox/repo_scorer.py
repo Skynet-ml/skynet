@@ -1135,6 +1135,8 @@ class _StageRelay:
                 transport.close()
 
         try:
+            # SKY-364 (#1006) adds relay_request(recorder=...). When it merges, pass
+            # a recorder bound to this run and candidate here; until then no call is recorded.
             answer = relay_request(
                 url=url,
                 headers=declared,

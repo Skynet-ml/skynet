@@ -706,7 +706,7 @@ def _perform_preflight(
         if request.workflow == "anything" and is_repo_payload(protected):
             report_preflight_phase("sandbox")
             # Staging empties the secret list, so read the gate's inputs first.
-            secret_bindings = dict(protected["target"]["repo"].get("secret_bindings") or {})
+            secret_bindings = dict((protected["target"].get("repo") or {}).get("secret_bindings") or {})
             secret_allowed_hosts = repo_secret_allowed_hosts(protected)
             protected, staged = stage_repository(
                 protected,

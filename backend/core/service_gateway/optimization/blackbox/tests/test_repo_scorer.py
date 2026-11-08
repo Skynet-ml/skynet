@@ -1583,6 +1583,30 @@ def test_unknown_services_and_catalog_connectors_are_refused(name: str, status: 
     assert message in answer["error"]
 
 
+@pytest.mark.parametrize(
+    ("name", "status", "message"),
+    [
+        ("judge", 403, "Service 'judge' is not listed for the [metric] role."),
+        ("Judge", 404, "Service 'Judge' is not in optimize.toml. Add a [services.Judge] table."),
+        ("JUDGE", 404, "Service 'JUDGE' is not in optimize.toml."),
+        ("judge/x", 404, "Service 'judge/x' is not in optimize.toml."),
+        ("../judge", 404, "Service '../judge' is not in optimize.toml."),
+        ("", 404, "is not in optimize.toml."),
+    ],
+)
+def test_a_name_that_only_looks_like_a_declared_service_is_unknown(
+    upstream: _Upstream, name: str, status: int, message: str
+) -> None:
+    """Service names match exactly, as TOML tables do: another case or a slash is a 404, never the declared service."""
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{upstream.port}/")
+    relay = _service_relay(workspace, role="metric", allowed=(), services={"judge": spec})
+    answer = _service_answer(relay, workspace, name)
+    assert answer["status"] == status
+    assert message in answer["error"]
+    assert upstream.requests == []
+
+
 def test_a_service_whose_host_resolves_to_a_private_address_is_refused(upstream: _Upstream) -> None:
     """The relay resolves the host and refuses loopback, so a url cannot reach the parent's own network."""
     workspace = _Workspace()
