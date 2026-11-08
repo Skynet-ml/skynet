@@ -11,6 +11,11 @@ services that listen only on the Mac's loopback), along with every private,
 loopback and link-local range. The proxy connects to the address it checked,
 so a second DNS answer cannot swap in a private one.
 
+Each request prints one JSON line to stdout (``event`` is ``CALL_EVENT``) with
+the host, port, outcome, byte counts, start time and duration, so the parent can
+write the call into the run record (E28). The proxy sees only TLS bytes, so a
+line never holds a body, a header or a path.
+
 The sidecar runs this file with the image's own Python, so it must use the
 standard library only. It is also importable for unit tests.
 
@@ -21,12 +26,16 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
+import json
 import os
 import socket
 import sys
 import threading
+import time
 
 READY_MARKER = "skynet-egress-proxy-ready"
+CALL_EVENT = "skynet-egress-call"
+_PRINT_LOCK = threading.Lock()
 _ALLOWED_PORT = 443
 _HEAD_LIMIT = 8192
 _HANDSHAKE_SECONDS = 30.0
@@ -116,22 +125,38 @@ def _read_head(client: socket.socket) -> tuple[bytes, bytes] | None:
     return head + b"\r\n\r\n", rest
 
 
-def _pipe(source: socket.socket, sink: socket.socket) -> None:
+def _pipe(source: socket.socket, sink: socket.socket, copied: list[int] | None = None) -> None:
     """Copy bytes one way until either side closes or goes idle.
 
     Args:
         source: Socket to read from.
         sink: Socket to write to.
+        copied: Gets the count of bytes copied, when given.
     """
+    total = 0
     try:
         while chunk := source.recv(65536):
             sink.sendall(chunk)
+            total += len(chunk)
     except OSError:
         pass
     finally:
+        if copied is not None:
+            copied.append(total)
         for side in (sink, source):
             with contextlib.suppress(OSError):
                 side.shutdown(socket.SHUT_RDWR)
+
+
+def log_call(call: dict) -> None:
+    """Print one request's JSON line for the parent's run record.
+
+    Args:
+        call: The request's host, port, outcome, byte counts and timing.
+    """
+    line = json.dumps({"event": CALL_EVENT, **call}, sort_keys=True)
+    with _PRINT_LOCK, contextlib.suppress(OSError, ValueError):
+        print(line, flush=True)
 
 
 def _open_upstream(addresses: list[tuple[int, tuple]]) -> socket.socket | None:
@@ -163,6 +188,13 @@ def handle(client: socket.socket, allowed: frozenset[str]) -> None:
         client: The accepted connection.
         allowed: Exact allowlisted host names.
     """
+    # The box image's own python3 runs this file, so no datetime.UTC (Python 3.11+).
+    wall = time.time()
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(wall)) + f".{int(wall % 1 * 1000):03d}+00:00"
+    clock = time.monotonic()
+    call: dict = {}
+    sent: list[int] = []
+    received: list[int] = []
     with client:
         client.settimeout(_HANDSHAKE_SECONDS)
         try:
@@ -171,28 +203,47 @@ def handle(client: socket.socket, allowed: frozenset[str]) -> None:
                 return
             head, rest = request
             target = parse_connect(head)
+            # Only the host and port go in the log: a refused plain-HTTP line could carry a path or query.
+            call = {"host": target[0] if target else None, "port": target[1] if target else None}
+            call.update(status="refused", code=403, reason="host or port is not allowed")
             addresses = public_addresses(*target) if target_allowed(target, allowed) else None
             if addresses is None:
                 client.sendall(_FORBIDDEN)
                 return
+            call.update(status="failed", code=502, reason="no checked address answered")
             upstream = _open_upstream(addresses)
             if upstream is None:
                 client.sendall(_BAD_GATEWAY)
                 return
+            call.update(reason="the tunnel could not start")
             with upstream:
-                back = threading.Thread(target=_pipe, args=(upstream, client), daemon=True)
+                back = threading.Thread(target=_pipe, args=(upstream, client, received), daemon=True)
                 try:
                     back.start()
                 except RuntimeError:
                     return
                 client.sendall(_ESTABLISHED)
+                call.update(status="ok", code=200, reason=None)
                 if rest:
                     upstream.sendall(rest)
                 client.settimeout(_IDLE_SECONDS)
-                _pipe(client, upstream)
+                _pipe(client, upstream, sent)
                 back.join()
-        except OSError:
+        except OSError as error:
+            if call.get("status") == "failed":
+                call.update(reason=type(error).__name__)
             return
+        finally:
+            if call:
+                log_call(
+                    {
+                        **call,
+                        "bytes_sent": len(rest) + sum(sent) if call["status"] == "ok" else 0,
+                        "bytes_received": sum(received),
+                        "started_at": started_at,
+                        "duration_ms": max(0, round((time.monotonic() - clock) * 1000)),
+                    }
+                )
 
 
 def _handle_slot(client: socket.socket, allowed: frozenset[str], slots: threading.BoundedSemaphore) -> None:
