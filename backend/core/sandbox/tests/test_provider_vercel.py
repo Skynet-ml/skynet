@@ -1110,6 +1110,72 @@ async def test_cancel_during_reserve_fails_the_reservation(client: FakeClient, l
     assert "create" not in log
 
 
+async def test_stop_during_create_stops_the_new_box(client: FakeClient, log: list[str]) -> None:
+    """Check that a stop while the create runs ends the start, stops the box once and settles."""
+    client.hang = True
+    env = make_env(client, log)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(client.created.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    box = client.boxes[env.name]
+    assert box.stops == 1
+    assert box.destroys == 1
+    assert env.usage.calls.count("settle") == 1
+    assert "fail" not in env.usage.calls
+    assert client.closed == 1
+
+
+async def test_stop_during_reserve_creates_no_box(client: FakeClient, log: list[str]) -> None:
+    """Check that a stop while the reservation thread runs makes no box and releases the hold."""
+    env = make_env(client, log)
+    gate = threading.Event()
+    made: list[Any] = []
+    original = env._usage_factory
+
+    def slow_factory(budget: Any, request: Any, *, operation_key: str) -> Any:
+        """Reserve after the test calls stop.
+
+        Args:
+            budget: The budget runtime.
+            request: The usage request.
+            operation_key: The operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        gate.wait(5)
+        usage = original(budget, request, operation_key=operation_key)
+        made.append(usage)
+        return usage
+
+    env._usage_factory = slow_factory
+    task = asyncio.create_task(env.start())
+    await asyncio.sleep(0.05)
+    stopping = asyncio.create_task(env.stop())
+    await asyncio.sleep(0.05)
+    gate.set()
+    await asyncio.wait_for(stopping, 5)
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert "create" not in log
+    assert client.boxes == {}
+    assert made[0].calls == ["fail"]
+
+
+async def test_cancelled_caller_still_sees_cancel_after_stop(client: FakeClient, log: list[str]) -> None:
+    """Check that a caller cancel during start stays a CancelledError."""
+    client.hang = True
+    env = make_env(client, log)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(client.created.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert client.boxes[env.name].stops == 1
+
+
 async def test_teardown_settles_after_running_extend(client: FakeClient, log: list[str]) -> None:
     """Check that the teardown waits for a running extend before it settles."""
     env = make_env(client, log, lifetime=1500)
@@ -1303,6 +1369,23 @@ async def test_stop_job_sandboxes_counts_live_boxes(monkeypatch: pytest.MonkeyPa
     assert live.stops == 1
     assert done.stops == 0
     assert client.closed == 1
+
+
+async def test_stop_job_sandboxes_bounds_a_hung_client_close(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:
+    """Check that a hung client close ends at the stop timeout and the sweep still returns its count."""
+    client = FakeClient(log)
+    live = FakeBox("a", FakeSession())
+    client.boxes = {"a": live}
+
+    async def hang() -> None:
+        """Never finish the close."""
+        await asyncio.Event().wait()
+
+    client.aclose = hang
+    monkeypatch.setattr(vercel, "STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr(VercelEnvironment, "_make_client", staticmethod(lambda capture: client))
+    assert await asyncio.wait_for(VercelEnvironment.stop_job_sandboxes("job-1"), 5) == 1
+    assert live.stops == 1
 
 
 def test_sdk_import_is_present() -> None:

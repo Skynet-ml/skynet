@@ -291,6 +291,7 @@ class VercelEnvironment(SandboxEnvironment):
         self._create_dispatched = False
         self._renewer: asyncio.Task[None] | None = None
         self._billing_call: asyncio.Future[Any] | None = None
+        self._starting: asyncio.Future[None] | None = None
         self._stop_task: asyncio.Future[None] | None = None
         self._halted = False
         self._funded_until: float | None = None
@@ -469,28 +470,40 @@ class VercelEnvironment(SandboxEnvironment):
 
         A failed create is not retried, because the create may have reached
         Vercel. Any failure or cancel stops the box and keeps or releases the
-        reservation before the error goes on.
+        reservation before the error goes on. The work runs in its own task,
+        so a ``stop()`` during the start can cancel it and then stop the box.
 
         Raises:
             StartTimeoutError: The create did not finish in time.
-            SandboxInfraError: The box came back without a usable session.
+            SandboxInfraError: The box came back without a usable session, or
+                a ``stop()`` ended the start.
         """
+        self._starting = asyncio.ensure_future(self._start())
         try:
-            with self.timings.phase("create"):
-                if self._client is None:
-                    self._client = self._client_factory(self._capture)
-                await create_with_capacity(
-                    self._create,
-                    self._reserve,
-                    at_capacity=self._at_capacity,
-                    bucket=self._pacing.creates if self._pacing else None,
-                    clock=self._clock,
-                )
+            await self._starting
         except BaseException as error:
             if self._stop_task is None:
                 self._stop_task = asyncio.ensure_future(self._teardown(error))
             await asyncio.shield(self._stop_task)
+            current = asyncio.current_task()
+            if isinstance(error, asyncio.CancelledError) and current is not None and not current.cancelling():
+                # Only stop() cancelled the start task; the caller was not
+                # cancelled, so it must not see a CancelledError.
+                raise SandboxInfraError("The Vercel sandbox stopped during start.") from None
             raise
+
+    async def _start(self) -> None:
+        """Make the client, then wait for capacity, reserve and create the box."""
+        with self.timings.phase("create"):
+            if self._client is None:
+                self._client = self._client_factory(self._capture)
+            await create_with_capacity(
+                self._create,
+                self._reserve,
+                at_capacity=self._at_capacity,
+                bucket=self._pacing.creates if self._pacing else None,
+                clock=self._clock,
+            )
 
     async def _create(self, usage: Any | None) -> None:
         """Send the create call and confirm the session.
@@ -616,6 +629,12 @@ class VercelEnvironment(SandboxEnvironment):
         Args:
             error: The start failure, or ``None`` for a normal stop.
         """
+        if self._starting is not None and not self._starting.done():
+            # A stop during the start: end the start first, so no box or
+            # reservation appears after this teardown has looked for it.
+            self._starting.cancel()
+            with contextlib.suppress(BaseException):
+                await self._starting
         if self._renewer is not None:
             self._renewer.cancel()
             with contextlib.suppress(BaseException):
@@ -1128,6 +1147,8 @@ class VercelEnvironment(SandboxEnvironment):
                 except Exception as error:
                     logger.warning("Job sandbox %s did not stop: %s", box.name, type(error).__name__)
         finally:
-            with contextlib.suppress(Exception):
-                await client.aclose()
+            try:
+                await asyncio.wait_for(client.aclose(), STOP_TIMEOUT)
+            except Exception as error:
+                logger.warning("Job sandbox client for %s did not close: %s", job_id, type(error).__name__)
         return stopped
