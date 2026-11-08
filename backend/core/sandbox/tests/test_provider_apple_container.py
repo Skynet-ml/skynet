@@ -67,6 +67,8 @@ FAKE_CONTAINER = textwrap.dedent(
         print("apiserver is running")
     elif verb == "image" and args[1:2] == ["pull"]:
         fail("pull_error")
+        if (state / "pull_hang").exists():
+            time.sleep(30)
         print(args[-1])
     elif verb == "run":
         fail("run_error")
@@ -528,6 +530,98 @@ async def test_a_killed_run_gives_up_when_no_container_appears(
             pass
     assert time.monotonic() - started < 5
     assert _verbs(container_state).count("list") >= 2
+
+
+async def test_a_cancel_during_the_pull_kills_it_at_once(
+    container_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End a cancelled start at once when the pull hangs, not at the pull deadline."""
+    (container_state / "pull_hang").touch()
+    monkeypatch.setattr(apple_provider, "_PULL_TIMEOUT_SECONDS", 6.0)
+    task = asyncio.create_task(AppleContainerEnvironment(_spec()).start())
+    for _ in range(200):
+        if "image" in _verbs(container_state):
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.2)
+    started = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert time.monotonic() - started < 2
+    assert "run" not in _verbs(container_state)
+
+
+def _short_run(monkeypatch: pytest.MonkeyPatch, run_seconds: float) -> None:
+    """Give ``run`` a short deadline and a fast late-container search.
+
+    Args:
+        monkeypatch: Replaces the provider's ``_cli`` and the search timing.
+        run_seconds: The ``run`` deadline.
+    """
+    real_cli = apple_provider._cli
+
+    async def short_run(container_bin: str, args: list[str], **kwargs: Any) -> Any:
+        """Give ``run`` the short deadline and leave every other call alone."""
+        if args[0] == "run":
+            kwargs["cli_seconds"] = run_seconds
+        return await real_cli(container_bin, args, **kwargs)
+
+    monkeypatch.setattr(apple_provider, "_cli", short_run)
+    monkeypatch.setattr(AppleContainerEnvironment, "late_run_seconds", 10.0)
+    monkeypatch.setattr(apple_provider, "_LATE_POLL_SECONDS", 0.1)
+
+
+async def _open_and_close(env: AppleContainerEnvironment) -> None:
+    """Start and stop the sandbox through ``async with``.
+
+    Args:
+        env: The sandbox.
+    """
+    async with env:
+        pass
+
+
+async def test_a_cancel_during_a_run_that_hits_its_deadline_removes_the_late_container(
+    container_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search for the late container after a cancel, when the run client then ran past its deadline."""
+    (container_state / "run_late").write_text("2.0")
+    _short_run(monkeypatch, 0.8)
+    task = asyncio.create_task(_open_and_close(AppleContainerEnvironment(_spec())))
+    for _ in range(200):
+        if "run" in _verbs(container_state):
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The fake server creates the container 2 s after the run; wait past it.
+    await asyncio.sleep(2.5)
+    verbs = _verbs(container_state)
+    assert "list" in verbs[verbs.index("run") :]
+    assert list((container_state / "containers").glob("*.json")) == []
+
+
+async def test_repeat_cancels_during_the_late_container_search_do_not_stop_it(
+    container_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finish the late-container search when cancels arrive during it, then raise the cancel."""
+    (container_state / "run_late").write_text("2.0")
+    _short_run(monkeypatch, 0.5)
+    task = asyncio.create_task(_open_and_close(AppleContainerEnvironment(_spec())))
+    for _ in range(200):
+        if "list" in _verbs(container_state):
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The fake server creates the container 2 s after the run; wait past it.
+    await asyncio.sleep(2.5)
+    assert list((container_state / "containers").glob("*.json")) == []
 
 
 async def test_other_run_failures_are_infra_errors_without_a_retry(container_state: Path) -> None:

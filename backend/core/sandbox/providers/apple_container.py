@@ -40,9 +40,9 @@ import shlex
 import shutil
 import subprocess
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
@@ -121,6 +121,8 @@ _LABEL_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _SERVICE_MARKERS = ("container system start", "xpc", "apiserver", "connection invalid")
 _NOT_FOUND_MARKERS = ("not found", "notfound", "no such")
 
+_T = TypeVar("_T")
+
 
 class _CliDeadlineError(SandboxInfraError):
     """Signal that a ``container`` call ran past its deadline and was killed."""
@@ -164,12 +166,38 @@ async def _kill(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
+async def _run_to_end(awaitable: Awaitable[_T]) -> _T:
+    """Run a cleanup to its end, even when the task is cancelled during it.
+
+    Args:
+        awaitable: The cleanup.
+
+    Returns:
+        The cleanup's result.
+
+    Raises:
+        asyncio.CancelledError: The task was cancelled during the cleanup.
+            The cleanup ended first, and only the first cancel is raised.
+    """
+    work = asyncio.ensure_future(awaitable)
+    cancelled: asyncio.CancelledError | None = None
+    while not work.done():
+        try:
+            await asyncio.wait({work})
+        except asyncio.CancelledError as error:
+            cancelled = cancelled or error
+    if cancelled is not None:
+        raise cancelled
+    return work.result()
+
+
 async def _cli(
     container_bin: str,
     args: Sequence[str],
     *,
     stdin: bytes | None = None,
     cli_seconds: float = _CLI_TIMEOUT_SECONDS,
+    kill_on_cancel: bool = False,
 ) -> _CliResult:
     """Run one ``container`` command and capture its output.
 
@@ -178,6 +206,8 @@ async def _cli(
         args: The CLI arguments.
         stdin: Bytes for the command's stdin, or ``None`` for no input.
         cli_seconds: Kill the CLI after this many seconds.
+        kill_on_cancel: Kill the CLI at once on a cancel, instead of waiting
+            for it to end. Only for a call that creates no container.
 
     Returns:
         The exit code and the captured output.
@@ -185,6 +215,8 @@ async def _cli(
     Raises:
         SandboxInfraError: The CLI is missing.
         _CliDeadlineError: The CLI did not finish in time and was killed.
+        asyncio.CancelledError: The task was cancelled. When the CLI then ran
+            past its deadline, the error's ``__cause__`` is a ``_CliDeadlineError``.
     """
     try:
         process = await asyncio.create_subprocess_exec(
@@ -208,14 +240,21 @@ async def _cli(
             await asyncio.wait({communication}, timeout=deadline - loop.time())
         except asyncio.CancelledError as error:
             cancelled = error
+            if kill_on_cancel:
+                break
     if not communication.done():
         communication.cancel()
-        await _kill(process)
+        await _run_to_end(_kill(process))
         with contextlib.suppress(asyncio.CancelledError):
             await communication
-        if cancelled is not None:
+        if cancelled is not None and kill_on_cancel:
             raise cancelled
-        raise _CliDeadlineError(f"container {args[0] if args else ''} did not finish in {cli_seconds:.0f}s.")
+        deadline_error = _CliDeadlineError(f"container {args[0] if args else ''} did not finish in {cli_seconds:.0f}s.")
+        if cancelled is not None:
+            # The caller still needs to know that the CLI was killed, so it
+            # can look for a container that the API server creates late.
+            raise cancelled from deadline_error
+        raise deadline_error
     if cancelled is not None:
         raise cancelled
     stdout, stderr = communication.result()
@@ -505,11 +544,18 @@ class AppleContainerEnvironment(SandboxEnvironment):
             SandboxFatalError: The container system service is not running.
             SandboxInfraError: The CLI could not pull the image or refused the container.
             StartTimeoutError: No command ran within ``ready_seconds``.
+            asyncio.CancelledError: The task was cancelled. A cancel during the
+                pull kills it at once. A cancel during ``run`` waits for the CLI
+                to end, and for the late-container search when the CLI was killed.
         """
         if self._name is not None:
             raise RuntimeError("The Apple container sandbox was already started.")
+        # A pull creates no container, so a cancel can kill it at once.
         pulled = await _cli(
-            self._bin, ["image", "pull", "--progress", "none", str(self._image)], cli_seconds=_PULL_TIMEOUT_SECONDS
+            self._bin,
+            ["image", "pull", "--progress", "none", str(self._image)],
+            cli_seconds=_PULL_TIMEOUT_SECONDS,
+            kill_on_cancel=True,
         )
         if pulled.returncode != 0:
             raise _service_error(f"The container CLI could not pull the image {self._image}", pulled)
@@ -518,7 +564,11 @@ class AppleContainerEnvironment(SandboxEnvironment):
         try:
             result = await _cli(self._bin, self._run_args(name))
         except _CliDeadlineError:
-            await self._remove_late_container(name)
+            await _run_to_end(self._remove_late_container(name))
+            raise
+        except asyncio.CancelledError as error:
+            if isinstance(error.__cause__, _CliDeadlineError):
+                await _run_to_end(self._remove_late_container(name))
             raise
         if result.returncode != 0:
             raise _service_error(f"The container CLI refused the sandbox {name}", result)
@@ -590,16 +640,7 @@ class AppleContainerEnvironment(SandboxEnvironment):
         if self._name is None or self._stopped:
             return
         self._stopped = True
-        removal = asyncio.ensure_future(_remove_container(self._bin, self._name))
-        cancelled: asyncio.CancelledError | None = None
-        while not removal.done():
-            try:
-                await asyncio.wait({removal})
-            except asyncio.CancelledError as error:
-                cancelled = error
-        if cancelled is not None:
-            raise cancelled
-        removal.result()
+        await _run_to_end(_remove_container(self._bin, self._name))
 
     def _require_running(self) -> str:
         """Return the container name of a started, not stopped sandbox.
