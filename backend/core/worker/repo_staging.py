@@ -61,6 +61,7 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
     drop_paths,
+    linked_hidden_paths,
     patch_paths,
     patch_violations,
     strip_archive,
@@ -229,7 +230,8 @@ def stage_repository(
         ConstraintsError: When the repository's ``optimize.toml`` is invalid,
             asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded, or when the request
-            uploads cases and the repository defines its own in ``[data] cases``.
+            uploads cases and the repository defines its own in ``[data] cases``,
+            or when a hidden path is, holds or lies inside a link.
         RepoGateError: When the agent's tree still shows a hidden path from ``hidden_repo_paths``.
     """
     result = copy.deepcopy(payload)
@@ -273,6 +275,11 @@ def stage_repository(
         if cases_file is not None and result.get("cases"):
             raise ConstraintsError(UPLOADED_CASES_REFUSED)
         hidden = hidden_repo_paths(environment.constraints)
+        if linked := linked_hidden_paths(snapshot.archive, hidden):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: the hidden scoring path '{linked[0]}' is, holds or lies inside a link."
+                " Make the [metric] and [data] cases paths real files and folders, with no symlinks or hard links."
+            )
         agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
         # Nothing checks that [metric] reference names a file, so a missing one is not a leak.
         leaks = check_hidden(

@@ -17,6 +17,7 @@ from ..repo_tree import (
     apply_patch,
     archive_chunks,
     drop_paths,
+    linked_hidden_paths,
     patch_paths,
     patch_violations,
     reset_tree,
@@ -313,6 +314,48 @@ def test_strip_archive_drops_a_link_to_a_hidden_file(tmp_path: Path) -> None:
 
     with tarfile.open(strip_archive(archive, ["eval"], tmp_path / "agent.tgz")) as packed:
         assert packed.getnames() == []
+
+
+def _linked_tree(archive: Path, links: dict[str, tuple[bytes, str]]) -> Path:
+    """Pack one real scoring file and the given links.
+
+    Args:
+        archive: Archive path to write.
+        links: Link path to its tar type and target.
+
+    Returns:
+        The archive.
+    """
+    with tarfile.open(archive, "w:gz") as packed:
+        data = tarfile.TarInfo("real/score.py")
+        data.size = 1
+        packed.addfile(data, io.BytesIO(b"x"))
+        for name, (kind, target) in links.items():
+            link = tarfile.TarInfo(name)
+            link.type, link.linkname = kind, target
+            packed.addfile(link)
+    return archive
+
+
+@pytest.mark.parametrize(
+    ("links", "hidden", "linked"),
+    [
+        pytest.param({"scoring": (tarfile.SYMTYPE, "real")}, ["scoring"], ["scoring"], id="hidden-is-a-symlink"),
+        pytest.param({"./scoring/": (tarfile.SYMTYPE, "real")}, ["scoring"], ["scoring"], id="member-name-form"),
+        pytest.param({"eval": (tarfile.SYMTYPE, "real")}, ["eval/score.py"], ["eval/score.py"], id="below-a-symlink"),
+        pytest.param({"eval/x": (tarfile.SYMTYPE, "../../etc")}, ["eval"], ["eval"], id="symlink-out-of-tree"),
+        pytest.param({"eval/x": (tarfile.SYMTYPE, "/etc/passwd")}, ["eval"], ["eval"], id="absolute-symlink"),
+        pytest.param({"eval/x": (tarfile.LNKTYPE, "real/score.py")}, ["eval"], ["eval"], id="hard-link-out"),
+        pytest.param({"eval/x": (tarfile.LNKTYPE, "eval/y")}, ["eval"], [], id="hard-link-inside"),
+        pytest.param({"src/x": (tarfile.SYMTYPE, "../real")}, ["eval", "real"], [], id="link-outside-hidden"),
+        pytest.param({}, ["real"], [], id="no-links"),
+    ],
+)
+def test_linked_hidden_paths_finds_each_link_that_would_leak(
+    tmp_path: Path, links: dict[str, tuple[bytes, str]], hidden: list[str], linked: list[str]
+) -> None:
+    """The strip matches names, so a link at, above or inside a hidden path would leave its target visible."""
+    assert linked_hidden_paths(_linked_tree(tmp_path / "tree.tgz", links), hidden) == linked
 
 
 def test_drop_paths_removes_the_sections_that_touch_a_hidden_path() -> None:

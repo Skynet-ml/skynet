@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import re
 import subprocess
 import tarfile
 import threading
@@ -68,12 +69,14 @@ def _payload(commit: str | None) -> dict[str, Any]:
     return {"target": {"kind": "repo", "repo": repo}}
 
 
-def _tree(workdir: Path, files: dict[str, str]) -> Path:
+def _tree(workdir: Path, files: dict[str, str], links: dict[str, tuple[bytes, str]] | None = None) -> Path:
     """Pack files the way the parent ships a fetched tree.
 
     Args:
         workdir: Folder the archive goes in.
         files: Root-relative path to text.
+        links: Root-relative link path to its tar type (``SYMTYPE`` or
+            ``LNKTYPE``) and target, packed after the files.
 
     Returns:
         The archive.
@@ -85,11 +88,18 @@ def _tree(workdir: Path, files: dict[str, str]) -> Path:
             info = tarfile.TarInfo(name)
             info.size = len(data)
             packed.addfile(info, io.BytesIO(data))
+        for name, (kind, target) in (links or {}).items():
+            info = tarfile.TarInfo(name)
+            info.type, info.linkname = kind, target
+            packed.addfile(info)
     return archive
 
 
 def _stage_with(
-    files: dict[str, str], monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any] | None = None
+    files: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any] | None = None,
+    links: dict[str, tuple[bytes, str]] | None = None,
 ) -> tuple[dict[str, Any], repo_staging.StagedRepository]:
     """Stage the fixture payload over a tree holding ``files``.
 
@@ -97,6 +107,7 @@ def _stage_with(
         files: Root-relative path to text in the fetched tree.
         monkeypatch: Pytest monkeypatch.
         payload: Payload to stage; the fixture payload pinned to ``c * 40`` when omitted.
+        links: Links in the fetched tree, as ``_tree`` takes them.
 
     Returns:
         The staged payload and repository.
@@ -108,7 +119,7 @@ def _stage_with(
         repo_staging,
         "fetch_snapshot",
         lambda repository, pinned, token, workdir: RepoSnapshot(
-            commit=pinned, archive=_tree(workdir, files), readonly_paths=(), size_bytes=1
+            commit=pinned, archive=_tree(workdir, files, links), readonly_paths=(), size_bytes=1
         ),
     )
     return repo_staging.stage_repository(payload or _payload("c" * 40), username="alice", binding_id="b", engine=None)
@@ -2048,6 +2059,68 @@ def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
 
     with pytest.raises(ConstraintsError, match=message):
         _stage_with(files, monkeypatch, payload)
+
+
+@pytest.mark.parametrize(
+    ("toml", "links", "linked"),
+    [
+        pytest.param('[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "real")}, "scoring", id="inside"),
+        pytest.param(
+            '[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "/etc")}, "scoring", id="outside-absolute"
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["scoring"]\n',
+            {"scoring": (tarfile.SYMTYPE, "../../x")},
+            "scoring",
+            id="outside-relative",
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["scoring/score.py"]\n',
+            {"scoring": (tarfile.SYMTYPE, "real")},
+            "scoring/score.py",
+            id="below-a-linked-folder",
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["eval"]\n', {"eval/data": (tarfile.SYMTYPE, "../real")}, "eval", id="link-inside-folder"
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["eval"]\n',
+            {"eval/copy.py": (tarfile.LNKTYPE, "real/score.py")},
+            "eval",
+            id="hard-link-out",
+        ),
+    ],
+)
+def test_staging_refuses_a_hidden_path_with_a_link(
+    monkeypatch: pytest.MonkeyPatch, toml: str, links: dict[str, tuple[bytes, str]], linked: str
+) -> None:
+    """The strip drops names, so a link would leave the scoring files in the agent's and candidate's trees."""
+    files = {"optimize.toml": toml, "real/score.py": "SECRET-METRIC\n", "src/app.py": "x = 1\n"}
+    if linked == "eval":
+        files["eval/score.py"] = "def metric(case, output):\n    return 1.0\n"
+
+    with pytest.raises(
+        ConstraintsError, match=f"hidden scoring path '{re.escape(linked)}' is, holds or lies inside a link"
+    ):
+        _stage_with(files, monkeypatch, links=links)
+
+
+def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it."""
+    files = {
+        "optimize.toml": '[metric]\nfiles = ["eval"]\n',
+        "eval/score.py": "def metric(case, output):\n    return 1.0\n",
+        "src/app.py": "x = 1\n",
+    }
+    links = {"src/alias.py": (tarfile.SYMTYPE, "app.py"), "eval/copy.py": (tarfile.LNKTYPE, "eval/score.py")}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, links=links)
+    try:
+        names = _names(Path(staged_payload["_repo_snapshot"]["archive"]))
+        assert "src/alias.py" in names
+        assert not [name for name in names if name.startswith("eval")]
+    finally:
+        staged.cleanup()
 
 
 @pytest.mark.parametrize("path", _EVERY_HIDDEN_PATH)

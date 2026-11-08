@@ -102,6 +102,11 @@ or the cases file): the `instructions` file, an `illegal` file of
 roles, the `[run] entry` file, or an editable path. The agent's tree leaves
 out everything inside a hidden path, so such a file would be stripped.
 
+The file is also refused when a hidden path is a symlink, lies inside a
+symlinked folder, or holds a symlink or a hard link to a file outside it.
+The strip matches names, so a link would leave its target in the agent's
+tree.
+
 The run stops before any model is called when the agent's tree still holds
 a hidden file. A version's edit to a hidden path, `optimize.toml` included,
 is dropped from the result.
