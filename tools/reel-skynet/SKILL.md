@@ -51,8 +51,11 @@ The page must be on the app before a helper runs: start with
 
 - Always run `waitForPreview` (with the PR head `sha`) and `deployedSha` first; a clip
   of the wrong commit is worthless. A preview updates a few minutes after each push.
-- Use a fresh `signup` per run. Other agents may test the same environment at the same
-  time with their own accounts; never reuse or touch theirs.
+- Use a fresh account per run: `signup` on local dev, or a check account from
+  `.agents/skills/skynet-test-accounts/account.py` on a preview or staging. Run
+  `account.py delete <id>` after the clip, also after a failure. Cancel the account's runs
+  first: the delete does not stop a running job or sandbox. Other agents may test the
+  same environment at the same time with their own accounts; never reuse or touch theirs.
 - Never buy credit or open checkout. A new preview account gets the preview credit;
   a new staging account has $0. If a flow needs more credit, stop and report.
 - Prefer role, label and placeholder selectors (as the helpers do); the wizard's

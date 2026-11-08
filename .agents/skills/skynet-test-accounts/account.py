@@ -16,7 +16,9 @@ failed or killed ``create`` still leaves a secret that ``list`` shows.
 ``delete`` signs in, calls ``POST /account/delete`` and then removes the
 secret. If sign-in fails for a ``pending`` account, it first finishes the
 email confirmation and marks the secret ``ready``. ``forget`` removes
-only the secret, for an account that does not exist.
+only the secret, for an account that does not exist: register never
+succeeded, the preview database is gone, or an earlier ``delete`` printed
+``account delete: HTTP 200``.
 Only ``env`` prints the password; run it only inside ``eval``. No command
 prints a token or an email code.
 """
@@ -430,12 +432,20 @@ def main():
     """Parse the command line and run one command."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
-    make = sub.add_parser("create")
-    make.add_argument("--target", required=True)
-    make.add_argument("--label", required=True)
-    for name in ("env", "delete", "forget"):
-        sub.add_parser(name).add_argument("id")
-    sub.add_parser("list")
+    make = sub.add_parser("create", help="sign up a fresh account; prints its id")
+    make.add_argument("--target", required=True, help="staging or pr-<n>")
+    make.add_argument("--label", required=True, help="your issue or PR, for example SKY-123")
+    helps = {
+        "env": "print the login.sh exports (password included); run it only inside eval",
+        "delete": "delete the account in the app, then its secret; run it after every check",
+        "forget": (
+            "remove only the secret; use it only when register never succeeded, the preview"
+            " database is gone, or an earlier delete printed 'account delete: HTTP 200'"
+        ),
+    }
+    for name, text in helps.items():
+        sub.add_parser(name, help=text, description=text).add_argument("id")
+    sub.add_parser("list", help="print every check account that still has a secret")
     args = parser.parse_args()
     if args.cmd == "create":
         create(args.target, args.label)
