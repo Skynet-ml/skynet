@@ -50,20 +50,34 @@ try:
     from langsmith.sandbox import (
         AsyncSandboxClient,
         CommandTimeoutError,
+        DataplaneNotConfiguredError,
         QuotaExceededError,
+        ResourceCreationError,
         ResourceNotFoundError,
+        ResourceTimeoutError,
+        SandboxAPIError,
         SandboxAuthenticationError,
         SandboxConnectionError,
+        SandboxNotReadyError,
+        SandboxOperationError,
         ValidationError,
     )
+    from langsmith.utils import LangSmithError
 except ImportError:
     AsyncSandboxClient = None
     CommandTimeoutError = None
+    DataplaneNotConfiguredError = None
     QuotaExceededError = None
+    ResourceCreationError = None
     ResourceNotFoundError = None
+    ResourceTimeoutError = None
+    SandboxAPIError = None
     SandboxAuthenticationError = None
     SandboxConnectionError = None
+    SandboxNotReadyError = None
+    SandboxOperationError = None
     ValidationError = None
+    LangSmithError = None
 
 logger = logging.getLogger(__name__)
 
@@ -177,10 +191,13 @@ class LangSmithEnvironment(SandboxEnvironment):
         """Create the sandbox and wait until it is ready. Do nothing when it already runs.
 
         Raises:
-            StartTimeoutError: The sandbox was not ready in time. It is deleted first.
-            SandboxFatalError: The API key is not valid.
-            SandboxTransientError: The quota is full or the connection failed.
-            SandboxRejectedError: The server refused the request.
+            StartTimeoutError: The sandbox was not ready in time, by the local
+                deadline or the server. It is deleted first.
+            SandboxFatalError: The API key or the account setup is not valid.
+            SandboxTransientError: The quota is full, no capacity is free, or
+                the server or the connection failed.
+            SandboxRejectedError: The server refused the request, or the image
+                did not start.
         """
         if self._box is not None:
             return
@@ -195,7 +212,7 @@ class LangSmithEnvironment(SandboxEnvironment):
         )
         try:
             async with asyncio.timeout(self._startup_timeout) as deadline:
-                with _mapped_errors():
+                with _mapped_errors(start_timeout=self._startup_timeout):
                     box = await self._client.create_sandbox(**self._create_kwargs())
         except TimeoutError:
             await self.stop()
@@ -259,8 +276,9 @@ class LangSmithEnvironment(SandboxEnvironment):
             RuntimeError: The sandbox is not running.
             SandboxRejectedError: ``sudo`` is set, or the server refused the command.
             RunTimeoutError: The command ran past the time limit. It is killed first.
-            SandboxFatalError: The API key is not valid.
-            SandboxTransientError: The quota is full or the connection failed.
+            SandboxFatalError: The API key is not valid, or the sandbox is gone.
+            SandboxTransientError: The quota is full, or the server or the
+                connection failed.
         """
         box = self._require_running()
         if sudo:
@@ -310,6 +328,8 @@ class LangSmithEnvironment(SandboxEnvironment):
 
         Raises:
             RuntimeError: The sandbox is not running.
+            SandboxRejectedError: The sandbox refused the write.
+            SandboxTransientError: The server or the connection failed.
         """
         box = self._require_running()
         with _mapped_errors():
@@ -327,14 +347,20 @@ class LangSmithEnvironment(SandboxEnvironment):
 
         Raises:
             RuntimeError: The sandbox is not running.
+            SandboxRejectedError: The file is not UTF-8 text, or the sandbox
+                refused the read.
+            SandboxTransientError: The server or the connection failed.
         """
         box = self._require_running()
-        try:
-            with _mapped_errors():
+        with _mapped_errors():
+            try:
                 data = await box.read(path, timeout=int(self._request_timeout))
-        except ResourceNotFoundError:
-            return None
-        return data.decode("utf-8")
+            except ResourceNotFoundError:
+                return None
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise SandboxRejectedError(f"The sandbox file {path} is not UTF-8 text.") from None
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
@@ -416,22 +442,69 @@ def _proxy_config(spec: SandboxSpec) -> dict[str, Any] | None:
 
 
 @contextlib.contextmanager
-def _mapped_errors() -> Iterator[None]:
-    """Map LangSmith SDK errors to Skynet error groups.
+def _mapped_errors(*, start_timeout: float | None = None) -> Iterator[None]:
+    """Map every LangSmith SDK error to a Skynet error group.
+
+    ``CommandTimeoutError`` passes through, so that ``exec`` raises the run
+    timeout. The except order matters: the SDK errors share base classes.
+
+    Args:
+        start_timeout: The ``start`` time limit; ``None`` outside ``start``.
 
     Raises:
-        SandboxFatalError: The API key is not valid.
-        SandboxTransientError: The quota is full or the connection failed.
-        SandboxRejectedError: The server refused the request as not valid.
+        StartTimeoutError: The server said that the sandbox was not ready in
+            time, during ``start``.
+        SandboxFatalError: The API key or the account setup is not valid, or
+            the sandbox is gone.
+        SandboxTransientError: The quota is full, no capacity is free, or the
+            server or the connection failed.
+        SandboxRejectedError: The server refused the request, the image did
+            not start, or the sandbox refused the operation.
     """
     try:
         yield
+    except CommandTimeoutError:
+        raise
     except SandboxAuthenticationError as exc:
         raise SandboxFatalError(f"LangSmith refused the API key: {type(exc).__name__}.") from exc
-    except (QuotaExceededError, SandboxConnectionError) as exc:
+    except ResourceTimeoutError as exc:
+        if start_timeout is not None:
+            raise StartTimeoutError(start_timeout) from exc
+        raise SandboxTransientError(f"LangSmith sandbox call timed out: {type(exc).__name__}.") from exc
+    except (ResourceNotFoundError, DataplaneNotConfiguredError) as exc:
+        raise SandboxFatalError(f"LangSmith sandbox call failed: {type(exc).__name__}.") from exc
+    except ResourceCreationError as exc:
+        # Unschedulable (HTTP 503) means no capacity now. ImagePull, CrashLoop
+        # and SandboxConfig fail again on a retry with the same spec.
+        if exc.error_type == "Unschedulable" or _http_status(exc) == 503:
+            raise SandboxTransientError(f"LangSmith has no sandbox capacity: {exc.error_type}.") from exc
+        raise SandboxRejectedError(f"LangSmith could not create the sandbox: {exc.error_type}.") from exc
+    except (QuotaExceededError, SandboxConnectionError, SandboxAPIError, SandboxNotReadyError) as exc:
         raise SandboxTransientError(f"LangSmith sandbox call failed: {type(exc).__name__}.") from exc
     except ValidationError as exc:
         raise SandboxRejectedError(f"LangSmith refused the sandbox request: {exc}") from exc
+    except SandboxOperationError as exc:
+        raise SandboxRejectedError(f"The LangSmith sandbox refused the operation: {exc.error_type}.") from exc
+    except LangSmithError as exc:
+        # The SDK raises its base class for an HTTP status it has no class for.
+        status = _http_status(exc)
+        if status is not None and (status >= 500 or status in (408, 429)):
+            raise SandboxTransientError(f"LangSmith sandbox call failed: HTTP {status}.") from exc
+        raise SandboxRejectedError(f"LangSmith refused the sandbox call: {type(exc).__name__}.") from exc
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """Return the HTTP status of the response that caused an SDK error.
+
+    Args:
+        exc: The SDK error; the SDK chains the ``httpx.HTTPStatusError``.
+
+    Returns:
+        The status code, or ``None`` when no HTTP response caused the error.
+    """
+    response = getattr(exc.__cause__, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
 
 
 async def _teardown(client: Any, name: str | None) -> None:

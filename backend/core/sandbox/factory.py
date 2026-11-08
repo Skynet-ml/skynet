@@ -35,7 +35,9 @@ class ProviderEntry:
 
 # The provider modules land in later issues (SBX-6 local, SBX-7 docker,
 # SBX-10 vercel, SBX-25+ the hosted providers); until then the factory reports
-# them as "not in this build". The hosted extras are not in pyproject yet.
+# them as "not in this build". Each hosted extra names a pyproject optional
+# dependency group; the e2b, daytona, modal and runloop groups land with
+# their providers.
 PROVIDERS: dict[str, ProviderEntry] = {
     "local": ProviderEntry("core.sandbox.providers.local", "LocalEnvironment", None, False),
     "docker": ProviderEntry("core.sandbox.providers.docker", "DockerEnvironment", None, False),

@@ -31,8 +31,35 @@ from core.sandbox.tests.test_environment import SandboxEnvironmentContract
 _SPEC = SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=1))
 
 
-class FakeSDKError(Exception):
+class FakeLangSmithError(Exception):
+    """Stand in for ``LangSmithError``, the SDK base class."""
+
+
+class FakeSDKError(FakeLangSmithError):
     """Stand in for ``SandboxClientError``."""
+
+    def __init__(self, message: str = "", *, error_type: str | None = None) -> None:
+        """Keep the machine-readable error type, like the SDK errors.
+
+        Args:
+            message: The error message.
+            error_type: The API error type.
+        """
+        super().__init__(message)
+        self.error_type = error_type
+
+
+class FakeHTTPStatusError(Exception):
+    """Stand in for ``httpx.HTTPStatusError``, which the SDK chains as the cause."""
+
+    def __init__(self, status_code: int) -> None:
+        """Keep a response with the status code.
+
+        Args:
+            status_code: The HTTP status.
+        """
+        super().__init__(status_code)
+        self.response = type("FakeResponse", (), {"status_code": status_code})()
 
 
 class FakeAuthError(FakeSDKError):
@@ -55,8 +82,46 @@ class FakeValidationError(FakeSDKError):
     """Stand in for ``ValidationError``."""
 
 
-class FakeCommandTimeoutError(FakeSDKError):
+class FakeCreationError(FakeSDKError):
+    """Stand in for ``ResourceCreationError``."""
+
+
+class FakeResourceTimeoutError(FakeSDKError):
+    """Stand in for ``ResourceTimeoutError``."""
+
+
+class FakeAPIError(FakeSDKError):
+    """Stand in for ``SandboxAPIError``."""
+
+
+class FakeNotReadyError(FakeSDKError):
+    """Stand in for ``SandboxNotReadyError``."""
+
+
+class FakeDataplaneError(FakeSDKError):
+    """Stand in for ``DataplaneNotConfiguredError``."""
+
+
+class FakeOperationError(FakeSDKError):
+    """Stand in for ``SandboxOperationError``."""
+
+
+class FakeCommandTimeoutError(FakeOperationError):
     """Stand in for ``CommandTimeoutError``."""
+
+
+def _caused_by_status(error: FakeSDKError, status_code: int) -> FakeSDKError:
+    """Chain an HTTP status error as the cause, as the SDK does.
+
+    Args:
+        error: The SDK error.
+        status_code: The HTTP status of the cause.
+
+    Returns:
+        The same error.
+    """
+    error.__cause__ = FakeHTTPStatusError(status_code)
+    return error
 
 
 @dataclass
@@ -246,10 +311,17 @@ def server(monkeypatch: pytest.MonkeyPatch) -> FakeServer:
     for name, value in {
         "AsyncSandboxClient": client_cls,
         "CommandTimeoutError": FakeCommandTimeoutError,
+        "DataplaneNotConfiguredError": FakeDataplaneError,
+        "LangSmithError": FakeLangSmithError,
         "QuotaExceededError": FakeQuotaError,
+        "ResourceCreationError": FakeCreationError,
         "ResourceNotFoundError": FakeNotFoundError,
+        "ResourceTimeoutError": FakeResourceTimeoutError,
+        "SandboxAPIError": FakeAPIError,
         "SandboxAuthenticationError": FakeAuthError,
         "SandboxConnectionError": FakeConnectionError,
+        "SandboxNotReadyError": FakeNotReadyError,
+        "SandboxOperationError": FakeOperationError,
         "ValidationError": FakeValidationError,
     }.items():
         monkeypatch.setattr(langsmith, name, value)
@@ -387,14 +459,61 @@ async def test_start_timeout_raises_and_cleans_up(server: FakeServer) -> None:
         (FakeQuotaError("full"), SandboxTransientError),
         (FakeConnectionError("reset"), SandboxTransientError),
         (FakeValidationError("bad spec"), SandboxRejectedError),
+        (_caused_by_status(FakeCreationError("no nodes", error_type="Unschedulable"), 503), SandboxTransientError),
+        (_caused_by_status(FakeCreationError("pull failed", error_type="ImagePull"), 422), SandboxRejectedError),
+        (_caused_by_status(FakeCreationError("crashed", error_type="CrashLoop"), 422), SandboxRejectedError),
+        (_caused_by_status(FakeResourceTimeoutError("not ready"), 408), StartTimeoutError),
+        (_caused_by_status(FakeAPIError("boom"), 500), SandboxTransientError),
+        (FakeNotReadyError("not ready"), SandboxTransientError),
+        (_caused_by_status(FakeNotFoundError("gone"), 404), SandboxFatalError),
+        (FakeDataplaneError("no dataplane"), SandboxFatalError),
+        (FakeOperationError("denied", error_type="PermissionDenied"), SandboxRejectedError),
+        (_caused_by_status(FakeSDKError("conflict"), 409), SandboxRejectedError),
+        (_caused_by_status(FakeSDKError("bad gateway"), 502), SandboxTransientError),
+        (FakeLangSmithError("base"), SandboxRejectedError),
     ],
 )
 async def test_sdk_errors_map_to_error_groups(server: FakeServer, error: Exception, expected: type) -> None:
-    """Map each SDK error class to its Skynet error group, with one create call."""
+    """Map each SDK error class to its Skynet error group, with one create call, and delete the sandbox."""
     server.create_error = error
-    with pytest.raises(expected):
-        await LangSmithEnvironment(_SPEC).start()
+    env = LangSmithEnvironment(_SPEC)
+    with pytest.raises(expected) as caught:
+        await env.start()
+    assert caught.value.__cause__ is error
     assert len(server.creates) == 1
+    assert server.deletes == [env.name]
+
+
+async def test_server_ready_timeout_raises_start_timeout(server: FakeServer) -> None:
+    """Raise StartTimeoutError with the start limit when the server times out before the local deadline."""
+    server.create_error = _caused_by_status(FakeResourceTimeoutError("not ready"), 408)
+    env = LangSmithEnvironment(_SPEC, startup_timeout_seconds=30)
+    with pytest.raises(StartTimeoutError) as caught:
+        await env.start()
+    assert caught.value.seconds == 30
+    assert server.closed == 1
+
+
+async def test_resource_timeout_after_start_is_transient(server: FakeServer) -> None:
+    """Map a server timeout outside start to the transient group, not to a start timeout."""
+    async with LangSmithEnvironment(_SPEC) as env:
+        box = server.boxes[env.name]
+
+        async def _timed_out(path: str, content: bytes, **kwargs: Any) -> None:
+            """Raise the server timeout."""
+            raise FakeResourceTimeoutError("slow")
+
+        box.write = _timed_out  # type: ignore[method-assign]
+        with pytest.raises(SandboxTransientError):
+            await env.upload_files({"/tmp/a": "x"})
+
+
+async def test_download_of_a_non_utf8_file_is_rejected(server: FakeServer) -> None:
+    """Raise SandboxRejectedError, not UnicodeDecodeError, for a file that is not UTF-8 text."""
+    async with LangSmithEnvironment(_SPEC) as env:
+        server.boxes[env.name].files["/tmp/bin"] = b"\xff\xfe\x00bad"
+        with pytest.raises(SandboxRejectedError, match="UTF-8"):
+            await env.download_file("/tmp/bin")
 
 
 async def test_exec_sends_server_limits_and_merged_env(server: FakeServer) -> None:
