@@ -331,3 +331,30 @@ def test_dot_search_lists_without_a_direct_lookup(monkeypatch: pytest.MonkeyPatc
     seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={"values": []}))
     assert bitbucket.list_repositories(_secret(), search) == []
     assert [r.url.path for r in seen] == ["/2.0/repositories"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["Team/My.Repo", "https://bitbucket.org/Team/My.Repo", "git@bitbucket.org:Team/My.Repo.git"],
+)
+def test_repo_url_keeps_upper_case_and_dots_in_the_slug(value: str) -> None:
+    """A workspace or slug with upper-case letters or a dot reaches the API as typed."""
+    assert bitbucket._repo_url(value) == f"{bitbucket.API_URL}/repositories/Team/My.Repo"
+
+
+def test_list_repositories_matches_a_mixed_case_slug_without_a_direct_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lower-case search finds ``Team/My.Repo`` in the member list and skips the direct lookup."""
+    values = [{"full_name": "Team/My.Repo", "is_private": True, "mainbranch": {"name": "main"}}]
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={"values": values}))
+    listed = bitbucket.list_repositories(_secret(), "team/my.repo")
+    assert [r["full_name"] for r in listed] == ["Team/My.Repo"]
+    assert [request.url.path for request in seen] == ["/2.0/repositories"]
+
+
+def test_open_change_keeps_a_mixed_case_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pull request for ``Team/My.Repo`` goes to that repository's API path."""
+    opened = {"id": 9, "draft": True, "links": {"html": {"href": "https://bitbucket.org/Team/My.Repo/pull-requests/9"}}}
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(201, json=opened))
+    change = bitbucket.open_change("bbtok", "Team/My.Repo", head="skynet/best", base_branch="main", title="T", body="B")
+    assert (change.number, change.url) == (9, opened["links"]["html"]["href"])
+    assert seen[-1].url.path == "/2.0/repositories/Team/My.Repo/pullrequests"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,7 +13,7 @@ import pytest
 
 from ...api.errors import DomainError
 from ...i18n import t_locale
-from .. import gitlab, transport
+from .. import github_repo, gitlab, transport
 from ..github_publish import HardeningSummary, RepoPublishError
 from ..github_repo import RepoFetchError
 from ..vault import ConnectorSecret
@@ -380,3 +381,53 @@ def test_hebrew_search_matches_the_description_without_a_direct_lookup(monkeypat
     found = gitlab.list_repositories(_secret(), "בוט")
     assert [repo["full_name"] for repo in found] == ["team/bot"]
     assert [r.url.path for r in seen] == ["/api/v4/projects"]
+
+
+def test_open_change_encodes_a_nested_group_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A merge request for ``group/sub/repo`` goes to the one-segment project path."""
+    opened = {"web_url": "https://gitlab.com/group/sub/repo/-/merge_requests/3", "iid": 3, "draft": True}
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(201, json=opened))
+    change = gitlab.open_change("glpat", "group/sub/repo", head="skynet/best", base_branch="main", title="T", body="B")
+    assert (change.url, change.number) == (opened["web_url"], 3)
+    assert seen[0].url.raw_path.decode() == "/api/v4/projects/group%2Fsub%2Frepo/merge_requests"
+
+
+def test_resolve_commit_encodes_a_nested_group_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The commit lookup of ``group/sub/repo`` uses the one-segment project path."""
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={"id": SHA}))
+    assert gitlab.resolve_commit("glpat", "group/sub/repo", "dev") == SHA
+    assert seen[0].url.raw_path.decode() == "/api/v4/projects/group%2Fsub%2Frepo/repository/commits/dev"
+
+
+def test_snapshot_clones_a_nested_group_path_from_gitlab(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The worker clones ``group/sub/repo`` from gitlab.com with the token scoped to that host."""
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def record(arguments: list[str], _cwd: Path, environment: dict[str, str]) -> str:
+        """Record one git command and stop at the fetch.
+
+        Args:
+            arguments: Arguments after ``git``.
+            _cwd: Working directory.
+            environment: Extra environment.
+
+        Returns:
+            Empty output.
+
+        Raises:
+            RepoFetchError: At the fetch, so no network call runs.
+        """
+        calls.append((arguments, environment))
+        if arguments[0] == "fetch":
+            raise RepoFetchError("stop")
+        return ""
+
+    monkeypatch.setattr(github_repo, "_git", record)
+    with pytest.raises(RepoFetchError, match="stop"):
+        github_repo.fetch_snapshot("group/sub/repo", SHA, "glpat", tmp_path, provider="gitlab")
+    remote = next(arguments for arguments, _ in calls if arguments[:2] == ["remote", "add"])
+    assert remote[-1] == "https://gitlab.com/group/sub/repo.git"
+    environment = calls[0][1]
+    assert environment["GIT_CONFIG_KEY_0"] == "http.https://gitlab.com/.extraheader"
+    basic = base64.b64encode(b"oauth2:glpat").decode()
+    assert environment["GIT_CONFIG_VALUE_0"] == f"AUTHORIZATION: basic {basic}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
@@ -145,7 +146,9 @@ def test_host_picker_refuses_other_providers() -> None:
     assert response.status_code == 422
 
 
-def _link(store: Any, provider: str, expires_in: timedelta, refresh_token: str | None = "rt") -> ConnectorVault:
+def _link(
+    store: Any, provider: str, expires_in: timedelta, refresh_token: str | None = "rt", access_token: str = "old"
+) -> ConnectorVault:
     """Store an OAuth grant for alice on ``provider``.
 
     Args:
@@ -153,6 +156,7 @@ def _link(store: Any, provider: str, expires_in: timedelta, refresh_token: str |
         provider: Connector name.
         expires_in: Time until the access token expires; negative for a stale token.
         refresh_token: The stored refresh token, or ``None``.
+        access_token: The stored access token.
 
     Returns:
         The vault that holds the grant.
@@ -161,7 +165,7 @@ def _link(store: Any, provider: str, expires_in: timedelta, refresh_token: str |
     vault.save(
         "alice",
         provider,
-        access_token="old",
+        access_token=access_token,
         auth_method="oauth",
         account_label="alice",
         refresh_token=refresh_token,
@@ -171,9 +175,9 @@ def _link(store: Any, provider: str, expires_in: timedelta, refresh_token: str |
 
 
 @pytest.mark.usefixtures("vault_key")
-@pytest.mark.parametrize(("provider", "name"), [("github", "GitHub"), ("bitbucket", "Bitbucket")])
+@pytest.mark.parametrize(("provider", "name"), [("github", "GitHub"), ("gitlab", "GitLab"), ("bitbucket", "Bitbucket")])
 def test_revoked_token_gives_the_github_error_shape(provider: str, name: str) -> None:
-    """A revoked Bitbucket token answers exactly like a revoked GitHub token: 409 ``connectors.rejected``."""
+    """A revoked GitLab or Bitbucket token answers exactly like a revoked GitHub token: 409 ``connectors.rejected``."""
     client, store = _make_client()
     _link(store, provider, timedelta(hours=1))
     with patch("core.connectors.transport.CLIENT.request", return_value=_response(401, {"message": "revoked"})):
@@ -184,12 +188,12 @@ def test_revoked_token_gives_the_github_error_shape(provider: str, name: str) ->
 
 
 @pytest.mark.usefixtures("vault_key")
-@pytest.mark.parametrize("provider", ["github", "bitbucket"])
+@pytest.mark.parametrize("provider", ["github", "gitlab", "bitbucket"])
 @pytest.mark.parametrize("refresh_token", ["rt", None])
 def test_expired_grant_gives_the_github_error_shape(
     monkeypatch: pytest.MonkeyPatch, provider: str, refresh_token: str | None
 ) -> None:
-    """An expired Bitbucket grant whose refresh fails, or with no refresh token, answers like GitHub's."""
+    """An expired GitLab or Bitbucket grant whose refresh fails, or with no refresh token, answers like GitHub's."""
     monkeypatch.setattr(settings, f"{provider}_oauth_client_id", "client")
     client, store = _make_client()
     vault = _link(store, provider, -timedelta(minutes=1), refresh_token)
@@ -202,6 +206,29 @@ def test_expired_grant_gives_the_github_error_shape(
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "connectors.expired"
     assert vault.get("alice", provider).status == "invalid"
+
+
+@pytest.mark.usefixtures("vault_key")
+@pytest.mark.parametrize("provider", ["gitlab", "bitbucket"])
+def test_failed_refresh_logs_no_token(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, provider: str
+) -> None:
+    """A revoked grant whose refresh fails leaves no token text in the logs or the answer."""
+    monkeypatch.setattr(settings, f"{provider}_oauth_client_id", "client")
+    client, store = _make_client()
+    _link(store, provider, -timedelta(minutes=1), "refresh-6f1d2c", "access-9b7e4a")
+    refused = _response(400, {"error": "invalid_grant", "error_description": "Token was revoked"})
+    with (
+        caplog.at_level(logging.DEBUG),
+        patch("core.connectors.oauth.httpx.post", return_value=refused),
+        patch("core.connectors.transport.CLIENT.request") as never,
+    ):
+        response = client.get(f"/connectors/{provider}/branches", params={"repo": "team/bot"})
+    never.assert_not_called()
+    assert response.status_code == 409, response.text
+    for secret in ("refresh-6f1d2c", "access-9b7e4a"):
+        assert secret not in caplog.text
+        assert secret not in response.text
 
 
 @pytest.mark.usefixtures("vault_key")
