@@ -49,6 +49,7 @@ from .sandbox import (
     unique_sandbox_name,
     write_codex_requirements,
 )
+from .sandbox_broker import ENGINE_BOX_KEY_PREFIX
 from .upstream import (
     AUTORESEARCH_SOURCE,
     AUTORESEARCH_VERSION,
@@ -1155,21 +1156,24 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         env={"PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"},
         name=unique_sandbox_name(f"app-{engine_id}"),
         inject_headers=headers,
+        # The worker parent's sandbox broker gives a box with this identity one of
+        # the engine box permits it shares across all jobs (SKY-426).
+        operation_key=f"{ENGINE_BOX_KEY_PREFIX}{uuid.uuid4().hex}" if getattr(runtime, "protected", False) else None,
         **network,
     )
     session = runtime.open(spec)
     final_result: Result | None = None
     opened = time.monotonic()
-    mailbox = _EvaluatorMailbox(
-        session,
-        server,
-        nonce,
-        getattr(ctx, "progress_callback", None),
-        getattr(ctx, "check_budget", None),
-        str_mode=task.str_mode,
-        cases=task.cases,
-    )
     try:
+        mailbox = _EvaluatorMailbox(
+            session,
+            server,
+            nonce,
+            getattr(ctx, "progress_callback", None),
+            getattr(ctx, "check_budget", None),
+            str_mode=task.str_mode,
+            cases=task.cases,
+        )
         payload = {
             "nonce": nonce,
             "source": upstream_revision,

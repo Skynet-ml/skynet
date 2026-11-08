@@ -62,6 +62,7 @@ from ..sandbox import (
     CommandResult,
     SandboxSpec,
 )
+from ..sandbox_broker import ENGINE_BOX_KEY_PREFIX
 from ..workspace_scorer import case_document
 
 
@@ -2292,3 +2293,82 @@ def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeyp
     run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
 
     assert session.requirements == []
+
+
+class ProtectedRuntime(FakeRuntime):
+    """Stand in for the worker child's runtime, which opens boxes through the parent broker."""
+
+    protected = True
+
+
+def test_protected_native_box_asks_the_parent_broker_for_an_engine_box_permit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A protected engine box carries the identity that makes the parent broker count it.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    runtime = ProtectedRuntime(FakeSession())
+
+    run_native_engine(
+        "autoresearch", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=2), _context(tmp_path, runtime)
+    )
+
+    assert runtime.spec is not None
+    assert runtime.spec.operation_key is not None
+    assert runtime.spec.operation_key.startswith(ENGINE_BOX_KEY_PREFIX)
+    assert len(runtime.spec.operation_key) > len(ENGINE_BOX_KEY_PREFIX)
+
+
+def test_direct_native_box_has_no_engine_box_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runtime with no parent broker gets no request identity, as before.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    runtime = FakeRuntime(FakeSession())
+
+    run_native_engine(
+        "autoresearch", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=2), _context(tmp_path, runtime)
+    )
+
+    assert runtime.spec is not None
+    assert runtime.spec.operation_key is None
+
+
+def test_cancelled_native_run_closes_its_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel that ends the engine command closes the box, so the parent broker frees its permit.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+
+    class CancelledError(Exception):
+        """Stand in for the run's cancel signal."""
+
+    class CancelledSession(FakeSession):
+        """Raise a cancel during the engine command."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Pass the install, then raise the cancel."""
+            if self.calls:
+                raise CancelledError("cancelled")
+            return super().run(command, **kwargs)
+
+    session = CancelledSession()
+    with pytest.raises(CancelledError):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=3),
+            _context(tmp_path, ProtectedRuntime(session)),
+        )
+
+    assert session.closed
