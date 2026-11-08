@@ -7,8 +7,10 @@ eval server is the single scoring path, exactly like upstream ``gepa.oa``.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import math
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -101,6 +103,56 @@ def _scored_progress(
     return forward
 
 
+class _SkippedCallError(Exception):
+    """A queued call of a batch that did not start because an earlier call failed."""
+
+
+def _stop_after_first_failure(
+    score_one: Callable[[Candidate, Any], tuple[float | None, dict[str, Any]]],
+) -> Callable[[Candidate, Any], tuple[float | None, dict[str, Any]]]:
+    """Wrap a scorer so worker threads run it in the caller's context and stop after a failure.
+
+    A serial batch ends at its first error, such as a budget stop or a cancel.
+    The wrapper keeps that rule: after one call fails, no queued call starts,
+    and the calls in flight end in their own time. A queued call starts after
+    every earlier call, so the failure the batch raises is still the first one.
+
+    Args:
+        score_one: Scores one ``(candidate, case)`` pair.
+
+    Returns:
+        A scorer that is safe to call from worker threads.
+    """
+    # Worker threads start with an empty context, so the run, usage and
+    # proposal-iteration scopes would not reach the scorer without this copy.
+    parent = contextvars.copy_context()
+    failed = threading.Event()
+
+    def score_in_context(candidate: Candidate, example: Any = None) -> tuple[float | None, dict[str, Any]]:
+        """Score one pair in a private copy of the caller's context, unless a call already failed.
+
+        Args:
+            candidate: The version GEPA wants scored.
+            example: The case.
+
+        Returns:
+            What ``score_one`` returns.
+
+        Raises:
+            _SkippedCallError: An earlier call of the batch failed, so this one does not start.
+        """
+        if failed.is_set():
+            raise _SkippedCallError
+        try:
+            # One Context cannot be entered by two threads at once.
+            return parent.copy().run(score_one, candidate, example)
+        except BaseException:
+            failed.set()
+            raise
+
+    return score_in_context
+
+
 class GepaEngine:
     """Reflective prompt-evolution engine backed by ``optimize_anything``."""
 
@@ -140,9 +192,9 @@ class GepaEngine:
                 seed=ctx.seed,
                 max_metric_calls=server.remaining,
                 max_reflection_cost=ctx.proposer_token_budget_usd,
-                # Scorers may be user code or a remote endpoint with no
-                # concurrency guarantees, and a serial loop keeps the budget
-                # accounting exact.
+                # ``batch_evaluator`` is GEPA's only scoring path here, and it
+                # fans a batch out itself up to ``ctx.concurrency``. GEPA's own
+                # pool would only nest a second pool over it.
                 parallel=False,
                 display_progress_bar=False,
             ),
@@ -210,8 +262,11 @@ class GepaEngine:
             Returns:
                 One ``(score, side_info)`` per pair, in order.
             """
-            # Serial, like ``parallel=False`` above: the budget checks stay exact.
-            return score_batch(score_one, pairs, 1)
+            # Text targets keep the serial loop. Agent targets run each case in
+            # its own sandbox, so their batch runs ``ctx.concurrency`` wide.
+            if ctx.concurrency <= 1:
+                return score_batch(score_one, pairs, 1)
+            return score_batch(_stop_after_first_failure(score_one), pairs, ctx.concurrency)
 
         kwargs: dict[str, Any] = {
             "seed_candidate": task.seed_candidate,
