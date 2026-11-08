@@ -254,5 +254,6 @@ SPEC = register(
         version=ANTIGRAVITY_SDK_VERSION,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
+        position=60,
     )
 )

@@ -35,7 +35,7 @@ class ProviderEntry:
 
 # The provider modules land in later issues (SBX-6 local, SBX-7 docker,
 # SBX-10 vercel, SBX-25+ the hosted providers); until then the factory reports
-# them as "not in this build". The modal extra is not in pyproject yet.
+# them as "not in this build". A hosted extra joins pyproject with its module.
 PROVIDERS: dict[str, ProviderEntry] = {
     "local": ProviderEntry("core.sandbox.providers.local", "LocalEnvironment", None, False),
     "docker": ProviderEntry("core.sandbox.providers.docker", "DockerEnvironment", None, False),
@@ -44,7 +44,9 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "daytona": ProviderEntry("core.sandbox.providers.daytona", "DaytonaEnvironment", "daytona", False),
     "modal": ProviderEntry("core.sandbox.providers.modal", "ModalEnvironment", "modal", False),
     "runloop": ProviderEntry("core.sandbox.providers.runloop", "RunloopEnvironment", "runloop", False),
+    "mosaic": ProviderEntry("core.sandbox.providers.mosaic", "MosaicEnvironment", "mosaic", False),
     "langsmith": ProviderEntry("core.sandbox.providers.langsmith", "LangSmithEnvironment", "langsmith", False),
+    "kernel": ProviderEntry("core.sandbox.providers.kernel", "KernelEnvironment", "kernel", False),
     "apple_container": ProviderEntry(
         "core.sandbox.providers.apple_container", "AppleContainerEnvironment", None, False
     ),
