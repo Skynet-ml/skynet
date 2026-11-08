@@ -1671,6 +1671,13 @@ class _Echo:
                         self.wfile.flush()
                         time.sleep(0.05)
                     return
+                if self.path.endswith("/result"):
+                    # The MCP SDK answers a POST tool call with an event stream that ends after its result.
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    self.wfile.write(b'event: message\ndata: {"result": {}}\n\n')
+                    return
                 if self.path.endswith("/events") or self.path.endswith("/large"):
                     # No Content-Length: an event stream ends when the connection closes.
                     self.send_response(200)
@@ -2087,6 +2094,49 @@ def test_an_open_mcp_event_stream_leaves_the_call_pool_free(echo: _Echo) -> None
     answer = json.loads(dict(workspace.writes)[answer_path])
     assert answer["status"] == 200
     assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+
+
+def test_full_mcp_listeners_never_cost_a_tool_call_its_result(echo: _Echo) -> None:
+    """With every stream place held by GET listeners, a POST event stream still gets its result.
+
+    A further GET listener gets a 503 and never reaches the server, so no refused request runs upstream.
+    """
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"), max_concurrency=repo_scorer._MCP_STREAMS + 1)
+    listeners = [f"{index:032x}" for index in range(repo_scorer._MCP_STREAMS + 1)]
+    deadline = time.monotonic() + 10
+    for identity in listeners[:-1]:
+        frame = {"id": identity, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+        relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    while not all(f"calls/000001/stages/{identity}.json" in dict(workspace.writes) for identity in listeners[:-1]):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    frames = [
+        {"id": listeners[-1], "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""},
+        {
+            "id": "f" * 32,
+            "mcp": "search",
+            "path": "result",
+            "method": "POST",
+            "headers": [],
+            "body": base64.b64encode(b'{"method": "tools/call"}').decode(),
+        },
+    ]
+    for frame in frames:
+        relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    answers = [f"calls/000001/stages/{frame['id']}.json" for frame in frames]
+    while not all(path in dict(workspace.writes) for path in answers):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    refused, result = (json.loads(dict(workspace.writes)[path]) for path in answers)
+    echo.release.set()
+    relay.close()
+    assert refused == {"status": 503, "error": "MCP server 'search' has 4 event streams open already."}
+    assert result["status"] == 200
+    assert "more" not in result
+    assert base64.b64decode(result["body"]) == b'event: message\ndata: {"result": {}}\n\n'
+    assert echo.paths.count("/events") == repo_scorer._MCP_STREAMS
+    assert echo.paths.count("/events/result") == 1
 
 
 def test_an_mcp_event_stream_stops_when_the_box_side_leaves(echo: _Echo) -> None:

@@ -851,7 +851,7 @@ class _StageRelay:
 
     Calls to one stage run in parallel, each in its own process and folder,
     up to ``max_concurrency`` at a time (E34). Service requests run in their
-    own pool with the same limit. An MCP event stream passes on in its own
+    own pool with the same limit. An MCP GET event stream passes on in its own
     thread, up to ``_MCP_STREAMS`` at a time, so it never holds that pool.
     """
 
@@ -1095,6 +1095,19 @@ class _StageRelay:
             frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
         """
         label = f"MCP server {name!r}"
+        # Only a GET listener streams. Its place is taken before the request goes out, so a
+        # refused listener never reaches the server; a POST answer ends after its result.
+        listener = frame.get("method") == "GET"
+        if listener:
+            with self._streams_lock:
+                opened = len(self._open_streams) < _MCP_STREAMS
+                if opened:
+                    self._open_streams.add(identity)
+            if not opened:
+                self._answer(
+                    identity, {"status": 503, "error": f"{label} has {_MCP_STREAMS} event streams open already."}
+                )
+                return
         try:
             url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
             response = self._request(url, headers, label, frame, kind="mcp", server=name)
@@ -1105,16 +1118,11 @@ class _StageRelay:
                 logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
                 response = {"status": 502, "error": f"{label} could not be reached."}
         stream = response.pop("stream", None)
-        if stream is not None:
-            with self._streams_lock:
-                opened = len(self._open_streams) < _MCP_STREAMS
-                if opened:
-                    self._open_streams.add(identity)
-            if not opened:
-                stream.close()
-                stream = None
-                response = {"status": 503, "error": f"{label} has {_MCP_STREAMS} event streams open already."}
         if stream is None:
+            if listener:
+                with self._streams_lock:
+                    self._open_streams.discard(identity)
+                    self._abandoned.discard(identity)
             self._answer(identity, response)
             return
         try:
@@ -1303,8 +1311,13 @@ class _StageRelay:
                     )
                     + _HEAD_END[2:]
                 )
-                if kind == "mcp" and response.headers.get("content-type", "").lower().startswith("text/event-stream"):
-                    # A GET event stream may stay open for the whole run, so its events pass on as they come.
+                if (
+                    kind == "mcp"
+                    and method == "GET"
+                    and response.headers.get("content-type", "").lower().startswith("text/event-stream")
+                ):
+                    # A GET event stream may stay open for the whole run, so its events pass on as they come;
+                    # a POST event stream ends after its result, so it is read whole like any other answer.
                     status.append(response.status_code)
                     return _streamed(stack.pop_all(), head, response.iter_bytes())
                 answer = bytearray()
