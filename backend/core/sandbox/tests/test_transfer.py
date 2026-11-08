@@ -90,6 +90,19 @@ def test_pack_leaves_out_default_and_caller_exclusions(repo: Path) -> None:
     assert "repo/secrets.env" not in names
 
 
+def test_pack_keeps_a_given_path_whose_own_name_matches_an_exclusion(tmp_path: Path) -> None:
+    """A path the caller names is packed; exclusions apply only below it."""
+    venv = tmp_path / "venv"
+    (venv / "__pycache__").mkdir(parents=True)
+    (venv / "app.py").write_text("x = 1\n")
+    (venv / "__pycache__" / "app.pyc").write_bytes(b"\0")
+
+    with tarfile.open(fileobj=io.BytesIO(pack([venv]))) as tar:
+        names = set(tar.getnames())
+
+    assert names == {"venv", "venv/app.py"}
+
+
 @pytest.mark.parametrize("relative", [".", "pkg/.."], ids=["dot", "trailing-dotdot"])
 def test_pack_names_dot_paths_after_the_resolved_directory(
     relative: str, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

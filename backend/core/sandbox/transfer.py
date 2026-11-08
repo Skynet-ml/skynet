@@ -57,7 +57,9 @@ def pack(paths: Iterable[str | os.PathLike[str]], exclude: Iterable[str] = ()) -
     Each path goes into the archive under its own base name; directories are
     added recursively. A path such as ``.`` or ``sub/..`` takes the name of
     the directory it resolves to. A member is left out when any part of its archive path
-    matches a name or glob in ``DEFAULT_EXCLUDE`` or ``exclude``. Patterns match
+    below the given path matches a name or glob in ``DEFAULT_EXCLUDE`` or
+    ``exclude``. A path given in ``paths`` is always packed, even when its own
+    name matches. Patterns match
     one path part at a time, so a pattern with a ``/`` (such as ``src/venv``)
     never matches; use the bare name instead.
 
@@ -82,7 +84,8 @@ def pack(paths: Iterable[str | os.PathLike[str]], exclude: Iterable[str] = ()) -
         Returns:
             The member, or ``None`` to leave it (and its children) out.
         """
-        parts = Path(info.name).parts
+        # The first part is the given path itself: the caller asked for it by name.
+        parts = Path(info.name).parts[1:]
         if any(fnmatch.fnmatchcase(part, pattern) for part in parts for pattern in patterns):
             return None
         return info
