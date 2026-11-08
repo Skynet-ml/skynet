@@ -254,3 +254,92 @@ def test_broken_url_search_is_a_400_not_a_500(search: str) -> None:
         response = client.get("/connectors/gitlab/repos", params={"search": search})
     assert response.status_code == 400, response.text
     assert response.json()["code"] == "connectors.invalid_ref"
+
+
+def _rejected_on_page_two(provider: str) -> Any:
+    """Build a host API stub that answers the first branch page and rejects the token on the second.
+
+    Args:
+        provider: ``gitlab`` or ``bitbucket``.
+
+    Returns:
+        A ``side_effect`` for ``CLIENT.request``.
+    """
+
+    def api(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Answer one canned call.
+
+        Args:
+            method: HTTP method.
+            url: Full request URL.
+            **kwargs: The request's keyword arguments.
+
+        Returns:
+            A canned response.
+        """
+        if provider == "gitlab":
+            if not url.endswith("/repository/branches"):
+                return _response(200, {"default_branch": "main"})
+            if kwargs["params"]["page"] == 1:
+                return _response(200, [{"name": f"b{i}"} for i in range(100)])
+            return _response(401, {"message": "401 Unauthorized"})
+        if url.endswith("/repositories/team/bot"):
+            return _response(200, {"full_name": "team/bot", "mainbranch": {"name": "main"}})
+        if url.endswith("/refs/branches"):
+            page_two = "https://api.bitbucket.org/2.0/repositories/team/bot/refs/branches?page=2"
+            return _response(200, {"values": [{"name": "main"}], "next": page_two})
+        return _response(401, {"type": "error"})
+
+    return api
+
+
+@pytest.mark.usefixtures("vault_key")
+@pytest.mark.parametrize(("provider", "name"), [("gitlab", "GitLab"), ("bitbucket", "Bitbucket")])
+def test_token_rejected_on_a_later_page_gives_no_partial_list(provider: str, name: str) -> None:
+    """A 401 on the second branch page answers 409 ``connectors.rejected``, not the first page alone."""
+    client, store = _make_client()
+    _link(store, provider, timedelta(hours=1))
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_rejected_on_page_two(provider)) as calls:
+        response = client.get(f"/connectors/{provider}/branches", params={"repo": "team/bot"})
+    assert any("page=2" in str(c) or "'page': 2" in str(c) for c in calls.call_args_list)
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert (body["code"], body["params"]) == ("connectors.rejected", {"provider": name})
+    assert "branches" not in body
+
+
+def _empty_repository(method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """Answer the calls for a repository with no commits and no default branch, on either host.
+
+    Args:
+        method: HTTP method.
+        url: Full request URL.
+        **kwargs: The request's keyword arguments.
+
+    Returns:
+        A canned response.
+    """
+    path = unquote(url).removeprefix("https://gitlab.com/api/v4").removeprefix("https://api.bitbucket.org/2.0")
+    if path in ("/projects/team/empty", "/repositories/team/empty"):
+        return _response(200, {"full_name": "team/empty", "default_branch": None, "mainbranch": None})
+    if path == "/projects/team/empty/repository/branches":
+        return _response(200, [])
+    if path == "/repositories/team/empty/refs/branches":
+        return _response(200, {"values": []})
+    return _response(404, {"message": "404 Tree Not Found"})
+
+
+@pytest.mark.usefixtures("vault_key")
+@pytest.mark.parametrize("provider", ["gitlab", "bitbucket"])
+def test_repository_with_no_default_branch_is_not_a_500(provider: str) -> None:
+    """An empty repository lists no branches and a null default; its tree and commits answer below 500."""
+    client, store = _make_client()
+    _link(store, provider, timedelta(hours=1))
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_empty_repository):
+        branches = client.get(f"/connectors/{provider}/branches", params={"repo": "team/empty"})
+        others = [client.get(f"/connectors/{provider}/{r}", params={"repo": "team/empty"}) for r in ("tree", "commits")]
+    assert branches.status_code == 200, branches.text
+    assert branches.json() == {"default_branch": None, "branches": []}
+    for response in others:
+        assert response.status_code < 500, response.text
+        assert response.status_code == 200 or response.json()["code"] == "connectors.not_found"
