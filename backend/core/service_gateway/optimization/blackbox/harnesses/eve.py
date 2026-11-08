@@ -269,6 +269,6 @@ SPEC = register(
         version=EVE_VERSION,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
-        position=110,
+        position=60,
     )
 )

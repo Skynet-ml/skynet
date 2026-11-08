@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -64,12 +65,12 @@ def _target(**overrides: str) -> BlackboxTarget:
     return BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, model="openrouter/acme/agent-1", harness="eve", **overrides)
 
 
-def test_eve_is_registered_after_the_earlier_harnesses_and_before_custom() -> None:
-    """List eve in the registry and the model ids, ahead of the custom harness."""
+def test_eve_is_registered_after_prime_and_before_cline() -> None:
+    """List eve in the registry and the model ids between prime and cline."""
     spec = REGISTRY[BLACKBOX_HARNESS_EVE]
-    assert (spec.binary, spec.version, spec.output_format, spec.position) == ("eve", "1.0.0-rc.6", "pi", 110)
-    assert BLACKBOX_HARNESSES[-2:] == ("eve", "custom")
-    assert list(REGISTRY)[-1] == "eve"
+    assert (spec.binary, spec.version, spec.output_format, spec.position) == ("eve", "1.0.0-rc.6", "pi", 60)
+    assert BLACKBOX_HARNESSES[-4:] == ("prime", "eve", "cline", "custom")
+    assert list(REGISTRY)[-2:] == ["eve", "cline"]
 
 
 def _write_fixed_files(run_command: str, root: Path) -> None:
@@ -81,7 +82,7 @@ def _write_fixed_files(run_command: str, root: Path) -> None:
     """
     (root / ".app/eve/agent").mkdir(parents=True)
     write_fixed = run_command.split(" && (cd .app/eve", 1)[0]
-    subprocess.run(write_fixed, shell=True, cwd=root, env={"PATH": "/usr/bin:/bin"}, timeout=10, check=True)
+    subprocess.run(write_fixed, shell=True, cwd=root, env={"PATH": os.environ["PATH"]}, timeout=10, check=True)
 
 
 def test_launch_generates_a_pinned_eve_project(tmp_path: Path) -> None:
@@ -152,7 +153,7 @@ def test_protected_launch_checks_the_pin_relays_the_gateway_and_blocks_updates(t
         relay,
         shell=True,
         cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin", "APP_BUDGET_RELAY_URL": "http://127.0.0.1:3210/v1"},
+        env={"PATH": os.environ["PATH"], "APP_BUDGET_RELAY_URL": "http://127.0.0.1:3210/v1"},
         timeout=10,
         check=True,
     )

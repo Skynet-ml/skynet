@@ -37,7 +37,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     "plain": {},
     "override": {"install_command": "my-install {model}", "run_command": "my-run {gateway_url}"},
 }
-_BUILT_INS = ("pi", "codex", "opencode", "prime", "cline", "eve")
+_BUILT_INS = ("pi", "codex", "opencode", "prime", "eve", "cline")
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
