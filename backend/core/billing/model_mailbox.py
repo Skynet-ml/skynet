@@ -156,7 +156,11 @@ class ModelMailbox:
                             if on_output is not None:
                                 on_output(stream, line + "\n")
 
-            wrapped = f"python3 {shlex.quote(source_path)} {shlex.quote(config_path)} bash -lc {shlex.quote(command)}"
+            # A login shell reads ~/.bash_profile or ~/.profile, which a version can write (E38).
+            wrapped = (
+                f"python3 {shlex.quote(source_path)} {shlex.quote(config_path)}"
+                f" bash --noprofile --norc -c {shlex.quote(command)}"
+            )
             result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
             for future in futures:
                 future.result()

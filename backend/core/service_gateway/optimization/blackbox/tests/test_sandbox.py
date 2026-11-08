@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import os
 import re
+import subprocess
 import threading
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +25,7 @@ from ..sandbox import (
     SANDBOX_TAG,
     CommandResult,
     LocalSubprocessRuntime,
+    LocalSubprocessSession,
     SandboxSpec,
     VercelCredentials,
     VercelSandboxRuntime,
@@ -189,8 +193,8 @@ class _FakeBox:
     ) -> _FakeProcess:
         """Record the invocation, hand back a detached fake process and schedule its exit file."""
         self.runs.append({"program": program, "args": args, "env": env, "kill_after": kill_after})
-        self.fs.land_after(_exit_file(args[1]), f"{self._returncode}\n", self._polls_to_finish)
-        stdout_file, stderr_file = _output_files(args[1])
+        self.fs.land_after(_exit_file(args[-1]), f"{self._returncode}\n", self._polls_to_finish)
+        stdout_file, stderr_file = _output_files(args[-1])
         self.fs.files[stdout_file] = self._stdout
         self.fs.files[stderr_file] = self._stderr
         self.process = _FakeProcess(self._stdout, self._stderr)
@@ -248,9 +252,9 @@ def test_run_wraps_in_timeout_and_flags_timeouts() -> None:
 
     result = session.run("sleep 99", timeout_seconds=5)
 
-    wrapped = box.runs[0]["args"][1]
-    assert box.runs[0]["args"][0] == "-lc"
-    assert wrapped.startswith("timeout --signal=KILL 5s bash -lc 'sleep 99' > /tmp/.app-output-")
+    assert box.runs[0]["args"][:3] == ["--noprofile", "--norc", "-c"]
+    wrapped = box.runs[0]["args"][3]
+    assert wrapped.startswith("timeout --signal=KILL 5s bash --noprofile --norc -c 'sleep 99' > /tmp/.app-output-")
     assert "; echo $? > /tmp/.app-exit-" in wrapped
     assert box.runs[0]["kill_after"] == 5 + KILL_GRACE_SECONDS
     assert result.timed_out is True
@@ -264,8 +268,10 @@ def test_run_caps_the_kill_timer_at_the_vercel_maximum() -> None:
 
     session.run("sleep 1", timeout_seconds=VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS)
 
-    wrapped = box.runs[0]["args"][1]
-    assert wrapped.startswith(f"timeout --signal=KILL {VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS}s bash -lc")
+    wrapped = box.runs[0]["args"][3]
+    assert wrapped.startswith(
+        f"timeout --signal=KILL {VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS}s bash --noprofile --norc -c"
+    )
     assert box.runs[0]["kill_after"] == 18_000
 
 
@@ -276,11 +282,53 @@ def test_run_without_timeout_has_no_kill_timer() -> None:
 
     result = session.run("echo hi")
 
-    assert box.runs[0]["args"][1].startswith("bash -lc 'echo hi' > /tmp/.app-output-")
+    assert box.runs[0]["args"][3].startswith("bash --noprofile --norc -c 'echo hi' > /tmp/.app-output-")
     assert box.runs[0]["kill_after"] is None
     assert result.timed_out is False
     assert result.exit_code == 124
     assert result.stdout == "hi"
+
+
+def test_a_planted_shell_profile_never_runs_in_a_box_command(tmp_path: Path) -> None:
+    """Run the Vercel command in a real bash: profiles in ``$HOME`` stay unread (E38)."""
+    box = _FakeBox(returncode=0)
+    VercelSandboxSession(box, _FakeApiSession(), contextvars.copy_context()).run("printf ok")
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = tmp_path / "profile-ran"
+    for name in (".bash_profile", ".bash_login", ".profile", ".bashrc"):
+        (home / name).write_text(f"echo {name} >> {marker}\n")
+    args = box.runs[0]["args"]
+    paths = re.findall(r"/tmp/\.app-(?:output|exit)-[^ ;]+", args[3])
+
+    try:
+        subprocess.run(
+            [box.runs[0]["program"], *args],
+            env={"PATH": os.environ["PATH"], "HOME": str(home), "SSH_CLIENT": "10.0.0.1 1 22"},
+            check=True,
+        )
+        assert Path(paths[0]).read_text().startswith("ok")
+    finally:
+        for path in paths:
+            Path(path).unlink(missing_ok=True)
+
+    assert len(paths) >= 2
+    assert not marker.exists()
+
+
+def test_a_planted_shell_profile_never_runs_in_a_local_command() -> None:
+    """A ``.bashrc`` a version writes in the local box ``$HOME`` stays unread, even with ``SSH_CLIENT`` set (E38)."""
+    session = LocalSubprocessSession(SandboxSpec(lifetime_seconds=60))
+    try:
+        for name in (".bash_profile", ".bash_login", ".profile", ".bashrc"):
+            (session.path / name).write_text("echo ran >> profile-ran\n")
+
+        result = session.run("printf ok", env={"SSH_CLIENT": "10.0.0.1 1 22"})
+
+        assert result.stdout == "ok"
+        assert not (session.path / "profile-ran").exists()
+    finally:
+        session.close()
 
 
 def test_run_uses_a_fresh_exit_file_per_command() -> None:
@@ -291,7 +339,7 @@ def test_run_uses_a_fresh_exit_file_per_command() -> None:
     session.run("true")
     session.run("true")
 
-    assert _exit_file(box.runs[0]["args"][1]) != _exit_file(box.runs[1]["args"][1])
+    assert _exit_file(box.runs[0]["args"][-1]) != _exit_file(box.runs[1]["args"][-1])
 
 
 def test_run_polls_the_exit_file_with_growing_delays(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -52,10 +52,12 @@ _GIT_NO_MAINTENANCE = "-c maintenance.auto=false -c gc.auto=0"
 # so the reset and the prepared digest never see them. A filter, hook or
 # fsmonitor command set there would run in a later checkout's git call, outside
 # every candidate stop (E38). Box git reads only the repository's own config.
+# The env and -c overrides are the guard, not HOME: a root candidate can create
+# any HOME folder, but git then reads no file in it.
 GIT = (
     "env HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null"
     " GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null"
-    " -c core.hooksPath=/dev/null -c core.fsmonitor=false"
+    " -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false"
 )
 _PROBE_TIMEOUT_SECONDS = 120.0
 _PROBE_ATTEMPTS = 5

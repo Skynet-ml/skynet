@@ -7,6 +7,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any
 
+from core.billing.model_mailbox import ModelMailbox
 from core.service_gateway.optimization.blackbox import check_terminal
 from core.service_gateway.optimization.blackbox.check_terminal import CheckTerminalRecorder
 from core.service_gateway.optimization.blackbox.runner import EVENT_PREFIX
@@ -216,7 +217,7 @@ def test_model_mailbox_plumbing_never_reaches_the_transcript() -> None:
     nonce = "0123456789abcdef0123456789abcdef"
     wrapped = (
         f"python3 .app-model-{nonce}/proxy.py .app-model-{nonce}/config.json "
-        "bash -lc 'python3 app_workspace_harness.py --run'"
+        "bash --noprofile --norc -c 'python3 app_workspace_harness.py --run'"
     )
     recorder = CheckTerminalRecorder()
     command_id = recorder.command_started(wrapped, scrub=lambda text: text)
@@ -228,4 +229,31 @@ def test_model_mailbox_plumbing_never_reaches_the_transcript() -> None:
     assert events[0]["label"] == "python3 app_workspace_harness.py --run"
     assert [event["text"] for event in events if event["kind"] == "output"] == ["score 1.0"]
     assert "APP_MODEL_" not in _text(recorder)
+
+
+def test_a_planted_shell_profile_never_runs_through_the_model_mailbox_wrapper() -> None:
+    """The mailbox wrapper runs its command with no profile, and the transcript still shows that command (E38)."""
+    session = LocalSubprocessSession(SandboxSpec(lifetime_seconds=60))
+    commands: list[str] = []
+    run = session.run
+
+    def recording_run(command: str, **kwargs: Any) -> CommandResult:
+        """Record the wrapped command line, then run it."""
+        commands.append(command)
+        return run(command, **kwargs)
+
+    session.run = recording_run  # type: ignore[method-assign]
+    try:
+        for name in (".bash_profile", ".bash_login", ".profile", ".bashrc"):
+            (session.path / name).write_text("echo ran >> profile-ran\n")
+
+        result = ModelMailbox(lambda *args: None).run(session, "printf ok", env={"SSH_CLIENT": "10.0.0.1 1 22"})
+
+        assert result.stdout == "ok"
+        assert not (session.path / "profile-ran").exists()
+        recorder = CheckTerminalRecorder()
+        recorder.command_started(commands[0], scrub=lambda text: text)
+        assert recorder.snapshot()["events"][0]["label"] == "printf ok"
+    finally:
+        session.close()
     assert ".app-model-" not in _text(recorder)

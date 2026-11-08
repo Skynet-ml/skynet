@@ -313,6 +313,12 @@ class RepoScorer:
                     self._workspace.close()
                     raise RepoScoreError(_LINKED_BOX)
                 session.write_files({RUNNER_PATH: RUNNER_SOURCE})
+            # Boundary (E38): the checkout and the reset run no code that a version
+            # controls. Version code runs in this box before the install only in
+            # [run] above and in earlier calls' metric steps. stop_candidates kills
+            # the processes that keep the run's marker or stay its descendants; a
+            # process that drops both can still wait here. Separate boxes close
+            # this (SKY-387). No same-uid sweep: it would kill the supervisor.
             not_installed = self._workspace.install_metric_files()
             if not_installed:
                 raise RepoScoreError(not_installed)

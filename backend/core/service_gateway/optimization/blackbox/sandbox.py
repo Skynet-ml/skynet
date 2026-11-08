@@ -169,6 +169,13 @@ class _OutputFile:
     text: str = ""
 
 
+# A login or interactive shell reads ~/.bash_profile, ~/.profile or ~/.bashrc,
+# which a version's code can write. Some bash builds (Debian, Homebrew) also read
+# ~/.bashrc in a plain `bash -c` when SSH_CLIENT is set. Code planted there would run before every
+# later box command: the reset, the metric install and the metric step (E38).
+_SHELL_FLAGS = ("--noprofile", "--norc", "-c")
+
+
 class VercelSandboxSession:
     """Session over one Vercel sandbox, bound to the SDK session that created it."""
 
@@ -274,7 +281,7 @@ class VercelSandboxSession:
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
     ) -> CommandResult:
-        """Run ``command`` through ``bash -lc`` in the working directory and wait for it.
+        """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and wait for it.
 
         The process runs detached and is watched with short polls instead of
         one streamed response: Vercel's edge drops a response that stays open
@@ -299,7 +306,7 @@ class VercelSandboxSession:
         Raises:
             ServiceError: If the process outlives its kill deadline.
         """
-        inner = f"bash -lc {shlex.quote(command)}"
+        inner = f"bash {' '.join(_SHELL_FLAGS)} {shlex.quote(command)}"
         kill_after = None
         deadline = None
         seconds = None
@@ -316,7 +323,7 @@ class VercelSandboxSession:
         started = time.monotonic()
         process = self._session.create_process(
             "bash",
-            ["-lc", f"{inner} > {streams['stdout'].path} 2> {streams['stderr'].path}; echo $? > {sentinel}"],
+            [*_SHELL_FLAGS, f"{inner} > {streams['stdout'].path} 2> {streams['stderr'].path}; echo $? > {sentinel}"],
             cwd=self._cwd,
             env=dict(env) if env else None,
             kill_after=kill_after,
@@ -709,7 +716,7 @@ def _private_root() -> Path:
 class LocalSubprocessSession:
     """Session over a temp directory on the worker host: a development stand-in, not a security boundary.
 
-    Commands run through ``bash -c`` as the worker's own user with a scrubbed
+    Commands run through ``bash --noprofile --norc -c`` as the worker's own user with a scrubbed
     environment; the directory is removed on :meth:`close`.
     """
 
@@ -785,7 +792,7 @@ class LocalSubprocessSession:
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
     ) -> CommandResult:
-        """Run ``command`` through ``bash -c`` in the working directory and wait for it.
+        """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and wait for it.
 
         Args:
             command: Shell command line.
@@ -800,7 +807,7 @@ class LocalSubprocessSession:
         if self._protected_relay is not None:
             command_environment = _contained_environment(command_environment, self._protected_relay)
         process = subprocess.Popen(
-            ["bash", "-c", command],
+            ["bash", *_SHELL_FLAGS, command],
             cwd=self._dir,
             env={**self._env, **command_environment},
             stdout=subprocess.PIPE,
