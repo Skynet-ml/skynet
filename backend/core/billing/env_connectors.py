@@ -8,7 +8,8 @@ per-call price in the run budget before and after the provider sees it.
 :func:`relay_request` is the one parent path for a repository's ``[services]`` and
 role ``.mcp.json`` http calls: it fills each ``${NAME}`` placeholder with the
 user's secret or, for a managed binding, Skynet's key for that host, and removes
-every filled value from the answer.
+every filled value from the answer. With a recorder it also writes the call into
+the run record (E28), with every secret it could carry removed (E52 rule 3).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import uuid
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlsplit
 
 from ..config import settings
@@ -27,6 +28,10 @@ from .credential_safety import credential_fragments, redact_secret_bytes
 from .mcp_broker import ToolCall
 from .operation_pricing import ChargePolicy, operation_quote
 from .runtime import BudgetRuntime, PaidResult
+
+if TYPE_CHECKING:
+    # scoped_relay imports this module, so the recorder type is for type checks only.
+    from ..worker.scoped_relay import CallRecorder
 
 CONNECTOR_PRICE_VERSION = "env-connectors-2026-11-06"
 CONNECTOR_COST_KIND = "tool"
@@ -406,6 +411,8 @@ def relay_request(
     allowed_hosts: Mapping[str, Collection[str]],
     send: Callable[[str, dict[str, str], bytes], bytes],
     runtime: BudgetRuntime | None = None,
+    recorder: CallRecorder | None = None,
+    kind: str = "host",
 ) -> bytes:
     """Send one ``[services]`` or MCP http request with its secrets filled in (E49-E53).
 
@@ -428,6 +435,11 @@ def relay_request(
             to its catalog endpoint.
         send: Sends the filled request and returns the answer body.
         runtime: The run budget; required when a managed secret is used.
+        recorder: Writes this call into the run record: ``ok``, ``failed``
+            or ``refused`` with its reason. Every user secret value and every
+            filled header value goes to the store as a secret.
+        kind: The record kind: ``host`` for a ``[services]`` call, ``mcp``
+            for a role ``.mcp.json`` call.
 
     Returns:
         The answer body without any filled secret value.
@@ -437,6 +449,76 @@ def relay_request(
             to, or a managed call is not to the connector's own endpoint, is a
             request the meter cannot read, has no budget, or names a tool with
             no price.
+    """
+    state = _RelayState(set(user_secrets.values()))
+    started = recorder.start() if recorder is not None else None
+    try:
+        answer = _relay(url, headers, body, user_secrets, bindings, secret_hosts, allowed_hosts, send, runtime, state)
+    except Exception as error:
+        if recorder is not None and started is not None:
+            recorder.record(
+                started,
+                kind=kind,
+                target=(urlsplit(url).hostname or "").rstrip(".").lower(),
+                status="failed" if state.sent else "refused",
+                request=body,
+                failure_reason=f"{type(error).__name__}: {error}",
+                # A tool that failed after the send still settles its price.
+                cost_usd=state.cost_usd if state.sent else None,
+                secrets=state.secrets,
+            )
+        raise
+    if recorder is not None and started is not None:
+        recorder.record(
+            started,
+            kind=kind,
+            target=(urlsplit(url).hostname or "").rstrip(".").lower(),
+            status="ok",
+            request=body,
+            response=answer,
+            cost_usd=state.cost_usd,
+            secrets=state.secrets,
+        )
+    return answer
+
+
+@dataclass
+class _RelayState:
+    """Collect what the run record needs from one relay call, even when it fails."""
+
+    secrets: set[str]
+    sent: bool = False
+    cost_usd: float | None = None
+
+
+def _relay(
+    url: str,
+    headers: Mapping[str, str],
+    body: bytes,
+    user_secrets: Mapping[str, str],
+    bindings: Mapping[str, str],
+    secret_hosts: Mapping[str, str],
+    allowed_hosts: Mapping[str, Collection[str]],
+    send: Callable[[str, dict[str, str], bytes], bytes],
+    runtime: BudgetRuntime | None,
+    state: _RelayState,
+) -> bytes:
+    """Fill, check, meter and send one relay call; see :func:`relay_request`.
+
+    Args:
+        url: The declared https url.
+        headers: The declared headers, with ``${NAME}`` placeholders.
+        body: The request body from the box.
+        user_secrets: The run's own secret values, by name.
+        bindings: ``user`` or ``managed`` for each secret name.
+        secret_hosts: The one host each secret may go to.
+        allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
+        send: Sends the filled request and returns the answer body.
+        runtime: The run budget; required when a managed secret is used.
+        state: Gets the filled secrets, whether the call was sent, and its cost.
+
+    Returns:
+        The answer body without any filled secret value.
     """
     host = (urlsplit(url).hostname or "").rstrip(".").lower()
     names = tuple(dict.fromkeys(name for value in headers.values() for name in _PLACEHOLDER.findall(value)))
@@ -453,12 +535,14 @@ def relay_request(
     }
     # A server can echo a value JSON-escaped (Go writes & as \u0026, PHP writes / as \/), so hide those forms too.
     fragments |= {form for fragment in fragments for form in _escaped_forms(fragment)}
+    state.secrets |= set(values.values()) | fragments
     ordered = sorted(fragments, key=len, reverse=True)
     managed = any(bindings.get(name) == MANAGED_BINDING for name in names)
     if managed and not _same_endpoint(url, CONNECTORS[host]):
         raise ValueError(f"A Skynet key for {host} may go only to {CONNECTORS[host].url}.")
     call = _managed_call(body) if managed else None
     if call is None:
+        state.sent = True
         answer = send(url, filled, body)
     else:
         if runtime is None:
@@ -473,9 +557,12 @@ def relay_request(
             Returns:
                 The raw answer, wrapped for the meter.
             """
-            progress.sent = True
+            progress.sent = state.sent = True
             return {"body": send(url, filled, body)}
 
         tool, arguments = call
+        if tool in CONNECTORS[host].tools:
+            policy = ChargePolicy("managed_model")
+            state.cost_usd = float(policy.convert(CONNECTORS[host].tools[tool]).total * policy.cent_usd)
         answer = tool_meter(runtime, CONNECTORS[host])(tool, arguments, ToolCall(run))["body"]
     return redact_secret_bytes(answer, ordered)

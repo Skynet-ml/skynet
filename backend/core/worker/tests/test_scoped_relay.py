@@ -92,3 +92,70 @@ def test_the_evaluator_token_reaches_only_its_paths(client: type[_Client]) -> No
         dispatch("evaluator", "/v1/messages", {}, {})
 
     assert client.timeouts == [600]
+
+
+class _BrokenSink:
+    """Fail every write, like a lost database connection."""
+
+    def record_call(self, *_args: object) -> int:
+        """Fail the write."""
+        raise RuntimeError("database is down")
+
+
+class _Sink:
+    """Keep every recorded call in memory."""
+
+    def __init__(self) -> None:
+        """Start with no calls."""
+        self.calls: list[tuple[str, dict[str, Any], list[str]]] = []
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
+        """Keep one call.
+
+        Args:
+            optimization_id: Owning job id.
+            call: The call fields.
+            secrets: The secrets to remove.
+
+        Returns:
+            The call's sequence number.
+        """
+        self.calls.append((optimization_id, call, secrets))
+        return len(self.calls)
+
+
+def test_recorder_sends_the_call_fields_and_drops_empty_secrets() -> None:
+    """Write one call with its candidate, role, timing and only the non-empty secrets."""
+    sink = _Sink()
+    recorder = scoped_relay.CallRecorder(sink, "job-1", "cand-1", "judge")
+    recorder.record(
+        recorder.start(),
+        kind="host",
+        target="api.example",
+        status="ok",
+        request=b"{}",
+        response=b"\xff",
+        secrets=["key", "", "key"],
+    )
+    [(job, call, secrets)] = sink.calls
+    assert job == "job-1"
+    assert (call["candidate_id"], call["role"], call["kind"], call["status"]) == ("cand-1", "judge", "host", "ok")
+    assert call["started_at"].tzinfo is not None
+    assert call["duration_ms"] >= 0
+    assert (call["request"], call["response"]) == ("{}", "\ufffd")
+    assert secrets == ["key"]
+
+
+def test_recorder_bind_keeps_the_run_and_changes_the_candidate() -> None:
+    """Bind a recorder to another candidate and role of the same run."""
+    recorder = scoped_relay.CallRecorder(_Sink(), "job-1", "cand-1", "judge").bind(candidate_id="cand-2")
+    assert (recorder.optimization_id, recorder.candidate_id, recorder.role) == ("job-1", "cand-2", "judge")
+    assert recorder.bind(role="proposer").role == "proposer"
+
+
+def test_recorder_store_failure_never_fails_the_call(caplog: pytest.LogCaptureFixture) -> None:
+    """Log a store failure without its text, and return normally."""
+    recorder = scoped_relay.CallRecorder(_BrokenSink(), "job-1", "cand-1", "judge")
+    recorder.record(recorder.start(), kind="host", target="api.example", status="ok", secrets=["key"])
+    assert "Could not record a host call" in caplog.text
+    assert "database is down" not in caplog.text
