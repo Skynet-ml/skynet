@@ -38,6 +38,7 @@ from ..harness_bridge import (
     parse_pi_output,
     parse_plain_output,
 )
+from ..harnesses import REGISTRY
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 
@@ -272,9 +273,7 @@ def test_pi_editor_launch_keeps_the_default_without_a_choice() -> None:
     assert '--model "$APP_MODEL"' in launch.run_command
 
 
-@pytest.mark.parametrize(
-    "harness", [BLACKBOX_HARNESS_PI, BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_OPENCODE, BLACKBOX_HARNESS_PRIME]
-)
+@pytest.mark.parametrize("harness", list(REGISTRY))
 def test_protected_harness_uses_offline_dependencies_and_local_relay(tmp_path: Path, harness: str) -> None:
     """Execute generated config substitution without invoking a CLI or contacting a provider."""
     launch = build_launch(_target(harness, run_command="true"), _GATEWAY, protected=True)
@@ -499,7 +498,7 @@ def test_parse_opencode_output_reads_text_parts_and_step_usage() -> None:
 
 @pytest.mark.parametrize(
     ("harness", "output_format"),
-    [("pi", "pi"), ("codex", "codex"), ("opencode", "opencode"), ("prime", "pi")],
+    [(spec.id, spec.output_format) for spec in REGISTRY.values()],
 )
 def test_launch_payload_names_the_parser_for_every_built_in_harness(harness: str, output_format: str) -> None:
     """Serialize a launch so the sandbox bridge can pick the right output parser by name."""
