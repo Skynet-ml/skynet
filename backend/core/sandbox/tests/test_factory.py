@@ -120,10 +120,11 @@ def test_failed_name_import_is_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_
     assert type(caught.value.__cause__) is ImportError
 
 
-def test_registered_provider_without_module_is_not_in_this_build() -> None:
+def test_registered_provider_without_module_is_not_in_this_build(monkeypatch: pytest.MonkeyPatch) -> None:
     """Say that a registered provider is not in this build until its module exists."""
+    _register(monkeypatch, "ghost", ProviderEntry("sky453_missing_provider_module", "Environment", None, False))
     with pytest.raises(ProviderUnavailableError, match="not in this build"):
-        factory.create_environment("e2b", _SPEC)
+        factory.create_environment("ghost", _SPEC)
 
 
 def test_missing_class_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
