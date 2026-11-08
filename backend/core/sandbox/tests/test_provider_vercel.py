@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -11,7 +12,9 @@ from typing import Any
 import httpx
 import pytest
 from vercel.sandbox import SandboxApiError
+from vercel.sandbox._internal.recovery import execute_with_sandbox_recovery
 
+from core.billing.signals import BudgetReached
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
@@ -153,7 +156,9 @@ class FakeProcess:
 
 
 class FakeSession:
-    """Stand in for a Vercel runtime session."""
+    """Stand in for a Vercel runtime session; it never resumes after a stop."""
+
+    cwd: str | None = None
 
     def __init__(self, readback: Any = None) -> None:
         """Keep the policy readback.
@@ -168,6 +173,34 @@ class FakeSession:
         self.stops = 0
         self.next_readback = readback
         self.log: list[str] | None = None
+        self.box: FakeBox | None = None
+
+    @property
+    def fs(self) -> FakeFs:
+        """Return the file system of the box.
+
+        Returns:
+            The fake file system.
+        """
+        return self.box.fs
+
+    async def create_process(self, command: str, args: list[str], **kwargs: Any) -> FakeProcess:
+        """Start a process on this session, or answer 410 after a stop.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+
+        Raises:
+            SandboxApiError: The session stopped.
+        """
+        if self.stops:
+            raise SandboxApiError(httpx.Response(410), "gone", data={"error": {"code": "sandbox_stopped"}})
+        return await self.box.create_process(command, args, **kwargs)
 
     async def extend_execution_time_limit(self, duration: timedelta) -> FakeSession:
         """Record one extension.
@@ -215,6 +248,7 @@ class FakeBox:
         self.status = "running"
         self.cwd = "/vercel/sandbox"
         self.current_session = session
+        session.box = self
         self.fs = FakeFs()
         self.stops = 0
         self.destroys = 0
@@ -271,6 +305,67 @@ class FakeBox:
         self.destroys += 1
 
 
+class ResumingBox(FakeBox):
+    """A box whose ``create_process`` resumes a stopped session, like the SDK ``Sandbox``."""
+
+    def __init__(self, name: str, session: FakeSession) -> None:
+        """Make a running box that counts resumes.
+
+        Args:
+            name: The box name.
+            session: The current session.
+        """
+        super().__init__(name, session)
+        self.resumes = 0
+        self.session_ids: list[str] = []
+
+    def _capture_recovery_session_id(self) -> str:
+        """Return the id that the SDK recovery helper pins.
+
+        Returns:
+            The current session id.
+        """
+        return self.current_session.id
+
+    async def _await_shared_resume(self) -> None:
+        """Resume into a new session, as the SDK does after a 410."""
+        self.resumes += 1
+        resumed = FakeSession()
+        resumed.id = f"session-{self.resumes + 1}"
+        resumed.box = self
+        self.current_session = resumed
+
+    async def create_process(self, command: str, args: list[str], **kwargs: Any) -> FakeProcess:
+        """Start a process through the real SDK recovery helper.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+        """
+
+        async def operation(session_id: str) -> FakeProcess:
+            """Answer 410 on a stopped session, else start the process.
+
+            Args:
+                session_id: The session that the helper pinned.
+
+            Returns:
+                The fake process.
+            """
+            if self.current_session.stops:
+                raise SandboxApiError(httpx.Response(410), "gone", data={"error": {"code": "sandbox_stopped"}})
+            self.session_ids.append(session_id)
+            process = FakeProcess(self.fs, args[-1], [0])
+            self.processes.append(process)
+            return process
+
+        return await execute_with_sandbox_recovery(operation, coordinator=self)
+
+
 class FakeClient:
     """Stand in for the async SDK client."""
 
@@ -287,6 +382,7 @@ class FakeClient:
         self.create_kwargs: list[dict[str, Any]] = []
         self.create_errors: list[BaseException] = []
         self.hang = False
+        self.created = asyncio.Event()
         self.closed = 0
         self.capture: Any = None
 
@@ -309,6 +405,7 @@ class FakeClient:
                 The fake box.
             """
             box = self.boxes.setdefault(kwargs["name"], FakeBox(kwargs["name"], FakeSession(self.readback)))
+            self.created.set()
             if self.hang:
                 await asyncio.Event().wait()
             if self.create_errors:
@@ -597,8 +694,7 @@ async def test_cancel_in_create_stops_once_and_settles(client: FakeClient, log: 
     client.hang = True
     env = make_env(client, log)
     task = asyncio.create_task(env.start())
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await asyncio.wait_for(client.created.wait(), 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -787,6 +883,137 @@ async def test_renewer_does_not_extend_unfunded_slice(client: FakeClient, log: l
     session = client.boxes[env.name].current_session
     await asyncio.wait_for(env._renewer, 5)
     assert session.extensions == []
+    await env.stop()
+
+
+async def test_exec_after_unconfirmed_extension_fails_without_resume(log: list[str]) -> None:
+    """Check that work after the renewer stops the session fails and never resumes it."""
+    client = FakeClient(log)
+    env = make_env(client, log, lifetime=1500)
+    client.boxes[env.name] = ResumingBox(env.name, FakeSession())
+    await env.start()
+    env.usage.confirm_error = RuntimeError("pending")
+    await asyncio.wait_for(env._renewer, 5)
+    box = client.boxes[env.name]
+    assert box.current_session.stops == 1
+    with pytest.raises(SandboxInfraError):
+        await env.exec("echo paid-work")
+    with pytest.raises(SandboxInfraError):
+        await env.upload_files({"a.txt": "data"})
+    assert box.resumes == 0
+    assert box.session_ids == []
+    await env.stop()
+
+
+async def test_exec_after_unfunded_slice_fails_at_funded_end(log: list[str]) -> None:
+    """Check that work runs until the funded lifetime ends, then fails closed."""
+    client = FakeClient(log)
+    env = make_env(client, log, lifetime=1500)
+    await env.start()
+    env.usage.extend_error = BudgetReached()
+    await asyncio.wait_for(env._renewer, 5)
+    assert (await env.exec("echo still-funded")).exit_code == 0
+    env._clock.now = 600
+    with pytest.raises(SandboxInfraError):
+        await env.exec("echo more")
+    await env.stop()
+
+
+async def test_410_from_stopped_session_fails_without_resume(log: list[str]) -> None:
+    """Check that a 410 from a session stopped elsewhere fails and halts the box."""
+    client = FakeClient(log)
+    env = make_env(client, log)
+    client.boxes[env.name] = ResumingBox(env.name, FakeSession())
+    await env.start()
+    box = client.boxes[env.name]
+    await box.current_session.stop()
+    with pytest.raises(SandboxInfraError):
+        await env.exec("echo paid-work")
+    with pytest.raises(SandboxInfraError):
+        await env.download_file("a.txt")
+    assert box.resumes == 0
+    assert box.session_ids == []
+    await env.stop()
+
+
+async def test_cancel_during_reserve_fails_the_reservation(client: FakeClient, log: list[str]) -> None:
+    """Check that a cancel while the reservation thread runs still releases the reservation."""
+    env = make_env(client, log)
+    gate = threading.Event()
+    made: list[Any] = []
+    original = env._usage_factory
+
+    def slow_factory(budget: Any, request: Any, *, operation_key: str) -> Any:
+        """Reserve after the test cancels the start.
+
+        Args:
+            budget: The budget runtime.
+            request: The usage request.
+            operation_key: The operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        gate.wait(5)
+        usage = original(budget, request, operation_key=operation_key)
+        made.append(usage)
+        return usage
+
+    env._usage_factory = slow_factory
+    task = asyncio.create_task(env.start())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await env.stop()
+    assert len(made) == 1
+    assert env.usage is made[0]
+    assert made[0].calls == ["fail"]
+    assert "create" not in log
+
+
+async def test_teardown_settles_after_running_extend(client: FakeClient, log: list[str]) -> None:
+    """Check that the teardown waits for a running extend before it settles."""
+    env = make_env(client, log, lifetime=1500)
+    await env.start()
+    started = threading.Event()
+    gate = threading.Event()
+    usage = env.usage
+    base_extend = usage.extend
+
+    def slow_extend(lifetime_ms: int, *, deadline: float) -> None:
+        """Hold the extend until the test releases it.
+
+        Args:
+            lifetime_ms: The new funded lifetime.
+            deadline: The funding deadline.
+        """
+        started.set()
+        gate.wait(5)
+        base_extend(lifetime_ms, deadline=deadline)
+        log.append("extend-done")
+
+    usage.extend = slow_extend
+    assert await asyncio.to_thread(started.wait, 5)
+    stopping = asyncio.create_task(env.stop())
+    await asyncio.sleep(0.05)
+    assert "settle" not in log
+    gate.set()
+    await asyncio.wait_for(stopping, 5)
+    assert log.index("extend-done") < log.index("settle")
+
+
+async def test_wait_without_sentinel_kills_process(client: FakeClient, log: list[str]) -> None:
+    """Check that the wait kills the command when it gives up without an exit code."""
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    box.outcomes = [httpx.ReadError("cut")] * 20
+    with pytest.raises(SandboxInfraError):
+        await env.exec("sleep 1000")
+    assert box.processes[0].killed == 1
+    assert env._clock.sleeps
     await env.stop()
 
 

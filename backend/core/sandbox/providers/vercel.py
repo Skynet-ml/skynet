@@ -85,6 +85,8 @@ KILL_GRACE = 30.0
 KILL_AFTER_MAX = 18_000.0
 CANCEL_GRACE = 10.0
 WAIT_ERROR_LIMIT = 20
+WAIT_BACKOFF = 0.5
+WAIT_BACKOFF_MAX = 5.0
 STOP_TIMEOUT = 60.0
 EXEC_ATTEMPTS = 3
 SLICE_MS = 600_000
@@ -140,6 +142,20 @@ def _is_retryable_wait_error(error: BaseException) -> bool:
     if isinstance(error, _WAIT_ERRORS):
         return True
     return SandboxApiError is not None and isinstance(error, SandboxApiError) and error.status_code >= 500
+
+
+def _is_session_stopped(error: BaseException) -> bool:
+    """Tell whether an SDK error says that the runtime session ended.
+
+    Args:
+        error: The SDK error.
+
+    Returns:
+        True for a 410 answer or a ``sandbox_stopped`` error code.
+    """
+    if SandboxApiError is None or not isinstance(error, SandboxApiError):
+        return False
+    return error.status_code == 410 or error.code == "sandbox_stopped"
 
 
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:
@@ -245,7 +261,10 @@ class VercelEnvironment(SandboxEnvironment):
         self._session: Any | None = None
         self._create_dispatched = False
         self._renewer: asyncio.Task[None] | None = None
+        self._billing_call: asyncio.Future[Any] | None = None
         self._stop_task: asyncio.Future[None] | None = None
+        self._halted = False
+        self._funded_until: float | None = None
 
     @property
     def usage(self) -> Any | None:
@@ -393,9 +412,22 @@ class VercelEnvironment(SandboxEnvironment):
             The usage reservation, or ``None`` for an unprotected box.
         """
         if self._budget is not None and self._usage is None:
-            self._usage = await asyncio.to_thread(
-                self._usage_factory, self._budget, self._usage_request(), operation_key=self.spec.operation_key
+            reserving = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._usage_factory, self._budget, self._usage_request(), operation_key=self.spec.operation_key
+                )
             )
+            try:
+                self._usage = await asyncio.shield(reserving)
+            except asyncio.CancelledError:
+                # The thread cannot be cancelled and may still reserve; keep
+                # its result so the teardown releases it instead of leaking it.
+                while not reserving.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(reserving)
+                if not reserving.cancelled() and reserving.exception() is None:
+                    self._usage = reserving.result()
+                raise
         yield self._usage
 
     async def start(self) -> None:
@@ -472,6 +504,7 @@ class VercelEnvironment(SandboxEnvironment):
             raise SandboxInfraError("The Vercel sandbox has no running session.")
         self._session = session
         if usage is not None:
+            self._funded_until = self._clock.monotonic() + first_ms / 1000
             await asyncio.to_thread(usage.confirm_created, session)
         if (initial.disabled or initial.allowed_hosts) and not policy_confirmed(initial, session.network_policy):
             raise SandboxInfraError("Vercel did not confirm the sandbox network policy.")
@@ -495,20 +528,40 @@ class VercelEnvironment(SandboxEnvironment):
             target = min(funded_ms + SLICE_MS, ceiling_ms)
             deadline = time.monotonic() + max(0.0, ends - FUND_MARGIN - self._clock.monotonic())
             try:
-                await asyncio.to_thread(usage.extend, target, deadline=deadline)
+                await self._billing(usage.extend, target, deadline=deadline)
             except (Exception, BudgetReached) as error:
-                # Without funding the box keeps its funded limit and Vercel ends it there.
+                # Without funding the box keeps its funded limit and Vercel ends
+                # it there; _funded_until stays put, so later work is refused.
                 logger.warning("Sandbox %s slice was not funded: %s", self.name, type(error).__name__)
                 return
             try:
                 updated = await session.extend_execution_time_limit(timedelta(milliseconds=target - funded_ms))
-                await asyncio.to_thread(usage.confirm_extended, updated)
+                await self._billing(usage.confirm_extended, updated)
             except Exception as error:
                 logger.warning("Sandbox %s extension was not confirmed: %s", self.name, type(error).__name__)
+                self._halted = True
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(session.stop(), STOP_TIMEOUT)
                 return
             funded_ms = target
+            self._funded_until = started + funded_ms / 1000
+
+    async def _billing(self, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run one reservation call in a thread that a cancel cannot cut short.
+
+        The teardown awaits the same call before it settles, so a settle never
+        races an extend that is still running.
+
+        Args:
+            call: The reservation method.
+            *args: Its positional arguments.
+            **kwargs: Its keyword arguments.
+
+        Returns:
+            The result of the call.
+        """
+        self._billing_call = asyncio.ensure_future(asyncio.to_thread(call, *args, **kwargs))
+        return await asyncio.shield(self._billing_call)
 
     async def stop(self) -> None:
         """Stop the box once and settle its reservation. Safe to call again."""
@@ -531,6 +584,9 @@ class VercelEnvironment(SandboxEnvironment):
             self._renewer.cancel()
             with contextlib.suppress(BaseException):
                 await self._renewer
+        if self._billing_call is not None:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(self._billing_call)
         box = self._box
         if box is None and self._create_dispatched and self._client is not None:
             # The create may have reached Vercel before the error or cancel.
@@ -558,18 +614,48 @@ class VercelEnvironment(SandboxEnvironment):
             with contextlib.suppress(Exception):
                 await self._client.aclose()
 
-    def _require_box(self) -> Any:
-        """Return the running box.
+    def _require_session(self) -> Any:
+        """Return the funded runtime session of the running box.
+
+        Work goes to the session handle, never to the SDK ``Sandbox``: the
+        sandbox resumes a stopped session on its own, and Skynet never funds
+        or captures that new session.
 
         Returns:
-            The SDK sandbox.
+            The SDK runtime session.
 
         Raises:
-            SandboxInfraError: The box is not running.
+            SandboxInfraError: The box is not running, its session stopped, or
+                its funded lifetime is over.
         """
-        if self._box is None or self._stop_task is not None:
+        if self._box is None or self._session is None or self._stop_task is not None or self._halted:
             raise SandboxInfraError("The Vercel sandbox is not running.")
-        return self._box
+        if self._funded_until is not None and self._clock.monotonic() >= self._funded_until:
+            raise SandboxInfraError("The Vercel sandbox has no funded lifetime left.")
+        return self._session
+
+    def _session_stopped(self, error: BaseException) -> SandboxInfraError:
+        """Mark the box halted after its session ended under a call.
+
+        Args:
+            error: The SDK error that reported the stop.
+
+        Returns:
+            The infra error to raise.
+        """
+        self._halted = True
+        return SandboxInfraError(f"The Vercel sandbox session stopped: {type(error).__name__}")
+
+    def _cwd(self, session: Any) -> str | None:
+        """Return the default working directory of the box.
+
+        Args:
+            session: The SDK runtime session.
+
+        Returns:
+            The session directory, or the box directory when the session has none.
+        """
+        return session.cwd or self._box.cwd
 
     async def exec(
         self,
@@ -598,7 +684,7 @@ class VercelEnvironment(SandboxEnvironment):
             SandboxInfraError: The exit code could not be read, or the
                 command outlived its kill deadline.
         """
-        box = self._require_box()
+        session = self._require_session()
         with self.timings.phase("run"):
             token = uuid.uuid4().hex
             sentinel = f"{EXIT_PREFIX}{token}"
@@ -610,13 +696,13 @@ class VercelEnvironment(SandboxEnvironment):
                 inner = f"timeout --signal=KILL {math.ceil(timeout_sec)}s {inner}"
                 kill_after = min(timeout_sec + KILL_GRACE, KILL_AFTER_MAX)
             script = f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
-            process = await self._create_process(box, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)
+            process = await self._create_process(session, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)
             try:
                 if kill_after is None:
-                    code = await self._wait(box, process, sentinel)
+                    code = await self._wait(session, process, sentinel)
                 else:
                     async with asyncio.timeout(kill_after + POLL_SLACK):
-                        code = await self._wait(box, process, sentinel)
+                        code = await self._wait(session, process, sentinel)
             except TimeoutError as error:
                 with contextlib.suppress(Exception):
                     await process.kill()
@@ -624,8 +710,8 @@ class VercelEnvironment(SandboxEnvironment):
             except asyncio.CancelledError:
                 await asyncio.shield(asyncio.ensure_future(self._abort(process)))
                 raise
-            stdout = await self._read_optional(box, out_path) or ""
-            stderr = await self._read_optional(box, err_path) or ""
+            stdout = await self._read_optional(session, out_path) or ""
+            stderr = await self._read_optional(session, err_path) or ""
             sink = on_output or current_output_sink()
             if sink is not None:
                 if stdout:
@@ -637,7 +723,7 @@ class VercelEnvironment(SandboxEnvironment):
 
     async def _create_process(
         self,
-        box: Any,
+        session: Any,
         script: str,
         *,
         cwd: str | None,
@@ -648,7 +734,7 @@ class VercelEnvironment(SandboxEnvironment):
         """Start the wrapped command, resending only when the request never arrived.
 
         Args:
-            box: The SDK sandbox.
+            session: The SDK runtime session.
             script: The wrapped shell script.
             cwd: The working directory.
             env: Extra environment variables.
@@ -657,10 +743,13 @@ class VercelEnvironment(SandboxEnvironment):
 
         Returns:
             The SDK process handle.
+
+        Raises:
+            SandboxInfraError: The session stopped.
         """
         for attempt in range(1, EXEC_ATTEMPTS + 1):
             try:
-                return await box.create_process(
+                return await session.create_process(
                     "bash",
                     [*SHELL_FLAGS, script],
                     cwd=cwd,
@@ -675,13 +764,17 @@ class VercelEnvironment(SandboxEnvironment):
                     raise
                 if self._pacing is not None:
                     await self._pacing.reads.acquire()
+            except Exception as error:
+                if _is_session_stopped(error):
+                    raise self._session_stopped(error) from error
+                raise
         raise AssertionError("unreachable")
 
-    async def _wait(self, box: Any, process: Any, sentinel: str) -> int:
+    async def _wait(self, session: Any, process: Any, sentinel: str) -> int:
         """Wait on the long poll; fall back to the sentinel file after many cuts.
 
         Args:
-            box: The SDK sandbox.
+            session: The SDK runtime session.
             process: The SDK process handle.
             sentinel: The path of the exit code file.
 
@@ -689,36 +782,43 @@ class VercelEnvironment(SandboxEnvironment):
             The exit code.
 
         Raises:
-            SandboxInfraError: Every wait failed and the sentinel has no code.
+            SandboxInfraError: The session stopped, or every wait failed and
+                the sentinel has no code.
         """
         errors = 0
         while True:
             try:
                 return await process.wait()
             except Exception as error:
+                if _is_session_stopped(error):
+                    raise self._session_stopped(error) from error
                 if not _is_retryable_wait_error(error):
                     raise
                 errors += 1
                 if errors >= WAIT_ERROR_LIMIT:
-                    code = await self._read_exit(box, sentinel)
+                    code = await self._read_exit(session, sentinel)
                     if code is None:
+                        # The command may still run and use the funded lifetime.
+                        with contextlib.suppress(Exception):
+                            await asyncio.wait_for(process.kill(), CANCEL_GRACE)
                         raise SandboxInfraError("The sandbox command exit code could not be read.") from error
                     return code
                 if self._pacing is not None:
                     await self._pacing.reads.acquire()
+                await self._clock.sleep(min(errors * WAIT_BACKOFF, WAIT_BACKOFF_MAX))
 
-    async def _read_exit(self, box: Any, sentinel: str) -> int | None:
+    async def _read_exit(self, session: Any, sentinel: str) -> int | None:
         """Read the exit code that the wrapper wrote.
 
         Args:
-            box: The SDK sandbox.
+            session: The SDK runtime session.
             sentinel: The path of the exit code file.
 
         Returns:
             The code, or ``None`` when the file is missing or unreadable.
         """
         try:
-            text = await self._read_optional(box, sentinel)
+            text = await self._read_optional(session, sentinel)
         except Exception:
             return None
         try:
@@ -740,19 +840,20 @@ class VercelEnvironment(SandboxEnvironment):
             with contextlib.suppress(Exception):
                 await process.kill()
 
-    async def _read_optional(self, box: Any, path: str) -> str | None:
+    async def _read_optional(self, session: Any, path: str) -> str | None:
         """Read one text file when it exists.
 
         Args:
-            box: The SDK sandbox.
+            session: The SDK runtime session.
             path: The sandbox path.
 
         Returns:
             The content, or ``None`` when the file does not exist.
         """
-        if not await box.fs.exists(path, cwd=box.cwd):
+        cwd = self._cwd(session)
+        if not await session.fs.exists(path, cwd=cwd):
             return None
-        return await box.fs.read_text(path, cwd=box.cwd)
+        return await session.fs.read_text(path, cwd=cwd)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write text files into the box.
@@ -760,12 +861,13 @@ class VercelEnvironment(SandboxEnvironment):
         Args:
             files: Maps each sandbox path to its text content.
         """
-        box = self._require_box()
+        session = self._require_session()
+        cwd = self._cwd(session)
         for path, text in files.items():
             parent = path.rsplit("/", 1)[0] if "/" in path else ""
             if parent:
-                await box.fs.mkdir(parent, cwd=box.cwd, recursive=True)
-            await box.fs.write_text(path, text, cwd=box.cwd)
+                await session.fs.mkdir(parent, cwd=cwd, recursive=True)
+            await session.fs.write_text(path, text, cwd=cwd)
 
     async def download_file(self, path: str) -> str | None:
         """Read one text file from the box.
@@ -776,7 +878,7 @@ class VercelEnvironment(SandboxEnvironment):
         Returns:
             The content, or ``None`` when the file does not exist.
         """
-        return await self._read_optional(self._require_box(), path)
+        return await self._read_optional(self._require_session(), path)
 
     async def _apply_network_policy(self, policy: NetworkPolicy) -> None:
         """Send a policy to the session and read it back.
@@ -787,8 +889,7 @@ class VercelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The readback does not prove the policy.
         """
-        self._require_box()
-        updated = await self._session.update_network_policy(self._sdk_policy(policy, update=True))
+        updated = await self._require_session().update_network_policy(self._sdk_policy(policy, update=True))
         if not policy_confirmed(policy, updated.network_policy):
             raise SandboxInfraError("Vercel did not confirm the sandbox network policy.")
 
