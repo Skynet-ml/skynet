@@ -19,7 +19,7 @@ from core.constants import OPTIMIZATION_TYPE_BLACKBOX
 from core.models.unified import UNIFIED_PAYLOAD_KIND
 from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
 from core.service_gateway.optimization.blackbox.preflight import verify_anything_in_sandbox
-from core.service_gateway.optimization.blackbox.sandbox import (
+from core.service_gateway.optimization.blackbox.sandbox_runtime import (
     ContainedSubprocessRuntime,
     current_sandbox_runtime,
     sandbox_runtime_context,
