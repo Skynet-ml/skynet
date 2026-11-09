@@ -1,8 +1,11 @@
 # Labels each pull request by what it touches, for the merge policy in
 # AGENTS.md: `ui` when any changed file is under frontend/ (mixed PRs count
-# as UI and wait for the user), otherwise `backend` (eligible for gated
-# auto-merge into staging). The label is recomputed on every push, so a PR
-# that later touches frontend/ flips to `ui`.
+# as UI and wait for the user); `backend` (eligible for gated auto-merge into
+# staging) only when every changed file is under backend/ or is Markdown
+# under docs/, and at least one is under backend/; otherwise no kind label,
+# so docs-only, CI-only (.github/, .dagger/) and other PRs wait for the user.
+# The label is recomputed on every push, so a PR that later touches
+# frontend/ flips to `ui`.
 name: pr kind label
 
 on:
@@ -31,13 +34,20 @@ jobs:
         run: |
           files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)')
           if grep -q '^frontend/' <<<"$files"; then
-            kind=ui other=backend
+            kind=ui
+          elif grep -q '^backend/' <<<"$files" \
+            && ! grep -qEv '^backend/|^docs/.*\.md$' <<<"$files"; then
+            kind=backend
           else
-            kind=backend other=ui
+            kind=none
           fi
 
           gh label create ui --repo "$REPO" --color 1d76db --description "Touches frontend/; needs user approval" --force >/dev/null
           gh label create backend --repo "$REPO" --color 0e8a16 --description "Backend only; gated auto-merge into staging" --force >/dev/null
 
-          gh pr edit "$PR" --repo "$REPO" --add-label "$kind" --remove-label "$other"
+          case "$kind" in
+            ui) gh pr edit "$PR" --repo "$REPO" --add-label ui --remove-label backend ;;
+            backend) gh pr edit "$PR" --repo "$REPO" --add-label backend --remove-label ui ;;
+            none) gh pr edit "$PR" --repo "$REPO" --remove-label ui --remove-label backend ;;
+          esac
           echo "PR #$PR labeled $kind" >> "$GITHUB_STEP_SUMMARY"
