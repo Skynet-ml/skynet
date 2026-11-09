@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} não é {expected}. O Skynet liga-se apenas ao gitlab.com e ao Bitbucket Cloud, não a servidores autogeridos. Utilize o endereço do repositório no {expected} ou mova o repositório para o {expected}.",
     "connectors.not_connected": "Ligue primeiro a sua conta do {provider}.",
     "connectors.not_found": "Esse item não foi encontrado no {provider}, ou a sua conta não tem acesso a ele.",
+    "connectors.rate_limited": "O limite de pedidos do {provider} foi atingido. Tente novamente mais tarde.",
     "connectors.oauth_failed": "O início de sessão com o {provider} não foi concluído. Tente novamente.",
     "connectors.oauth_not_configured": "O início de sessão com o {provider} não está configurado nesta instalação. Introduza as credenciais em alternativa.",
     "connectors.oauth_state_invalid": "A ligação de início de sessão é inválida ou expirou. Comece novamente.",
