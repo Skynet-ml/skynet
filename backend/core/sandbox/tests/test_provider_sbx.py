@@ -18,7 +18,6 @@ from typing import Any
 import httpx
 import pytest
 
-from core.config import settings
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -972,8 +971,3 @@ def test_factory_registers_sbx_for_development_only(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(factory.settings, "app_environment", "production")
     with pytest.raises(factory.ProductionNotAllowedError, match="sbx"):
         factory.load_provider("sbx")
-
-
-def test_default_backend_is_async() -> None:
-    """Keep the async backend as the default (SKY-529)."""
-    assert type(settings).model_fields["sandbox_backend"].default == "async"

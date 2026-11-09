@@ -3,8 +3,8 @@
 This leaf module holds the runtime context binding, the local and contained
 subprocess runtimes, the bridge onto the async ``core.sandbox`` providers, and
 the Codex requirements helpers. ``sandbox.py`` re-exports every name here, so
-SKY-433 can delete the legacy Vercel runtime without breaking these callers.
-It never imports ``sandbox.py``, ``docker_sandbox.py``, httpx or the Vercel SDK.
+callers that import from ``sandbox.py`` keep working (SKY-433). It never
+imports ``sandbox.py``, httpx or the Vercel SDK.
 """
 
 from __future__ import annotations
@@ -553,11 +553,11 @@ class AsyncBridgeRuntime:
         """
         mode = network_mode(disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts))
         if mode not in self._capabilities.network_modes:
-            # The legacy Docker runtime allows open egress; the async Docker
-            # provider allows only deny-all or an allowlist (SKY-419 review).
+            # The async Docker provider allows only deny-all or an allowlist
+            # (SKY-419 review); open egress has no runtime to fall back to.
             raise ServiceError(
-                f"The async {self._capabilities.name} sandbox does not support {mode.value} network egress. "
-                "Set SANDBOX_BACKEND=legacy, or give the sandbox an allowlist of hosts."
+                f"The {self._capabilities.name} sandbox does not support {mode.value} network egress. "
+                "Give the sandbox an allowlist of hosts, or disable its network."
             )
         with _bridge_errors():
             environment = create_environment(self.provider, _async_spec(spec), **self._options)

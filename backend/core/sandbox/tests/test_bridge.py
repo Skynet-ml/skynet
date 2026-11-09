@@ -11,25 +11,20 @@ from pydantic import SecretStr
 
 from core.api import preflight_execution
 from core.billing.budgets import BudgetError
+from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import UsagePendingError
+from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP
 from core.config import Settings
 from core.config import settings as global_settings
 from core.sandbox import bridge
 from core.sandbox.providers.vercel import VercelEnvironment
 from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeUsage, readback
-from core.service_gateway.optimization.blackbox import sandbox as legacy_sandbox
 from core.service_gateway.optimization.blackbox import sandbox_runtime
-from core.service_gateway.optimization.blackbox.docker_sandbox import DockerSandboxRuntime
-from core.service_gateway.optimization.blackbox.sandbox import VercelSandboxRuntime
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 
 _DIGEST = "registry.example/skynet@sha256:" + "a" * 64
 _LOCAL_IMAGE = "sha256:" + "c" * 64
 _BUDGET = SimpleNamespace(budget_id="budget-1", generation=3)
-
-
-class _StopBeforeNetworkError(Exception):
-    """Stop the legacy open right after it builds its usage request."""
 
 
 def _settings(**values: Any) -> Settings:
@@ -46,17 +41,13 @@ def _settings(**values: Any) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-def _hosted(backend: str) -> Settings:
+def _hosted() -> Settings:
     """Build hosted settings with fake Vercel credentials.
-
-    Args:
-        backend: The ``sandbox_backend`` value.
 
     Returns:
         The settings.
     """
     return _settings(
-        sandbox_backend=backend,
         vercel_token=SecretStr("token"),
         vercel_team_id="team",
         vercel_project_id="project",
@@ -149,54 +140,38 @@ def _spec(**values: Any) -> SandboxSpec:
     return SandboxSpec(**{**fields, **values})
 
 
-def _legacy_request(spec: SandboxSpec, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Run the legacy Vercel open until it builds its usage request.
+def _expected_request(spec: SandboxSpec) -> dict[str, Any]:
+    """Build the usage request that the removed sync Vercel box reserved for a spec.
+
+    The sync runtime is gone, so this pins its request shape by hand: the
+    async box must keep the same reservation, or a live budget changes.
 
     Args:
         spec: The blackbox spec.
-        monkeypatch: Pytest fixture.
 
     Returns:
-        The request the legacy runtime reserves.
+        The request with its operation key.
     """
-    captured: dict[str, Any] = {}
-
-    def reserve(budget: Any, request: dict[str, Any], *, operation_key: str) -> None:
-        """Keep the request and stop before any network call.
-
-        Args:
-            budget: The budget runtime.
-            request: The usage request.
-            operation_key: The operation key.
-
-        Raises:
-            _StopBeforeNetworkError: Always.
-        """
-        captured.update(request, operation_key=operation_key)
-        raise _StopBeforeNetworkError
-
-    monkeypatch.setattr(legacy_sandbox, "VercelUsageReservation", reserve)
-    runtime = bridge.protected_runtime(_hosted("legacy"), image=_DIGEST, budget=_BUDGET)
-    with pytest.raises(_StopBeforeNetworkError):
-        runtime.open(spec)
-    return captured
-
-
-def test_legacy_backend_keeps_the_legacy_runtimes() -> None:
-    """Check that ``sandbox_backend = legacy`` builds the same runtimes as before."""
-    vercel = bridge.protected_runtime(_hosted("legacy"), image=_DIGEST, budget=_BUDGET)
-    assert isinstance(vercel, VercelSandboxRuntime)
-    assert vercel.protected
-    assert not vercel.injects_headers
-    local = _settings(sandbox_backend="legacy", local_mode=True, local_sandbox_image=_LOCAL_IMAGE, docker_bin="docker")
-    docker = bridge.protected_runtime(local, image=_LOCAL_IMAGE, budget=_BUDGET, recorder="recorder")
-    assert isinstance(docker, DockerSandboxRuntime)
-    assert docker.protected
+    request: dict[str, Any] = {
+        "name": "skynet-" + json_fingerprint([_BUDGET.budget_id, _BUDGET.generation, spec.operation_key])[:48],
+        "image": spec.image,
+        "lifetime_ms": min(int(spec.lifetime_seconds * 1000), 600_000),
+        "vcpus": spec.vcpus,
+        "network_disabled": spec.network_disabled,
+        "ports": [],
+        "persistent": False,
+        "environment_fingerprint": json_fingerprint(dict(spec.env)),
+        "operation_key": spec.operation_key,
+    }
+    if spec.allowed_hosts:
+        request["allowed_hosts"] = sorted(set(spec.allowed_hosts))
+        request["network_bytes_cap"] = SANDBOX_NETWORK_BYTES_CAP
+    return request
 
 
 def test_async_vercel_runtime_is_protected_and_funded() -> None:
     """Check that the async Vercel runtime funds each box and injects no headers."""
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
     assert isinstance(runtime, bridge.ProtectedBridgeRuntime)
     assert runtime.provider == "vercel"
     assert runtime.protected
@@ -207,7 +182,7 @@ def test_async_vercel_runtime_is_protected_and_funded() -> None:
 
 def test_async_docker_runtime_is_free_and_unfunded() -> None:
     """Check that the async Docker runtime never gets the budget."""
-    local = _settings(sandbox_backend="async", local_mode=True, local_sandbox_image=_LOCAL_IMAGE, docker_bin="dk")
+    local = _settings(local_mode=True, local_sandbox_image=_LOCAL_IMAGE, docker_bin="dk")
     runtime = bridge.protected_runtime(local, image=_LOCAL_IMAGE, budget=_BUDGET)
     assert isinstance(runtime, bridge.ProtectedBridgeRuntime)
     assert runtime.provider == "docker"
@@ -227,10 +202,10 @@ def test_async_docker_runtime_is_free_and_unfunded() -> None:
         ),
     ],
 )
-def test_async_reservation_matches_the_legacy_reservation(
+def test_async_reservation_matches_the_pinned_reservation(
     values: dict[str, Any], policy: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Check that the async box reserves the same request as the legacy box.
+    """Check that the async box reserves the same request as the removed sync box.
 
     Args:
         values: Spec fields to change.
@@ -238,22 +213,21 @@ def test_async_reservation_matches_the_legacy_reservation(
         monkeypatch: Pytest fixture.
     """
     spec = _spec(**values)
-    legacy = _legacy_request(spec, monkeypatch)
     wiring = _Wiring(monkeypatch, policy)
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
 
     session = runtime.open(spec)
     session.close()
 
     (usage,) = wiring.usages
-    assert {**usage.request, "operation_key": usage.operation_key} == legacy
+    assert {**usage.request, "operation_key": usage.operation_key} == _expected_request(spec)
     assert usage.request["lifetime_ms"] == 600_000
 
 
 def test_async_box_reserves_once_and_settles_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check one reservation and one settlement for one box, even on a second close."""
     wiring = _Wiring(monkeypatch)
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
 
     session = runtime.open(_spec(lifetime_seconds=60))
     session.close()
@@ -271,7 +245,7 @@ def test_async_create_error_releases_the_reservation(monkeypatch: pytest.MonkeyP
     """Check that a failed create fails the reservation once and never settles it."""
     wiring = _Wiring(monkeypatch)
     wiring.client.create_errors.append(RuntimeError("create failed"))
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
 
     with pytest.raises(RuntimeError, match="create failed"):
         runtime.open(_spec(lifetime_seconds=60))
@@ -285,7 +259,7 @@ def test_async_cancel_during_create_releases_the_reservation(monkeypatch: pytest
     """Check that a cancel during the create stops the box and ends the reservation once."""
     wiring = _Wiring(monkeypatch)
     wiring.client.hang = True
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
     environment = wiring.create("vercel", sandbox_runtime._async_spec(_spec(lifetime_seconds=60)), **runtime._options)
 
     async def cancel_create() -> None:
@@ -333,10 +307,10 @@ def _fail_settle(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
 def test_async_close_raises_a_failed_settle_once(
     monkeypatch: pytest.MonkeyPatch, error: Exception, raised: type[Exception]
 ) -> None:
-    """Check that close raises a settle failure like the legacy close, and settles once."""
+    """Check that close raises a settle failure once, and settles once."""
     wiring = _Wiring(monkeypatch)
     _fail_settle(monkeypatch, error)
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
     session = runtime.open(_spec(lifetime_seconds=60))
     box = next(iter(wiring.client.boxes.values()))
 
@@ -358,7 +332,7 @@ def test_async_close_retry_after_a_bridge_timeout_still_raises_the_settle_error(
     """Check that a close retried after a bridge timeout reports the settle failure and settles once."""
     wiring = _Wiring(monkeypatch)
     _fail_settle(monkeypatch, UsagePendingError("pending"))
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
     session = runtime.open(_spec(lifetime_seconds=60))
     inner = session._session
     original = inner.close
@@ -388,7 +362,7 @@ def test_preflight_reports_pending_when_the_async_settle_stays_pending(monkeypat
     """Check that a pending settle at close turns a passed async preflight into "pending"."""
     wiring = _Wiring(monkeypatch)
     _fail_settle(monkeypatch, UsagePendingError("pending"))
-    runtime = bridge.protected_runtime(_hosted("async"), image=_DIGEST, budget=_BUDGET)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET)
 
     class _Gateway:
         """Hold the bound box and close it the way the model gateway closes its sandbox."""
@@ -456,28 +430,20 @@ def test_preflight_reports_pending_when_the_async_settle_stays_pending(monkeypat
     assert usage.calls.count("settle") == 1
 
 
-def test_legacy_unavailable_reason_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that the legacy backend asks the legacy checks."""
-    monkeypatch.setattr(bridge, "sandbox_unavailable_reason", lambda settings: "legacy vercel")
-    monkeypatch.setattr(bridge, "docker_sandbox_unavailable_reason", lambda settings: "legacy docker")
-    assert bridge.protected_unavailable_reason(_hosted("legacy")) == "legacy vercel"
-    assert bridge.protected_unavailable_reason(_settings(local_mode=True)) == "legacy docker"
-
-
 def test_async_unavailable_reason_asks_the_vercel_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the async backend reports missing Vercel credentials from the provider preflight."""
     monkeypatch.setattr(global_settings, "vercel_token", None)
-    assert bridge.protected_unavailable_reason(_hosted("async")) == "The Vercel sandbox credentials are not configured."
+    assert bridge.protected_unavailable_reason(_hosted()) == "The Vercel sandbox credentials are not configured."
     monkeypatch.setattr(global_settings, "vercel_token", SecretStr("token"))
     monkeypatch.setattr(global_settings, "vercel_team_id", "team")
     monkeypatch.setattr(global_settings, "vercel_project_id", "project")
-    assert bridge.protected_unavailable_reason(_hosted("async")) is None
+    assert bridge.protected_unavailable_reason(_hosted()) is None
 
 
 def test_async_unavailable_reason_checks_local_docker(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the async local backend still probes the Docker CLI and image."""
     monkeypatch.setattr(bridge, "docker_sandbox_unavailable_reason", lambda settings: "no docker")
-    local = _settings(sandbox_backend="async", local_mode=True)
+    local = _settings(local_mode=True)
     assert bridge.protected_unavailable_reason(local) == "no docker"
 
 
@@ -485,4 +451,4 @@ def test_async_unavailable_reason_trusts_a_bound_parent_runtime(monkeypatch: pyt
     """Check that a child with a bound parent runtime needs no provider of its own."""
     monkeypatch.setattr(global_settings, "vercel_token", None)
     with sandbox_runtime.sandbox_runtime_context(object()):  # type: ignore[arg-type]
-        assert bridge.protected_unavailable_reason(_hosted("async")) is None
+        assert bridge.protected_unavailable_reason(_hosted()) is None

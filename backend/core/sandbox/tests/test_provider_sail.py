@@ -20,7 +20,6 @@ from typing import Any
 
 import pytest
 
-from core.config import settings
 from core.sandbox import factory
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import RunTimeoutError, SandboxFatalError, SandboxInfraError, StartTimeoutError
@@ -457,11 +456,6 @@ def test_factory_loads_sail_outside_production(monkeypatch: pytest.MonkeyPatch) 
     """Load the Sail class from the registry outside production."""
     monkeypatch.setattr(factory.settings, "app_environment", "staging")
     assert factory.load_provider("sail") is SailEnvironment
-
-
-def test_the_default_sandbox_backend_is_async() -> None:
-    """Keep the async backend as the default (SKY-529)."""
-    assert type(settings).model_fields["sandbox_backend"].default == "async"
 
 
 def test_preflight_needs_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:

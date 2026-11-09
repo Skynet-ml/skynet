@@ -1,11 +1,10 @@
-"""Protected sandbox runtimes for the trusted parent, picked by ``sandbox_backend``.
+"""Protected sandbox runtimes for the trusted parent.
 
 ``core.billing.protected_execution`` builds its sandbox here, so it imports no
-sync runtime itself. With ``sandbox_backend = "legacy"`` this module returns
-the legacy Vercel or Docker runtime, built as before. With ``"async"`` it
-returns the async provider through the SBX-11 sync bridge, and the Vercel
-provider reserves and settles the same usage slices as the legacy runtime.
-The legacy imports go away with the legacy runtimes in SKY-433.
+runtime itself. This module returns the async provider of the deployment
+(Docker in local mode, Vercel everywhere else) through the SBX-11 sync bridge.
+The Vercel provider reserves and settles each usage slice against the run's
+budget.
 
 ``core.sandbox.__init__`` never imports this module, because this module
 imports the blackbox runtimes, which import ``core.sandbox``.
@@ -16,15 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import Settings
-from ..service_gateway.optimization.blackbox.docker_sandbox import (
-    DockerSandboxRuntime,
-    docker_sandbox_unavailable_reason,
-)
-from ..service_gateway.optimization.blackbox.sandbox import (
-    VercelCredentials,
-    VercelSandboxRuntime,
-    sandbox_unavailable_reason,
-)
+from ..service_gateway.optimization.blackbox.sandbox import docker_sandbox_unavailable_reason
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxRuntime
 from ..service_gateway.optimization.blackbox.sandbox_runtime import AsyncBridgeRuntime, current_sandbox_runtime
 from .errors import SandboxFatalError
@@ -79,10 +70,6 @@ def protected_unavailable_reason(settings: Settings) -> str | None:
     Returns:
         A user-facing reason, or ``None`` when protected boxes can open.
     """
-    if settings.sandbox_backend != "async":
-        if settings.local_mode:
-            return docker_sandbox_unavailable_reason(settings)
-        return sandbox_unavailable_reason(settings)
     if current_sandbox_runtime() is not None:
         return None
     try:
@@ -101,29 +88,15 @@ def protected_runtime(settings: Settings, *, image: str, budget: Any, recorder: 
         settings: Trusted deployment configuration.
         image: The immutable image of every box.
         budget: The run's budget runtime.
-        recorder: Writes each egress proxy request into the run record, or
-            ``None``. Only the legacy Docker runtime records them.
+        recorder: Unused. The async providers record no egress proxy
+            requests; callers still pass the run's call recorder.
 
     Returns:
-        The legacy runtime when ``sandbox_backend`` is ``"legacy"``, otherwise
-        the async provider through the sync bridge.
+        The async provider of this deployment through the sync bridge.
 
     Raises:
-        SandboxFatalError: The async backend cannot load its provider.
+        SandboxFatalError: The provider cannot load.
     """
-    if settings.sandbox_backend == "async":
-        if settings.local_mode:
-            return ProtectedBridgeRuntime("docker", budget=budget, image=image, docker_bin=settings.docker_bin)
-        return ProtectedBridgeRuntime("vercel", budget=budget)
     if settings.local_mode:
-        return DockerSandboxRuntime(image, docker_bin=settings.docker_bin, budget=budget, recorder=recorder)
-    assert settings.vercel_token is not None
-    return VercelSandboxRuntime(
-        VercelCredentials(
-            token=settings.vercel_token.get_secret_value(),
-            team_id=str(settings.vercel_team_id),
-            project_id=str(settings.vercel_project_id),
-        ),
-        image=image,
-        budget=budget,
-    )
+        return ProtectedBridgeRuntime("docker", budget=budget, image=image, docker_bin=settings.docker_bin)
+    return ProtectedBridgeRuntime("vercel", budget=budget)
