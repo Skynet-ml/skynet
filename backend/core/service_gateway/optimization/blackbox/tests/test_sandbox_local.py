@@ -15,10 +15,10 @@ from core.exceptions import ServiceError
 
 from ..sandbox import (
     _CREDENTIALS_MISSING,
+    AsyncBridgeRuntime,
     LocalSubprocessRuntime,
     LocalSubprocessSession,
     SandboxSpec,
-    VercelSandboxRuntime,
     scorer_runtime_from_settings,
 )
 
@@ -160,10 +160,12 @@ def test_scorer_runtime_refuses_missing_managed_credentials(monkeypatch: pytest.
 
 @_needs_sdk
 def test_scorer_runtime_prefers_vercel_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Configured legacy scorers resolve to the managed sync Vercel runtime."""
-    creds = {"sandbox_backend": "legacy", "vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
+    """Configured scorers resolve to the managed Vercel provider through the sync bridge."""
+    creds = {"vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
 
-    assert isinstance(scorer_runtime_from_settings(_settings(monkeypatch, **creds)), VercelSandboxRuntime)
+    runtime = scorer_runtime_from_settings(_settings(monkeypatch, **creds))
+    assert isinstance(runtime, AsyncBridgeRuntime)
+    assert runtime.provider == "vercel"
 
 
 def test_local_runtime_has_no_header_injecting_edge() -> None:

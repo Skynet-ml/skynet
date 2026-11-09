@@ -3,8 +3,8 @@
 This leaf module holds the runtime context binding, the local and contained
 subprocess runtimes, the bridge onto the async ``core.sandbox`` providers, and
 the Codex requirements helpers. ``sandbox.py`` re-exports every name here, so
-SKY-433 can delete the legacy Vercel runtime without breaking these callers.
-It never imports ``sandbox.py``, ``docker_sandbox.py``, httpx or the Vercel SDK.
+callers that import from ``sandbox.py`` keep working (SKY-433). It never
+imports ``sandbox.py``, httpx or the Vercel SDK.
 """
 
 from __future__ import annotations
@@ -375,11 +375,11 @@ def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
     A bad spec, a rejected request, a fatal error or a command that outlived
     its kill deadline fails the same way in a fresh box, and the async path
     never retries by default (SKY-406 D3, D10). The other ``core.sandbox``
-    errors that a retry cannot fix map the same way, as the legacy path's
-    ``ServiceError`` did (SKY-564). Transient box-death errors and run
-    outcomes stay as they are: the callers read their group for the one
-    fresh box and for grading. Cancellation and budget errors are not
-    ``core.sandbox`` errors, so they pass through unchanged.
+    errors that a retry cannot fix map to ``ServiceError`` too (SKY-564).
+    Transient box-death errors and run outcomes stay as they are: the
+    callers read their group for the one fresh box and for grading.
+    Cancellation and budget errors are not ``core.sandbox`` errors, so they
+    pass through unchanged.
 
     Args:
         timed: The call is a command with a timeout, so an infra error caused
@@ -507,7 +507,7 @@ class AsyncBridgeSession:
             bridge_run(self._session.environment.disable_network)
 
     def close(self) -> None:
-        """Stop the sandbox, and log a teardown failure like the legacy sessions do.
+        """Stop the sandbox, and log a teardown failure instead of raising it.
 
         Callers close in ``finally`` blocks and catch only usage errors, so any
         other stop failure here would replace a finished result or the real error.
@@ -571,11 +571,11 @@ class AsyncBridgeRuntime:
         """
         mode = network_mode(disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts))
         if mode not in self._capabilities.network_modes:
-            # The legacy Docker runtime allows open egress; the async Docker
-            # provider allows only deny-all or an allowlist (SKY-419 review).
+            # The async Docker provider allows only deny-all or an allowlist
+            # (SKY-419 review); open egress has no runtime to fall back to.
             raise ServiceError(
-                f"The async {self._capabilities.name} sandbox does not support {mode.value} network egress. "
-                "Set SANDBOX_BACKEND=legacy, or give the sandbox an allowlist of hosts."
+                f"The {self._capabilities.name} sandbox does not support {mode.value} network egress. "
+                "Give the sandbox an allowlist of hosts, or disable its network."
             )
         with _bridge_errors():
             environment = create_environment(self.provider, _async_spec(spec), **self._options)
@@ -610,7 +610,7 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
 
     Returns:
         The same sandbox, with ``vcpus`` moved into the resource request and
-        the Skynet sandbox tag added, as the legacy runtime adds it.
+        the Skynet sandbox tag added.
     """
     return AsyncSandboxSpec(
         lifetime_seconds=spec.lifetime_seconds,

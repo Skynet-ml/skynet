@@ -706,6 +706,40 @@ async def test_running_command_makes_no_status_reads(client: FakeClient, log: li
     await env.stop()
 
 
+async def test_a_planted_shell_profile_never_runs_in_a_box_command(client: FakeClient, log: list[str]) -> None:
+    """Check that the outer and inner bash both skip the profile and rc files (E38)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    call = client.boxes[env.name].create_calls[0]
+    assert call["command"] == "bash"
+    assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
+    assert call["args"][-1].startswith("bash --noprofile --norc -c ")
+    await env.stop()
+
+
+async def test_sudo_reaches_the_provider_and_defaults_to_false(client: FakeClient, log: list[str]) -> None:
+    """Check that a caller's ``sudo=True`` reaches the SDK and the default stays ``False``."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    await env.exec("echo hello", sudo=True)
+    calls = client.boxes[env.name].create_calls
+    assert [call["sudo"] for call in calls] == [False, True]
+    await env.stop()
+
+
+async def test_kill_timer_is_capped_while_the_command_keeps_its_timeout(client: FakeClient, log: list[str]) -> None:
+    """Check that a timeout above the cap gives an 18 000 s kill timer and the full command timeout."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=20_000)
+    call = client.boxes[env.name].create_calls[0]
+    assert call["kill_after"] == vercel.KILL_AFTER_MAX == 18_000
+    assert "timeout --signal=KILL 20000s" in call["args"][-1]
+    await env.stop()
+
+
 async def test_wait_survives_19_transport_errors(client: FakeClient, log: list[str]) -> None:
     """Check that 19 transport errors still end with the code from wait()."""
     env = make_env(client, log)

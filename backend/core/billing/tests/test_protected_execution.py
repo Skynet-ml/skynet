@@ -17,7 +17,6 @@ from core.sandbox.bridge import ProtectedBridgeRuntime
 from core.sandbox.providers.vercel import VercelEnvironment
 from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeUsage, readback
 from core.service_gateway.optimization.blackbox import sandbox_runtime
-from core.service_gateway.optimization.blackbox.sandbox import VercelSandboxRuntime
 
 _DIGEST = "registry.example/skynet@sha256:" + "a" * 64
 _ENV = ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "APP_LOCAL_MODE", "SKYNET_LOCAL_MODE")
@@ -57,12 +56,11 @@ class _Gateway:
         """
 
 
-def _settings(monkeypatch: pytest.MonkeyPatch, backend: str) -> Settings:
+def _settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     """Build hosted settings with fake Vercel credentials and a pinned digest image.
 
     Args:
         monkeypatch: Pytest fixture.
-        backend: The ``sandbox_backend`` value.
 
     Returns:
         A fresh ``Settings`` instance.
@@ -71,7 +69,6 @@ def _settings(monkeypatch: pytest.MonkeyPatch, backend: str) -> Settings:
         monkeypatch.delenv(name, raising=False)
     return Settings(
         _env_file=None,
-        sandbox_backend=backend,
         vercel_token=SecretStr("token"),
         vercel_team_id="team",
         vercel_project_id="project",
@@ -162,28 +159,16 @@ def test_protected_execution_imports_no_sync_runtime() -> None:
     assert "DockerSandboxRuntime" not in source
 
 
-def test_legacy_backend_binds_the_legacy_vercel_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that the default backend binds the same runtime as before."""
-    settings = _settings(monkeypatch, "legacy")
-    assert settings.sandbox_backend == "legacy"
-    gateway = _Gateway()
-
-    bind_protected_sandbox(gateway, settings, workflow="dspy", owner_id="job-9")
-
-    assert isinstance(gateway.broker._runtime, VercelSandboxRuntime)
-    gateway.broker.close()
-
-
 @pytest.mark.usefixtures("provider_credentials")
 def test_async_backend_reports_no_unavailable_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that a configured async deployment can open protected boxes."""
-    assert protected_vercel_unavailable_reason(_settings(monkeypatch, "async"), "dspy") is None
+    assert protected_vercel_unavailable_reason(_settings(monkeypatch), "dspy") is None
 
 
 def test_async_backend_reports_missing_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that the async backend reports the provider's credential problem."""
+    """Check that the protected check reports the provider's credential problem."""
     monkeypatch.setattr(global_settings, "vercel_token", None)
-    reason = protected_vercel_unavailable_reason(_settings(monkeypatch, "async"), "dspy")
+    reason = protected_vercel_unavailable_reason(_settings(monkeypatch), "dspy")
     assert reason == "The Vercel sandbox credentials are not configured."
 
 
@@ -193,7 +178,7 @@ def test_async_bind_reserves_and_settles_each_box_once(monkeypatch: pytest.Monke
     log, usages = _fake_vercel(monkeypatch)
     gateway = _Gateway()
 
-    identity = bind_protected_sandbox(gateway, _settings(monkeypatch, "async"), workflow="dspy", owner_id="job-9")
+    identity = bind_protected_sandbox(gateway, _settings(monkeypatch), workflow="dspy", owner_id="job-9")
 
     assert identity["image"] == _DIGEST
     runtime = gateway.broker._runtime
