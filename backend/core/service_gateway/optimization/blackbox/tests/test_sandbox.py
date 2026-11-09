@@ -111,13 +111,36 @@ class _RecordingSession:
         return self.result
 
 
-def test_the_codex_requirements_write_runs_the_fixed_command_as_root() -> None:
-    """The write runs one fixed root command, and a matching read-back lets Codex start."""
+def test_the_codex_requirements_write_needs_no_root_when_the_image_ships_the_file() -> None:
+    """A box whose image ships the root-owned file only reads it back and never asks for root."""
     session = _RecordingSession(CommandResult(exit_code=0, stdout=_CODEX_REQUIREMENTS_READBACK))
 
     write_codex_requirements(session)
 
-    assert session.calls == [(_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})]
+    assert session.calls == [(_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})]
+
+
+class _EmptyMountSession(_RecordingSession):
+    """Session whose /etc/codex starts empty and fills only after the root write."""
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Record the command, and return the good read-back only for the root write."""
+        self.calls.append((command, kwargs))
+        if kwargs.get("sudo"):
+            return self.result
+        return CommandResult(exit_code=1, stdout="", stderr="No such file or directory")
+
+
+def test_the_codex_requirements_write_falls_back_to_the_fixed_root_command() -> None:
+    """A box without the file (the local Docker empty mount) gets one fixed root write, then Codex starts."""
+    session = _EmptyMountSession(CommandResult(exit_code=0, stdout=_CODEX_REQUIREMENTS_READBACK))
+
+    write_codex_requirements(session)
+
+    assert session.calls == [
+        (_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60}),
+        (_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True}),
+    ]
     assert _CODEX_REQUIREMENTS_COMMAND.endswith(_CODEX_REQUIREMENTS_CHECK)
 
 

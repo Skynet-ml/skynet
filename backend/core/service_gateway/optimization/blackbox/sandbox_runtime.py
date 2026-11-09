@@ -659,14 +659,23 @@ def _require_codex_requirements(result: CommandResult) -> None:
 
 
 def write_codex_requirements(session: SandboxSession) -> None:
-    """Write the root-owned Codex requirements file and read it back before Codex starts.
+    """Make sure the root-owned Codex requirements file is in place before Codex starts.
+
+    The sandbox image ships the file root-owned, so the plain read-back passes
+    and the box needs no root. The image carries no ``sudo``: Codex runs as the
+    image user with its own sandbox off, so a root path in the box would let the
+    model rewrite the file (SKY-389). Only a box without the file, such as the
+    local Docker box that mounts an empty ``/etc/codex``, gets the root write.
 
     Args:
-        session: A control-plane session whose ``run`` can run as root.
+        session: A control-plane session; its ``run`` must run as root only when the box lacks the file.
 
     Raises:
-        ServiceError: When the write fails or the read-back does not match, so Codex never starts.
+        ServiceError: When the file is missing and the root write fails, or the read-back does not match.
     """
+    check = session.run(_CODEX_REQUIREMENTS_CHECK, timeout_seconds=60)
+    if check.ok and not check.timed_out and check.stdout == _CODEX_REQUIREMENTS_READBACK:
+        return
     _require_codex_requirements(session.run(_CODEX_REQUIREMENTS_COMMAND, timeout_seconds=60, sudo=True))
 
 
