@@ -2414,6 +2414,7 @@ class GepaRepoEngine:
         self.max_token_cost = config.max_token_cost
         self.stop_at_score = config.stop_at_score
         self.run_dir = Path(config.run_dir or "gepa-repo-run").resolve()
+        self.tracker = BestValsetVersion()
 
     def run(self, task: Task, server: EvalServer) -> Result:
         """Run GEPA until its evaluation or proposer budget runs out.
@@ -2434,7 +2435,7 @@ class GepaRepoEngine:
         self.proposer.background = task.background
         gepa_dir = self.run_dir / "gepa"
         gepa_dir.mkdir(parents=True, exist_ok=True)
-        tracker = BestValsetVersion()
+        tracker = self.tracker = BestValsetVersion()
         crashed: set[str] = set()
 
         def _key(candidate: Any) -> str:
@@ -2531,6 +2532,20 @@ class GepaRepoEngine:
         return Result(
             best_candidate=fallback[0], best_score=fallback[1], total_evals=server.budget.used, metadata=metadata
         )
+
+    def incumbent(self, server: EvalServer) -> tuple[str, float] | None:
+        """Return the best version GEPA scored on every case so far.
+
+        The parent's budget stop unwinds ``optimize_anything`` without a
+        result, so the valset tracker is GEPA's only record of its best version.
+
+        Args:
+            server: Evaluation server whose aggregate checkpoints back the fallback.
+
+        Returns:
+            ``(patch, score)`` or ``None`` before any version was fully scored.
+        """
+        return self.tracker.best or best_aggregate_candidate(server)
 
     def process_result(self, result: Result, output_dir: str | Path) -> None:
         """Write the best patch and run metadata beside the evaluator artifacts.
