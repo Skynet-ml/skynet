@@ -918,6 +918,42 @@ def test_gateway_domain_failure_has_plain_detail(worker: BackgroundWorker, store
     assert store._jobs["gateway-domain"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
 
 
+def test_failed_protected_run_closes_its_budget(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """A failed protected run closes its budget so unstarted holds return to the wallet (SKY-529)."""
+    store.engine = MagicMock()
+    store.seed_job(
+        "failed-budget",
+        payload=_BLACKBOX_PAYLOAD,
+        payload_overview=_BLACKBOX_OVERVIEW,
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("failed-budget")
+    gateway = MagicMock()
+    gateway.protect_payload.side_effect = RuntimeError("stalled")
+    with (
+        patch("core.worker.engine.notify_job_completed") as notify,
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.validate_blackbox_payload"),
+        patch("core.worker.engine.payload_uses_token_source", return_value=False),
+        patch("core.worker.engine.ModelGateway", return_value=gateway),
+        patch("core.worker.engine.BudgetService"),
+        patch("core.worker.engine.BudgetRuntime"),
+        patch("core.worker.engine.bind_protected_sandbox"),
+        patch("core.worker.engine.protected_image", return_value=None),
+        patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload),
+        patch.object(worker, "_close_budget_gateway", return_value=(None, None)),
+    ):
+        gateway.runtime.service.close_for_failed_job.side_effect = RuntimeError("database down")
+        worker._process_job("failed-budget", 0)
+    assert store._jobs["failed-budget"]["status"] == "failed"
+    gateway.runtime.service.close_for_failed_job.assert_called_once_with(
+        gateway.runtime.budget_id, gateway.runtime.username
+    )
+    notify.assert_called_once()
+
+
 def _run_repository_job(
     worker: BackgroundWorker, store: FakeJobStore, snapshot: dict
 ) -> tuple[MagicMock, MagicMock, MagicMock]:

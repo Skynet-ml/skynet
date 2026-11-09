@@ -361,3 +361,56 @@ def test_runtime_settlement_precedes_terminal_and_preserves_pending_result(
     assert "username" not in snapshot
     assert "account_available_cents" not in snapshot
     assert store.get_job("settling")["terminal_evidence"]["execution_budget"] == snapshot
+
+
+def test_failed_job_closes_budget_and_releases_only_unstarted_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bill metered usage, return unstarted holds, and still settle pending sandbox usage (SKY-529).
+
+    Args:
+        monkeypatch: Fixture binding the checkpoint's immutable runtime profile.
+    """
+    store = SQLiteJobStore()
+    store.create_job("failed-run")
+    budgets = _fund_checkpoint(store, "failed-run", monkeypatch)
+    budget_id = store.get_job("failed-run")["execution_budget_id"]
+
+    def reserve(key: str, cost_kind: str) -> str:
+        """Reserve one three-cent run operation and return its id."""
+        return budgets.reserve(
+            budget_id,
+            "resume-owner",
+            operation_key=key,
+            generation=0,
+            phase="run",
+            cost_kind=cost_kind,
+            request_fingerprint=key,
+            price_snapshot={"version": "fixture"},
+            max_cents=3,
+        ).id
+
+    metered = reserve("metered", "model")
+    budgets.mark_dispatched(metered, "resume-owner", "metered-request")
+    budgets.settle(metered, "resume-owner", evidence_key="metered", actual_cents=2, evidence={"usage": "fixture"})
+    unstarted = reserve("unstarted", "model")
+    sandbox = reserve("sandbox", "sandbox")
+    budgets.mark_dispatched(sandbox, "resume-owner", "sandbox-request")
+    budgets.mark_pending(sandbox, "resume-owner")
+    before = budgets.get(budget_id, "resume-owner")
+    assert before.reserved_cents == 6
+
+    closed = budgets.close_for_failed_job(budget_id, "resume-owner")
+
+    assert closed.state == "closed"
+    assert closed.blocked_reason == "job_failed"
+    assert closed.run_spent_cents == 2
+    assert closed.reserved_cents == 3
+    assert closed.account_available_cents == before.account_available_cents + 3
+    assert budgets.get_operation(unstarted, "resume-owner").state == "released"
+    assert budgets.get_operation(sandbox, "resume-owner").state == "pending"
+
+    budgets.settle(sandbox, "resume-owner", evidence_key="sandbox", actual_cents=1, evidence={"usage": "fixture"})
+    settled = budgets.get(budget_id, "resume-owner")
+    assert settled.run_spent_cents == 3
+    assert settled.reserved_cents == 0
+    assert settled.wallet_reserved_cents == 0
+    assert settled.account_available_cents == 50 - 3
