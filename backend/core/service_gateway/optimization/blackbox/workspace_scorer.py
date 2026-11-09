@@ -163,7 +163,7 @@ class _SlotBox(SandboxEnvironment):
 
 
 def run_on_pool(phase: Phase, calls: Sequence[Callable[[], R]], workers: int) -> list[R]:
-    """Run sync calls on the process sandbox pool, one box per call, and keep their order.
+    """Run sync calls on a new sandbox pool for this fan-out, one box per call, in order.
 
     Only ``workers`` bounds the calls in flight; Skynet sets no process box
     limit, since the user controls spend with the run's budget. Each
