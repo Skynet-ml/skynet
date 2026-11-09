@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -58,6 +59,7 @@ from ..sandbox import (
     _CODEX_REQUIREMENTS_CHECK,
     _CODEX_REQUIREMENTS_COMMAND,
     _CODEX_REQUIREMENTS_READBACK,
+    CODEX_REQUIREMENTS,
     CODEX_REQUIREMENTS_PATH,
     CommandResult,
     SandboxSpec,
@@ -84,6 +86,7 @@ class FakeSession:
         self.candidate: Any = "better"
         self.requirements: list[tuple[str, dict[str, Any]]] = []
         self.readback = _CODEX_REQUIREMENTS_READBACK
+        self.root_write_readback = _CODEX_REQUIREMENTS_READBACK
 
     def write_files(self, files: dict[str, str]) -> None:
         """Persist files as an in-memory child filesystem.
@@ -116,6 +119,8 @@ class FakeSession:
         """
         if CODEX_REQUIREMENTS_PATH in command:
             self.requirements.append((command, kwargs))
+            if kwargs.get("sudo"):
+                self.readback = self.root_write_readback
             return CommandResult(exit_code=0, stdout=self.readback)
         self.calls.append((command, kwargs))
         if len(self.calls) == 1:
@@ -999,15 +1004,17 @@ def test_dockerfile_bakes_shinka_into_the_venv_the_runtime_uses() -> None:
     assert f'{native_runtime.SHINKA_IMAGE_PYTHON} -c "import shinka.core.async_runner"' in dockerfile
 
 
-def test_dockerfile_gives_the_sandbox_image_sudo_for_root_setup() -> None:
-    """Ship sudo and a NOPASSWD rule for the image user, so Vercel can run the root Codex setup (SKY-529)."""
+def test_dockerfile_ships_the_codex_requirements_file_root_owned_and_no_sudo() -> None:
+    """Bake the exact requirements file as root before ``USER 1001``, and give the image user no root path (SKY-389)."""
     dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
-    assert "ARG INCLUDE_SANDBOX_SUDO=false" in dockerfile
-    assert '[ "$INCLUDE_SANDBOX_SUDO" = "1" ]' in dockerfile
-    assert "apt-get install -y --no-install-recommends sudo" in dockerfile
-    assert "'appuser ALL=(ALL) NOPASSWD:ALL'" in dockerfile
-    assert "useradd -u 1001 -g 0 -m -s /sbin/nologin appuser" in dockerfile
-    assert "\nUSER 1001\n" in dockerfile
+    bake = dockerfile.index(f"> {CODEX_REQUIREMENTS_PATH}")
+    assert "install -d -o root -g root -m 0755 /etc/codex" in dockerfile
+    assert "printf '" + CODEX_REQUIREMENTS.replace("\n", "\\n") + "'" in dockerfile
+    assert f"chown root:root {CODEX_REQUIREMENTS_PATH}" in dockerfile
+    assert f"chmod 0644 {CODEX_REQUIREMENTS_PATH}" in dockerfile
+    assert bake < dockerfile.index("\nUSER 1001\n")
+    assert "sudoers" not in dockerfile
+    assert not re.search(r"apt-get install[^\n]*\bsudo\b", dockerfile)
 
 
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2196,9 +2203,10 @@ def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> 
 class _OrderedSession(FakeSession):
     """Record how many runner commands ran before the requirements step."""
 
-    def __init__(self, *, own_writer: bool = False) -> None:
+    def __init__(self, *, own_writer: bool = False, readback: str = _CODEX_REQUIREMENTS_READBACK) -> None:
         """Optionally give the session its own requirements writer, as a remote child session has."""
         super().__init__()
+        self.readback = readback
         self.before: list[int] = []
         self.writer_calls = 0
         if own_writer:
@@ -2216,21 +2224,39 @@ class _OrderedSession(FakeSession):
         return super().run(command, **kwargs)
 
 
+_CHECK_CALL = (_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})
+_ROOT_WRITE_CALL = (_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})
+
+
 @pytest.mark.parametrize(
-    ("contained", "own_writer", "expected"),
+    ("contained", "own_writer", "readback", "expected"),
     [
-        (True, False, [(_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})]),
-        (False, False, [(_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})]),
-        (False, True, []),
+        (True, False, _CODEX_REQUIREMENTS_READBACK, [_CHECK_CALL]),
+        (False, False, _CODEX_REQUIREMENTS_READBACK, [_CHECK_CALL]),
+        (False, False, "", [_CHECK_CALL, _ROOT_WRITE_CALL]),
+        (False, True, _CODEX_REQUIREMENTS_READBACK, []),
     ],
-    ids=["outer-box-check-only", "docker-or-vercel-root-write", "remote-child-broker-action"],
+    ids=[
+        "outer-box-check-only",
+        "image-ships-file-no-root",
+        "docker-empty-mount-root-write",
+        "remote-child-broker-action",
+    ],
 )
 def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, own_writer: bool, expected: list[Any]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contained: bool,
+    own_writer: bool,
+    readback: str,
+    expected: list[Any],
 ) -> None:
-    """Each box kind puts the root-owned file in place after setup and before the Codex runner starts."""
+    """Each box kind has the root-owned file in place after setup and before the Codex runner starts.
+
+    A box whose image ships the file needs no root command at all (SKY-389).
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
-    session = _OrderedSession(own_writer=own_writer)
+    session = _OrderedSession(own_writer=own_writer, readback=readback)
     runtime = FakeRuntime(session)
     runtime.contained = contained
     ctx = _context(tmp_path, runtime)
@@ -2240,7 +2266,7 @@ def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
 
     assert session.requirements == expected
     assert session.writer_calls == (1 if own_writer else 0)
-    assert session.before == [1]
+    assert session.before == [1] * max(len(expected), 1)
     assert len(session.calls) == 2
 
 
@@ -2257,6 +2283,7 @@ def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     session.readback = readback
+    session.root_write_readback = readback
     runtime = FakeRuntime(session)
     runtime.contained = contained
     ctx = _context(tmp_path, runtime)
@@ -2265,7 +2292,8 @@ def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
     with pytest.raises(ServiceError, match="Codex cannot start"):
         run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
 
-    assert len(session.requirements) == 1
+    assert session.requirements[0][0] == _CODEX_REQUIREMENTS_CHECK
+    assert len(session.requirements) == (1 if contained else 2)
     assert len(session.calls) == 1
     assert session.closed
 

@@ -134,27 +134,6 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
         && /opt/shinka/venv/bin/python -c "import shinka.core.async_runner"; \
     fi
 
-# Vercel runs a box's commands as the image's USER and runs `sudo: true`
-# commands (the parent's root setup, e.g. the root-owned Codex requirements
-# file) through the box's own `sudo` binary. Vercel's managed images ship sudo
-# with this NOPASSWD rule for their user; a custom image must ship its own.
-# Sandbox image builds only (--build-arg INCLUDE_SANDBOX_SUDO=1): the
-# API/worker images keep no root path for appuser.
-ARG INCLUDE_SANDBOX_SUDO=false
-RUN if [ "$INCLUDE_SANDBOX_SUDO" = "1" ] || [ "$INCLUDE_SANDBOX_SUDO" = "true" ]; then \
-        apt-get update \
-        && apt-get install -y --no-install-recommends sudo \
-        && rm -rf /var/lib/apt/lists/* \
-        && printf '%s\n' \
-            'Defaults always_set_home' \
-            'Defaults !env_reset' \
-            'Defaults !fqdn' \
-            'appuser ALL=(ALL) NOPASSWD:ALL' \
-            > /etc/sudoers.d/sandbox \
-        && chmod 0440 /etc/sudoers.d/sandbox \
-        && visudo -cf /etc/sudoers.d/sandbox; \
-    fi
-
 # dspy.Flex serve-time dependency. An optimized Flex program ALWAYS executes
 # its generated Python in a Deno/Pyodide WASM sandbox (dspy.PythonInterpreter
 # shells out to `deno` on PATH) — even the un-optimized baseline runs through
@@ -197,6 +176,17 @@ ARG GIT_SHA=unknown
 
 # Login shells must retain the same interpreter used to install the pinned dependencies.
 RUN printf '%s\n' 'export PATH="/app/.venv/bin:$PATH"' > /etc/profile.d/skynet-runtime.sh
+
+# Codex turns unified exec on unless a root-owned /etc/codex/requirements.toml
+# turns it off (SKY-389). The image ships that file, so a Vercel box needs no
+# root step and the image carries no sudo: Codex runs as appuser with its own
+# sandbox off, and any root path would let the model rewrite the file.
+# Keep the content equal to CODEX_REQUIREMENTS in
+# core/service_gateway/optimization/blackbox/sandbox_runtime.py.
+RUN install -d -o root -g root -m 0755 /etc/codex \
+    && printf '[features]\nunified_exec = false\n' > /etc/codex/requirements.toml \
+    && chown root:root /etc/codex/requirements.toml \
+    && chmod 0644 /etc/codex/requirements.toml
 
 USER 1001
 
