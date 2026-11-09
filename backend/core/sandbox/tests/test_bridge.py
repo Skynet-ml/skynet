@@ -188,7 +188,7 @@ def test_legacy_backend_keeps_the_legacy_runtimes() -> None:
     assert isinstance(vercel, VercelSandboxRuntime)
     assert vercel.protected
     assert not vercel.injects_headers
-    local = _settings(local_mode=True, local_sandbox_image=_LOCAL_IMAGE, docker_bin="docker")
+    local = _settings(sandbox_backend="legacy", local_mode=True, local_sandbox_image=_LOCAL_IMAGE, docker_bin="docker")
     docker = bridge.protected_runtime(local, image=_LOCAL_IMAGE, budget=_BUDGET, recorder="recorder")
     assert isinstance(docker, DockerSandboxRuntime)
     assert docker.protected

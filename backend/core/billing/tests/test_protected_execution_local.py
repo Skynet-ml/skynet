@@ -170,6 +170,7 @@ def test_docker_cost_profile_is_zero(local_settings: tuple[Settings, Path]) -> N
 def test_bind_uses_docker_without_a_vercel_token_and_never_charges(local_settings: tuple[Settings, Path]) -> None:
     """Bind a Docker broker with the mailbox, and open, write and close a box with zero settled cost."""
     settings, log = local_settings
+    settings = settings.model_copy(update={"sandbox_backend": "legacy"})
     assert settings.vercel_token is None
     gateway = _Gateway()
 

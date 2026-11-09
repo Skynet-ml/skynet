@@ -464,9 +464,9 @@ def test_factory_loads_mosaic_outside_production(monkeypatch: pytest.MonkeyPatch
     assert factory.load_provider("mosaic") is MosaicEnvironment
 
 
-def test_the_default_sandbox_backend_stays_legacy() -> None:
-    """Keep the legacy backend as the default."""
-    assert type(settings).model_fields["sandbox_backend"].default == "legacy"
+def test_the_default_sandbox_backend_is_async() -> None:
+    """Keep the async backend as the default (SKY-529)."""
+    assert type(settings).model_fields["sandbox_backend"].default == "async"
 
 
 def test_preflight_needs_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:

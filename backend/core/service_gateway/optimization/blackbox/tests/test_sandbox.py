@@ -822,7 +822,9 @@ def test_unavailable_reason_never_names_the_sandbox_vendor(monkeypatch: pytest.M
 @_needs_sdk
 def test_configured_settings_yield_a_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Full credentials leave no reason and build a runtime; missing ones give None."""
-    configured = _settings(monkeypatch, vercel_token="t", vercel_team_id="team", vercel_project_id="proj")
+    configured = _settings(
+        monkeypatch, sandbox_backend="legacy", vercel_token="t", vercel_team_id="team", vercel_project_id="proj"
+    )
 
     assert sandbox_unavailable_reason(configured) is None
     assert isinstance(sandbox_runtime_from_settings(configured), VercelSandboxRuntime)
@@ -835,7 +837,7 @@ def test_configured_settings_pick_the_sandbox_image(monkeypatch: pytest.MonkeyPa
     fake_sync = _FakeSync(_FakeBox())
     monkeypatch.setattr(sandbox_mod, "vercel_sync", fake_sync)
     monkeypatch.setattr(sandbox_mod, "vercel_api", _FakeApi(_FakeApiSession()))
-    creds = {"vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
+    creds = {"sandbox_backend": "legacy", "vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
 
     for image, expected in ((None, "vercel/sandbox/universal:latest"), ("my/img:1", "my/img:1")):
         overrides = {"vercel_sandbox_image": image} if image else {}
@@ -911,15 +913,14 @@ _VERCEL_CREDS = {"vercel_token": "t", "vercel_team_id": "team", "vercel_project_
 
 @_needs_sdk
 def test_legacy_backend_returns_the_sync_vercel_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``legacy`` is the default and builds the same sync runtime as before SKY-419."""
+    """``legacy`` builds the same sync runtime as before SKY-419; the default is ``async`` (SKY-529)."""
     default = _settings(monkeypatch, **_VERCEL_CREDS)
     explicit = _settings(monkeypatch, **_VERCEL_CREDS, sandbox_backend="legacy")
 
-    assert default.sandbox_backend == "legacy"
-    for configured in (default, explicit):
-        runtime = sandbox_runtime_from_settings(configured)
-        assert type(runtime) is VercelSandboxRuntime
-        assert runtime.injects_headers is True
+    assert default.sandbox_backend == "async"
+    runtime = sandbox_runtime_from_settings(explicit)
+    assert type(runtime) is VercelSandboxRuntime
+    assert runtime.injects_headers is True
 
 
 @_needs_sdk

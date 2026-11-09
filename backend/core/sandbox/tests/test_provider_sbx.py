@@ -974,6 +974,6 @@ def test_factory_registers_sbx_for_development_only(monkeypatch: pytest.MonkeyPa
         factory.load_provider("sbx")
 
 
-def test_default_backend_stays_legacy() -> None:
-    """Keep the legacy backend as the default."""
-    assert type(settings).model_fields["sandbox_backend"].default == "legacy"
+def test_default_backend_is_async() -> None:
+    """Keep the async backend as the default (SKY-529)."""
+    assert type(settings).model_fields["sandbox_backend"].default == "async"

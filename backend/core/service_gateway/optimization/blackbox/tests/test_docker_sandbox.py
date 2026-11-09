@@ -722,7 +722,9 @@ def test_local_mode_settings_build_docker_and_never_vercel(
 ) -> None:
     """Local mode opens Docker boxes without any Vercel credential configured."""
     binary, _ = fake_docker
-    settings = _settings(monkeypatch, local_mode=True, docker_bin=binary, local_sandbox_image=_IMAGE)
+    settings = _settings(
+        monkeypatch, sandbox_backend="legacy", local_mode=True, docker_bin=binary, local_sandbox_image=_IMAGE
+    )
     # The package conftest binds a host-subprocess runtime; this test checks
     # the settings resolver itself, so it clears that binding.
     token = _RUNTIME_OVERRIDE.set(None)

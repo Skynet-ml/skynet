@@ -160,8 +160,8 @@ def test_scorer_runtime_refuses_missing_managed_credentials(monkeypatch: pytest.
 
 @_needs_sdk
 def test_scorer_runtime_prefers_vercel_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Configured production scorers always resolve to the managed Vercel runtime."""
-    creds = {"vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
+    """Configured legacy scorers resolve to the managed sync Vercel runtime."""
+    creds = {"sandbox_backend": "legacy", "vercel_token": "t", "vercel_team_id": "team", "vercel_project_id": "proj"}
 
     assert isinstance(scorer_runtime_from_settings(_settings(monkeypatch, **creds)), VercelSandboxRuntime)
 
