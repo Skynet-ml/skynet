@@ -53,7 +53,7 @@ class ServiceSandbox(InMemorySandbox):
             The built snapshot.
         """
         type(self).built.append(run_deadline.isoformat())
-        return BuiltSnapshot(f"snap-{len(type(self).built)}", "builder")
+        return BuiltSnapshot(f"snap-{len(type(self).built)}", "skynet-box-0123456789")
 
 
 class PlainSandbox(InMemorySandbox):
@@ -166,12 +166,12 @@ class _SnapshotSession(FakeSession):
             """Return a fixed snapshot.
 
             Args:
-                _builder: Unused builder name.
+                _builder: Unused builder name; a provider names the builder after its own box.
 
             Returns:
                 The snapshot.
             """
-            return BuiltSnapshot("snap-p", "builder")
+            return BuiltSnapshot("snap-p", "skynet-box-0123456789")
 
         return bridge_run(cache.get_or_build, cache_key, build).snapshot_id
 
@@ -237,3 +237,17 @@ def test_the_broker_snapshots_in_its_one_cache_and_deletes_after_the_boxes_close
     assert runtime.order == ["close", "snap-p"]
     with pytest.raises(SandboxFatalError, match="run ended"):
         bridge_run(cache.get_or_build, "key-b", None)
+
+
+def test_the_broker_release_deletes_a_snapshot_named_after_the_provider_box() -> None:
+    """Delete a key's snapshot at release when the provider names its builder after the box, not the key."""
+    runtime = _SnapshotRuntime()
+    cache = _cache(runtime.order)
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120, snapshots=cache)
+    parent = broker.parent_runtime(())
+    box = parent.open(SandboxSpec(lifetime_seconds=60, operation_key="k"))
+    assert parent.snapshot(box, "key-a") == "snap-p"
+    parent.release_snapshot("key-a")
+    assert runtime.order == ["snap-p"]
+    broker.close()
+    assert runtime.order == ["snap-p", "close"]

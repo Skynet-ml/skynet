@@ -433,14 +433,17 @@ class RepoWorkspace:
             return session
 
     def _box_spec(self, *, restored: bool) -> SandboxSpec:
-        """Return the spec of the next box, with an operation key of its own.
+        """Return the spec of the next box, with the operation key of its kind.
 
         Args:
             restored: Whether the box opens from the after-setup snapshot.
 
         Returns:
-            The setup spec for the first box. A box from the snapshot, or a
-            box that sets up again after the snapshot failed, gets its own key.
+            The setup spec, on the setup key, for a box that sets up. Every
+            box from the snapshot shares the ``<key>:restored`` key, and every
+            box that sets up again after the snapshot failed shares the
+            ``<key>:fallback`` key; boxes of one kind reuse their key as the
+            setup boxes reuse the setup key.
         """
         spec = self._spec
         if restored:
@@ -448,9 +451,10 @@ class RepoWorkspace:
         suffix = ":restored" if restored else ":fallback" if self._snapshots_off else ""
         if spec.operation_key is None or not suffix:
             return spec
-        # The budget ledger ties one key to one request, so a different box on
-        # the setup key is refused. The box name comes from the key too, and
-        # the snapshot builder's name must not match a box that stays open.
+        # The budget ledger ties one key to one request, so a box with a
+        # different spec on the setup key is refused. The box name comes from
+        # the key too, and the snapshot builder's name must not match a box
+        # that stays open.
         return replace(spec, operation_key=f"{spec.operation_key}{suffix}")
 
     def _open_restored(self) -> SandboxSession | None:

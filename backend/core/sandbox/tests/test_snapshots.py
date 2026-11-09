@@ -867,7 +867,7 @@ async def test_failed_release_is_retried_by_close_and_deleted_once() -> None:
 
 
 async def test_release_of_an_evicted_and_rebuilt_key_deletes_both_snapshots() -> None:
-    """Check that release finds the evicted snapshot of its key by builder name."""
+    """Check that release finds the evicted snapshot of its key by its recorded id."""
     provider = Provider()
     clock = FakeClock()
     cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
@@ -890,3 +890,35 @@ async def test_release_of_a_borrowed_snapshot_only_drops_it() -> None:
     assert provider.deletes == []
     await owner.release(_key())
     assert provider.deletes == ["snap-1"]
+
+
+async def test_release_deletes_a_snapshot_whose_builder_is_the_provider_box() -> None:
+    """Check that release finds a snapshot by its key when the provider names the builder after its own box."""
+    deleted: list[tuple[str, object]] = []
+    hold = object()
+
+    async def delete(built: BuiltSnapshot) -> None:
+        """Record the delete and the hold it settles.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        deleted.append((built.snapshot_id, built.reservation))
+
+    async def build(_name: str) -> BuiltSnapshot:
+        """Return a snapshot named after the provider box, as the Vercel provider does.
+
+        Args:
+            _name: The cache's builder name, which the provider ignores.
+
+        Returns:
+            The snapshot.
+        """
+        return BuiltSnapshot(snapshot_id="snap-1", builder_name="skynet-0123456789abcdef", reservation=hold)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=delete)
+    await cache.get_or_build(_key(), build)
+    await cache.release(_key())
+    assert deleted == [("snap-1", hold)]
+    await cache.close()
+    assert deleted == [("snap-1", hold)]

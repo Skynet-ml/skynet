@@ -260,6 +260,10 @@ class SnapshotCache:
         # Snapshots this pod built, by snapshot id. Only ``close`` deletes them,
         # because pods that borrowed one cannot tell the owner they still use it.
         self._owned: dict[str, BuiltSnapshot] = {}
+        # The owned snapshot ids of each cache key. The provider names the
+        # builder after the box it snapshots, not after the key, so
+        # ``release`` cannot find a key's snapshots by builder name.
+        self._owned_by_key: dict[str, set[str]] = {}
         self._closed = False
 
     def expiration(self, now: datetime | None = None) -> timedelta:
@@ -322,6 +326,7 @@ class SnapshotCache:
                     self._require_open()
                 if found is None:
                     self._owned[built.snapshot_id] = built
+                    self._owned_by_key.setdefault(cache_key, set()).add(built.snapshot_id)
                 self._entries[cache_key] = built
                 self._last_used[cache_key] = self._clock.monotonic()
                 return built
@@ -368,15 +373,16 @@ class SnapshotCache:
         Raises:
             Exception: The first failed delete, after all of them ran.
         """
-        name = self.builder_name(cache_key)
         async with self._locks.setdefault(cache_key, asyncio.Lock()):
             self._entries.pop(cache_key, None)
             self._last_used.pop(cache_key, None)
             failure: Exception | None = None
-            # By builder name, not by entry: an evicted and rebuilt key owns
+            # By recorded id, not by entry: an evicted and rebuilt key owns
             # more than one snapshot, and the evicted one has no entry.
-            for snapshot_id in [key for key, built in self._owned.items() if built.builder_name == name]:
+            for snapshot_id in sorted(self._owned_by_key.pop(cache_key, set())):
                 error = await self._delete_owned(snapshot_id)
+                if snapshot_id in self._owned:
+                    self._owned_by_key.setdefault(cache_key, set()).add(snapshot_id)
                 failure = failure or error
         if failure is not None:
             raise failure
