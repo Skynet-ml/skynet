@@ -19,12 +19,16 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
 - Compose services (see ``..services``) run as processes in the box. The
   box grows by their size, so the reservation prices them. They start after
   the create or the snapshot restore, and stop before a snapshot.
-- Harbor's directory transfer and log streaming features are left out.
+- ``exec`` streams new command output to the output sink while the command
+  runs, so a model mailbox frame reaches the parent before the exit.
+- Harbor's directory transfer feature is left out.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import codecs
 import contextlib
 import dataclasses
 import logging
@@ -117,6 +121,10 @@ EXIT_PREFIX = "/tmp/.app-exit-"
 OUTPUT_PREFIX = "/tmp/.app-output-"
 TIMEOUT_CODES = frozenset({124, 137})
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
+OUTPUT_POLL = 0.5
+# Prints the bytes after each 1-based offset as one base64 line per file. The
+# SDK has no ranged read, and a full re-read on every poll is O(n^2).
+TAIL_SCRIPT = 'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null | base64 | tr -d "\\n"; echo; shift 2; done'
 _LIVE_STATUSES = frozenset({"pending", "running"})
 
 ResponseCapture = Callable[[httpx.Response], Awaitable[None]]
@@ -263,6 +271,35 @@ def policy_confirmed(policy: NetworkPolicy, readback: Any | None) -> bool:
             and not subnet_allow
         )
     return readback.mode == "allow-all" or (readback.mode == "custom" and "*" in domains)
+
+
+@dataclasses.dataclass
+class _OutputTail:
+    """The read state of one command output file."""
+
+    stream: str
+    path: str
+    offset: int = 0
+    emitted: int = 0
+    decoder: codecs.IncrementalDecoder = dataclasses.field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
+    )
+
+
+async def _stop_poller(poller: asyncio.Future[None] | None) -> BaseException | None:
+    """Cancel the output poller and wait until it ends.
+
+    Args:
+        poller: The poller task, or ``None`` when no sink exists.
+
+    Returns:
+        The sink error that ended the poller, or ``None``.
+    """
+    if poller is None:
+        return None
+    poller.cancel()
+    await asyncio.wait({poller})
+    return None if poller.cancelled() else poller.exception()
 
 
 class VercelEnvironment(SandboxEnvironment):
@@ -808,14 +845,16 @@ class VercelEnvironment(SandboxEnvironment):
         on_output: OutputSink | None = None,
         sudo: bool = False,
     ) -> ExecResult:
-        """Run one shell command and wait for its exit code without polling.
+        """Run one shell command and wait for its exit code without polling its status.
 
         Args:
             command: The shell command.
             cwd: The working directory, or the box default.
             env: Extra environment variables for this command.
             timeout_sec: The time limit; ``None`` means no limit.
-            on_output: Receives ``(stream, text)`` after the command ends.
+            on_output: Receives each new ``(stream, text)`` chunk while the
+                command runs, and the rest after it ends. The chunks of one
+                stream join to its full text.
             sudo: Run the command as root.
 
         Returns:
@@ -840,27 +879,35 @@ class VercelEnvironment(SandboxEnvironment):
                 kill_after = min(timeout_sec + KILL_GRACE, KILL_AFTER_MAX)
             script = f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
             process = await self._create_process(session, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)
+            sink = on_output or current_output_sink()
+            tails = (_OutputTail("stdout", out_path), _OutputTail("stderr", err_path))
+            # A model mailbox answers frames only while the command runs, so
+            # output that arrives after the exit would hang the guest (SKY-529).
+            poller = asyncio.ensure_future(self._stream_output(session, tails, sink)) if sink is not None else None
             try:
-                if kill_after is None:
-                    code = await self._wait(session, process, sentinel)
-                else:
-                    async with asyncio.timeout(kill_after + POLL_SLACK):
+                try:
+                    if kill_after is None:
                         code = await self._wait(session, process, sentinel)
-            except TimeoutError as error:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(process.kill(), CANCEL_GRACE)
-                raise SandboxInfraError("The sandbox command outlived its kill deadline.") from error
-            except asyncio.CancelledError:
-                await asyncio.shield(asyncio.ensure_future(self._abort(process)))
-                raise
+                    else:
+                        async with asyncio.timeout(kill_after + POLL_SLACK):
+                            code = await self._wait(session, process, sentinel)
+                except TimeoutError as error:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(process.kill(), CANCEL_GRACE)
+                    raise SandboxInfraError("The sandbox command outlived its kill deadline.") from error
+                except asyncio.CancelledError:
+                    await asyncio.shield(asyncio.ensure_future(self._abort(process)))
+                    raise
+            finally:
+                sink_error = await _stop_poller(poller)
+            if sink_error is not None:
+                raise sink_error
             stdout = await self._read_optional(session, out_path) or ""
             stderr = await self._read_optional(session, err_path) or ""
-            sink = on_output or current_output_sink()
             if sink is not None:
-                if stdout:
-                    sink("stdout", stdout)
-                if stderr:
-                    sink("stderr", stderr)
+                for tail, text in zip(tails, (stdout, stderr), strict=True):
+                    if text[tail.emitted :]:
+                        sink(tail.stream, text[tail.emitted :])
             timed_out = timeout_sec is not None and code in TIMEOUT_CODES
             return ExecResult(exit_code=code, stdout=stdout, stderr=stderr, timed_out=timed_out)
 
@@ -912,6 +959,36 @@ class VercelEnvironment(SandboxEnvironment):
                     raise self._session_stopped(error) from error
                 raise
         raise AssertionError("unreachable")
+
+    async def _stream_output(self, session: Any, tails: Sequence[_OutputTail], sink: OutputSink) -> None:
+        """Send new command output to the sink until the caller cancels this task.
+
+        Args:
+            session: The SDK runtime session.
+            tails: The read state of each output file.
+            sink: Receives each new ``(stream, text)`` chunk.
+        """
+        while True:
+            await self._clock.sleep(OUTPUT_POLL)
+            if self._pacing is not None:
+                await self._pacing.reads.acquire()
+            pairs = [value for tail in tails for value in (str(tail.offset + 1), tail.path)]
+            try:
+                completed = await session.run_process(
+                    "bash", [*SHELL_FLAGS, TAIL_SCRIPT, "tail", *pairs], capture_output=True
+                )
+                chunks = [base64.b64decode(line) for line in completed.stdout.split("\n")[: len(tails)]]
+            except Exception:
+                # A missed poll only delays output: the next poll or the final read sends it.
+                logger.debug("A sandbox output poll failed.", exc_info=True)
+                continue
+            for tail, chunk in zip(tails, chunks, strict=False):
+                # A stale, shorter read gives no bytes, so the offset never moves back.
+                tail.offset += len(chunk)
+                text = tail.decoder.decode(chunk)
+                if text:
+                    tail.emitted += len(text)
+                    sink(tail.stream, text)
 
     async def _wait(self, session: Any, process: Any, sentinel: str) -> int:
         """Wait on the long poll; fall back to the sentinel file after many cuts.
