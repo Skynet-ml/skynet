@@ -34,7 +34,7 @@ SOURCE_EXCLUDE = [
     "**/*.pem",
     "**/*.key",
     "**/id_rsa*",
-    "**/credentials*.json",
+    "**/*credentials*.json",
 ]
 
 
