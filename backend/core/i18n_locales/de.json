@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} ist nicht {expected}. Skynet verbindet nur gitlab.com und Bitbucket Cloud, keine selbst verwalteten Server. Verwenden Sie die {expected}-Adresse des Repositorys oder verschieben Sie das Repository zu {expected}.",
     "connectors.not_connected": "Verbinden Sie zuerst Ihr {provider}-Konto.",
     "connectors.not_found": "Dieses Element wurde bei {provider} nicht gefunden, oder Ihr Konto hat keinen Zugriff darauf.",
+    "connectors.rate_limited": "Das Anfragelimit von {provider} ist erreicht. Versuchen Sie es später erneut.",
     "connectors.oauth_failed": "Die Anmeldung bei {provider} wurde nicht abgeschlossen. Bitte versuchen Sie es erneut.",
     "connectors.oauth_not_configured": "Die Anmeldung mit {provider} ist für diese Instanz nicht eingerichtet. Fügen Sie stattdessen Anmeldedaten ein.",
     "connectors.oauth_state_invalid": "Der Anmeldelink ist ungültig oder abgelaufen. Bitte beginnen Sie erneut.",

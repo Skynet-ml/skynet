@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} 不是 {expected}。Skynet 只连接 gitlab.com 和 Bitbucket Cloud，不连接自托管服务器。请使用仓库在 {expected} 上的地址，或将仓库迁移到 {expected}。",
     "connectors.not_connected": "请先连接您的 {provider} 账户。",
     "connectors.not_found": "在 {provider} 上未找到该项目，或您的账户无权访问。",
+    "connectors.rate_limited": "已达到 {provider} 的请求次数上限。请稍后重试。",
     "connectors.oauth_failed": "{provider} 登录未完成，请重试。",
     "connectors.oauth_not_configured": "此部署未配置 {provider} 登录，请改为粘贴凭据。",
     "connectors.oauth_state_invalid": "登录链接无效或已过期，请重新开始。",
