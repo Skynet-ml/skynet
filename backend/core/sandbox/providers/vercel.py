@@ -123,6 +123,9 @@ TIMEOUT_CODES = frozenset({124, 137})
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 OUTPUT_POLL = 0.5
 OUTPUT_POLL_WARN_AFTER = 3
+# The SDK streams a run with no read timeout, so a stalled tail read would stop
+# every later poll and starve a model mailbox until the guest proxy gives up.
+OUTPUT_POLL_TIMEOUT = 10.0
 # Prints the bytes after each 1-based offset as one base64 line per file. The
 # SDK has no ranged read, and a full re-read on every poll is O(n^2).
 TAIL_SCRIPT = 'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null | base64 | tr -d "\\n"; echo; shift 2; done'
@@ -864,6 +867,7 @@ class VercelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The exit code could not be read, or the
                 command outlived its kill deadline.
+            Exception: The output sink failed; this error wins over the deadline.
         """
         session = self._require_session()
         if env:
@@ -895,6 +899,10 @@ class VercelEnvironment(SandboxEnvironment):
                 except TimeoutError as error:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(process.kill(), CANCEL_GRACE)
+                    # A sink error can start an abort that outlives the deadline;
+                    # the sink error is the cause, so the caller must see it.
+                    if poller is not None and poller.done() and not poller.cancelled() and poller.exception():
+                        raise poller.exception() from error
                     raise SandboxInfraError("The sandbox command outlived its kill deadline.") from error
                 except asyncio.CancelledError:
                     await asyncio.shield(asyncio.ensure_future(self._abort(process)))
@@ -977,9 +985,15 @@ class VercelEnvironment(SandboxEnvironment):
                 await self._pacing.reads.acquire()
             pairs = [value for tail in tails for value in (str(tail.offset + 1), tail.path)]
             try:
-                completed = await session.run_process(
-                    "bash", [*SHELL_FLAGS, TAIL_SCRIPT, "tail", *pairs], capture_output=True
-                )
+                # Not ``wait_for``: on 3.11 it swallows a cancel that lands as the
+                # read ends, and then ``_stop_poller`` waits forever.
+                async with asyncio.timeout(OUTPUT_POLL_TIMEOUT):
+                    completed = await session.run_process(
+                        "bash",
+                        [*SHELL_FLAGS, TAIL_SCRIPT, "tail", *pairs],
+                        capture_output=True,
+                        kill_after=OUTPUT_POLL_TIMEOUT,
+                    )
                 if completed.returncode != 0:
                     raise RuntimeError(f"The tail script exited with {completed.returncode}: {completed.stderr}")
                 chunks = [base64.b64decode(line) for line in completed.stdout.split("\n")[: len(tails)]]

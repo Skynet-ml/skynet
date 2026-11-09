@@ -1967,6 +1967,148 @@ async def test_a_poll_that_keeps_failing_logs_one_warning(
     await env.stop()
 
 
+async def test_a_hung_poll_times_out_and_later_output_still_streams(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a tail read that never returns counts as one failed poll, not a stuck poller (SKY-529)."""
+    monkeypatch.setattr(vercel, "OUTPUT_POLL_TIMEOUT", 0.05)
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    answer = session.run_process
+    hang = asyncio.Event()
+    seen = asyncio.Event()
+    calls: list[dict[str, Any]] = []
+    chunks: list[tuple[str, str]] = []
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Stall the first tail read like a stream with no timeout; answer the rest.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+        """
+        calls.append(kwargs)
+        if len(calls) == 1:
+            await hang.wait()
+        return await answer(command, args, **kwargs)
+
+    def sink(stream: str, text: str) -> None:
+        """Record a chunk and mark the first stdout text.
+
+        Args:
+            stream: The stream name.
+            text: The new text.
+        """
+        chunks.append((stream, text))
+        if stream == "stdout":
+            seen.set()
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Write a frame and finish only after the sink saw it.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "frame\n"
+        await seen.wait()
+        return 0
+
+    session.run_process = run_process
+    _guest(client.boxes[env.name], run)
+    try:
+        result = await asyncio.wait_for(env.exec("guest", on_output=sink), 5)
+    finally:
+        hang.set()
+    assert result.stdout == "frame\n"
+    assert chunks == [("stdout", "frame\n")]
+    assert calls[0]["kill_after"] == vercel.OUTPUT_POLL_TIMEOUT
+    await env.stop()
+
+
+async def test_cancel_while_the_poller_runs_aborts_once_and_leaves_no_task(client: FakeClient, log: list[str]) -> None:
+    """Check that a cancel during a streamed exec terminates the command once and ends every helper task."""
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    box.block = True
+    session = box.current_session
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(env.exec("sleep 100", on_output=lambda *chunk: None))
+    await _until_read(session, 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    leftover = {other for other in asyncio.all_tasks() - before if not other.done()}
+    assert leftover == set()
+    assert box.processes[0].terminated == 1
+    assert box.processes[0].killed == 0
+    await env.stop()
+
+
+async def test_a_sink_error_wins_over_the_kill_deadline(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that the caller gets the sink error when the abort it started outlives the deadline."""
+    monkeypatch.setattr(vercel, "KILL_GRACE", 0.0)
+    monkeypatch.setattr(vercel, "POLL_SLACK", 0.0)
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+
+    async def create_process(command: str, args: list[str], **kwargs: Any) -> FakeProcess:
+        """Start a process that writes a bad frame and ignores terminate until a kill.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+        """
+        process = FakeProcess(box.fs, args[-1], [], block=True)
+        box.fs.files[process.out] = "bad frame\n"
+
+        async def slow_terminate() -> None:
+            """Count the call and return only after the kill, like a stalled HTTP call."""
+            process.terminated += 1
+            await process.released.wait()
+
+        process.terminate = slow_terminate
+        box.processes.append(process)
+        return process
+
+    def sink(stream: str, text: str) -> None:
+        """Reject every chunk, like a model mailbox that reads a bad frame.
+
+        Args:
+            stream: The stream name.
+            text: The new text.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad frame")
+
+    box.create_process = create_process
+    with pytest.raises(ValueError, match="bad frame"):
+        await asyncio.wait_for(env.exec("guest", timeout_sec=0.05, on_output=sink), 5)
+    assert box.processes[0].terminated == 1
+    assert box.processes[0].killed >= 1
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await env.stop()
+
+
 def test_tail_script_reads_bytes_after_each_offset(tmp_path: Path) -> None:
     """Check the real tail script in a local shell: missing files and offsets past the end are empty."""
     out = tmp_path / "out"
