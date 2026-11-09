@@ -346,7 +346,7 @@ def _kill_deadline_error() -> SandboxInfraError:
 
 
 def test_async_spec_keeps_the_skynet_sandbox_tag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bridge adds ``SANDBOX_TAG`` as the legacy runtime does, and the spec's tags still win."""
+    """The bridge adds ``SANDBOX_TAG``, and the spec's tags still win."""
     session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60, tags={"skynet_job": "job-1"}))
     try:
         assert session._session.environment.spec.tags == {**SANDBOX_TAG, "skynet_job": "job-1"}
@@ -542,7 +542,7 @@ def test_async_session_close_keeps_the_original_error(
 
 @pytest.mark.parametrize("error", [UsagePendingError("usage pending"), BudgetError("over budget")])
 def test_async_session_close_raises_usage_errors(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
-    """Usage errors still reach the caller, as they do from the legacy Vercel close."""
+    """Usage errors still reach the caller from the async close."""
     session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60))
 
     async def unsettled_stop() -> None:
