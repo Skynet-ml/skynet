@@ -1564,7 +1564,7 @@ class BudgetService:
             budget.updated_at = now
         return len(owned)
 
-    def close_for_failed_job(self, budget_id: str, username: str) -> BudgetSnapshot:
+    def close_for_failed_job(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
         """Close a failed job's envelope and return the holds of work that never started.
 
         Settled usage stays billed. Dispatched and pending work keeps its
@@ -1574,15 +1574,22 @@ class BudgetService:
         Args:
             budget_id: Envelope of the job that reached a terminal failure.
             username: Authenticated owner.
+            expected_generation: Epoch of the worker that saw the failure.
 
         Returns:
-            Closed budget with only the coverage of started work still held.
+            Closed budget with only the coverage of started work still held,
+            or the unchanged budget when a resume already fenced that epoch.
         """
         with self._transaction() as session:
             wallet, budget = self._locked(session, budget_id, username)
+            # A manual resume can fence a new epoch between the failed status
+            # write and this close. The new epoch's holds and admission are
+            # not this worker's to end.
+            if budget.generation != expected_generation:
+                return self._snapshot(session, budget, wallet)
             now = datetime.now(UTC)
             _release_reserved(session, budget, now)
-            if budget.state != "blocked":
+            if budget.state not in {"blocked", "closed"}:
                 budget.state = "closed"
                 budget.blocked_reason = "job_failed"
             budget.updated_at = now

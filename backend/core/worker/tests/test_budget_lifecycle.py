@@ -398,7 +398,7 @@ def test_failed_job_closes_budget_and_releases_only_unstarted_holds(monkeypatch:
     before = budgets.get(budget_id, "resume-owner")
     assert before.reserved_cents == 6
 
-    closed = budgets.close_for_failed_job(budget_id, "resume-owner")
+    closed = budgets.close_for_failed_job(budget_id, "resume-owner", expected_generation=0)
 
     assert closed.state == "closed"
     assert closed.blocked_reason == "job_failed"
@@ -414,3 +414,58 @@ def test_failed_job_closes_budget_and_releases_only_unstarted_holds(monkeypatch:
     assert settled.reserved_cents == 0
     assert settled.wallet_reserved_cents == 0
     assert settled.account_available_cents == 50 - 3
+
+    reopened = budgets.resume_admission(budget_id, "resume-owner", expected_generation=0)
+    assert reopened.state == "attached"
+    assert reopened.blocked_reason is None
+
+
+def test_stale_failed_close_keeps_the_resumed_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure close from a fenced epoch leaves a manual resume's admission and holds alone (SKY-529).
+
+    Args:
+        monkeypatch: Fixture binding the checkpoint's immutable runtime profile.
+    """
+    store = SQLiteJobStore()
+    store.create_job("resumed-run")
+    budgets = _fund_checkpoint(store, "resumed-run", monkeypatch)
+    budget_id = store.get_job("resumed-run")["execution_budget_id"]
+    fenced = budgets.fence_generation(budget_id, "resume-owner", expected_generation=0)
+    budgets.stop_admission(budget_id, "resume-owner", reason="resume")
+    budgets.resume_admission(budget_id, "resume-owner", expected_generation=fenced.generation)
+    new_work = budgets.reserve(
+        budget_id,
+        "resume-owner",
+        operation_key="new-work",
+        generation=fenced.generation,
+        phase="run",
+        cost_kind="model",
+        request_fingerprint="new-work",
+        price_snapshot={"version": "fixture"},
+        max_cents=3,
+    )
+
+    stale = budgets.close_for_failed_job(budget_id, "resume-owner", expected_generation=0)
+
+    assert stale.state == "attached"
+    assert stale.blocked_reason is None
+    assert stale.reserved_cents == 3
+    assert budgets.get_operation(new_work.id, "resume-owner").state == "reserved"
+
+
+def test_failed_close_keeps_an_earlier_stop_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that stopped at its budget limit keeps that reason when it then fails (SKY-529).
+
+    Args:
+        monkeypatch: Fixture binding the checkpoint's immutable runtime profile.
+    """
+    store = SQLiteJobStore()
+    store.create_job("limited-run")
+    budgets = _fund_checkpoint(store, "limited-run", monkeypatch)
+    budget_id = store.get_job("limited-run")["execution_budget_id"]
+    budgets.stop_admission(budget_id, "resume-owner", reason="budget_reached")
+
+    closed = budgets.close_for_failed_job(budget_id, "resume-owner", expected_generation=0)
+
+    assert closed.state == "closed"
+    assert closed.blocked_reason == "budget_reached"
