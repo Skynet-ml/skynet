@@ -66,6 +66,7 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.usage_tags import LANE_KEY, current_tags
+from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
@@ -310,6 +311,14 @@ class RepoScorer:
         self._root_session: SandboxSession | None = None
         self._calls = 0
         self._lock = threading.Lock()
+        # The stage tree's own snapshot, built from ``stage_archive`` only: a
+        # snapshot of the scorer box would carry the metric into candidate code.
+        self._stage_snapshot_key = snapshot_cache_key(
+            image_digest="", setup_command="", install_command="", lock_files={"stage-tree": uuid.uuid4().hex}
+        )
+        self._stage_snapshot_id: str | None = None
+        self._stage_snapshot_done = False
+        self._stage_snapshot_lock = threading.Lock()
 
     def score(self, patch: str, case: Any = None) -> dict[str, Any]:
         """Check out one version and score it.
@@ -603,6 +612,7 @@ class RepoScorer:
                 yield relay
             return
         evaluation_id = uuid.uuid4().hex
+        snapshot_id = self._stage_snapshot()
         specs = {
             name: stage_spec(
                 name,
@@ -610,6 +620,7 @@ class RepoScorer:
                 evaluation_id=evaluation_id,
                 lifetime_seconds=self._timeout_seconds + _STAGE_LAYOUT_SECONDS,
                 tags={},
+                snapshot_id=snapshot_id,
             )
             for name, stage in self._stages.items()
         }
@@ -625,7 +636,9 @@ class RepoScorer:
             kept = drop_paths(patch, self._hidden)
             try:
                 with ThreadPoolExecutor(max_workers=len(boxes), thread_name_prefix="stage-layout") as pool:
-                    laid_out = list(pool.map(lambda box: self._lay_out(box, kept), boxes.values()))
+                    laid_out = list(
+                        pool.map(lambda box: self._lay_out(box, kept, restored=snapshot_id is not None), boxes.values())
+                    )
             except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
                 raise
             except Exception as error:
@@ -702,7 +715,51 @@ class RepoScorer:
         """
         return self._mcp_roles.get(role) or RoleEnvironment()
 
-    def _lay_out(self, box: SandboxSession, patch: str) -> bool:
+    def _stage_snapshot(self) -> str | None:
+        """Return the stage tree's after-setup snapshot, built once for this scorer.
+
+        A builder box gets only the stage archive and the runner, never the
+        scorer's tree, so the snapshot holds no metric file. Each stage box
+        then starts from it and only applies the version.
+
+        Returns:
+            The snapshot id, or ``None`` when the runtime has no snapshots or
+            the build failed; stage boxes then unpack the tree themselves.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the builder box.
+        """
+        take = getattr(self._stage_runtime, "snapshot", None)
+        if take is None or not self._stages:
+            return None
+        with self._stage_snapshot_lock:
+            if self._stage_snapshot_done:
+                return self._stage_snapshot_id
+            name, stage = next(iter(self._stages.items()))
+            spec = stage_spec(
+                name,
+                stage,
+                evaluation_id=f"snapshot-{uuid.uuid4().hex}",
+                lifetime_seconds=_STAGE_LAYOUT_SECONDS,
+                tags={},
+            )
+            try:
+                box = self._stage_runtime.open(spec)
+                try:
+                    if self._lay_out(box, "", restored=False):
+                        self._stage_snapshot_id = take(box, self._stage_snapshot_key)
+                finally:
+                    box.close()
+            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+                raise
+            except Exception as error:
+                # Only the type: the provider's text can name the snapshot.
+                logger.warning("The stage snapshot failed (%s); stage boxes unpack the tree", type(error).__name__)
+                self._stage_snapshot_id = None
+            self._stage_snapshot_done = True
+            return self._stage_snapshot_id
+
+    def _lay_out(self, box: SandboxSession, patch: str, *, restored: bool = False) -> bool:
         """Unpack the tree without the hidden metric into one stage box and apply the version.
 
         Stage boxes get no setup command, so the tree runs with the image's
@@ -711,21 +768,27 @@ class RepoScorer:
         Args:
             box: One open stage box.
             patch: The version, hidden paths already dropped.
+            restored: The box started from the stage snapshot, which holds the
+                tree and the runner, so only the version is written.
 
         Returns:
             Whether the tree and the version are in place.
         """
         parts = []
-        for index, chunk in enumerate(archive_chunks(self._stage_archive)):
-            name = f"{STAGE_DIR}/tree.{index:04d}.b64"
-            box.write_files({name: chunk})
-            parts.append(name)
-        box.write_files(
-            {f"{STAGE_DIR}/{RUNNER_PATH.rsplit('/', 1)[1]}": RUNNER_SOURCE, f"{STAGE_DIR}/version.patch": patch}
-        )
-        files = " ".join(shlex.quote(part) for part in parts)
+        if not restored:
+            for index, chunk in enumerate(archive_chunks(self._stage_archive)):
+                name = f"{STAGE_DIR}/tree.{index:04d}.b64"
+                box.write_files({name: chunk})
+                parts.append(name)
+            box.write_files({f"{STAGE_DIR}/{RUNNER_PATH.rsplit('/', 1)[1]}": RUNNER_SOURCE})
+        box.write_files({f"{STAGE_DIR}/version.patch": patch})
+        if restored:
+            unpack = f"test -d {_STAGE_TREE};"
+        else:
+            files = " ".join(shlex.quote(part) for part in parts)
+            unpack = f"mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
         result = box.run(
-            f"set -e; mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
+            f"set -e; {unpack}"
             f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
             timeout_seconds=_STAGE_LAYOUT_SECONDS,
         )

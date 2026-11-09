@@ -24,9 +24,14 @@ import shlex
 import threading
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ....billing.budgets import BudgetError
+from ....billing.operation_pricing import UnpricedOperationError
+from ....billing.runtime import UsagePendingError
+from ....billing.signals import BudgetReached
+from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import MAX_PATCH_BYTES, archive_chunks, drop_paths, patch_violations
 from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
 
@@ -35,6 +40,9 @@ logger = logging.getLogger(__name__)
 # The agent never sees the hidden files, so this reason does not name them,
 # and the scorer keeps it out of the rule judge's protected-path message.
 HIDDEN_CHANGED = "The metric files changed while the version ran."
+# A snapshot fault falls back to a normal box; a budget refusal must stop the
+# run instead, as it does for any other box.
+_BUDGET_ERRORS = (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError)
 
 REPO_DIR = ".app-repo"
 BASE_DIR = f"{REPO_DIR}/base"
@@ -346,6 +354,16 @@ class RepoWorkspace:
         # The hidden files, packed, held here while no checkout has them (E38).
         self._metric_files: str | None = None
         self._metric_installed = False
+        # This workspace's own after-setup snapshot. The key is new for every
+        # workspace, so no other box (a stage box, another run) can reuse it.
+        self._snapshot_key = snapshot_cache_key(
+            image_digest=spec.image or "",
+            setup_command=self._setup or "",
+            install_command="",
+            lock_files={"workspace": uuid.uuid4().hex},
+        )
+        self._snapshot_id: str | None = None
+        self._snapshots_off = False
         self._lock = threading.Lock()
 
     @property
@@ -366,6 +384,12 @@ class RepoWorkspace:
         takes the box offline. A failure is remembered, so no later call
         reopens a box and nothing runs in one that was not taken offline.
 
+        When the runtime can save boxes, the prepared box is saved as an
+        after-setup snapshot before it goes offline, and this box and every
+        later one open deny-all from that snapshot. Each box from a snapshot
+        must hold the prepared tree's digest. When the snapshot cannot be
+        saved or opened, the workspace sets up a normal box instead.
+
         Args:
             on_output: Receives setup output as it streams.
 
@@ -380,27 +404,115 @@ class RepoWorkspace:
             return self._session
         if self._failure is not None:
             raise self._failure
-        session = self._runtime.open(self._spec)
-        try:
-            self._prepare(session, on_output)
-            if not self._spec.network_disabled:
-                self._cut_network(session)
-        except BaseException as error:
-            self._failure = error
-            # Unsettled usage stays in the ledger for reconciliation; the setup
-            # error is what the user can act on, so no close error may replace
-            # it. Only the type is logged: settlement and ledger texts can name
-            # the provider.
+        while True:
+            restored = self._snapshot_id is not None and not self._snapshots_off
+            if restored:
+                session = self._open_restored()
+                if session is None:
+                    continue
+            else:
+                session = self._runtime.open(self._spec)
             try:
-                session.close()
-            except Exception as close_error:
-                logger.warning(
-                    "Repository setup failed; the sandbox did not close cleanly (%s)",
-                    type(close_error).__name__,
-                )
+                if restored:
+                    if self._digest_prepared(session) != self._prepared_digest:
+                        raise RepoSetupError("The setup snapshot does not hold the prepared repository.")
+                else:
+                    self._prepare(session, on_output)
+                    if self._save_snapshot(session):
+                        self._close_quietly(session, "The setup box")
+                        continue
+                    if not self._spec.network_disabled:
+                        self._cut_network(session)
+            except BaseException as error:
+                self._failed_setup(session, error)
+                raise
+            self._session = session
+            return session
+
+    def _open_restored(self) -> SandboxSession | None:
+        """Open a deny-all box from the workspace's after-setup snapshot.
+
+        Returns:
+            The box, or ``None`` when it did not open, so the caller sets up
+            a normal box. A budget refusal is not a snapshot fault and is raised.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the runtime.
+        """
+        spec = replace(self._spec, snapshot_id=self._snapshot_id, network_disabled=True, allowed_hosts=())
+        try:
+            return self._runtime.open(spec)
+        except _BUDGET_ERRORS:
             raise
-        self._session = session
-        return session
+        except Exception as error:
+            # Only the type: the provider's text can name the snapshot.
+            logger.warning("The setup snapshot did not open (%s); setting up a new box", type(error).__name__)
+            self._snapshots_off = True
+            return None
+
+    def _save_snapshot(self, session: SandboxSession) -> bool:
+        """Save the prepared box as the workspace's after-setup snapshot.
+
+        It runs before the box goes offline and before any secret enters it,
+        so the snapshot holds no secret, and after the hidden files left the
+        tree, so it holds no metric file.
+
+        Args:
+            session: The box, just prepared.
+
+        Returns:
+            Whether the box was used for a snapshot (or a failed one), so the
+            caller closes it and opens the next box. ``False`` keeps the box.
+        """
+        take = getattr(self._runtime, "snapshot", None)
+        if take is None or self._snapshots_off:
+            return False
+        try:
+            snapshot_id = take(session, self._snapshot_key)
+        except _BUDGET_ERRORS:
+            raise
+        except Exception as error:
+            # The provider may have stopped the box already, so the next box
+            # sets up again instead of keeping this one.
+            logger.warning("The setup snapshot failed (%s); setting up a new box", type(error).__name__)
+            self._snapshots_off = True
+            return True
+        if snapshot_id is None:
+            return False
+        self._snapshot_id = snapshot_id
+        return True
+
+    def _close_quietly(self, session: SandboxSession, what: str) -> None:
+        """Close a box the workspace no longer uses, and log only a failure's type.
+
+        Args:
+            session: The box.
+            what: Names the box in the log line.
+        """
+        try:
+            session.close()
+        except Exception as close_error:
+            logger.warning("%s did not close cleanly (%s)", what, type(close_error).__name__)
+
+    def _failed_setup(self, session: SandboxSession, error: BaseException) -> None:
+        """Remember a setup failure and close its box.
+
+        Args:
+            session: The box that failed.
+            error: The failure, raised again by every later ``session`` call.
+        """
+        self._failure = error
+        # Unsettled usage stays in the ledger for reconciliation; the setup
+        # error is what the user can act on, so no close error may replace
+        # it. Only the type is logged: settlement and ledger texts can name
+        # the provider.
+        try:
+            session.close()
+        except Exception as close_error:
+            logger.warning(
+                "Repository setup failed; the sandbox did not close cleanly (%s)",
+                type(close_error).__name__,
+            )
 
     def _prepare(self, session: SandboxSession, on_output: OutputSink | None) -> None:
         """Unpack the snapshot and run the setup command once on the starting commit.

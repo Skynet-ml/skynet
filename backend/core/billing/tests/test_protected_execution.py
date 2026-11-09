@@ -15,8 +15,10 @@ from core.config import Settings
 from core.config import settings as global_settings
 from core.sandbox.bridge import ProtectedBridgeRuntime
 from core.sandbox.providers.vercel import VercelEnvironment
+from core.sandbox.snapshots import SnapshotCache
 from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeUsage, readback
 from core.service_gateway.optimization.blackbox import sandbox_runtime
+from core.service_gateway.optimization.blackbox.tests.test_sandbox_broker import FakeRuntime
 
 _DIGEST = "registry.example/skynet@sha256:" + "a" * 64
 _ENV = ("VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "APP_LOCAL_MODE", "SKYNET_LOCAL_MODE")
@@ -199,3 +201,45 @@ def test_async_bind_reserves_and_settles_each_box_once(monkeypatch: pytest.Monke
     assert usage.calls.count("confirm_created") == 1
     assert usage.calls.count("settle") == 1
     assert "fail" not in usage.calls
+
+
+@pytest.mark.usefixtures("provider_credentials")
+def test_async_bind_gives_the_broker_one_snapshot_cache_for_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a hosted run gets one setup snapshot cache, owned by the run and closed with the broker."""
+    _fake_vercel(monkeypatch)
+    gateway = _Gateway()
+
+    bind_protected_sandbox(gateway, _settings(monkeypatch), workflow="dspy", owner_id="job-9")
+
+    cache = gateway.broker._snapshots
+    assert isinstance(cache, SnapshotCache)
+    assert cache.run_id == "job-9"
+    gateway.broker.close()
+    assert cache._closed
+
+
+@pytest.mark.usefixtures("provider_credentials")
+def test_async_bind_skips_the_cache_without_snapshot_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a runtime without snapshots gets no cache, so boxes set up normally."""
+    _fake_vercel(monkeypatch)
+    plain = FakeRuntime()
+
+    def runtime(*_args: Any, **_kwargs: Any) -> FakeRuntime:
+        """Return a runtime that cannot snapshot.
+
+        Args:
+            *_args: Unused.
+            **_kwargs: Unused.
+
+        Returns:
+            The fake runtime.
+        """
+        return plain
+
+    monkeypatch.setattr(protected_execution, "protected_runtime", runtime)
+    gateway = _Gateway()
+
+    bind_protected_sandbox(gateway, _settings(monkeypatch), workflow="dspy", owner_id="job-9")
+
+    assert gateway.broker._runtime is plain
+    assert gateway.broker._snapshots is None

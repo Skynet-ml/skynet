@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
 from ..sandbox.bridge import protected_runtime, protected_unavailable_reason
+from ..sandbox.factory import load_provider
+from ..sandbox.snapshots import SnapshotCache
 from ..service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from ..service_gateway.optimization.blackbox.sandbox_contract import JOB_TAG
 from ..storage.run_call_store import PostgresRunCallStore
@@ -186,6 +189,16 @@ def bind_protected_sandbox(
     gateway.recorder = recorder
     runtime = protected_runtime(settings, image=image, budget=gateway.runtime, recorder=recorder)
     mailbox = ModelMailbox(gateway.dispatch_guest)
+    snapshots = None
+    if getattr(runtime, "supports_snapshots", False):
+        # The parent knows no run deadline, only the session ceiling. A box
+        # that opens from an expired snapshot fails, and the workspace then
+        # sets up a normal box again.
+        snapshots = SnapshotCache(
+            owner_id,
+            datetime.now(UTC) + timedelta(seconds=lifetime),
+            delete=load_provider(runtime.provider).delete_snapshot,
+        )
     broker = SandboxBroker(
         runtime,
         image=image,
@@ -193,6 +206,7 @@ def bind_protected_sandbox(
         tags={JOB_TAG: owner_id},
         command_runner=mailbox.run,
         parent_command_runner=ModelMailbox(gateway.dispatch_route).run,
+        snapshots=snapshots,
     )
     gateway.bind_sandbox(broker, image=image, lifetime_seconds=lifetime)
     if parent_hosts:

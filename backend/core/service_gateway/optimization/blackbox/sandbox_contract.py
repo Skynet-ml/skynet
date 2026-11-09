@@ -10,7 +10,10 @@ import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from core.sandbox.services import ComposeService
 
 # Slack past the in-sandbox timeout before the service kills the wrapper as well.
 KILL_GRACE_SECONDS = 15.0
@@ -47,6 +50,12 @@ class SandboxSpec:
     # Holds code no optimizer may read (the metric): a local workspace opens
     # under a private root instead of beside proposer workspaces.
     private: bool = False
+    # The repository's ``[sandbox] compose`` services; a runtime that cannot
+    # run them refuses the spec instead of opening a box without them.
+    services: tuple[ComposeService, ...] = ()
+    # Start from this after-setup snapshot. A runtime without snapshots
+    # ignores it and opens a normal box, so callers always check the tree.
+    snapshot_id: str | None = None
 
 
 @dataclass(frozen=True)

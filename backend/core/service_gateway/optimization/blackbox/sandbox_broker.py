@@ -13,6 +13,8 @@ from typing import Any, Protocol
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, quote_vercel_sandbox
 from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
+from ....sandbox.snapshots import SnapshotCache
+from ....sandbox.sync_bridge import run as bridge_run
 from .sandbox_contract import (
     CommandResult,
     OutputSink,
@@ -238,6 +240,22 @@ class _ParentSandboxRuntime:
             raise ServiceError("The parent's box cannot reach hosts this run was not funded for.")
         return self._broker._open_parent(spec)
 
+    def snapshot(self, session: SandboxSession, cache_key: str) -> str | None:
+        """Save a box this runtime opened as an after-setup snapshot of the run.
+
+        Args:
+            session: A box from this runtime's ``open``, after its setup.
+            cache_key: Names the box's setup, so one setup gets one snapshot.
+
+        Returns:
+            The snapshot id, or ``None`` when the run has no snapshots, so the
+            caller keeps its box as it is.
+
+        Raises:
+            ServiceError: When the provider refuses the snapshot.
+        """
+        return self._broker._snapshot_parent(session, cache_key)
+
 
 class SandboxBroker:
     """Expose only owned guest operations while retaining credentials and billing."""
@@ -252,6 +270,7 @@ class SandboxBroker:
         tags: Mapping[str, str] | None = None,
         command_runner: SandboxCommandRunner | None = None,
         parent_command_runner: SandboxCommandRunner | None = None,
+        snapshots: SnapshotCache | None = None,
     ) -> None:
         """Bind one parent-owned runtime and deployment-selected resource profile.
 
@@ -265,6 +284,9 @@ class SandboxBroker:
             parent_command_runner: Mailbox wrapper for the parent's own boxes.
                 Those boxes run untrusted repository code, so this one may
                 serve only model routes; without it they get no model access.
+            snapshots: The run's one snapshot cache for parent boxes; ``None``
+                when the provider has no snapshots. ``close`` deletes its
+                snapshots.
         """
         self._runtime = runtime
         self._image = image
@@ -286,6 +308,7 @@ class SandboxBroker:
         self._tags = dict(tags or {})
         self._command_runner = command_runner
         self._parent_command_runner = parent_command_runner
+        self._snapshots = snapshots
         self._sessions: dict[str, _OwnedSession] = {}
         # Kept apart from ``_sessions`` so no guest handle can ever address them.
         self._parent_sessions: list[ParentSandboxSession] = []
@@ -448,6 +471,8 @@ class SandboxBroker:
                     network_disabled=not hosts,
                     allowed_hosts=hosts,
                     operation_key=spec.operation_key,
+                    services=spec.services,
+                    snapshot_id=spec.snapshot_id,
                 )
             ),
             self._parent_command_runner,
@@ -461,6 +486,25 @@ class SandboxBroker:
             session.close()
             raise ServiceError("The sandbox broker closed during creation.")
         return session
+
+    def _snapshot_parent(self, session: SandboxSession, cache_key: str) -> str | None:
+        """Save one parent box in the run's snapshot cache.
+
+        Args:
+            session: The parent box after its setup.
+            cache_key: Names the box's setup.
+
+        Returns:
+            The snapshot id, or ``None`` when the run or the box has no snapshots.
+
+        Raises:
+            ServiceError: When the provider refuses the snapshot.
+        """
+        inner = session._session if isinstance(session, ParentSandboxSession) else session
+        take = getattr(inner, "snapshot", None)
+        if self._snapshots is None or take is None:
+            return None
+        return take(self._snapshots, cache_key)
 
     def _forget_parent(self, session: ParentSandboxSession) -> None:
         """Drop a closed parent box so a long run does not keep one per stage and evaluation.
@@ -548,6 +592,13 @@ class SandboxBroker:
         for session in owned:
             try:
                 session.close()
+            except BaseException as error:
+                failure = failure or error
+        # After the boxes: a snapshot's builder box must be stopped before
+        # its delete destroys it.
+        if self._snapshots is not None:
+            try:
+                bridge_run(self._snapshots.close)
             except BaseException as error:
                 failure = failure or error
         if failure is not None:

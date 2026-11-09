@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import math
 import tarfile
 import threading
@@ -1126,10 +1127,36 @@ def test_a_byok_scorer_without_a_usable_key_ends_with_a_stable_key(
     assert BudgetService(engine=engine).get(budget_id, _USER).reserved_cents == 0
 
 
+def _compose_archive(tmp_path: Path, *, compose: bool = True) -> Path:
+    """Pack a trusted tree, with or without an optimize.toml that names one compose service.
+
+    Args:
+        tmp_path: Scratch folder.
+        compose: Whether the tree names a compose file.
+
+    Returns:
+        The archive.
+    """
+    archive = tmp_path / ("composed.tgz" if compose else "plain.tgz")
+    files = {"src/app.py": b"VALUE = 1\n"}
+    if compose:
+        files["optimize.toml"] = b'version = 1\n[sandbox]\ncompose = "compose.yaml"\n'
+        files["compose.yaml"] = b"services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n"
+    with tarfile.open(archive, "w:gz") as packed:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            packed.addfile(info, io.BytesIO(data))
+    return archive
+
+
 def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A BYOK scorer model gets its saved key at run time, and each scorer box of a pass has its own key."""
+    """A BYOK scorer model gets its saved key at run time, and each scorer box of a pass has its own key.
+
+    The second box's trusted tree names a ``[sandbox] compose`` file, so only that box starts its services.
+    """
     budget_id = _budget(engine)
     job = _seed(
         engine,
@@ -1138,6 +1165,8 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     )
     protected: list[dict[str, Any]] = []
     keys: list[str] = []
+    services: list[tuple[str, ...]] = []
+    composed = _compose_archive(tmp_path)
 
     class FakeGateway:
         """Records the payload the runner protects."""
@@ -1173,13 +1202,14 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         """Records the box's operation key."""
 
         def __init__(self, *, spec: Any, **kwargs: Any) -> None:
-            """Record the key.
+            """Record the key and the compose services.
 
             Args:
                 spec: The sandbox spec.
                 **kwargs: The workspace arguments.
             """
             keys.append(spec.operation_key)
+            services.append(tuple(service.name for service in spec.services))
 
     class FakeScorer:
         """A scorer that prepares nothing."""
@@ -1244,8 +1274,8 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         claim="pod-a:one",
         vault=FakeVault(),  # type: ignore[arg-type]
     ) as runner:
-        runner.open_scorer(tmp_path / "a.tgz", ())
-        runner.open_scorer(tmp_path / "a.tgz", ("fix",))
+        runner.open_scorer(_compose_archive(tmp_path, compose=False), ())
+        runner.open_scorer(composed, ("fix",))
 
     assert protected[0]["scorer"]["model"]["extra"]["api_key"] == "saved-user-key"
     assert job.scorer is not None
@@ -1253,6 +1283,7 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     assert len(keys) == 2
     assert keys[0] != keys[1]
     assert all(key.startswith(f"repo-scorer:{operation_key(job.id)}:") for key in keys)
+    assert services == [(), ("db",)]
 
     with (
         pytest.raises(ValueError, match="vault"),

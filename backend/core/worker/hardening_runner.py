@@ -51,6 +51,7 @@ from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
 from ..models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningView
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
 from ..service_gateway.optimization.blackbox.hardening import Candidate, HardeningRunner
+from ..service_gateway.optimization.blackbox.repo_constraints import read_constraints
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
@@ -672,6 +673,8 @@ def open_hardening_runner(
                 The prepared scorer.
             """
             box = json_fingerprint({"claim": claim, "fixes": list(fixes)})[:24]
+            # The trusted tree's own [sandbox] compose services run next to the scorer.
+            constraints = read_constraints(archive)
             scorer = RepoScorer(
                 RepoWorkspace(
                     runtime=gateway.parent_sandbox_runtime(),
@@ -681,6 +684,7 @@ def open_hardening_runner(
                         network_disabled=not hosts,
                         allowed_hosts=hosts,
                         operation_key=f"repo-scorer:{operation_key(job.id)}:{box}",
+                        services=constraints.compose_services if constraints is not None else (),
                     ),
                     archive=archive,
                     editable_paths=editable,

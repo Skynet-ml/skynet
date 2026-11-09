@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import inspect
 import logging
 import os
 import shlex
@@ -45,6 +46,7 @@ from ....sandbox.errors import (
 from ....sandbox.factory import create_environment, load_provider
 from ....sandbox.network import NetworkPolicyError
 from ....sandbox.pool import TrialFingerprintError
+from ....sandbox.snapshots import BuiltSnapshot, SnapshotCache
 from ....sandbox.sync_bridge import SyncSession, open_session
 from ....sandbox.sync_bridge import run as bridge_run
 from ....sandbox.transfer import UnsafeArchiveError
@@ -506,6 +508,38 @@ class AsyncBridgeSession:
         with _bridge_errors():
             bridge_run(self._session.environment.disable_network)
 
+    def snapshot(self, cache: SnapshotCache, cache_key: str) -> str:
+        """Save this box as an after-setup snapshot in the run's cache, once per key.
+
+        The provider stops the box when it takes the snapshot, so the caller
+        closes this session and opens a new box from the returned id.
+
+        Args:
+            cache: The run's snapshot cache, which owns and deletes the snapshot.
+            cache_key: Names this box's setup; a second call with it reuses the snapshot.
+
+        Returns:
+            The snapshot id.
+
+        Raises:
+            ServiceError: The provider refused the snapshot for good.
+        """
+        environment = self._session.environment
+
+        async def build(_builder: str) -> BuiltSnapshot:
+            """Snapshot this box on the bridge loop.
+
+            Args:
+                _builder: The builder name the cache passes; the box is the builder.
+
+            Returns:
+                The built snapshot.
+            """
+            return await environment.snapshot(run_deadline=cache.run_deadline)
+
+        with _bridge_errors():
+            return bridge_run(cache.get_or_build, cache_key, build).snapshot_id
+
     def close(self) -> None:
         """Stop the sandbox, and log a teardown failure instead of raising it.
 
@@ -552,13 +586,25 @@ class AsyncBridgeRuntime:
                 build, or not allowed in production.
         """
         self.provider = provider
-        self._capabilities = load_provider(provider).capabilities
+        provider_class = load_provider(provider)
+        self._capabilities = provider_class.capabilities
+        # No capability flag names compose services, so the constructor says
+        # whether this provider can start them.
+        self._runs_services = "services" in inspect.signature(provider_class).parameters
         self.injects_headers = self._capabilities.injects_headers
         self._sweep_options: dict[str, Any] = {} if docker_bin is None else {"docker_bin": docker_bin}
         self._options: dict[str, Any] = {**self._sweep_options, **({} if image is None else {"image": image})}
 
+    @property
+    def supports_snapshots(self) -> bool:
+        """Return whether this provider can save and start from after-setup snapshots."""
+        return self._capabilities.snapshots
+
     def open(self, spec: SandboxSpec) -> SandboxSession:
         """Create and start a sandbox per ``spec``.
+
+        A ``snapshot_id`` on a provider without snapshots is dropped, so the
+        box opens empty and the caller's tree check sends it back to setup.
 
         Args:
             spec: Lifetime, environment, image, header injection and labels for the sandbox.
@@ -577,8 +623,17 @@ class AsyncBridgeRuntime:
                 f"The {self._capabilities.name} sandbox does not support {mode.value} network egress. "
                 "Give the sandbox an allowlist of hosts, or disable its network."
             )
+        extra: dict[str, Any] = {}
+        if spec.services:
+            if not self._runs_services:
+                raise ServiceError(
+                    f"The {self._capabilities.name} sandbox cannot run the repository's compose services."
+                )
+            extra["services"] = tuple(spec.services)
+        if spec.snapshot_id is not None and self._capabilities.snapshots:
+            extra["snapshot_id"] = spec.snapshot_id
         with _bridge_errors():
-            environment = create_environment(self.provider, _async_spec(spec), **self._options)
+            environment = create_environment(self.provider, _async_spec(spec), **self._options, **extra)
             return AsyncBridgeSession(open_session(environment))
 
     def stop_job_sandboxes(self, job_id: str) -> int:
