@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -14,6 +16,7 @@ from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
+from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
 
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
 from ..sandbox import _CODEX_REQUIREMENTS_COMMAND, _CODEX_REQUIREMENTS_READBACK, CommandResult, SandboxSpec
@@ -458,3 +461,35 @@ def test_a_cancelled_job_broker_closes_every_box_once_and_refuses_new_ones() -> 
     with pytest.raises(ServiceError):
         broker.handle("close", first)
     assert len(runtime.sessions) == 2
+
+
+def test_after_the_run_deadline_boxes_use_no_snapshot_and_the_snapshots_are_deleted() -> None:
+    """Stop snapshot use at the run deadline, so no use stretches storage past its hold."""
+    deleted: list[str] = []
+
+    async def delete(built: BuiltSnapshot) -> None:
+        """Record a deleted snapshot."""
+        deleted.append(built.snapshot_id)
+
+    async def build(name: str) -> BuiltSnapshot:
+        """Build one fake snapshot."""
+        return BuiltSnapshot(snapshot_id="snap-1", builder_name=name)
+
+    cache = SnapshotCache("run", datetime.now(UTC) + timedelta(hours=1), delete=delete)
+    asyncio.run(cache.get_or_build("key", build))
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120, snapshots=cache)
+    parent = broker.parent_runtime(("pypi.org",))
+    spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), operation_key="k", snapshot_id="snap-1")
+    assert parent.supports_snapshots
+    parent.open(spec)
+    assert runtime.specs[-1].snapshot_id == "snap-1"
+
+    cache.run_deadline = datetime.now(UTC) - timedelta(seconds=1)
+    assert not parent.supports_snapshots
+    assert deleted == ["snap-1"]
+    parent.open(replace(spec, operation_key="k2"))
+    assert runtime.specs[-1].snapshot_id is None
+    assert parent.snapshot(runtime.sessions[-1], "key") is None
+    broker.close()
+    assert deleted == ["snap-1"]

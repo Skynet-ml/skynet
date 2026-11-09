@@ -277,6 +277,20 @@ class SnapshotCache:
         """
         return snapshot_expiration(self.run_deadline, now or _utcnow())
 
+    def past_deadline(self, now: datetime | None = None) -> bool:
+        """Return whether the run deadline passed, so no box may use a snapshot.
+
+        Vercel counts a snapshot's expiry from its last use, so a use after
+        the deadline would keep storage past the end of its budget hold.
+
+        Args:
+            now: The current time, or ``None`` for the wall clock.
+
+        Returns:
+            ``True`` at or after ``run_deadline``.
+        """
+        return (now or _utcnow()) >= self.run_deadline
+
     def builder_name(self, cache_key: str) -> str:
         """Return the builder box name of a cache key in this run.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import uuid
@@ -23,6 +24,8 @@ from .sandbox_contract import (
     SandboxSpec,
 )
 from .sandbox_runtime import write_codex_requirements
+
+logger = logging.getLogger(__name__)
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 
@@ -261,7 +264,7 @@ class _ParentSandboxRuntime:
     @property
     def supports_snapshots(self) -> bool:
         """Return whether the run has a snapshot cache, so ``snapshot`` can save a box."""
-        return self._broker._snapshots is not None
+        return self._broker._snapshots_live()
 
     def snapshot(self, session: SandboxSession, cache_key: str) -> str | None:
         """Save a box this runtime opened as an after-setup snapshot of the run.
@@ -506,7 +509,7 @@ class SandboxBroker:
                     allowed_hosts=hosts,
                     operation_key=spec.operation_key,
                     services=spec.services,
-                    snapshot_id=spec.snapshot_id,
+                    snapshot_id=spec.snapshot_id if self._snapshots_live() else None,
                 )
             ),
             self._parent_command_runner,
@@ -535,9 +538,32 @@ class SandboxBroker:
             ServiceError: When the provider refuses the snapshot.
         """
         take = getattr(session, "snapshot", None)
-        if self._snapshots is None or take is None:
+        if take is None or not self._snapshots_live():
             return None
         return take(self._snapshots, cache_key)
+
+    def _snapshots_live(self) -> bool:
+        """Return whether boxes may still save or start from the run's snapshots.
+
+        After the run deadline the cache closes and deletes its snapshots, so
+        their storage holds settle. A box that asked for a snapshot then opens
+        empty, and its caller's tree check sends it back to a normal setup. A
+        failed delete is logged; the run end tries it again.
+
+        Returns:
+            ``False`` when the run has no snapshot cache or its deadline passed.
+        """
+        if self._snapshots is None:
+            return False
+        if not self._snapshots.past_deadline():
+            return True
+        try:
+            bridge_run(self._snapshots.close)
+        except Exception as error:
+            logger.warning(
+                "The expired setup snapshots were not deleted (%s); the run end retries it", type(error).__name__
+            )
+        return False
 
     def _release_snapshot(self, cache_key: str) -> None:
         """Delete the run's snapshots for one key, when the run has a snapshot cache.
