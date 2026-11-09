@@ -51,7 +51,7 @@ from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
 from ..models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningView
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
 from ..service_gateway.optimization.blackbox.hardening import Candidate, HardeningRunner
-from ..service_gateway.optimization.blackbox.repo_constraints import read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, read_constraints
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
@@ -540,7 +540,8 @@ class RepoHardeningRunner(HardeningRunner):
             patch: The solution as a git patch.
 
         Returns:
-            The metric score, or NaN when ``fix_diff`` does not apply.
+            The metric score, or NaN when ``fix_diff`` does not apply or
+            breaks the constraints file or the compose file it names.
         """
         fixes = tuple(self.fixes) + ((fix_diff,) if fix_diff else ())
         scorer = self._scorers.get(fixes)
@@ -556,7 +557,16 @@ class RepoHardeningRunner(HardeningRunner):
                 # the suite replay.
                 logger.info("Hardening job %s: the drafted fix does not apply.", self.job.id)
                 return float("nan")
-            scorer = self.open_scorer(archive, fixes)
+            try:
+                scorer = self.open_scorer(archive, fixes)
+            except ConstraintsError:
+                if not fix_diff:
+                    raise
+                # The scorer reads the fixed tree's constraints for its compose
+                # services, so a broken file fails this fix like one that does
+                # not apply, not the job.
+                logger.info("Hardening job %s: the drafted fix breaks the constraints file.", self.job.id)
+                return float("nan")
             self._scorers[fixes] = scorer
         return float(scorer.score(patch)["score"])
 

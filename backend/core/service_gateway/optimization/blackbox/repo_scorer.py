@@ -97,6 +97,9 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 _ISOLATED = "-I -B -u"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
+# The exit code of a stage box from the stage snapshot that has no tree, so
+# the scorer can tell a bad snapshot from a version that does not apply.
+_NO_STAGE_TREE_EXIT = 97
 # Unpacking the tree and applying the version in a stage box; the box's hold
 # covers this on top of the scorer's own timeout.
 _STAGE_LAYOUT_SECONDS = 600.0
@@ -147,6 +150,10 @@ _FRAME_FILE = re.compile(r'File "([^"]*)"')
 
 class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
+
+
+class _StageSnapshotError(RepoScoreError):
+    """Stage boxes from the stage snapshot did not open or did not hold the tree."""
 
 
 class _AnswerTooLargeError(Exception):
@@ -590,8 +597,9 @@ class RepoScorer:
         Every box opens before the scorer's first sample, or none stays open
         (E29, E32). Each box has its own hold, keyed to this evaluation and
         its stage (E31), and every box closes when the evaluation ends, also
-        on a failure. When the boxes from the stage snapshot fail, the scorer
-        drops the snapshot and tries once more with unpacked boxes.
+        on a failure. When the boxes from the stage snapshot do not open or
+        do not hold the tree, the scorer drops the snapshot and tries once more
+        with unpacked boxes. A version that does not apply keeps the snapshot.
 
         Args:
             patch: The version being scored.
@@ -615,9 +623,7 @@ class RepoScorer:
         snapshot_id = self._stage_snapshot()
         try:
             relay = self._open_stages(patch, response_dir, snapshot_id)
-        except RepoScoreError:
-            if snapshot_id is None:
-                raise
+        except _StageSnapshotError:
             # A bad snapshot would fail every later candidate, so this scorer
             # drops it and unpacks the tree in each stage box from now on.
             logger.warning("Stage boxes from the stage snapshot failed; stage boxes unpack the tree")
@@ -642,8 +648,10 @@ class RepoScorer:
             The relay over the open boxes; the caller closes it.
 
         Raises:
-            RepoScoreError: When a stage box cannot open for a reason other
-                than the budget, or cannot lay out the version.
+            _StageSnapshotError: When a box from the stage snapshot cannot open
+                for a reason other than the budget, or holds no tree.
+            RepoScoreError: When an unpacked stage box cannot open for a reason
+                other than the budget, or a box cannot lay out the version.
             BudgetReached: And the other budget errors, from a stage box.
         """
         evaluation_id = uuid.uuid4().hex
@@ -664,7 +672,8 @@ class RepoScorer:
             raise
         except Exception as error:
             logger.warning("Stage boxes did not open: %s", error)
-            raise RepoScoreError("The stage boxes could not open, so the version has no score.") from None
+            failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
+            raise failure("The stage boxes could not open, so the version has no score.") from None
         relay = self._relay(boxes, response_dir)
         try:
             kept = drop_paths(patch, self._hidden)
@@ -673,7 +682,7 @@ class RepoScorer:
                     laid_out = list(
                         pool.map(lambda box: self._lay_out(box, kept, restored=snapshot_id is not None), boxes.values())
                     )
-            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError, _StageSnapshotError):
                 raise
             except Exception as error:
                 logger.warning("Stage box layout failed: %s", error)
@@ -808,6 +817,9 @@ class RepoScorer:
 
         Returns:
             Whether the tree and the version are in place.
+
+        Raises:
+            _StageSnapshotError: When a box from the stage snapshot holds no tree.
         """
         parts = []
         if not restored:
@@ -818,7 +830,7 @@ class RepoScorer:
             box.write_files({f"{STAGE_DIR}/{RUNNER_PATH.rsplit('/', 1)[1]}": RUNNER_SOURCE})
         box.write_files({f"{STAGE_DIR}/version.patch": patch})
         if restored:
-            unpack = f"test -d {_STAGE_TREE};"
+            unpack = f"test -d {_STAGE_TREE} || exit {_NO_STAGE_TREE_EXIT};"
         else:
             files = " ".join(shlex.quote(part) for part in parts)
             unpack = f"mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
@@ -827,6 +839,8 @@ class RepoScorer:
             f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
             timeout_seconds=_STAGE_LAYOUT_SECONDS,
         )
+        if restored and result.exit_code == _NO_STAGE_TREE_EXIT:
+            raise _StageSnapshotError("A stage box from the stage snapshot has no tree, so the version has no score.")
         if not result.ok:
             logger.warning(
                 "Stage box layout failed (exit %s): %s", result.exit_code, (result.stderr or result.stdout)[-2_000:]

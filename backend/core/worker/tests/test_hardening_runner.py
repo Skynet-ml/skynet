@@ -28,6 +28,7 @@ from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
+from core.service_gateway.optimization.blackbox.repo_constraints import read_constraints
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import hardening_runner
 from core.worker.hardening_job import HardeningWorkspace
@@ -735,6 +736,56 @@ def test_an_approved_fix_that_does_not_apply_still_raises(tmp_path: Path) -> Non
     try:
         with pytest.raises(RuntimeError):
             runner._score(None, "")
+    finally:
+        runner.close()
+
+
+def test_a_drafted_fix_that_breaks_the_constraints_file_scores_nan(tmp_path: Path) -> None:
+    """A drafted fix that adds an invalid constraints file scores NaN instead of failing the job."""
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.py").write_text("v1\n")
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "agent.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "eval" / "exploits",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+    scorer = SimpleNamespace(score=lambda patch: {"score": 1.0}, close=lambda: None)
+
+    def open_scorer(archive: Path, fixes: tuple[str, ...]) -> SimpleNamespace:
+        """Read the fixed tree's constraints like the real scorer does.
+
+        Args:
+            archive: The packed tree.
+            fixes: The metric fixes packed into the tree.
+
+        Returns:
+            The scorer.
+        """
+        read_constraints(archive)
+        return scorer
+
+    runner = RepoHardeningRunner(
+        workspace,
+        new_job(attacker_model="m", judge_model="m", place="local"),
+        gateway=None,
+        meter=None,
+        open_scorer=open_scorer,
+        managed_key="k",  # type: ignore[arg-type]
+    )
+    broken = (
+        "diff --git a/optimize.toml b/optimize.toml\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n+++ b/optimize.toml\n"
+        "@@ -0,0 +1 @@\n+not = [valid\n"
+    )
+    try:
+        assert math.isnan(runner._score(broken, ""))
+        assert runner._score(None, "") == 1.0
     finally:
         runner.close()
 

@@ -411,7 +411,7 @@ class RepoWorkspace:
                 if session is None:
                     continue
             else:
-                session = self._runtime.open(self._spec)
+                session = self._runtime.open(self._box_spec(restored=False))
             try:
                 if restored:
                     if self._digest_prepared(session) != self._prepared_digest:
@@ -432,6 +432,27 @@ class RepoWorkspace:
             self._session = session
             return session
 
+    def _box_spec(self, *, restored: bool) -> SandboxSpec:
+        """Return the spec of the next box, with an operation key of its own.
+
+        Args:
+            restored: Whether the box opens from the after-setup snapshot.
+
+        Returns:
+            The setup spec for the first box. A box from the snapshot, or a
+            box that sets up again after the snapshot failed, gets its own key.
+        """
+        spec = self._spec
+        if restored:
+            spec = replace(spec, snapshot_id=self._snapshot_id, network_disabled=True, allowed_hosts=())
+        suffix = ":restored" if restored else ":fallback" if self._snapshots_off else ""
+        if spec.operation_key is None or not suffix:
+            return spec
+        # The budget ledger ties one key to one request, so a different box on
+        # the setup key is refused. The box name comes from the key too, and
+        # the snapshot builder's name must not match a box that stays open.
+        return replace(spec, operation_key=f"{spec.operation_key}{suffix}")
+
     def _open_restored(self) -> SandboxSession | None:
         """Open a deny-all box from the workspace's after-setup snapshot.
 
@@ -442,9 +463,8 @@ class RepoWorkspace:
         Raises:
             BudgetReached: And the other budget errors, from the runtime.
         """
-        spec = replace(self._spec, snapshot_id=self._snapshot_id, network_disabled=True, allowed_hosts=())
         try:
-            return self._runtime.open(spec)
+            return self._runtime.open(self._box_spec(restored=True))
         except _BUDGET_ERRORS:
             raise
         except Exception as error:

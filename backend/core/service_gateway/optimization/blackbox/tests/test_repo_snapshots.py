@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
-from core.billing.runtime import UsagePendingError
+from core.billing.budgets import BudgetService
+from core.billing.operation_pricing import json_fingerprint
+from core.billing.runtime import BudgetRuntime, UsagePendingError
+from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelUsageReservation
 from core.exceptions import ServiceError
+from core.sandbox.providers.vercel import box_name
+from core.storage.models import Base, BillingCustomerModel
 
-from ..repo_scorer import _STAGE_LAYOUT_SECONDS
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError
 from ..repo_workspace import PREPARED_DIR, WORK_DIR, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import SandboxBroker
@@ -125,6 +133,7 @@ class _StageSnapshotRuntime:
         snapshot_error: BaseException | None = None,
         open_error: BaseException | None = None,
         empty_restore: bool = False,
+        restore_edit: Callable[[Path], None] | None = None,
     ) -> None:
         """Start with no boxes.
 
@@ -133,12 +142,14 @@ class _StageSnapshotRuntime:
             snapshot_error: What ``snapshot`` raises, if anything.
             open_error: What an open from a snapshot raises, if anything.
             empty_restore: Open a box from a snapshot without the saved tree.
+            restore_edit: Changes a restored box's folder after the copy.
         """
         self._local = LocalSubprocessRuntime()
         self._root = root
         self._snapshot_error = snapshot_error
         self._open_error = open_error
         self._empty_restore = empty_restore
+        self._restore_edit = restore_edit
         self.specs: list[SandboxSpec] = []
         self.written: list[list[str]] = []
         self.keys: list[str] = []
@@ -162,6 +173,8 @@ class _StageSnapshotRuntime:
         session = self._local.open(spec)
         if spec.snapshot_id is not None and not self._empty_restore:
             shutil.copytree(self.saved[spec.snapshot_id], session.path, dirs_exist_ok=True)
+            if self._restore_edit is not None:
+                self._restore_edit(session.path)
         written: list[str] = []
         self.written.append(written)
         write = session.write_files
@@ -198,6 +211,71 @@ class _StageSnapshotRuntime:
         shutil.copytree(session.path, self._root / snapshot_id, symlinks=True)
         self.saved[snapshot_id] = self._root / snapshot_id
         return snapshot_id
+
+
+class _BilledSnapshotRuntime(_SnapshotRuntime):
+    """Reserve each box in a real budget ledger before it opens, the way the Vercel provider does."""
+
+    def __init__(self, root: Path, budget: BudgetRuntime, **options: Any) -> None:
+        """Bill every box against one budget.
+
+        Args:
+            root: Where the saved snapshots go.
+            budget: The budget runtime the boxes reserve from.
+            **options: The ``_SnapshotRuntime`` options.
+        """
+        super().__init__(root, **options)
+        self._budget = budget
+        self.names: list[str] = []
+
+    def open(self, spec: SandboxSpec) -> _Box:
+        """Reserve the box under its operation key, then open it.
+
+        Args:
+            spec: The requested box.
+
+        Returns:
+            The box.
+        """
+        assert spec.operation_key is not None
+        name = box_name(spec.operation_key, self._budget)
+        hosts = sorted(set(spec.allowed_hosts))
+        request = {
+            "name": name,
+            "image": IMAGE,
+            "lifetime_ms": int(spec.lifetime_seconds * 1000),
+            "vcpus": 2,
+            "network_disabled": spec.network_disabled,
+            **({"allowed_hosts": hosts, "network_bytes_cap": SANDBOX_NETWORK_BYTES_CAP} if hosts else {}),
+            "ports": [],
+            "persistent": False,
+            "environment_fingerprint": json_fingerprint(dict(spec.env)),
+            **({"snapshot_id": spec.snapshot_id} if spec.snapshot_id else {}),
+        }
+        VercelUsageReservation(self._budget, request, operation_key=spec.operation_key)
+        self.names.append(name)
+        return super().open(spec)
+
+
+def _budget(tmp_path: Path) -> BudgetRuntime:
+    """Build a real budget runtime over a SQLite ledger.
+
+    Args:
+        tmp_path: Where the ledger file goes.
+
+    Returns:
+        A setup-phase runtime with a funded budget.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="cus", balance_cents=1000, grant_remaining=0)
+        )
+        session.commit()
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 500, idempotency_key="run")
+    return BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
 
 
 def _space(archive: Path, runtime: Any) -> RepoWorkspace:
@@ -329,6 +407,54 @@ def test_snapshot_fault_falls_back_to_a_normal_box(tmp_path: Path, fault: str) -
     assert _setups(runtime.boxes[-1]) == 1
     assert not runtime.boxes[-1].online
     assert runtime.boxes[0].closed
+
+
+@pytest.mark.parametrize("path", ["restored", "bad-tree", "snapshot-fault"])
+def test_each_workspace_box_reserves_under_its_own_operation_key(tmp_path: Path, path: str) -> None:
+    """Reserve the setup, restored and fallback boxes in the real ledger without a reused-key conflict.
+
+    Args:
+        tmp_path: Scratch folder.
+        path: Which boxes open: the setup box then a restored box, or a fallback
+            after a restored box with a bad tree, or after a failed snapshot.
+    """
+
+    def tamper(folder: Path) -> None:
+        """Change the prepared tree in the restored box.
+
+        Args:
+            folder: The restored box's folder.
+        """
+        (folder / PREPARED_DIR / "src/app.py").write_text("x = 99\n")
+
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _BilledSnapshotRuntime(
+        tmp_path / "snaps",
+        _budget(tmp_path),
+        tamper=tamper if path == "bad-tree" else None,
+        snapshot_error=ServiceError("refused") if path == "snapshot-fault" else None,
+    )
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=replace(_ONLINE, operation_key="repo-scorer:job"),
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=_SETUP,
+        secrets={"API_KEY": "very-secret-value"},
+    )
+    try:
+        space.checkout("")
+        assert space.session().read_file(f"{WORK_DIR}/built.txt") == "x = 1\n"
+    finally:
+        space.close()
+    expected = {
+        "restored": ["repo-scorer:job", "repo-scorer:job:restored"],
+        "bad-tree": ["repo-scorer:job", "repo-scorer:job:restored", "repo-scorer:job:fallback"],
+        "snapshot-fault": ["repo-scorer:job", "repo-scorer:job:fallback"],
+    }[path]
+    assert [spec.operation_key for spec in runtime.specs] == expected
+    assert len(set(runtime.names)) == len(expected)
 
 
 def test_budget_refusal_during_the_snapshot_stops_setup(tmp_path: Path) -> None:
@@ -483,6 +609,34 @@ def test_stage_boxes_from_a_bad_snapshot_fall_back_to_unpacked_boxes(tmp_path: P
     tried = 1 if fault == "open" else 2
     assert snapshot_ids[:tried] == ["stage-0"] * tried
     assert snapshot_ids[tried:] == [None] * 4
+
+
+def test_a_version_that_does_not_apply_in_restored_stage_boxes_keeps_the_stage_snapshot(tmp_path: Path) -> None:
+    """Fail only that version when its patch does not apply in stage boxes from the snapshot, and keep the snapshot.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+
+    def edit(folder: Path) -> None:
+        """Change the file the version patches, so the patch does not apply.
+
+        Args:
+            folder: The restored stage box's folder.
+        """
+        (folder / ".app-stage/tree/src/app.py").write_text("x = 5\n")
+
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps", restore_edit=edit)
+    stages = {name: STAGES[name] for name in ("double", "shout")}
+    scorer, archive = _stage_scorer(tmp_path, _TWO_STAGES, runtime, stages)
+    try:
+        with pytest.raises(RepoScoreError, match="could not lay out"):
+            scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"}))
+        assert scorer._stage_snapshot_id == "stage-0"
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+    finally:
+        scorer.close()
+    assert [spec.snapshot_id for spec in runtime.specs[1:]] == ["stage-0"] * 4
 
 
 def test_budget_refusal_from_a_snapshot_stage_box_is_raised(tmp_path: Path) -> None:
