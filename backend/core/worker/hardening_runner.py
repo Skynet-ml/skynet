@@ -49,9 +49,10 @@ from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import Settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
 from ..models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningView
+from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
 from ..service_gateway.optimization.blackbox.hardening import Candidate, HardeningRunner
-from ..service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import read_constraints
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
@@ -540,8 +541,7 @@ class RepoHardeningRunner(HardeningRunner):
             patch: The solution as a git patch.
 
         Returns:
-            The metric score, or NaN when ``fix_diff`` does not apply or
-            breaks the constraints file or the compose file it names.
+            The metric score, or NaN when ``fix_diff`` does not apply.
         """
         fixes = tuple(self.fixes) + ((fix_diff,) if fix_diff else ())
         scorer = self._scorers.get(fixes)
@@ -557,16 +557,7 @@ class RepoHardeningRunner(HardeningRunner):
                 # the suite replay.
                 logger.info("Hardening job %s: the drafted fix does not apply.", self.job.id)
                 return float("nan")
-            try:
-                scorer = self.open_scorer(archive, fixes)
-            except ConstraintsError:
-                if not fix_diff:
-                    raise
-                # The scorer reads the fixed tree's constraints for its compose
-                # services, so a broken file fails this fix like one that does
-                # not apply, not the job.
-                logger.info("Hardening job %s: the drafted fix breaks the constraints file.", self.job.id)
-                return float("nan")
+            scorer = self.open_scorer(archive, fixes)
             self._scorers[fixes] = scorer
         return float(scorer.score(patch)["score"])
 
@@ -585,10 +576,36 @@ class RepoHardeningRunner(HardeningRunner):
         for fix in fixes:
             apply_patch(tree, fix)
         archive = folder / "tree.tgz"
-        with tarfile.open(archive, "w:gz") as packed:
-            for entry in sorted(tree.iterdir()):
-                packed.add(entry, arcname=entry.name)
+        _pack_tree(tree, archive)
         return archive
+
+
+def _pack_tree(tree: Path, archive: Path) -> None:
+    """Pack a tree's top-level entries into a gzip tar archive.
+
+    Args:
+        tree: The folder to pack.
+        archive: The archive to write.
+    """
+    with tarfile.open(archive, "w:gz") as packed:
+        for entry in sorted(tree.iterdir()):
+            packed.add(entry, arcname=entry.name)
+
+
+def _trusted_compose_services(trusted_root: Path) -> tuple[ComposeService, ...]:
+    """Read the ``[sandbox]`` compose services of the unfixed trusted tree.
+
+    Args:
+        trusted_root: The base-commit tree.
+
+    Returns:
+        The compose services, or none when the tree names no compose file.
+    """
+    with tempfile.TemporaryDirectory(prefix="hardening-constraints-") as folder:
+        archive = Path(folder) / "tree.tgz"
+        _pack_tree(trusted_root, archive)
+        constraints = read_constraints(archive)
+    return constraints.compose_services if constraints is not None else ()
 
 
 @contextmanager
@@ -668,6 +685,10 @@ def open_hardening_runner(
         protected = gateway.protect_payload({"scorer": dict(scorer_spec)}, managed_key=managed_key, allow_batch=False)
         model_gateway = _repo_model_gateway(protected["scorer"])
         editable = tuple(target.get("repo", {}).get("editable_paths") or ())
+        # Staging reads the compose services from the base commit. A drafted
+        # fix may touch any path, so it must not change what runs next to the
+        # scorer: every scorer box of the pass gets the unfixed tree's services.
+        compose_services = _trusted_compose_services(workspace.trusted_root)
 
         def open_scorer(archive: Path, fixes: tuple[str, ...]) -> RepoScorer:
             """Open and prepare one scorer box on a packed tree.
@@ -683,8 +704,6 @@ def open_hardening_runner(
                 The prepared scorer.
             """
             box = json_fingerprint({"claim": claim, "fixes": list(fixes)})[:24]
-            # The trusted tree's own [sandbox] compose services run next to the scorer.
-            constraints = read_constraints(archive)
             scorer = RepoScorer(
                 RepoWorkspace(
                     runtime=gateway.parent_sandbox_runtime(),
@@ -694,7 +713,7 @@ def open_hardening_runner(
                         network_disabled=not hosts,
                         allowed_hosts=hosts,
                         operation_key=f"repo-scorer:{operation_key(job.id)}:{box}",
-                        services=constraints.compose_services if constraints is not None else (),
+                        services=compose_services,
                     ),
                     archive=archive,
                     editable_paths=editable,
