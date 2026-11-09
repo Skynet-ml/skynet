@@ -1054,8 +1054,7 @@ def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
         with pytest.raises(native_runner.BudgetStopped):
             engine.run(task, server)
         assert engine.incumbent(server) == expected
-        # GEPA scores case by case and logs no aggregate checkpoint, so the
-        # runner's fidelity check keeps its tracked version out of the result.
-        assert native_runner._budget_incumbent(engine, task, server, tmp_path / "out") == {}
+        kept = native_runner._budget_incumbent(engine, task, server, tmp_path / "out")
+        assert ((kept["best_candidate"], kept["best_score"]) if kept else None) == expected
     finally:
         server.stop()

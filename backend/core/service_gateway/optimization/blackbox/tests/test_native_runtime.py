@@ -964,9 +964,9 @@ def test_real_native_runner_drives_upstream_with_fake_cli(tmp_path: Path, engine
     assert (tmp_path / "native_artifacts.tar.gz.b64").stat().st_size > 0
 
 
-@pytest.mark.parametrize("stop", ["budget", "error"])
-def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: str) -> None:
-    """A parent stop mid-sweep ends GEPA's repository run with its own reason, not an AttributeError (SKY-529)."""
+@pytest.mark.parametrize(("stop", "stop_at"), [("budget", 3), ("error", 3), ("budget", 5)])
+def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: str, stop_at: int) -> None:
+    """A parent stop ends GEPA's repository run with its own reason and its fully scored best (SKY-529)."""
     source = tmp_path / "source" / "src"
     source.mkdir(parents=True)
     (source / "app.py").write_text("x = 1\n")
@@ -1006,9 +1006,10 @@ def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: 
                 continue
             request = json.loads(line.split(" ", 2)[2])
             requests += 1
-            # Staging job e5121995 stopped after two of the seed's four scorer runs.
+            # Staging job e5121995 stopped after two of the seed's four scorer
+            # runs; a stop at the fifth comes after the seed's full sweep.
             response: dict[str, Any] = {"score": 0.5, "info": {}}
-            if requests == 3:
+            if requests == stop_at:
                 response = {"error": "The parent evaluator stopped this run."}
                 if stop == "budget":
                     response["stop_reason"] = "budget_reached"
@@ -1020,7 +1021,7 @@ def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: 
             process.kill()
             process.wait()
     result = json.loads((tmp_path / "native_result.json").read_text())
-    assert requests == 3
+    assert requests == stop_at
     assert "AttributeError" not in json.dumps(result)
     if stop == "budget":
         assert result["stop_reason"] == "budget_reached"
@@ -1028,7 +1029,10 @@ def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: 
     else:
         assert result["error"] == "The parent evaluator stopped this run."
         assert result["interrupted_incumbent"] == {}
-    assert "best_candidate" not in result
+    if stop_at > 4:
+        assert (result["best_candidate"], result["best_score"]) == ("", 0.5)
+    else:
+        assert "best_candidate" not in result
 
 
 def test_autosaddler_bootstrap_pins_upstream_into_a_python_312_venv() -> None:

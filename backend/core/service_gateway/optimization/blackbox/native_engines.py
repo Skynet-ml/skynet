@@ -2359,9 +2359,14 @@ class BestValsetVersion:
     server's aggregate log, so this is the only record of what GEPA had found.
     """
 
-    def __init__(self) -> None:
-        """Start with nothing recorded."""
+    def __init__(self, server: EvalServer | None = None) -> None:
+        """Start with nothing recorded.
+
+        Args:
+            server: Evaluation server that receives each new best as an aggregate checkpoint.
+        """
         self.best: tuple[str, float] | None = None
+        self.server = server
 
     def on_valset_evaluated(self, event: dict[str, Any]) -> None:
         """Keep ``event``'s version when it covers the whole validation set and beats the best so far.
@@ -2377,6 +2382,10 @@ class BestValsetVersion:
             return
         if self.best is None or score > self.best[1]:
             self.best = (next(iter(event["candidate"].values()), ""), score)
+            # SKY-529: the runner keeps an interrupted run's incumbent only when
+            # the server logged that aggregate, and GEPA's per-case calls log none.
+            if self.server is not None:
+                self.server.log_progress(score, self.best[0])
 
 
 class GepaRepoEngine:
@@ -2435,7 +2444,7 @@ class GepaRepoEngine:
         self.proposer.background = task.background
         gepa_dir = self.run_dir / "gepa"
         gepa_dir.mkdir(parents=True, exist_ok=True)
-        tracker = self.tracker = BestValsetVersion()
+        tracker = self.tracker = BestValsetVersion(server)
         crashed: set[str] = set()
 
         def _key(candidate: Any) -> str:
