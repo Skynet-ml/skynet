@@ -961,6 +961,30 @@ class RepoWorkspace:
         with self._lock:
             self._end_box()
 
+    def release_snapshot(self) -> None:
+        """Delete this workspace's after-setup snapshot when its owner is done with it.
+
+        ``close`` only recycles the box, and the next box starts from the
+        snapshot, so only the owner's last close calls this. The key is this
+        workspace's own, so no other box needs the snapshot, and a run that
+        opens many workspaces does not hold storage for each until its end.
+        A budget error is raised; any other failure is left for the run end.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the snapshot delete.
+        """
+        release = getattr(self._runtime, "release_snapshot", None)
+        if release is None:
+            return
+        with self._lock:
+            self._snapshot_id = None
+            try:
+                release(self._snapshot_key)
+            except _BUDGET_ERRORS:
+                raise
+            except Exception as error:
+                logger.warning("The setup snapshot was not deleted (%s); the run end retries it", type(error).__name__)
+
     def _end_box(self) -> None:
         """Destroy the box; the caller holds the lock."""
         if self._session is not None:

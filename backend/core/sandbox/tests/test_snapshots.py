@@ -823,3 +823,70 @@ async def test_two_pods_build_one_snapshot_under_the_advisory_lock() -> None:
         assert {built.snapshot_id for built in results} == {"snap-1"}
     finally:
         engine.dispose()
+
+
+async def test_release_deletes_the_key_once_and_close_skips_it() -> None:
+    """Check that release deletes only its key's snapshot, a second release is a no-op, and close skips it."""
+    provider = Provider()
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    await cache.get_or_build(_key(), provider.build)
+    await cache.get_or_build(_key(install_command="uv sync"), provider.build)
+    await cache.release(_key())
+    assert provider.deletes == ["snap-1"]
+    await cache.release(_key())
+    assert provider.deletes == ["snap-1"]
+    await cache.close()
+    assert provider.deletes == ["snap-1", "snap-2"]
+
+
+async def test_failed_release_is_retried_by_close_and_deleted_once() -> None:
+    """Check that a failed release raises, close deletes it once, and nothing deletes it twice."""
+    provider = Provider()
+    calls: list[str] = []
+
+    async def flaky_delete(built: BuiltSnapshot) -> None:
+        """Fail the first delete, then delete.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            raise RuntimeError("provider error")
+        await provider.delete(built)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=flaky_delete)
+    await cache.get_or_build(_key(), provider.build)
+    with pytest.raises(RuntimeError):
+        await cache.release(_key())
+    await cache.close()
+    await cache.close()
+    await cache.release(_key())
+    assert calls == ["snap-1", "snap-1"]
+    assert provider.deletes == ["snap-1"]
+
+
+async def test_release_of_an_evicted_and_rebuilt_key_deletes_both_snapshots() -> None:
+    """Check that release finds the evicted snapshot of its key by builder name."""
+    provider = Provider()
+    clock = FakeClock()
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
+    await cache.get_or_build(_key(), provider.build)
+    clock.now = 1_000.0
+    assert await cache.evict_idle(600.0) == [_key()]
+    await cache.get_or_build(_key(), provider.build)
+    await cache.release(_key())
+    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
+
+
+async def test_release_of_a_borrowed_snapshot_only_drops_it() -> None:
+    """Check that a release never deletes a snapshot that another pod built."""
+    provider = Provider()
+    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    await owner.get_or_build(_key(), provider.build)
+    await borrower.get_or_build(_key(), provider.build)
+    await borrower.release(_key())
+    assert provider.deletes == []
+    await owner.release(_key())
+    assert provider.deletes == ["snap-1"]

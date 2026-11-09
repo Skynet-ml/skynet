@@ -628,7 +628,9 @@ class RepoScorer:
             # drops it and unpacks the tree in each stage box from now on.
             logger.warning("Stage boxes from the stage snapshot failed; stage boxes unpack the tree")
             with self._stage_snapshot_lock:
-                self._stage_snapshot_id = None
+                bad, self._stage_snapshot_id = self._stage_snapshot_id, None
+                if bad is not None:
+                    self._release_stage_snapshot()
             relay = self._open_stages(patch, response_dir, None)
         try:
             yield relay
@@ -911,8 +913,35 @@ class RepoScorer:
         return self._root
 
     def close(self) -> None:
-        """Destroy the workspace box."""
+        """Destroy the workspace box and delete this scorer's snapshots.
+
+        Raises:
+            BudgetReached: And the other budget errors, from a snapshot delete.
+        """
         self._workspace.close()
+        self._workspace.release_snapshot()
+        with self._stage_snapshot_lock:
+            self._stage_snapshot_id = None
+            self._release_stage_snapshot()
+
+    def _release_stage_snapshot(self) -> None:
+        """Delete the stage snapshot; the caller holds ``_stage_snapshot_lock``.
+
+        The key is this scorer's own, so no other box needs the snapshot. A
+        budget error is raised; any other failure is left for the run end.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the snapshot delete.
+        """
+        release = getattr(self._stage_runtime, "release_snapshot", None)
+        if release is None:
+            return
+        try:
+            release(self._stage_snapshot_key)
+        except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+            raise
+        except Exception as error:
+            logger.warning("The stage snapshot was not deleted (%s); the run end retries it", type(error).__name__)
 
 
 def _control_answer(error: BaseException) -> dict[str, Any] | None:

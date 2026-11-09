@@ -279,6 +279,17 @@ class _ParentSandboxRuntime:
         """
         return self._broker._snapshot_parent(session, cache_key)
 
+    def release_snapshot(self, cache_key: str) -> None:
+        """Delete the run's snapshots for a key whose only user ended.
+
+        Args:
+            cache_key: The key that ``snapshot`` saved the box under.
+
+        Raises:
+            Exception: The provider's delete failed; the run end tries it again.
+        """
+        self._broker._release_snapshot(cache_key)
+
 
 class SandboxBroker:
     """Expose only owned guest operations while retaining credentials and billing."""
@@ -527,6 +538,18 @@ class SandboxBroker:
         if self._snapshots is None or take is None:
             return None
         return take(self._snapshots, cache_key)
+
+    def _release_snapshot(self, cache_key: str) -> None:
+        """Delete the run's snapshots for one key, when the run has a snapshot cache.
+
+        Args:
+            cache_key: Names the setup whose snapshots end.
+
+        Raises:
+            Exception: The provider's delete failed; the run end tries it again.
+        """
+        if self._snapshots is not None:
+            bridge_run(self._snapshots.release, cache_key)
 
     def _forget_parent(self, session: ParentSandboxSession) -> None:
         """Drop a closed parent box so a long run does not keep one per stage and evaluation.

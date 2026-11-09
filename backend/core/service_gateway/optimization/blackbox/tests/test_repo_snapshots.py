@@ -70,6 +70,7 @@ class _SnapshotRuntime:
         self.specs: list[SandboxSpec] = []
         self.keys: list[str] = []
         self.saved: dict[str, Path] = {}
+        self.released: list[str] = []
         self.boxes: list[_Box] = []
 
     def open(self, spec: SandboxSpec) -> _Box:
@@ -119,6 +120,14 @@ class _SnapshotRuntime:
         self.saved[snapshot_id] = self._root / snapshot_id
         return snapshot_id
 
+    def release_snapshot(self, cache_key: str) -> None:
+        """Record that the caller is done with the snapshot for ``cache_key``.
+
+        Args:
+            cache_key: Names the box's setup.
+        """
+        self.released.append(cache_key)
+
 
 class _StageSnapshotRuntime:
     """Open local stage boxes, record what each box gets, and save a box as a snapshot."""
@@ -154,6 +163,7 @@ class _StageSnapshotRuntime:
         self.written: list[list[str]] = []
         self.keys: list[str] = []
         self.saved: dict[str, Path] = {}
+        self.released: list[str] = []
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
         """Open a local box and record the paths written into it.
@@ -211,6 +221,14 @@ class _StageSnapshotRuntime:
         shutil.copytree(session.path, self._root / snapshot_id, symlinks=True)
         self.saved[snapshot_id] = self._root / snapshot_id
         return snapshot_id
+
+    def release_snapshot(self, cache_key: str) -> None:
+        """Record that the caller is done with the snapshot for ``cache_key``.
+
+        Args:
+            cache_key: Names the box's setup.
+        """
+        self.released.append(cache_key)
 
 
 class _BilledSnapshotRuntime(_SnapshotRuntime):
@@ -677,3 +695,101 @@ def test_a_broker_parent_runtime_without_a_cache_opens_no_stage_builder(
         scorer.close()
     assert asked == []
     assert runtime.specs == []
+
+
+def test_workspace_close_keeps_the_snapshot_and_release_drops_it(tmp_path: Path) -> None:
+    """Keep the snapshot across a box recycle, and release only the workspace's own key.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _SnapshotRuntime(tmp_path / "snaps")
+    space = _space(archive, runtime)
+    space.session()
+    space.close()
+    assert runtime.released == []
+    space.session()
+    space.close()
+    space.release_snapshot()
+    assert runtime.released == [runtime.keys[0]]
+    assert space._snapshot_id is None
+
+
+def test_scorer_close_releases_the_workspace_and_stage_snapshots(tmp_path: Path) -> None:
+    """Release the scorer box's key on its runtime and the stage key on the stage runtime when the scorer closes.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps")
+    scorer_runtime = _SnapshotRuntime(tmp_path / "scorer-snaps")
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        _TWO_STAGES,
+        runtime,
+        {name: STAGES[name] for name in ("double", "shout")},
+        scorer_runtime=scorer_runtime,
+    )
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+        assert runtime.released == []
+        assert scorer_runtime.released == []
+    finally:
+        scorer.close()
+    assert runtime.released == [runtime.keys[0]]
+    assert scorer_runtime.released == [scorer_runtime.keys[0]]
+
+
+def test_a_bad_stage_snapshot_is_released_when_it_is_dropped(tmp_path: Path) -> None:
+    """Release the stage key as soon as a bad stage snapshot is dropped, before the scorer closes.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps", open_error=ServiceError("refused"))
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+        assert runtime.released == [runtime.keys[0]]
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+        assert runtime.released == [runtime.keys[0]]
+    finally:
+        scorer.close()
+    assert runtime.released == [runtime.keys[0]] * 2
+
+
+def test_a_failed_workspace_release_is_left_for_the_run_end(tmp_path: Path) -> None:
+    """Log and keep going when a release fails for a non-budget reason, and raise a budget refusal.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _SnapshotRuntime(tmp_path / "snaps")
+    space = _space(archive, runtime)
+    space.session()
+    space.close()
+    raised: list[Exception] = [ServiceError("down"), UsagePendingError("pending")]
+
+    def refuse(cache_key: str) -> None:
+        """Fail the release with the next error.
+
+        Args:
+            cache_key: Names the box's setup.
+
+        Raises:
+            Exception: The next configured error.
+        """
+        raise raised.pop(0)
+
+    runtime.release_snapshot = refuse  # type: ignore[method-assign]
+    space.release_snapshot()
+    with pytest.raises(UsagePendingError):
+        space.release_snapshot()
+
+
+def test_broker_release_without_a_cache_is_a_no_op() -> None:
+    """Do nothing when the broker's parent runtime has no snapshot cache."""
+    parent = SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=120).parent_runtime(())
+    parent.release_snapshot("any-key")

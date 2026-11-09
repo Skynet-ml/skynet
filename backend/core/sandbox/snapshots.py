@@ -353,6 +353,34 @@ class SnapshotCache:
                     dropped.append(key)
         return dropped
 
+    async def release(self, cache_key: str) -> None:
+        """Drop one key and delete the snapshots this pod built for it.
+
+        Call it when the only user of a key ends, so its storage hold settles
+        then and not at run end. Each delete settles its hold once. A failed
+        delete stays owned, so ``close`` tries it again; the first failure is
+        raised after every delete. A second call finds nothing to delete. A
+        snapshot borrowed from another pod is only dropped from the cache.
+
+        Args:
+            cache_key: The key whose snapshots end.
+
+        Raises:
+            Exception: The first failed delete, after all of them ran.
+        """
+        name = self.builder_name(cache_key)
+        async with self._locks.setdefault(cache_key, asyncio.Lock()):
+            self._entries.pop(cache_key, None)
+            self._last_used.pop(cache_key, None)
+            failure: Exception | None = None
+            # By builder name, not by entry: an evicted and rebuilt key owns
+            # more than one snapshot, and the evicted one has no entry.
+            for snapshot_id in [key for key, built in self._owned.items() if built.builder_name == name]:
+                error = await self._delete_owned(snapshot_id)
+                failure = failure or error
+        if failure is not None:
+            raise failure
+
     async def close(self) -> None:
         """Delete every snapshot that this pod built and refuse new builds.
 
@@ -367,16 +395,34 @@ class SnapshotCache:
         self._entries.clear()
         self._last_used.clear()
         failure: BaseException | None = None
-        for snapshot_id, built in list(self._owned.items()):
-            try:
-                await self._delete(built)
-            except Exception as error:
-                logger.warning("Run %s could not delete a setup snapshot: %s", self.run_id, error)
-                failure = failure or error
-            else:
-                self._owned.pop(snapshot_id, None)
+        for snapshot_id in list(self._owned):
+            error = await self._delete_owned(snapshot_id)
+            failure = failure or error
         if failure is not None:
             raise failure
+
+    async def _delete_owned(self, snapshot_id: str) -> Exception | None:
+        """Delete one owned snapshot, or put it back for a later try when the delete fails.
+
+        It leaves ``_owned`` before the delete starts, so a ``release`` and a
+        ``close`` that overlap never delete it, and settle its hold, twice.
+
+        Args:
+            snapshot_id: The owned snapshot.
+
+        Returns:
+            The delete's error, or ``None`` when it was deleted or already gone.
+        """
+        built = self._owned.pop(snapshot_id, None)
+        if built is None:
+            return None
+        try:
+            await self._delete(built)
+        except Exception as error:
+            logger.warning("Run %s could not delete a setup snapshot: %s", self.run_id, error)
+            self._owned[snapshot_id] = built
+            return error
+        return None
 
     async def _discard_late_build(self, built: BuiltSnapshot) -> None:
         """Delete a snapshot whose build ended after the run ended.
