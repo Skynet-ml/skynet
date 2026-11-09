@@ -31,15 +31,26 @@ def _require_local_tools(tools: Any) -> None:
     Raises:
         UnpricedOperationError: A tool is not a caller-executed function or custom tool.
     """
+    # The rejected type is in the message so a sandbox CLI failure names its cause
+    # (SKY-569); tool type names are protocol words, not user data.
     if not isinstance(tools, list):
-        raise UnpricedOperationError("Provider-operated Responses tools require separately verified coverage.")
+        raise UnpricedOperationError(
+            "Provider-operated Responses tools require separately verified coverage "
+            f"(tools is {type(tools).__name__}, not a list)."
+        )
     for tool in tools:
         if not isinstance(tool, dict):
-            raise UnpricedOperationError("Provider-operated Responses tools require separately verified coverage.")
+            raise UnpricedOperationError(
+                "Provider-operated Responses tools require separately verified coverage "
+                f"(tool is {type(tool).__name__}, not an object)."
+            )
         if tool.get("type") == "namespace":
             _require_local_tools(tool.get("tools"))
         elif tool.get("type") not in _LOCAL_TOOL_TYPES:
-            raise UnpricedOperationError("Provider-operated Responses tools require separately verified coverage.")
+            raise UnpricedOperationError(
+                "Provider-operated Responses tools require separately verified coverage "
+                f"(tool type {str(tool.get('type'))[:64]!r})."
+            )
 
 
 def _content_parts(content: Any) -> list[dict[str, Any]]:
