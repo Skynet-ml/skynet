@@ -76,7 +76,7 @@ class FakeFs:
 
     def __init__(self) -> None:
         """Start with no files."""
-        self.files: dict[str, str] = {}
+        self.files: dict[str, str | bytes] = {}
         self.dirs: list[str] = []
         self.stopped = False
 
@@ -102,18 +102,20 @@ class FakeFs:
         self._check()
         return path in self.files
 
-    async def read_text(self, path: str, *, cwd: str) -> str:
-        """Read one file.
+    async def read_text(self, path: str, *, cwd: str, errors: str = "strict") -> str:
+        """Read one file; a file stored as bytes is decoded as UTF-8.
 
         Args:
             path: The file path.
             cwd: The working directory.
+            errors: The decoding error policy.
 
         Returns:
             The file text.
         """
         self._check()
-        return self.files[path]
+        value = self.files[path]
+        return value.decode(errors=errors) if isinstance(value, bytes) else value
 
     async def write_text(self, path: str, text: str, *, cwd: str) -> None:
         """Write one file.
@@ -255,7 +257,8 @@ class FakeSession:
         pairs = args[5:]
         lines = []
         for start, path in zip(pairs[::2], pairs[1::2], strict=True):
-            data = self.fs.files.get(path, "").encode()[int(start) - 1 :]
+            value = self.fs.files.get(path, "")
+            data = (value if isinstance(value, bytes) else value.encode())[int(start) - 1 :]
             lines.append(base64.b64encode(data).decode())
         return SimpleNamespace(returncode=0, stdout="".join(f"{line}\n" for line in lines), stderr="")
 
@@ -1826,6 +1829,141 @@ async def test_no_tail_reads_without_a_sink(client: FakeClient, log: list[str]) 
     result = await env.exec("guest")
     assert result.stdout == "quiet\n"
     assert client.boxes[env.name].current_session.tail_reads == 0
+    await env.stop()
+
+
+async def _until_read(session: FakeSession, count: int) -> None:
+    """Wait until the provider made ``count`` tail reads.
+
+    Args:
+        session: The fake session.
+        count: The read count.
+
+    Raises:
+        AssertionError: The provider stopped polling.
+    """
+    for _ in range(100_000):
+        if session.tail_reads >= count:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("The provider stopped polling the output files.")
+
+
+async def test_a_multibyte_char_split_across_polls_reaches_the_sink_once(client: FakeClient, log: list[str]) -> None:
+    """Check that a char split between polls arrives once, and a bad byte decodes the same in both reads."""
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    chunks: list[tuple[str, str]] = []
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Write the first byte of ``é``, then its second byte and an invalid byte after a poll.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = b"\xc3"
+        await _until_read(session, session.tail_reads + 2)
+        fs.files[out] = b"\xc3\xa9\xff"
+        await _until_read(session, session.tail_reads + 2)
+        return 0
+
+    _guest(client.boxes[env.name], run)
+    result = await asyncio.wait_for(env.exec("guest", on_output=lambda *chunk: chunks.append(chunk)), 5)
+    assert "".join(text for stream, text in chunks if stream == "stdout") == result.stdout == "\u00e9\ufffd"
+    await env.stop()
+
+
+async def test_a_failing_sink_aborts_the_command(client: FakeClient, log: list[str]) -> None:
+    """Check that a sink error stops the running command at once, not at its exit (SKY-529)."""
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+
+    async def create_process(command: str, args: list[str], **kwargs: Any) -> FakeProcess:
+        """Start a process that writes one line and then runs until it is stopped.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+        """
+        process = FakeProcess(box.fs, args[-1], [], block=True)
+        box.fs.files[process.out] = "bad frame\n"
+        box.processes.append(process)
+        return process
+
+    def sink(stream: str, text: str) -> None:
+        """Reject every chunk, like a model mailbox that reads a bad frame.
+
+        Args:
+            stream: The stream name.
+            text: The new text.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad frame")
+
+    box.create_process = create_process
+    with pytest.raises(ValueError, match="bad frame"):
+        await asyncio.wait_for(env.exec("guest", on_output=sink), 5)
+    assert box.processes[0].terminated == 1
+    await env.stop()
+
+
+async def test_a_poll_that_keeps_failing_logs_one_warning(
+    client: FakeClient, log: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Check that a tail script with a nonzero exit is a failure, and repeated failures warn once."""
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    chunks: list[tuple[str, str]] = []
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Answer every tail read like a box without ``base64``.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            A failed process with empty output.
+        """
+        session.tail_reads += 1
+        return SimpleNamespace(returncode=127, stdout="\n\n", stderr="base64: command not found")
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Write output and run for several polls.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "done\n"
+        await _until_read(session, 6)
+        return 0
+
+    session.run_process = run_process
+    _guest(client.boxes[env.name], run)
+    with caplog.at_level("DEBUG", logger=vercel.__name__):
+        result = await asyncio.wait_for(env.exec("guest", on_output=lambda *chunk: chunks.append(chunk)), 5)
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert [record.getMessage() for record in warnings] == ["A sandbox output poll failed (3 in a row)."]
+    assert chunks == [("stdout", "done\n")]
+    assert result.stdout == "done\n"
     await env.stop()
 
 

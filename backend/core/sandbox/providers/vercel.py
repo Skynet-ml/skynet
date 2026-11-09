@@ -122,6 +122,7 @@ OUTPUT_PREFIX = "/tmp/.app-output-"
 TIMEOUT_CODES = frozenset({124, 137})
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 OUTPUT_POLL = 0.5
+OUTPUT_POLL_WARN_AFTER = 3
 # Prints the bytes after each 1-based offset as one base64 line per file. The
 # SDK has no ranged read, and a full re-read on every poll is O(n^2).
 TAIL_SCRIPT = 'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null | base64 | tr -d "\\n"; echo; shift 2; done'
@@ -887,10 +888,10 @@ class VercelEnvironment(SandboxEnvironment):
             try:
                 try:
                     if kill_after is None:
-                        code = await self._wait(session, process, sentinel)
+                        code = await self._wait_unless_sink_fails(session, process, sentinel, poller)
                     else:
                         async with asyncio.timeout(kill_after + POLL_SLACK):
-                            code = await self._wait(session, process, sentinel)
+                            code = await self._wait_unless_sink_fails(session, process, sentinel, poller)
                 except TimeoutError as error:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(process.kill(), CANCEL_GRACE)
@@ -902,8 +903,9 @@ class VercelEnvironment(SandboxEnvironment):
                 sink_error = await _stop_poller(poller)
             if sink_error is not None:
                 raise sink_error
-            stdout = await self._read_optional(session, out_path) or ""
-            stderr = await self._read_optional(session, err_path) or ""
+            # Decode like the streaming decoder, so ``tail.emitted`` counts the same text.
+            stdout = await self._read_optional(session, out_path, errors="replace") or ""
+            stderr = await self._read_optional(session, err_path, errors="replace") or ""
             if sink is not None:
                 for tail, text in zip(tails, (stdout, stderr), strict=True):
                     if text[tail.emitted :]:
@@ -968,6 +970,7 @@ class VercelEnvironment(SandboxEnvironment):
             tails: The read state of each output file.
             sink: Receives each new ``(stream, text)`` chunk.
         """
+        failures = 0
         while True:
             await self._clock.sleep(OUTPUT_POLL)
             if self._pacing is not None:
@@ -977,11 +980,17 @@ class VercelEnvironment(SandboxEnvironment):
                 completed = await session.run_process(
                     "bash", [*SHELL_FLAGS, TAIL_SCRIPT, "tail", *pairs], capture_output=True
                 )
+                if completed.returncode != 0:
+                    raise RuntimeError(f"The tail script exited with {completed.returncode}: {completed.stderr}")
                 chunks = [base64.b64decode(line) for line in completed.stdout.split("\n")[: len(tails)]]
             except Exception:
+                failures += 1
                 # A missed poll only delays output: the next poll or the final read sends it.
-                logger.debug("A sandbox output poll failed.", exc_info=True)
+                # A poll that keeps failing starves a model mailbox, so it must be visible.
+                level = logging.WARNING if failures == OUTPUT_POLL_WARN_AFTER else logging.DEBUG
+                logger.log(level, "A sandbox output poll failed (%d in a row).", failures, exc_info=True)
                 continue
+            failures = 0
             for tail, chunk in zip(tails, chunks, strict=False):
                 # A stale, shorter read gives no bytes, so the offset never moves back.
                 tail.offset += len(chunk)
@@ -989,6 +998,39 @@ class VercelEnvironment(SandboxEnvironment):
                 if text:
                     tail.emitted += len(text)
                     sink(tail.stream, text)
+
+    async def _wait_unless_sink_fails(
+        self, session: Any, process: Any, sentinel: str, poller: asyncio.Future[None] | None
+    ) -> int:
+        """Wait for the command, but abort it as soon as the output sink fails.
+
+        Args:
+            session: The SDK runtime session.
+            process: The SDK process handle.
+            sentinel: The path of the exit code file.
+            poller: The output poller task, or ``None`` when no sink exists.
+
+        Returns:
+            The exit code.
+
+        Raises:
+            Exception: The sink error that ended the poller. A command whose
+                output nobody reads would only burn paid sandbox time.
+        """
+        if poller is None:
+            return await self._wait(session, process, sentinel)
+        waiter = asyncio.ensure_future(self._wait(session, process, sentinel))
+        try:
+            await asyncio.wait({waiter, poller}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            waiter.cancel()
+            raise
+        if waiter.done():
+            return waiter.result()
+        waiter.cancel()
+        await asyncio.wait({waiter})
+        await asyncio.shield(asyncio.ensure_future(self._abort(process)))
+        raise poller.exception()
 
     async def _wait(self, session: Any, process: Any, sentinel: str) -> int:
         """Wait on the long poll; fall back to the sentinel file after many cuts.
@@ -1062,12 +1104,13 @@ class VercelEnvironment(SandboxEnvironment):
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.kill(), CANCEL_GRACE)
 
-    async def _read_optional(self, session: Any, path: str) -> str | None:
+    async def _read_optional(self, session: Any, path: str, *, errors: str = "strict") -> str | None:
         """Read one text file when it exists.
 
         Args:
             session: The SDK runtime session.
             path: The sandbox path.
+            errors: The UTF-8 decoding error policy.
 
         Returns:
             The content, or ``None`` when the file does not exist.
@@ -1079,7 +1122,7 @@ class VercelEnvironment(SandboxEnvironment):
         with self._stop_guard():
             if not await session.fs.exists(path, cwd=cwd):
                 return None
-            return await session.fs.read_text(path, cwd=cwd)
+            return await session.fs.read_text(path, cwd=cwd, errors=errors)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write text files into the box.
