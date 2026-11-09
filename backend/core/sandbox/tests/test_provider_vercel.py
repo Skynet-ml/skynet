@@ -2129,6 +2129,18 @@ def test_tail_script_reads_bytes_after_each_offset(tmp_path: Path) -> None:
     assert [base64.b64decode(line) for line in lines[:3]] == ["\u00e9cd".encode(), b"", b""]
 
 
+def test_tail_script_reads_at_most_the_cap_per_poll(tmp_path: Path) -> None:
+    """Check that one poll of a large backlog reads only the capped bytes, so the offset moves in bounded steps."""
+    out = tmp_path / "out"
+    out.write_bytes(b"x" * (vercel.OUTPUT_POLL_MAX_BYTES + 5))
+    args = [*vercel.SHELL_FLAGS, vercel.TAIL_SCRIPT, "tail", "1", str(out)]
+    completed = subprocess.run(["bash", *args], capture_output=True, text=True, check=True)
+    assert len(base64.b64decode(completed.stdout.split("\n")[0])) == vercel.OUTPUT_POLL_MAX_BYTES
+    args[-2] = str(vercel.OUTPUT_POLL_MAX_BYTES + 1)
+    completed = subprocess.run(["bash", *args], capture_output=True, text=True, check=True)
+    assert base64.b64decode(completed.stdout.split("\n")[0]) == b"xxxxx"
+
+
 def test_model_mailbox_round_trip_through_the_vercel_provider(client: FakeClient, log: list[str]) -> None:
     """Check that a guest model frame gets its response while the guest still runs (SKY-529)."""
     env = make_env(client, log, protected=False, clock=SYSTEM_CLOCK)

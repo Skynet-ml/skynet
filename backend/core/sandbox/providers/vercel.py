@@ -126,9 +126,16 @@ OUTPUT_POLL_WARN_AFTER = 3
 # The SDK streams a run with no read timeout, so a stalled tail read would stop
 # every later poll and starve a model mailbox until the guest proxy gives up.
 OUTPUT_POLL_TIMEOUT = 10.0
+# One poll reads at most this many bytes of each file. Without a cap, a large
+# backlog can outlast OUTPUT_POLL_TIMEOUT on every poll, and the poller never
+# catches up. With it, the offset moves forward in bounded steps.
+OUTPUT_POLL_MAX_BYTES = 1 << 20
 # Prints the bytes after each 1-based offset as one base64 line per file. The
 # SDK has no ranged read, and a full re-read on every poll is O(n^2).
-TAIL_SCRIPT = 'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null | base64 | tr -d "\\n"; echo; shift 2; done'
+TAIL_SCRIPT = (
+    'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null'
+    f' | head -c {OUTPUT_POLL_MAX_BYTES} | base64 | tr -d "\\n"; echo; shift 2; done'
+)
 _LIVE_STATUSES = frozenset({"pending", "running"})
 
 ResponseCapture = Callable[[httpx.Response], Awaitable[None]]
