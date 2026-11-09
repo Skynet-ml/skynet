@@ -34,7 +34,7 @@ SOURCE_EXCLUDE = [
     "**/*.pem",
     "**/*.key",
     "**/id_rsa*",
-    "**/credentials*.json",
+    "**/*credentials*.json",
 ]
 
 
@@ -320,6 +320,38 @@ class SkynetCi:
     async def frontend_build(self) -> None:
         """Run the Next.js production build."""
         await self._frontend().with_exec(["npm", "run", "build"]).sync()
+
+    @function
+    async def source_exclude_proof(self) -> str:
+        """Prove that the source filter drops credentials JSON files.
+
+        The filter runs in the engine, so this uses the engine's own pattern
+        matcher, not a Python glob port (SKY-543).
+
+        Returns:
+            A one-line summary of the dropped and kept sample files.
+
+        Raises:
+            ValueError: A credentials JSON file passed the filter, or keep.py did not.
+        """
+        dropped = [
+            "gcp-credentials.json",
+            "credentials.json",
+            "a/b/svc_credentials.json",
+        ]
+        samples = core().directory().with_new_file("keep.py", "")
+        for path in dropped:
+            samples = samples.with_new_file(path, "{}")
+        filtered = (
+            core().directory().with_directory(".", samples, exclude=SOURCE_EXCLUDE)
+        )
+        entries = {entry.rstrip("/") for entry in await filtered.glob("**")}
+        leaked = sorted(entries.intersection(dropped))
+        if leaked or "keep.py" not in entries:
+            raise ValueError(
+                f"SOURCE_EXCLUDE is wrong: leaked={leaked}, entries={sorted(entries)}"
+            )
+        return f"ok: dropped {', '.join(dropped)}; kept keep.py"
 
     @function
     @check

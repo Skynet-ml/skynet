@@ -288,11 +288,12 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
     return repos
 
 
-def list_branches(secret: ConnectorSecret, full_name: str) -> dict[str, Any]:
+def list_branches(token: str | None, full_name: str) -> dict[str, Any]:
     """List a repository's branch names with its default branch.
 
     Args:
-        secret: The stored connector.
+        token: Bearer token with read access to the repository; ``None`` for
+            an anonymous read of a public repository.
         full_name: The repository as ``owner/name``.
 
     Returns:
@@ -300,7 +301,7 @@ def list_branches(secret: ConnectorSecret, full_name: str) -> dict[str, Any]:
         :data:`BRANCH_LIMIT` names, plus the default branch when the cap cut it.
     """
     owner, name = _split_repo(full_name)
-    headers = _headers(secret.access_token)
+    headers = _headers(token)
     meta = get_json(_repo_url(owner, name), provider=PROVIDER, headers=headers)
     default = meta.get("default_branch") if isinstance(meta, dict) else None
     default = default if isinstance(default, str) else None
@@ -322,21 +323,6 @@ def list_branches(secret: ConnectorSecret, full_name: str) -> dict[str, Any]:
     if default and default not in branches:
         branches.insert(0, default)
     return {"default_branch": default, "branches": branches}
-
-
-def repository_tree(secret: ConnectorSecret, full_name: str, branch: str) -> dict[str, Any]:
-    """List every file and folder of a repository at a branch in one call.
-
-    Args:
-        secret: The stored connector.
-        full_name: The repository as ``owner/name``.
-        branch: Branch name; empty for the default branch.
-
-    Returns:
-        ``{"entries": [{"path", "type": "file" | "dir"}], "truncated": bool}``;
-        ``truncated`` is GitHub's flag for a tree too large to list whole.
-    """
-    return tree_entries(secret.access_token, full_name, branch)
 
 
 def tree_entries(token: str | None, full_name: str, branch: str) -> dict[str, Any]:
@@ -376,11 +362,12 @@ def tree_entries(token: str | None, full_name: str, branch: str) -> dict[str, An
     return {"entries": entries, "truncated": bool(body.get("truncated"))}
 
 
-def read_text_file(token: str, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+def read_text_file(token: str | None, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
     """Read one file of a repository at a branch as text, up to a byte cap.
 
     Args:
-        token: Bearer token with read access to the repository.
+        token: Bearer token with read access to the repository; ``None`` for
+            an anonymous read of a public repository.
         full_name: The repository as ``owner/name``.
         branch: Branch name; empty for the default branch.
         path: File path inside the repository.

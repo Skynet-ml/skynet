@@ -19,7 +19,6 @@ import pytest
 
 from core.sandbox import JOB_TAG, NetworkPolicy, ResourceRequest, SandboxSpec, factory
 from core.sandbox.errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -626,19 +625,19 @@ async def test_exec_keeps_stdout_and_stderr_apart(fake_sdk: type[FakeClient]) ->
     assert chunks == [("stderr", result.stderr)]
 
 
-async def test_exec_raises_a_run_timeout(fake_sdk: type[FakeClient]) -> None:
-    """Raise RunTimeoutError when the command passes its limit."""
+async def test_exec_returns_a_timed_out_result(fake_sdk: type[FakeClient]) -> None:
+    """Return exit code 124 and timed_out when the command passes its limit."""
     async with DaytonaEnvironment(_SPEC) as env:
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 5", timeout_sec=0.05)
+        result = await env.exec("sleep 5", timeout_sec=0.05)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_exec_uses_the_run_phase_timeout_by_default(fake_sdk: type[FakeClient]) -> None:
     """Apply the run phase timeout when the call gives none."""
     timeouts = PhaseTimeouts(start=1, setup=1, run=0.05, score=1)
     async with DaytonaEnvironment(_SPEC, timeouts=timeouts) as env:
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 5")
+        result = await env.exec("sleep 5")
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_exec_refuses_sudo(fake_sdk: type[FakeClient]) -> None:

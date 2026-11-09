@@ -25,7 +25,7 @@ from typing import ClassVar
 
 from ..capabilities import EnvironmentCapabilities
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
-from ..errors import RunTimeoutError, SandboxFatalError, SandboxRejectedError
+from ..errors import SandboxFatalError, SandboxRejectedError
 from ..resources import SandboxSpec
 from ..timeouts import Phase, PhaseTimeouts
 
@@ -38,6 +38,8 @@ LOCAL_CAPABILITIES = EnvironmentCapabilities(name="local")
 _SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 _ENV_PASSTHROUGH = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 _READ_CHUNK = 4096
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 # A SIGKILLed shell exits in milliseconds; the 2 s bound only stops a stuck
 # reap from blocking exec.
 _EXIT_POLLS = 200
@@ -155,15 +157,15 @@ class LocalEnvironment(SandboxEnvironment):
             sudo: Not supported; a local sandbox never runs commands as root.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, its whole process group is killed first, and the
+            result has exit code 124, ``timed_out`` set and the output so far.
 
         Raises:
             RuntimeError: The sandbox is not running, or it stopped while the
                 command started. The command is killed first.
             SandboxRejectedError: ``sudo`` is set.
             ValueError: ``cwd`` leaves the temp directory.
-            RunTimeoutError: The command ran past the time limit. Its whole
-                process group is killed first.
         """
         root = self._require_running()
         if sudo:
@@ -206,6 +208,8 @@ class LocalEnvironment(SandboxEnvironment):
         stdout: list[str] = []
         stderr: list[str] = []
         finished = False
+        timed_out = False
+        exit_code = _TIMEOUT_EXIT_CODE
         try:
             async with asyncio.timeout(limit) as deadline:
                 exit_code = await _collect(process, stdout, stderr, on_output)
@@ -215,7 +219,7 @@ class LocalEnvironment(SandboxEnvironment):
             # deadline is a run timeout.
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit) from None
+            timed_out = True
         finally:
             # A timeout, a cancel or an output-sink error must not leave the
             # command or its children running on the host.
@@ -223,7 +227,7 @@ class LocalEnvironment(SandboxEnvironment):
                 await asyncio.shield(_end_process(process))
             if not _group_exists(process.pid):
                 self._groups.discard(process.pid)
-        return ExecResult(exit_code=exit_code, stdout="".join(stdout), stderr="".join(stderr))
+        return ExecResult(exit_code=exit_code, stdout="".join(stdout), stderr="".join(stderr), timed_out=timed_out)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write UTF-8 text files into the temp directory, creating parent directories.

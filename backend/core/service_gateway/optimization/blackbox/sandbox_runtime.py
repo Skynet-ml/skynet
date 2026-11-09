@@ -34,10 +34,20 @@ from ....config import app_env, with_legacy_env
 from ....exceptions import ServiceError
 from ....sandbox import ExecResult, ResourceRequest, SandboxSpecError, network_mode
 from ....sandbox import SandboxSpec as AsyncSandboxSpec
-from ....sandbox.errors import SandboxFatalError, SandboxInfraError, SandboxRejectedError
+from ....sandbox.errors import (
+    SandboxError,
+    SandboxFatalError,
+    SandboxInfraError,
+    SandboxRejectedError,
+    SandboxRunOutcomeError,
+    SandboxTransientError,
+)
 from ....sandbox.factory import create_environment, load_provider
+from ....sandbox.network import NetworkPolicyError
+from ....sandbox.pool import TrialFingerprintError
 from ....sandbox.sync_bridge import SyncSession, open_session
 from ....sandbox.sync_bridge import run as bridge_run
+from ....sandbox.transfer import UnsafeArchiveError
 from .sandbox_contract import (
     JOB_TAG,
     SANDBOX_TAG,
@@ -364,8 +374,12 @@ def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
     other error as a dead box, which they close and retry in a fresh paid box.
     A bad spec, a rejected request, a fatal error or a command that outlived
     its kill deadline fails the same way in a fresh box, and the async path
-    never retries by default (SKY-406 D3, D10). Transient box-death errors
-    stay as they are, so the callers' one fresh box still applies to them.
+    never retries by default (SKY-406 D3, D10). The other ``core.sandbox``
+    errors that a retry cannot fix map the same way, as the legacy path's
+    ``ServiceError`` did (SKY-564). Transient box-death errors and run
+    outcomes stay as they are: the callers read their group for the one
+    fresh box and for grading. Cancellation and budget errors are not
+    ``core.sandbox`` errors, so they pass through unchanged.
 
     Args:
         timed: The call is a command with a timeout, so an infra error caused
@@ -389,6 +403,10 @@ def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
         if timed and isinstance(error.__cause__, TimeoutError):
             raise ServiceError(f"The sandbox command outlived its kill deadline: {error}") from error
         raise
+    except (SandboxTransientError, SandboxRunOutcomeError):
+        raise
+    except (SandboxError, NetworkPolicyError, UnsafeArchiveError, TrialFingerprintError) as error:
+        raise ServiceError(f"The sandbox refused the request: {error}") from error
 
 
 # The async Vercel teardown waits up to 60 s (``STOP_TIMEOUT`` in
