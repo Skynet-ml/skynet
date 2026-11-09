@@ -207,12 +207,24 @@ class _SnapshotRuntime(FakeRuntime):
 def test_a_parent_box_keeps_its_services_and_snapshot_id() -> None:
     """Keep the compose services and the snapshot id when the broker rebuilds a parent box's spec."""
     runtime = FakeRuntime()
-    parent = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120).parent_runtime(())
-    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="k", services=(_DB,), snapshot_id="snap-3"))
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120, snapshots=_cache([]))
+    broker.parent_runtime(()).open(
+        SandboxSpec(lifetime_seconds=60, operation_key="k", services=(_DB,), snapshot_id="snap-3")
+    )
     (spec,) = runtime.specs
     assert spec.services == (_DB,)
     assert spec.snapshot_id == "snap-3"
     assert spec.image == IMAGE
+
+
+def test_a_parent_box_without_the_runs_cache_drops_its_snapshot_id() -> None:
+    """Open an empty box when the run has no snapshot cache, so no snapshot runs outside a storage hold."""
+    runtime = FakeRuntime()
+    parent = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120).parent_runtime(())
+    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="k", services=(_DB,), snapshot_id="snap-3"))
+    (spec,) = runtime.specs
+    assert spec.services == (_DB,)
+    assert spec.snapshot_id is None
 
 
 def test_a_parent_snapshot_needs_the_runs_cache() -> None:

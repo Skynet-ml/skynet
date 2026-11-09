@@ -263,7 +263,7 @@ class _ParentSandboxRuntime:
 
     @property
     def supports_snapshots(self) -> bool:
-        """Return whether the run has a snapshot cache, so ``snapshot`` can save a box."""
+        """Return whether the run has a snapshot cache before its deadline, so ``snapshot`` can save a box."""
         return self._broker._snapshots_live()
 
     def snapshot(self, session: SandboxSession, cache_key: str) -> str | None:
