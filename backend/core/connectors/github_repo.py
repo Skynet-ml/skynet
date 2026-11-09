@@ -74,11 +74,12 @@ def github_token(engine: Any, username: str) -> str:
         raise RepoFetchError("Connect GitHub again: the connection is missing or has expired.") from error
 
 
-def resolve_commit(token: str, repository: str, branch: str | None) -> str:
+def resolve_commit(token: str | None, repository: str, branch: str | None) -> str:
     """Pin a branch, or the default branch, to its current commit.
 
     Args:
-        token: GitHub token with read access to the repository.
+        token: GitHub token with read access to the repository; ``None``
+            calls anonymously, which reaches public repositories only.
         repository: ``owner/name``.
         branch: Branch to pin; ``None`` picks the repository's default branch.
 

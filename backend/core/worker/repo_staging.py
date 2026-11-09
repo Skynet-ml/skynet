@@ -45,6 +45,7 @@ from ..connectors.github_publish import (
 )
 from ..connectors.github_repo import RepoFetchError, RepoSnapshot, fetch_snapshot, github_token, resolve_commit
 from ..connectors.saved_secrets import SavedSecretStore
+from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
@@ -238,6 +239,45 @@ def hidden_path_labels(constraints: RepoConstraints | None) -> dict[str, str]:
     return {path: label for path, label in labels.items() if path in hidden}
 
 
+def _owner_token(engine: Any, username: str, provider: str) -> str | None:
+    """Return the owner's token for a repository host, or ``None`` without a usable connection.
+
+    A public repository needs no connection (SKY-568), so a missing or expired
+    one falls back to an anonymous read instead of stopping the run.
+
+    Args:
+        engine: SQLAlchemy engine holding the connector vault.
+        username: Owner of the run and of the connection.
+        provider: The repository host.
+
+    Returns:
+        The token, or ``None``.
+    """
+    try:
+        if provider == repo_hosts.DEFAULT_PROVIDER:
+            return github_token(engine, username)
+        return repo_hosts.host_token(engine, username, provider)
+    except RepoFetchError:
+        return None
+
+
+def _anonymous_fetch_error(error: RepoFetchError, provider: str) -> RepoFetchError:
+    """Explain that an anonymous read reaches public repositories only.
+
+    Args:
+        error: Why the anonymous lookup or clone failed.
+        provider: The repository host.
+
+    Returns:
+        The error with the advice to connect the host.
+    """
+    host = host_label(provider)
+    return RepoFetchError(
+        f"{error} Without a {host} connection, only a public repository can be read."
+        f" Connect {host} to optimize a private repository."
+    )
+
+
 def stage_repository(
     payload: dict[str, Any],
     *,
@@ -265,6 +305,8 @@ def stage_repository(
             uploads cases and the repository defines its own in ``[data] cases``,
             or when a hidden path is, holds or lies inside a link.
         RepoGateError: When the agent's tree still shows a hidden path from ``hidden_repo_paths``.
+        RepoFetchError: When the repository cannot be read; without a host
+            connection, the message says to connect the host.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -279,17 +321,26 @@ def stage_repository(
         saved=SavedSecretStore(engine),
     )
     provider = repo_hosts.provider_of(repo)
-    if provider == repo_hosts.DEFAULT_PROVIDER:
-        token = github_token(engine, username)
-        commit = repo.get("commit") or resolve_commit(token, repo["repository"], repo.get("branch"))
-    else:
-        token = repo_hosts.host_token(engine, username, provider)
-        commit = repo.get("commit") or repo_hosts.resolve_commit(
-            provider, token, repo["repository"], repo.get("branch")
-        )
+    token = _owner_token(engine, username, provider)
+    try:
+        if provider == repo_hosts.DEFAULT_PROVIDER:
+            commit = repo.get("commit") or resolve_commit(token, repo["repository"], repo.get("branch"))
+        else:
+            commit = repo.get("commit") or repo_hosts.resolve_commit(
+                provider, token, repo["repository"], repo.get("branch")
+            )
+    except RepoFetchError as error:
+        if token is not None:
+            raise
+        raise _anonymous_fetch_error(error, provider) from error
     workdir = Path(tempfile.mkdtemp(prefix="app-repo-"))
     try:
-        snapshot = fetch_snapshot(repo["repository"], commit, token, workdir, **repo_hosts.git_kwargs(provider))
+        try:
+            snapshot = fetch_snapshot(repo["repository"], commit, token, workdir, **repo_hosts.git_kwargs(provider))
+        except RepoFetchError as error:
+            if token is not None:
+                raise
+            raise _anonymous_fetch_error(error, provider) from error
         environment = effective_environment(
             read_constraints(snapshot.archive),
             approved_editable=repo["editable_paths"],

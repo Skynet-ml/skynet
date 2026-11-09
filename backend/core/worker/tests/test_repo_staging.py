@@ -30,7 +30,7 @@ from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
-from core.connectors.github_repo import RepoSnapshot
+from core.connectors.github_repo import RepoFetchError, RepoSnapshot
 from core.exceptions import ServiceError
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.service_gateway.optimization.blackbox import runner
@@ -355,6 +355,137 @@ def test_staging_pins_the_commit_and_keeps_secrets_in_the_parent(
     assert original["target"]["repo"]["secrets"][0]["credential_ref"] == "ref-1"
     staged.cleanup()
     assert not staged.workdir.exists()
+
+
+def _no_connection(engine: Any, username: str) -> str:
+    """Stand in for an owner with no GitHub connection.
+
+    Args:
+        engine: Unused database engine.
+        username: Unused owner.
+
+    Raises:
+        RepoFetchError: Always, as the token lookup does without a connection.
+    """
+    raise RepoFetchError("Connect GitHub again to read this repository.")
+
+
+def test_staging_reads_a_public_repository_without_a_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a GitHub connection, resolve the commit and clone anonymously (SKY-568)."""
+    calls: list[tuple[str, Any]] = []
+
+    def resolve(token: str | None, repository: str, branch: str | None) -> str:
+        """Record the lookup token and pin the branch."""
+        calls.append(("resolve", token))
+        return "a" * 40
+
+    def fetch(repository: str, pinned: str, token: str | None, workdir: Path) -> RepoSnapshot:
+        """Record the clone token and pack an empty tree."""
+        calls.append(("fetch", token))
+        return RepoSnapshot(commit=pinned, archive=_tree(workdir, {}), readonly_paths=(), size_bytes=1)
+
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {"API_KEY": "secret-value"})
+    monkeypatch.setattr(repo_staging, "github_token", _no_connection)
+    monkeypatch.setattr(repo_staging, "resolve_commit", resolve)
+    monkeypatch.setattr(repo_staging, "fetch_snapshot", fetch)
+    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
+
+    staged_payload, staged = repo_staging.stage_repository(
+        _payload(None), username="alice", binding_id="b", engine=None
+    )
+
+    assert calls == [("resolve", None), ("fetch", None)]
+    assert staged_payload["target"]["repo"]["commit"] == "a" * 40
+    staged.cleanup()
+
+
+def test_a_private_repository_without_a_connection_says_to_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An anonymous lookup that fails tells the owner to connect GitHub for a private repository."""
+
+    def resolve(token: str | None, repository: str, branch: str | None) -> str:
+        """Refuse the lookup the way GitHub hides a private repository."""
+        raise RepoFetchError("GitHub could not find acme/app at 'main'.")
+
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging, "github_token", _no_connection)
+    monkeypatch.setattr(repo_staging, "resolve_commit", resolve)
+
+    with pytest.raises(RepoFetchError) as raised:
+        repo_staging.stage_repository(_payload(None), username="alice", binding_id="b", engine=None)
+
+    message = str(raised.value)
+    assert "GitHub could not find acme/app" in message
+    assert "Connect GitHub to optimize a private repository." in message
+
+
+def test_a_failed_anonymous_clone_says_to_connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pinned commit skips the lookup, so a refused anonymous clone carries the same advice and cleans up."""
+    workdirs: list[Path] = []
+
+    def fetch(repository: str, pinned: str, token: str | None, workdir: Path) -> RepoSnapshot:
+        """Refuse the clone the way git does for a private repository."""
+        workdirs.append(workdir)
+        raise RepoFetchError("git fetch failed: could not read Username.")
+
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging, "github_token", _no_connection)
+    monkeypatch.setattr(repo_staging, "fetch_snapshot", fetch)
+
+    with pytest.raises(RepoFetchError, match=r"Connect GitHub to optimize a private repository\."):
+        repo_staging.stage_repository(_payload("c" * 40), username="alice", binding_id="b", engine=None)
+
+    assert workdirs
+    assert not workdirs[0].exists()
+
+
+def test_a_failure_with_a_connection_keeps_the_original_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a connection, a refused lookup is not rewritten as advice to connect."""
+
+    def resolve(token: str | None, repository: str, branch: str | None) -> str:
+        """Refuse the lookup."""
+        raise RepoFetchError("GitHub could not find acme/app at 'main'.")
+
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "gh-token")
+    monkeypatch.setattr(repo_staging, "resolve_commit", resolve)
+
+    with pytest.raises(RepoFetchError) as raised:
+        repo_staging.stage_repository(_payload(None), username="alice", binding_id="b", engine=None)
+
+    assert str(raised.value) == "GitHub could not find acme/app at 'main'."
+
+
+def test_staging_uses_the_gitlab_connection_and_falls_back_without_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GitLab repository reads through its connection token, or anonymously when there is none."""
+    seen: list[str | None] = []
+
+    def resolve(provider: str, token: str | None, repository: str, branch: str | None) -> str:
+        """Record the lookup token and pin the branch."""
+        seen.append(token)
+        return "a" * 40
+
+    def fetch(repository: str, pinned: str, token: str | None, workdir: Path, **_: Any) -> RepoSnapshot:
+        """Record the clone token and pack an empty tree."""
+        seen.append(token)
+        return RepoSnapshot(commit=pinned, archive=_tree(workdir, {}), readonly_paths=(), size_bytes=1)
+
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging.repo_hosts, "resolve_commit", resolve)
+    monkeypatch.setattr(repo_staging, "fetch_snapshot", fetch)
+    monkeypatch.setattr(repo_staging, "saved_index_url", lambda engine, username: "https://pypi.org/simple")
+    payload = _payload(None)
+    payload["target"]["repo"]["provider"] = "gitlab"
+
+    def no_gitlab(engine: Any, username: str, provider: str) -> str:
+        """Refuse the token lookup as a missing connection does."""
+        raise RepoFetchError("Connect GitLab again to read this repository.")
+
+    for host_token, expected in ((lambda engine, username, provider: "gl-token", "gl-token"), (no_gitlab, None)):
+        seen.clear()
+        monkeypatch.setattr(repo_staging.repo_hosts, "host_token", host_token)
+        _, staged = repo_staging.stage_repository(payload, username="alice", binding_id="b", engine=None)
+        assert seen == [expected, expected]
+        staged.cleanup()
 
 
 def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:

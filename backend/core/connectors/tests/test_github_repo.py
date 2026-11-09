@@ -20,6 +20,7 @@ from ..github_repo import (
     git_auth_env,
     list_commits,
     patched_repo_zip,
+    resolve_commit,
 )
 
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
@@ -139,6 +140,24 @@ def test_list_commits_reads_the_branch_and_trims_titles(monkeypatch: pytest.Monk
     ]
     assert seen[0].url.path == "/repos/acme/app/commits"
     assert seen[0].url.params["sha"] == "dev"
+
+
+def test_resolve_commit_without_a_token_calls_anonymously(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A public repository pins its default branch with no Authorization header (SKY-568)."""
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the request and answer the repository and commit lookups."""
+        seen.append(request)
+        if request.url.path == "/repos/acme/app":
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(200, json={"sha": "e" * 40})
+
+    monkeypatch.setattr(transport, "CLIENT", httpx.Client(transport=httpx.MockTransport(answer)))
+
+    assert resolve_commit(None, "acme/app", None) == "e" * 40
+    assert [request.url.path for request in seen] == ["/repos/acme/app", "/repos/acme/app/commits/main"]
+    assert all("authorization" not in request.headers for request in seen)
 
 
 def test_commit_summary_drops_a_commit_without_an_id() -> None:
