@@ -79,6 +79,10 @@ type ModuleTypes {
             .withCheck
         )
         .withFunction(
+          function("source_exclude_proof", typeDef.withKind(TypeDefKind.STRING_KIND))
+            .withDescription("Prove that the source filter drops credentials JSON files.\n\nThe filter runs in the engine, so this uses the engine's own pattern\nmatcher, not a Python glob port (SKY-543).\n\nReturns:\n    A one-line summary of the dropped and kept sample files.\n\nRaises:\n    ValueError: A credentials JSON file passed the filter, or keep.py did not.")
+        )
+        .withFunction(
           function("summary", typeDef.withKind(TypeDefKind.STRING_KIND))
             .withDescription("Return the pytest output of one core shard, with the skip reasons.\n\nCI prints this after ``dagger check`` ran the same shard, so the\nengine serves it from cache and the log shows the pass and skip counts.\n\nArgs:\n    shard: The zero-based shard index.\n\nReturns:\n    The pytest stdout of the shard.")
             .withArg("shard", typeDef.withKind(TypeDefKind.INTEGER_KIND))
