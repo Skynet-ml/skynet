@@ -14,7 +14,7 @@ import itertools
 import json
 import tarfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -916,6 +916,144 @@ def test_gateway_domain_failure_has_plain_detail(worker: BackgroundWorker, store
         worker._process_job("gateway-domain", 0)
     gateway.protect_payload.assert_called_once()
     assert store._jobs["gateway-domain"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
+
+
+def _fail_protected_run(
+    worker: BackgroundWorker, store: FakeJobStore, failure: Callable[[MagicMock], None]
+) -> tuple[MagicMock, MagicMock, list[str]]:
+    """Run a protected blackbox job whose payload protection fails, with the budget gateway mocked.
+
+    Args:
+        worker: Worker under test.
+        store: In-memory job store.
+        failure: Runs in place of payload protection with the gateway, and raises the run's error.
+
+    Returns:
+        The mocked gateway, the completion notification mock, and the order of budget calls.
+    """
+    store.engine = MagicMock()
+    store.seed_job(
+        "failed-budget",
+        payload=_BLACKBOX_PAYLOAD,
+        payload_overview=_BLACKBOX_OVERVIEW,
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("failed-budget")
+    gateway = MagicMock()
+    gateway.runtime.generation = 0
+    # No sandbox to stop, so the failure close is the only budget publication.
+    gateway.detach_sandbox.return_value = None
+    gateway.protect_payload.side_effect = lambda *args, **kwargs: failure(gateway)
+    calls: list[str] = []
+    gateway.runtime.service.close_for_failed_job.side_effect = lambda *args, **kwargs: calls.append("close")
+    with (
+        patch("core.worker.engine.notify_job_completed") as notify,
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.validate_blackbox_payload"),
+        patch("core.worker.engine.payload_uses_token_source", return_value=False),
+        patch("core.worker.engine.ModelGateway", return_value=gateway),
+        patch("core.worker.engine.BudgetService"),
+        patch("core.worker.engine.BudgetRuntime"),
+        patch("core.worker.engine.bind_protected_sandbox"),
+        patch("core.worker.engine.protected_image", return_value=None),
+        patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload),
+        patch.object(worker, "_close_budget_gateway", return_value=(None, None)),
+        patch.object(worker, "_publish_budget_snapshot", side_effect=lambda *args: calls.append("publish")),
+    ):
+        worker._process_job("failed-budget", 0)
+    return gateway, notify, calls
+
+
+def _stall(gateway: MagicMock) -> None:
+    """Fail the run with a generic error.
+
+    Args:
+        gateway: The run's mocked gateway, unused.
+
+    Raises:
+        RuntimeError: Always, as a stalled run does.
+    """
+    raise RuntimeError("stalled")
+
+
+def test_failed_protected_run_closes_its_budget(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """A failed protected run closes its own epoch's budget, then republishes it (SKY-529)."""
+    gateway, notify, calls = _fail_protected_run(worker, store, _stall)
+
+    assert store._jobs["failed-budget"]["status"] == "failed"
+    gateway.runtime.service.close_for_failed_job.assert_called_once_with(
+        gateway.runtime.budget_id, gateway.runtime.username, expected_generation=0
+    )
+    assert calls == ["close", "publish"]
+    notify.assert_called_once()
+
+
+def test_failed_budget_close_error_still_notifies(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """A budget close that fails publishes nothing new and still sends the failure notification."""
+
+    def stall_with_broken_close(gateway: MagicMock) -> None:
+        """Make the coming budget close fail, then fail the run.
+
+        Args:
+            gateway: The run's mocked gateway.
+
+        Raises:
+            RuntimeError: Always, as a stalled run does.
+        """
+        gateway.runtime.service.close_for_failed_job.side_effect = RuntimeError("database down")
+        raise RuntimeError("stalled")
+
+    gateway, notify, calls = _fail_protected_run(worker, store, stall_with_broken_close)
+
+    assert store._jobs["failed-budget"]["status"] == "failed"
+    gateway.runtime.service.close_for_failed_job.assert_called_once()
+    assert calls == []
+    notify.assert_called_once()
+
+
+@pytest.mark.parametrize("persisted", ["cancelled", "paused"])
+def test_cancelled_or_paused_protected_run_keeps_its_budget(
+    worker: BackgroundWorker, store: FakeJobStore, persisted: str
+) -> None:
+    """A cancel or pause leaves the budget to its own endpoint, so the failure close never runs.
+
+    Args:
+        worker: Worker under test.
+        store: In-memory job store.
+        persisted: Terminal status the cancel or pause endpoint wrote.
+    """
+
+    def stop_from_endpoint(gateway: MagicMock) -> None:
+        """Write the endpoint's terminal status, then stop the run cooperatively.
+
+        Args:
+            gateway: The run's mocked gateway, unused.
+
+        Raises:
+            CancellationError: Always, as the cancel watcher does.
+        """
+        store.update_job("failed-budget", status=persisted)
+        raise engine_module.CancellationError("stopped")
+
+    gateway, _notify, calls = _fail_protected_run(worker, store, stop_from_endpoint)
+
+    assert store._jobs["failed-budget"]["status"] == persisted
+    gateway.runtime.service.close_for_failed_job.assert_not_called()
+    assert calls == []
+
+
+def test_lost_failure_write_keeps_the_budget(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """A failure write that loses its generation fence leaves the new owner's budget alone."""
+    store.update_job_if_status = MagicMock(return_value=False)  # type: ignore[attr-defined]
+
+    gateway, notify, calls = _fail_protected_run(worker, store, _stall)
+
+    store.update_job_if_status.assert_called_once()  # type: ignore[attr-defined]
+    gateway.runtime.service.close_for_failed_job.assert_not_called()
+    assert calls == []
+    notify.assert_not_called()
 
 
 def _run_repository_job(

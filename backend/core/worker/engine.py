@@ -772,6 +772,7 @@ class BackgroundWorker:
         overview: dict[str, Any] = {}  # pre-init so BaseException handler has a defined value even if early error
         execution_generation: int | None = None
         execution_budget_snapshot: dict[str, Any] | None = None
+        run_gateway: ModelGateway | None = None
         # Legacy (unprotected) runs are billed from the worker, not a budget
         # gateway; the exception handler reads these to bill a leg that ended
         # without a successful completion.
@@ -1009,6 +1010,7 @@ class BackgroundWorker:
                             phase="run",
                         )
                     )
+                    run_gateway = budget_gateway
                     sandbox_workflow = "anything" if optimization_type == OPTIMIZATION_TYPE_BLACKBOX else "dspy"
                     current_image = protected_image(settings, sandbox_workflow)
                     sandbox_image = (
@@ -1418,8 +1420,9 @@ class BackgroundWorker:
                         )
                 if detached_sandbox is not None:
                     # This runs after the success write and after the gateway's own
-                    # snapshot. The failure write leaves the budget evidence alone,
-                    # so the settled snapshot of the background stop stands.
+                    # snapshot. On failure, _close_failed_budget also publishes, and
+                    # this stop can publish an older copy after it. Only the job's
+                    # fallback copy goes stale: the API serves the live budget row.
                     self._stop_sandbox_in_background(
                         optimization_id,
                         *detached_sandbox,
@@ -1504,6 +1507,8 @@ class BackgroundWorker:
                         self._job_store.update_job(optimization_id, **fields)
                 except Exception:  # isolation boundary: a DB hiccup must not prevent the notification below
                     logger.exception("Optimization %s: failed to update status to %s", optimization_id, final_status)
+                if run_gateway is not None:
+                    self._close_failed_budget(optimization_id, run_gateway, execution_generation)
                 if self._job_store.claim_completion_notification(optimization_id):
                     notify_job_completed(
                         optimization_id=optimization_id,
@@ -1563,6 +1568,29 @@ class BackgroundWorker:
             logger.exception("Optimization %s: could not release the run for a restart", optimization_id)
             return
         logger.info("Optimization %s released for recovery after a worker shutdown", optimization_id)
+
+    def _close_failed_budget(self, optimization_id: str, gateway: ModelGateway, generation: int | None) -> None:
+        """Close a failed run's budget so unstarted work stops holding wallet money.
+
+        The gateway close already settled the metered usage. Dispatched and
+        pending work, such as a sandbox the background stop still settles,
+        keeps its coverage until its usage is known.
+
+        Args:
+            optimization_id: Failed job owning the budget.
+            gateway: The run's closed gateway, still holding its budget authority.
+            generation: Worker epoch allowed to publish the closed snapshot.
+        """
+        runtime = gateway.runtime
+        try:
+            runtime.service.close_for_failed_job(
+                runtime.budget_id, runtime.username, expected_generation=runtime.generation
+            )
+        except Exception:  # isolation boundary: the failure notification must still go out
+            logger.exception("Optimization %s: could not close its run budget", optimization_id)
+            return
+        # The terminal evidence froze the budget before this close.
+        self._publish_budget_snapshot(optimization_id, gateway, generation)
 
     def _close_budget_gateway(
         self, optimization_id: str, gateway: ModelGateway, generation: int | None
