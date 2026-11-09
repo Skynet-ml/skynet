@@ -213,9 +213,9 @@ class BoxOutcome(Generic[T, R]):
 class SandboxPool:
     """Run candidates in boxes under a box limit for each provider and phase limits.
 
-    Make one pool for each event loop and share it, so that every engine
-    on that loop counts against the same limits. The semaphores bind to
-    the loop of the first run, so a run on another loop raises.
+    Share one pool among the runs that must count against the same limits.
+    The semaphores bind to the loop of the first run, so a run on another
+    loop raises.
 
     The default number of workers is the highest provider limit. A box
     holds its provider permit from its start to its stop, also while it
