@@ -964,6 +964,77 @@ def test_real_native_runner_drives_upstream_with_fake_cli(tmp_path: Path, engine
     assert (tmp_path / "native_artifacts.tar.gz.b64").stat().st_size > 0
 
 
+@pytest.mark.parametrize(("stop", "stop_at"), [("budget", 3), ("error", 3), ("budget", 5)])
+def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: str, stop_at: int) -> None:
+    """A parent stop ends GEPA's repository run with its own reason and its fully scored best (SKY-529)."""
+    source = tmp_path / "source" / "src"
+    source.mkdir(parents=True)
+    (source / "app.py").write_text("x = 1\n")
+    archive = tmp_path / "tree.tgz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(tmp_path / "source"), "."], check=True)
+    chunks = []
+    for index, chunk in enumerate(repo_tree.archive_chunks(archive)):
+        chunks.append(f"tree.{index}.b64")
+        (tmp_path / chunks[-1]).write_text(chunk)
+    (tmp_path / "rpc").mkdir()
+    payload = {
+        "nonce": "testnonce",
+        "engine_id": "gepa_repo",
+        "model": "claude-test",
+        "sandbox": False,
+        "max_token_cost": 0.05,
+        "max_evals": 8,
+        "max_concurrency": 1,
+        "timeout_seconds": 20,
+        "repo": {"chunks": chunks, "editable_paths": ["src"], "readonly_paths": []},
+        "task": {"name": "repo", "seed_candidate": "", "train_set": [{"id": i} for i in range(4)]},
+    }
+    (tmp_path / "input.json").write_text(json.dumps(payload))
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUNBUFFERED": "1"}
+    process = subprocess.Popen(
+        [sys.executable, native_runner.__file__, "input.json"],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    requests = 0
+    try:
+        for line in process.stdout:
+            if not line.startswith("APP_NATIVE_RPC testnonce "):
+                continue
+            request = json.loads(line.split(" ", 2)[2])
+            requests += 1
+            # Staging job e5121995 stopped after two of the seed's four scorer
+            # runs; a stop at the fifth comes after the seed's full sweep.
+            response: dict[str, Any] = {"score": 0.5, "info": {}}
+            if requests == stop_at:
+                response = {"error": "The parent evaluator stopped this run."}
+                if stop == "budget":
+                    response["stop_reason"] = "budget_reached"
+            (tmp_path / "rpc" / f"{request['id']}.json").write_text(json.dumps(response))
+        stderr = process.stderr.read()
+        assert process.wait(timeout=25) == int(stop == "error"), stderr
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    result = json.loads((tmp_path / "native_result.json").read_text())
+    assert requests == stop_at
+    assert "AttributeError" not in json.dumps(result)
+    if stop == "budget":
+        assert result["stop_reason"] == "budget_reached"
+        assert "error" not in result
+    else:
+        assert result["error"] == "The parent evaluator stopped this run."
+        assert result["interrupted_incumbent"] == {}
+    if stop_at > 4:
+        assert (result["best_candidate"], result["best_score"]) == ("", 0.5)
+    else:
+        assert "best_candidate" not in result
+
+
 def test_autosaddler_bootstrap_pins_upstream_into_a_python_312_venv() -> None:
     """Install the pinned AutoSaddler revision on its own interpreter instead of the GEPA archive."""
     command = _bootstrap_command("vercel", engine_id="autosaddler")
