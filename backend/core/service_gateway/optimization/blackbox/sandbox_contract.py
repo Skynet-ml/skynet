@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from core.sandbox.services import ComposeService
+    from ....sandbox.services import ComposeService
 
 # Slack past the in-sandbox timeout before the service kills the wrapper as well.
 KILL_GRACE_SECONDS = 15.0

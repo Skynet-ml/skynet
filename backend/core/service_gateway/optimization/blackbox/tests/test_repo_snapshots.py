@@ -13,11 +13,13 @@ from core.billing.runtime import UsagePendingError
 from core.exceptions import ServiceError
 
 from ..repo_scorer import _STAGE_LAYOUT_SECONDS
-from ..repo_workspace import PREPARED_DIR, WORK_DIR, RepoSetupError, RepoWorkspace
+from ..repo_workspace import PREPARED_DIR, WORK_DIR, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
+from ..sandbox_broker import SandboxBroker
 from ..sandbox_contract import SandboxSession
 from .test_repo_scorer import STAGES, _stage_scorer
 from .test_repo_workspace import _ONLINE, _archive, _Box, _patch
+from .test_sandbox_broker import IMAGE, FakeRuntime
 
 _SETUP = 'echo "key=${API_KEY:-unset}"; cat src/app.py > built.txt'
 _TWO_STAGES = (
@@ -114,17 +116,29 @@ class _StageSnapshotRuntime:
     """Open local stage boxes, record what each box gets, and save a box as a snapshot."""
 
     injects_headers = False
+    supports_snapshots = True
 
-    def __init__(self, root: Path, *, snapshot_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        snapshot_error: BaseException | None = None,
+        open_error: BaseException | None = None,
+        empty_restore: bool = False,
+    ) -> None:
         """Start with no boxes.
 
         Args:
             root: Where the saved snapshots go.
             snapshot_error: What ``snapshot`` raises, if anything.
+            open_error: What an open from a snapshot raises, if anything.
+            empty_restore: Open a box from a snapshot without the saved tree.
         """
         self._local = LocalSubprocessRuntime()
         self._root = root
         self._snapshot_error = snapshot_error
+        self._open_error = open_error
+        self._empty_restore = empty_restore
         self.specs: list[SandboxSpec] = []
         self.written: list[list[str]] = []
         self.keys: list[str] = []
@@ -138,10 +152,15 @@ class _StageSnapshotRuntime:
 
         Returns:
             The box, filled from the named snapshot when the spec has one.
+
+        Raises:
+            BaseException: The configured open error, for a box from a snapshot.
         """
         self.specs.append(spec)
+        if spec.snapshot_id is not None and self._open_error is not None:
+            raise self._open_error
         session = self._local.open(spec)
-        if spec.snapshot_id is not None:
+        if spec.snapshot_id is not None and not self._empty_restore:
             shutil.copytree(self.saved[spec.snapshot_id], session.path, dirs_exist_ok=True)
         written: list[str] = []
         self.written.append(written)
@@ -252,8 +271,8 @@ def test_prepared_box_is_saved_and_the_kept_box_opens_from_it_offline(tmp_path: 
     assert "very-secret-value" not in _texts(runtime.saved["snap-0"])
 
 
-def test_snapshot_without_the_prepared_tree_fails_setup(tmp_path: Path) -> None:
-    """Refuse a box from a snapshot whose prepared tree changed, and keep refusing later calls.
+def test_snapshot_without_the_prepared_tree_falls_back_to_a_normal_box(tmp_path: Path) -> None:
+    """Close a box from a snapshot whose prepared tree changed, and set up a normal box instead.
 
     Args:
         tmp_path: Scratch folder.
@@ -271,14 +290,17 @@ def test_snapshot_without_the_prepared_tree_fails_setup(tmp_path: Path) -> None:
     runtime = _SnapshotRuntime(tmp_path / "snaps", tamper=tamper)
     space = _space(archive, runtime)
     try:
-        with pytest.raises(RepoSetupError, match="setup snapshot does not hold"):
-            space.session()
-        with pytest.raises(RepoSetupError):
-            space.session()
+        space.checkout("")
+        assert space.session().read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
+        assert space.session() is runtime.boxes[-1]
     finally:
         space.close()
-    assert all(box.closed for box in runtime.boxes)
-    assert len(runtime.specs) == 2
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", None]
+    assert runtime.boxes[0].closed
+    assert runtime.boxes[1].closed
+    assert _setups(runtime.boxes[2]) == 1
+    assert not runtime.boxes[2].online
+    assert len(runtime.saved) == 1
 
 
 @pytest.mark.parametrize("fault", ["snapshot", "open"])
@@ -434,3 +456,70 @@ def test_stage_runtime_without_snapshots_opens_no_builder(tmp_path: Path) -> Non
         scorer.close()
     assert len(runtime.specs) == 2
     assert all(spec.snapshot_id is None for spec in runtime.specs)
+
+
+@pytest.mark.parametrize("fault", ["open", "tree"])
+def test_stage_boxes_from_a_bad_snapshot_fall_back_to_unpacked_boxes(tmp_path: Path, fault: str) -> None:
+    """Drop the stage snapshot and score with unpacked boxes when boxes from it fail, for this and later versions.
+
+    Args:
+        tmp_path: Scratch folder.
+        fault: ``open`` when a box cannot open from the snapshot, ``tree`` when
+            the restored box has no tree.
+    """
+    runtime = _StageSnapshotRuntime(
+        tmp_path / "stage-snaps",
+        open_error=ServiceError("refused") if fault == "open" else None,
+        empty_restore=fault == "tree",
+    )
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+    finally:
+        scorer.close()
+    assert len(runtime.keys) == 1
+    snapshot_ids = [spec.snapshot_id for spec in runtime.specs[1:]]
+    tried = 1 if fault == "open" else 2
+    assert snapshot_ids[:tried] == ["stage-0"] * tried
+    assert snapshot_ids[tried:] == [None] * 4
+
+
+def test_budget_refusal_from_a_snapshot_stage_box_is_raised(tmp_path: Path) -> None:
+    """Raise a budget refusal from a stage box opened from the snapshot instead of retrying unpacked.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    runtime = _StageSnapshotRuntime(tmp_path / "stage-snaps", open_error=UsagePendingError("usage pending"))
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, runtime, {name: STAGES[name] for name in ("double", "shout")})
+    try:
+        with pytest.raises(UsagePendingError):
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "stage-0"]
+
+
+def test_a_broker_parent_runtime_without_a_cache_opens_no_stage_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skip the stage builder box when the real broker's parent runtime has no snapshot cache.
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Records each box the scorer asks the parent runtime for.
+    """
+    runtime: Any = FakeRuntime()
+    parent = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120).parent_runtime(())
+    assert not parent.supports_snapshots
+    asked: list[SandboxSpec] = []
+    real_open = parent.open
+    monkeypatch.setattr(parent, "open", lambda spec: asked.append(spec) or real_open(spec))
+    scorer, _ = _stage_scorer(tmp_path, _TWO_STAGES, parent, {name: STAGES[name] for name in ("double", "shout")})
+    try:
+        assert scorer._stage_snapshot() is None
+    finally:
+        scorer.close()
+    assert asked == []
+    assert runtime.specs == []

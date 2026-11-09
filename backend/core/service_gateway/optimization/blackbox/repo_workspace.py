@@ -415,7 +415,10 @@ class RepoWorkspace:
             try:
                 if restored:
                     if self._digest_prepared(session) != self._prepared_digest:
-                        raise RepoSetupError("The setup snapshot does not hold the prepared repository.")
+                        logger.warning("The setup snapshot does not hold the prepared repository; setting up a new box")
+                        self._snapshots_off = True
+                        self._close_quietly(session, "The restored box")
+                        continue
                 else:
                     self._prepare(session, on_output)
                     if self._save_snapshot(session):

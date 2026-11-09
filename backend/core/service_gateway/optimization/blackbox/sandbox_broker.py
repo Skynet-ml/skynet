@@ -186,6 +186,24 @@ class ParentSandboxSession:
             return self._command_runner(self._session, command, **options)
         return self._session.run(command, **options)
 
+    def snapshot(self, cache: SnapshotCache, cache_key: str) -> str | None:
+        """Save the box in a snapshot cache, when its runtime can save boxes.
+
+        Args:
+            cache: The run's snapshot cache.
+            cache_key: Names the box's setup.
+
+        Returns:
+            The snapshot id, or ``None`` when the box cannot be saved.
+
+        Raises:
+            ServiceError: When the provider refuses the snapshot.
+        """
+        take = getattr(self._session, "snapshot", None)
+        if take is None:
+            return None
+        return take(cache, cache_key)
+
     def disable_network(self) -> None:
         """Switch the box to deny-all networking and confirm the provider applied it.
 
@@ -239,6 +257,11 @@ class _ParentSandboxRuntime:
         if not set(spec.allowed_hosts) <= set(self._allowed_hosts):
             raise ServiceError("The parent's box cannot reach hosts this run was not funded for.")
         return self._broker._open_parent(spec)
+
+    @property
+    def supports_snapshots(self) -> bool:
+        """Return whether the run has a snapshot cache, so ``snapshot`` can save a box."""
+        return self._broker._snapshots is not None
 
     def snapshot(self, session: SandboxSession, cache_key: str) -> str | None:
         """Save a box this runtime opened as an after-setup snapshot of the run.
@@ -500,8 +523,7 @@ class SandboxBroker:
         Raises:
             ServiceError: When the provider refuses the snapshot.
         """
-        inner = session._session if isinstance(session, ParentSandboxSession) else session
-        take = getattr(inner, "snapshot", None)
+        take = getattr(session, "snapshot", None)
         if self._snapshots is None or take is None:
             return None
         return take(self._snapshots, cache_key)

@@ -590,7 +590,8 @@ class RepoScorer:
         Every box opens before the scorer's first sample, or none stays open
         (E29, E32). Each box has its own hold, keyed to this evaluation and
         its stage (E31), and every box closes when the evaluation ends, also
-        on a failure.
+        on a failure. When the boxes from the stage snapshot fail, the scorer
+        drops the snapshot and tries once more with unpacked boxes.
 
         Args:
             patch: The version being scored.
@@ -611,8 +612,41 @@ class RepoScorer:
             with self._service_relay(_METRIC_ROLE, response_dir) as relay:
                 yield relay
             return
-        evaluation_id = uuid.uuid4().hex
         snapshot_id = self._stage_snapshot()
+        try:
+            relay = self._open_stages(patch, response_dir, snapshot_id)
+        except RepoScoreError:
+            if snapshot_id is None:
+                raise
+            # A bad snapshot would fail every later candidate, so this scorer
+            # drops it and unpacks the tree in each stage box from now on.
+            logger.warning("Stage boxes from the stage snapshot failed; stage boxes unpack the tree")
+            with self._stage_snapshot_lock:
+                self._stage_snapshot_id = None
+            relay = self._open_stages(patch, response_dir, None)
+        try:
+            yield relay
+        finally:
+            relay.close()
+
+    def _open_stages(self, patch: str, response_dir: str, snapshot_id: str | None) -> _StageRelay:
+        """Open one evaluation's stage boxes and lay the version out in each.
+
+        Args:
+            patch: The version being scored.
+            response_dir: The call's answer folder, relative to the scorer box.
+            snapshot_id: The stage snapshot the boxes start from, or ``None``
+                to unpack the tree in each box.
+
+        Returns:
+            The relay over the open boxes; the caller closes it.
+
+        Raises:
+            RepoScoreError: When a stage box cannot open for a reason other
+                than the budget, or cannot lay out the version.
+            BudgetReached: And the other budget errors, from a stage box.
+        """
+        evaluation_id = uuid.uuid4().hex
         specs = {
             name: stage_spec(
                 name,
@@ -646,9 +680,10 @@ class RepoScorer:
                 laid_out = [False]
             if not all(laid_out):
                 raise RepoScoreError("A stage box could not lay out the version, so it has no score.")
-            yield relay
-        finally:
+        except BaseException:
             relay.close()
+            raise
+        return relay
 
     @contextlib.contextmanager
     def _service_relay(self, role: str, response_dir: str) -> Iterator[_StageRelay | None]:
@@ -730,7 +765,7 @@ class RepoScorer:
             BudgetReached: And the other budget errors, from the builder box.
         """
         take = getattr(self._stage_runtime, "snapshot", None)
-        if take is None or not self._stages:
+        if take is None or not getattr(self._stage_runtime, "supports_snapshots", False) or not self._stages:
             return None
         with self._stage_snapshot_lock:
             if self._stage_snapshot_done:
