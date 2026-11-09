@@ -224,10 +224,6 @@ class SandboxControl(Protocol):
         """Set the most a guest-opened box may reach besides the relay."""
         ...
 
-    def stop_waiting(self) -> None:
-        """Refuse new sandboxes and end opens that still wait for capacity."""
-        ...
-
     def close(self) -> None:
         """Stop every owned sandbox and settle its confirmed usage."""
         ...
@@ -1390,8 +1386,6 @@ class ModelGateway:
         for route in self._routes.values():
             route.stop_batch()
         try:
-            if self._sandbox is not None:
-                self._sandbox.stop_waiting()
             self._server.shutdown()
             self._server.server_close()
             self._thread.join(timeout=2)

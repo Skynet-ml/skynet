@@ -62,7 +62,6 @@ from ..sandbox import (
     CommandResult,
     SandboxSpec,
 )
-from ..sandbox_broker import ENGINE_BOX_KEY_PREFIX
 from ..workspace_scorer import case_document
 
 
@@ -2301,10 +2300,10 @@ class ProtectedRuntime(FakeRuntime):
     protected = True
 
 
-def test_protected_native_box_asks_the_parent_broker_for_an_engine_box_permit(
+def test_protected_native_box_opens_with_no_box_permit_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A protected engine box carries the identity that makes the parent broker count it.
+    """A protected engine box carries no request identity, because no parent permit counts it (SKY-540).
 
     Args:
         tmp_path: Artifact destination.
@@ -2318,31 +2317,11 @@ def test_protected_native_box_asks_the_parent_broker_for_an_engine_box_permit(
     )
 
     assert runtime.spec is not None
-    assert runtime.spec.operation_key is not None
-    assert runtime.spec.operation_key.startswith(ENGINE_BOX_KEY_PREFIX)
-    assert len(runtime.spec.operation_key) > len(ENGINE_BOX_KEY_PREFIX)
-
-
-def test_direct_native_box_has_no_engine_box_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A runtime with no parent broker gets no request identity, as before.
-
-    Args:
-        tmp_path: Artifact destination.
-        monkeypatch: Pytest fixture for the source archive.
-    """
-    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
-    runtime = FakeRuntime(FakeSession())
-
-    run_native_engine(
-        "autoresearch", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=2), _context(tmp_path, runtime)
-    )
-
-    assert runtime.spec is not None
     assert runtime.spec.operation_key is None
 
 
 def test_cancelled_native_run_closes_its_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cancel that ends the engine command closes the box, so the parent broker frees its permit.
+    """A cancel that ends the engine command closes the box.
 
     Args:
         tmp_path: Artifact destination.
@@ -2368,6 +2347,32 @@ def test_cancelled_native_run_closes_its_box(tmp_path: Path, monkeypatch: pytest
             "autoresearch",
             Task("seed"),
             EvalServer(lambda *_: (0.5, {}), max_evals=3),
+            _context(tmp_path, ProtectedRuntime(session)),
+        )
+
+    assert session.closed
+
+
+def test_a_mailbox_setup_failure_still_closes_the_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box opens before the evaluator mailbox, so a mailbox failure must not leak the paid box.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive and the mailbox.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+
+    def broken_mailbox(*_args: Any, **_kwargs: Any) -> None:
+        """Fail like a mailbox that cannot start."""
+        raise RuntimeError("mailbox setup failed")
+
+    monkeypatch.setattr(native_runtime, "_EvaluatorMailbox", broken_mailbox)
+    session = FakeSession()
+    with pytest.raises(RuntimeError, match="mailbox setup failed"):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=2),
             _context(tmp_path, ProtectedRuntime(session)),
         )
 
