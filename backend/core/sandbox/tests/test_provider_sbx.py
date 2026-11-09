@@ -23,7 +23,6 @@ from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import (
-    RunTimeoutError,
     SandboxError,
     SandboxFatalError,
     SandboxInfraError,
@@ -705,20 +704,20 @@ async def test_stop_logs_a_failed_delete(caplog: pytest.LogCaptureFixture) -> No
 
 
 async def test_run_timeout_kills_the_command() -> None:
-    """Raise RunTimeoutError and kill a command that runs past its limit."""
+    """Return a timed-out result and kill a command that runs past its limit."""
     async with SbxEnvironment(_spec()) as env:
         CLOUD.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 100", timeout_sec=0.1)
+        result = await env.exec("sleep 100", timeout_sec=0.1)
+        assert (result.exit_code, result.timed_out) == (124, True)
         assert CLOUD.killed == list(CLOUD.processes)
 
 
 async def test_run_timeout_bounds_a_hanging_command_start() -> None:
-    """Raise RunTimeoutError when the process create call does not answer."""
+    """Return a timed-out result when the process create call does not answer."""
     async with SbxEnvironment(_spec()) as env:
         CLOUD.process_create_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 100", timeout_sec=0.1)
+        result = await env.exec("sleep 100", timeout_sec=0.1)
+        assert (result.exit_code, result.timed_out) == (124, True)
         assert CLOUD.killed == []
 
 

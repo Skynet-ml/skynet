@@ -23,7 +23,6 @@ from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
 from core.sandbox.errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -799,11 +798,11 @@ async def test_exec_before_start_is_an_infra_error() -> None:
 
 
 async def test_a_timed_out_command_is_killed(fake_sdk: FakeCloud) -> None:
-    """Kill the command and raise RunTimeoutError at the time limit."""
+    """Kill the command and return a timed-out result at the time limit."""
     async with RunloopEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.05)
+        result = await env.exec("true", timeout_sec=0.05)
+        assert (result.exit_code, result.timed_out) == (124, True)
     assert len(fake_sdk.killed) == 1
 
 
@@ -811,8 +810,8 @@ async def test_the_run_timeout_is_the_default_limit(fake_sdk: FakeCloud) -> None
     """Use the run phase timeout when the call sets no limit."""
     async with RunloopEnvironment(_spec(), timeouts=_timeouts(run=0.05)) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true")
+        result = await env.exec("true")
+        assert (result.exit_code, result.timed_out) == (124, True)
     assert len(fake_sdk.killed) == 1
 
 
