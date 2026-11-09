@@ -74,15 +74,9 @@ SHAPE_MESSAGE_KEY = "contract.shape.blackbox"
 
 R = TypeVar("R")
 
-# No setting holds a box limit yet. One call fans out to at most eight
-# final-run cases or a contract check's few samples, so 16 lets two such
-# calls run at once. SBX-23 moves the limit to a setting shared across pods.
-POOL_BOX_LIMIT = 16
 POOL_PROVIDER = "blackbox-sync"
 # A slot box opens nothing, but the spec check needs a finite lifetime.
 _SLOT_LIFETIME_SECONDS = 24 * 3600.0
-
-_pool_state: tuple[asyncio.AbstractEventLoop, SandboxPool, anyio.CapacityLimiter] | None = None
 
 
 class _SkippedError(Exception):
@@ -97,7 +91,7 @@ class _SlotBox(SandboxEnvironment):
     """Hold one pool permit while a sync scorer call runs; it opens no sandbox.
 
     The scorers still open their own sandboxes through the sync runtime, so
-    this box only counts the call against the process box limit.
+    this box only counts the call against its fan-out's ``workers``.
     """
 
     capabilities: ClassVar[EnvironmentCapabilities] = EnvironmentCapabilities(name=POOL_PROVIDER)
@@ -171,15 +165,15 @@ class _SlotBox(SandboxEnvironment):
 def run_on_pool(phase: Phase, calls: Sequence[Callable[[], R]], workers: int) -> list[R]:
     """Run sync calls on the process sandbox pool, one box per call, and keep their order.
 
-    Every call counts against the one process limit ``POOL_BOX_LIMIT``. Each
+    Only ``workers`` bounds the calls in flight; Skynet sets no process box
+    limit, since the user controls spend with the run's budget. Each
     call runs in its own thread with a copy of the caller's context, so run
     and usage scopes reach it. After the first failure no further call
     starts, and the failure of the earliest call is raised once the calls
     in flight end. A failure can be any exception, also a ``BaseException``
     such as ``BudgetReached``; it is raised in the caller's thread, not on
     the shared portal loop. A cancel waits for the calls in flight, then
-    releases every permit. Do not call this from inside a pooled call: the
-    nested call can wait forever for a permit at the box limit.
+    releases every permit.
 
     Args:
         phase: ``Phase.RUN`` for final-run cases, ``Phase.SCORE`` for scorer cases.
@@ -204,28 +198,6 @@ def run_on_pool(phase: Phase, calls: Sequence[Callable[[], R]], workers: int) ->
     return results
 
 
-def _pool() -> tuple[SandboxPool, anyio.CapacityLimiter]:
-    """Return this event loop's pool and thread limiter, and make them on first use.
-
-    The pool binds to one loop; a new portal loop after ``sync_bridge.shutdown``
-    gets a new pool. Only the portal thread calls this, so no lock is needed.
-
-    Returns:
-        The pool and the limiter of its worker threads.
-    """
-    global _pool_state
-    loop = asyncio.get_running_loop()
-    if _pool_state is None or _pool_state[0] is not loop:
-        # An explicit limiter: anyio's default of 40 threads is shared with
-        # other work on the loop and must not cap the pool below its limit.
-        _pool_state = (
-            loop,
-            SandboxPool({POOL_PROVIDER: POOL_BOX_LIMIT}),
-            anyio.CapacityLimiter(POOL_BOX_LIMIT),
-        )
-    return _pool_state[1], _pool_state[2]
-
-
 async def _run_on_pool(
     phase: Phase, items: list[tuple[contextvars.Context, Callable[[], R]]], workers: int
 ) -> tuple[list[R], BaseException | None]:
@@ -243,7 +215,11 @@ async def _run_on_pool(
         Each call's result in the items' order and no error, or no results
         and the error of the earliest call that failed.
     """
-    pool, limiter = _pool()
+    # A pool for each fan-out: no limit is shared, so one fan-out never
+    # waits for another's boxes. An explicit thread limiter, because anyio's
+    # default of 40 threads is shared with other work on the loop.
+    pool = SandboxPool({POOL_PROVIDER: workers})
+    limiter = anyio.CapacityLimiter(workers)
     results: dict[int, R] = {}
     errors: dict[int, BaseException] = {}
 
@@ -332,7 +308,7 @@ async def _in_thread(context: contextvars.Context, func: Callable[[], R], limite
 
     A thread cannot be stopped, so a cancel waits for the call to end before
     it goes on. The box permit is then held until the thread ends, and the
-    pool never has more than its limit of calls running.
+    pool never has more than its ``workers`` calls running.
 
     Args:
         context: The caller's context copy to run the call in.
