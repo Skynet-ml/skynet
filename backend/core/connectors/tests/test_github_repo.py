@@ -186,7 +186,7 @@ def test_a_spent_rate_limit_is_not_a_refusal(status: int, headers: dict[str, str
 
 
 def test_resolve_commit_reports_the_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An anonymous lookup stopped by the rate limit says so, not that the repository is missing."""
+    """A spent rate limit says so, not that the repository is missing; only an anonymous read advises to connect."""
 
     def answer(request: httpx.Request) -> httpx.Response:
         """Answer like GitHub after the anonymous quota is spent."""
@@ -194,5 +194,10 @@ def test_resolve_commit_reports_the_rate_limit(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(transport, "CLIENT", httpx.Client(transport=httpx.MockTransport(answer)))
 
-    with pytest.raises(RepoRateLimitError, match=r"rate limit is reached"):
+    with pytest.raises(RepoRateLimitError) as anonymous:
         resolve_commit(None, "acme/app", None)
+    with pytest.raises(RepoRateLimitError) as linked:
+        resolve_commit("gh-token", "acme/app", None)
+
+    assert str(anonymous.value) == "GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit."
+    assert str(linked.value) == "GitHub's rate limit is reached. Try again later."

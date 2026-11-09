@@ -321,7 +321,7 @@
     "connectors.invalid_credentials": "פרטי הגישה נדחו. בדקו אותם ונסו שוב.",
     "connectors.rejected": "{provider} דחה את הבקשה. ייתכן שלפרטי הגישה שלכם אין הרשאה לפריט הזה.",
     "connectors.not_found": "הפריט לא נמצא ב-{provider}, או שלחשבון שלכם אין גישה אליו.",
-    "connectors.rate_limited": "הגעתם למגבלת הבקשות של {provider}. נסו שוב מאוחר יותר. חיבור {provider} מגדיל את המגבלה.",
+    "connectors.rate_limited": "הגעתם למגבלת הבקשות של {provider}. נסו שוב מאוחר יותר.",
     "connectors.provider_error": "{provider} החזיר שגיאה לא צפויה (HTTP {status_code}). נסו שוב בעוד רגע.",
     "connectors.query_failed": "{provider} לא הצליח להריץ את השאילתה: {reason}",
     "connectors.file_unsupported": "לא ניתן לקרוא את הקובץ כטבלה. פורמטים נתמכים: CSV, TSV, JSON, JSONL ו-Parquet.",

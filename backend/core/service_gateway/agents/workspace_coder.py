@@ -21,6 +21,7 @@ import dspy
 from ...api.errors import DomainError
 from ...brand import APP_NAME
 from ...connectors import github, repo_hosts
+from ...connectors.github_repo import rate_limit_message
 from ...connectors.transport import label
 from .conversation_react import ConversationReAct
 from .repo_browser import RepoBrowser
@@ -187,7 +188,7 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
     except Exception as exc:  # any host failure leaves the agent without the repository, not the turn
         logger.info("Coding agent cannot open %s: %s", repository, type(exc).__name__)
         if isinstance(exc, DomainError) and exc.code == "connectors.rate_limited":
-            return None, f"{host}'s rate limit is reached. Try again later. Connecting {host} raises the limit."
+            return None, rate_limit_message(host, token is None)
         if token is None:
             return None, (
                 f"{host} refused to list {repository}. Without a {host} connection, only a public repository"

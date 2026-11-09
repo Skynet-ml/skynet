@@ -436,7 +436,7 @@ def test_coder_prompt_writes_the_cases_into_a_jsonl_file_named_in_data() -> None
 
 
 def test_coding_agent_reports_the_rate_limit_not_a_private_repository(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A spent rate limit names the limit, with or without a link, instead of the public-only advice."""
+    """A spent rate limit names the limit instead of the public-only advice; only an unlinked read advises to connect."""
 
     def limited(token: str | None, full_name: str, branch: str) -> dict[str, Any]:
         """Answer like GitHub after the quota is spent."""
@@ -444,7 +444,10 @@ def test_coding_agent_reports_the_rate_limit_not_a_private_repository(monkeypatc
 
     monkeypatch.setattr(workspace_coder.github, "tree_entries", limited)
 
-    for token_fn in (None, lambda: "gh-token"):
-        browser, reason = open_repo({**_REPO_METRIC, "github_connected": token_fn is not None}, token_fn)
-        assert browser is None
-        assert reason == "GitHub's rate limit is reached. Try again later. Connecting GitHub raises the limit."
+    browser, reason = open_repo({**_REPO_METRIC, "github_connected": False}, None)
+    linked_browser, linked_reason = open_repo(_REPO_METRIC, lambda: "gh-token")
+
+    assert browser is None
+    assert reason == "GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit."
+    assert linked_browser is None
+    assert linked_reason == "GitHub's rate limit is reached. Try again later."

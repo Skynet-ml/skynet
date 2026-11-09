@@ -423,7 +423,7 @@ def test_a_rate_limited_anonymous_lookup_keeps_the_rate_limit_error(monkeypatch:
 
     def resolve(token: str | None, repository: str, branch: str | None) -> str:
         """Fail the lookup the way a spent anonymous quota does."""
-        raise RepoRateLimitError("GitHub's rate limit is reached. Try again later. Connecting GitHub raises the limit.")
+        raise RepoRateLimitError("GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit.")
 
     monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
     monkeypatch.setattr(repo_staging, "github_token", _no_connection)
@@ -432,7 +432,7 @@ def test_a_rate_limited_anonymous_lookup_keeps_the_rate_limit_error(monkeypatch:
     with pytest.raises(RepoRateLimitError) as raised:
         repo_staging.stage_repository(_payload(None), username="alice", binding_id="b", engine=None)
 
-    assert "only a public repository" not in str(raised.value)
+    assert str(raised.value) == "GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit."
 
 
 def test_a_failed_anonymous_clone_says_to_connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

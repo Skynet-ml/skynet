@@ -46,7 +46,21 @@ class RepoFetchError(RuntimeError):
 
 
 class RepoRateLimitError(RepoFetchError):
-    """GitHub's rate limit stopped the lookup, so the repository itself may be readable."""
+    """The host's rate limit stopped the lookup, so the repository itself may be readable."""
+
+
+def rate_limit_message(host: str, anonymous: bool) -> str:
+    """Explain a spent rate limit, with the advice to connect only for a read without a token.
+
+    Args:
+        host: The repository host's display name.
+        anonymous: Whether the read ran without a token.
+
+    Returns:
+        The message for the run's owner.
+    """
+    message = f"{host}'s rate limit is reached. Try again later."
+    return f"{message} Connect {host} to raise the limit." if anonymous else message
 
 
 @dataclass(frozen=True)
@@ -104,9 +118,7 @@ def resolve_commit(token: str | None, repository: str, branch: str | None) -> st
         return str(get_json(url, provider=PROVIDER, headers=headers)["sha"])
     except DomainError as error:
         if error.code == "connectors.rate_limited":
-            raise RepoRateLimitError(
-                "GitHub's rate limit is reached. Try again later. Connecting GitHub raises the limit."
-            ) from error
+            raise RepoRateLimitError(rate_limit_message("GitHub", not token)) from error
         raise RepoFetchError(f"GitHub could not find {repository} at '{branch or 'its default branch'}'.") from error
 
 
