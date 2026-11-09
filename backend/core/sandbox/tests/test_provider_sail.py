@@ -23,7 +23,7 @@ import pytest
 from core.config import settings
 from core.sandbox import factory
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
-from core.sandbox.errors import RunTimeoutError, SandboxFatalError, SandboxInfraError, StartTimeoutError
+from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.providers import sail
 from core.sandbox.providers.sail import SailEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -566,29 +566,29 @@ async def test_exec_sends_env_user_timeout_and_cwd(fake_sdk: FakeCloud) -> None:
     assert second["timeout"] == 3
 
 
-async def test_a_timed_out_command_raises(fake_sdk: FakeCloud) -> None:
-    """Raise RunTimeoutError when Sail reports a timeout."""
+async def test_a_timed_out_command_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
+    """Return a timed-out result when Sail reports a timeout."""
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_times_out = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=1)
+        result = await env.exec("true", timeout_sec=1)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
-async def test_a_timed_out_command_without_a_limit_raises(fake_sdk: FakeCloud) -> None:
-    """Raise RunTimeoutError when Sail reports a timeout and no limit is set."""
+async def test_a_timed_out_command_without_a_limit_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
+    """Return a timed-out result when Sail reports a timeout and no limit is set."""
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_times_out = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true")
+        result = await env.exec("true")
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
-async def test_a_hung_run_call_raises_a_run_timeout(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_hung_run_call_returns_a_timed_out_result(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
     """End a run call that the SDK never returns, after the limit and the grace."""
     monkeypatch.setattr(sail, "EXEC_GRACE", 0.01)
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.01)
+        result = await env.exec("true", timeout_sec=0.01)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_truncated_output_logs_a_warning(fake_sdk: FakeCloud, caplog: pytest.LogCaptureFixture) -> None:

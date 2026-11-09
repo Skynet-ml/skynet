@@ -39,7 +39,6 @@ from typing import Any
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -94,6 +93,8 @@ _UNBOUNDED_POLLS = 10**9
 _MAX_KEEP_ALIVE_SECONDS = 172_800
 _MAX_MEMORY_GB = 64
 _ENDED_STATUSES = frozenset({"failure", "shutdown"})
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Runloop custom sizes: 1 or an even number of vCPUs up to 16, even GiB of
@@ -463,13 +464,14 @@ class RunloopEnvironment(SandboxEnvironment):
             sudo: Has no effect: the devbox already runs commands as root.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, it is killed first, and the result has exit code
+            124 and ``timed_out`` set.
 
         Raises:
             SandboxInfraError: The devbox is not running, or Runloop gave no
                 exit code.
             SandboxRejectedError: An environment variable name is not valid.
-            RunTimeoutError: The command ran past the time limit. It is killed first.
         """
         devbox, client = self._devbox, self._client
         if devbox is None or client is None:
@@ -485,6 +487,7 @@ class RunloopEnvironment(SandboxEnvironment):
             execution = await devbox.cmd.exec_async(wrapped, **callbacks)
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
         finished = False
+        timed_out = False
         try:
             async with asyncio.timeout(limit) as deadline:
                 with _mapped("wait for the command"):
@@ -498,11 +501,13 @@ class RunloopEnvironment(SandboxEnvironment):
         except TimeoutError:
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit) from None
+            timed_out = True
         finally:
             if not finished:
                 # A timeout, a cancel or a lost wait must not leave the command running.
                 await asyncio.shield(_kill(execution))
+        if timed_out:
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
         if result.exit_code is None:
             raise SandboxInfraError("Runloop gave no exit code for the command.")
         return ExecResult(exit_code=result.exit_code, stdout=stdout, stderr=stderr)

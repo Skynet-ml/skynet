@@ -40,7 +40,6 @@ from typing import Any
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -90,6 +89,8 @@ _NO_LIMIT_SECONDS = 24 * 60 * 60
 # The asyncio start timeout bounds the wait, so the SDK budget must never end it first.
 _UNBOUNDED_WAIT = 10**6
 _ENDED_STATUSES = frozenset({"ERROR", "TERMINATED", "TIMEOUT"})
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
 # The SDK gateway upload and read calls say "failed" or "timed out" for a
@@ -410,12 +411,12 @@ class PrimeEnvironment(SandboxEnvironment):
             sudo: Has no effect: the sandbox already runs commands as root.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, the result has exit code 124 and ``timed_out`` set.
 
         Raises:
             SandboxInfraError: The sandbox is not running.
             SandboxRejectedError: An environment variable name is not valid.
-            RunTimeoutError: The command ran past the time limit.
         """
         client, sandbox_id = self._running()
         for key in env or {}:
@@ -432,9 +433,9 @@ class PrimeEnvironment(SandboxEnvironment):
         except TimeoutError:
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit) from None
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
         except _classes(CommandTimeoutError):
-            raise RunTimeoutError(limit if limit is not None else _NO_LIMIT_SECONDS) from None
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
         stdout, stderr = response.stdout or "", response.stderr or ""
         if on_output is not None:
             if stdout:

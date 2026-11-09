@@ -56,7 +56,6 @@ import httpx
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -99,6 +98,8 @@ _PRECONDITION_FAILED = frozenset({409, 412})
 _SAFE_CODE = re.compile(r"[A-Za-z_]+")
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 _CREDENTIAL_PERMISSIONS = ["sandboxesExec", "sandboxesFilesRead", "sandboxesFilesWrite"]
 _DOWNLOAD_PARTS = frozenset({b"metadata", b"content", b"error", b"stream-error"})
 # The sbx Cloud shapes as (vCPUs, memory in MiB).
@@ -671,11 +672,12 @@ class _Capture:
         if text:
             self.on_output(stream, text)
 
-    def result(self, exit_code: int) -> ExecResult:
+    def result(self, exit_code: int, *, timed_out: bool = False) -> ExecResult:
         """Build the command result.
 
         Args:
             exit_code: The process exit code.
+            timed_out: The command ran past its time limit.
 
         Returns:
             The exit code and the decoded output.
@@ -684,6 +686,7 @@ class _Capture:
             exit_code=exit_code,
             stdout=self.buffers["stdout"].decode("utf-8", "replace"),
             stderr=self.buffers["stderr"].decode("utf-8", "replace"),
+            timed_out=timed_out,
         )
 
 
@@ -1096,13 +1099,14 @@ class SbxEnvironment(SandboxEnvironment):
             sudo: Run the command as root instead of the sandbox user.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, it is killed first, and the result has exit code
+            124, ``timed_out`` set and the output so far.
 
         Raises:
             SandboxInfraError: The sandbox is not running, or sbx gave an
                 invalid process answer.
             SandboxRejectedError: An environment variable name is not valid.
-            RunTimeoutError: The command ran past the time limit. It is killed first.
         """
         runtime = self._runtime
         if runtime is None:
@@ -1123,6 +1127,7 @@ class SbxEnvironment(SandboxEnvironment):
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
         process_path: str | None = None
         finished = False
+        timed_out = False
         try:
             async with asyncio.timeout(limit) as deadline:
                 response = await _call(
@@ -1139,12 +1144,14 @@ class SbxEnvironment(SandboxEnvironment):
         except TimeoutError:
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit) from None
+            timed_out = True
         finally:
             # A timeout, a cancel or a lost wait must not leave the command
             # running. With no process name yet there is nothing to kill.
             if not finished and process_path is not None:
                 await asyncio.shield(_kill(runtime, process_path))
+        if timed_out:
+            return capture.result(_TIMEOUT_EXIT_CODE, timed_out=True)
         return capture.result(exit_code)
 
     @staticmethod

@@ -488,6 +488,53 @@ async def test_failed_stop_still_stops_the_rest() -> None:
     assert [command.split(".svc-")[1].split(".pid")[0] for command, _ in env.calls] == ["app", "db"]
 
 
+class TimedOutEnv(FakeEnv):
+    """Return a timed-out result for the commands that contain one substring."""
+
+    def __init__(self, part: str) -> None:
+        """Keep the substring of the commands that time out.
+
+        Args:
+            part: A command substring.
+        """
+        super().__init__()
+        self.part = part
+
+    async def exec(self, command: str, **kwargs: Any) -> ExecResult:
+        """Log one command, and return exit code 124 and timed_out when it matches.
+
+        Args:
+            command: The shell command.
+            kwargs: The exec options.
+
+        Returns:
+            The result.
+        """
+        result = await super().exec(command, **kwargs)
+        if self.part in command:
+            return ExecResult(exit_code=124, timed_out=True)
+        return result
+
+
+async def test_timed_out_launch_names_the_service_and_keeps_it_for_the_stop() -> None:
+    """Check that a launch past its time limit stops the start and the service is still stopped later."""
+    env = TimedOutEnv("svc-cache.pid")
+    started: list[ComposeService] = []
+    with pytest.raises(SandboxInfraError, match="cache did not start: exit code 124"):
+        await start_services(env, parse_compose(COMPOSE), started)
+    assert [service.name for service in started] == ["db", "cache"]
+
+
+async def test_timed_out_stop_still_stops_the_rest(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that a stop past its time limit does not end the stop of the other services."""
+    env = TimedOutEnv("svc-cache")
+    started = [_service("db"), _service("cache"), _service("app")]
+    await stop_services(env, started)
+    assert [command.split(".svc-")[1].split(".pid")[0] for command, _ in env.calls] == ["app", "cache", "db"]
+    assert started == []
+    assert "did not stop" not in caplog.text
+
+
 async def test_healthcheck_runs_in_the_service_dir_and_env() -> None:
     """Check that the health poll gets the working_dir and env of its service on the command line."""
     (db,) = parse_compose(
