@@ -999,6 +999,17 @@ def test_dockerfile_bakes_shinka_into_the_venv_the_runtime_uses() -> None:
     assert f'{native_runtime.SHINKA_IMAGE_PYTHON} -c "import shinka.core.async_runner"' in dockerfile
 
 
+def test_dockerfile_gives_the_sandbox_image_sudo_for_root_setup() -> None:
+    """Ship sudo and a NOPASSWD rule for the image user, so Vercel can run the root Codex setup (SKY-529)."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    assert "ARG INCLUDE_SANDBOX_SUDO=false" in dockerfile
+    assert '[ "$INCLUDE_SANDBOX_SUDO" = "1" ]' in dockerfile
+    assert "apt-get install -y --no-install-recommends sudo" in dockerfile
+    assert "'appuser ALL=(ALL) NOPASSWD:ALL'" in dockerfile
+    assert "useradd -u 1001 -g 0 -m -s /sbin/nologin appuser" in dockerfile
+    assert "\nUSER 1001\n" in dockerfile
+
+
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:
     """Report ShinkaEvolve readiness from the image's own venv rather than the backend interpreter.
 
