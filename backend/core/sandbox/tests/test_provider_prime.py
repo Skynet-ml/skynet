@@ -530,7 +530,7 @@ def test_create_fields_defaults() -> None:
     """Use the default image, a short name and no secrets for a bare spec."""
     env = PrimeEnvironment(_spec(lifetime_seconds=1))
     fields = env._create_fields
-    assert fields["docker_image"] == prime.DEFAULT_IMAGE
+    assert fields["docker_image"] == prime.DEFAULT_IMAGE == "python:3.12.15-slim"
     assert fields["name"] == f"skynet-{env._box_tag[:12]}"
     assert fields["timeout_minutes"] == 1
     assert "secrets" not in fields

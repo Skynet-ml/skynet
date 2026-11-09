@@ -42,7 +42,7 @@ RUN case "$TARGETARCH" in \
 # 3.12 for PEP 683 immortal objects: core interpreter objects stop taking
 # refcount writes, so job children fork()ed from the fat parent dirty far
 # fewer copy-on-write pages. Full test suite verified green on 3.12.
-FROM docker.io/python:3.12-slim
+FROM docker.io/python:3.12.15-slim
 
 WORKDIR /app
 

@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 
 API_KEY_ENV = "PRIME_API_KEY"
 BOX_TAG = "skynet_box"
-DEFAULT_IMAGE = "python:3.12-slim"
+DEFAULT_IMAGE = "python:3.12.15-slim"
 STOP_TIMEOUT = 60.0
 POLL_INTERVAL = 1.0
 NETWORK_APPLY_TIMEOUT = 30.0
