@@ -693,6 +693,17 @@ async def test_sudo_reaches_the_provider_and_defaults_to_false(client: FakeClien
     await env.stop()
 
 
+async def test_kill_timer_is_capped_while_the_command_keeps_its_timeout(client: FakeClient, log: list[str]) -> None:
+    """Check that a timeout above the cap gives an 18 000 s kill timer and the full command timeout."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=20_000)
+    call = client.boxes[env.name].create_calls[0]
+    assert call["kill_after"] == vercel.KILL_AFTER_MAX == 18_000
+    assert "timeout --signal=KILL 20000s" in call["args"][-1]
+    await env.stop()
+
+
 async def test_wait_survives_19_transport_errors(client: FakeClient, log: list[str]) -> None:
     """Check that 19 transport errors still end with the code from wait()."""
     env = make_env(client, log)

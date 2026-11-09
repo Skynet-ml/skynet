@@ -3,24 +3,32 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from sqlalchemy import Engine, create_engine, select
+from sqlalchemy.orm import Session
+from vercel.sandbox import SandboxApiError
 
 from core.billing import vercel_usage
+from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
-from core.billing.runtime import UsagePendingError
+from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.vercel_usage import (
     PROPOSER_REGISTRY_HOSTS,
     SANDBOX_NETWORK_BYTES_CAP,
+    VercelUsageReservation,
     proposer_hosts,
     quote_vercel_sandbox,
     vercel_actual_usd,
     vercel_sandbox_cost_range,
 )
 from core.config import settings
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
 
 IMAGE = "vcr.example/skynet/optimizer@sha256:" + "a" * 64
 CREATE = {
@@ -58,6 +66,79 @@ RECEIPT = {
 def _at_cost_markup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the usage markup to 1.0 so these tests check settlement arithmetic, not pricing policy."""
     monkeypatch.setattr(settings, "usage_markup", 1.0)
+
+
+@pytest.fixture
+def database(tmp_path: Path) -> Iterator[Engine]:
+    """Create a private funded wallet and ledger for real admission tests.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite file.
+
+    Yields:
+        The engine bound to the funded ledger.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'vercel.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=100, grant_remaining=0)
+        )
+        session.commit()
+    yield engine
+    engine.dispose()
+
+
+def _runtime(database: Engine) -> BudgetRuntime:
+    """Bind a real budget runtime to the local ledger.
+
+    Args:
+        database: Engine of the funded ledger.
+
+    Returns:
+        A runtime for a fresh 50-cent budget owned by ``alice``.
+    """
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    return BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+
+
+def _create_request() -> httpx.Request:
+    """Build the create request that ``fail`` recognizes as the provider's create call.
+
+    Returns:
+        A POST request to the Vercel sandbox create endpoint.
+    """
+    return httpx.Request("POST", "https://vercel.com/api/v3/sandboxes")
+
+
+def test_lost_creation_response_keeps_the_hold_and_refuses_a_replay(database: Engine) -> None:
+    """Keep a hold pending after a lost create response and refuse a second dispatch for the same key."""
+    runtime = _runtime(database)
+    reservation = VercelUsageReservation(runtime, CREATE, operation_key="evaluation-one")
+    reservation.fail(httpx.ReadError("creation response lost", request=_create_request()))
+    with pytest.raises(UsagePendingError, match="already dispatched"):
+        VercelUsageReservation(runtime, CREATE, operation_key="evaluation-one")
+    assert len(runtime._pinned) == 1
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    with Session(database) as session:
+        assert session.scalar(select(ExecutionOperationModel)).state == "pending"
+
+
+def test_refused_creation_without_a_session_releases_the_hold(database: Engine) -> None:
+    """Release the hold when the provider answers the create call with a 400 and no session exists."""
+    runtime = _runtime(database)
+    reservation = VercelUsageReservation(runtime, CREATE, operation_key="evaluation-one")
+    response = httpx.Response(400, request=_create_request())
+    reservation.fail(SandboxApiError(response, "Invalid request: `timeout` should be <= 86400000."))
+    assert runtime._pinned == {}
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.pending_operations == 0
+    assert snapshot.reserved_cents == 0
+    with Session(database) as session:
+        assert session.scalar(select(ExecutionOperationModel)).state == "released"
 
 
 def test_quote_covers_all_regions_and_settles_cpu_separately_from_wall_time() -> None:
