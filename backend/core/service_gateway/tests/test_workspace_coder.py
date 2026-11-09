@@ -12,6 +12,7 @@ import dspy
 import litellm
 import pytest
 
+from core.api.errors import DomainError
 from core.config import settings
 from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents import repo_browser, workspace_coder
@@ -85,23 +86,25 @@ class _ScriptedLM(dspy.BaseLM):
         )
 
 
-def _fake_github(monkeypatch: pytest.MonkeyPatch, reads: list[str]) -> None:
+def _fake_github(monkeypatch: pytest.MonkeyPatch, reads: list[str], token_seen: str | None = "gh-token") -> None:
     """Stand in for GitHub at the ``github`` module boundary.
 
     Args:
         monkeypatch: The test's monkeypatch.
         reads: Collects every file path read.
+        token_seen: The token every call must carry; ``None`` for an anonymous read.
     """
 
     def tree_entries(token: str | None, full_name: str, branch: str) -> dict[str, Any]:
         """List a small repository."""
-        assert token == "gh-token"
+        assert token == token_seen
         assert full_name == "acme/shop"
         paths = ["README.md", "pyproject.toml", "tests/test_app.py"]
         return {"entries": [{"path": p, "type": "file", "size": 10} for p in paths], "truncated": False}
 
-    def read_text_file(token: str, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
+    def read_text_file(token: str | None, full_name: str, branch: str, path: str, max_bytes: int) -> tuple[str, bool]:
         """Return the file's name as its text."""
+        assert token == token_seen
         reads.append(path)
         return f"contents of {path}", False
 
@@ -163,20 +166,19 @@ def test_coding_agent_is_offered_on_the_metric_screen_only() -> None:
     assert coding_agent_tools(other, turn, lm=None, emit=lambda _e: None, github_token=None) == []
 
 
-def test_coding_agent_reads_the_repository_only_for_a_linked_repository_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The repository tools come only with a repository run, GitHub linked and a token."""
+def test_coding_agent_reads_the_repository_only_for_a_repository_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repository tools come with a repository run; a linked caller reads with its token."""
     _fake_github(monkeypatch, [])
 
     def token() -> str:
         """Return the caller's token."""
         return "gh-token"
 
+    gitlab_run = {**_REPO_METRIC, "repo_provider": "gitlab"}
     cases: list[tuple[dict[str, Any], Any]] = [
         ({**_REPO_METRIC, "artifact_kind": "dspy_program"}, token),
-        ({**_REPO_METRIC, "github_connected": False}, token),
-        ({k: v for k, v in _REPO_METRIC.items() if k != "github_connected"}, token),
-        (_REPO_METRIC, None),
-        (_REPO_METRIC, lambda: None),
+        (gitlab_run, None),
+        (gitlab_run, lambda: None),
     ]
     for state, token_fn in cases:
         browser, reason = open_repo(state, token_fn)
@@ -190,8 +192,42 @@ def test_coding_agent_reads_the_repository_only_for_a_linked_repository_run(monk
     assert [tool.name for tool in coder_tools(browser)] == ["list_repo_folder", "read_repo_file"]
 
 
-def test_coding_agent_goes_on_without_the_repository_when_the_token_lookup_fails() -> None:
-    """A vault failure while loading the token leaves the agent without the repository, not failing the turn."""
+def test_coding_agent_reads_a_public_github_repository_without_a_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a GitHub link, the coding agent opens and reads the repository anonymously (SKY-568)."""
+    reads: list[str] = []
+    _fake_github(monkeypatch, reads, token_seen=None)
+    unlinked = {**_REPO_METRIC, "github_connected": False}
+
+    for token_fn in (None, lambda: None, lambda: ""):
+        browser, reason = open_repo(unlinked, token_fn)
+        assert browser is not None
+        assert reason == ""
+        assert [tool.name for tool in coder_tools(browser)] == ["list_repo_folder", "read_repo_file"]
+    assert "README.md" in reads
+
+
+def test_coding_agent_says_only_a_public_repository_reads_without_a_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An anonymous listing that GitHub refuses explains that only a public repository can be read."""
+
+    def missing(token: str | None, full_name: str, branch: str) -> dict[str, Any]:
+        """Answer like GitHub for a private or missing repository."""
+        raise DomainError("connectors.not_found", status=404, provider="GitHub")
+
+    monkeypatch.setattr(workspace_coder.github, "tree_entries", missing)
+
+    browser, reason = open_repo({**_REPO_METRIC, "github_connected": False}, None)
+    linked_browser, linked_reason = open_repo(_REPO_METRIC, lambda: "gh-token")
+
+    assert browser is None
+    assert "only a public repository can be read" in reason
+    assert "Connect GitHub to optimize a private repository." in reason
+    assert linked_browser is None
+    assert linked_reason == "GitHub refused to list acme/shop."
+
+
+def test_coding_agent_reads_anonymously_when_the_token_lookup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A vault failure while loading the token falls back to an anonymous read, not a failed turn."""
+    _fake_github(monkeypatch, [], token_seen=None)
 
     def broken_token() -> str:
         """Fail like a database error inside the vault."""
@@ -199,8 +235,8 @@ def test_coding_agent_goes_on_without_the_repository_when_the_token_lookup_fails
 
     browser, reason = open_repo(_REPO_METRIC, broken_token)
 
-    assert browser is None
-    assert "GitHub is not linked" in reason
+    assert browser is not None
+    assert reason == ""
 
 
 class _Spec:

@@ -168,15 +168,15 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
     if provider not in repo_hosts.HOSTS:
         return None, "The repository host is not supported."
     host = label(provider)
-    # The wizard reports only the GitHub link; for another host the token lookup is the check.
-    if (provider == github.PROVIDER and state.get("github_connected") is not True) or github_token is None:
-        return None, f"{host} is not linked, so the repository cannot be read."
-    try:
-        token = github_token()
-    except Exception as exc:  # a vault or database failure must not fail the whole hand-off
-        logger.info("Coding agent cannot load the %s token: %s", host, type(exc).__name__)
-        token = None
-    if not token:
+    # GitHub serves a public repository without a token (SKY-568); the other hosts still need a link.
+    anonymous_ok = provider == github.PROVIDER
+    token: str | None = None
+    if github_token is not None:
+        try:
+            token = github_token() or None
+        except Exception as exc:  # a vault or database failure must not fail the whole hand-off
+            logger.info("Coding agent cannot load the %s token: %s", host, type(exc).__name__)
+    if token is None and not anonymous_ok:
         return None, f"{host} is not linked, so the repository cannot be read."
     try:
         if provider == github.PROVIDER:
@@ -185,6 +185,11 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
             tree = repo_hosts.host(provider).tree_entries(token, repository, "")
     except Exception as exc:  # any host failure leaves the agent without the repository, not the turn
         logger.info("Coding agent cannot open %s: %s", repository, type(exc).__name__)
+        if token is None:
+            return None, (
+                f"{host} refused to list {repository}. Without a {host} connection, only a public repository"
+                f" can be read. Connect {host} to optimize a private repository."
+            )
         return None, f"{host} refused to list {repository}."
     browser = RepoBrowser(
         provider=provider,
