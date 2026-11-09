@@ -11,10 +11,12 @@ from pathlib import Path
 import httpx
 import pytest
 
+from ...api.errors import DomainError
 from .. import transport
 from ..github_repo import (
     GITHUB_HOST,
     RepoFetchError,
+    RepoRateLimitError,
     commit_summary,
     fetch_snapshot,
     git_auth_env,
@@ -164,3 +166,33 @@ def test_commit_summary_drops_a_commit_without_an_id() -> None:
     """A commit with no id is skipped, and a long title is cut."""
     assert commit_summary(None, "msg", None) is None
     assert len(commit_summary("e" * 40, "x" * 500, None)["title"]) == 120
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "code"),
+    [
+        (403, {"X-RateLimit-Remaining": "0"}, "connectors.rate_limited"),
+        (429, {}, "connectors.rate_limited"),
+        (403, {}, "connectors.rejected"),
+        (403, {"X-RateLimit-Remaining": "12"}, "connectors.rejected"),
+    ],
+)
+def test_a_spent_rate_limit_is_not_a_refusal(status: int, headers: dict[str, str], code: str) -> None:
+    """A 429, or a 403 with no calls left, reports the rate limit; any other 403 stays a refusal (SKY-568)."""
+    with pytest.raises(DomainError) as raised:
+        transport.raise_for_status(httpx.Response(status, headers=headers), "github")
+
+    assert raised.value.code == code
+
+
+def test_resolve_commit_reports_the_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An anonymous lookup stopped by the rate limit says so, not that the repository is missing."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Answer like GitHub after the anonymous quota is spent."""
+        return httpx.Response(403, headers={"X-RateLimit-Remaining": "0"}, json={"message": "API rate limit exceeded"})
+
+    monkeypatch.setattr(transport, "CLIENT", httpx.Client(transport=httpx.MockTransport(answer)))
+
+    with pytest.raises(RepoRateLimitError, match=r"rate limit is reached"):
+        resolve_commit(None, "acme/app", None)

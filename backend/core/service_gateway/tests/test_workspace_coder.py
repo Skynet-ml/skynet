@@ -433,3 +433,18 @@ def test_coder_prompt_writes_the_cases_into_a_jsonl_file_named_in_data() -> None
     assert 'set ``cases = "data/cases.jsonl"`` in ``[data]``' in prompt
     assert "hides the file from the agent and the candidate" in prompt
     assert "write no ``[data]`` section" in prompt
+
+
+def test_coding_agent_reports_the_rate_limit_not_a_private_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spent rate limit names the limit, with or without a link, instead of the public-only advice."""
+
+    def limited(token: str | None, full_name: str, branch: str) -> dict[str, Any]:
+        """Answer like GitHub after the quota is spent."""
+        raise DomainError("connectors.rate_limited", status=429, provider="GitHub")
+
+    monkeypatch.setattr(workspace_coder.github, "tree_entries", limited)
+
+    for token_fn in (None, lambda: "gh-token"):
+        browser, reason = open_repo({**_REPO_METRIC, "github_connected": token_fn is not None}, token_fn)
+        assert browser is None
+        assert reason == "GitHub's rate limit is reached. Try again later. Connecting GitHub raises the limit."

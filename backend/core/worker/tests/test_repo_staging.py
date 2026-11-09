@@ -30,7 +30,7 @@ from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
-from core.connectors.github_repo import RepoFetchError, RepoSnapshot
+from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import ServiceError
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.service_gateway.optimization.blackbox import runner
@@ -416,6 +416,23 @@ def test_a_private_repository_without_a_connection_says_to_connect(monkeypatch: 
     message = str(raised.value)
     assert "GitHub could not find acme/app" in message
     assert "Connect GitHub to optimize a private repository." in message
+
+
+def test_a_rate_limited_anonymous_lookup_keeps_the_rate_limit_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spent rate limit is not rewritten as advice that only a public repository can be read."""
+
+    def resolve(token: str | None, repository: str, branch: str | None) -> str:
+        """Fail the lookup the way a spent anonymous quota does."""
+        raise RepoRateLimitError("GitHub's rate limit is reached. Try again later. Connecting GitHub raises the limit.")
+
+    monkeypatch.setattr(repo_staging, "resolve_repo_secrets", lambda payload, **_: {})
+    monkeypatch.setattr(repo_staging, "github_token", _no_connection)
+    monkeypatch.setattr(repo_staging, "resolve_commit", resolve)
+
+    with pytest.raises(RepoRateLimitError) as raised:
+        repo_staging.stage_repository(_payload(None), username="alice", binding_id="b", engine=None)
+
+    assert "only a public repository" not in str(raised.value)
 
 
 def test_a_failed_anonymous_clone_says_to_connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

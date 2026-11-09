@@ -43,7 +43,14 @@ from ..connectors.github_publish import (
     push_candidates,
     push_version,
 )
-from ..connectors.github_repo import RepoFetchError, RepoSnapshot, fetch_snapshot, github_token, resolve_commit
+from ..connectors.github_repo import (
+    RepoFetchError,
+    RepoRateLimitError,
+    RepoSnapshot,
+    fetch_snapshot,
+    github_token,
+    resolve_commit,
+)
 from ..connectors.saved_secrets import SavedSecretStore
 from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
@@ -330,7 +337,8 @@ def stage_repository(
                 provider, token, repo["repository"], repo.get("branch")
             )
     except RepoFetchError as error:
-        if token is not None:
+        # A spent rate limit says nothing about whether the repository is public.
+        if token is not None or isinstance(error, RepoRateLimitError):
             raise
         raise _anonymous_fetch_error(error, provider) from error
     workdir = Path(tempfile.mkdtemp(prefix="app-repo-"))

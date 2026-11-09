@@ -45,6 +45,10 @@ class RepoFetchError(RuntimeError):
     """Explain, in words a run's owner can act on, why the repository could not be fetched."""
 
 
+class RepoRateLimitError(RepoFetchError):
+    """GitHub's rate limit stopped the lookup, so the repository itself may be readable."""
+
+
 @dataclass(frozen=True)
 class RepoSnapshot:
     """A repository tree fetched at one commit, ready to ship into a sandbox."""
@@ -87,6 +91,7 @@ def resolve_commit(token: str | None, repository: str, branch: str | None) -> st
         The 40-character commit id.
 
     Raises:
+        RepoRateLimitError: When GitHub's rate limit stops the lookup.
         RepoFetchError: When GitHub refuses the lookup.
     """
     headers = _headers(token)
@@ -98,6 +103,10 @@ def resolve_commit(token: str | None, repository: str, branch: str | None) -> st
         url = f"{API_URL}/repos/{repository}/commits/{quote(branch, safe='')}"
         return str(get_json(url, provider=PROVIDER, headers=headers)["sha"])
     except DomainError as error:
+        if error.code == "connectors.rate_limited":
+            raise RepoRateLimitError(
+                "GitHub's rate limit is reached. Try again later. Connecting GitHub raises the limit."
+            ) from error
         raise RepoFetchError(f"GitHub could not find {repository} at '{branch or 'its default branch'}'.") from error
 
 
