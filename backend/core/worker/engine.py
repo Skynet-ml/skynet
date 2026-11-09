@@ -1420,8 +1420,9 @@ class BackgroundWorker:
                         )
                 if detached_sandbox is not None:
                     # This runs after the success write and after the gateway's own
-                    # snapshot. The failure write leaves the budget evidence alone,
-                    # so the settled snapshot of the background stop stands.
+                    # snapshot. On failure, _close_failed_budget also publishes, and
+                    # this stop can publish an older copy after it. Only the job's
+                    # fallback copy goes stale: the API serves the live budget row.
                     self._stop_sandbox_in_background(
                         optimization_id,
                         *detached_sandbox,
