@@ -9,7 +9,7 @@ import { useSettingsModal } from "@/features/settings";
 import type { NotificationItem, NotificationTab } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { formatRelativeTime, formatScore } from "@/shared/lib/formatters";
-import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { Bell, Checks, GearSix, Stack, Target, Trash, X, type Icon } from "@/shared/ui/icons";
@@ -247,7 +247,16 @@ function PanelBody({
             const active = value === tab;
             const unread = value === "focused" ? inbox.counts.focused : inbox.counts.everything;
             return (
-              <TooltipButton key={value} tooltip={msg(tip)}>
+              <TooltipButton
+                key={value}
+                dir={getActiveDir()}
+                tooltip={
+                  <span className="flex flex-col items-center gap-0.5 text-center">
+                    <span className="font-medium">{msg(label)}</span>
+                    <span className="text-muted-foreground">{msg(tip)}</span>
+                  </span>
+                }
+              >
                 <button
                   type="button"
                   role="tab"
