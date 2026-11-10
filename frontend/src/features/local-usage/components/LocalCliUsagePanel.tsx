@@ -67,6 +67,18 @@ function CliLogo({ cli }: { cli: CliProvider }) {
   );
 }
 
+/** One label and value of the account tooltip, in the layout of a message's info tooltip. */
+function AccountRow({ label, value, dir }: { label: string; value: string; dir: "ltr" | "auto" }) {
+  return (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd dir={dir} className="min-w-0 text-end font-medium [overflow-wrap:anywhere]">
+        {value}
+      </dd>
+    </>
+  );
+}
+
 /** An info icon whose tooltip names the account and plan the CLI is signed in as. */
 function AccountInfo({ account }: { account: CliAccount }) {
   return (
@@ -80,9 +92,17 @@ function AccountInfo({ account }: { account: CliAccount }) {
           <Info className="size-4" aria-hidden="true" />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="flex flex-col gap-0.5 text-start" dir={getActiveDir()}>
-        <span>{msg("localUsage.account", { email: account.email })}</span>
-        {account.plan && <span>{msg("localUsage.plan", { plan: account.plan })}</span>}
+      <TooltipContent
+        side="top"
+        dir={getActiveDir()}
+        className="max-w-(--radix-tooltip-content-available-width) text-start"
+      >
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
+          <AccountRow label={msg("localUsage.account")} value={account.email} dir="ltr" />
+          {account.plan && (
+            <AccountRow label={msg("localUsage.plan")} value={account.plan} dir="auto" />
+          )}
+        </dl>
       </TooltipContent>
     </Tooltip>
   );
