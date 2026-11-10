@@ -619,6 +619,12 @@ h3 {
 .Toastify {
   --toastify-icon-color-success: var(--success);
 }
+/* Toasts sit in the corner, but rise above a bar pinned to the screen bottom
+   (the wizard's Back/Next row, the phone tab bar): a toast over that bar's
+   button turned the next click on it into a dismiss. */
+body:has([data-toast-clearance]) .Toastify__toast-container[class*="--bottom-"] {
+  bottom: max(5.5rem, env(safe-area-inset-bottom));
+}
 .Toastify__toast--success {
   background: var(--surface-3) !important;
   color: var(--text-1) !important;

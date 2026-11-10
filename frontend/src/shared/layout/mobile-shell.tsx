@@ -106,6 +106,7 @@ export function MobileShell({ children }: { children: React.ReactNode }) {
 
       <nav
         aria-label={msg("mobile.nav.aria")}
+        data-toast-clearance
         className="fixed inset-x-0 bottom-0 z-30 border-t border-border/40 bg-background/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl"
         dir={dir}
       >
