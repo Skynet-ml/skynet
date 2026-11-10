@@ -614,8 +614,14 @@ class RepoWorkspace:
         start = getattr(session, "start_services", None)
         if start is None:
             raise RepoSetupError("This sandbox cannot start the repository's compose services.")
+        # Setup ran at WORK_DIR, so venv scripts and editable installs name that
+        # path. It is missing until a checkout and then holds version code, so
+        # text files in the copy are pointed at the copy instead.
         copied = session.run(
-            f"set -e; rm -rf {SERVICES_DIR}; cp -a {PREPARED_DIR} {SERVICES_DIR}; cd {SERVICES_DIR}; pwd -P",
+            f'set -e; work="$(pwd -P)/{WORK_DIR}"; rm -rf {SERVICES_DIR}; cp -a {PREPARED_DIR} {SERVICES_DIR};'
+            f' cd {SERVICES_DIR}; here="$(pwd -P)";'
+            ' grep -rlIF -e "$work" . | while IFS= read -r f; do'
+            ' sed "s#$work#$here#g" "$f" > "$f.tmp" && cat "$f.tmp" > "$f" && rm -f "$f.tmp"; done; pwd -P',
             timeout_seconds=_SETUP_TIMEOUT_SECONDS,
         )
         lines = copied.stdout.strip().splitlines() if copied.ok else []

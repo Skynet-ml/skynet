@@ -900,6 +900,39 @@ def test_a_kept_setup_box_starts_its_services_after_setup(tmp_path: Path) -> Non
     _check_start(box)
 
 
+def test_services_use_their_copy_for_the_paths_that_setup_recorded(tmp_path: Path) -> None:
+    """Point a venv script that setup wrote with the work path at the services copy, and keep it runnable.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _ServiceRuntime(tmp_path / "snaps", saves=False)
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=replace(_ONLINE, services=(_API,)),
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=(
+            "mkdir -p .venv/bin; printf '#!%s/.venv/bin/python\\n' \"$(pwd -P)\" > .venv/bin/tool;"
+            " chmod +x .venv/bin/tool; cat src/app.py > built.txt"
+        ),
+        secrets={},
+    )
+    try:
+        space.checkout("")
+        (box,) = runtime.boxes
+        base = box.starts[0]["base"]
+        tool = base / ".venv" / "bin" / "tool"
+        assert tool.read_text() == f"#!{base}/.venv/bin/python\n"
+        assert tool.stat().st_mode & 0o111
+        prepared = (box._inner.path / PREPARED_DIR / ".venv" / "bin" / "tool").read_text()
+        assert prepared == f"#!{(box._inner.path / WORK_DIR).resolve()}/.venv/bin/python\n"
+    finally:
+        space.close()
+
+
 def test_a_restored_box_starts_its_services_after_the_digest_check(tmp_path: Path) -> None:
     """Start no service in the box that becomes the snapshot, and start them in the restored box after its check.
 
