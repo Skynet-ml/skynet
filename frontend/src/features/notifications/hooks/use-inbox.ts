@@ -14,6 +14,7 @@ import {
   type NotificationTab,
   type NotificationUnreadCounts,
 } from "@/shared/lib/api";
+import { onLinkChange } from "@/shared/hooks/use-linked-account";
 import { msg } from "@/shared/lib/messages";
 
 import { appendPage, mergeHead } from "../lib/catalog";
@@ -88,16 +89,19 @@ export function useInbox({
   open: boolean;
   tab: NotificationTab;
 }): Inbox {
+  const [accountRevision, setAccountRevision] = React.useState(0);
+  const identity = `${tab}:${accountRevision}`;
+  React.useEffect(() => onLinkChange(() => setAccountRevision((n) => n + 1)), []);
   const [counts, setCounts] = React.useState<NotificationUnreadCounts>(NO_UNREAD);
   const [items, setItems] = React.useState<NotificationItem[]>([]);
   const [status, setStatus] = React.useState<InboxStatus>("loading");
   const [cursor, setCursor] = React.useState<string | null>(null);
   const [loadingMore, setLoadingMore] = React.useState(false);
   // A response for a tab the user already left must not land on the new one.
-  const tabRef = React.useRef(tab);
+  const tabRef = React.useRef(identity);
   React.useLayoutEffect(() => {
-    tabRef.current = tab;
-  }, [tab]);
+    tabRef.current = identity;
+  }, [identity]);
   // Older pages are only fetched once the head has set where they start.
   const headLoaded = React.useRef(false);
   // Ids removed on screen but maybe not on the server yet: a poll racing the
@@ -110,14 +114,15 @@ export function useInbox({
   );
 
   const refreshCounts = React.useCallback(() => {
+    const requested = identity;
     getNotificationUnreadCount()
-      .then(setCounts)
+      .then((next) => { if (tabRef.current === requested) setCounts(next); })
       .catch(() => undefined);
-  }, []);
+  }, [identity]);
 
   const refreshHead = React.useCallback(() => {
-    const requested = tab;
-    listNotifications(requested)
+    const requested = identity;
+    listNotifications(tab)
       .then((page) => {
         if (tabRef.current !== requested) return;
         const head = withoutRemoving(page.items);
@@ -132,21 +137,24 @@ export function useInbox({
         // A failed background poll keeps what is on screen.
         if (!headLoaded.current) setStatus("error");
       });
-  }, [tab, withoutRemoving]);
+  }, [tab, identity, withoutRemoving]);
 
   // Switching tabs starts that list over; the poll below fetches it at once.
   React.useEffect(() => {
     headLoaded.current = false;
+    removing.current.clear();
+    setCounts(NO_UNREAD);
+    setLoadingMore(false);
     setItems([]);
     setCursor(null);
     setStatus("loading");
-  }, [tab]);
+  }, [identity]);
 
   const refreshAll = () => {
     refreshHead();
     refreshCounts();
   };
-  usePolling(refreshAll, INBOX_POLL_MS, enabled, tab);
+  usePolling(refreshAll, INBOX_POLL_MS, enabled, identity);
 
   // Opening the panel shows what was prefetched and checks for anything newer.
   const onOpen = React.useEffectEvent(refreshAll);
@@ -156,17 +164,17 @@ export function useInbox({
 
   const loadMore = React.useCallback(() => {
     if (!cursor || loadingMore) return;
-    const requested = tab;
+    const requested = identity;
     setLoadingMore(true);
-    listNotifications(requested, cursor)
+    listNotifications(tab, cursor)
       .then((page) => {
         if (tabRef.current !== requested) return;
         setItems((prev) => appendPage(prev, withoutRemoving(page.items)));
         setCursor(page.next_cursor);
       })
       .catch(() => undefined)
-      .finally(() => setLoadingMore(false));
-  }, [cursor, loadingMore, tab, withoutRemoving]);
+      .finally(() => { if (tabRef.current === requested) setLoadingMore(false); });
+  }, [cursor, loadingMore, tab, identity, withoutRemoving]);
 
   const retry = React.useCallback(() => {
     setStatus("loading");
@@ -195,7 +203,7 @@ export function useInbox({
     markAllNotificationsRead(tab)
       .catch(() => undefined)
       .finally(refreshCounts);
-  }, [tab, refreshCounts]);
+  }, [tab, identity, refreshCounts]);
 
   const remove = React.useCallback(
     (item: NotificationItem) => {
@@ -211,7 +219,7 @@ export function useInbox({
       }
       removeNotification(item.id)
         .catch(() => {
-          if (tabRef.current === tab) {
+          if (tabRef.current === identity) {
             setItems((prev) =>
               prev.some((it) => it.id === item.id)
                 ? prev
@@ -225,7 +233,7 @@ export function useInbox({
           refreshCounts();
         });
     },
-    [tab, refreshCounts],
+    [tab, identity, refreshCounts],
   );
 
   const clearAll = React.useCallback(() => {
@@ -242,7 +250,7 @@ export function useInbox({
     );
     clearNotifications(tab)
       .catch(() => {
-        if (tabRef.current === tab) {
+        if (tabRef.current === identity) {
           setItems((prev) => appendPage(prev, snapshot));
           setCursor(snapshotCursor);
         }
@@ -252,7 +260,7 @@ export function useInbox({
         snapshot.forEach((item) => ids.delete(item.id));
         refreshCounts();
       });
-  }, [items, cursor, tab, refreshCounts]);
+  }, [items, cursor, tab, identity, refreshCounts]);
 
   return {
     counts,

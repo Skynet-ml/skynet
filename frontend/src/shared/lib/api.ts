@@ -114,6 +114,11 @@ export function apiUrl(path: string, source?: ApiSource): string {
   return `${apiBase()}${routedPath(path, source)}`;
 }
 
+/** Account data always belongs to the web account; an unlinked Mac must fail closed. */
+function accountRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(isLocalMode() ? apiPath(path, "hosted") : path, init);
+}
+
 /** Hosted revoked the Mac's link: let the link state re-read instead of refreshing the local token. */
 const HOSTED_LINK_REVOKED_CODE = "hosted_link.revoked";
 
@@ -1212,12 +1217,12 @@ export interface NotificationPreferencesPatch {
 
 /** Fetch where each notification event is routed. */
 export function getNotificationPreferences() {
-  return request<NotificationPreferences>("/account/notification-preferences");
+  return accountRequest<NotificationPreferences>("/account/notification-preferences");
 }
 
 /** Change grid cells and hold settings; untouched fields keep their value. */
 export function updateNotificationPreferences(patch: NotificationPreferencesPatch) {
-  return request<NotificationPreferences>("/account/notification-preferences", {
+  return accountRequest<NotificationPreferences>("/account/notification-preferences", {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
@@ -1381,38 +1386,49 @@ export interface NotificationUnreadCounts {
 export function listNotifications(tab: NotificationTab, cursor?: string | null) {
   const q = new URLSearchParams({ tab });
   if (cursor) q.set("cursor", cursor);
-  return request<NotificationPage>(`/notifications?${q.toString()}`);
+  return accountRequest<NotificationPage>(`/notifications?${q.toString()}`).then((page) => {
+    if (!isLocalMode()) return page;
+    return {
+      ...page,
+      items: page.items.map((item) => {
+        if (!item.link?.startsWith("/optimizations/")) return item;
+        const link = new URL(item.link, "https://skynet.invalid");
+        link.searchParams.set("source", "hosted");
+        return { ...item, link: `${link.pathname}${link.search}${link.hash}` };
+      }),
+    };
+  });
 }
 
 export function getNotificationUnreadCount() {
-  return request<NotificationUnreadCounts>("/notifications/unread-count");
+  return accountRequest<NotificationUnreadCounts>("/notifications/unread-count");
 }
 
 export function markNotificationRead(id: string) {
-  return request<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
+  return accountRequest<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
     method: "POST",
   });
 }
 
 export function markAllNotificationsRead(tab: NotificationTab) {
-  return request<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
+  return accountRequest<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
 }
 
 /** Take one item out of the caller's inbox; held email, Chrome and Slack sends still go out. */
 export function removeNotification(id: string) {
-  return request<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
+  return accountRequest<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
 /** Take every item on a tab out of the caller's inbox. */
 export function clearNotifications(tab: NotificationTab) {
-  return request<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
+  return accountRequest<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
 }
 
 /** The VAPID key browsers subscribe with; null while web push is off on the server. */
 export function getPushVapidKey() {
-  return request<{ public_key: string | null }>("/notifications/push/vapid-key");
+  return accountRequest<{ public_key: string | null }>("/notifications/push/vapid-key");
 }
 
 /** Save (or refresh) this browser's web push subscription for the caller. */
@@ -1420,7 +1436,7 @@ export function savePushSubscription(subscription: {
   endpoint: string;
   keys: { p256dh: string; auth: string };
 }) {
-  return request<{ subscribed: boolean }>("/notifications/push/subscriptions", {
+  return accountRequest<{ subscribed: boolean }>("/notifications/push/subscriptions", {
     method: "POST",
     body: JSON.stringify(subscription),
   });
@@ -1428,7 +1444,7 @@ export function savePushSubscription(subscription: {
 
 /** Forget this browser's web push subscription; repeating it is harmless. */
 export function deletePushSubscription(endpoint: string) {
-  return request<{ subscribed: boolean }>("/notifications/push/subscriptions", {
+  return accountRequest<{ subscribed: boolean }>("/notifications/push/subscriptions", {
     method: "DELETE",
     body: JSON.stringify({ endpoint }),
   });
@@ -1458,7 +1474,7 @@ export interface SlackChannelOption {
 
 /** Whether Slack is set up and where the caller's Slack notifications go. */
 export function getSlackConnection() {
-  return request<SlackConnection>("/notifications/slack");
+  return accountRequest<SlackConnection>("/notifications/slack");
 }
 
 /** Mint the "Add to Slack" URL; the page navigates to it. */
@@ -1468,14 +1484,14 @@ export function startSlackOAuth() {
 
 /** The channels the Slack app can see in the caller's workspace. */
 export function listSlackChannels() {
-  return request<{ channels: SlackChannelOption[]; truncated: boolean }>(
+  return accountRequest<{ channels: SlackChannelOption[]; truncated: boolean }>(
     "/notifications/slack/channels",
   );
 }
 
 /** Post to a channel, or (null) as a direct message from the app. */
 export function updateSlackTarget(channelId: string | null) {
-  return request<SlackConnection>("/notifications/slack", {
+  return accountRequest<SlackConnection>("/notifications/slack", {
     method: "PATCH",
     body: JSON.stringify({ channel_id: channelId }),
   });
@@ -1483,7 +1499,7 @@ export function updateSlackTarget(channelId: string | null) {
 
 /** Revoke and forget the caller's Slack install; repeating it is harmless. */
 export function disconnectSlack() {
-  return request<SlackConnection>("/notifications/slack", { method: "DELETE" });
+  return accountRequest<SlackConnection>("/notifications/slack", { method: "DELETE" });
 }
 
 export type ExperienceLevelValue = "guided" | "standard" | "expert";
@@ -1669,7 +1685,10 @@ export function getUsage(start?: string, end?: string, source: ApiSource = "host
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingUsageResponse>(`/billing/usage${qs ? `?${qs}` : ""}`, undefined, source);
+  const path = `/billing/usage${qs ? `?${qs}` : ""}`;
+  return source === "hosted"
+    ? accountRequest<BillingUsageResponse>(path)
+    : request<BillingUsageResponse>(path);
 }
 
 /** Display-safe billing address fields stored on the Stripe customer. */
@@ -1725,7 +1744,7 @@ export interface BillingTransactionsResponse {
 
 /** Fetch billing contact details and masked saved payment methods from Stripe. */
 export function getBillingProfile() {
-  return request<BillingProfileResponse>("/billing/profile");
+  return accountRequest<BillingProfileResponse>("/billing/profile");
 }
 
 /** Fetch completed Stripe purchases over an optional ISO-8601 date window; a linked Mac reads hosted. */
@@ -1734,10 +1753,8 @@ export function getBillingTransactions(start?: string, end?: string) {
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingTransactionsResponse>(
+  return accountRequest<BillingTransactionsResponse>(
     `/billing/transactions${qs ? `?${qs}` : ""}`,
-    undefined,
-    "hosted",
   );
 }
 

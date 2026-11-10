@@ -158,7 +158,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
   // The first read comes from refresh() once the session signs in.
   React.useEffect(() => {
     if (!local) return;
-    const onFocus = () => void readHosted(false);
+    const onFocus = () => void readHosted(true);
     const onLinkChange = () => void readHosted(true);
     window.addEventListener("focus", onFocus);
     window.addEventListener(HOSTED_LINK_CHANGED_EVENT, onLinkChange);

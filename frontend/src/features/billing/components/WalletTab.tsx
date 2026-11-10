@@ -44,6 +44,8 @@ import {
   type BillingTransaction,
   type BillingTransactionsResponse,
 } from "@/shared/lib/api";
+import { isLocalMode } from "@/shared/lib/runtime-env";
+import { hostedAppUrl } from "@/shared/lib/share-link";
 import { onLinkChange } from "@/shared/hooks/use-linked-account";
 import { LinkAccountPrompt } from "./LinkAccountPrompt";
 import { useBalance } from "../providers/balance-provider";
@@ -79,6 +81,13 @@ function formatUsdWhole(usd: number, locale: string): string {
   }).format(usd);
 }
 
+/** Keep financial mutations on the hosted web session, outside the Mac link token's scope. */
+function openWebBilling() {
+  const url = hostedAppUrl("/?settings=billing");
+  if (url) window.open(url, "_blank", "noopener,noreferrer");
+  else toast.error(msg("billing.portal.error"));
+}
+
 /**
  * Inline top-up — one pill control holding the pack segments, a
  * free-type custom amount, and the buy action, all in the segmented-control
@@ -93,7 +102,9 @@ function AddFundsControls() {
   );
   const [customDraft, setCustomDraft] = React.useState("");
   const [buying, setBuying] = React.useState(false);
-  const { wallet } = useBalance();
+  const { shownWallet: wallet } = useBalance();
+
+  if (!wallet) return null;
 
   const pack: TopUpPack | undefined = TOP_UP_PACKS.find((p) => p.id === selection);
   // The custom field is typed in whole dollars; the checkout API is denominated
@@ -108,6 +119,7 @@ function AddFundsControls() {
   const priceLabel = Number.isInteger(usd) ? formatUsdWhole(usd, locale) : formatUsd(usd, locale);
 
   const onBuy = async () => {
+    if (isLocalMode()) return openWebBilling();
     setBuying(true);
     track(TelemetryEvent.CheckoutStarted, {
       pack_id: pack ? pack.id : "custom",
@@ -215,7 +227,7 @@ function AddFundsControls() {
           ) : (
             <Sparkle aria-hidden="true" />
           )}
-          {formatMsg("billing.upgrade.buy", { p1: priceLabel })}
+          {isLocalMode() ? msg("downloads.browser") : formatMsg("billing.upgrade.buy", { p1: priceLabel })}
         </Button>
       </div>
     </SettingsRow>
@@ -252,21 +264,33 @@ function TransactionHistory() {
   const [data, setData] = React.useState<BillingTransactionsResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [failed, setFailed] = React.useState(false);
+  const requestId = React.useRef(0);
 
   const load = React.useCallback(() => {
+    const id = ++requestId.current;
     setLoading(true);
     setFailed(false);
     getBillingTransactions()
-      .then(setData)
-      .catch(() => setFailed(true))
-      .finally(() => setLoading(false));
+      .then((result) => { if (id === requestId.current) setData(result); })
+      .catch(() => { if (id === requestId.current) setFailed(true); })
+      .finally(() => { if (id === requestId.current) setLoading(false); });
   }, []);
 
   React.useEffect(() => {
     load();
+    return () => { requestId.current += 1; };
   }, [load]);
 
-  React.useEffect(() => onLinkChange(load), [load]);
+  React.useEffect(() => onLinkChange(() => {
+    setData(null);
+    load();
+  }), [load]);
+
+  React.useEffect(() => {
+    if (!isLocalMode()) return;
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [load]);
 
   return (
     <section
@@ -603,19 +627,34 @@ function BillingDetails() {
   const [portalFlow, setPortalFlow] = React.useState<"manage" | "payment_method" | null>(null);
   const [editing, setEditing] = React.useState<PaymentMethod | null>(null);
   const [removing, setRemoving] = React.useState<PaymentMethod | null>(null);
+  const requestId = React.useRef(0);
 
   const loadProfile = React.useCallback(() => {
+    const id = ++requestId.current;
     setLoadError(false);
     getBillingProfile()
-      .then(setProfile)
-      .catch(() => setLoadError(true));
+      .then((result) => { if (id === requestId.current) setProfile(result); })
+      .catch(() => { if (id === requestId.current) setLoadError(true); });
   }, []);
 
   React.useEffect(() => {
     loadProfile();
+    return () => { requestId.current += 1; };
+  }, [loadProfile]);
+
+  React.useEffect(() => onLinkChange(() => {
+    setProfile(null);
+    loadProfile();
+  }), [loadProfile]);
+
+  React.useEffect(() => {
+    if (!isLocalMode()) return;
+    window.addEventListener("focus", loadProfile);
+    return () => window.removeEventListener("focus", loadProfile);
   }, [loadProfile]);
 
   const openPortal = React.useCallback(async (flow: "manage" | "payment_method") => {
+    if (isLocalMode()) return openWebBilling();
     setPortalFlow(flow);
     try {
       const { url } = await createBillingPortalSession(flow);
@@ -758,7 +797,7 @@ function BillingDetails() {
                     variant="ghost"
                     size="icon-sm"
                     disabled={unavailable}
-                    onClick={() => setEditing(method)}
+                    onClick={() => isLocalMode() ? openWebBilling() : setEditing(method)}
                     className="text-muted-foreground hover:text-foreground"
                     autoTooltip={false}
                     aria-label={`${msg("billing.payment_methods.edit")} ${paymentMethodLabel(method)}`}
@@ -769,7 +808,7 @@ function BillingDetails() {
                     variant="ghost"
                     size="icon-sm"
                     disabled={unavailable}
-                    onClick={() => setRemoving(method)}
+                    onClick={() => isLocalMode() ? openWebBilling() : setRemoving(method)}
                     className="text-muted-foreground hover:text-destructive"
                     autoTooltip={false}
                     aria-label={`${msg("billing.payment_methods.remove")} ${paymentMethodLabel(method)}`}
