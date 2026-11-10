@@ -12,14 +12,12 @@ import {
   CreditCard,
   HardDrive,
   HardDrives,
-  Info,
   Key,
   Lock,
   Plug,
   Robot,
   ShieldCheck,
   Sparkle,
-  Tag,
   User,
 } from "@/shared/ui/icons";
 import type { Icon } from "@/shared/ui/icons";
@@ -31,7 +29,6 @@ type MessageKey = Parameters<typeof msg>[0];
 
 export const SETTINGS_TAB_ORDER = [
   "wizard",
-  "tagging",
   "agent",
   "account",
   "notifications",
@@ -43,7 +40,6 @@ export const SETTINGS_TAB_ORDER = [
   "connectors",
   "api",
   "admin",
-  "about",
 ] as const;
 
 export type SettingsTab = (typeof SETTINGS_TAB_ORDER)[number];
@@ -62,12 +58,6 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     icon: Sparkle,
     labelKey: "settings.tab.wizard",
     keywordsKey: "app.shell.search.kw.wizard",
-    group: "workflows",
-  },
-  tagging: {
-    icon: Tag,
-    labelKey: "settings.tab.tagging",
-    keywordsKey: "app.shell.search.kw.tagging",
     group: "workflows",
   },
   agent: {
@@ -136,12 +126,6 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     keywordsKey: "app.shell.search.kw.admin",
     group: "system",
     adminOnly: true,
-  },
-  about: {
-    icon: Info,
-    labelKey: "settings.tab.about",
-    keywordsKey: "app.shell.search.kw.about",
-    group: "system",
   },
 };
 

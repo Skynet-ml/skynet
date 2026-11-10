@@ -97,7 +97,7 @@ import { MinimizedPill } from "./MinimizedPill";
 import { PresenceStrip } from "./PresenceStrip";
 import { ToolCallRow } from "./ToolCallRow";
 import { ChatSourceContext } from "./JobSummaryCard";
-import { ToolsCarousel } from "./ToolsCarousel";
+import { ToolsShowcase } from "./ToolsShowcase";
 import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
 import { AGENT_PROMPT_EVENT, takeQueuedAgentPrompt } from "../lib/prompt-queue";
@@ -978,7 +978,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   </TooltipContent>
                 </Tooltip>
                 <PopoverContent side="bottom" align="center" sideOffset={8} className="p-0">
-                  <ToolsCarousel />
+                  <ToolsShowcase />
                 </PopoverContent>
               </Popover>
             </div>

@@ -62,20 +62,19 @@ export function channelLive(channel: GridChannel, slackConfigured: boolean): boo
 }
 
 /**
- * In the Mac app, why a channel's column is off: the column stays visible
- * and disabled with this reason. Null when it works, or on a hosted server.
+ * Only native macOS delivery depends on local configuration. Account channels
+ * use hosted settings, even when the Mac has no local provider credentials.
  */
 export function localOffReason(
   channel: GridChannel,
   local: LocalNotificationChannels | null,
 ): MessageKey | null {
-  if (!local || channel === "inbox") return null;
+  if (!local || channel !== "macos") return null;
   return local.channels[channel] === false ? "notifications.local.not_configured" : null;
 }
 
 /**
- * Whether a cell shows as on. In the Mac app a channel that is not set up
- * shows off, but the saved value stays, so it is back on once set up.
+ * Preserve hosted preferences. Only unavailable native delivery shows off.
  */
 export function cellShownOn(
   stored: boolean,
@@ -86,16 +85,14 @@ export function cellShownOn(
 }
 
 /**
- * The message keys of a column header's tooltip, joined with ": ". Hosted
- * keeps its own wording for an unset Slack; the Mac app names the channel
- * and why it is off.
+ * Use hosted Slack availability and local native delivery availability.
  */
 export function channelHeaderTip(
   channel: GridChannel,
   slackReady: boolean,
   local: LocalNotificationChannels | null,
 ): MessageKey[] {
-  if (!local) {
+  if (channel !== "macos") {
     return channelLive(channel, slackReady)
       ? [CHANNEL_KEYS[channel]]
       : ["notifications.slack.unavailable"];
@@ -144,7 +141,7 @@ export function cellEditable(
 ): boolean {
   // News is always in the inbox: the backend adds every entry for every user.
   if (event === "product_news") return false;
-  if (local) return localOffReason(channel, local) === null;
+  if (channel === "macos") return local !== null && localOffReason(channel, local) === null;
   return channelLive(channel, slackConfigured);
 }
 

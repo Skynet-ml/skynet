@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { formatCount, formatPercent, formatReset, formatTime } from "./cli-usage.ts";
+import {
+  formatCount,
+  formatCredits,
+  formatPercent,
+  formatReset,
+  formatTime,
+} from "./cli-usage.ts";
 
 void describe("cli usage formatting", () => {
   void it("groups counts for the locale", () => {
@@ -22,5 +28,12 @@ void describe("cli usage formatting", () => {
   void it("formats a reset time with its weekday", () => {
     assert.equal(formatReset("bad", "en"), null);
     assert.match(formatReset("2026-11-12T15:00:00+00:00", "en") ?? "", /day/);
+  });
+});
+
+void describe("formatCredits", () => {
+  void it("rounds a credit balance to a whole number", () => {
+    assert.equal(formatCredits(2453.717819, "en"), "2,454");
+    assert.equal(formatCredits(12.2, "en"), "12");
   });
 });

@@ -37,7 +37,6 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 
 SettingsTab = Literal[
     "wizard",
-    "tagging",
     "agent",
     "account",
     "notifications",
@@ -49,7 +48,6 @@ SettingsTab = Literal[
     "connectors",
     "api",
     "admin",
-    "about",
 ]
 SettingKey = Literal[
     "profile",
@@ -143,7 +141,7 @@ _SETTINGS: dict[str, _Setting] = {
         ("PUT", "/account/model-privacy"),
     ),
     "preferences": _Setting(
-        "tagging",
+        "wizard",
         "Device preferences: wizard code assist, split mode and AI tagging assist. "
         "Change them with update_user_preferences.",
     ),

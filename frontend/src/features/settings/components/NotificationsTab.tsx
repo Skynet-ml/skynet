@@ -22,7 +22,6 @@ import {
   chromeCellAction,
   currentPushSubscription,
   heldChannels,
-  localOffChannels,
   localOffReason,
   nativePermission,
   pushPermission,
@@ -49,6 +48,9 @@ import {
   type NotificationPreferences,
   type NotificationPreferencesPatch,
 } from "@/shared/lib/api";
+import { onLinkChange } from "@/shared/hooks/use-linked-account";
+import { isLocalMode } from "@/shared/lib/runtime-env";
+import { hostedAppUrl } from "@/shared/lib/share-link";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
@@ -85,6 +87,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/shared/ui/primitives/table";
+
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 
 import { SlackConnectionSection } from "./SlackConnectionSection";
 
@@ -145,7 +149,10 @@ function ChannelHeader({
   local: LocalNotificationChannels | null;
 }) {
   const ChannelIcon = CHANNEL_ICONS[channel];
-  const live = local ? localOffReason(channel, local) === null : channelLive(channel, slackReady);
+  const live =
+    channel === "macos"
+      ? localOffReason(channel, local) === null
+      : channelLive(channel, slackReady);
   const tip = channelHeaderTip(channel, slackReady, local)
     .map((key) => msg(key))
     .join(": ");
@@ -230,9 +237,10 @@ export function NotificationsTab() {
   const [subscribing, setSubscribing] = React.useState(false);
   const [slack, setSlack] = React.useState<SlackConnection | null>(null);
   const [slackConnecting, setSlackConnecting] = React.useState(false);
-  // Set only in the Mac app: the macOS column and which hosted channels this Mac can use.
+  // Native macOS delivery stays local; account channels use the hosted service.
   const [local, setLocal] = useLocalNotificationChannels(!signedOut);
   const [macosPermission, setMacosPermission] = React.useState(nativePermission);
+  const webMode = useResourceMode().web;
 
   React.useEffect(() => {
     let alive = true;
@@ -247,38 +255,50 @@ export function NotificationsTab() {
     };
   }, []);
 
+  const loadVersion = React.useRef(0);
   const load = React.useCallback(async () => {
+    const version = ++loadVersion.current;
     if (signedOut) return;
     setLoading(true);
     setLoadError(false);
     try {
-      const next = await getNotificationPreferences();
+      const [next, connection] = await Promise.all([
+        getNotificationPreferences(),
+        getSlackConnection().catch(() => null),
+      ]);
+      if (version !== loadVersion.current) return;
       setPrefs(next);
       setHold(next.hold_minutes);
+      setSlack(connection);
     } catch {
-      setLoadError(true);
+      if (version === loadVersion.current) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (version === loadVersion.current) setLoading(false);
     }
   }, [signedOut]);
 
+  const reloadCurrent = React.useRef<(() => Promise<void>) | null>(null);
   React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  // A failed status read leaves the Slack column off rather than erroring the tab.
-  React.useEffect(() => {
-    if (signedOut) return;
-    let alive = true;
-    void getSlackConnection()
-      .then((next) => {
-        if (alive) setSlack(next);
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
+    reloadCurrent.current = load;
+    const refresh = () => {
+      setPrefs(null);
+      setSlack(null);
+      if (holdTimer.current) clearTimeout(holdTimer.current);
+      void load();
     };
-  }, [signedOut]);
+    refresh();
+    const unsubscribe = onLinkChange(refresh);
+    const onFocus = () => {
+      if (isLocalMode()) void load();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      ++loadVersion.current;
+      reloadCurrent.current = null;
+      unsubscribe();
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [load, session?.user?.email]);
 
   // The Slack OAuth callback lands back here with ?slack=connected|error; say so once.
   React.useEffect(() => {
@@ -296,6 +316,11 @@ export function NotificationsTab() {
   }, []);
 
   const connectSlack = React.useCallback(async () => {
+    if (isLocalMode()) {
+      const url = hostedAppUrl("/?settings=notifications");
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
     setSlackConnecting(true);
     try {
       const { authorize_url } = await startSlackOAuth();
@@ -317,12 +342,21 @@ export function NotificationsTab() {
   const save = React.useCallback(
     async (patch: NotificationPreferencesPatch, optimistic: NotificationPreferences) => {
       const before = prefs;
+      const version = loadVersion.current;
       setPrefs(optimistic);
       try {
         const saved = await updateNotificationPreferences(patch);
+        if (version !== loadVersion.current) {
+          void reloadCurrent.current?.();
+          return;
+        }
         setPrefs(saved);
         toast.success(msg("settings.notifications.prefs_saved"));
       } catch {
+        if (version !== loadVersion.current) {
+          void reloadCurrent.current?.();
+          return;
+        }
         setPrefs(before);
         if (before) setHold(before.hold_minutes);
         toast.error(msg("settings.notifications.prefs_save_error"));
@@ -370,7 +404,7 @@ export function NotificationsTab() {
       writeCell(event, channel, on);
       return void connectSlack();
     }
-    if (channel !== "chrome" || !on) return writeCell(event, channel, on);
+    if (channel !== "chrome" || !on || isLocalMode()) return writeCell(event, channel, on);
     const action = chromeCellAction(pushPermission(), pushSubscribed);
     if (action === "blocked") return setChromeBlocked(true);
     if (action === "unsupported") return toastPushResult("unsupported");
@@ -387,6 +421,11 @@ export function NotificationsTab() {
 
   // The Chrome row's own switch-on: this browser only, the grid says which updates it gets.
   const turnOnChrome = async () => {
+    if (isLocalMode()) {
+      const url = hostedAppUrl("/?settings=notifications");
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
     setSubscribing(true);
     const result = await subscribePush();
     setSubscribing(false);
@@ -448,17 +487,16 @@ export function NotificationsTab() {
   });
 
   const permission = pushPermission();
-  // In the Mac app without VAPID keys, push cannot work: say so in place of the turn-on button.
-  const chromeState: MessageKey | null =
-    localOffReason("chrome", local) ??
-    (permission === "unsupported"
+  // Browser permission is separate from the hosted notification preference.
+  const chromeState: MessageKey | null = isLocalMode()
+    ? null
+    : permission === "unsupported"
       ? "notifications.push.unsupported"
       : permission === "denied"
         ? "settings.notifications.chrome.blocked"
         : pushSubscribed
           ? "settings.notifications.chrome.on"
-          : null);
-  const offChannels = localOffChannels(local);
+          : null;
 
   const macosState: MessageKey | null =
     macosPermission === "granted"
@@ -567,12 +605,6 @@ export function NotificationsTab() {
           </>
         )}
 
-        {offChannels.length > 0 && (
-          <p data-local-off className="pt-2 text-xs text-muted-foreground">
-            {`${offChannels.map((c) => msg(CHANNEL_KEYS[c])).join(", ")}: ${msg("notifications.local.not_configured")}`}
-          </p>
-        )}
-
         {chromeBlocked && (
           <InlineWarningRow
             message={msg("notifications.push.blocked")}
@@ -582,7 +614,7 @@ export function NotificationsTab() {
       </section>
 
       <section data-setup="notification-channels" className="border-t border-border/40 pt-2">
-        {local && (
+        {local && !webMode && (
           <SettingsRow
             icon={AppleLogo}
             label={msg(CHANNEL_KEYS.macos)}
@@ -605,35 +637,37 @@ export function NotificationsTab() {
             )}
           </SettingsRow>
         )}
-        <SettingsRow
-          icon={CHANNEL_ICONS.chrome}
-          label={msg(CHANNEL_KEYS.chrome)}
-          description={msg("settings.notifications.chrome.description")}
-        >
-          {chromeState ? (
-            <span className="text-xs text-muted-foreground">{msg(chromeState)}</span>
-          ) : (
-            <TooltipButton tooltip={msg("settings.notifications.chrome.turn_on")} side="top">
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                onClick={() => void turnOnChrome()}
-                disabled={signedOut || subscribing}
-                aria-label={msg("settings.notifications.chrome.turn_on")}
-              >
-                {subscribing ? (
-                  <CircleNotch
-                    className="animate-spin motion-reduce:animate-none"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <BellRinging className="size-4" aria-hidden="true" />
-                )}
-              </Button>
-            </TooltipButton>
-          )}
-        </SettingsRow>
+        {!isLocalMode() && (
+          <SettingsRow
+            icon={CHANNEL_ICONS.chrome}
+            label={msg(CHANNEL_KEYS.chrome)}
+            description={msg("settings.notifications.chrome.description")}
+          >
+            {chromeState ? (
+              <span className="text-xs text-muted-foreground">{msg(chromeState)}</span>
+            ) : (
+              <TooltipButton tooltip={msg("settings.notifications.chrome.turn_on")} side="top">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  onClick={() => void turnOnChrome()}
+                  disabled={signedOut || subscribing}
+                  aria-label={msg("settings.notifications.chrome.turn_on")}
+                >
+                  {subscribing ? (
+                    <CircleNotch
+                      className="animate-spin motion-reduce:animate-none"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <BellRinging className="size-4" aria-hidden="true" />
+                  )}
+                </Button>
+              </TooltipButton>
+            )}
+          </SettingsRow>
+        )}
         {slack?.configured && (
           <SlackConnectionSection
             connection={slack}

@@ -12,7 +12,6 @@ import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 import { motion, useReducedMotion } from "framer-motion";
 import {
-  ChatText,
   BookOpen,
   Columns,
   Cpu,
@@ -20,16 +19,11 @@ import {
   ArrowSquareOut,
   HardDrive,
   Translate,
-  PaperPlaneTilt,
   PencilSimple,
   Plus,
-  ArrowCounterClockwise,
-  HardDrives,
-  Shield,
   ShieldCheck,
   Sparkle,
   Table as TableIcon,
-  Tag,
   Trash,
   User,
   Info,
@@ -45,7 +39,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/shared/ui/primitives/select";
-import { Switch } from "@/shared/ui/primitives/switch";
 import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
 import { ExpandToggleButton } from "@/shared/ui/expand-toggle-button";
@@ -84,17 +77,12 @@ import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatStorageSize } from "@/shared/lib/formatters";
-import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
-import type { CatalogModel } from "@/shared/types/api";
 import { ComposerModelMenu } from "@/shared/ui/agent";
-import { ModelChip } from "@/shared/ui/model-chip";
-import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
 import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { useLocale } from "@/shared/providers";
 import { docsPathForLocale } from "@/shared/lib/locale";
 import { docsLinkHref } from "@/shared/lib/docs-link";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
-import { LEGAL_CONFIG } from "@/features/legal";
 import { LanguageSwitcher } from "@/shared/ui/language-switcher";
 import {
   deleteStorageQuotaOverride,
@@ -129,121 +117,10 @@ import { AgentEngineSetting } from "./AgentEngineSetting";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
 
 function WizardTab() {
-  const { prefs, setPref } = useUserPrefs();
-
   return (
     <div className="space-y-1">
-      <SettingsRow icon={Sparkle} label={msg("settings.wizard.code_assist.label")}>
-        <Select
-          value={prefs.wizardCodeAssist}
-          onValueChange={(v) => setPref("wizardCodeAssist", v as typeof prefs.wizardCodeAssist)}
-        >
-          <SelectTrigger
-            size="sm"
-            className={cn(TOUCH_FIELD_SM, "w-full min-w-0 sm:w-auto sm:min-w-[160px]")}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="auto">{msg("settings.wizard.code_assist.auto")}</SelectItem>
-            <SelectItem value="manual">{msg("settings.wizard.code_assist.manual")}</SelectItem>
-          </SelectContent>
-        </Select>
-      </SettingsRow>
-
-      <SettingsRow icon={Columns} label={msg("settings.wizard.split_mode.label")}>
-        <Select
-          value={prefs.wizardSplitMode}
-          onValueChange={(v) => setPref("wizardSplitMode", v as typeof prefs.wizardSplitMode)}
-        >
-          <SelectTrigger
-            size="sm"
-            className={cn(TOUCH_FIELD_SM, "w-full min-w-0 sm:w-auto sm:min-w-[160px]")}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="auto">{msg("settings.wizard.split_mode.auto")}</SelectItem>
-            <SelectItem value="manual">{msg("settings.wizard.split_mode.manual")}</SelectItem>
-          </SelectContent>
-        </Select>
-      </SettingsRow>
       <PackageRegistrySetting />
       <OptimizationDefaults />
-    </div>
-  );
-}
-
-function TaggingTab() {
-  const { prefs, setPref } = useUserPrefs();
-  const [modelDialogOpen, setModelDialogOpen] = React.useState(false);
-  // The same recents the submit wizard's model dialog keeps — one shared
-  // localStorage list across every model-config surface.
-  const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
-  // Same managed-catalog source the tagger setup feeds the dialog: thinking
-  // detection and the chip's vision badge need the model metadata.
-  const [catalogModels, setCatalogModels] = React.useState<CatalogModel[] | null>(null);
-  React.useEffect(() => {
-    if (catalogModels) return;
-    // Read the localStorage-backed cache after mount, not in useState, so the
-    // first client render matches the server's.
-    const cached = cachedCatalog();
-    if (cached) {
-      setCatalogModels(cached.models);
-      return;
-    }
-    let cancelled = false;
-    getModelCatalog()
-      .then((c) => {
-        if (!cancelled) setCatalogModels(c.models);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [catalogModels]);
-
-  return (
-    <div className="space-y-1">
-      <SettingsRow
-        icon={Tag}
-        label={msg("settings.tagger.assist.label")}
-        description={msg("settings.tagger.assist.description")}
-      >
-        <Switch checked={prefs.taggerAssist} onCheckedChange={(v) => setPref("taggerAssist", v)} />
-      </SettingsRow>
-
-      <SettingsRow
-        icon={Cpu}
-        label={msg("settings.tagger.default_model.label")}
-        description={msg("settings.tagger.default_model.description")}
-      >
-        <ModelChip
-          config={prefs.taggerAssistModel}
-          emptyLabel={msg("tagger.assist.model.placeholder")}
-          defaultFlag="is_default"
-          catalogModels={catalogModels ?? undefined}
-          onClick={() => setModelDialogOpen(true)}
-          onRemove={
-            prefs.taggerAssistModel.name
-              ? () => setPref("taggerAssistModel", { name: "" })
-              : undefined
-          }
-        />
-      </SettingsRow>
-      <ModelConfigModal
-        open={modelDialogOpen}
-        onOpenChange={setModelDialogOpen}
-        config={prefs.taggerAssistModel}
-        onSave={(cfg) => {
-          saveToRecent(cfg);
-          setPref("taggerAssistModel", cfg);
-        }}
-        roleLabel={msg("settings.tagger.default_model.label")}
-        catalogModels={catalogModels ?? undefined}
-        recentConfigs={recentConfigs}
-        onRemoveRecent={removeRecentConfig}
-      />
     </div>
   );
 }
@@ -270,29 +147,6 @@ function AgentTab() {
           allModels={localMenu.allModels}
           openRouterEngine={localMenu.openRouterEngine}
         />
-      </SettingsRow>
-
-      <SettingsRow
-        icon={Shield}
-        label={msg("settings.agent.trust.label")}
-        description={msg("settings.agent.trust.description")}
-      >
-        <Select
-          value={prefs.agentTrustMode}
-          onValueChange={(v) => setPref("agentTrustMode", v as typeof prefs.agentTrustMode)}
-        >
-          <SelectTrigger
-            size="sm"
-            className={cn(TOUCH_FIELD_SM, "w-full min-w-0 sm:w-auto sm:min-w-[160px]")}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="ask">{msg("settings.agent.trust.ask")}</SelectItem>
-            <SelectItem value="auto_safe">{msg("settings.agent.trust.auto_safe")}</SelectItem>
-            <SelectItem value="yolo">{msg("settings.agent.trust.yolo")}</SelectItem>
-          </SelectContent>
-        </Select>
       </SettingsRow>
     </div>
   );
@@ -1057,70 +911,6 @@ function AdminTab({ expanded }: { expanded: boolean }) {
   );
 }
 
-function AboutTab() {
-  const { resetAll } = useUserPrefs();
-  const { apiUrl, appVersion: version } = getRuntimeEnv();
-
-  const handleResetAll = React.useCallback(() => {
-    resetAll();
-    toast.success(msg("settings.about.reset_all.success"));
-  }, [resetAll]);
-  const feedbackHref = `mailto:${LEGAL_CONFIG.contactEmail}?subject=${encodeURIComponent(
-    msg("settings.about.feedback.subject"),
-  )}`;
-
-  return (
-    <div className="space-y-1">
-      <SettingsRow icon={Info} label={msg("settings.about.version.label")}>
-        <span className="text-sm font-mono text-foreground" dir="ltr">
-          {version}
-        </span>
-      </SettingsRow>
-
-      <SettingsRow icon={HardDrives} label={msg("settings.about.api_url.label")}>
-        <span className="max-w-full break-all text-xs font-mono text-muted-foreground" dir="ltr">
-          {apiUrl}
-        </span>
-      </SettingsRow>
-
-      <SettingsRow
-        icon={ChatText}
-        label={msg("settings.about.feedback.label")}
-        description={msg("settings.about.feedback.description")}
-      >
-        <Button
-          variant="outline"
-          size="icon-sm"
-          asChild
-          autoTooltip={false}
-          aria-label={msg("settings.about.feedback.action")}
-        >
-          <a href={feedbackHref}>
-            <PaperPlaneTilt className="size-3.5" aria-hidden="true" />
-          </a>
-        </Button>
-      </SettingsRow>
-
-      <SettingsRow
-        icon={ArrowCounterClockwise}
-        label={msg("settings.about.reset_all.label")}
-        description={msg("settings.about.reset_all.description")}
-      >
-        <Button
-          variant="outline"
-          size="icon-sm"
-          onClick={handleResetAll}
-          className="size-[44px] text-destructive hover:text-destructive sm:size-8 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]"
-          autoTooltip={false}
-          aria-label={msg("settings.about.reset_all.action")}
-        >
-          <ArrowCounterClockwise className="size-3.5" />
-        </Button>
-      </SettingsRow>
-    </div>
-  );
-}
-
 function ApiTab() {
   const { data: session } = useSession();
   const { locale } = useLocale();
@@ -1309,7 +1099,11 @@ function ApiTab() {
           autoTooltip={false}
           aria-label={msg("settings.api.guide_action")}
         >
-          <a href={docsLinkHref(docsPathForLocale(locale, "api"))} target="_blank" rel="noopener noreferrer">
+          <a
+            href={docsLinkHref(docsPathForLocale(locale, "api"))}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             <ArrowSquareOut className="size-3.5" />
           </a>
         </Button>
@@ -1337,12 +1131,9 @@ const SETTINGS_RAIL_ITEM_CLASS =
 const EXPANDABLE_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set(["usage", "admin"]);
 
 function SettingsPanelHeader({ tab, action }: { tab: SettingsTab; action?: React.ReactNode }) {
-  const { icon: Icon, labelKey } = SETTINGS_TABS[tab];
+  const { labelKey } = SETTINGS_TABS[tab];
   return (
     <div className="mb-4 flex items-center gap-3 border-b border-border/50 pb-3">
-      <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent text-muted-foreground [&_svg]:size-4">
-        <Icon className="size-4" aria-hidden="true" />
-      </span>
       <h2 className="flex-1 text-base font-semibold tracking-tight text-foreground">
         {msg(labelKey)}
       </h2>
@@ -1498,9 +1289,6 @@ export function SettingsModal() {
               <TabsContent value="wizard">
                 <WizardTab />
               </TabsContent>
-              <TabsContent value="tagging">
-                <TaggingTab />
-              </TabsContent>
               <TabsContent value="agent">
                 <AgentTab />
               </TabsContent>
@@ -1536,9 +1324,6 @@ export function SettingsModal() {
                   <AdminTab expanded={expanded} />
                 </TabsContent>
               )}
-              <TabsContent value="about">
-                <AboutTab />
-              </TabsContent>
             </motion.div>
           </div>
         </Tabs>

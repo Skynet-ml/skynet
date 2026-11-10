@@ -7,7 +7,7 @@ import { perLocale } from "@/shared/lib/per-locale";
 
 import { cn } from "@/shared/lib/utils";
 
-import { TOOL_META, getToolTitle, type ApprovalSeverity } from "../lib/tool-meta";
+import { TOOL_ICONS, TOOL_META, getToolTitle, type ApprovalSeverity } from "../lib/tool-meta";
 
 const SEVERITY: Record<ApprovalSeverity, { color: string; label: string | null }> = perLocale(
   () => ({
@@ -59,7 +59,7 @@ const NEUTRAL_ACCENT = "var(--foreground)";
  */
 export function ToolHeader({ toolKey, severity, trailing, className }: ToolHeaderProps) {
   const meta = TOOL_META[toolKey];
-  const Icon = meta?.icon ?? Wrench;
+  const Icon = meta?.icon ?? TOOL_ICONS[toolKey] ?? Wrench;
   const provided = severity && severity in SEVERITY ? (severity as ApprovalSeverity) : undefined;
   const resolvedSeverity = meta?.severity ?? provided;
   const sev = resolvedSeverity ? SEVERITY[resolvedSeverity] : null;

@@ -1,27 +1,58 @@
 import {
+  ArrowSquareOut,
   ArrowsClockwise,
+  BookOpen,
   Books,
   ChartBar,
+  ChatCenteredDots,
   Check,
   CheckCircle,
+  ClockCounterClockwise,
+  Code,
+  Columns,
   Copy,
+  Cpu,
+  Cube,
   Database,
   FadersHorizontal,
+  Feather,
+  FileCode,
   FileMagnifyingGlass,
+  FileText,
+  FlowArrow,
+  FolderOpen,
+  Gauge,
   Gear,
+  GearSix,
+  GitBranch,
+  GithubLogo,
+  Globe,
+  GridFour,
+  Hash,
+  Info,
+  LinkSimple,
+  ListBullets,
   ListChecks,
   MagicWand,
   MagnifyingGlass,
+  Package,
   Pause,
   PencilSimple,
   Play,
   PushPin,
   Scroll,
+  SealCheck,
+  ShareNetwork,
   ShieldCheck,
   Sparkle,
   Square,
+  Stack,
   Tag,
+  Target,
   Trash,
+  TreeStructure,
+  TrendUp,
+  UploadSimple,
   Wallet,
   type Icon,
 } from "@/shared/ui/icons";
@@ -56,51 +87,59 @@ interface ToolMetaDef {
 
 export const TOOL_META: Record<string, ToolMetaDef> = {
   delete_job_optimizations: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.1", {
-      p1: TERMS.optimization,
-    }),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.2", {
-      p1: TERMS.optimization,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.1", {
+        p1: TERMS.optimization,
+      }),
+    description: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.2", {
+        p1: TERMS.optimization,
+      }),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.1"),
     severity: "destructive",
     icon: Trash,
   },
   bulk_delete_jobs_optimizations_bulk_delete_post: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.3", {
-      p1: TERMS.optimizationPlural,
-    }),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.4", {
-      p1: TERMS.optimizationPlural,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.3", {
+        p1: TERMS.optimizationPlural,
+      }),
+    description: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.4", {
+        p1: TERMS.optimizationPlural,
+      }),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.2"),
     severity: "destructive",
     icon: Trash,
   },
   cancel_job_optimizations: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.5", {
-      p1: TERMS.optimization,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.5", {
+        p1: TERMS.optimization,
+      }),
     description: () => msg("auto.features.agent.panel.lib.tool.meta.literal.6"),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.7"),
     severity: "warning",
     icon: Square,
   },
   bulk_cancel_jobs_optimizations_bulk_cancel_post: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.26", {
-      p1: TERMS.optimizationPlural,
-    }),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.27", {
-      p1: TERMS.optimizationPlural,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.26", {
+        p1: TERMS.optimizationPlural,
+      }),
+    description: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.27", {
+        p1: TERMS.optimizationPlural,
+      }),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.69"),
     severity: "warning",
     icon: Square,
   },
   rename_job_optimizations: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.11", {
-      p1: TERMS.optimization,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.11", {
+        p1: TERMS.optimization,
+      }),
     description: () => msg("auto.features.agent.panel.lib.tool.meta.literal.9"),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.10"),
     severity: "info",
@@ -108,9 +147,10 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
   },
   toggle_pin_job_optimizations: {
     title: () => msg("auto.features.agent.panel.lib.tool.meta.literal.11"),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.12", {
-      p1: TERMS.optimization,
-    }),
+    description: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.12", {
+        p1: TERMS.optimization,
+      }),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.12"),
     severity: "info",
     icon: PushPin,
@@ -123,10 +163,12 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     icon: CheckCircle,
   },
   profile_datasets_profile_post: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.15", { p1: TERMS.dataset }),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.16", {
-      p1: TERMS.dataset,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.15", { p1: TERMS.dataset }),
+    description: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.16", {
+        p1: TERMS.dataset,
+      }),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.23"),
     severity: "info",
     icon: FileMagnifyingGlass,
@@ -139,29 +181,33 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     icon: MagnifyingGlass,
   },
   clone_job_optimizations: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.17", {
-      p1: TERMS.optimization,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.17", {
+        p1: TERMS.optimization,
+      }),
     description: () => msg("auto.features.agent.panel.lib.tool.meta.literal.30"),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.31"),
     severity: "warning",
     icon: Copy,
   },
   retry_job_optimizations: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.18", {
-      p1: TERMS.optimization,
-    }),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.19", {
-      p1: TERMS.optimizationTypeRun,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.18", {
+        p1: TERMS.optimization,
+      }),
+    description: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.19", {
+        p1: TERMS.optimizationTypeRun,
+      }),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.32"),
     severity: "warning",
     icon: ArrowsClockwise,
   },
   bulk_pin_jobs_optimizations_bulk_pin_post: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.21", {
-      p1: TERMS.optimizationPlural,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.21", {
+        p1: TERMS.optimizationPlural,
+      }),
     description: () => msg("auto.features.agent.panel.lib.tool.meta.literal.35"),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.36"),
     severity: "info",
@@ -175,9 +221,10 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     icon: Tag,
   },
   list_jobs_optimizations_get: {
-    title: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.25", {
-      p1: TERMS.optimizationPlural,
-    }),
+    title: () =>
+      formatMsg("auto.features.agent.panel.lib.tool.meta.template.25", {
+        p1: TERMS.optimizationPlural,
+      }),
     description: () => msg("auto.features.agent.panel.lib.tool.meta.literal.49"),
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.50"),
     severity: "info",
@@ -338,26 +385,22 @@ const DEFAULT_META: ToolMetaDef = {
 // don't need icon/severity/description. Keeps tool rows from falling back
 // to an English-looking prettified snake_case (e.g. "list models for agent").
 const TOOL_TITLES: Record<string, LocaleString> = {
-  list_models_for_agent: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.28", {
-    p1: TERMS.modelPlural,
-  }),
-  get_registry_snapshot_registry_get: () => msg("auto.features.agent.panel.lib.tool.meta.literal.73"),
-  get_optimization_counts_optimizations_counts_get: () => formatMsg(
-    "auto.features.agent.panel.lib.tool.meta.template.29",
-    { p1: TERMS.optimizationPlural },
-  ),
-  get_job_summary_optimizations: () => formatMsg(
-    "auto.features.agent.panel.lib.tool.meta.template.30",
-    { p1: TERMS.optimization },
-  ),
-  get_optimizer_stats_analytics_optimizers_get: () => formatMsg(
-    "auto.features.agent.panel.lib.tool.meta.template.31",
-    { p1: TERMS.optimizer },
-  ),
-  get_model_stats_analytics_models_get: () => formatMsg(
-    "auto.features.agent.panel.lib.tool.meta.template.31",
-    { p1: TERMS.modelPlural },
-  ),
+  list_models_for_agent: () =>
+    formatMsg("auto.features.agent.panel.lib.tool.meta.template.28", {
+      p1: TERMS.modelPlural,
+    }),
+  get_registry_snapshot_registry_get: () =>
+    msg("auto.features.agent.panel.lib.tool.meta.literal.73"),
+  get_optimization_counts_optimizations_counts_get: () =>
+    formatMsg("auto.features.agent.panel.lib.tool.meta.template.29", {
+      p1: TERMS.optimizationPlural,
+    }),
+  get_job_summary_optimizations: () =>
+    formatMsg("auto.features.agent.panel.lib.tool.meta.template.30", { p1: TERMS.optimization }),
+  get_optimizer_stats_analytics_optimizers_get: () =>
+    formatMsg("auto.features.agent.panel.lib.tool.meta.template.31", { p1: TERMS.optimizer }),
+  get_model_stats_analytics_models_get: () =>
+    formatMsg("auto.features.agent.panel.lib.tool.meta.template.31", { p1: TERMS.modelPlural }),
   list_sample_datasets_datasets_samples_get: () => msg("agent.tool.list_samples.title"),
   validate_datasets_validate_post: () => msg("agent.tool.validate_datasets.title"),
   web_search: () => msg("agent.tool.web_search.title"),
@@ -373,12 +416,13 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   list_host_repositories_connectors: () => msg("agent.tool.host_repos.any_title"),
   serve_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.74"),
   serve_pair_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.75"),
-  request_user_dataset_datasets_request_upload_post: () => msg(
-    "auto.features.agent.panel.lib.tool.meta.literal.76",
-  ),
+  request_user_dataset_datasets_request_upload_post: () =>
+    msg("auto.features.agent.panel.lib.tool.meta.literal.76"),
   request_user_pair_inference: () => msg("auto.features.agent.panel.lib.tool.meta.literal.70"),
-  get_grid_search_result_optimizations: () => msg("auto.features.agent.panel.lib.tool.meta.literal.77"),
-  get_pair_test_results_optimizations: () => msg("auto.features.agent.panel.lib.tool.meta.literal.78"),
+  get_grid_search_result_optimizations: () =>
+    msg("auto.features.agent.panel.lib.tool.meta.literal.77"),
+  get_pair_test_results_optimizations: () =>
+    msg("auto.features.agent.panel.lib.tool.meta.literal.78"),
   list_settings: () => msg("agent.tool.list_settings.title"),
   get_setting: () => msg("agent.tool.get_setting.title"),
   open_page: () => msg("agent.tool.open_page.title"),
@@ -386,6 +430,45 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   continue_to_next_screen: () => msg("agent.screen_nav.continued"),
   go_back_to_screen: () => msg("agent.screen_nav.back_running"),
   turn_check: () => msg("agent.turn_check.title"),
+};
+
+// Icons for the tools that have only a title above, so every tool row and the
+// "What I can do" list show a fitting glyph in place of the wrench fallback.
+export const TOOL_ICONS: Record<string, Icon> = {
+  list_models_for_agent: Cpu,
+  get_registry_snapshot_registry_get: Stack,
+  get_optimization_counts_optimizations_counts_get: Hash,
+  get_job_summary_optimizations: FileText,
+  get_optimizer_stats_analytics_optimizers_get: TrendUp,
+  get_model_stats_analytics_models_get: Gauge,
+  list_sample_datasets_datasets_samples_get: Package,
+  validate_datasets_validate_post: SealCheck,
+  web_search: Globe,
+  search_docs: BookOpen,
+  fetch_url: LinkSimple,
+  hand_off_to_coding_agent: Code,
+  read_repo_file: FileCode,
+  list_repo_folder: FolderOpen,
+  crawl_site: TreeStructure,
+  blackbox_engines_blackbox_engines_get: Cube,
+  optimizer_catalog_optimizers_get: Target,
+  list_github_repositories_connectors_github_repos_get: GithubLogo,
+  list_host_repositories_connectors: GitBranch,
+  serve_info_serve: Info,
+  serve_pair_info_serve: Info,
+  request_user_dataset_datasets_request_upload_post: UploadSimple,
+  request_user_pair_inference: Sparkle,
+  get_grid_search_result_optimizations: GridFour,
+  get_pair_test_results_optimizations: Columns,
+  list_settings: ListBullets,
+  get_setting: GearSix,
+  open_page: ArrowSquareOut,
+  remember_for_later: Feather,
+  continue_to_next_screen: FlowArrow,
+  go_back_to_screen: ClockCounterClockwise,
+  ask_user: ChatCenteredDots,
+  read_shared_chat_item: ShareNetwork,
+  turn_check: Check,
 };
 
 function prettifyToolName(tool: string): string {
