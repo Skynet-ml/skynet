@@ -276,6 +276,13 @@ class _BilledSnapshotRuntime(_SnapshotRuntime):
         return super().open(spec)
 
 
+class _BilledPlainRuntime(_BilledSnapshotRuntime):
+    """Reserve each box in a real budget ledger, on a runtime that cannot save boxes."""
+
+    snapshot = None
+    release_snapshot = None
+
+
 def _budget(tmp_path: Path) -> BudgetRuntime:
     """Build a real budget runtime over a SQLite ledger.
 
@@ -468,12 +475,62 @@ def test_each_workspace_box_reserves_under_its_own_operation_key(tmp_path: Path,
     finally:
         space.close()
     expected = {
-        "restored": ["repo-scorer:job", "repo-scorer:job:restored"],
-        "bad-tree": ["repo-scorer:job", "repo-scorer:job:restored", "repo-scorer:job:fallback"],
-        "snapshot-fault": ["repo-scorer:job", "repo-scorer:job:fallback"],
+        "restored": ["repo-scorer:job", "repo-scorer:job:restored-1"],
+        "bad-tree": ["repo-scorer:job", "repo-scorer:job:restored-1", "repo-scorer:job:fallback-2"],
+        "snapshot-fault": ["repo-scorer:job", "repo-scorer:job:fallback-1"],
     }[path]
     assert [spec.operation_key for spec in runtime.specs] == expected
     assert len(set(runtime.names)) == len(expected)
+
+
+@pytest.mark.parametrize("path", ["restored", "fallback", "no-cache", "no-snapshots"])
+def test_each_replaced_workspace_box_reserves_under_a_new_operation_key(tmp_path: Path, path: str) -> None:
+    """Replace the box twice after its prepared tree changed, each time on a key no earlier box used.
+
+    Args:
+        tmp_path: Scratch folder.
+        path: Which boxes replace it: boxes from the snapshot, set-up-again boxes
+            after the snapshot did not open, or set-up-again boxes on a runtime
+            with no snapshot cache or no snapshots at all.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime_class = _BilledPlainRuntime if path == "no-snapshots" else _BilledSnapshotRuntime
+    runtime = runtime_class(
+        tmp_path / "snaps",
+        _budget(tmp_path),
+        open_error=ServiceError("refused") if path == "fallback" else None,
+        saves=path != "no-cache",
+    )
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=replace(_ONLINE, operation_key="repo-scorer:job"),
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=_SETUP,
+        secrets={"API_KEY": "very-secret-value"},
+    )
+    try:
+        space.checkout("")
+        for _ in range(2):
+            (runtime.boxes[-1]._inner.path / PREPARED_DIR / "src/app.py").write_text("x = 99\n")
+            space.checkout("")
+            assert space.session().read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
+            assert space.session() is runtime.boxes[-1]
+    finally:
+        space.close()
+    expected = {
+        "restored": ["", ":restored-1", ":restored-2", ":restored-3"],
+        "fallback": ["", ":restored-1", ":fallback-2", ":fallback-3", ":fallback-4"],
+        "no-cache": ["", ":box-1", ":box-2"],
+        "no-snapshots": ["", ":box-1", ":box-2"],
+    }[path]
+    assert [spec.operation_key for spec in runtime.specs] == [f"repo-scorer:job{suffix}" for suffix in expected]
+    assert len(set(runtime.names)) == len(expected)
+    assert space._snapshots_off is (path == "fallback")
+    if path == "restored":
+        assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", "snap-0", "snap-0"]
+        assert [_setups(box) for box in runtime.boxes] == [1, 0, 0, 0]
 
 
 def test_budget_refusal_during_the_snapshot_stops_setup(tmp_path: Path) -> None:

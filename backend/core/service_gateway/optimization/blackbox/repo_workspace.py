@@ -368,6 +368,7 @@ class RepoWorkspace:
         )
         self._snapshot_id: str | None = None
         self._snapshots_off = False
+        self._opened = 0
         self._lock = threading.Lock()
 
     @property
@@ -392,7 +393,9 @@ class RepoWorkspace:
         after-setup snapshot before it goes offline, and this box and every
         later one open deny-all from that snapshot. Each box from a snapshot
         must hold the prepared tree's digest. When the snapshot cannot be
-        saved or opened, the workspace sets up a normal box instead.
+        saved or opened, the workspace sets up a normal box instead. Every box
+        after the first gets its own operation key (see ``_box_spec``), so a
+        box that replaces a closed one is not refused by the budget ledger.
 
         Args:
             on_output: Receives setup output as it streams.
@@ -440,29 +443,35 @@ class RepoWorkspace:
             return session
 
     def _box_spec(self, *, restored: bool) -> SandboxSpec:
-        """Return the spec of the next box, with the operation key of its kind.
+        """Return the spec of the next box, with an operation key no other box of the workspace has.
+
+        Every call counts as one open, also when the open then fails, because
+        the runtime can reserve the key before it fails.
 
         Args:
             restored: Whether the box opens from the after-setup snapshot.
 
         Returns:
-            The setup spec, on the setup key, for a box that sets up. Every
-            box from the snapshot shares the ``<key>:restored`` key, and every
-            box that sets up again after the snapshot failed shares the
-            ``<key>:fallback`` key; boxes of one kind reuse their key as the
-            setup boxes reuse the setup key.
+            The setup spec, on the setup key, for the first box. A later box
+            gets ``<key>:restored-<n>`` when it opens from the snapshot,
+            ``<key>:fallback-<n>`` when it sets up again after the snapshot
+            failed, and ``<key>:box-<n>`` when it sets up again for another
+            reason; ``n`` is the box's place in the workspace's opens.
         """
+        number = self._opened
+        self._opened += 1
         spec = self._spec
         if restored:
             spec = replace(spec, snapshot_id=self._snapshot_id, network_disabled=True, allowed_hosts=())
-        suffix = ":restored" if restored else ":fallback" if self._snapshots_off else ""
-        if spec.operation_key is None or not suffix:
+        if spec.operation_key is None or number == 0:
             return spec
-        # The budget ledger ties one key to one request, so a box with a
-        # different spec on the setup key is refused. The box name comes from
-        # the key too, and the snapshot builder's name must not match a box
-        # that stays open.
-        return replace(spec, operation_key=f"{spec.operation_key}{suffix}")
+        kind = "restored" if restored else "fallback" if self._snapshots_off else "box"
+        # The budget ledger ties one key to one request and returns the same
+        # operation for a key again, so a box that replaces a closed box on its
+        # key is refused once that box settles. The box name comes from the key
+        # too, and the snapshot builder's name (``<box key>:snapshot``) must not
+        # match a box that stays open.
+        return replace(spec, operation_key=f"{spec.operation_key}:{kind}-{number}")
 
     def _open_restored(self) -> SandboxSession | None:
         """Open a deny-all box from the workspace's after-setup snapshot.
