@@ -49,7 +49,7 @@ export type SettingsTabMeta = {
   labelKey: MessageKey;
   /** Space/comma separated terms for what the tab contains, localized. */
   keywordsKey: MessageKey;
-  group: "workflows" | "assistants" | "preferences" | "access" | "system";
+  group: "workflows" | "assistants" | "preferences" | "access";
   adminOnly?: boolean;
 };
 
@@ -124,7 +124,7 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     icon: HardDrive,
     labelKey: "settings.tab.admin",
     keywordsKey: "app.shell.search.kw.admin",
-    group: "system",
+    group: "access",
     adminOnly: true,
   },
 };

@@ -1117,7 +1117,6 @@ const SETTINGS_GROUPS = [
   { key: "assistants", labelKey: "settings.group.assistants" },
   { key: "preferences", labelKey: "settings.group.preferences" },
   { key: "access", labelKey: "settings.group.access" },
-  { key: "system", labelKey: "settings.group.system" },
 ] as const;
 
 // Vertical-rail item, styled to match the main sidebar nav while staying easy
