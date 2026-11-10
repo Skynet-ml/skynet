@@ -798,6 +798,15 @@ class VercelEnvironment(SandboxEnvironment):
                     await asyncio.to_thread(usage.settle)
                 else:
                     await asyncio.to_thread(usage.fail, error or SandboxInfraError("The sandbox was never created."))
+            except UsagePendingError as billing_error:
+                # Skynet never stops a snapshot builder's session, so its
+                # receipt is not final yet and the reconciler settles it later.
+                if not (self._snapshotted and box is not None):
+                    logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
+                    if box is not None:
+                        self._settle_error = billing_error
+                else:
+                    logger.info("Snapshot builder %s usage settles after its receipt is final.", self.name)
             except Exception as billing_error:
                 logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
                 if box is not None:

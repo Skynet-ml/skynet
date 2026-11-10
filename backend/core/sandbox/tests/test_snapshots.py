@@ -17,7 +17,7 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 from vercel.sandbox import SandboxApiError, SnapshotSource
 
-from core.billing.budgets import BudgetService
+from core.billing.budgets import BudgetError, BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.vercel_usage import VercelSnapshotReservation
@@ -476,6 +476,73 @@ async def test_setup_box_becomes_a_snapshot_with_the_run_expiry() -> None:
     box = client.boxes[env.name]
     assert (box.stops, box.destroys, session.stops) == (0, 0, 0)
     assert log[-1] == "settle"
+
+
+async def _snapshotted_env_whose_settle_raises(log: list[str], error: Exception) -> VercelEnvironment:
+    """Make a box that took its snapshot and whose usage settle raises.
+
+    Args:
+        log: The shared call log.
+        error: The error that the usage settle raises.
+
+    Returns:
+        The provider, ready to stop.
+    """
+    client = FakeClient(log)
+    env = _snapshotting_env(log, client)
+    await env.start()
+
+    async def snapshot(*, expiration: Any = None) -> Any:
+        """Return a created snapshot.
+
+        Args:
+            expiration: Unused.
+
+        Returns:
+            The snapshot handle.
+        """
+        return SimpleNamespace(id="snap-1", status="created", expires_at=1_000)
+
+    def settle() -> None:
+        """Raise the settle error.
+
+        Raises:
+            Exception: Always, the given error.
+        """
+        raise error
+
+    client.boxes[env.name].current_session.snapshot = snapshot
+    await env.snapshot(run_deadline=DEADLINE, now=NOW)
+    env._usage.settle = settle
+    return env
+
+
+async def test_snapshotted_box_with_an_unstopped_receipt_closes_quietly(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that the expected pending receipt of a snapshot builder raises nothing and logs no warning.
+
+    The builder session is not stopped by Skynet, so its receipt is not final
+    and the reconciler settles the hold later.
+    """
+    env = await _snapshotted_env_whose_settle_raises([], UsagePendingError("The receipt is not stopped."))
+    with caplog.at_level(logging.INFO):
+        await env.stop()
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize("error", [BudgetError("The budget is closed."), RuntimeError("database down")])
+async def test_snapshotted_box_still_raises_a_real_settle_error(
+    caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """Check that a budget or unexpected settle failure of a snapshot builder still warns and raises.
+
+    Args:
+        caplog: The log capture.
+        error: The settle failure.
+    """
+    env = await _snapshotted_env_whose_settle_raises([], error)
+    with pytest.raises((BudgetError, UsagePendingError)):
+        await env.stop()
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
 
 
 async def test_provider_refuses_to_snapshot_a_box_with_env() -> None:
