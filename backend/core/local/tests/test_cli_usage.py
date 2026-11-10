@@ -357,3 +357,23 @@ def test_route_answers_in_local_mode(engine, state_dir, monkeypatch: pytest.Monk
     assert codex["windows"]["5h"]["input_tokens"] == 4
     assert codex["quota"] == quotas["codex"]
     assert _by_cli(response.json())["claude"]["quota"]["status"] == "reconnect"
+
+
+def test_codex_reset_route_is_404_outside_local_mode(engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hosted deployments answer 404 and never start codex."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(local_cli_usage_router, "use_codex_reset", lambda _settings: pytest.fail("codex ran"))
+    client = _client(engine)
+    assert client.post("/local/cli-usage/codex/reset").status_code == 404
+    assert "/local/cli-usage/codex/reset" not in client.app.openapi()["paths"]
+
+
+def test_codex_reset_route_gives_the_outcome(engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In local mode the route uses one reset and returns Codex's outcome."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    calls: list[object] = []
+    monkeypatch.setattr(local_cli_usage_router, "use_codex_reset", lambda s: calls.append(s) or "reset")
+    response = _client(engine).post("/local/cli-usage/codex/reset")
+    assert response.status_code == 200
+    assert response.json() == {"outcome": "reset"}
+    assert len(calls) == 1
