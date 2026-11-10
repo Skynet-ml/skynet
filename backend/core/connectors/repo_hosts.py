@@ -97,12 +97,13 @@ def host_token(engine: Any, username: str, provider: str | None) -> str:
         ) from error
 
 
-def resolve_commit(provider: str | None, token: str, repository: str, branch: str | None) -> str:
+def resolve_commit(provider: str | None, token: str | None, repository: str, branch: str | None) -> str:
     """Pin a branch, or the default branch, to its current commit on a host.
 
     Args:
         provider: The repository host.
-        token: Host token with read access to the repository.
+        token: Host token with read access to the repository; ``None`` calls
+            anonymously, which reaches public repositories only.
         repository: The repository path.
         branch: Branch to pin; ``None`` picks the default branch.
 

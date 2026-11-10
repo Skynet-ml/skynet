@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -58,6 +59,7 @@ from ..sandbox import (
     _CODEX_REQUIREMENTS_CHECK,
     _CODEX_REQUIREMENTS_COMMAND,
     _CODEX_REQUIREMENTS_READBACK,
+    CODEX_REQUIREMENTS,
     CODEX_REQUIREMENTS_PATH,
     CommandResult,
     SandboxSpec,
@@ -84,6 +86,7 @@ class FakeSession:
         self.candidate: Any = "better"
         self.requirements: list[tuple[str, dict[str, Any]]] = []
         self.readback = _CODEX_REQUIREMENTS_READBACK
+        self.root_write_readback = _CODEX_REQUIREMENTS_READBACK
 
     def write_files(self, files: dict[str, str]) -> None:
         """Persist files as an in-memory child filesystem.
@@ -116,6 +119,8 @@ class FakeSession:
         """
         if CODEX_REQUIREMENTS_PATH in command:
             self.requirements.append((command, kwargs))
+            if kwargs.get("sudo"):
+                self.readback = self.root_write_readback
             return CommandResult(exit_code=0, stdout=self.readback)
         self.calls.append((command, kwargs))
         if len(self.calls) == 1:
@@ -959,6 +964,77 @@ def test_real_native_runner_drives_upstream_with_fake_cli(tmp_path: Path, engine
     assert (tmp_path / "native_artifacts.tar.gz.b64").stat().st_size > 0
 
 
+@pytest.mark.parametrize(("stop", "stop_at"), [("budget", 3), ("error", 3), ("budget", 5)])
+def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: str, stop_at: int) -> None:
+    """A parent stop ends GEPA's repository run with its own reason and its fully scored best (SKY-529)."""
+    source = tmp_path / "source" / "src"
+    source.mkdir(parents=True)
+    (source / "app.py").write_text("x = 1\n")
+    archive = tmp_path / "tree.tgz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(tmp_path / "source"), "."], check=True)
+    chunks = []
+    for index, chunk in enumerate(repo_tree.archive_chunks(archive)):
+        chunks.append(f"tree.{index}.b64")
+        (tmp_path / chunks[-1]).write_text(chunk)
+    (tmp_path / "rpc").mkdir()
+    payload = {
+        "nonce": "testnonce",
+        "engine_id": "gepa_repo",
+        "model": "claude-test",
+        "sandbox": False,
+        "max_token_cost": 0.05,
+        "max_evals": 8,
+        "max_concurrency": 1,
+        "timeout_seconds": 20,
+        "repo": {"chunks": chunks, "editable_paths": ["src"], "readonly_paths": []},
+        "task": {"name": "repo", "seed_candidate": "", "train_set": [{"id": i} for i in range(4)]},
+    }
+    (tmp_path / "input.json").write_text(json.dumps(payload))
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUNBUFFERED": "1"}
+    process = subprocess.Popen(
+        [sys.executable, native_runner.__file__, "input.json"],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    requests = 0
+    try:
+        for line in process.stdout:
+            if not line.startswith("APP_NATIVE_RPC testnonce "):
+                continue
+            request = json.loads(line.split(" ", 2)[2])
+            requests += 1
+            # Staging job e5121995 stopped after two of the seed's four scorer
+            # runs; a stop at the fifth comes after the seed's full sweep.
+            response: dict[str, Any] = {"score": 0.5, "info": {}}
+            if requests == stop_at:
+                response = {"error": "The parent evaluator stopped this run."}
+                if stop == "budget":
+                    response["stop_reason"] = "budget_reached"
+            (tmp_path / "rpc" / f"{request['id']}.json").write_text(json.dumps(response))
+        stderr = process.stderr.read()
+        assert process.wait(timeout=25) == int(stop == "error"), stderr
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    result = json.loads((tmp_path / "native_result.json").read_text())
+    assert requests == stop_at
+    assert "AttributeError" not in json.dumps(result)
+    if stop == "budget":
+        assert result["stop_reason"] == "budget_reached"
+        assert "error" not in result
+    else:
+        assert result["error"] == "The parent evaluator stopped this run."
+        assert result["interrupted_incumbent"] == {}
+    if stop_at > 4:
+        assert (result["best_candidate"], result["best_score"]) == ("", 0.5)
+    else:
+        assert "best_candidate" not in result
+
+
 def test_autosaddler_bootstrap_pins_upstream_into_a_python_312_venv() -> None:
     """Install the pinned AutoSaddler revision on its own interpreter instead of the GEPA archive."""
     command = _bootstrap_command("vercel", engine_id="autosaddler")
@@ -997,6 +1073,19 @@ def test_dockerfile_bakes_shinka_into_the_venv_the_runtime_uses() -> None:
     assert f"python -m venv {venv}" in dockerfile
     assert "core/service_gateway/optimization/blackbox/shinka_requirements.txt" in dockerfile
     assert f'{native_runtime.SHINKA_IMAGE_PYTHON} -c "import shinka.core.async_runner"' in dockerfile
+
+
+def test_dockerfile_ships_the_codex_requirements_file_root_owned_and_no_sudo() -> None:
+    """Bake the exact requirements file as root before ``USER 1001``, and give the image user no root path (SKY-389)."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    bake = dockerfile.index(f"> {CODEX_REQUIREMENTS_PATH}")
+    assert "install -d -o root -g root -m 0755 /etc/codex" in dockerfile
+    assert "printf '" + CODEX_REQUIREMENTS.replace("\n", "\\n") + "'" in dockerfile
+    assert f"chown root:root {CODEX_REQUIREMENTS_PATH}" in dockerfile
+    assert f"chmod 0644 {CODEX_REQUIREMENTS_PATH}" in dockerfile
+    assert bake < dockerfile.index("\nUSER 1001\n")
+    assert "sudoers" not in dockerfile
+    assert not re.search(r"apt-get install[^\n]*\bsudo\b", dockerfile)
 
 
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2185,9 +2274,10 @@ def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> 
 class _OrderedSession(FakeSession):
     """Record how many runner commands ran before the requirements step."""
 
-    def __init__(self, *, own_writer: bool = False) -> None:
+    def __init__(self, *, own_writer: bool = False, readback: str = _CODEX_REQUIREMENTS_READBACK) -> None:
         """Optionally give the session its own requirements writer, as a remote child session has."""
         super().__init__()
+        self.readback = readback
         self.before: list[int] = []
         self.writer_calls = 0
         if own_writer:
@@ -2205,21 +2295,39 @@ class _OrderedSession(FakeSession):
         return super().run(command, **kwargs)
 
 
+_CHECK_CALL = (_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})
+_ROOT_WRITE_CALL = (_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})
+
+
 @pytest.mark.parametrize(
-    ("contained", "own_writer", "expected"),
+    ("contained", "own_writer", "readback", "expected"),
     [
-        (True, False, [(_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})]),
-        (False, False, [(_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})]),
-        (False, True, []),
+        (True, False, _CODEX_REQUIREMENTS_READBACK, [_CHECK_CALL]),
+        (False, False, _CODEX_REQUIREMENTS_READBACK, [_CHECK_CALL]),
+        (False, False, "", [_CHECK_CALL, _ROOT_WRITE_CALL]),
+        (False, True, _CODEX_REQUIREMENTS_READBACK, []),
     ],
-    ids=["outer-box-check-only", "docker-or-vercel-root-write", "remote-child-broker-action"],
+    ids=[
+        "outer-box-check-only",
+        "image-ships-file-no-root",
+        "docker-empty-mount-root-write",
+        "remote-child-broker-action",
+    ],
 )
 def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, own_writer: bool, expected: list[Any]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contained: bool,
+    own_writer: bool,
+    readback: str,
+    expected: list[Any],
 ) -> None:
-    """Each box kind puts the root-owned file in place after setup and before the Codex runner starts."""
+    """Each box kind has the root-owned file in place after setup and before the Codex runner starts.
+
+    A box whose image ships the file needs no root command at all (SKY-389).
+    """
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
-    session = _OrderedSession(own_writer=own_writer)
+    session = _OrderedSession(own_writer=own_writer, readback=readback)
     runtime = FakeRuntime(session)
     runtime.contained = contained
     ctx = _context(tmp_path, runtime)
@@ -2229,7 +2337,7 @@ def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
 
     assert session.requirements == expected
     assert session.writer_calls == (1 if own_writer else 0)
-    assert session.before == [1]
+    assert session.before == [1] * max(len(expected), 1)
     assert len(session.calls) == 2
 
 
@@ -2246,6 +2354,7 @@ def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     session = FakeSession()
     session.readback = readback
+    session.root_write_readback = readback
     runtime = FakeRuntime(session)
     runtime.contained = contained
     ctx = _context(tmp_path, runtime)
@@ -2254,7 +2363,8 @@ def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
     with pytest.raises(ServiceError, match="Codex cannot start"):
         run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
 
-    assert len(session.requirements) == 1
+    assert session.requirements[0][0] == _CODEX_REQUIREMENTS_CHECK
+    assert len(session.requirements) == (1 if contained else 2)
     assert len(session.calls) == 1
     assert session.closed
 
@@ -2292,3 +2402,88 @@ def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeyp
     run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
 
     assert session.requirements == []
+
+
+class ProtectedRuntime(FakeRuntime):
+    """Stand in for the worker child's runtime, which opens boxes through the parent broker."""
+
+    protected = True
+
+
+def test_protected_native_box_opens_with_no_box_permit_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A protected engine box carries no request identity, because no parent permit counts it (SKY-540).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    runtime = ProtectedRuntime(FakeSession())
+
+    run_native_engine(
+        "autoresearch", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=2), _context(tmp_path, runtime)
+    )
+
+    assert runtime.spec is not None
+    assert runtime.spec.operation_key is None
+
+
+def test_cancelled_native_run_closes_its_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel that ends the engine command closes the box.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+
+    class CancelledError(Exception):
+        """Stand in for the run's cancel signal."""
+
+    class CancelledSession(FakeSession):
+        """Raise a cancel during the engine command."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Pass the install, then raise the cancel."""
+            if self.calls:
+                raise CancelledError("cancelled")
+            return super().run(command, **kwargs)
+
+    session = CancelledSession()
+    with pytest.raises(CancelledError):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=3),
+            _context(tmp_path, ProtectedRuntime(session)),
+        )
+
+    assert session.closed
+
+
+def test_a_mailbox_setup_failure_still_closes_the_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box opens before the evaluator mailbox, so a mailbox failure must not leak the paid box.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive and the mailbox.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+
+    def broken_mailbox(*_args: Any, **_kwargs: Any) -> None:
+        """Fail like a mailbox that cannot start."""
+        raise RuntimeError("mailbox setup failed")
+
+    monkeypatch.setattr(native_runtime, "_EvaluatorMailbox", broken_mailbox)
+    session = FakeSession()
+    with pytest.raises(RuntimeError, match="mailbox setup failed"):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=2),
+            _context(tmp_path, ProtectedRuntime(session)),
+        )
+
+    assert session.closed

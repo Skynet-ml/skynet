@@ -1126,10 +1126,43 @@ def test_a_byok_scorer_without_a_usable_key_ends_with_a_stable_key(
     assert BudgetService(engine=engine).get(budget_id, _USER).reserved_cents == 0
 
 
+def _compose_tree(root: Path) -> Path:
+    """Write a trusted tree whose optimize.toml names one compose service, ``db``.
+
+    Args:
+        root: The folder to write the tree in.
+
+    Returns:
+        The tree.
+    """
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("VALUE = 1\n")
+    (root / "optimize.toml").write_text('version = 1\n[sandbox]\ncompose = "compose.yaml"\n')
+    (root / "compose.yaml").write_text("services:\n  db:\n    image: postgres:16\n    command: postgres -D /data\n")
+    return root
+
+
+# A drafted fix that renames the compose service, and one that breaks optimize.toml.
+_RENAME_SERVICE_FIX = (
+    "diff --git a/compose.yaml b/compose.yaml\n"
+    "--- a/compose.yaml\n+++ b/compose.yaml\n"
+    "@@ -1,4 +1,4 @@\n services:\n-  db:\n+  evil:\n     image: postgres:16\n     command: postgres -D /data\n"
+)
+_BREAK_CONSTRAINTS_FIX = (
+    "diff --git a/optimize.toml b/optimize.toml\n"
+    "--- a/optimize.toml\n+++ b/optimize.toml\n"
+    '@@ -1,3 +1 @@\n-version = 1\n-[sandbox]\n-compose = "compose.yaml"\n+not = [valid\n'
+)
+
+
 def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A BYOK scorer model gets its saved key at run time, and each scorer box of a pass has its own key."""
+    """A BYOK scorer model gets its saved key at run time, and each scorer box of a pass has its own key.
+
+    Every box starts the unfixed trusted tree's ``[sandbox] compose`` services: a drafted fix that renames
+    the service or breaks optimize.toml changes neither the services nor the score.
+    """
     budget_id = _budget(engine)
     job = _seed(
         engine,
@@ -1138,6 +1171,8 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     )
     protected: list[dict[str, Any]] = []
     keys: list[str] = []
+    services: list[tuple[str, ...]] = []
+    trusted = _compose_tree(tmp_path / "trusted")
 
     class FakeGateway:
         """Records the payload the runner protects."""
@@ -1173,13 +1208,14 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         """Records the box's operation key."""
 
         def __init__(self, *, spec: Any, **kwargs: Any) -> None:
-            """Record the key.
+            """Record the key and the compose services.
 
             Args:
                 spec: The sandbox spec.
                 **kwargs: The workspace arguments.
             """
             keys.append(spec.operation_key)
+            services.append(tuple(service.name for service in spec.services))
 
     class FakeScorer:
         """A scorer that prepares nothing."""
@@ -1195,6 +1231,17 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
 
         def prepare(self) -> None:
             """Prepare nothing."""
+
+        def score(self, patch: str) -> dict[str, float]:
+            """Return a fixed score.
+
+            Args:
+                patch: The solution patch.
+
+            Returns:
+                The score.
+            """
+            return {"score": 1.0}
 
         def close(self) -> None:
             """Close nothing."""
@@ -1225,8 +1272,8 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
     monkeypatch.setattr(hardening_runner, "RepoScorer", FakeScorer)
     workspace = HardeningWorkspace(
         agent_archive=tmp_path / "a.tgz",
-        trusted_root=tmp_path,
-        exploits_path=tmp_path / "e",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
         reference=None,
         commit="c0ffee",
         applied_fixes=(),
@@ -1244,15 +1291,16 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         claim="pod-a:one",
         vault=FakeVault(),  # type: ignore[arg-type]
     ) as runner:
-        runner.open_scorer(tmp_path / "a.tgz", ())
-        runner.open_scorer(tmp_path / "a.tgz", ("fix",))
+        assert runner._score(None, "") == 1.0
+        assert runner._score(_RENAME_SERVICE_FIX, "") == 1.0
+        assert runner._score(_BREAK_CONSTRAINTS_FIX, "") == 1.0
 
     assert protected[0]["scorer"]["model"]["extra"]["api_key"] == "saved-user-key"
     assert job.scorer is not None
     assert "api_key" not in job.scorer["model"]["extra"]
-    assert len(keys) == 2
-    assert keys[0] != keys[1]
+    assert len(set(keys)) == 3
     assert all(key.startswith(f"repo-scorer:{operation_key(job.id)}:") for key in keys)
+    assert services == [("db",), ("db",), ("db",)]
 
     with (
         pytest.raises(ValueError, match="vault"),

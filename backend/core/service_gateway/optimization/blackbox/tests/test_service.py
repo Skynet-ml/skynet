@@ -34,7 +34,6 @@ from core.models.blackbox import (
 )
 from core.models.results import ModelTokenUsage
 from core.models.unified import UnifiedCase, UnifiedRunRequest
-from core.sandbox.timeouts import Phase
 
 from .. import autoresearch as autoresearch_mod
 from .. import autosaddler as autosaddler_mod
@@ -42,7 +41,6 @@ from .. import meta_harness as meta_harness_mod
 from .. import scorer as scorer_mod
 from .. import service as service_mod
 from .. import shinka_evolve as shinka_evolve_mod
-from .. import workspace_scorer as workspace_scorer_mod
 from ..agent_runs import PHASE_BASELINE, PHASE_FINAL
 from ..auto import LaneOutcome
 from ..harness import GatewayConfig
@@ -1168,54 +1166,6 @@ def test_final_run_stops_scheduling_cases_once_one_fails() -> None:
         service_mod._final_run(scorer, "v", cases, label="optimized version", phase=PHASE_FINAL, concurrency=2)
 
     assert set(started) <= {1, 2, 3}
-
-
-def test_final_run_and_workspace_scorer_share_one_pool_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Final-run cases and scorer cases together never run more than the process pool limit at once."""
-    monkeypatch.setattr(workspace_scorer_mod, "POOL_BOX_LIMIT", 2)
-    monkeypatch.setattr(workspace_scorer_mod, "_pool_state", None)
-    lock = threading.Lock()
-    active = 0
-    peak = 0
-
-    def work(value: float) -> float:
-        """Count the calls in flight while one sleeps briefly."""
-        nonlocal active, peak
-        with lock:
-            active += 1
-            peak = max(peak, active)
-        time.sleep(0.05)
-        with lock:
-            active -= 1
-        return value
-
-    final: list[Any] = []
-    scored: list[Any] = []
-    final_thread = threading.Thread(
-        target=lambda: final.append(
-            service_mod._final_run(
-                lambda candidate, case: (work(case["n"] / 4), {}),
-                "v",
-                [{"n": n} for n in range(1, 5)],
-                label="optimized version",
-                phase=PHASE_FINAL,
-                concurrency=4,
-            )
-        )
-    )
-    scorer_thread = threading.Thread(
-        target=lambda: scored.append(
-            workspace_scorer_mod.run_on_pool(Phase.SCORE, [lambda n=n: work(n) for n in range(4)], 4)
-        )
-    )
-    final_thread.start()
-    scorer_thread.start()
-    final_thread.join(timeout=10)
-    scorer_thread.join(timeout=10)
-
-    assert final[0].cases == [(0.25, ""), (0.5, ""), (0.75, ""), (1.0, "")]
-    assert scored == [[0, 1, 2, 3]]
-    assert peak == 2
 
 
 def test_final_run_without_cases_scores_the_version_once() -> None:

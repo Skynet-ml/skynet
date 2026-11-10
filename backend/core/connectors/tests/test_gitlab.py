@@ -15,7 +15,7 @@ from ...api.errors import DomainError
 from ...i18n import t_locale
 from .. import github_repo, gitlab, transport
 from ..github_publish import HardeningSummary, RepoPublishError
-from ..github_repo import RepoFetchError
+from ..github_repo import RepoFetchError, RepoRateLimitError
 from ..vault import ConnectorSecret
 
 SHA = "a" * 40
@@ -237,6 +237,18 @@ def test_resolve_commit_failure_is_a_fetch_error(monkeypatch: pytest.MonkeyPatch
     _serve(monkeypatch, lambda _r: httpx.Response(404, json={}))
     with pytest.raises(RepoFetchError, match="team/bot at 'dev'"):
         gitlab.resolve_commit("glpat", "team/bot", "dev")
+
+
+def test_resolve_commit_reports_the_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 429 is a rate-limit error; only a read without a token advises to connect GitLab."""
+    _serve(monkeypatch, lambda _r: httpx.Response(429, json={}))
+    with pytest.raises(RepoRateLimitError) as anonymous:
+        gitlab.resolve_commit(None, "team/bot", "dev")
+    with pytest.raises(RepoRateLimitError) as linked:
+        gitlab.resolve_commit("glpat", "team/bot", "dev")
+
+    assert str(anonymous.value) == "GitLab's rate limit is reached. Try again later. Connect GitLab to raise the limit."
+    assert str(linked.value) == "GitLab's rate limit is reached. Try again later."
 
 
 def test_open_change_opens_a_draft_merge_request(monkeypatch: pytest.MonkeyPatch) -> None:

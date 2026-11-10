@@ -13,7 +13,7 @@ import anyio
 import anyio.lowlevel
 import pytest
 
-from core.sandbox import SandboxSpec, sync_bridge
+from core.sandbox import ExecResult, SandboxSpec, sync_bridge
 from core.sandbox.errors import SandboxTransientError
 from core.sandbox.tests.fake_provider import InMemorySandbox
 
@@ -200,6 +200,19 @@ def test_sync_session_streams_output() -> None:
     finally:
         session.close()
     assert chunks == [("stdout", "hello\n")]
+
+
+def test_sync_session_returns_a_timed_out_result() -> None:
+    """Return the timed-out result of the environment, not an error."""
+    environment = InMemorySandbox(SandboxSpec(lifetime_seconds=60))
+    environment.script("sleep 99", ExecResult(124, stdout="partial\n", timed_out=True))
+    session = sync_bridge.open_session(environment)
+    try:
+        result = session.run("sleep 99", timeout_seconds=1)
+    finally:
+        session.close()
+    assert result == ExecResult(124, stdout="partial\n", timed_out=True)
+    assert not result.ok
 
 
 def test_sync_session_errors_pass_through() -> None:
