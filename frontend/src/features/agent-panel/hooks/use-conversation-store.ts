@@ -19,6 +19,7 @@
 
 import * as React from "react";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
 
 import {
   deleteConversation,
@@ -64,6 +65,8 @@ function writeLastSeen(map: LastSeenMap): void {
 export interface ConversationStoreState {
   conversations: ConversationSummary[];
   loading: boolean;
+  /** A Local/Web switch is in progress: the listed chats belong to the other side. */
+  swapping: boolean;
   activeId: string | null;
   unreadIds: ReadonlySet<string>;
   setActiveId: (id: string | null) => void;
@@ -86,6 +89,8 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
   const [activeId, setActiveId] = React.useState<string | null>(null);
   const [lastSeen, setLastSeen] = React.useState<LastSeenMap>(() => readLastSeen());
   const { web } = useResourceMode();
+  const [rowsSide, setRowsSide] = React.useState(web);
+  const swapping = useSourceSwap(web) || rowsSide !== web;
 
   const refresh = React.useCallback(
     async (params?: ListConversationsParams) => {
@@ -94,8 +99,8 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
       const rows = await listConversations(params);
       setLoading(false);
       if (rows !== null) setConversations(rows);
+      setRowsSide(web);
     },
-    // `web` is not read here; a new pick must list the other side's chats.
     [enabled, web],
   );
 
@@ -197,6 +202,7 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
   return {
     conversations,
     loading,
+    swapping,
     activeId,
     unreadIds,
     setActiveId,

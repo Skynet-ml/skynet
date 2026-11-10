@@ -27,6 +27,8 @@ interface ConversationDrawerProps {
   onOpenChange: (open: boolean) => void;
   conversations: ConversationSummary[];
   loading: boolean;
+  /** A Local/Web switch is in progress: show the skeleton, not the other side's chats. */
+  swapping?: boolean;
   activeId: string | null;
   unreadIds: ReadonlySet<string>;
   /** Conversations with a turn still streaming or waiting in the queue. */
@@ -93,6 +95,7 @@ export function ConversationDrawer(props: ConversationDrawerProps) {
     onOpenChange,
     conversations,
     loading,
+    swapping = false,
     activeId,
     unreadIds,
     busyIds,
@@ -132,7 +135,7 @@ export function ConversationDrawer(props: ConversationDrawerProps) {
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto overscroll-contain px-2 pb-4">
-          {loading && conversations.length === 0 ? (
+          {swapping || (loading && conversations.length === 0) ? (
             <ConversationDrawerSkeleton />
           ) : conversations.length === 0 ? (
             <EmptyState
@@ -144,7 +147,7 @@ export function ConversationDrawer(props: ConversationDrawerProps) {
               }
             />
           ) : (
-            <>
+            <div className="swap-in">
               {groups.map((group) => (
                 <Section
                   key={group.label}
@@ -159,7 +162,7 @@ export function ConversationDrawer(props: ConversationDrawerProps) {
                   onDelete={onDelete}
                 />
               ))}
-            </>
+            </div>
           )}
         </div>
       </SheetContent>

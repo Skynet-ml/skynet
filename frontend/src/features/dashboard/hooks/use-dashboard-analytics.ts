@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getDashboardAnalytics, type DashboardAnalytics } from "@/shared/lib/api";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
 import type { AnalyticsBucket, AnalyticsRange } from "./use-analytics-filters";
 
 type UseDashboardAnalyticsArgs = {
@@ -59,6 +60,7 @@ export function useDashboardAnalytics({
     setShownSide(web);
     setAnalyticsData(null);
   }
+  const swapping = useSourceSwap(web);
 
   const fetchDashboardAnalytics = useCallback(async () => {
     const username = isAdmin ? undefined : sessionUser || undefined;
@@ -114,10 +116,11 @@ export function useDashboardAnalytics({
     void fetchDashboardAnalytics();
   }, [activeTab, fetchDashboardAnalytics]);
 
+  // The skeleton stays up for the whole swap, even when the new side answers at once.
   return {
-    analyticsData,
+    analyticsData: swapping ? null : analyticsData,
     setAnalyticsData,
-    analyticsLoading,
+    analyticsLoading: analyticsLoading || swapping,
     fetchDashboardAnalytics,
   };
 }

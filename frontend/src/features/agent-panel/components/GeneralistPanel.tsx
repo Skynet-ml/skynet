@@ -1334,6 +1334,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onOpenChange={setDrawerOpen}
         conversations={store.conversations}
         loading={store.loading}
+        swapping={store.swapping}
         activeId={agent.conversationId ?? store.activeId}
         unreadIds={store.unreadIds}
         busyIds={agent.busyConversationIds}

@@ -2289,6 +2289,27 @@ table {
   }
 }
 
+/* Content that follows the Local/Web pick comes out of its skeleton with a
+   short fade and a light blur, so the swap reads as one step. */
+.swap-in {
+  animation: swap-in 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes swap-in {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swap-in {
+    animation-name: docs-fade-in;
+    animation-duration: 160ms;
+  }
+}
+
 /* The reply hook catches once when it fires: it drops in from above, bites,
    and swings to rest about its eye. Saved chats show it still. */
 .agent-hook-fired [data-hook-icon] {

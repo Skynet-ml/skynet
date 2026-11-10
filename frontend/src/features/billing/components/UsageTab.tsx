@@ -32,6 +32,8 @@ import { AppDatePicker, toISODate } from "@/shared/ui/app-date-picker";
 import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { Segmented } from "@/shared/ui/segmented";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { PanelHeading } from "@/shared/ui/panel-heading";
 import { Button } from "@/shared/ui/primitives/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
@@ -196,6 +198,45 @@ function StatCard({ icon: Icon, label, value }: { icon: Icon; label: string; val
       <span dir="ltr" className="text-2xl font-semibold tabular-nums text-foreground">
         {value}
       </span>
+    </div>
+  );
+}
+
+/** Bones of the stats, chart and breakdowns, in the same grids as the loaded tab. */
+function UsageSkeleton() {
+  return (
+    <div className="flex flex-col gap-6" aria-busy="true">
+      <div
+        className="grid gap-3"
+        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
+      >
+        {[0, 1].map((i) => (
+          <div
+            key={i}
+            className="flex flex-col gap-1 rounded-xl border border-border/60 bg-muted/20 px-4 py-3.5"
+          >
+            <Skeleton width={72} height={10} />
+            <Skeleton width={96} height={28} />
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-3">
+        <Skeleton width={120} height={12} />
+        <Skeleton height={220} borderRadius={8} />
+      </div>
+      <div
+        className="grid gap-x-8 gap-y-6"
+        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" }}
+      >
+        {[0, 1].map((i) => (
+          <div key={i} className="flex flex-col gap-3">
+            <Skeleton width={96} height={12} />
+            {[0, 1, 2].map((row) => (
+              <Skeleton key={row} height={20} />
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -672,6 +713,9 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
 
   const resources = useResourceMode();
   const source = resources.mode;
+  // The side the figures on screen belong to; the other side's figures never show.
+  const [dataSource, setDataSource] = React.useState(source);
+  const swapping = useSourceSwap(source);
   const load = React.useCallback(() => {
     const { startIso, endIso, startMs, endMs } = rangeBounds(range, customFrom, customTo);
     const id = ++reqId.current;
@@ -685,7 +729,9 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
       hostedTotal ? getOptimizationCounts(undefined, false, source) : Promise.resolve(null),
     ])
       .then(([resp, counts]) => {
-        if (id === reqId.current) setData(counts ? { ...resp, runs: counts.total } : resp);
+        if (id !== reqId.current) return;
+        setData(counts ? { ...resp, runs: counts.total } : resp);
+        setDataSource(source);
       })
       .catch(() => {
         if (id !== reqId.current) return;
@@ -696,6 +742,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
         } else {
           setData(deriveUsage(wallet.usage, startMs, endMs, startIso, endIso));
         }
+        setDataSource(source);
       })
       .finally(() => {
         if (id === reqId.current) setLoading(false);
@@ -765,7 +812,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
   // first row (the CLI toggle) takes the range button's place.
   if (source === "local") {
     return (
-      <div className="relative">
+      <div className="swap-in relative">
         {localPanel}
         <div className="absolute end-0 top-0">{controls}</div>
       </div>
@@ -801,16 +848,11 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
     );
   }
 
-  if (data == null) {
+  if (data == null || swapping || dataSource !== source) {
     return (
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-6">
         {toolbar}
-        <div className="flex h-64 items-center justify-center" aria-busy="true">
-          <ArrowsClockwise
-            className="size-5 animate-spin text-muted-foreground"
-            aria-hidden="true"
-          />
-        </div>
+        <UsageSkeleton />
       </div>
     );
   }
@@ -827,6 +869,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
           icon={ChartBar}
           title={msg("usage.empty.title")}
           description={msg("usage.empty.desc")}
+          className="swap-in"
         />
       </div>
     );
@@ -837,7 +880,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
       {toolbar}
 
       <div
-        className="grid gap-3"
+        className="swap-in grid gap-3"
         style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
       >
         <StatCard
@@ -852,13 +895,13 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
         />
       </div>
 
-      <div className="flex flex-col gap-3">
+      <div className="swap-in flex flex-col gap-3">
         <PanelHeading className="mb-0">{msg("usage.panel.over_time")}</PanelHeading>
         <SpendChart buckets={buckets} locale={locale} />
       </div>
 
       <div
-        className="grid gap-x-8 gap-y-6"
+        className="swap-in grid gap-x-8 gap-y-6"
         style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" }}
       >
         <div className="flex flex-col gap-3">
@@ -871,7 +914,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
         </div>
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div className="swap-in flex flex-col gap-2">
         <PanelHeading className="mb-0">{msg("usage.panel.by_day")}</PanelHeading>
         {days.length === 0 ? (
           <EmptyState variant="list" title={msg("billing.wallet.filter_empty")} />

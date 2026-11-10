@@ -5,6 +5,7 @@ import { it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+const stub = path.join(frontend, "src/features/optimizations/components/__fixtures__/style-stub.ts");
 
 // node --test only loads .ts, so the .tsx DayRow test runs in a jiti child.
 void it("Usage DayRow client tests pass", () => {
@@ -18,7 +19,10 @@ void it("Usage DayRow client tests pass", () => {
         ...process.env,
         NODE_TEST_CONTEXT: undefined,
         JITI_JSX: "1",
-        JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/` }),
+        JITI_ALIAS: JSON.stringify({
+          "@/": `${path.join(frontend, "src")}/`,
+          "react-loading-skeleton/dist/skeleton.css": stub,
+        }),
       },
     },
   );

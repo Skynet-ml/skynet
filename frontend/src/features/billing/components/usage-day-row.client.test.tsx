@@ -1,7 +1,7 @@
 /*
  * node --test cannot load .tsx, so usage-day-row.render.test.ts runs this file
  * through jiti inside `npm run test:unit`. To run it by hand from frontend/:
- * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\"}" npx jiti <this file>
+ * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\",\"react-loading-skeleton/dist/skeleton.css\":\"$PWD/src/features/optimizations/components/__fixtures__/style-stub.ts\"}" npx jiti <this file>
  */
 import assert from "node:assert/strict";
 import { after, test } from "node:test";

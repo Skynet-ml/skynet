@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listJobs, getOptimizationCounts, type OptimizationCounts } from "@/shared/lib/api";
 import { loadRuns, useHostedRetry } from "@/features/sidebar";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
 import type { PaginatedJobsResponse } from "@/shared/types/api";
 import { msg } from "@/shared/lib/messages";
 import { FETCH_PAGE_SIZE } from "../constants";
@@ -16,6 +17,8 @@ export type UseJobsListReturn = {
   setData: React.Dispatch<React.SetStateAction<PaginatedJobsResponse | null>>;
   loading: boolean;
   initialLoad: boolean;
+  /** A Local/Web switch is in progress: the rows on hand belong to the other side. */
+  swapping: boolean;
   error: string | null;
   pageOffset: number;
   setPageOffset: React.Dispatch<React.SetStateAction<number>>;
@@ -39,6 +42,8 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
     setPagedSide(web);
     setPageOffset(0);
   }
+  const [dataSide, setDataSide] = useState(web);
+  const swapping = useSourceSwap(web);
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -77,6 +82,8 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
     } catch (e) {
       setError(e instanceof Error ? e.message : msg("dashboard.load_error"));
     } finally {
+      // Also after a failure, so a failed load never leaves the skeleton up.
+      setDataSide(web);
       setLoading(false);
       setInitialLoad(false);
     }
@@ -96,6 +103,7 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
     // not show "no runs"; a list with rows keeps its pager usable.
     loading: loading || (hostedRetry.pending && !data?.total),
     initialLoad,
+    swapping: swapping || dataSide !== web,
     error,
     pageOffset,
     setPageOffset,

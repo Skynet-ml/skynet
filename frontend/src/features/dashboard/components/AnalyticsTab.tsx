@@ -142,7 +142,7 @@ function AnalyticsTabImpl({
   const noSuccessMessage = msg("dashboard.analytics.no_successful_runs");
 
   return (
-    <div className="space-y-6">
+    <div className="swap-in space-y-6">
       {toolbar}
 
       {chartData.truncated && <InlineWarningRow message={msg("dashboard.analytics.truncated")} />}

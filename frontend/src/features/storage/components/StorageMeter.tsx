@@ -16,6 +16,8 @@ import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { cn } from "@/shared/lib/utils";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
+import { Skeleton } from "@/shared/ui/skeleton";
 
 /**
  * Compact account-wide storage gauge for the sidebar footer: a thin bar plus an
@@ -33,6 +35,8 @@ export function StorageMeter({ collapsed = false }: { collapsed?: boolean }) {
   const [usage, setUsage] = React.useState<StorageUsageResponse | null>(null);
   const active = usePathname().startsWith("/storage");
   const source = useResourceMode().mode;
+  const [usageSource, setUsageSource] = React.useState(source);
+  const swapping = useSourceSwap(source);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -42,7 +46,10 @@ export function StorageMeter({ collapsed = false }: { collapsed?: boolean }) {
       const id = ++reqId;
       getStorageUsage(source)
         .then((res) => {
-          if (!cancelled && id === reqId) setUsage(res);
+          if (!cancelled && id === reqId) {
+            setUsage(res);
+            setUsageSource(source);
+          }
         })
         .catch(() => {
           /* ambient gauge — stay silent if the figure is briefly unavailable */
@@ -62,6 +69,17 @@ export function StorageMeter({ collapsed = false }: { collapsed?: boolean }) {
   }, [source]);
 
   if (!usage || usage.quota_bytes <= 0) return null;
+
+  if (!collapsed && (swapping || usageSource !== source)) {
+    return (
+      <div className="min-h-[44px] px-3 pt-3 pb-1 lg:min-h-0" aria-hidden="true">
+        <Skeleton height={6} borderRadius={9999} containerClassName="flex leading-none" />
+        <p className="mt-1.5 text-[0.6875rem]">
+          <Skeleton width="60%" />
+        </p>
+      </div>
+    );
+  }
 
   const usagePct = Math.min(100, (usage.used_bytes / usage.quota_bytes) * 100);
   // Full, not over: run logs stop saving the moment usage reaches the quota.
@@ -109,7 +127,7 @@ export function StorageMeter({ collapsed = false }: { collapsed?: boolean }) {
       aria-label={msg("storage.page.title")}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "block min-h-[44px] rounded-lg px-3 pt-3 pb-1 transition-colors duration-150 lg:min-h-0",
+        "swap-in block min-h-[44px] rounded-lg px-3 pt-3 pb-1 transition-colors duration-150 lg:min-h-0",
         active ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/40",
       )}
     >

@@ -228,7 +228,7 @@ export function JobsTab({
   }, [layoutJson]);
 
   return (
-    <Card className="overflow-hidden border-border/60">
+    <Card className="swap-in overflow-hidden border-border/60">
       <CardContent className="px-3 pt-4 sm:px-6 sm:pt-5">
         <div className="mb-3 flex min-h-[44px] items-center gap-2 lg:min-h-0">
           {filteredItems.length > 0 && (

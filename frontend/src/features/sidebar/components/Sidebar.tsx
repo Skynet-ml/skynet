@@ -70,6 +70,7 @@ import {
 } from "@/features/sidebar";
 import { AccountMenu } from "@/shared/layout/account-menu";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ShareDialog } from "@/features/optimizations";
 import { StorageMeter } from "@/features/storage";
@@ -309,6 +310,9 @@ export function Sidebar() {
 
   const hostedRetry = useHostedRetry();
   const { web } = useResourceMode();
+  // The side the listed runs belong to; the other side's runs never show.
+  const [jobsSide, setJobsSide] = React.useState(web);
+  const swapping = useSourceSwap(web) || jobsSide !== web;
   const fetchData = React.useCallback(async () => {
     void fetchFolders();
     try {
@@ -329,6 +333,7 @@ export function Sidebar() {
       if (tabRef.current !== tab) return;
       hostedRetry.failed(res.hostedFailed);
       setJobs(res.items);
+      setJobsSide(web);
       setActiveCount(res.items.filter((j) => isActiveStatus(j.status)).length);
       setLoadedAll(allLoaded(res.items, res.totals));
       loadedItemsRef.current = res.items;
@@ -336,6 +341,7 @@ export function Sidebar() {
       setRenderedTab(tab);
     } catch (err) {
       console.warn("sidebar fetch failed:", err);
+      setJobsSide(web);
     }
   }, [sessionUser, isAdmin, tab, fetchFolders, hostedRetry.failed, web]);
 
@@ -430,7 +436,7 @@ export function Sidebar() {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [loadedAll, loadMore, jobs.length]);
+  }, [loadedAll, loadMore, jobs.length, swapping]);
 
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ id: string } | null>(null);
   const [deleteLoading, setDeleteLoading] = React.useState(false);
@@ -767,92 +773,96 @@ export function Sidebar() {
           data-setup="runs"
         >
           <div ref={listRef} className="flex-1 overflow-y-auto px-3 pt-1 pb-2 no-scrollbar">
-            <AnimatePresence mode="wait" initial={false}>
-              <motion.div
-                key={renderedTab}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.14, ease: "easeOut" }}
-              >
-                {showFolders && (
-                  <div className="mb-2">
-                    <FolderTree
-                      folders={rootFolders}
-                      childMap={childMap}
-                      expanded={expandedFolders}
-                      onToggle={toggleFolder}
-                      view={view}
-                      version={folderVersion}
-                      renderRun={(job) =>
-                        renderJob(
-                          job,
-                          job.role != null && job.role !== "owner",
-                          job.folder_id ? topFolderName(folders, job.folder_id) : null,
-                        )
-                      }
-                      onAction={setFolderDialog}
-                    />
-                  </div>
-                )}
-                {/* One flat list, not a div per group, so a run keeps its
-                    element when a sort moves it under another heading. */}
-                <AnimatePresence initial={false}>
-                  {groupedJobs.flatMap((group, groupIdx) => [
-                    <motion.p
-                      key={`group:${group.label}`}
-                      layout="position"
-                      initial={ROW_MOTION.initial}
-                      animate={ROW_MOTION.animate}
-                      exit={ROW_MOTION.exit}
-                      transition={rowTransition(0)}
-                      className={cn(
-                        "flex items-center gap-1.5 text-[0.625rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/60 px-2 py-1.5",
-                        groupIdx > 0 && "mt-2",
-                      )}
-                    >
-                      <span>{group.label}</span>
-                      <span className="tabular-nums text-muted-foreground/40 font-normal">
-                        {group.jobs.length}
-                      </span>
-                    </motion.p>,
-                    ...group.jobs.map((job, idx) => (
-                      <motion.div
-                        key={runKey(job)}
-                        layout="position"
-                        initial={ROW_MOTION.initial}
-                        animate={ROW_MOTION.animate}
-                        exit={ROW_MOTION.exit}
-                        transition={rowTransition(idx)}
-                      >
-                        {renderJob(job, renderedTab === "shared")}
-                      </motion.div>
-                    )),
-                  ])}
-                </AnimatePresence>
-                {groupedJobs.length > 0 && <div className="h-2" aria-hidden="true" />}
-                {loadedAll && groupedJobs.length === 0 && !showFolders && jobs.length > 0 && (
-                  <p className="px-2 py-6 text-center text-[0.6875rem] text-muted-foreground/60">
-                    {msg("sidebar.filter.no_match")}
-                  </p>
-                )}
-                {loadedAll &&
-                  !hostedRetry.pending &&
-                  groupedJobs.length === 0 &&
-                  !showFolders &&
-                  jobs.length === 0 && (
-                  <EmptyState
-                    icon={PaperPlaneTilt}
-                    iconWrap="tile"
-                    title={msg(
-                      renderedTab === "shared" ? "sidebar.shared.empty" : "sidebar.mine.empty",
+            {!swapping && (
+              <div className="swap-in">
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.div
+                    key={renderedTab}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.14, ease: "easeOut" }}
+                  >
+                    {showFolders && (
+                      <div className="mb-2">
+                        <FolderTree
+                          folders={rootFolders}
+                          childMap={childMap}
+                          expanded={expandedFolders}
+                          onToggle={toggleFolder}
+                          view={view}
+                          version={folderVersion}
+                          renderRun={(job) =>
+                            renderJob(
+                              job,
+                              job.role != null && job.role !== "owner",
+                              job.folder_id ? topFolderName(folders, job.folder_id) : null,
+                            )
+                          }
+                          onAction={setFolderDialog}
+                        />
+                      </div>
                     )}
-                    className="px-1 py-10 [&_p]:text-balance"
-                  />
-                )}
-              </motion.div>
-            </AnimatePresence>
-            {(loadingMore || hostedRetry.pending) && jobs.length === 0 && (
+                    {/* One flat list, not a div per group, so a run keeps its
+                        element when a sort moves it under another heading. */}
+                    <AnimatePresence initial={false}>
+                      {groupedJobs.flatMap((group, groupIdx) => [
+                        <motion.p
+                          key={`group:${group.label}`}
+                          layout="position"
+                          initial={ROW_MOTION.initial}
+                          animate={ROW_MOTION.animate}
+                          exit={ROW_MOTION.exit}
+                          transition={rowTransition(0)}
+                          className={cn(
+                            "flex items-center gap-1.5 text-[0.625rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/60 px-2 py-1.5",
+                            groupIdx > 0 && "mt-2",
+                          )}
+                        >
+                          <span>{group.label}</span>
+                          <span className="tabular-nums text-muted-foreground/40 font-normal">
+                            {group.jobs.length}
+                          </span>
+                        </motion.p>,
+                        ...group.jobs.map((job, idx) => (
+                          <motion.div
+                            key={runKey(job)}
+                            layout="position"
+                            initial={ROW_MOTION.initial}
+                            animate={ROW_MOTION.animate}
+                            exit={ROW_MOTION.exit}
+                            transition={rowTransition(idx)}
+                          >
+                            {renderJob(job, renderedTab === "shared")}
+                          </motion.div>
+                        )),
+                      ])}
+                    </AnimatePresence>
+                    {groupedJobs.length > 0 && <div className="h-2" aria-hidden="true" />}
+                    {loadedAll && groupedJobs.length === 0 && !showFolders && jobs.length > 0 && (
+                      <p className="px-2 py-6 text-center text-[0.6875rem] text-muted-foreground/60">
+                        {msg("sidebar.filter.no_match")}
+                      </p>
+                    )}
+                    {loadedAll &&
+                      !hostedRetry.pending &&
+                      groupedJobs.length === 0 &&
+                      !showFolders &&
+                      jobs.length === 0 && (
+                      <EmptyState
+                        icon={PaperPlaneTilt}
+                        iconWrap="tile"
+                        title={msg(
+                          renderedTab === "shared" ? "sidebar.shared.empty" : "sidebar.mine.empty",
+                        )}
+                        className="px-1 py-10 [&_p]:text-balance"
+                      />
+                    )}
+                  </motion.div>
+                </AnimatePresence>
+              </div>
+            )}
+            {(swapping || ((loadingMore || hostedRetry.pending) && jobs.length === 0)) && (
               <SidebarRunsSkeleton groups={runGroupsHint} />
             )}
             {loadingMore && jobs.length > 0 && (
@@ -860,7 +870,10 @@ export function Sidebar() {
                 <SidebarMoreSkeleton />
               </div>
             )}
-            {!loadedAll && <div ref={sentinelRef} aria-hidden="true" className="h-1 w-full" />}
+            {/* No paging during a Local/Web swap: the rows on hand belong to the other side. */}
+            {!loadedAll && !swapping && (
+              <div ref={sentinelRef} aria-hidden="true" className="h-1 w-full" />
+            )}
           </div>
         </div>
 

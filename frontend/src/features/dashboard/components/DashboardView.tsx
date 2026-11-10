@@ -7,7 +7,7 @@ import { useSession } from "next-auth/react";
 import { motion, useReducedMotion } from "framer-motion";
 import { toast } from "react-toastify";
 import { ChartBar, Table } from "@/shared/ui/icons";
-import { DashboardSkeleton } from "./DashboardSkeleton";
+import { DashboardSkeleton, JobsTabSkeleton } from "./DashboardSkeleton";
 import { Card } from "@/shared/ui/primitives/card";
 import {
   UNDERLINE_TABS_LIST_CLASS,
@@ -104,6 +104,7 @@ export function DashboardView() {
     setData,
     loading,
     initialLoad,
+    swapping,
     error,
     pageOffset,
     setPageOffset,
@@ -483,34 +484,38 @@ export function DashboardView() {
               )}
 
               <TabsContent value="jobs">
-                <JobsTab
-                  data={data}
-                  loading={loading}
-                  error={error}
-                  filteredItems={filteredItems}
-                  activeCount={activeCount}
-                  clearAllFilters={clearAll}
-                  colResize={colResize}
-                  sortKey={sortKey}
-                  sortDir={sortDir}
-                  toggleSort={toggleSort}
-                  filters={filters}
-                  setColumnFilter={setColumnFilter}
-                  openFilter={openFilter}
-                  setOpenFilter={setOpenFilter}
-                  filterOptions={filterOptions}
-                  showSharedColumns={hasShared}
-                  sessionUser={sessionUser}
-                  selectedIds={selectedIds}
-                  toggleRowSelected={toggleRowSelected}
-                  selectablePageIds={selectablePageIds}
-                  pageAllSelected={pageAllSelected}
-                  pageSomeSelected={pageSomeSelected}
-                  togglePageSelection={togglePageSelection}
-                  pageOffset={pageOffset}
-                  setPageOffset={setPageOffset}
-                  onOpenJob={(id, source) => router.push(runHref(id, source))}
-                />
+                {swapping ? (
+                  <JobsTabSkeleton />
+                ) : (
+                  <JobsTab
+                    data={data}
+                    loading={loading}
+                    error={error}
+                    filteredItems={filteredItems}
+                    activeCount={activeCount}
+                    clearAllFilters={clearAll}
+                    colResize={colResize}
+                    sortKey={sortKey}
+                    sortDir={sortDir}
+                    toggleSort={toggleSort}
+                    filters={filters}
+                    setColumnFilter={setColumnFilter}
+                    openFilter={openFilter}
+                    setOpenFilter={setOpenFilter}
+                    filterOptions={filterOptions}
+                    showSharedColumns={hasShared}
+                    sessionUser={sessionUser}
+                    selectedIds={selectedIds}
+                    toggleRowSelected={toggleRowSelected}
+                    selectablePageIds={selectablePageIds}
+                    pageAllSelected={pageAllSelected}
+                    pageSomeSelected={pageSomeSelected}
+                    togglePageSelection={togglePageSelection}
+                    pageOffset={pageOffset}
+                    setPageOffset={setPageOffset}
+                    onOpenJob={(id, source) => router.push(runHref(id, source))}
+                  />
+                )}
               </TabsContent>
 
               <TabsContent value="analytics">
