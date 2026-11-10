@@ -49,7 +49,12 @@ from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
-from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelSnapshotReservation, VercelUsageReservation
+from core.billing.vercel_usage import (
+    SANDBOX_NETWORK_BYTES_CAP,
+    SessionNotStoppedError,
+    VercelSnapshotReservation,
+    VercelUsageReservation,
+)
 from core.config import settings
 
 from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources, validate_spec
@@ -798,9 +803,10 @@ class VercelEnvironment(SandboxEnvironment):
                     await asyncio.to_thread(usage.settle)
                 else:
                     await asyncio.to_thread(usage.fail, error or SandboxInfraError("The sandbox was never created."))
-            except UsagePendingError as billing_error:
-                # Skynet never stops a snapshot builder's session, so its
-                # receipt is not final yet and the reconciler settles it later.
+            except SessionNotStoppedError as billing_error:
+                # The snapshot call stops the builder's session, but Vercel's
+                # receipt can still show it running for a short time after the
+                # stop. The reconciler settles the hold when the receipt is final.
                 if not (self._snapshotted and box is not None):
                     logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
                     if box is not None:
@@ -1334,12 +1340,13 @@ class VercelEnvironment(SandboxEnvironment):
         try:
             try:
                 handle = await asyncio.wait_for(client.get_snapshot(snapshot_id=built.snapshot_id), STOP_TIMEOUT)
-                deleted_at = None
                 if handle.status != "deleted":
                     await asyncio.wait_for(handle.delete(), STOP_TIMEOUT)
-                    # Vercel keeps ``updated_at`` at the creation time on a
-                    # delete, so the storage ends at our own delete time.
-                    deleted_at = int(time.time() * 1000)
+                # Vercel keeps ``updated_at`` at the creation time on a delete,
+                # so the storage ends at our own delete time. A retry after an
+                # earlier delete that reached Vercel uses this call's time too;
+                # the expiry caps the stored time.
+                deleted_at = int(time.time() * 1000)
             except BaseException:
                 if built.reservation is not None:
                     with contextlib.suppress(Exception):

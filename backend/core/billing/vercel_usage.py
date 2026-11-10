@@ -322,6 +322,10 @@ def _admitted_network_cap(price_snapshot: Mapping[str, Any] | None) -> int:
     return cap if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0 else 0
 
 
+class SessionNotStoppedError(UsagePendingError):
+    """Report that Vercel's receipt does not yet show the admitted session as stopped."""
+
+
 def vercel_actual_usd(
     session: Mapping[str, Any], *, session_id: str, vcpus: int, price_snapshot: Mapping[str, Any] | None = None
 ) -> Decimal:
@@ -338,10 +342,11 @@ def vercel_actual_usd(
         transfer when the admission allowed named hosts.
 
     Raises:
+        SessionNotStoppedError: When the receipt does not yet show the session as stopped.
         UsagePendingError: When final usage or its billing classification is uncertain.
     """
     if session.get("id") != session_id or session.get("status") != "stopped":
-        raise UsagePendingError("The cloud sandbox has not confirmed the admitted session is fully stopped.")
+        raise SessionNotStoppedError("The cloud sandbox has not confirmed the admitted session is fully stopped.")
     region = session.get("region")
     rates = (
         price_snapshot.get("rates")

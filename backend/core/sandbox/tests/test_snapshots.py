@@ -17,10 +17,16 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 from vercel.sandbox import SandboxApiError, SnapshotSource
 
+from core.billing.budget_amounts import cent_units
 from core.billing.budgets import BudgetError, BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
-from core.billing.vercel_usage import VercelSnapshotReservation
+from core.billing.vercel_usage import (
+    SessionNotStoppedError,
+    VercelSnapshotReservation,
+    vercel_charge_policy,
+    vercel_snapshot_actual_usd,
+)
 from core.config import app_env, settings
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError
 from core.sandbox.providers.vercel import VercelEnvironment
@@ -520,28 +526,48 @@ async def _snapshotted_env_whose_settle_raises(log: list[str], error: Exception)
 async def test_snapshotted_box_with_an_unstopped_receipt_closes_quietly(caplog: pytest.LogCaptureFixture) -> None:
     """Check that the expected pending receipt of a snapshot builder raises nothing and logs no warning.
 
-    The builder session is not stopped by Skynet, so its receipt is not final
-    and the reconciler settles the hold later.
+    The snapshot call stops the builder session, but Vercel's receipt can
+    still show it running for a short time after the stop. The reconciler
+    settles the hold later.
     """
-    env = await _snapshotted_env_whose_settle_raises([], UsagePendingError("The receipt is not stopped."))
+    env = await _snapshotted_env_whose_settle_raises([], SessionNotStoppedError("The receipt is not stopped."))
     with caplog.at_level(logging.INFO):
         await env.stop()
     assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO and "settles after its receipt is final" in record.getMessage()
+    ]
 
 
-@pytest.mark.parametrize("error", [BudgetError("The budget is closed."), RuntimeError("database down")])
-async def test_snapshotted_box_still_raises_a_real_settle_error(
-    caplog: pytest.LogCaptureFixture, error: Exception
-) -> None:
-    """Check that a budget or unexpected settle failure of a snapshot builder still warns and raises.
-
-    Args:
-        caplog: The log capture.
-        error: The settle failure.
-    """
-    env = await _snapshotted_env_whose_settle_raises([], error)
-    with pytest.raises((BudgetError, UsagePendingError)):
+async def test_snapshotted_box_still_raises_a_usage_anomaly(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that a pending usage anomaly of a snapshot builder, not a late receipt, still warns and raises."""
+    anomaly = UsagePendingError("Cloud sandbox transfer exceeded the admitted network allowance.")
+    env = await _snapshotted_env_whose_settle_raises([], anomaly)
+    with pytest.raises(UsagePendingError) as raised:
         await env.stop()
+    assert raised.value is anomaly
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+async def test_snapshotted_box_still_raises_a_budget_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that a budget settle failure of a snapshot builder still warns and raises unchanged."""
+    error = BudgetError("The budget is closed.")
+    env = await _snapshotted_env_whose_settle_raises([], error)
+    with pytest.raises(BudgetError) as raised:
+        await env.stop()
+    assert raised.value is error
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+async def test_snapshotted_box_wraps_an_unexpected_settle_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that an unexpected settle failure of a snapshot builder warns and raises a pending usage error."""
+    error = RuntimeError("database down")
+    env = await _snapshotted_env_whose_settle_raises([], error)
+    with pytest.raises(UsagePendingError) as raised:
+        await env.stop()
+    assert raised.value.__cause__ is error
     assert [record for record in caplog.records if record.levelno == logging.WARNING]
 
 
@@ -813,6 +839,26 @@ class VercelLikeSnapshotHandle(FakeSnapshotHandle):
         self.status = "deleted"
 
 
+def _storage_units(reservation: VercelSnapshotReservation, size_bytes: int, stored_ms: int) -> int:
+    """Price stored snapshot bytes for a stored time at the admitted quote.
+
+    Args:
+        reservation: The snapshot hold with its admitted quote.
+        size_bytes: The stored size.
+        stored_ms: The stored time.
+
+    Returns:
+        The charge in budget units.
+    """
+    price = reservation.quote.price_snapshot
+    usd = vercel_snapshot_actual_usd(
+        {"id": "snap-1", "status": "deleted", "size_bytes": size_bytes, "created_at": 0, "updated_at": stored_ms},
+        snapshot_id="snap-1",
+        price_snapshot=price,
+    )
+    return cent_units(vercel_charge_policy(price).convert(usd).total)
+
+
 async def test_snapshot_storage_is_priced_to_our_delete_time(database: Engine) -> None:
     """Check that a snapshot is billed for its stored day when Vercel keeps ``updated_at`` at creation."""
     runtime = _runtime(database)
@@ -826,8 +872,64 @@ async def test_snapshot_storage_is_priced_to_our_delete_time(database: Engine) -
     await VercelEnvironment.delete_snapshot(built, client=client)
     operation = _operation(database)
     assert operation.state == "settled"
-    assert operation.actual_units > 0
+    one_day = _storage_units(reservation, 10_000_000_000, 86_400_000)
+    assert one_day > 0
+    assert one_day <= operation.actual_units <= _storage_units(reservation, 10_000_000_000, 86_460_000)
     assert runtime.service.get(runtime.budget_id, "alice").billed_cents > 0
+
+
+class FlakySettleReservation(VercelSnapshotReservation):
+    """Fail the first settle after the delete reached Vercel, then settle normally."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Make the hold with no settle call yet.
+
+        Args:
+            *args: The ``VercelSnapshotReservation`` arguments.
+            **kwargs: The ``VercelSnapshotReservation`` keyword arguments.
+        """
+        super().__init__(*args, **kwargs)
+        self.settle_calls = 0
+
+    def settle(self, snapshot: Any) -> None:
+        """Raise like a database outage on the first call, then settle.
+
+        Args:
+            snapshot: The provider state of the snapshot.
+
+        Raises:
+            RuntimeError: On the first call.
+        """
+        self.settle_calls += 1
+        if self.settle_calls == 1:
+            self.pending(snapshot)
+            raise RuntimeError("database down")
+        super().settle(snapshot)
+
+
+async def test_snapshot_delete_retry_prices_storage_to_the_retry_time(database: Engine) -> None:
+    """Check that a retry after a delete that reached Vercel still bills the stored day.
+
+    The first settle fails after the delete, so the retry finds the snapshot
+    already deleted with ``updated_at`` at the creation time.
+    """
+    runtime = _runtime(database)
+    reservation = FlakySettleReservation(
+        runtime, {"session_id": "session-1", "retention_ms": 3 * 86_400_000}, operation_key="op-1:snapshot"
+    )
+    reservation.bind("snap-1")
+    client = SnapshotClient([], VercelLikeSnapshotHandle("snap-1", 10_000_000_000))
+    client.boxes["builder"] = FakeBox("builder", FakeSession())
+    built = BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", reservation=reservation)
+    with pytest.raises(RuntimeError):
+        await VercelEnvironment.delete_snapshot(built, client=client)
+    await VercelEnvironment.delete_snapshot(built, client=client)
+    operation = _operation(database)
+    assert reservation.settle_calls == 2
+    assert operation.state == "settled"
+    one_day = _storage_units(reservation, 10_000_000_000, 86_400_000)
+    assert one_day > 0
+    assert one_day <= operation.actual_units <= _storage_units(reservation, 10_000_000_000, 86_460_000)
 
 
 async def test_missing_builder_record_is_normal_after_the_delete(
