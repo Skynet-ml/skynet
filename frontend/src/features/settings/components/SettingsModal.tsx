@@ -1129,18 +1129,6 @@ const SETTINGS_RAIL_ITEM_CLASS =
 // toggle that grows the modal to fill the screen.
 const EXPANDABLE_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set(["usage", "admin"]);
 
-function SettingsPanelHeader({ tab, action }: { tab: SettingsTab; action?: React.ReactNode }) {
-  const { labelKey } = SETTINGS_TABS[tab];
-  return (
-    <div className="mb-4 flex items-center gap-3 border-b border-border/50 pb-3">
-      <h2 className="flex-1 text-base font-semibold tracking-tight text-foreground">
-        {msg(labelKey)}
-      </h2>
-      {action}
-    </div>
-  );
-}
-
 export function SettingsModal() {
   const { open, setOpen, targetTab, clearTarget, guided } = useSettingsModal();
   const { data: session } = useSession();
@@ -1254,6 +1242,7 @@ export function SettingsModal() {
                         <span className="relative z-10 flex min-w-0 flex-1 items-center gap-2.5">
                           <Icon
                             aria-hidden="true"
+                            weight="regular"
                             className="size-4 shrink-0 transition-colors duration-200"
                           />
                           <span className="flex-1 truncate text-start">{msg(labelKey)}</span>
@@ -1272,19 +1261,16 @@ export function SettingsModal() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: prefersReduced ? 0 : 0.18, ease: [0.2, 0.8, 0.2, 1] }}
             >
-              <SettingsPanelHeader
-                tab={activeTab}
-                action={
-                  canExpand && (
-                    <ExpandToggleButton
-                      ref={expandButton}
-                      expanded={expanded}
-                      controls={settingsTabsId}
-                      onToggle={() => setExpanded(!expanded)}
-                    />
-                  )
-                }
-              />
+              {canExpand && (
+                <div className="mb-2 flex justify-end">
+                  <ExpandToggleButton
+                    ref={expandButton}
+                    expanded={expanded}
+                    controls={settingsTabsId}
+                    onToggle={() => setExpanded(!expanded)}
+                  />
+                </div>
+              )}
               <TabsContent value="wizard">
                 <WizardTab />
               </TabsContent>

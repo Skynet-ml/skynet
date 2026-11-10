@@ -8,16 +8,16 @@
 
 import {
   Bell,
-  ChartBar,
+  CallBell,
+  Code,
   CreditCard,
+  Gauge,
   HardDrive,
   HardDrives,
-  Key,
   Lock,
   Plug,
-  Robot,
+  Shapes,
   ShieldCheck,
-  Sparkle,
   User,
 } from "@/shared/ui/icons";
 import type { Icon } from "@/shared/ui/icons";
@@ -55,13 +55,13 @@ export type SettingsTabMeta = {
 
 export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
   wizard: {
-    icon: Sparkle,
+    icon: Shapes,
     labelKey: "settings.tab.wizard",
     keywordsKey: "app.shell.search.kw.wizard",
     group: "workflows",
   },
   agent: {
-    icon: Robot,
+    icon: CallBell,
     labelKey: "settings.tab.agent",
     keywordsKey: "app.shell.search.kw.agent",
     group: "assistants",
@@ -79,13 +79,13 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     group: "preferences",
   },
   security: {
-    icon: ShieldCheck,
+    icon: Lock,
     labelKey: "settings.tab.security",
     keywordsKey: "app.shell.search.kw.security",
     group: "access",
   },
   privacy: {
-    icon: Lock,
+    icon: ShieldCheck,
     labelKey: "settings.tab.privacy",
     keywordsKey: "app.shell.search.kw.privacy",
     group: "access",
@@ -97,7 +97,7 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     group: "access",
   },
   usage: {
-    icon: ChartBar,
+    icon: Gauge,
     labelKey: "settings.tab.usage",
     keywordsKey: "app.shell.search.kw.usage",
     group: "access",
@@ -115,7 +115,7 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     group: "access",
   },
   api: {
-    icon: Key,
+    icon: Code,
     labelKey: "settings.tab.api",
     keywordsKey: "app.shell.search.kw.api",
     group: "access",
