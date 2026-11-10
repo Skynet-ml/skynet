@@ -614,6 +614,7 @@ class _Box:
         self._cutoff_works = cutoff_works
         self.commands: list[tuple[str, bool]] = []
         self.closed = False
+        self.service_bases: list[str] = []
 
     def write_files(self, files: dict[str, str]) -> None:
         """Accept files."""
@@ -629,7 +630,17 @@ class _Box:
             return CommandResult(exit_code=1) if self.online else CommandResult(exit_code=0, stdout=_PROBE_OK)
         if "hashlib.sha256" in command:
             return CommandResult(exit_code=0, stdout="0" * 64)
+        if "pwd -P" in command:
+            return CommandResult(exit_code=0, stdout="/box/.app-services\n")
         return CommandResult(exit_code=0)
+
+    def start_services(self, base_dir: str) -> None:
+        """Record the start of the compose services.
+
+        Args:
+            base_dir: The folder the services run in.
+        """
+        self.service_bases.append(base_dir)
 
     def disable_network(self) -> None:
         """Switch the network off, or fail like a provider that refused."""
@@ -820,6 +831,7 @@ def test_binding_starts_the_base_compose_services_next_to_the_scorer(tmp_path: P
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
 
     assert gateway.boxes[0].spec.services == (db,)
+    assert gateway.boxes[0].service_bases == ["/box/.app-services"]
     staged.close_scorers()
 
 

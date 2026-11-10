@@ -50,6 +50,10 @@ WORK_DIR = f"{REPO_DIR}/work"
 PREPARED_DIR = f"{REPO_DIR}/prepared"
 PATCH_FILE = f"{REPO_DIR}/version.patch"
 HIDDEN_FILE = f"{REPO_DIR}/hidden.b64"
+# The compose services run in their own copy of the prepared tree, outside
+# REPO_DIR: a checkout clears REPO_DIR, and a service that writes into the
+# prepared tree would break its digest and replace the box at every checkout.
+SERVICES_DIR = ".app-services"
 _SETUP_TIMEOUT_SECONDS = 1_800.0
 _GIT_IDENTITY = "-c user.name=app -c user.email=app@localhost -c commit.gpgsign=false"
 # A commit may start ``git maintenance`` in the background (detached since
@@ -426,6 +430,9 @@ class RepoWorkspace:
                         continue
                     if not self._spec.network_disabled:
                         self._cut_network(session)
+                # After the cut, so no service holds a connection it opened
+                # while the box could still reach the registries.
+                self._start_services(session)
             except BaseException as error:
                 self._failed_setup(session, error)
                 raise
@@ -592,6 +599,29 @@ class RepoWorkspace:
         self._prepared_digest = self._digest_prepared(session)
         if self._prepared_digest is None:
             raise RepoSetupError("The prepared repository could not be fingerprinted.")
+
+    def _start_services(self, session: SandboxSession) -> None:
+        """Start the compose services on a copy of the prepared tree, after setup.
+
+        Args:
+            session: The prepared, offline box.
+
+        Raises:
+            RepoSetupError: When the box cannot start services or the copy fails.
+        """
+        if not self._spec.services:
+            return
+        start = getattr(session, "start_services", None)
+        if start is None:
+            raise RepoSetupError("This sandbox cannot start the repository's compose services.")
+        copied = session.run(
+            f"set -e; rm -rf {SERVICES_DIR}; cp -a {PREPARED_DIR} {SERVICES_DIR}; cd {SERVICES_DIR}; pwd -P",
+            timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+        )
+        lines = copied.stdout.strip().splitlines() if copied.ok else []
+        if not lines or not lines[-1].startswith("/"):
+            raise RepoSetupError(f"The repository could not be copied for the compose services: {_tail(copied)}")
+        start(lines[-1])
 
     def _digest_prepared(self, session: SandboxSession) -> str | None:
         """Hash the whole prepared tree in the box.

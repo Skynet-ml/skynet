@@ -207,6 +207,20 @@ class ParentSandboxSession:
             return None
         return take(cache, cache_key)
 
+    def start_services(self, base_dir: str) -> None:
+        """Start the box's compose services, with the repository folder as their base.
+
+        Args:
+            base_dir: The absolute folder of the repository in the box.
+
+        Raises:
+            ServiceError: When the runtime cannot start compose services.
+        """
+        start = getattr(self._session, "start_services", None)
+        if start is None:
+            raise ServiceError("This sandbox runtime cannot start the repository's compose services.")
+        start(base_dir)
+
     def disable_network(self) -> None:
         """Switch the box to deny-all networking and confirm the provider applied it.
 
@@ -346,6 +360,7 @@ class SandboxBroker:
         self._command_runner = command_runner
         self._parent_command_runner = parent_command_runner
         self._snapshots = snapshots
+        self._snapshots_expired = False
         self._sessions: dict[str, _OwnedSession] = {}
         # Kept apart from ``_sessions`` so no guest handle can ever address them.
         self._parent_sessions: list[ParentSandboxSession] = []
@@ -547,16 +562,21 @@ class SandboxBroker:
 
         After the run deadline the cache closes and deletes its snapshots, so
         their storage holds settle. A box that asked for a snapshot then opens
-        empty, and its caller's tree check sends it back to a normal setup. A
-        failed delete is logged; the run end tries it again.
+        empty, and its caller's tree check sends it back to a normal setup.
+        Only the first call after the deadline closes the cache, so a failed
+        delete does not slow every later box; the run end tries it again.
 
         Returns:
             ``False`` when the run has no snapshot cache or its deadline passed.
         """
-        if self._snapshots is None:
+        if self._snapshots is None or self._snapshots_expired:
             return False
         if not self._snapshots.past_deadline():
             return True
+        with self._lock:
+            if self._snapshots_expired:
+                return False
+            self._snapshots_expired = True
         try:
             bridge_run(self._snapshots.close)
         except Exception as error:

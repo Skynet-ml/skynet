@@ -4,8 +4,9 @@ A Vercel box has no container runtime, so a compose ``image`` is not pulled.
 Each service runs its ``entrypoint`` and ``command`` as a background process
 in the box, in ``depends_on`` order. The box grows by the declared ``cpus``
 and ``mem_limit`` of each service, so the reservation prices the services
-too. Services start after the box (or its snapshot restore) is up, and they
-stop before a snapshot, so a snapshot never holds a running service.
+too. Services start when the caller asks, once the repository is in the
+box, and they stop before a snapshot, so a snapshot never holds a running
+service.
 """
 
 from __future__ import annotations

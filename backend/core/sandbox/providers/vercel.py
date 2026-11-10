@@ -17,8 +17,9 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
   a trial box can start from it. A box that holds env values or injected
   headers is refused, and the snapshot storage is metered as sandbox cost.
 - Compose services (see ``..services``) run as processes in the box. The
-  box grows by their size, so the reservation prices them. They start after
-  the create or the snapshot restore, and stop before a snapshot.
+  box grows by their size, so the reservation prices them. They start only
+  when the caller calls ``start_services``, once the repository is in the
+  box, and stop before a snapshot.
 - ``exec`` streams new command output to the output sink while the command
   runs, so a model mailbox frame reaches the parent before the exit.
 - Harbor's directory transfer feature is left out.
@@ -33,6 +34,7 @@ import contextlib
 import dataclasses
 import logging
 import math
+import posixpath
 import shlex
 import subprocess
 import time
@@ -350,7 +352,7 @@ class VercelEnvironment(SandboxEnvironment):
             snapshot_id: Start the box from this run snapshot instead of the image.
             snapshot_usage_factory: Makes the storage reservation of a snapshot.
             services: The compose services in start order. The box grows by
-                their size.
+                their size; ``start_services`` starts them.
 
         Raises:
             SandboxSpecError: The spec is invalid, a protected box has no
@@ -601,9 +603,27 @@ class VercelEnvironment(SandboxEnvironment):
                 bucket=self._pacing.creates if self._pacing else None,
                 clock=self._clock,
             )
-        if self._services:
-            with self.timings.phase("services"):
-                await start_services(self, self._services, self._services_up)
+
+    async def start_services(self, base_dir: str) -> None:
+        """Start the compose services in the running box, in start order.
+
+        Args:
+            base_dir: The absolute folder of the repository in the box. A
+                relative service ``working_dir``, and a missing one, resolve in it.
+
+        Raises:
+            SandboxInfraError: A service did not start.
+            HealthcheckError: A service did not become healthy.
+        """
+        services = [
+            dataclasses.replace(
+                service,
+                working_dir=posixpath.join(base_dir, service.working_dir) if service.working_dir else base_dir,
+            )
+            for service in self._services
+        ]
+        with self.timings.phase("services"):
+            await start_services(self, services, self._services_up)
 
     async def _create(self, usage: Any | None) -> None:
         """Send the create call and confirm the session.

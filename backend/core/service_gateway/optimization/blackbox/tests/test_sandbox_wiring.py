@@ -42,6 +42,15 @@ class ServiceSandbox(InMemorySandbox):
         super().__init__(spec)
         self.snapshot_id = snapshot_id
         self.services = tuple(services)
+        self.service_bases: list[str] = []
+
+    async def start_services(self, base_dir: str) -> None:
+        """Record the start of the compose services.
+
+        Args:
+            base_dir: The folder the services run in.
+        """
+        self.service_bases.append(base_dir)
 
     async def snapshot(self, *, run_deadline: datetime) -> BuiltSnapshot:
         """Save the box once and name the snapshot after the call count.
@@ -106,6 +115,9 @@ def test_the_bridge_passes_services_and_the_snapshot_to_a_capable_provider(monke
         environment = session._session.environment
         assert environment.services == (_DB,)
         assert environment.snapshot_id == "snap-9"
+        assert environment.service_bases == []
+        session.start_services("/repo")
+        assert environment.service_bases == ["/repo"]
     finally:
         session.close()
 
@@ -215,6 +227,19 @@ def test_a_parent_box_keeps_its_services_and_snapshot_id() -> None:
     assert spec.services == (_DB,)
     assert spec.snapshot_id == "snap-3"
     assert spec.image == IMAGE
+
+
+def test_a_parent_box_forwards_the_service_start() -> None:
+    """Start the services through the parent box, and refuse when its runtime cannot start them."""
+    runtime = FakeRuntime()
+    parent = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120).parent_runtime(())
+    box = parent.open(SandboxSpec(lifetime_seconds=60, operation_key="k", services=(_DB,)))
+    with pytest.raises(ServiceError, match="cannot start the repository's compose services"):
+        box.start_services("/repo")
+    bases: list[str] = []
+    runtime.sessions[0].start_services = bases.append  # type: ignore[attr-defined]
+    box.start_services("/repo")
+    assert bases == ["/repo"]
 
 
 def test_a_parent_box_without_the_runs_cache_drops_its_snapshot_id() -> None:

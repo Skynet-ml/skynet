@@ -264,6 +264,7 @@ class SnapshotCache:
         # builder after the box it snapshots, not after the key, so
         # ``release`` cannot find a key's snapshots by builder name.
         self._owned_by_key: dict[str, set[str]] = {}
+        self._delete_lock = asyncio.Lock()
         self._closed = False
 
     def expiration(self, now: datetime | None = None) -> timedelta:
@@ -414,8 +415,11 @@ class SnapshotCache:
         self._closed = True
         self._entries.clear()
         self._last_used.clear()
+        # A release's delete in flight can still fail and put its snapshot back.
+        async with self._delete_lock:
+            owned = list(self._owned)
         failure: BaseException | None = None
-        for snapshot_id in list(self._owned):
+        for snapshot_id in owned:
             error = await self._delete_owned(snapshot_id)
             failure = failure or error
         if failure is not None:
@@ -426,6 +430,8 @@ class SnapshotCache:
 
         It leaves ``_owned`` before the delete starts, so a ``release`` and a
         ``close`` that overlap never delete it, and settle its hold, twice.
+        Deletes run one at a time, so ``close`` sees a snapshot that a failed
+        or cancelled ``release`` delete puts back.
 
         Args:
             snapshot_id: The owned snapshot.
@@ -433,16 +439,20 @@ class SnapshotCache:
         Returns:
             The delete's error, or ``None`` when it was deleted or already gone.
         """
-        built = self._owned.pop(snapshot_id, None)
-        if built is None:
+        async with self._delete_lock:
+            built = self._owned.pop(snapshot_id, None)
+            if built is None:
+                return None
+            try:
+                await self._delete(built)
+            except Exception as error:
+                logger.warning("Run %s could not delete a setup snapshot: %s", self.run_id, error)
+                self._owned[snapshot_id] = built
+                return error
+            except BaseException:
+                self._owned[snapshot_id] = built
+                raise
             return None
-        try:
-            await self._delete(built)
-        except Exception as error:
-            logger.warning("Run %s could not delete a setup snapshot: %s", self.run_id, error)
-            self._owned[snapshot_id] = built
-            return error
-        return None
 
     async def _discard_late_build(self, built: BuiltSnapshot) -> None:
         """Delete a snapshot whose build ended after the run ended.

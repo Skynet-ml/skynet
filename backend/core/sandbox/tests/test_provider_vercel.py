@@ -1494,14 +1494,18 @@ def _service_scripts(box: FakeBox, marker: str) -> list[str]:
     return found
 
 
-async def test_services_start_in_order_after_the_create(client: FakeClient, log: list[str]) -> None:
-    """Check that each service launches in start order after the create, and the phase is timed."""
-    env = make_env(client, log, services=SERVICES, resources=ResourceRequest(cpus=2))
+async def test_services_start_only_when_asked_in_the_base_folder(client: FakeClient, log: list[str]) -> None:
+    """Check that the create starts no service, and the start launches each in order in the base folder."""
+    services = (*SERVICES, ComposeService(name="api", command="python -m api", working_dir="srv"))
+    env = make_env(client, log, services=services, resources=ResourceRequest(cpus=4))
     await env.start()
     box = client.boxes[env.name]
-    assert _service_scripts(box, "setsid") == ["db", "cache"]
+    assert box.create_calls == []
+    await env.start_services("/repo")
+    assert _service_scripts(box, "setsid") == ["db", "cache", "api"]
+    assert [call["cwd"] for call in box.create_calls] == ["/repo", "/repo", "/repo/srv"]
     # Each launch is one timed run inside the services phase.
-    assert [record.phase for record in env.timings.records] == ["create", "run", "run", "services"]
+    assert [record.phase for record in env.timings.records] == ["create", "run", "run", "run", "services"]
     await env.stop()
 
 
@@ -1534,10 +1538,12 @@ def test_services_too_large_fail_before_any_create(client: FakeClient, log: list
 
 
 async def test_services_start_again_on_a_box_from_a_snapshot(client: FakeClient, log: list[str]) -> None:
-    """Check that a trial box from a snapshot starts its own services."""
+    """Check that a trial box from a snapshot starts no service at create, and its own services when asked."""
     env = make_env(client, log, services=SERVICES)
     env.snapshot_id = "snap-1"
     await env.start()
+    assert _service_scripts(client.boxes[env.name], "setsid") == []
+    await env.start_services("/repo")
     assert _service_scripts(client.boxes[env.name], "setsid") == ["db", "cache"]
     await env.stop()
 
@@ -1546,6 +1552,7 @@ async def test_snapshot_stops_the_services_first(client: FakeClient, log: list[s
     """Check that the services stop in reverse order before the snapshot call."""
     env = make_env(client, log, protected=False, services=SERVICES)
     await env.start()
+    await env.start_services("/repo")
     box = client.boxes[env.name]
     session = box.current_session
     seen: list[list[str]] = []
@@ -1572,6 +1579,7 @@ async def test_cancel_in_the_service_stop_reserves_no_snapshot_hold(client: Fake
     """Check that the service stop runs before the hold, so a cancel there leaves no hold without pending."""
     env = make_env(client, log, services=SERVICES)
     await env.start()
+    await env.start_services("/repo")
     reserved: list[str] = []
 
     def factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:

@@ -508,6 +508,18 @@ class AsyncBridgeSession:
         with _bridge_errors():
             bridge_run(self._session.environment.disable_network)
 
+    def start_services(self, base_dir: str) -> None:
+        """Start the box's compose services, with the repository folder as their base.
+
+        Args:
+            base_dir: The absolute folder of the repository in the box.
+
+        Raises:
+            ServiceError: The provider refused the start for good.
+        """
+        with _bridge_errors():
+            bridge_run(self._session.environment.start_services, base_dir)
+
     def snapshot(self, cache: SnapshotCache, cache_key: str) -> str:
         """Save this box as an after-setup snapshot in the run's cache, once per key.
 

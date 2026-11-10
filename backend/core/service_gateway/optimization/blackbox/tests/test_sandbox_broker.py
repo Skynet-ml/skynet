@@ -493,3 +493,39 @@ def test_after_the_run_deadline_boxes_use_no_snapshot_and_the_snapshots_are_dele
     assert parent.snapshot(runtime.sessions[-1], "key") is None
     broker.close()
     assert deleted == ["snap-1"]
+
+
+def test_after_the_run_deadline_a_failed_snapshot_delete_runs_once_until_the_run_end() -> None:
+    """Close the expired cache once, so a failing delete does not slow every later box."""
+    calls: list[str] = []
+
+    async def failing_delete(built: BuiltSnapshot) -> None:
+        """Fail every delete before the run end.
+
+        Args:
+            built: The snapshot to delete.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        calls.append(built.snapshot_id)
+        raise RuntimeError("provider error")
+
+    async def build(name: str) -> BuiltSnapshot:
+        """Build one fake snapshot."""
+        return BuiltSnapshot(snapshot_id="snap-1", builder_name=name)
+
+    cache = SnapshotCache("run", datetime.now(UTC) - timedelta(seconds=1), delete=failing_delete)
+    asyncio.run(cache.get_or_build("key", build))
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120, snapshots=cache)
+    parent = broker.parent_runtime(("pypi.org",))
+    spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), operation_key="k", snapshot_id="snap-1")
+    for number in range(4):
+        parent.open(replace(spec, operation_key=f"k{number}"))
+    assert not parent.supports_snapshots
+    assert calls == ["snap-1"]
+    assert all(opened.snapshot_id is None for opened in runtime.specs)
+    with pytest.raises(RuntimeError):
+        broker.close()
+    assert calls == ["snap-1", "snap-1"]

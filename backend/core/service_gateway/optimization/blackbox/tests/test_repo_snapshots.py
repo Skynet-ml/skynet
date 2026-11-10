@@ -18,10 +18,11 @@ from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelUsageReservation
 from core.exceptions import ServiceError
 from core.sandbox.providers.vercel import box_name
+from core.sandbox.services import ComposeService
 from core.storage.models import Base, BillingCustomerModel
 
 from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError
-from ..repo_workspace import PREPARED_DIR, WORK_DIR, RepoWorkspace
+from ..repo_workspace import PREPARED_DIR, SERVICES_DIR, WORK_DIR, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 from ..sandbox_contract import SandboxSession
@@ -793,3 +794,157 @@ def test_broker_release_without_a_cache_is_a_no_op() -> None:
     """Do nothing when the broker's parent runtime has no snapshot cache."""
     parent = SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=120).parent_runtime(())
     parent.release_snapshot("any-key")
+
+
+_API = ComposeService(name="api", command="python -m api")
+
+
+class _ServiceBox(_Box):
+    """Record when the workspace starts the compose services, and what the box holds then."""
+
+    def __init__(self, inner: Any, *, online: bool) -> None:
+        """Wrap a local session with no service started.
+
+        Args:
+            inner: The real local session.
+            online: Whether the box opened with network access.
+        """
+        super().__init__(inner, online=online, cutoff="ok")
+        self.starts: list[dict[str, Any]] = []
+
+    def start_services(self, base_dir: str) -> None:
+        """Record the start, and write into the base folder as a service with a data file does.
+
+        Args:
+            base_dir: The absolute folder the services run in.
+        """
+        base = Path(base_dir)
+        self.starts.append(
+            {
+                "base": base,
+                "online": self.online,
+                "commands": len(self.commands),
+                "built": (base / "built.txt").is_file(),
+            }
+        )
+        (base / "service.db").write_text("rows\n")
+
+
+class _ServiceRuntime(_SnapshotRuntime):
+    """Open the snapshot runtime's boxes as boxes that can start compose services."""
+
+    def open(self, spec: SandboxSpec) -> _ServiceBox:
+        """Open a box that records its service start.
+
+        Args:
+            spec: The requested box.
+
+        Returns:
+            The box.
+        """
+        box = super().open(spec)
+        self.boxes[-1] = _ServiceBox(box._inner, online=box.online)
+        return self.boxes[-1]
+
+
+def _service_space(archive: Path, runtime: Any) -> RepoWorkspace:
+    """Build an online workspace with one compose service and a setup command.
+
+    Args:
+        archive: Packed tree.
+        runtime: Where its boxes open.
+
+    Returns:
+        The workspace.
+    """
+    return RepoWorkspace(
+        runtime=runtime,
+        spec=replace(_ONLINE, services=(_API,)),
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=_SETUP,
+        secrets={},
+    )
+
+
+def _check_start(box: _ServiceBox) -> None:
+    """Check that a box started its services once, offline, after setup, in a copy of the prepared tree.
+
+    Args:
+        box: The box the workspace kept.
+    """
+    (start,) = box.starts
+    assert start["base"] == (box._inner.path / SERVICES_DIR).resolve()
+    assert start["built"]
+    assert not start["online"]
+    assert "cp -a" in box.commands[start["commands"] - 1][0]
+
+
+def test_a_kept_setup_box_starts_its_services_after_setup(tmp_path: Path) -> None:
+    """Start the services in a kept setup box only after setup and the cut, and keep the box at checkout.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _ServiceRuntime(tmp_path / "snaps", saves=False)
+    space = _service_space(archive, runtime)
+    try:
+        space.checkout(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"}))
+        space.checkout("")
+    finally:
+        space.close()
+    (box,) = runtime.boxes
+    assert _setups(box) == 1
+    _check_start(box)
+
+
+def test_a_restored_box_starts_its_services_after_the_digest_check(tmp_path: Path) -> None:
+    """Start no service in the box that becomes the snapshot, and start them in the restored box after its check.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _ServiceRuntime(tmp_path / "snaps")
+    space = _service_space(archive, runtime)
+    try:
+        space.checkout("")
+    finally:
+        space.close()
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0"]
+    assert runtime.boxes[0].starts == []
+    assert not (runtime.saved["snap-0"] / SERVICES_DIR).exists()
+    restored = runtime.boxes[1]
+    _check_start(restored)
+    before = [command for command, _, _ in restored.commands[: restored.starts[0]["commands"]]]
+    assert any("hexdigest" in command for command in before)
+
+
+def test_a_fallback_box_starts_its_services_after_setup(tmp_path: Path) -> None:
+    """Start no service in a restored box that fails its check, and start them in the fallback box.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+
+    def tamper(folder: Path) -> None:
+        """Change the prepared tree in the restored box.
+
+        Args:
+            folder: The restored box's folder.
+        """
+        (folder / PREPARED_DIR / "src/app.py").write_text("x = 99\n")
+
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _ServiceRuntime(tmp_path / "snaps", tamper=tamper)
+    space = _service_space(archive, runtime)
+    try:
+        space.checkout("")
+    finally:
+        space.close()
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", None]
+    assert runtime.boxes[0].starts == []
+    assert runtime.boxes[1].starts == []
+    _check_start(runtime.boxes[2])
