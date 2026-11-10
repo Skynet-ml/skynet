@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "Nutzungsbedingungen AGB rechtlich Vereinbarung terms service legal",
   "app.shell.search.kw.privacy_policy": "Datenschutzerklärung Datenschutz rechtlich Daten DSGVO privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "Sitzungen Labeling Taggen annotieren Labels automatisches Taggen Autopilot Bewertungsschema Kalibrierung labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "Der Preis enthält eine Plattformgebühr von {p1}.",
   "billing.plans.topup.custom_range": "Gib einen Betrag von {p1} bis {p2} ein.",
   "submit.economy.label": "Halber Preis, langsamer",
   "submit.economy.hint": "Verwaltete Modellaufrufe laufen zum halben Preis über die Batch-Warteschlange des Anbieters. Jede Runde kann Minuten bis Stunden dauern.",

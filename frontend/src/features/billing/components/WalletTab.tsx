@@ -54,7 +54,6 @@ import {
   formatCentsUsd,
   formatResetDate,
   formatUsd,
-  purchaseFeeUsd,
   purchaseTotalUsd,
   type TopUpPack,
 } from "../lib/wallet";
@@ -132,9 +131,7 @@ function AddFundsControls() {
           p1: formatUsdWhole(CUSTOM_CENTS_MIN / 100, locale),
           p2: formatUsdWhole(CUSTOM_CENTS_MAX / 100, locale),
         })
-      : formatMsg("billing.plans.topup.fee_note", {
-          p1: formatUsd(purchaseFeeUsd(cents, wallet.pricing), locale),
-        });
+      : undefined;
   return (
     <SettingsRow icon={Sparkle} label={msg("billing.action.add_funds")} description={description}>
       <div

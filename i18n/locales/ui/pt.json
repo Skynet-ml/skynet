@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "termos de serviço condições jurídico acordo terms service legal",
   "app.shell.search.kw.privacy_policy": "política de privacidade jurídico dados LGPD privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "sessões rotulagem anotar rótulos marcação automática piloto automático rubrica calibração labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "O preço inclui uma taxa de plataforma de {p1}.",
   "billing.plans.topup.custom_range": "Insira um valor de {p1} a {p2}.",
   "submit.economy.label": "Metade do preço, mais lento",
   "submit.economy.hint": "As chamadas a modelos geridos passam pela fila de lotes do fornecedor a metade do preço. Cada ronda pode demorar de minutos a horas.",

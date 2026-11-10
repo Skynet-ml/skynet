@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "termini di servizio condizioni legale accordo terms service legal",
   "app.shell.search.kw.privacy_policy": "informativa sulla privacy legale dati GDPR privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "sessioni etichettatura annotare etichette etichettatura automatica pilota automatico rubrica calibrazione labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "Il prezzo include una commissione di piattaforma di {p1}.",
   "billing.plans.topup.custom_range": "Inserisci un importo da {p1} a {p2}.",
   "submit.economy.label": "Metà prezzo, più lento",
   "submit.economy.hint": "Le chiamate ai modelli gestiti passano dalla coda batch del fornitore a metà prezzo. Ogni round può richiedere da minuti a ore.",

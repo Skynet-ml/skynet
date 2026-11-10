@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "服務條款 條款 法律 協議 terms service legal",
   "app.shell.search.kw.privacy_policy": "私隱政策 私隱 法律 數據 privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "工作階段 標註 加標籤 註解 標籤 自動標註 自動駕駛 評分準則 校準 labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "價錢已包括 {p1} 平台費。",
   "billing.plans.topup.custom_range": "請輸入 {p1} 至 {p2} 之間嘅金額。",
   "submit.economy.label": "半價，較慢",
   "submit.economy.hint": "託管模型嘅調用會以半價經供應商嘅批次隊列處理。每一輪可能要幾分鐘到幾個鐘。",

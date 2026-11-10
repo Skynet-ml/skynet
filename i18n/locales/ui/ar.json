@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "شروط الخدمة الشروط قانوني اتفاقية terms service legal",
   "app.shell.search.kw.privacy_policy": "سياسة الخصوصية قانوني البيانات privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "جلسات الوسم التعليق التوضيحي التسميات وسم تلقائي طيار آلي معايير التقييم معايرة labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "يشمل السعر رسوم منصة قدرها {p1}.",
   "billing.plans.topup.custom_range": "أدخل مبلغًا من {p1} إلى {p2}.",
   "submit.economy.label": "نصف السعر، أبطأ",
   "submit.economy.hint": "تمر استدعاءات النماذج المُدارة عبر طابور الدفعات لدى المزوّد بنصف السعر. قد تستغرق كل جولة من دقائق إلى ساعات.",

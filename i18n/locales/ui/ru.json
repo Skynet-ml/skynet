@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "условия использования юридическая информация соглашение terms service legal",
   "app.shell.search.kw.privacy_policy": "политика конфиденциальности юридическая информация данные privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "сессии разметка аннотирование метки авторазметка автопилот рубрика калибровка labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "Цена включает сбор платформы {p1}.",
   "billing.plans.topup.custom_range": "Введите сумму от {p1} до {p2}.",
   "submit.economy.label": "Вдвое дешевле, медленнее",
   "submit.economy.hint": "Вызовы управляемых моделей идут через пакетную очередь провайдера за полцены. Каждый раунд может занять от минут до часов.",

@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "умови використання юридична інформація угода terms service legal",
   "app.shell.search.kw.privacy_policy": "політика конфіденційності юридична інформація дані privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "сесії розмітка анотування мітки авторозмітка автопілот рубрика калібрування labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "Ціна включає збір платформи {p1}.",
   "billing.plans.topup.custom_range": "Введіть суму від {p1} до {p2}.",
   "submit.economy.label": "Удвічі дешевше, повільніше",
   "submit.economy.hint": "Виклики керованих моделей проходять через пакетну чергу провайдера за пів ціни. Кожен раунд може тривати від хвилин до годин.",

@@ -3528,7 +3528,6 @@
   "app.shell.search.kw.terms": "terms service legal agreement",
   "app.shell.search.kw.privacy_policy": "privacy policy legal data GDPR",
   "app.shell.search.kw.sessions": "labeling sessions tagging annotate labels autotag autopilot rubric calibration",
-  "billing.plans.topup.fee_note": "Price includes a {p1} platform fee.",
   "billing.plans.topup.custom_range": "Enter an amount from {p1} to {p2}.",
   "submit.economy.label": "Half price, slower",
   "submit.economy.hint": "Managed model calls go through the provider's batch queue at half price. Each round can take minutes to hours.",

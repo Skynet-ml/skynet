@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "服务条款 条款 法律 协议 terms service legal",
   "app.shell.search.kw.privacy_policy": "隐私政策 法律 数据 privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "会话 标注 打标签 注释 标签 自动标注 自动驾驶 评分标准 校准 labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "价格包含 {p1} 平台费。",
   "billing.plans.topup.custom_range": "请输入 {p1} 至 {p2} 之间的金额。",
   "submit.economy.label": "半价，较慢",
   "submit.economy.hint": "托管模型调用将以半价通过提供商的批处理队列执行。每一轮可能需要几分钟到几小时。",

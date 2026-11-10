@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "kullanım koşulları hizmet şartları yasal sözleşme terms service legal",
   "app.shell.search.kw.privacy_policy": "gizlilik politikası yasal veri KVKK privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "oturumlar etiketleme açıklama ekleme etiketler otomatik etiketleme otopilot değerlendirme ölçütü kalibrasyon labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "Fiyata {p1} platform ücreti dahildir.",
   "billing.plans.topup.custom_range": "{p1} ile {p2} arasında bir tutar girin.",
   "submit.economy.label": "Yarı fiyat, daha yavaş",
   "submit.economy.hint": "Yönetilen model çağrıları sağlayıcının toplu iş kuyruğundan yarı fiyatına geçer. Her tur dakikalardan saatlere kadar sürebilir.",

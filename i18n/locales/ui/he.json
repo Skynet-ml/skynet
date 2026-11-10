@@ -3528,7 +3528,6 @@
   "app.shell.search.kw.terms": "תנאי שימוש תנאים משפטי הסכם terms service legal",
   "app.shell.search.kw.privacy_policy": "מדיניות פרטיות משפטי נתונים privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "סשנים תיוג תוויות סימון תיוג אוטומטי טייס אוטומטי רובריקה כיול labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "המחיר כולל עמלת פלטפורמה של {p1}.",
   "billing.plans.topup.custom_range": "יש להזין סכום בין {p1} ל-{p2}.",
   "submit.economy.label": "חצי מחיר, איטי יותר",
   "submit.economy.hint": "קריאות מודל מנוהלות עוברות בתור אצוות אצל הספק בחצי מחיר. כל סבב יכול לקחת בין דקות לשעות.",

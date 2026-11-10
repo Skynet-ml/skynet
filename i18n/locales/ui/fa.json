@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "شرایط خدمات شرایط حقوقی توافق‌نامه terms service legal",
   "app.shell.search.kw.privacy_policy": "سیاست حفظ حریم خصوصی حقوقی داده‌ها privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "جلسات برچسب‌گذاری حاشیه‌نویسی برچسب‌ها برچسب‌گذاری خودکار خلبان خودکار روبریک کالیبراسیون labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "قیمت شامل کارمزد پلتفرم {p1} است.",
   "billing.plans.topup.custom_range": "مبلغی بین {p1} تا {p2} وارد کنید.",
   "submit.economy.label": "نصف قیمت، کندتر",
   "submit.economy.hint": "فراخوانی‌های مدل مدیریت‌شده با نصف قیمت از صف دسته‌ای ارائه‌دهنده عبور می‌کنند. هر دور ممکن است از چند دقیقه تا چند ساعت طول بکشد.",

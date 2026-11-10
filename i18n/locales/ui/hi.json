@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "सेवा की शर्तें शर्तें कानूनी अनुबंध terms service legal",
   "app.shell.search.kw.privacy_policy": "गोपनीयता नीति कानूनी डेटा privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "सत्र लेबलिंग टैगिंग एनोटेट लेबल ऑटो-टैग ऑटोपायलट रूब्रिक कैलिब्रेशन labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "कीमत में {p1} का प्लेटफ़ॉर्म शुल्क शामिल है।",
   "billing.plans.topup.custom_range": "{p1} से {p2} तक की राशि दर्ज करें।",
   "submit.economy.label": "आधी कीमत, धीमा",
   "submit.economy.hint": "प्रबंधित मॉडल कॉल आधी कीमत पर प्रदाता की बैच कतार से होकर जाती हैं। हर दौर में कुछ मिनट से कुछ घंटे लग सकते हैं।",

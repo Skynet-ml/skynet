@@ -3941,7 +3941,6 @@
   "app.shell.search.kw.terms": "términos condiciones servicio legal acuerdo terms service legal",
   "app.shell.search.kw.privacy_policy": "política de privacidad legal datos RGPD privacy policy legal GDPR",
   "app.shell.search.kw.sessions": "sesiones etiquetado anotar etiquetas etiquetado automático piloto automático rúbrica calibración labeling sessions autotag autopilot rubric",
-  "billing.plans.topup.fee_note": "El precio incluye una tarifa de plataforma de {p1}.",
   "billing.plans.topup.custom_range": "Introduce un importe de {p1} a {p2}.",
   "submit.economy.label": "Mitad de precio, más lento",
   "submit.economy.hint": "Las llamadas a modelos gestionados pasan por la cola de lotes del proveedor a mitad de precio. Cada ronda puede tardar de minutos a horas.",
