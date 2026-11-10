@@ -15,7 +15,7 @@ import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { Bell, Checks, GearSix, Stack, Target, Trash, X, type Icon } from "@/shared/ui/icons";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { TooltipBody, TooltipButton } from "@/shared/ui/tooltip-button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Sheet, SheetContent, SheetTitle } from "@/shared/ui/primitives/sheet";
 
@@ -250,12 +250,7 @@ function PanelBody({
               <TooltipButton
                 key={value}
                 dir={getActiveDir()}
-                tooltip={
-                  <span className="flex flex-col items-center gap-0.5 text-center">
-                    <span className="font-medium">{msg(label)}</span>
-                    <span className="text-muted-foreground">{msg(tip)}</span>
-                  </span>
-                }
+                tooltip={<TooltipBody title={msg(label)} detail={msg(tip)} centered />}
               >
                 <button
                   type="button"

@@ -60,7 +60,7 @@ import { NumberInput } from "@/shared/ui/number-input";
 import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { TooltipBody, TooltipButton } from "@/shared/ui/tooltip-button";
 import { Button } from "@/shared/ui/primitives/button";
 import {
   DropdownMenu,
@@ -89,9 +89,23 @@ const HOLD_SAVE_DELAY_MS = 600;
 const GRID_EVENTS = EVENT_TYPES.filter((event) => event !== "product_news");
 
 /** A header is not focusable on its own, so its tooltip hangs on a focusable wrapper. */
-function Tip({ tip, children }: { tip: React.ReactNode; children: React.ReactElement }) {
+function Tip({
+  title,
+  detail,
+  atStart = false,
+  children,
+}: {
+  title: string;
+  detail?: string;
+  atStart?: boolean;
+  children: React.ReactElement;
+}) {
   return (
-    <TooltipButton tooltip={tip} side="top">
+    <TooltipButton
+      tooltip={<TooltipBody title={title} detail={detail} centered={!atStart} />}
+      side="top"
+      align={atStart ? "start" : "center"}
+    >
       <span
         tabIndex={0}
         className="inline-flex rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45"
@@ -106,7 +120,8 @@ function EventHeader({ event }: { event: NotificationEventType }) {
   const EventIcon = EVENT_ICONS[event];
   const keys = EVENT_KEYS[event];
   return (
-    <Tip tip={msg(keys.tip)}>
+    // Opens from the label's start edge, so a long detail never spills over the Settings rail.
+    <Tip title={msg(keys.label)} detail={msg(keys.tip)} atStart>
       <span className="inline-flex min-w-0 items-center gap-2 text-sm text-foreground">
         <EventIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
         <span className="min-w-0 text-pretty break-words">{msg(keys.label)}</span>
@@ -129,11 +144,12 @@ function ChannelHeader({
     channel === "macos"
       ? localOffReason(channel, local) === null
       : channelLive(channel, slackReady);
-  const tip = channelHeaderTip(channel, slackReady, local)
+  const detail = channelHeaderTip(channel, slackReady, local)
+    .filter((key) => key !== CHANNEL_KEYS[channel])
     .map((key) => msg(key))
-    .join(": ");
+    .join(" ");
   return (
-    <Tip tip={tip}>
+    <Tip title={msg(CHANNEL_KEYS[channel])} detail={detail || undefined}>
       <ChannelIcon
         className={cn("size-4", live ? "text-muted-foreground" : "text-muted-foreground/45")}
         aria-label={msg(CHANNEL_KEYS[channel])}
@@ -474,13 +490,15 @@ export function NotificationsTab() {
           <>
             <div className="hidden sm:block">
               <Table>
-                <TableHeader>
+                {/* The shared sticky, tinted header is for long scrolling tables; this
+                    short grid sits on the Settings card, so only a hairline divides it. */}
+                <TableHeader className="static bg-transparent backdrop-blur-none">
                   <TableRow>
-                    <TableHead>
+                    <TableHead className="h-10">
                       <span className="sr-only">{msg("settings.notifications.grid.label")}</span>
                     </TableHead>
                     {columns.map((channel) => (
-                      <TableHead key={channel} className="w-16">
+                      <TableHead key={channel} className="h-10 w-16">
                         <div className="flex justify-center">
                           <ChannelHeader channel={channel} slackReady={slackReady} local={local} />
                         </div>
