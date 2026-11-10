@@ -52,6 +52,11 @@ const SharingBreakdown = dynamic(() => import("./UsageCharts"), {
   loading: () => <div className="h-[260px]" />,
 });
 
+function preloadCharts() {
+  void import("./AnalyticsCharts");
+  void import("./UsageCharts");
+}
+
 type AnalyticsTabProps = {
   analyticsLoading: boolean;
   analyticsData: DashboardAnalytics | null;
@@ -94,6 +99,8 @@ function AnalyticsTabImpl({
   const showAccess = chartData.accessUsage.length > 1 || Boolean(access);
 
   const loading = analyticsLoading && analyticsData === null;
+  // Start the chart code with the data request, not after it lands.
+  useEffect(preloadCharts, []);
   const shape = loading
     ? null
     : JSON.stringify(
@@ -140,7 +147,10 @@ function AnalyticsTabImpl({
 
       {chartData.truncated && <InlineWarningRow message={msg("dashboard.analytics.truncated")} />}
 
-      <AnimatePresence mode="wait">
+      {/* No entry fade: the skeleton already draws this layout, and the tab
+          remounts on every visit, so a mount fade blinks the whole panel.
+          Filter changes still cross-fade. */}
+      <AnimatePresence mode="wait" initial={false}>
         <motion.div
           key={filterKey}
           initial={{ opacity: 0, y: 8 }}

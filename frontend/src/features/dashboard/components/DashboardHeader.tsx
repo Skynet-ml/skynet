@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { Users } from "@/shared/ui/icons";
 import { AnimatedNumber } from "@/shared/ui/motion";
 import type { DashboardStats } from "../lib/get-dashboard-stats";
@@ -40,7 +40,12 @@ function StatCell({ label, value, accent = "default", pulse = false, icon }: Sta
   );
 }
 
-export function DashboardHeader({ stats }: DashboardHeaderProps) {
+export function DashboardHeader({ stats: next }: DashboardHeaderProps) {
+  // While a tab's stats load, keep the last strip on screen (dimmed) so the
+  // page does not collapse and jump back when the numbers land.
+  const [shown, setShown] = useState(next);
+  if (next && next !== shown) setShown(next);
+  const stats = next ?? shown;
   if (!stats) return null;
 
   const cells: StatCellProps[] = [
@@ -88,7 +93,10 @@ export function DashboardHeader({ stats }: DashboardHeaderProps) {
   // sidebar open and Split View leave too little room for five labelled
   // cells in one row, so they wrap to three columns there.
   return (
-    <div className="@container">
+    <div
+      className={`@container transition-opacity duration-200 ${next ? "" : "opacity-50"}`}
+      aria-busy={!next}
+    >
       <div className="grid grid-cols-2 items-stretch @min-[26rem]:grid-cols-3 @min-[40rem]:flex">
         {cells.map((cell, i) => (
           <Fragment key={cell.label}>
