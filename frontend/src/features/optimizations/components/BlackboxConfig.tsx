@@ -125,10 +125,7 @@ type ConfigRow = { label: ReactNode; value: string; icon: ReactNode };
 function MiniGrid({ rows }: { rows: ConfigRow[] }) {
   if (rows.length === 0) return null;
   return (
-    <div
-      className="grid gap-3"
-      style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(11rem, 100%), 1fr))" }}
-    >
+    <div>
       {rows.map((row, index) => (
         <SlideMiniCard key={index} label={row.label} value={row.value} icon={row.icon} />
       ))}
@@ -495,8 +492,8 @@ export function BlackboxConfigCard({
         renderSlide={(activeSlide) => (
           <>
             {activeSlide === 0 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -528,8 +525,8 @@ export function BlackboxConfigCard({
             )}
 
             {activeSlide === 1 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -578,12 +575,7 @@ export function BlackboxConfigCard({
             {activeSlide === 2 && (
               <div>
                 {reflectionCard || taskCard || scorerModelCard || target.model ? (
-                  <div
-                    className="grid gap-4"
-                    style={{
-                      gridTemplateColumns: "repeat(auto-fit, minmax(min(17rem, 100%), 1fr))",
-                    }}
-                  >
+                  <div className="flex flex-col">
                     {reflectionCard && (
                       <ModelCard
                         label={msg("optimization.blackbox.config.reflection_model")}
@@ -623,8 +615,8 @@ export function BlackboxConfigCard({
             )}
 
             {activeSlide === 3 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -651,8 +643,8 @@ export function BlackboxConfigCard({
             )}
 
             {activeSlide === 4 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -670,12 +662,12 @@ export function BlackboxConfigCard({
                 </div>
                 {split &&
                   (holdout ? (
-                    <div className="flex flex-1 flex-col gap-3">
+                    <div className="flex flex-col gap-1 border-b border-border/40 py-2.5">
                       <div className="flex items-center gap-2.5">
-                        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent text-muted-foreground [&_svg]:size-4">
+                        <span className="text-muted-foreground [&_svg]:size-3.5">
                           <Shuffle className="size-4" aria-hidden="true" />
                         </span>
-                        <p className="text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
+                        <p className="text-xs text-muted-foreground">
                           <HelpTip text={tip("blackbox.config.split")}>
                             {msg("optimization.blackbox.config.split")}
                           </HelpTip>

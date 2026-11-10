@@ -54,7 +54,6 @@ import { formatCentsUsd } from "@/features/billing";
 import { runEstimateLabelKey } from "@/features/local-runtime";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { TERMS } from "@/shared/lib/terms";
-import { InfoCard } from "./ui-primitives";
 import { BlackboxConfigCard } from "./BlackboxConfig";
 import {
   ConfigCarousel,
@@ -220,10 +219,7 @@ type ConfigRow = { label: ReactNode; value: string; icon: ReactNode };
 function MiniGrid({ rows }: { rows: ConfigRow[] }) {
   if (rows.length === 0) return null;
   return (
-    <div
-      className="grid gap-3"
-      style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(11rem, 100%), 1fr))" }}
-    >
+    <div>
       {rows.map((row, index) => (
         <SlideMiniCard key={index} label={row.label} value={row.value} icon={row.icon} />
       ))}
@@ -243,8 +239,8 @@ function ColumnRoles({ mapping, order }: { mapping: ColumnMapping; order: string
     ignore: msg("auto.features.submit.components.steps.summarystep.literal.8"),
   };
   return (
-    <div className="rounded-xl border border-border/45 bg-background/65 p-4">
-      <div className="mb-3 flex items-center gap-2 text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
+    <div className="space-y-2 border-b border-border/40 py-2.5">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Columns className="size-3.5" aria-hidden="true" />
         <HelpTip text={tip("submit.column_roles")}>
           {msg("auto.features.submit.components.steps.summarystep.11")}
@@ -543,8 +539,8 @@ export function ConfigTab({
         renderSlide={(activeSlide) => (
           <>
             {activeSlide === 0 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -580,8 +576,8 @@ export function ConfigTab({
             )}
 
             {activeSlide === 1 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -606,12 +602,7 @@ export function ConfigTab({
             {activeSlide === 2 && (
               <div>
                 {!isGrid ? (
-                  <div
-                    className="grid gap-4"
-                    style={{
-                      gridTemplateColumns: "repeat(auto-fit, minmax(min(17rem, 100%), 1fr))",
-                    }}
-                  >
+                  <div className="flex flex-col">
                     {modelCfg && <ModelCard label={msg("model.generation.label")} cfg={modelCfg} />}
                     {reflCfg && <ModelCard label={TERMS.reflectionModel} cfg={reflCfg} />}
                     {taskCfg && (
@@ -644,12 +635,7 @@ export function ConfigTab({
                     )}
                   </div>
                 ) : activePair ? (
-                  <div
-                    className="grid gap-4"
-                    style={{
-                      gridTemplateColumns: "repeat(auto-fit, minmax(min(17rem, 100%), 1fr))",
-                    }}
-                  >
+                  <div className="flex flex-col">
                     <ModelCard
                       label={msg("model.generation.label")}
                       cfg={pickPairModelConfig(
@@ -714,21 +700,21 @@ export function ConfigTab({
             )}
 
             {activeSlide === 3 && (
-              <div className="flex flex-col gap-5">
+              <div className="flex flex-col">
                 {job.source_dataset_id && (
                   <Link
                     href={`/datasets?open=${job.source_dataset_id}`}
-                    className="group/srclink flex min-h-28 items-center gap-4 rounded-2xl border border-border/60 bg-muted p-5 transition-[background-color,border-color,transform] hover:border-primary-fill/70 hover:bg-accent active:scale-[0.995] sm:p-6"
+                    className="group/srclink flex items-center gap-2 border-b border-border/40 py-2.5 text-sm hover:text-primary"
                   >
-                    <span className="grid size-14 shrink-0 place-items-center rounded-2xl bg-primary-fill text-primary-foreground">
-                      <Books className="size-6" aria-hidden="true" />
+                    <span className="text-muted-foreground">
+                      <Books className="size-3.5" aria-hidden="true" />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
+                      <span className="block text-xs text-muted-foreground">
                         {msg("optimizations.source_dataset.label")}
                       </span>
                       <span
-                        className="mt-1 block truncate font-mono text-base font-semibold text-foreground sm:text-lg"
+                        className="mt-1 block break-all text-sm font-medium text-foreground"
                         dir="ltr"
                       >
                         {job.source_dataset_id}
@@ -742,12 +728,12 @@ export function ConfigTab({
                 )}
                 <MiniGrid rows={dataRows} />
                 {columnMapping && <ColumnRoles mapping={columnMapping} order={columnOrder} />}
-                <div className="flex flex-1 flex-col gap-3">
+                <div className="flex flex-col gap-1 border-b border-border/40 py-2.5">
                   <div className="flex items-center gap-2.5">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent text-muted-foreground [&_svg]:size-4">
+                    <span className="text-muted-foreground [&_svg]:size-3.5">
                       <Database className="size-4" aria-hidden="true" />
                     </span>
-                    <p className="text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
+                    <p className="text-xs text-muted-foreground">
                       <HelpTip text={tip("data.split_explanation")}>
                         {msg("auto.features.optimizations.components.configtab.9")}
                         {TERMS.dataset}
@@ -756,8 +742,8 @@ export function ConfigTab({
                   </div>
                   <SplitBar fractions={splitFractions} />
                 </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <InfoCard
+                <div className="flex flex-col">
+                  <SlideMiniCard
                     label={
                       <HelpTip text={tip("data.shuffle_explanation")}>
                         {msg("auto.features.optimizations.components.configtab.13")}
@@ -770,7 +756,7 @@ export function ConfigTab({
                     }
                     icon={<Shuffle className="size-3.5" />}
                   />
-                  <InfoCard
+                  <SlideMiniCard
                     label={
                       <HelpTip text={tip("data.seed")}>
                         {msg("auto.features.optimizations.components.configtab.14")}

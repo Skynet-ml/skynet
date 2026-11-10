@@ -1,106 +1,19 @@
 "use client";
 
-import { useCallback, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, motion, useReducedMotion, type Variants } from "framer-motion";
-import {
-  ArrowsOut,
-  CaretLeft,
-  CaretRight,
-  Key,
-  Plug,
-  TextT,
-  Thermometer,
-  Wallet,
-} from "@/shared/ui/icons";
-import { Button } from "@/shared/ui/primitives/button";
-import { Dialog, DialogContent } from "@/shared/ui/primitives/dialog";
-import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
-import { HelpTip } from "@/shared/ui/help-tip";
+import type { ReactNode } from "react";
+import { Key, Plug, TextT, Thermometer, Wallet } from "@/shared/ui/icons";
+import { SummaryTabs, SummaryRow, SummaryTextRow, SummaryModel } from "@/shared/ui/run-summary";
 import { msg } from "@/shared/lib/messages";
 import { perLocale } from "@/shared/lib/per-locale";
 import { tip } from "@/shared/lib/tooltips";
 import { TERMS } from "@/shared/lib/terms";
-import { cn } from "@/shared/lib/utils";
-import { getActiveDir } from "@/shared/lib/runtime-locale";
-import { arrowPageStep } from "@/shared/lib/arrow-paging";
-import { ProviderLogo } from "@/shared/ui/provider-logo";
-import { modelProviderSlug } from "@/shared/lib/model-provider";
+import type { ModelConfig } from "@/shared/types/api";
 import { ReasoningPill } from "./ui-primitives";
 
-export type ConfigSlide = {
-  id: string;
-  label: string;
-  icon: ReactNode;
-  tip?: string;
-};
+export type ConfigSlide = { id: string; label: string; icon: ReactNode; tip?: string };
 
-const SLIDE_VARIANTS: Variants = {
-  enter: (direction: 1 | -1) => ({ opacity: 0, x: direction * 36 }),
-  center: { opacity: 1, x: 0 },
-  exit: (direction: 1 | -1) => ({ opacity: 0, x: direction * -28 }),
-};
-
-const SLIDE_TRANSITION = {
-  duration: 0.24,
-  ease: [0.2, 0.8, 0.2, 1] as const,
-};
-
-// Card values are single-line facts; notes are prose. Anything past these
-// limits is clipped with an ellipsis and gets a maximize button that opens
-// the full text in a dialog.
-const VALUE_CHAR_LIMIT = 40;
-const NOTE_CHAR_LIMIT = 280;
-
-function clipText(text: string, limit: number): string {
-  return text.length > limit ? `${text.slice(0, limit).trimEnd()}…` : text;
-}
-
-/** Maximize button that opens the untruncated text in a dialog. */
-function ExpandTextButton({
-  label,
-  text,
-  mono = false,
-}: {
-  label: ReactNode;
-  text: string;
-  mono?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const expandLabel = msg("optimization.config.expand");
-  return (
-    <>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-xs"
-        autoTooltip={false}
-        onClick={() => setOpen(true)}
-        aria-label={expandLabel}
-        className="text-muted-foreground hover:text-foreground"
-      >
-        <ArrowsOut className="size-3.5" aria-hidden="true" />
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="flex w-[min(40rem,92vw)] max-w-[min(40rem,92vw)] flex-col overflow-hidden sm:max-w-[min(40rem,92vw)]">
-          <DialogTitleRow title={label} />
-          <div className="max-h-[70dvh] min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-border/45 bg-muted p-4">
-            <p
-              className={cn("whitespace-pre-wrap break-words text-sm", mono && "font-mono")}
-              dir={mono ? "ltr" : "auto"}
-            >
-              {text}
-            </p>
-          </div>
-        </DialogContent>
-      </Dialog>
-    </>
-  );
-}
-
-/** Numbered feature card for a slide's leading facts. */
+/** Saved facts use the same rows as the final submission summary. */
 export function SlideHeroCard({
-  index,
   label,
   value,
   icon,
@@ -111,135 +24,63 @@ export function SlideHeroCard({
   icon: ReactNode;
 }) {
   return (
-    <article className="flex min-h-40 min-w-0 flex-col justify-between gap-6 rounded-2xl border border-border/60 bg-muted p-5 sm:p-6">
-      <div className="flex items-start justify-between gap-3">
-        <span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-primary-fill text-primary-foreground [&_svg]:size-5">
-          {icon}
-        </span>
-        <span className="font-mono text-[0.625rem] tabular-nums text-muted-foreground/70" dir="ltr">
-          0{index + 1}
-        </span>
-      </div>
-      <div className="min-w-0">
-        <div className="text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
-          {label}
-        </div>
-        <div className="mt-1 flex min-w-0 items-center gap-2">
-          <div
-            className="min-w-0 truncate font-mono text-xl font-semibold tracking-tight text-foreground sm:text-2xl"
-            dir="ltr"
-            title={value}
-          >
-            {clipText(value, VALUE_CHAR_LIMIT)}
-          </div>
-          {value.length > VALUE_CHAR_LIMIT && <ExpandTextButton label={label} text={value} mono />}
-        </div>
-      </div>
-    </article>
+    <SummaryRow label={label} icon={icon}>
+      <bdi>{value}</bdi>
+    </SummaryRow>
   );
 }
 
-/** Compact card for a slide's secondary facts. */
 export function SlideMiniCard({
   label,
   value,
   icon,
 }: {
   label: ReactNode;
-  value: string;
+  value: ReactNode;
   icon: ReactNode;
 }) {
   return (
-    <article className="flex min-h-28 min-w-0 flex-col justify-between gap-4 rounded-xl border border-border/45 bg-background/65 p-4">
-      <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent text-muted-foreground [&_svg]:size-4">
-        {icon}
-      </span>
-      <div className="min-w-0">
-        <div className="truncate text-[0.6875rem] font-medium text-muted-foreground">{label}</div>
-        <div className="mt-0.5 flex min-w-0 items-center gap-2">
-          <div
-            className="min-w-0 truncate font-mono text-base font-semibold text-foreground"
-            dir="ltr"
-            title={value}
-          >
-            {clipText(value, VALUE_CHAR_LIMIT)}
-          </div>
-          {value.length > VALUE_CHAR_LIMIT && <ExpandTextButton label={label} text={value} mono />}
-        </div>
-      </div>
-    </article>
+    <SummaryRow label={label} icon={icon}>
+      <bdi>{value ?? "—"}</bdi>
+    </SummaryRow>
   );
 }
 
-/** Free-text block for prose the wizard captured (description, objective, background). */
 export function SlideNote({ label, text }: { label: ReactNode; text: string }) {
-  const long = text.length > NOTE_CHAR_LIMIT;
-  return (
-    <div className="rounded-xl border border-border/45 bg-background/65 p-4">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <div className="min-w-0 text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
-          {label}
-        </div>
-        {long && <ExpandTextButton label={label} text={text} />}
-      </div>
-      <p className="whitespace-pre-wrap text-sm" dir="auto">
-        {clipText(text, NOTE_CHAR_LIMIT)}
-      </p>
-    </div>
-  );
+  return <SummaryTextRow label={label}>{text}</SummaryTextRow>;
 }
 
-/** Proportional train / val / test bar for a slide's split summary. */
+/** The saved split uses the submission summary's compact bar and legend. */
 export function SplitBar({
   fractions,
 }: {
   fractions: { train: number; val: number; test: number };
 }) {
+  const parts = [
+    ["train", "bg-primary-fill", fractions.train],
+    ["val", "bg-chart-3", fractions.val],
+    ["test", "bg-muted-foreground", fractions.test],
+  ] as const;
   return (
-    <div className="flex min-h-28 flex-1 overflow-hidden rounded-2xl border border-border/50 bg-muted/30">
-      <div
-        className="flex min-w-0 flex-col items-center justify-center gap-3 bg-primary-fill p-2 text-primary-foreground transition-[width] sm:items-stretch sm:justify-between sm:p-5"
-        style={{ width: `${fractions.train * 100}%` }}
-      >
-        <span className="hidden truncate text-[0.625rem] font-semibold uppercase tracking-[0.08em] opacity-70 sm:block">
-          {msg("auto.features.optimizations.components.configtab.10")}
-        </span>
-        <span className="font-mono text-sm font-semibold tabular-nums sm:text-2xl" dir="ltr">
-          {Math.round(fractions.train * 100)}%
-        </span>
+    <div className="space-y-2 py-2.5">
+      <div className="flex h-2 overflow-hidden rounded-full">
+        {parts.map(([part, color, value]) => (
+          <div key={part} className={color} style={{ width: `${value * 100}%` }} />
+        ))}
       </div>
-      <div
-        className="flex min-w-0 flex-col items-center justify-center gap-3 bg-chart-3 p-2 text-foreground transition-[width] sm:items-stretch sm:justify-between sm:p-5"
-        style={{ width: `${fractions.val * 100}%` }}
-      >
-        <span className="hidden truncate text-[0.625rem] font-semibold uppercase tracking-[0.08em] opacity-70 sm:block">
-          {msg("auto.features.optimizations.components.configtab.11")}
-        </span>
-        <span className="font-mono text-sm font-semibold tabular-nums sm:text-2xl" dir="ltr">
-          {Math.round(fractions.val * 100)}%
-        </span>
-      </div>
-      <div
-        className="flex min-w-0 flex-col items-center justify-center gap-3 bg-muted-foreground p-2 text-primary-foreground transition-[width] sm:items-stretch sm:justify-between sm:p-5"
-        style={{ width: `${fractions.test * 100}%` }}
-      >
-        <span className="hidden truncate text-[0.625rem] font-semibold uppercase tracking-[0.08em] opacity-70 sm:block">
-          {msg("auto.features.optimizations.components.configtab.12")}
-        </span>
-        <span className="font-mono text-sm font-semibold tabular-nums sm:text-2xl" dir="ltr">
-          {Math.round(fractions.test * 100)}%
-        </span>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        {parts.map(([part, color, value]) => (
+          <span key={part} className="inline-flex items-center gap-1.5">
+            <span className={`size-2 rounded-full ${color}`} />
+            {msg(`submit.split.label_${part}`)} <bdi>{Math.round(value * 100)}%</bdi>
+          </span>
+        ))}
       </div>
     </div>
   );
 }
 
-/**
- * Shared shell for the config tab: header with a step rail, an animated
- * slide body with swipe and keyboard navigation, and a footer with
- * previous/next controls. Both the regular and black-box config views
- * render through it so the two stay visually identical.
- */
+/** Shared summary tabs replace the old numbered carousel without changing stored facts. */
 export function ConfigCarousel({
   slides,
   renderSlide,
@@ -247,186 +88,12 @@ export function ConfigCarousel({
   slides: ConfigSlide[];
   renderSlide: (index: number) => ReactNode;
 }) {
-  const prefersReducedMotion = useReducedMotion();
-  const isRtl = getActiveDir() === "rtl";
-  const [activeSlide, setActiveSlide] = useState(0);
-  const [slideDirection, setSlideDirection] = useState<1 | -1>(isRtl ? -1 : 1);
-  const touchStart = useRef<{ x: number; y: number } | null>(null);
-
-  const goToSlide = useCallback(
-    (next: number) => {
-      const clamped = Math.max(0, Math.min(slides.length - 1, next));
-      if (clamped === activeSlide) return;
-      const forward = clamped > activeSlide;
-      setSlideDirection(forward === isRtl ? -1 : 1);
-      setActiveSlide(clamped);
-    },
-    [activeSlide, isRtl, slides.length],
-  );
-
-  const previousSlide = slides[activeSlide - 1];
-  const currentSlide = slides[activeSlide] ?? slides[0]!;
-  const nextSlide = slides[activeSlide + 1];
-  const PreviousIcon = isRtl ? CaretRight : CaretLeft;
-  const NextIcon = isRtl ? CaretLeft : CaretRight;
-
   return (
-    <motion.section
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.3 }}
-      className="w-full overflow-hidden rounded-2xl border border-border bg-card/80 backdrop-blur-xl"
-      role="region"
-      aria-label={currentSlide.label}
-      tabIndex={0}
-      onKeyDown={(event) => {
-        // Arrows page from anywhere in the shell — the step rail and footer
-        // buttons keep focus after a click — not only from the region itself.
-        const step = arrowPageStep(event, isRtl);
-        if (step === 0) return;
-        event.preventDefault();
-        goToSlide(activeSlide + step);
-      }}
-    >
-      <div className="flex items-center justify-between gap-5 border-b border-border/60 bg-secondary/35 px-5 py-4 sm:px-6 sm:py-5 lg:px-8">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted text-primary">
-            {currentSlide.icon}
-          </span>
-          <div className="min-w-0">
-            <span
-              className="font-mono text-[0.625rem] tabular-nums text-muted-foreground"
-              dir="ltr"
-            >
-              {activeSlide + 1} / {slides.length}
-            </span>
-            <h3 className="truncate text-lg font-bold tracking-tight text-foreground sm:text-xl">
-              {currentSlide.tip ? (
-                <HelpTip text={currentSlide.tip}>{currentSlide.label}</HelpTip>
-              ) : (
-                currentSlide.label
-              )}
-            </h3>
-          </div>
-        </div>
-        <div
-          className="hidden min-w-0 flex-1 items-center justify-end gap-2 sm:flex"
-          aria-label={currentSlide.label}
-        >
-          {slides.map((slide, index) => (
-            <TooltipButton key={slide.id} tooltip={slide.label}>
-              <button
-                type="button"
-                onClick={() => goToSlide(index)}
-                aria-label={slide.label}
-                aria-current={activeSlide === index ? "step" : undefined}
-                className={cn(
-                  "flex shrink-0 cursor-pointer items-center rounded-xl border p-1.5 transition-[background-color,border-color,color,transform] duration-150",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45 focus-visible:ring-offset-2 active:scale-[0.98]",
-                  activeSlide === index
-                    ? "border-primary-fill/70 bg-background text-foreground"
-                    : "border-transparent text-muted-foreground hover:border-border/60 hover:bg-background/55 hover:text-foreground",
-                )}
-              >
-                <span
-                  className={cn(
-                    "grid size-8 shrink-0 place-items-center rounded-lg transition-colors [&_svg]:size-4",
-                    activeSlide === index
-                      ? "bg-primary-fill text-primary-foreground"
-                      : "bg-muted text-muted-foreground",
-                  )}
-                >
-                  {slide.icon}
-                </span>
-              </button>
-            </TooltipButton>
-          ))}
-        </div>
-      </div>
-
-      <div
-        className="relative overflow-hidden p-4 sm:p-6 lg:p-8"
-        onTouchStart={(event) => {
-          const touch = event.touches[0];
-          touchStart.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
-        }}
-        onTouchEnd={(event) => {
-          const start = touchStart.current;
-          const touch = event.changedTouches[0];
-          touchStart.current = null;
-          if (!start || !touch) return;
-          const deltaX = touch.clientX - start.x;
-          const deltaY = touch.clientY - start.y;
-          if (Math.abs(deltaX) < 52 || Math.abs(deltaX) < Math.abs(deltaY) * 1.2) return;
-          const forward = isRtl ? deltaX > 0 : deltaX < 0;
-          goToSlide(activeSlide + (forward ? 1 : -1));
-        }}
-      >
-        <AnimatePresence mode="wait" custom={slideDirection} initial={false}>
-          <motion.div
-            key={activeSlide}
-            custom={slideDirection}
-            variants={SLIDE_VARIANTS}
-            initial="enter"
-            animate="center"
-            exit="exit"
-            transition={prefersReducedMotion ? { duration: 0 } : SLIDE_TRANSITION}
-            className="w-full"
-          >
-            {renderSlide(activeSlide)}
-          </motion.div>
-        </AnimatePresence>
-      </div>
-
-      <div className="flex items-center justify-between gap-3 border-t border-border/60 bg-secondary/25 px-4 py-3 sm:px-6">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => goToSlide(activeSlide - 1)}
-          disabled={!previousSlide}
-          aria-label={
-            previousSlide?.label ??
-            msg("auto.features.agent.panel.components.toolscarousel.literal.14")
-          }
-          className="bg-primary-fill text-primary-foreground hover:bg-primary-hover hover:text-primary-foreground [@media(hover:none)_and_(pointer:coarse)]:size-11"
-        >
-          <PreviousIcon className="size-4" aria-hidden="true" />
-        </Button>
-
-        <div className="flex items-center justify-center gap-1 sm:hidden">
-          {slides.map((slide, index) => (
-            <button
-              key={slide.id}
-              type="button"
-              onClick={() => goToSlide(index)}
-              aria-label={slide.label}
-              aria-current={activeSlide === index ? "step" : undefined}
-              className="flex size-6 cursor-pointer items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45"
-            >
-              <span
-                className={cn(
-                  "h-1.5 rounded-full transition-[width,background-color] duration-200",
-                  activeSlide === index ? "w-5 bg-primary-fill" : "w-1.5 bg-primary-fill/20",
-                )}
-              />
-            </button>
-          ))}
-        </div>
-
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => goToSlide(activeSlide + 1)}
-          disabled={!nextSlide}
-          aria-label={
-            nextSlide?.label ?? msg("auto.features.agent.panel.components.toolscarousel.literal.15")
-          }
-          className="bg-primary-fill text-primary-foreground hover:bg-primary-hover hover:text-primary-foreground [@media(hover:none)_and_(pointer:coarse)]:size-11"
-        >
-          <NextIcon className="size-4" aria-hidden="true" />
-        </Button>
-      </div>
-    </motion.section>
+    <section className="flex max-h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-card/80 shadow-lg backdrop-blur-xl">
+      <SummaryTabs tabs={slides} label={msg("submit.v2.overview.tabs_label")}>
+        {(current) => renderSlide(slides.findIndex((slide) => slide.id === current))}
+      </SummaryTabs>
+    </section>
   );
 }
 
@@ -477,7 +144,6 @@ export function ModelCard({
 }) {
   const cardTip = labelTip ?? MODEL_CARD_TIPS[label];
   const name = String(cfg.name || "—");
-  const shortName = name.includes("/") ? name.split("/").pop()! : name;
   const temp = resolveModelParameter(cfg, "temperature");
   const maxTok = resolveModelParameter(cfg, "max_tokens");
   const extra = (cfg.extra ?? {}) as Record<string, unknown>;
@@ -503,78 +169,40 @@ export function ModelCard({
         ? msg("billing.mode.managed")
         : null;
   const endpointLabel = msg("optimization.config.model_endpoint");
-  const showParams = params && (temp != null || maxTok != null || reasoning);
   return (
-    <article className="flex min-h-36 min-w-0 flex-col justify-between gap-5 rounded-2xl border border-border/60 bg-muted p-5">
-      <div className="flex min-w-0 items-start gap-3.5">
-        <span className="grid size-12 shrink-0 place-items-center rounded-2xl border border-border/45 bg-background">
-          <ProviderLogo slug={modelProviderSlug(name)} size={30} />
-        </span>
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <span className="text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
-            {cardTip ? <HelpTip text={cardTip}>{label}</HelpTip> : label}
-          </span>
-          <span
-            className="truncate font-mono text-base font-semibold tracking-tight text-foreground sm:text-lg"
-            dir="ltr"
-            title={name}
-          >
-            {shortName}
-          </span>
-        </div>
-      </div>
-      {(showParams || billingValue || baseUrl) && (
-        <div
-          className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted-foreground"
-          dir="ltr"
-        >
-          {params && temp != null && (
-            <span
-              className="inline-flex items-center gap-1.5 rounded-md border border-border/45 bg-background/75 px-2.5 py-1"
-              aria-label={`${temperatureLabel}: ${temp}`}
-              title={temperatureLabel}
-            >
-              <Thermometer className="size-3" aria-hidden="true" />
-              {temp}
-            </span>
-          )}
-          {params && maxTok != null && (
-            <span
-              className="inline-flex items-center gap-1.5 rounded-md border border-border/45 bg-background/75 px-2.5 py-1"
-              aria-label={`${maxTokensLabel}: ${maxTok}`}
-              title={maxTokensLabel}
-            >
-              <TextT className="size-3" aria-hidden="true" />
-              {maxTok}
-            </span>
-          )}
-          {params && reasoning && <ReasoningPill value={reasoning} />}
-          {billingValue && (
-            <span
-              className="inline-flex items-center gap-1.5 rounded-md border border-border/45 bg-background/75 px-2.5 py-1"
-              aria-label={`${billingLabel}: ${billingValue}`}
-              title={billingLabel}
-            >
-              {tokenSource === "byok" ? (
-                <Key className="size-3" aria-hidden="true" />
-              ) : (
-                <Wallet className="size-3" aria-hidden="true" />
-              )}
-              {billingValue}
-            </span>
-          )}
-          {baseUrl && (
-            <span
-              className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/45 bg-background/75 px-2.5 py-1"
-              aria-label={`${endpointLabel}: ${baseUrl}`}
-              title={`${endpointLabel}: ${baseUrl}`}
-            >
-              <Plug className="size-3 shrink-0" aria-hidden="true" />
-              <span className="truncate">{baseUrl}</span>
-            </span>
-          )}
-        </div>
-      )}
-    </article>
+    <div className="space-y-2 border-b border-border/40 py-3 last:border-b-0">
+      <SummaryModel
+        role={label}
+        help={cardTip}
+        config={{ ...cfg, name } as unknown as ModelConfig}
+      />
+      <dl>
+        {params && temp != null && (
+          <SummaryRow label={temperatureLabel} icon={<Thermometer />}>
+            <bdi>{temp}</bdi>
+          </SummaryRow>
+        )}
+        {params && maxTok != null && (
+          <SummaryRow label={maxTokensLabel} icon={<TextT />}>
+            <bdi>{maxTok}</bdi>
+          </SummaryRow>
+        )}
+        {params && reasoning && (
+          <SummaryRow label={msg("agent.model_menu.effort_label")}>
+            <ReasoningPill value={reasoning} />
+          </SummaryRow>
+        )}
+        {billingValue && (
+          <SummaryRow label={billingLabel} icon={tokenSource === "byok" ? <Key /> : <Wallet />}>
+            {billingValue}
+          </SummaryRow>
+        )}
+        {baseUrl && (
+          <SummaryRow label={endpointLabel} icon={<Plug />}>
+            <bdi className="break-all">{baseUrl}</bdi>
+          </SummaryRow>
+        )}
+      </dl>
+    </div>
   );
 }
