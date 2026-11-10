@@ -7,6 +7,8 @@ import { Card, CardContent } from "@/shared/ui/primitives/card";
 import { FadeIn } from "@/shared/ui/motion";
 import { TERMS } from "@/shared/lib/terms";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { cn } from "@/shared/lib/utils";
+import { CARD_TOOLBAR_HEIGHT, EMPTY_CARD_STATE } from "../constants";
 
 interface AnalyticsEmptyProps {
   variant?: "no-data" | "no-results" | "loading-error";
@@ -69,21 +71,20 @@ export function AnalyticsEmpty({
       title={config.title}
       description={config.description}
       action={config.action}
-      className={isNoData ? undefined : "min-h-[40dvh] justify-center"}
+      className={isNoData ? EMPTY_CARD_STATE : "min-h-[40dvh] justify-center"}
     >
       {isNoData && <div className="h-8" aria-hidden="true" />}
     </EmptyState>
   );
 
   // Same card, padding and toolbar-height spacer as the Jobs tab empty state.
-  // The h-8 spacer takes the place of the Jobs tab's small action button, so
-  // both cards are the same size and nothing moves when the user switches tabs.
+  // The h-8 spacer takes the place of the Jobs tab's small action button.
   return (
     <FadeIn>
       {isNoData ? (
         <Card className="overflow-hidden border-border/60">
           <CardContent className="px-3 pt-4 sm:px-6 sm:pt-5">
-            <div className="mb-3 min-h-[44px] lg:min-h-0" aria-hidden="true" />
+            <div className={cn("mb-3", CARD_TOOLBAR_HEIGHT)} aria-hidden="true" />
             {empty}
           </CardContent>
         </Card>

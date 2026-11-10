@@ -48,9 +48,10 @@ import type { ApiSource } from "@/shared/lib/api-route";
 import { runKey } from "@/features/sidebar";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
+import { cn } from "@/shared/lib/utils";
 import { TERMS } from "@/shared/lib/terms";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
-import { FETCH_PAGE_SIZE } from "../constants";
+import { CARD_TOOLBAR_HEIGHT, EMPTY_CARD_STATE, FETCH_PAGE_SIZE } from "../constants";
 import {
   columnCollapse,
   DEFAULT_COL_WIDTHS,
@@ -230,7 +231,7 @@ export function JobsTab({
   return (
     <Card className="swap-in overflow-hidden border-border/60">
       <CardContent className="px-3 pt-4 sm:px-6 sm:pt-5">
-        <div className="mb-3 flex min-h-[44px] items-center gap-2 lg:min-h-0">
+        <div className={cn("mb-3 flex items-center gap-2", CARD_TOOLBAR_HEIGHT)}>
           {filteredItems.length > 0 && (
             <span className="text-[0.6875rem] text-muted-foreground tabular-nums">
               {filteredItems.length}
@@ -267,6 +268,7 @@ export function JobsTab({
             title={`${msg("auto.features.dashboard.components.jobstab.4")}${TERMS.optimizationPlural}`}
             description={msg("auto.features.dashboard.components.jobstab.5")}
             action={{ label: TERMS.notificationNewOpt, href: "/submit", icon: Plus }}
+            className={EMPTY_CARD_STATE}
           />
         )}
 
