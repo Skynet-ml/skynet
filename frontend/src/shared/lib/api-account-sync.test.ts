@@ -19,6 +19,9 @@ registerHooks({
     if (specifier === "@/shared/lib/api-route") {
       return { shortCircuit: true, url: new URL("./api-route.ts", import.meta.url).href };
     }
+    if (specifier === "@/shared/lib/resource-mode") {
+      return { shortCircuit: true, url: new URL("./resource-mode.ts", import.meta.url).href };
+    }
     if (stubs[specifier]) {
       return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(stubs[specifier])}` };
     }
