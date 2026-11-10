@@ -4580,5 +4580,10 @@
   "usage.day.empty": "इस दिन कोई बिल की गई कॉल नहीं है।",
   "usage.day.load_error": "इस दिन की कॉल लोड नहीं हो सकीं।",
   "usage.day.truncated": "{total} में से नवीनतम {shown} कॉल दिखाई जा रही हैं।",
-  "usage.day.loading": "इस दिन की कॉल लोड हो रही हैं…"
+  "usage.day.loading": "इस दिन की कॉल लोड हो रही हैं…",
+  "agent.model_menu.search": "मॉडल खोजें…",
+  "agent.model_menu.no_results": "कोई मिलता-जुलता मॉडल नहीं",
+  "agent.model_menu.search_placeholder": "सभी मॉडल खोजें…",
+  "agent.model_menu.clear_search": "खोज साफ़ करें",
+  "agent.model_menu.no_results_hint": "कोई दूसरा नाम या प्रदाता आज़माएँ।"
 }

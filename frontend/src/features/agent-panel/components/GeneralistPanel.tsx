@@ -1189,6 +1189,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             fast={agent.fastMode}
             onFastChange={agent.setFastMode}
             models={localMenu.models}
+            allModels={localMenu.allModels}
             openRouterEngine={localMenu.openRouterEngine}
           />
         }

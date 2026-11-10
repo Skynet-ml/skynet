@@ -74,6 +74,10 @@ const cli = (patch: Partial<Cli> = {}): Cli => ({
   login_hint: "Run `claude auth login` in a terminal.",
   rate_limited_until: null,
   models: ["anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.1"],
+  efforts: Object.fromEntries(
+    (patch.models ?? ["anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.1"])
+      .map((slug) => [slug, ["low", "medium", "high"]]),
+  ),
   ...patch,
 });
 
@@ -228,9 +232,7 @@ test("each CLI menu row takes only the levels the CLI takes for that model", () 
   assert.deepEqual(levels("anthropic/claude-opus-5.5"), full);
   assert.deepEqual(levels("anthropic/claude-sonnet-4.6"), ["low", "medium", "high", "max"]);
   assert.deepEqual(levels("anthropic/claude-opus-4.5"), ["low", "medium", "high"]);
-  // A model with no levels gets the menu's disabled Effort row.
-  assert.deepEqual(levels("anthropic/claude-haiku-4.5"), []);
-  assert.equal(row("anthropic/claude-haiku-4.5").supports_thinking, false);
+  assert.equal(row("anthropic/claude-haiku-4.5"), undefined);
   for (const slug of [
     "anthropic/claude-opus-5.5",
     "anthropic/claude-sonnet-4.6",
@@ -284,8 +286,7 @@ test("the config dialog's CLI models take the same levels as the menu, not the c
   assert.equal(opus.reasoning_default_enabled, true);
   assert.equal(unpickedEffort(opus), null);
   const haiku = dialog.find((m) => m.value === "anthropic/claude-haiku-4.5")!;
-  assert.equal(haiku.supports_thinking, false);
-  assert.deepEqual(haiku.reasoning_efforts, []);
+  assert.equal(haiku, undefined);
 
   const codex = subscriptionCatalogModels(
     cli({ id: "codex", models: ["openai/gpt-6.1-sol"], efforts: { "openai/gpt-6.1-sol": full } }),
@@ -304,11 +305,9 @@ test("the config dialog's CLI models take the same levels as the menu, not the c
     "max",
   ]);
 });
-test("a CLI status with no effort table offers no effort", () => {
-  const [row] = subscriptionMenuModels(cli({ models: ["anthropic/claude-opus-5.5"] }), []);
-  assert.equal(row!.supports_thinking, false);
-  assert.deepEqual(row!.reasoning_efforts, []);
-  assert.equal(row!.supports_fast, false);
+test("a CLI status with no effort table offers no models", () => {
+  const rows = subscriptionMenuModels(cli({ models: ["anthropic/claude-opus-5.5"], efforts: undefined }), []);
+  assert.deepEqual(rows, []);
 });
 
 test("a CLI row takes fast mode only when the CLI lists its model", () => {
@@ -716,7 +715,8 @@ const keyRow = (value: string, patch: Partial<CatalogRow> = {}): CatalogRow => (
   label: value.split("/").slice(1).join("/"),
   provider: "openrouter",
   byok_provider: "openrouter",
-  supports_thinking: false,
+  supports_thinking: true,
+  reasoning_efforts: ["low", "medium", "high"],
   supports_vision: false,
   available: true,
   ...patch,
@@ -1495,7 +1495,7 @@ test("the Agent settings name the agent engine and describe each engine truthful
   assert.equal(en["settings.agent_engine.description_local"], "Every agent runs on this CLI");
   assert.equal(
     en["settings.agent_engine.description_openrouter"],
-    "Every agent runs on your saved OpenRouter key",
+    "Every agent uses OpenRouter with Skynet credits or your saved key",
   );
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
     const loc = JSON.parse(readFileSync(new URL(file, dir), "utf8")) as Record<string, string>;
@@ -1592,4 +1592,22 @@ test("a hidden pick's effort goes with the key model only when that model takes 
   assert.equal(keyEngineEffort("max", null, "openrouter/openai/gpt-5", rows), "max");
   assert.equal(keyEngineEffort("max", "auto:intelligent", "openrouter/openai/gpt-5", rows), "max");
   assert.equal(keyEngineEffort(null, local, null, rows), null);
+});
+
+test("a signed-in Mac can select OpenRouter without a saved key", () => {
+  assert.equal(effectiveAgentEngine("openrouter", false, true), "openrouter");
+  const option = agentEngineOptions(null, true, new Date(), false, true).find((item) => item.engine === "openrouter");
+  assert.equal(option?.disabled, false);
+  assert.equal(option?.keyPending, false);
+});
+
+
+test("key models without effort controls cannot enter the shortlist or request catalog", () => {
+  const retired = keyRow("openrouter/anthropic/claude-haiku-4.5", { reasoning_efforts: [] });
+  const supported = keyRow("openrouter/anthropic/claude-opus-5.5");
+  assert.deepEqual(keyMenuModels([retired, supported], retired.value), [supported]);
+  assert.deepEqual(localKeyRows({
+    keysLoading: false, keysFailed: false, stamp: "key",
+    loaded: { stamp: "key", models: [retired, supported] }, cached: null,
+  }), [supported]);
 });

@@ -3,7 +3,14 @@
 import * as React from "react";
 import { fetchWithAuthRetry } from "@/shared/lib/api";
 import { tI18n } from "@/shared/lib/i18n";
-import { cachedByokCatalog, cachedCatalog, getByokModelCatalog } from "@/shared/lib/model-catalog";
+import {
+  cachedHostedCatalog,
+  getHostedModelCatalog,
+  cachedByokCatalog,
+  cachedCatalog,
+  getByokModelCatalog,
+} from "@/shared/lib/model-catalog";
+import { useLinkedAccount, wasLinked } from "@/shared/hooks/use-linked-account";
 import { getRuntimeEnv, isLocalMode } from "@/shared/lib/runtime-env";
 import { peekByokKeys, useByokKeys } from "@/features/billing/providers/byok-provider";
 import type { CatalogModel } from "@/shared/types/api";
@@ -77,15 +84,29 @@ export function peekLocalStatus(): LocalStatus | null {
  * The model id an agent request sends: the model the composer chip shows. On
  * a CLI the request waits for `/local/status`, since the CLI's models decide
  * the id. Every agent runs on the agent engine's CLI, else the default CLI.
- * The OpenRouter engine runs every agent on the saved key; with that key
- * removed or unverified, agents run on the default CLI again. Hosted builds
- * send the composer's choice unchanged.
+ * OpenRouter uses the saved key when verified, otherwise the signed-in
+ * account's managed catalog. Hosted builds send the composer's choice unchanged.
  */
 export async function localAgentModel(model: string | null): Promise<string | null> {
   if (!isLocalMode()) return model;
   // A status refresh can change the engine, so load the engine after the status.
   await loadLocalStatus().catch(() => null);
   const engine: AgentEngine | null = await loadAgentEngine();
+  if (engine === OPENROUTER_ENGINE && menuKeyVerified(peekByokKeys()) === false && wasLinked()) {
+    const catalog = await getHostedModelCatalog();
+    if (model?.startsWith("openrouter/") && catalog.models.some((row) => row.value === model))
+      return model;
+    const available = catalog.models.filter(
+      (row) => row.available && row.value.startsWith("openrouter/"),
+    );
+    return (
+      (
+        available.find((row) => row.is_default) ??
+        available.find((row) => row.featured) ??
+        available[0]
+      )?.value ?? null
+    );
+  }
   return resolveLocalAgentModel(model, null, {
     loadStatus: loadLocalStatus,
     peekStatus: peekLocalStatus,
@@ -108,7 +129,10 @@ export function localAgentEffort(
   sent: string | null,
 ): string | null {
   if (!isLocalMode()) return effort;
-  const rows = requestKeyRows(peekByokKeys(), lastKeyLoad, cachedByokCatalog()?.models ?? null);
+  const rows =
+    menuKeyVerified(peekByokKeys()) === false && wasLinked()
+      ? (cachedHostedCatalog()?.models ?? null)
+      : requestKeyRows(peekByokKeys(), lastKeyLoad, cachedByokCatalog()?.models ?? null);
   return keyEngineEffort(effort, pick, sent, rows);
 }
 
@@ -181,26 +205,64 @@ function useLocalKeyModels(enabled: boolean): CatalogModel[] | null {
 /**
  * The composer menu's models for an agent in the local build: only the agent
  * engine's CLI models (the default CLI with no CLI engine). With the
- * OpenRouter engine the menu lists only the saved key's models; with that
- * key removed or unverified, the menu is the default CLI's, as with no engine.
+ * OpenRouter engine the menu lists the saved key's models, or the hosted
+ * catalog when no verified key exists.
  * Until the engine loads (or while its load fails) the menu has no rows, so a
  * saved pick is never cleared. `pick` is the agent's saved model, which keeps a
  * saved key pick listed past the key's shortlist. Hosted builds get undefined
  * and keep the catalog.
  */
-export function useLocalAgentMenuModels(
-  pick: string | null,
-): { models: CatalogModel[] | undefined; openRouterEngine: boolean } {
+export function useLocalAgentMenuModels(pick: string | null): {
+  models: CatalogModel[] | undefined;
+  allModels: CatalogModel[] | undefined;
+  openRouterEngine: boolean;
+} {
   const local = isLocalMode();
+  const account = useLinkedAccount();
+  const [hostedModels, setHostedModels] = React.useState<CatalogModel[] | null>(null);
+  const [hostedTries, setHostedTries] = React.useState(0);
   const { status } = useLocalStatus(local);
   const { engine: stored, loaded: engineLoaded } = useAgentEngine();
   const keys = useByokKeys();
   const keyVerified = menuKeyVerified(keys);
   // Only the OpenRouter engine lists the key's models, so no other engine loads them.
   const keyModels = useLocalKeyModels(local && stored === OPENROUTER_ENGINE);
+  const managed =
+    local && account?.linked === true && stored === OPENROUTER_ENGINE && keyVerified === false;
+  React.useEffect(() => {
+    if (!managed) return;
+    let active = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    getHostedModelCatalog()
+      .then((catalog) => {
+        if (active) setHostedModels(catalog.models);
+      })
+      .catch(() => {
+        if (active)
+          retry = setTimeout(() => setHostedTries((n) => n + 1), keyRetryDelayMs(hostedTries));
+      });
+    return () => {
+      active = false;
+      clearTimeout(retry);
+    };
+  }, [managed, hostedTries]);
   return React.useMemo(() => {
-    if (!local) return { models: undefined, openRouterEngine: false };
-    return localAgentMenu({
+    if (!local) return { models: undefined, allModels: undefined, openRouterEngine: false };
+    if (managed) {
+      const available = (hostedModels ?? []).filter(
+        (row) => row.available && row.value.startsWith("openrouter/"),
+      );
+      const featured = available.filter(
+        (row) => row.featured || row.is_default || row.value === pick,
+      );
+      const rows = featured.length ? featured : available.slice(0, 50);
+      return {
+        models: [...rows].sort((a, b) => Number(!!b.is_default) - Number(!!a.is_default)),
+        allModels: available,
+        openRouterEngine: true,
+      };
+    }
+    const menu = localAgentMenu({
       engineLoaded,
       stored,
       keyVerified,
@@ -210,7 +272,11 @@ export function useLocalAgentMenuModels(
       pick,
       catalog: cachedCatalog()?.models,
     });
-  }, [local, engineLoaded, stored, keyVerified, status, keyModels, pick]);
+    return {
+      ...menu,
+      allModels: menu.openRouterEngine ? (keyModels ?? []) : menu.models,
+    };
+  }, [local, engineLoaded, stored, keyVerified, status, keyModels, pick, managed, hostedModels]);
 }
 
 /**

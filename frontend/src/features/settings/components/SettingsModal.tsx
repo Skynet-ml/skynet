@@ -267,6 +267,7 @@ function AgentTab() {
           effort={prefs.composerEffort}
           onEffortChange={(v) => setPref("composerEffort", v)}
           models={localMenu.models}
+          allModels={localMenu.allModels}
           openRouterEngine={localMenu.openRouterEngine}
         />
       </SettingsRow>

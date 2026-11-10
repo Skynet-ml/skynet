@@ -26,6 +26,7 @@ from ..billing.signals import BudgetReached
 from ..config import app_env, settings
 from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..local.cli_catalog import parse_subscription_model_id
+from ..local.managed_models import HOSTED_INFERENCE_KEY
 from ..models import ModelConfig
 
 try:
@@ -614,6 +615,10 @@ def build_language_model(config: ModelConfig, *, disable_cache: bool = False) ->
     if config.max_tokens is not None:
         lm_kwargs["max_tokens"] = config.max_tokens
     lm_kwargs.update(config.extra)
+    hosted_inference = bool(lm_kwargs.pop(HOSTED_INFERENCE_KEY, False))
+    if hosted_inference:
+        lm_kwargs["model"] = f"litellm_proxy/{model_name.removeprefix('openrouter/')}"
+        lm_kwargs.setdefault("max_tokens", _OPENAI_REASONING_MAX_TOKENS)
     extra_body = lm_kwargs.get("extra_body")
     reasoning_off = (
         isinstance(extra_body, dict)
@@ -672,6 +677,7 @@ def build_language_model(config: ModelConfig, *, disable_cache: bool = False) ->
     # LiteLLM rebuilds a streamed call's usage and drops the gateway's
     # ``token_source`` mark, so the LM itself carries the zero-cost flag.
     language_model.subscription = config.token_source == "subscription"
+    language_model.hosted_inference = hosted_inference
     return language_model
 
 

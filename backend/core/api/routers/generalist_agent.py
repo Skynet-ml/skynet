@@ -30,7 +30,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
-from ...billing.cli_dispatch import CLI_FAST_KEY
 from ...billing.metering import meter_llm_run
 from ...config import settings
 from ...connectors import github
@@ -64,6 +63,7 @@ from ..agent_engine import engine_agent_model
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import ReasoningEffort
+from ..model_fast_mode import with_fast_mode
 from ..model_router import effective_reasoning_effort, metering_token_source, route_agent_model, route_local_byok_model
 from ..suggest_model import hosted_suggest_model
 from ._helpers import enforce_llm_balance, sse_from_events, stream_with_llm_metering
@@ -214,8 +214,8 @@ class GeneralistAgentRequest(BaseModel):
     fast_mode: bool = Field(
         default=False,
         description=(
-            "Run this turn in the CLI's fast mode. Applies only to a local CLI model that takes "
-            "fast mode; any other model ignores it."
+            "Run this turn in fast mode on a supported local CLI or OpenRouter priority endpoint. "
+            "Unsupported models ignore this flag."
         ),
     )
     steer_key: str | None = Field(
@@ -980,10 +980,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         effort = req.reasoning_effort if on_cli else effective_reasoning_effort(model_config.name, req.reasoning_effort)
         if effort:
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
-        if on_cli and req.fast_mode:
-            body = model_config.extra.get("extra_body")
-            fast_body = {**(body if isinstance(body, dict) else {}), CLI_FAST_KEY: True}
-            model_config = model_config.model_copy(update={"extra": {**model_config.extra, "extra_body": fast_body}})
+        model_config = await asyncio.to_thread(with_fast_mode, model_config, req.fast_mode)
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.

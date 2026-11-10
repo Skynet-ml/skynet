@@ -57,8 +57,8 @@ def test_parse_subscription_model_id_rejects_other_ids(model_id: str) -> None:
 
 def test_cli_model_arg_maps_slug_to_cli_name() -> None:
     """Each CLI gets its own ``--model`` name for a catalog slug."""
-    assert cli_model_arg("claude", "anthropic/claude-sonnet-4.5") == "claude-sonnet-4-5-20250929"
-    assert cli_model_arg("claude", "anthropic/claude-haiku-4.5") == "claude-haiku-4-5"
+    assert cli_model_arg("claude", "anthropic/claude-sonnet-4.6") == "claude-sonnet-4-6"
+    assert cli_model_arg("claude", "anthropic/claude-haiku-5.5") == "claude-haiku-5-5"
     assert cli_model_arg("codex", "openai/gpt-6-sol") == "gpt-6-sol"
 
 
@@ -84,6 +84,7 @@ def test_every_cli_model_has_an_effort_row() -> None:
     for cli, models in CLI_MODELS.items():
         assert set(CLI_EFFORTS[cli]) == set(models)
         for levels in CLI_EFFORTS[cli].values():
+            assert levels
             assert list(levels) == [level for level in ladder if level in levels]
 
 

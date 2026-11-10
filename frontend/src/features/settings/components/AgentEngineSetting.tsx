@@ -182,6 +182,7 @@ export function AgentEngineSelect({
   failed = false,
   value,
   keyVerified = false,
+  managedAvailable = false,
   keysFailed = false,
   automatic = false,
   saving,
@@ -191,14 +192,16 @@ export function AgentEngineSelect({
   failed?: boolean;
   value: AgentEngine;
   keyVerified?: boolean | null;
+  managedAvailable?: boolean;
   keysFailed?: boolean;
   /** True while `value` is the backend's automatic pick, not a saved choice. */
   automatic?: boolean;
   saving: boolean;
   onChange: (engine: AgentEngine) => void;
 }) {
-  const options = agentEngineOptions(status, true, new Date(), keyVerified);
-  const shown = effectiveAgentEngine(value, keyVerified) ?? defaultAgentCli(status);
+  const options = agentEngineOptions(status, true, new Date(), keyVerified, managedAvailable);
+  const shown =
+    effectiveAgentEngine(value, keyVerified, managedAvailable) ?? defaultAgentCli(status);
   const keyGone = shown !== value;
   const current = options.find((option) => option.engine === shown);
   // A key list that still loads is no reason to warn about the OpenRouter engine.
@@ -341,6 +344,7 @@ function LocalAgentEngineSetting() {
         failed={failed}
         value={value}
         keyVerified={keyVerified}
+        managedAvailable
         keysFailed={keysFailed}
         automatic={stored === false}
         saving={saving}

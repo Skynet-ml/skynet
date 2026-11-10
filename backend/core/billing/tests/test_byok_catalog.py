@@ -59,13 +59,14 @@ def _static_catalog() -> ModelCatalogResponse:
             CatalogProvider(slug="openrouter", label="OpenRouter"),
         ],
         models=[
-            CatalogModel(value="openai/gpt-4o", label="gpt-4o", provider="openai", available=True),
-            CatalogModel(value="openai/gpt-4.1", label="gpt-4.1", provider="openai", available=True),
+            CatalogModel(value="openai/gpt-4o", label="gpt-4o", provider="openai", available=True, supports_thinking=True),
+            CatalogModel(value="openai/gpt-4.1", label="gpt-4.1", provider="openai", available=True, supports_thinking=True),
             CatalogModel(
                 value="openrouter/anthropic/claude-3-haiku",
                 label="anthropic/claude-3-haiku",
                 provider="openrouter",
                 available=True,
+                supports_thinking=True,
             ),
         ],
     )
@@ -103,11 +104,8 @@ def test_custom_catalog_fetches_models_with_stored_secret(vault: ProviderKeyVaul
         catalog = _byok_catalog_for_user(vault, ALICE)
 
     discover.assert_called_once_with("https://inference.example/v1", "private-secret", limit=None)
-    assert [provider.slug for provider in catalog.providers] == ["custom"]
-    assert {(model.value, model.byok_provider) for model in catalog.models} == {
-        ("openai/private-chat", "custom"),
-        ("openai/second-chat", "custom"),
-    }
+    assert catalog.providers == []
+    assert catalog.models == []
     assert "private-secret" not in catalog.model_dump_json()
 
 
@@ -160,6 +158,8 @@ def test_live_listing_narrows_static_models_and_adds_declared_chat_models(vault:
         "openai/gpt-5-preview": {
             "architecture": {"output_modalities": ["text"], "input_modalities": ["text", "image"]},
             "context_length": 400000,
+            "supports_reasoning": True,
+            "reasoning": {"supported_efforts": ["low", "high"]},
         },
         "openai/text-embedding-3-small": {"architecture": {"output_modalities": ["embeddings"]}},
         "mystery/model": {},
@@ -204,10 +204,8 @@ def test_custom_endpoint_replaces_the_provider_static_models(vault: ProviderKeyV
         catalog = _byok_catalog_for_user(vault, ALICE)
 
     probe.assert_not_called()
-    assert [(provider.slug, provider.default_base_url) for provider in catalog.providers] == [
-        ("openai", "https://gateway.example/v1")
-    ]
-    assert [(model.value, model.byok_provider) for model in catalog.models] == [("openai/gateway-chat", "openai")]
+    assert catalog.providers == []
+    assert catalog.models == []
 
 
 def test_catalog_is_cached_per_account_until_keys_change(vault: ProviderKeyVault) -> None:

@@ -30,7 +30,7 @@ from core.service_gateway.language_models import (
 from core.service_gateway.optimization.blackbox.workspace_harness import attempt_record
 from core.service_gateway.optimization.unified.dspy_engine import lm_helper
 
-MODEL = "anthropic/claude-haiku-4.5"
+MODEL = "anthropic/claude-haiku-5.5"
 SUBSCRIPTION_ID = f"subscription/claude/{MODEL}"
 
 

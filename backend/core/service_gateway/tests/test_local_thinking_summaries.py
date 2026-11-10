@@ -14,7 +14,7 @@ from core.api import model_router
 from core.billing import cli_dispatch
 from core.billing.tests.test_cli_runners import CLAUDE_SUCCESS, calls, fake_cli, local_settings, printing
 from core.constants import TOKEN_SOURCE_BYOK
-from core.local.cli_catalog import CLI_MODELS, CliProvider
+from core.local.cli_catalog import CLI_MODELS, CliProvider, cli_model_arg
 from core.models import ModelConfig
 from core.service_gateway import language_models
 from core.service_gateway.agents import generalist
@@ -198,7 +198,7 @@ async def test_local_summary_runs_on_the_selected_cli(built: list[ModelConfig]) 
     summary = built[0]
     assert summary.token_source == "subscription"
     assert summary.cli_provider == "claude"
-    assert summary.name in CLI_MODELS["claude"]
+    assert cli_model_arg("claude", summary.name, internal=True)
     assert summary.name != turn.name
     assert len(sink) == 1
 
@@ -206,7 +206,7 @@ async def test_local_summary_runs_on_the_selected_cli(built: list[ModelConfig]) 
 @pytest.mark.parametrize("cli", list(CLI_MODELS))
 def test_every_cli_has_a_summary_model_it_runs(cli: str) -> None:
     """Name a summary model in each CLI's own catalog, so no CLI engine is left without labels."""
-    assert generalist._LOCAL_SUMMARY_MODELS[cli] in CLI_MODELS[cli]  # type: ignore[index]
+    assert cli_model_arg(cli, generalist._LOCAL_SUMMARY_MODELS[cli], internal=True)  # type: ignore[arg-type,index]
 
 
 @pytest.mark.parametrize(
@@ -258,14 +258,14 @@ async def test_local_cli_summary_answers_through_the_fake_cli(tmp_path: Path, mo
     assert sink[0].subscription is True
     assert sink[0].usage_totals.reported_cost_usd == 0.0
     log = (tmp_path / "claude.log").read_text()
-    assert CLI_MODELS["claude"][generalist._LOCAL_SUMMARY_MODELS["claude"]] in log
+    assert cli_model_arg("claude", generalist._LOCAL_SUMMARY_MODELS["claude"], internal=True) in log
 
 
 def test_label_models_cover_exactly_the_local_clis() -> None:
     """Name a label model for each CLI local mode offers, and none for a removed CLI like Droid."""
     assert set(generalist._LOCAL_SUMMARY_MODELS) == set(get_args(CliProvider))
     for cli, model in generalist._LOCAL_SUMMARY_MODELS.items():
-        assert model in CLI_MODELS[cli]
+        assert cli_model_arg(cli, model, internal=True)
 
 
 def test_slow_cli_label_never_holds_the_turns_cli_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,7 +289,7 @@ def test_slow_cli_label_never_holds_the_turns_cli_slots(tmp_path: Path, monkeypa
     assert turn_slots._value == current.cli_max_concurrency
 
     agent = build_language_model(
-        ModelConfig(name="anthropic/claude-haiku-4.5", token_source="subscription", cli_provider="claude"),
+        ModelConfig(name="anthropic/claude-haiku-5.5", token_source="subscription", cli_provider="claude"),
         disable_cache=True,
     )
     started = time.monotonic()
@@ -345,7 +345,7 @@ def test_cli_suggestion_runs_while_a_label_holds_the_label_pool(
     assert lm.kwargs["timeout"] == 30.0
     assert cli_dispatch._NEXT_PROMPT_CLI_TIMEOUT_SECONDS > cli_dispatch._LABEL_CLI_TIMEOUT_SECONDS
     build_language_model(
-        ModelConfig(name="anthropic/claude-haiku-4.5", token_source="subscription", cli_provider="claude"),
+        ModelConfig(name="anthropic/claude-haiku-5.5", token_source="subscription", cli_provider="claude"),
         disable_cache=True,
     )("ping")
     side, turn_call = calls(tmp_path, "claude")

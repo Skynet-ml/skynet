@@ -12,21 +12,26 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Iterator
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
 
 import litellm
 import pytest
 import stripe
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, inspect
 from sqlalchemy.orm import Session
 
 from core.api.errors import DomainError
+from core.api.routers.billing import create_billing_router
 from core.billing.pricing import ModelUsage, cents_for_usage
 from core.billing.service import (
     CUSTOM_CENTS_MAX,
@@ -46,9 +51,11 @@ from core.storage.models import (
     Base,
     BillingCustomerModel,
     BillingWebhookEventModel,
+    JobModel,
     TelemetryEventModel,
     WalletLedgerModel,
 )
+from scripts import provision_stripe
 
 
 @pytest.fixture
@@ -638,12 +645,31 @@ def _add_ledger(
         session.commit()
 
 
+def _add_optimization(engine: object, username: str, when: datetime) -> None:
+    """Save a synthetic optimization without executing work or charging its owner.
+
+    Args:
+        engine: Test database engine.
+        username: Optimization owner.
+        when: Optimization creation time.
+    """
+    with Session(engine) as session:
+        session.add(JobModel(optimization_id=str(uuid4()), username=username, created_at=when, status="completed"))
+        session.commit()
+
+
 def test_get_usage_aggregates_runs_by_day_and_model(engine: object) -> None:
-    """get_usage sums billed spend, counts runs, and rolls up by day and model."""
+    """Count optimizations separately from billed spend grouped by day and model.
+
+    Args:
+        engine: Test database engine.
+    """
     user = "u@x.com"
     now = datetime.now(UTC)
     day1 = now - timedelta(days=1)
     day2 = now - timedelta(days=2)
+    for when in (day1, day1, day2):
+        _add_optimization(engine, user, when)
     _add_ledger(engine, user, delta=-300, kind="run", model="openai/gpt-5.5", when=day1)
     _add_ledger(engine, user, delta=-50, kind="run", model="anthropic/claude", when=day1)
     # A positive run row (legacy correction) is ignored by the rollups.
@@ -731,9 +757,18 @@ def test_get_usage_rolls_up_token_counts_per_model(engine: object) -> None:
 
 
 def test_get_usage_excludes_rows_outside_window(engine: object) -> None:
-    """Rows older than the window's start are not counted in the rollup."""
+    """Exclude another account and dates outside the usage window.
+
+    Args:
+        engine: Test database engine.
+    """
     user = "u@x.com"
     now = datetime.now(UTC)
+    for when in (now - timedelta(days=1), now - timedelta(days=40), now + timedelta(days=1)):
+        _add_optimization(engine, user, when)
+    _add_optimization(engine, "other@example.test", now - timedelta(days=1))
+    _add_ledger(engine, "other@example.test", delta=-999, kind="run", model="m", when=now - timedelta(days=1))
+    _add_ledger(engine, user, delta=-999, kind="run", model="m", when=now + timedelta(days=1))
     _add_ledger(engine, user, delta=-40, kind="run", model="m", when=now - timedelta(days=1))
     _add_ledger(engine, user, delta=-999, kind="run", model="m", when=now - timedelta(days=40))
 
@@ -743,6 +778,48 @@ def test_get_usage_excludes_rows_outside_window(engine: object) -> None:
     assert snapshot.billed_cents == 40
     assert snapshot.runs == 1
     assert len(snapshot.entries) == 1
+
+
+@pytest.mark.parametrize("charges", [0, 1, 3])
+def test_get_usage_counts_optimizations_independently_of_charges(engine: object, charges: int) -> None:
+    """Count every owned optimization even when wallet charge counts differ.
+
+    Args:
+        engine: Test database engine.
+        charges: Number of billed calls, independent of optimization count.
+    """
+    user = "owner@example.test"
+    now = datetime.now(UTC)
+    for _ in range(2):
+        _add_optimization(engine, user, now - timedelta(days=1))
+    for _ in range(charges):
+        _add_ledger(engine, user, delta=-40, kind="run", model="m", when=now - timedelta(days=1))
+
+    snapshot = StripeBillingService(engine=engine).get_usage(user, now - timedelta(days=7), now)
+
+    assert snapshot.runs == 2
+    assert snapshot.billed_cents == charges * 40
+    assert sum(row.runs for row in snapshot.by_day) == charges
+    assert sum(row.runs for row in snapshot.by_model) == charges
+
+
+def test_get_usage_includes_optimizations_at_both_window_boundaries(engine: object) -> None:
+    """Include both boundary instants without including adjacent optimizations.
+
+    Args:
+        engine: Test database engine.
+    """
+    user = "owner@example.test"
+    end = datetime.now(UTC)
+    start = end - timedelta(days=7)
+    for when in (start - timedelta(microseconds=1), start, end, end + timedelta(microseconds=1)):
+        _add_optimization(engine, user, when)
+
+    snapshot = StripeBillingService(engine=engine).get_usage(user, start, end)
+
+    assert snapshot.runs == 2
+    assert snapshot.billed_cents == 0
+    assert snapshot.entries == []
 
 
 def _checkout_event(
@@ -1371,227 +1448,6 @@ def test_webhook_dispute_after_partial_refund_nets(engine: object, webhook_ready
     assert dispute_rows[0].delta_cents == -300
 
 
-def _subscription(
-    subscription_id: str,
-    username: str,
-    status: str,
-    *,
-    period_end: int = 1_800_000_000,
-    cancel_at_period_end: bool = False,
-) -> dict:
-    """Build a Subscription object shaped like the 2025+ Stripe API.
-
-    Args:
-        subscription_id: Stripe subscription id.
-        username: Account stamped into the subscription metadata.
-        status: Stripe subscription status.
-        period_end: Epoch seconds of the current period end, carried on the item.
-        cancel_at_period_end: Whether the subscription lapses at period end.
-
-    Returns:
-        A subscription mapping with the fields the handler reads.
-    """
-    return {
-        "id": subscription_id,
-        "customer": f"cus_{username}",
-        "status": status,
-        "cancel_at_period_end": cancel_at_period_end,
-        "cancel_at": None,
-        "metadata": {"username": username, "plan": "pro"},
-        "items": {"data": [{"current_period_end": period_end}]},
-    }
-
-
-def _subscription_event(event_id: str, event_type: str, subscription: dict) -> dict:
-    """Wrap a subscription in a ``customer.subscription.*`` event.
-
-    Args:
-        event_id: Stripe event id.
-        event_type: One of the subscription lifecycle event types.
-        subscription: The event's Subscription object.
-
-    Returns:
-        An event dict shaped like the fields ``handle_webhook`` reads.
-    """
-    return {"id": event_id, "type": event_type, "data": {"object": subscription}}
-
-
-@pytest.fixture
-def pro_price(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Configure a Pro monthly price id."""
-    monkeypatch.setattr(settings, "stripe_price_pro_monthly", "price_pro")
-
-
-def test_subscription_checkout_builds_subscription_session(engine: object, configured: None, pro_price: None) -> None:
-    """Pro checkout is a subscription session that stamps the username on the subscription."""
-    _seed_customer(engine, "u@x.com")
-    service = StripeBillingService(engine=engine)
-    captured: dict[str, object] = {}
-
-    def _create(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return SimpleNamespace(url="https://stripe.test/c/cs_pro")
-
-    with patch("stripe.checkout.Session.create", side_effect=_create):
-        url = service.create_subscription_checkout("u@x.com")
-    assert url == "https://stripe.test/c/cs_pro"
-    assert captured["mode"] == "subscription"
-    assert captured["customer"] == "cus_u@x.com"
-    assert captured["line_items"] == [{"price": "price_pro", "quantity": 1}]
-    assert captured["subscription_data"] == {"metadata": {"username": "u@x.com", "plan": "pro"}}
-    assert str(captured["success_url"]).endswith("/?billing=pro")
-
-
-def test_subscription_checkout_unavailable_without_price(engine: object, configured: None) -> None:
-    """With no Pro price configured the upgrade is a 503, before any Stripe call."""
-    service = StripeBillingService(engine=engine)
-    with patch("stripe.checkout.Session.create") as create, pytest.raises(DomainError) as exc:
-        service.create_subscription_checkout("u@x.com")
-    assert exc.value.status_code == 503
-    assert exc.value.code == "billing.plan_unavailable"
-    create.assert_not_called()
-
-
-def test_subscription_checkout_refuses_existing_subscriber(engine: object, configured: None, pro_price: None) -> None:
-    """An account already on Pro can't start a second subscription."""
-    _seed_customer(engine, "u@x.com")
-    with Session(engine) as session:
-        session.get(BillingCustomerModel, "u@x.com").subscription_status = "active"
-        session.commit()
-    service = StripeBillingService(engine=engine)
-    with patch("stripe.checkout.Session.create") as create, pytest.raises(DomainError) as exc:
-        service.create_subscription_checkout("u@x.com")
-    assert exc.value.status_code == 409
-    assert exc.value.code == "billing.already_subscribed"
-    create.assert_not_called()
-
-
-def test_webhook_subscription_lifecycle_mirrors_latest_state(engine: object, webhook_ready: None) -> None:
-    """Created, cancel-scheduled and deleted events each mirror the re-read subscription."""
-    _seed_customer(engine, "u@x.com")
-    service = StripeBillingService(engine=engine)
-    active = _subscription("sub_1", "u@x.com", "active")
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_s1", "customer.subscription.created", active),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=active),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    wallet = service.get_wallet("u@x.com")
-    assert wallet.plan.plan == "pro"
-    assert wallet.plan.renews_at == datetime.fromtimestamp(1_800_000_000, UTC).isoformat()
-    assert wallet.plan.cancel_at_period_end is False
-
-    cancelling = _subscription("sub_1", "u@x.com", "active", cancel_at_period_end=True)
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_s2", "customer.subscription.updated", cancelling),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=cancelling),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    assert service.get_wallet("u@x.com").plan.cancel_at_period_end is True
-
-    canceled = _subscription("sub_1", "u@x.com", "canceled")
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_s3", "customer.subscription.deleted", canceled),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=canceled),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    assert service.get_wallet("u@x.com").plan.plan == "free"
-
-
-def test_webhook_subscription_out_of_order_event_applies_current_state(engine: object, webhook_ready: None) -> None:
-    """A late ``created`` event carrying ``incomplete`` can't downgrade an active subscription."""
-    _seed_customer(engine, "u@x.com")
-    service = StripeBillingService(engine=engine)
-    stale = _subscription("sub_1", "u@x.com", "incomplete")
-    current = _subscription("sub_1", "u@x.com", "active")
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_late", "customer.subscription.created", stale),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=current),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    assert service.get_wallet("u@x.com").plan.plan == "pro"
-
-
-def test_webhook_subscription_falls_back_to_event_copy(engine: object, webhook_ready: None) -> None:
-    """When the re-read fails, the event's own subscription snapshot is applied."""
-    _seed_customer(engine, "u@x.com")
-    service = StripeBillingService(engine=engine)
-    active = _subscription("sub_1", "u@x.com", "active")
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_fb", "customer.subscription.created", active),
-        ),
-        patch("stripe.Subscription.retrieve", side_effect=stripe.APIConnectionError("down")),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    assert service.get_wallet("u@x.com").plan.plan == "pro"
-
-
-def test_webhook_abandoned_second_subscription_keeps_live_one(engine: object, webhook_ready: None) -> None:
-    """An expired duplicate subscription does not overwrite the one being paid for."""
-    _seed_customer(engine, "u@x.com")
-    service = StripeBillingService(engine=engine)
-    live = _subscription("sub_live", "u@x.com", "active")
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_a", "customer.subscription.created", live),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=live),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    dead = _subscription("sub_dead", "u@x.com", "incomplete_expired")
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_b", "customer.subscription.updated", dead),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=dead),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    with Session(engine) as session:
-        row = session.get(BillingCustomerModel, "u@x.com")
-        assert row.stripe_subscription_id == "sub_live"
-        assert row.subscription_status == "active"
-
-
-def test_webhook_subscription_resolves_account_by_customer_id(engine: object, webhook_ready: None) -> None:
-    """A subscription without username metadata is matched through its Stripe customer."""
-    _seed_customer(engine, "u@x.com")
-    service = StripeBillingService(engine=engine)
-    active = _subscription("sub_1", "u@x.com", "past_due")
-    active["metadata"] = {}
-    with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event("evt_c", "customer.subscription.updated", active),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=active),
-    ):
-        service.handle_webhook(b"{}", "sig")
-    assert service.get_wallet("u@x.com").plan.plan == "pro"
-
-
-def test_wallet_plan_reports_availability(engine: object, configured: None, pro_price: None) -> None:
-    """A new account reads as free, with the upgrade available once a Pro price is set."""
-    plan = StripeBillingService(engine=engine).get_wallet("new@x.com").plan
-    assert plan.plan == "free"
-    assert plan.available is True
-
-
 def test_byok_model_charge_stays_zero_with_usage_markup() -> None:
     """BYOK model usage is free; managed spend is marked up."""
     usages = _usages(2_000_000)
@@ -1599,38 +1455,120 @@ def test_byok_model_charge_stays_zero_with_usage_markup() -> None:
     assert cents_for_usage(usages) == 230
 
 
-def _send_subscription(service: StripeBillingService, event_id: str, subscription: dict) -> None:
-    """Deliver one ``customer.subscription.updated`` webhook for ``subscription``.
+@pytest.mark.parametrize(
+    "event_type",
+    ["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"],
+)
+def test_retired_subscription_events_preserve_history_without_calls(
+    engine: object, webhook_ready: None, event_type: str
+) -> None:
+    """Acknowledge subscription events without changing history, balance, or provider state.
 
     Args:
-        service: Billing service under test.
-        event_id: Unique Stripe event id.
-        subscription: The subscription object to deliver.
+        engine: Isolated billing database.
+        webhook_ready: Fixture enabling signed-event handling with fake credentials.
+        event_type: Retired subscription lifecycle event.
     """
+    _seed_customer(engine, "u@x.com")
+    with Session(engine) as session:
+        customer = session.get(BillingCustomerModel, "u@x.com")
+        customer.stripe_subscription_id = "sub_archived"
+        customer.subscription_status = "active"
+        customer.balance_cents = 125
+        session.commit()
+    event = {
+        "id": "evt_retired",
+        "type": event_type,
+        "data": {"object": {"id": "sub_archived", "status": "canceled", "metadata": {"username": "u@x.com"}}},
+    }
+    service = StripeBillingService(engine=engine)
     with (
-        patch(
-            "stripe.Webhook.construct_event",
-            return_value=_subscription_event(event_id, "customer.subscription.updated", subscription),
-        ),
-        patch("stripe.Subscription.retrieve", return_value=subscription),
+        patch("stripe.Webhook.construct_event", return_value=event),
+        patch("stripe.Subscription.retrieve") as retrieve,
     ):
         service.handle_webhook(b"{}", "sig")
-
-
-def _past_due_since(engine: object, username: str) -> datetime | None:
-    """Read the mirrored past-due start for an account."""
+        service.handle_webhook(b"{}", "sig")
+    retrieve.assert_not_called()
     with Session(engine) as session:
-        return session.get(BillingCustomerModel, username).subscription_past_due_since
+        customer = session.get(BillingCustomerModel, "u@x.com")
+        assert customer.stripe_subscription_id == "sub_archived"
+        assert customer.subscription_status == "active"
+        assert customer.balance_cents == 125
+        assert session.get(BillingWebhookEventModel, "evt_retired") is not None
+        assert session.query(WalletLedgerModel).count() == 0
+    assert "plan" not in asdict(service.get_wallet("u@x.com"))
 
 
-def test_webhook_stamps_past_due_start_once_and_clears_it_on_recovery(engine: object, webhook_ready: None) -> None:
-    """The grace clock starts on the first past_due event, survives repeats, and resets on payment."""
+def test_retired_subscription_checkout_cannot_credit_wallet(engine: object, webhook_ready: None) -> None:
+    """Ignore a completed subscription checkout even if it carries top-up metadata.
+
+    Args:
+        engine: Isolated billing database.
+        webhook_ready: Fixture enabling signed-event handling with fake credentials.
+    """
     _seed_customer(engine, "u@x.com")
+    event = _checkout_event("evt_subscription_checkout", "u@x.com", 500)
+    event["data"]["object"]["mode"] = "subscription"
     service = StripeBillingService(engine=engine)
-    _send_subscription(service, "evt_pd1", _subscription("sub_1", "u@x.com", "past_due"))
-    first = _past_due_since(engine, "u@x.com")
-    assert first is not None
-    _send_subscription(service, "evt_pd2", _subscription("sub_1", "u@x.com", "past_due", period_end=1_900_000_000))
-    assert _past_due_since(engine, "u@x.com") == first
-    _send_subscription(service, "evt_ok", _subscription("sub_1", "u@x.com", "active"))
-    assert _past_due_since(engine, "u@x.com") is None
+    with patch("stripe.Webhook.construct_event", return_value=event):
+        service.handle_webhook(b"{}", "sig")
+    assert _balance(engine, "u@x.com") == 0
+    assert _ledger_rows(engine, "u@x.com", "topup") == []
+
+
+def test_retired_checkout_route_and_wallet_plan_are_absent(engine: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the subscription endpoint and schema while retaining prepaid billing routes.
+
+    Args:
+        engine: Isolated billing database.
+        monkeypatch: Build the hosted route set without starting the full app.
+    """
+    monkeypatch.setattr(settings, "local_mode", False)
+    app = FastAPI()
+    app.include_router(create_billing_router(job_store=SimpleNamespace(engine=engine)))
+    schema = app.openapi()
+    assert "/billing/subscription/checkout" not in schema["paths"]
+    assert "/billing/checkout" in schema["paths"]
+    assert "/billing/portal" in schema["paths"]
+    assert "PlanResponse" not in schema["components"]["schemas"]
+    assert "plan" not in schema["components"]["schemas"]["WalletResponse"]["properties"]
+    with TestClient(app) as client:
+        assert client.post("/billing/subscription/checkout").status_code == 404
+    assert not hasattr(StripeBillingService, "create_subscription_checkout")
+
+
+def test_provisioning_keeps_only_prepaid_prices(configured: None, capsys: pytest.CaptureFixture[str]) -> None:
+    """Provision the three existing top-up prices without a monthly product.
+
+    Args:
+        configured: Fake Stripe key fixture.
+        capsys: Captured setup output.
+    """
+    with (
+        patch.object(provision_stripe, "_ensure_price", return_value="price_fixture") as ensure,
+        patch.object(stripe, "api_key", None),
+    ):
+        assert provision_stripe.main() == 0
+    assert [(call.args[0], call.args[2]) for call in ensure.call_args_list] == [
+        ("skynet_pack_starter", 500),
+        ("skynet_pack_plus", 2000),
+        ("skynet_pack_pro", 5000),
+    ]
+    output = capsys.readouterr().out
+    assert "STRIPE_PRICE_PACK_PRO=price_fixture" in output
+    assert "MONTHLY" not in output
+
+
+def test_prepaid_price_creation_has_no_recurring_terms() -> None:
+    """Create the existing prepaid pack as a one-time price."""
+    with (
+        patch.object(stripe.Price, "list", return_value=SimpleNamespace(data=[])),
+        patch.object(stripe.Price, "create", return_value=SimpleNamespace(id="price_fixture")) as create,
+    ):
+        assert provision_stripe._ensure_price("skynet_pack_pro", "Prepaid top-up", 5000) == "price_fixture"
+    assert create.call_args.kwargs == {
+        "currency": "usd",
+        "unit_amount": 5000,
+        "lookup_key": "skynet_pack_pro",
+        "product_data": {"name": "Prepaid top-up"},
+    }

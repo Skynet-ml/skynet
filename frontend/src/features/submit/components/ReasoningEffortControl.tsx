@@ -34,9 +34,7 @@ export function ReasoningEffortControl({
           efforts={efforts}
           value={stored && efforts.includes(stored) ? stored : null}
           onChange={onChange}
-          // The dialog picks the model in its own list above, and the slider's
-          // first stop is the default, so neither the model line nor the reset shows.
-          showReset={false}
+          // The dialog picks the model in its own list above, so no model line shows.
           hintFor={effortHint}
         />
       </div>

@@ -45,9 +45,7 @@ CLI_MODELS: dict[CliProvider, dict[str, str]] = {
         "anthropic/claude-sonnet-5.5": "claude-sonnet-5-5",
         "anthropic/claude-sonnet-5": "claude-sonnet-5",
         "anthropic/claude-sonnet-4.6": "claude-sonnet-4-6",
-        "anthropic/claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
         "anthropic/claude-haiku-5.5": "claude-haiku-5-5",
-        "anthropic/claude-haiku-4.5": "claude-haiku-4-5",
     },
 }
 
@@ -72,8 +70,6 @@ CLI_EFFORTS: dict[CliProvider, dict[str, tuple[str, ...]]] = {
         "anthropic/claude-opus-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-sonnet-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-opus-4.5": ("low", "medium", "high"),
-        "anthropic/claude-sonnet-4.5": (),
-        "anthropic/claude-haiku-4.5": (),
     },
 }
 # The slugs that take fast mode, from the same check. Every Codex model
@@ -133,12 +129,13 @@ def parse_subscription_model_id(model_id: str) -> tuple[CliProvider, str] | None
     return cli, slug  # type: ignore[return-value]
 
 
-def cli_model_arg(cli: CliProvider, slug: str) -> str:
+def cli_model_arg(cli: CliProvider, slug: str, *, internal: bool = False) -> str:
     """Return the ``--model`` argument ``cli`` takes for a catalog slug.
 
     Args:
         cli: The CLI that runs the call.
         slug: OpenRouter catalog slug, such as ``anthropic/claude-sonnet-4.6``.
+        internal: Allow the fixed thinking-label model for internal side calls.
 
     Returns:
         The CLI's own model name for that slug.
@@ -149,6 +146,8 @@ def cli_model_arg(cli: CliProvider, slug: str) -> str:
     models = CLI_MODELS.get(cli)
     if models is None:
         raise ValueError(f"Unknown CLI {cli!r}")
+    if internal and cli == "claude" and slug == "anthropic/claude-haiku-4.5":
+        return "claude-haiku-4-5"
     try:
         return models[slug]
     except KeyError:

@@ -24,11 +24,12 @@ from ...billing import cli_dispatch
 from ...billing.tests.test_cli_runners import CODEX_TURN, emitting, fake_app_server, local_settings, requests
 from ...local.cli_catalog import CLI_MODELS
 from ...local.cli_probe import CliStatus
+from ...models import ModelConfig
 from ...service_gateway import language_models
 from ...service_gateway.agents import code as code_agent_engine
 from ...service_gateway.language_models import build_language_model
 from ...storage.models import AgentEnginePreferenceModel, Base, UserModel
-from .. import agent_engine, model_router
+from .. import agent_engine, model_fast_mode, model_router
 from .. import auth as auth_mod
 from ..account_data_service import delete_account, export_account
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -438,13 +439,15 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
 
 
 @pytest.mark.parametrize("effort", ["ultra", "ultracode"])
-def test_hosted_chat_turn_maps_a_retired_effort_and_drops_fast_mode(
-    effort: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("priority", [False, True])
+def test_hosted_chat_turn_maps_retired_effort_and_applies_supported_fast_mode(
+    effort: str, priority: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Run a hosted turn at its top level for a retired level, and without fast mode.
+    """Run a hosted turn at its top level with fast mode only on supported endpoints.
 
     Args:
         effort: A retired level from an old pick.
+        priority: Whether the selected model supports OpenRouter priority routing.
         monkeypatch: Swaps the agent loop and the catalog.
     """
     engine = _engine()
@@ -453,7 +456,8 @@ def test_hosted_chat_turn_maps_a_retired_effort_and_drops_fast_mode(
         session.add(UserModel(email=_USER, name=_USER, password_hash="x"))
         session.commit()
     monkeypatch.setattr(agent_mod, "queue_conversation_embed", lambda *a, **k: None)
-    slug = "anthropic/claude-opus-5.5"
+    slug = "openrouter/anthropic/claude-opus-5.5" if priority else "anthropic/claude-opus-5.5"
+    monkeypatch.setattr(model_fast_mode, "fast_providers", lambda model: ("anthropic/fast",) if priority else ())
     ladder = CatalogModel(
         value=slug,
         label="Opus",
@@ -497,6 +501,8 @@ def test_hosted_chat_turn_maps_a_retired_effort_and_drops_fast_mode(
     assert model_config.token_source != "subscription"
     assert model_config.extra.get("reasoning_effort") == "high"
     assert cli_dispatch.CLI_FAST_KEY not in (model_config.extra.get("extra_body") or {})
+    if priority:
+        assert model_config.extra["extra_body"]["provider"]["only"] == ["anthropic/fast"]
 
 
 # Each route, its routing function and its module, with a minimal valid body.
@@ -582,10 +588,12 @@ _COMPOSER_ROUTES = [
     ids=["tagger_interview", "tagger_interview_stream"],
 )
 @pytest.mark.parametrize("fast", [True, False])
-def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
-    path: str, module: Any, engine_fn: str, body: dict[str, Any], fast: bool, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("openrouter", [False, True])
+def test_composer_route_passes_effort_and_fast_mode_to_the_engine(
+    path: str, module: Any, engine_fn: str, body: dict[str, Any], fast: bool,
+    openrouter: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Hand the engine the CLI's top effort and, when asked, the fast-mode flag on each composer route.
+    """Pass effort and fast mode through each composer route for CLI and OpenRouter BYOK.
 
     The gates and the session load are stubbed, and the engine call records
     its arguments and stops the turn, so no model runs and nothing is charged.
@@ -596,6 +604,7 @@ def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
         engine_fn: The engine call the route makes.
         body: A valid request body with no model.
         fast: Whether the turn asks for fast mode.
+        openrouter: Whether the local engine uses its OpenRouter key instead of a CLI.
         monkeypatch: Stubs the gates and records the engine call.
     """
     engine = _engine()
@@ -611,6 +620,12 @@ def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
     monkeypatch.setattr(tagger_mod, "enforce_llm_balance", lambda *_args: None)
     monkeypatch.setattr(tagger_mod, "_load_for_role", lambda *_args: SimpleNamespace(columns=[], data=[]))
     monkeypatch.setattr(tagger_mod, "_interview_config", lambda _row: {})
+    if openrouter:
+        byok = ModelConfig(name="openrouter/anthropic/claude-opus-5.5", token_source="byok",
+                           byok_provider="openrouter", extra={"api_key": "synthetic"})
+        monkeypatch.setattr(tagger_mod, "route_local_byok_model", lambda *args, **kwargs: byok)
+        monkeypatch.setattr(tagger_mod, "effective_reasoning_effort", lambda model, effort: effort)
+        monkeypatch.setattr(model_fast_mode, "fast_providers", lambda model: ("anthropic/fast",))
     store = SimpleNamespace(engine=engine)
     app = FastAPI()
 
@@ -623,9 +638,17 @@ def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
     app.include_router(create_tagger_assist_router(job_store=store, get_worker_ref=lambda: None))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(username=_USER, role="user", groups=())
     TestClient(app).post(path, json={**body, "model": _CODEX_ID, "reasoning_effort": "max", "fast_mode": fast})
-    assert seen["model"] == _CODEX_ID
+    assert seen["model"] == (byok.name if openrouter else _CODEX_ID)
     assert seen["reasoning_effort"] == "max"
     config_ = seen["model_config"]
+    if openrouter:
+        assert config_.token_source == "byok"
+        assert config_.extra["api_key"] == "synthetic"
+        if fast:
+            assert config_.extra["extra_body"]["provider"]["only"] == ["anthropic/fast"]
+        else:
+            assert "extra_body" not in config_.extra
+        return
     if not fast:
         assert config_ is None
         return

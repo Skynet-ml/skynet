@@ -4580,5 +4580,10 @@
   "usage.day.empty": "В этот день нет оплаченных вызовов.",
   "usage.day.load_error": "Не удалось загрузить вызовы за этот день.",
   "usage.day.truncated": "Показаны последние {shown} из {total} вызовов.",
-  "usage.day.loading": "Загрузка вызовов за этот день…"
+  "usage.day.loading": "Загрузка вызовов за этот день…",
+  "agent.model_menu.search": "Поиск моделей…",
+  "agent.model_menu.no_results": "Нет подходящих моделей",
+  "agent.model_menu.search_placeholder": "Искать среди всех моделей…",
+  "agent.model_menu.clear_search": "Очистить поиск",
+  "agent.model_menu.no_results_hint": "Попробуйте другое название или провайдера."
 }

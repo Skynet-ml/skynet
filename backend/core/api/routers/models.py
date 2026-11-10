@@ -48,6 +48,7 @@ from ..model_catalog import (
     get_catalog_cached,
     with_zero_retention,
 )
+from ..model_fast_mode import fast_providers
 from ..response_limits import AGENT_MAX_LIST, AGENT_MAX_TEXT, cap_list, truncate_text
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
@@ -431,6 +432,18 @@ def create_models_router(*, http_client: Callable[[], httpx.Client] | None = Non
             The cached catalog including each model's availability flag.
         """
         return with_artificial_analysis_links(with_interview_default(with_zero_retention(get_catalog_cached())))
+
+    @router.get("/models/fast-mode", summary="Check priority endpoint availability")
+    def model_fast_mode(model: str) -> dict[str, bool]:
+        """Report whether the selected OpenRouter model offers priority routing.
+
+        Args:
+            model: The frontend's fully qualified model id.
+
+        Returns:
+            Whether public endpoint metadata lists an available priority tier.
+        """
+        return {"supports_fast": bool(fast_providers(model))}
 
     @router.get(
         "/models/byok",

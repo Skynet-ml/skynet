@@ -24,6 +24,7 @@ def _model(value: str, price: float) -> CatalogModel:
         provider="openrouter",
         available=True,
         featured=True,
+        supports_thinking=True,
         input_cost_per_token=price / 2,
         output_cost_per_token=price / 2,
     )

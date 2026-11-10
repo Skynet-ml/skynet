@@ -49,6 +49,7 @@ from ..model_catalog import (
     get_byok_catalog_cached,
     narrow_models_to_served,
     probe_byok_provider_models,
+    with_effort_controls,
 )
 from .models import discover_models_at_endpoint
 
@@ -242,7 +243,7 @@ def _byok_catalog_for_user(vault: ProviderKeyVault, username: str) -> ModelCatal
             providers.append(CatalogProvider(slug=prefix, label=view.label or view.provider, has_env_key=True))
         models.extend(provider_models)
 
-    response = ModelCatalogResponse(providers=providers, models=models)
+    response = with_effort_controls(ModelCatalogResponse(providers=providers, models=models))
     with _byok_user_catalog_lock:
         _byok_user_catalog_cache[username] = (signature, now, response)
     return response
@@ -264,16 +265,6 @@ class UsageEntryResponse(BaseModel):
     model: str | None = Field(default=None, description="Model id for a run row, else null.")
     cents: int = Field(description="Signed delta in cents: negative for a spend.")
     kind: str = Field(description="Entry kind: 'run', 'topup', or 'grant'.")
-
-
-class PlanResponse(BaseModel):
-    """The caller's platform plan: free, or the Skynet Pro subscription."""
-
-    plan: Literal["free", "pro"] = Field(description="'pro' while the subscription is entitled, else 'free'.")
-    status: str | None = Field(default=None, description="Mirrored Stripe subscription status, or null.")
-    renews_at: str | None = Field(default=None, description="ISO-8601 end of the current Pro billing period.")
-    cancel_at_period_end: bool = Field(default=False, description="True when Pro lapses at renews_at.")
-    available: bool = Field(default=False, description="Whether Pro can be purchased on this deployment.")
 
 
 class PricingTermsResponse(BaseModel):
@@ -307,7 +298,6 @@ class WalletResponse(BaseModel):
     paid_balance_cents: int = Field(description="Purchased balance in cents, on top of the free grant.")
     free_grant: FreeGrantResponse
     usage: list[UsageEntryResponse] = Field(default_factory=list, description="Most-recent-first ledger rows.")
-    plan: PlanResponse = Field(default_factory=lambda: PlanResponse(plan="free"))
     pricing: PricingTermsResponse = Field(default_factory=_pricing_terms)
 
 
@@ -611,13 +601,6 @@ def create_billing_router(*, job_store) -> APIRouter:
                 )
                 for row in snapshot.usage
             ],
-            plan=PlanResponse(
-                plan="pro" if snapshot.plan.plan == "pro" else "free",
-                status=snapshot.plan.status,
-                renews_at=snapshot.plan.renews_at,
-                cancel_at_period_end=snapshot.plan.cancel_at_period_end,
-                available=snapshot.plan.available,
-            ),
         )
 
     if local:
@@ -837,21 +820,6 @@ def create_billing_router(*, job_store) -> APIRouter:
             raise DomainError("billing.invalid_amount", status=400)
         return CheckoutSessionResponse(url=url)
 
-    @router.post(
-        "/billing/subscription/checkout",
-        response_model=CheckoutSessionResponse,
-        summary=f"Start a Stripe Checkout session that subscribes the caller to {APP_NAME} Pro",
-    )
-    def create_subscription_checkout(user: AuthenticatedUserDep) -> CheckoutSessionResponse:
-        """Create a subscription Checkout session for the Skynet Pro monthly plan.
-
-        Args:
-            user: Authenticated subscriber; the plan lands on their account via webhook.
-
-        Returns:
-            The hosted Checkout URL to redirect the subscriber to.
-        """
-        return CheckoutSessionResponse(url=service.create_subscription_checkout(user.username))
 
     @router.post(
         "/billing/portal",

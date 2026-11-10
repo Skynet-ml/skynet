@@ -293,7 +293,8 @@ def meter_llm_run(
     """
     if engine is None or not username:
         return 0
-    lms = _coerce_lms(language_models)
+    # Hosted inference settles against the linked account before returning its response.
+    lms = [lm for lm in _coerce_lms(language_models) if not getattr(lm, "hosted_inference", False)]
     if not lms:
         return 0
     service = StripeBillingService(engine=engine)

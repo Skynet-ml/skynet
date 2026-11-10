@@ -1,8 +1,8 @@
 """Pin the frontend's copies of billing constants to the backend's.
 
 The wallet endpoint serves the usage markup and fee terms, but the frontend
-seeds its first paint from ``DEFAULT_PRICING_TERMS``; top-up packs, the Pro
-price and the fallback token rates are hand-copied outright. The backend
+seeds its first paint from ``DEFAULT_PRICING_TERMS``; top-up packs and the
+fallback token rates are hand-copied outright. The backend
 charges the real amounts; this test parses the frontend sources and fails the
 moment a copy drifts, so the UI never quotes a price it will not charge.
 """
@@ -20,7 +20,6 @@ from core.config import Settings
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _BILLING_LIB = _REPO_ROOT / "frontend" / "src" / "features" / "billing" / "lib"
-_PROVISION_STRIPE = _REPO_ROOT / "backend" / "scripts" / "provision_stripe.py"
 
 
 def _ts_number_constants(filename: str) -> dict[str, float]:
@@ -71,11 +70,3 @@ def test_top_up_packs_match_backend() -> None:
     assert {pack_id: int(cents) for pack_id, cents, _ in packs} == service.PACK_CENTS
     for _, cents, usd in packs:
         assert float(usd) == pytest.approx(int(cents) * pricing.CENT_USD_VALUE)
-
-
-def test_pro_monthly_price_matches_stripe_provisioning() -> None:
-    """``PRO_MONTHLY_USD`` equals the amount the Stripe Pro price is provisioned at."""
-    ts = _ts_number_constants("wallet.ts")
-    match = re.search(r"_PRO_MONTHLY\b[^=]*=\s*\([^)]*?(\d+)\s*\)", _PROVISION_STRIPE.read_text(encoding="utf-8"))
-    assert match is not None
-    assert round(ts["PRO_MONTHLY_USD"] * 100) == int(match.group(1))

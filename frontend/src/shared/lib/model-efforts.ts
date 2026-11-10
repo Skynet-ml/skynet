@@ -29,6 +29,13 @@ export function effortsFor(
   return DEFAULT_EFFORTS;
 }
 
+/** Whether a model can use the shared reasoning-effort slider. */
+export function supportsEffortSlider(model: EffortSource & { supports_thinking?: boolean }): boolean {
+  return !!model.supports_thinking && effortsFor(model.value, [model]).some(
+    (level) => level !== "none" && EFFORT_ORDER.includes(level),
+  );
+}
+
 const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 interface UnpickedEffortSource {

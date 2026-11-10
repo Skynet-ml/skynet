@@ -206,11 +206,6 @@ class Settings(BaseSettings):
     stripe_price_pack_pro: str = Field(
         default="", alias="STRIPE_PRICE_PACK_PRO", description="Stripe price id for the 'pro' one-time top-up pack."
     )
-    stripe_price_pro_monthly: str = Field(
-        default="",
-        alias="STRIPE_PRICE_PRO_MONTHLY",
-        description="Stripe recurring price id for the Skynet Pro monthly plan. Unset hides the upgrade.",
-    )
     app_public_url: str = Field(
         default="http://localhost:3000",
         alias="APP_PUBLIC_URL",
@@ -772,18 +767,11 @@ class Settings(BaseSettings):
         alias="CONNECTOR_IMPORT_MAX_ROWS",
         description="Row cap for connectors that import records rather than files (database tables, LLM traces, Notion databases).",
     )
-    # Free and Pro budgets match ChatGPT Free (500 MB) and Plus (20 GB) storage
-    # (SKY-289). Binary units because formatStorageSize divides by 1024, so the
-    # meter shows a round "500 MB" and "20 GB".
+    # Binary units match formatStorageSize, so the meter shows a round "500 MB".
     user_storage_quota_bytes: int = Field(
         default=500 * 1024 * 1024,
         ge=1,
         description="Per-user unified storage budget in bytes across all of their Skynet data",
-    )
-    pro_storage_quota_bytes: int = Field(
-        default=20 * 1024 * 1024 * 1024,
-        ge=1,
-        description="Unified storage budget in bytes for an account on the Skynet Pro plan",
     )
     cancel_poll_interval: float = Field(
         default=1.0, ge=0.1, le=10.0, description="Seconds between cancel signal checks"
@@ -1324,11 +1312,6 @@ class Settings(BaseSettings):
         return self
 
     max_jobs_per_user: int = Field(default=100, ge=1, description="Default per-user job cap")
-    pro_max_jobs_per_user: int = Field(
-        default=1000,
-        ge=1,
-        description="Saved-job cap for an account on the Skynet Pro plan (admin overrides still win)",
-    )
     max_total_users: int = Field(
         default=0,
         ge=0,
@@ -1352,19 +1335,6 @@ class Settings(BaseSettings):
         description=(
             "Cap on a single user's concurrently active runs (pending/validating/running/"
             "paused); further submissions are refused until one finishes. 0 disables the cap."
-        ),
-    )
-    pro_max_concurrent_jobs_per_user: int = Field(
-        default=20,
-        ge=0,
-        description="Concurrent active-run cap for an account on the Skynet Pro plan. 0 disables the cap.",
-    )
-    pro_past_due_grace_days: int = Field(
-        default=7,
-        ge=0,
-        description=(
-            "Days a Pro subscription keeps its limits after Stripe marks it past_due (a failed renewal). "
-            "Past the grace the account falls back to the free limits until payment succeeds."
         ),
     )
     global_daily_spend_ceiling_cents: int = Field(

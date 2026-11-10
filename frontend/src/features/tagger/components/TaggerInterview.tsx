@@ -293,6 +293,7 @@ export function TaggerInterview({
                 onFastChange={onSetInterviewFast}
                 defaultFlag="is_interview_default"
                 models={localMenu.models}
+                allModels={localMenu.allModels}
                 openRouterEngine={localMenu.openRouterEngine}
               />
             }

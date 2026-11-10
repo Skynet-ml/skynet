@@ -4,9 +4,9 @@ import { isRefusedLocalHost, proxyRoute } from "./proxy-route.ts";
 
 const desktop = { APP_LOCAL_MODE: "1", AUTH_URL: "http://127.0.0.1:48120" };
 
-test("downloads open signed-out without exposing similarly named app routes", () => {
-  assert.equal(proxyRoute("staging.skynetml.com", "/download", {}), "pass");
-  assert.equal(proxyRoute("staging.skynetml.com", "/download/", {}), "pass");
+test("the removed downloads page has no public-route exception", () => {
+  assert.equal(proxyRoute("staging.skynetml.com", "/download", {}), "auth");
+  assert.equal(proxyRoute("staging.skynetml.com", "/download/", {}), "auth");
   assert.equal(proxyRoute("staging.skynetml.com", "/download-private", {}), "auth");
   assert.equal(proxyRoute("staging.skynetml.com", "/download/history", {}), "auth");
   assert.equal(proxyRoute("evil.example:48120", "/download", desktop), "refuse");

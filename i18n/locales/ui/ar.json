@@ -4580,5 +4580,10 @@
   "usage.day.empty": "لا توجد استدعاءات مدفوعة في هذا اليوم.",
   "usage.day.load_error": "تعذّر تحميل استدعاءات هذا اليوم.",
   "usage.day.truncated": "عرض أحدث {shown} من أصل {total} من الاستدعاءات.",
-  "usage.day.loading": "جارٍ تحميل استدعاءات هذا اليوم…"
+  "usage.day.loading": "جارٍ تحميل استدعاءات هذا اليوم…",
+  "agent.model_menu.search": "البحث عن النماذج…",
+  "agent.model_menu.no_results": "لا توجد نماذج مطابقة",
+  "agent.model_menu.search_placeholder": "ابحث في كل النماذج…",
+  "agent.model_menu.clear_search": "مسح البحث",
+  "agent.model_menu.no_results_hint": "جرّب اسمًا أو مزوّدًا آخر."
 }

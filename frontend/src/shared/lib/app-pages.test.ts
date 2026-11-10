@@ -55,11 +55,12 @@ test("page ids are unique", () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test("downloads follows Storage before the legal pages in global search", () => {
+test("global search links Storage directly to the legal pages without Downloads", () => {
   const ids = APP_PAGES.filter((page) => page.group === "navigate").map((page) => page.id);
   const storage = ids.indexOf("storage");
   assert.ok(storage >= 0);
-  assert.deepEqual(ids.slice(storage, storage + 4), ["storage", "download", "terms", "privacy"]);
+  assert.deepEqual(ids.slice(storage, storage + 3), ["storage", "terms", "privacy"]);
+  assert.equal(APP_PAGES.some((page) => page.href === "/download"), false);
 });
 
 test("matchesQuery needs every term, in any order", () => {

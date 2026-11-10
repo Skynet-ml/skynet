@@ -4580,5 +4580,10 @@
   "usage.day.empty": "No hay llamadas facturadas este día.",
   "usage.day.load_error": "No pudimos cargar las llamadas de este día.",
   "usage.day.truncated": "Se muestran las {shown} más recientes de {total} llamadas.",
-  "usage.day.loading": "Cargando las llamadas de este día…"
+  "usage.day.loading": "Cargando las llamadas de este día…",
+  "agent.model_menu.search": "Buscar modelos…",
+  "agent.model_menu.no_results": "No hay modelos que coincidan",
+  "agent.model_menu.search_placeholder": "Buscar en todos los modelos…",
+  "agent.model_menu.clear_search": "Borrar búsqueda",
+  "agent.model_menu.no_results_hint": "Prueba con otro nombre o proveedor."
 }

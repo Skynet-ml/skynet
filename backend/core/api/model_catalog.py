@@ -223,6 +223,58 @@ class ModelCatalogResponse(BaseModel):
     models: list[CatalogModel]
 
 
+def supports_effort_control(model: CatalogModel) -> bool:
+    """Check whether a model supports the shared effort control.
+
+    Args:
+        model: Catalog metadata, including an optional provider effort ladder.
+
+    Returns:
+        Whether thinking and a usable effort level are available. Unknown
+        ladders retain the client's existing family fallback.
+    """
+    return model.supports_thinking and (
+        model.reasoning_efforts is None
+        or any(level in REASONING_EFFORTS and level != "none" for level in model.reasoning_efforts)
+    )
+
+
+def with_effort_controls(catalog: ModelCatalogResponse) -> ModelCatalogResponse:
+    """Keep selectable models without changing the source metadata snapshot.
+
+    Args:
+        catalog: The raw provider catalog.
+
+    Returns:
+        A catalog containing only models with effort controls.
+    """
+    models = [model for model in catalog.models if supports_effort_control(model)]
+    if len(models) == len(catalog.models):
+        return catalog
+    if models and any(model.is_default for model in catalog.models) and not any(model.is_default for model in models):
+        default = min(
+            models,
+            key=lambda model: (
+                not model.featured,
+                model.lab_tier,
+                model.input_cost_per_token / model.intelligence_index
+                if model.input_cost_per_token and model.intelligence_index else float("inf"),
+                model.value,
+            ),
+        )
+        models = [model.model_copy(update={"is_default": model.value == default.value}) for model in models]
+    if models and any(model.is_strongest for model in catalog.models) and not any(model.is_strongest for model in models):
+        strongest = max(models, key=lambda model: model.intelligence_index or 0)
+        models = [model.model_copy(update={"is_strongest": model.value == strongest.value}) for model in models]
+    providers = {(model.provider, model.data_center) for model in models}
+    return catalog.model_copy(
+        update={
+            "models": models,
+            "providers": [provider for provider in catalog.providers if (provider.slug, provider.data_center) in providers],
+        }
+    )
+
+
 class _DataCenter(BaseModel):
     """One reachable endpoint for a provider.
 
@@ -1542,7 +1594,8 @@ def get_catalog() -> ModelCatalogResponse:
         return allowed is None or m.value in allowed
 
     _hidden_model_values = frozenset(
-        m.value for m in models if m.available and not _REMOVED_MODEL_RE.search(m.value) and not _practical(m)
+        m.value for m in models
+        if m.available and supports_effort_control(m) and not _REMOVED_MODEL_RE.search(m.value) and not _practical(m)
     )
     models = [m for m in models if _practical(m) and not excluded_from_managed(m.value)]
     models = [
@@ -1590,7 +1643,7 @@ def catalog_snapshot() -> ModelCatalogResponse | None:
     Returns:
         The cached catalog, or ``None`` before the boot prewarm lands.
     """
-    return _cached_response
+    return with_effort_controls(_cached_response) if _cached_response is not None else None
 
 
 def lowest_effort_from_low(entry: CatalogModel) -> str | None:
@@ -1667,7 +1720,7 @@ def agent_model_id(configured: str = "") -> str:
     """
     if configured.strip():
         return configured.strip()
-    snapshot = _cached_response
+    snapshot = catalog_snapshot()
     default = next((m.value for m in snapshot.models if m.is_default), None) if snapshot else None
     return default or DEFAULT_AGENT_MODEL_ID
 
@@ -1687,7 +1740,7 @@ def strongest_model_id(configured: str = "") -> str:
     """
     if configured.strip():
         return configured.strip()
-    snapshot = _cached_response
+    snapshot = catalog_snapshot()
     strongest = next((m.value for m in snapshot.models if m.is_strongest), None) if snapshot else None
     return strongest or agent_model_id()
 
@@ -1780,18 +1833,18 @@ def get_catalog_cached() -> ModelCatalogResponse:
     now = time.monotonic()
     fresh = ttl > 0.0 and _cached_response is not None and (now - _cached_at_monotonic) < ttl
     if fresh:
-        return _cached_response  # type: ignore[return-value]
+        return with_effort_controls(_cached_response)  # type: ignore[arg-type]
     if _cached_response is not None:
         # Stale but usable — serve it now, refresh in the background.
         if ttl > 0.0:
             _kick_background_refresh()
-        return _cached_response
+        return with_effort_controls(_cached_response)
 
     with _cache_lock:
         # Re-check under the lock so we don't rebuild twice when callers
         # race in during the first cold-start miss.
         if _cached_response is not None:
-            return _cached_response
+            return with_effort_controls(_cached_response)
         _cached_response = get_catalog()
         _cached_at_monotonic = time.monotonic()
         logger.info(
@@ -1799,7 +1852,7 @@ def get_catalog_cached() -> ModelCatalogResponse:
             len(_cached_response.providers),
             len(_cached_response.models),
         )
-        return _cached_response
+        return with_effort_controls(_cached_response)
 
 
 def prewarm_catalog() -> None:
@@ -1906,11 +1959,11 @@ def get_byok_catalog_cached() -> ModelCatalogResponse:
         _byok_cached = get_byok_catalog()
     snapshot = _cached_response
     if snapshot is None:
-        return _byok_cached
+        return with_effort_controls(_byok_cached)
     if _byok_enriched is None or _byok_enriched[0] is not snapshot:
         enriched = _byok_cached.model_copy(update={"models": with_platform_reasoning(_byok_cached.models)})
         _byok_enriched = (snapshot, enriched)
-    return _byok_enriched[1]
+    return with_effort_controls(_byok_enriched[1])
 
 
 def probe_byok_provider_models(provider_slug: str, api_key: str) -> dict[str, dict] | None:
@@ -1986,7 +2039,9 @@ def narrow_models_to_served(
     for model in static_models:
         bare = model.value.removeprefix(f"{provider_slug}/")
         if bare in deployed or model.value in deployed:
-            kept.append(model.model_copy(update={"byok_provider": byok_provider}))
+            item = deployed.get(bare, deployed.get(model.value, {}))
+            reasoning = _probe_item_reasoning(item) if "reasoning" in item else {}
+            kept.append(model.model_copy(update={"byok_provider": byok_provider, **reasoning}))
             seen.add(bare)
     for model_id, item in deployed.items():
         bare = model_id.removeprefix(f"{provider_slug}/")
@@ -2000,13 +2055,14 @@ def narrow_models_to_served(
                 provider=provider_slug,
                 byok_provider=byok_provider,
                 supports_thinking=_probe_item_supports_thinking(item),
+                **(_probe_item_reasoning(item) if "reasoning" in item else {}),
                 supports_vision=_probe_item_supports_vision(item),
                 available=True,
                 max_input_tokens=_probe_item_max_input_tokens(item),
             )
         )
     kept.sort(key=lambda m: m.value)
-    return with_platform_reasoning(kept)
+    return [model for model in with_platform_reasoning(kept) if supports_effort_control(model)]
 
 
 def is_hidden_model(name: str) -> bool:
@@ -2060,5 +2116,7 @@ def require_known_model(model: str | None, *, role: str | None = None) -> None:
     name = str(model or "").strip()
     if role in CLASSIFIER_ROLES and name in CLASSIFIER_ONLY_MODELS:
         return
-    if name and not is_hidden_model(name) and all(entry.value != name for entry in get_catalog_cached().models):
+    if name and not is_hidden_model(name) and not any(
+        entry.value == name and supports_effort_control(entry) for entry in get_catalog_cached().models
+    ):
         raise DomainError("models.unknown_model", status=422)

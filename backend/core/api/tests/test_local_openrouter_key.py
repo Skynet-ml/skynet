@@ -170,6 +170,13 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[obje
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status(cli) for cli in CLI_MODELS])
     monkeypatch.setattr(model_router, "get_catalog_cached", lambda: SimpleNamespace(models=[]))
     monkeypatch.setattr(model_router, "require_known_model", _require_catalog_model)
+    monkeypatch.setattr(
+        model_router, "get_byok_catalog_cached",
+        lambda: SimpleNamespace(models=[
+            model_catalog.CatalogModel(value=name, label=name, provider="openrouter", supports_thinking=True)
+            for name in {_MODEL, config.DEFAULT_AGENT_MODEL_ID, "openrouter/anthropic/claude-sonnet-4.5"}
+        ]),
+    )
     monkeypatch.setattr(model_router, "default_model_id", lambda: _MODEL)
     monkeypatch.setattr(model_router, "interview_model_id", lambda: _MODEL)
     remote: list[object] = []

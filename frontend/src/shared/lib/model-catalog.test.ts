@@ -6,6 +6,7 @@ import type { CatalogModel } from "@/shared/types/api";
 
 // The catalog module fetches through these at load; the ranking helpers don't need them.
 const stubs: Record<string, string> = {
+  "@/shared/lib/messages": "export const msg = (key) => key;",
   "@/shared/lib/api":
     "export const getByokModels = async () => ({ providers: [], models: [] }); export const getHostedModels = getByokModels;",
   "@/shared/lib/runtime-env": "export const getRuntimeEnv = () => ({ apiUrl: '' });",
@@ -13,6 +14,9 @@ const stubs: Record<string, string> = {
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === "@/shared/lib/model-efforts") {
+      return { shortCircuit: true, url: new URL("./model-efforts.ts", import.meta.url).href };
+    }
     const source = stubs[specifier];
     if (source !== undefined) {
       return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` };

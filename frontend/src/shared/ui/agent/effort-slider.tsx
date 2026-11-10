@@ -15,7 +15,7 @@ import { ArrowCounterClockwise, CaretRight, Lightning } from "@/shared/ui/icons"
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 
 // Track height in px; the thumb is a little taller than the track.
-const TRACK_PX = 22;
+const TRACK_PX = 14;
 // A short spring: the fill and thumb overshoot a hair and settle.
 const SPRING =
   "duration-[320ms] ease-[cubic-bezier(0.34,1.3,0.64,1)] motion-reduce:transition-none";
@@ -131,25 +131,34 @@ interface EffortSliderProps {
   efforts: readonly string[];
   value: string | null;
   onChange: (effort: string | null) => void;
-  /** The model the levels belong to, shown under the level name; absent shows no model line. */
+  /** The model the levels belong to; absent shows no model line. */
   modelName?: string;
-  /** Opens the model list; the model name becomes its button. */
+  /** Opens or closes the model list; the model name becomes its button. */
   onPickModel?: () => void;
-  /** The reset-to-default button; the first stop and Home also reach the default. */
-  showReset?: boolean;
+  /** Whether the model list above the slider is open. */
+  modelsOpen?: boolean;
   hintFor: (level: string | null) => string;
   /** The fast mode toggle; absent when the model does not take fast mode. */
-  fast?: { on: boolean; onChange: (on: boolean) => void; note: string } | null;
+  fast?: { on: boolean; onChange: (on: boolean) => void } | null;
 }
 
 /**
- * The effort picker for a local CLI model: a track from the model default to
- * the top level, with arrow keys, a reset to the default and, on models that
- * take it, a fast mode toggle. The model name opens the model list.
+ * The effort picker for a reasoning model: a track from the model default to
+ * the top level, with arrow keys and, on models that take it, a fast mode
+ * toggle. The first stop and Home reach the default.
  */
 export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
   function EffortSlider(
-    { efforts, value, onChange, modelName, onPickModel, showReset = true, hintFor, fast },
+    {
+      efforts,
+      value,
+      onChange,
+      modelName,
+      onPickModel,
+      modelsOpen = false,
+      hintFor,
+      fast,
+    },
     ref,
   ) {
     const stops = sliderStops(efforts);
@@ -161,22 +170,34 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
     // Each step up remounts the burst, so its flash and spray play once.
     const [seen, setSeen] = React.useState({ index, burst: 0 });
     if (seen.index !== index) {
-      setSeen({ index, burst: index > seen.index ? seen.burst + 1 : seen.burst });
+      setSeen({
+        index,
+        burst: index > seen.index ? seen.burst + 1 : seen.burst,
+      });
     }
     const label = level ? effortLabel(level) : msg("agent.model_menu.effort_default");
     const hintId = React.useId();
     const trackRef = React.useRef<HTMLDivElement>(null);
     const dragging = React.useRef(false);
+    const [hovered, setHovered] = React.useState<number | null>(null);
 
     const isRtl = (el: Element | null) => !!el && getComputedStyle(el).direction === "rtl";
 
-    const pickAt = (clientX: number) => {
+    const stopAt = (clientX: number): number | null => {
       const track = trackRef.current;
-      if (!track || stops.length < 2) return;
+      if (!track || stops.length < 2) return null;
       const rect = track.getBoundingClientRect();
-      const along = (isRtl(track) ? rect.right - clientX : clientX - rect.left) - TRACK_PX / 2;
-      const at = Math.round((along / (rect.width - TRACK_PX)) * (stops.length - 1));
-      const next = stops[Math.min(stops.length - 1, Math.max(0, at))] ?? null;
+      const scale = track.offsetWidth > 0 ? rect.width / track.offsetWidth : 1;
+      const inset = TRACK_PX * scale;
+      const along = (isRtl(track) ? rect.right - clientX : clientX - rect.left) - inset / 2;
+      const at = Math.round((along / (rect.width - inset)) * (stops.length - 1));
+      return Math.min(stops.length - 1, Math.max(0, at));
+    };
+
+    const pickAt = (clientX: number) => {
+      const at = stopAt(clientX);
+      if (at === null) return;
+      const next = stops[at] ?? null;
       if (next !== level) onChange(next);
     };
 
@@ -184,14 +205,22 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
     // each end, so the end stops sit inside the pill.
     const inset = TRACK_PX / 2;
     const at = (t: number) => `calc(${inset}px + (100% - ${TRACK_PX}px) * ${t})`;
-    const iconButton = cn(
-      "flex size-9 shrink-0 items-center justify-center rounded-full transition-colors",
-      "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
+    const levelLabel = (
+      <span
+        key={level ?? "default"}
+        dir="auto"
+        className={cn(
+          "effort-level text-xl font-medium leading-7 tracking-[-0.01em]",
+          "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-200",
+        )}
+      >
+        {label}
+      </span>
     );
     return (
-      // Radix menus block Tab; letting it through reaches the reset and fast buttons.
+      // Radix menus block Tab; letting it through reaches the fast button.
       <div
-        className="effort-charge flex w-full flex-col gap-4 px-4 pb-5 pt-4"
+        className="effort-charge flex w-full flex-col gap-0 px-3.5 pb-3.5 pt-3"
         style={{ "--effort-heat": charge.heat } as React.CSSProperties}
         onKeyDown={(e) => {
           if (e.key === "Tab") e.stopPropagation();
@@ -199,92 +228,85 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
       >
         <div className="flex items-start gap-2">
           {fast ? (
-            <TooltipButton
-              side="top"
-              tooltip={
-                <span className="flex flex-col gap-0.5">
-                  <span>{msg("agent.model_menu.fast")}</span>
-                  <span className="font-normal text-muted-foreground" dir="auto">
-                    {fast.note}
-                  </span>
-                </span>
-              }
-            >
+            <TooltipButton side="top" tooltip={msg("agent.model_menu.fast")}>
               <button
                 type="button"
                 aria-pressed={fast.on}
                 aria-label={msg("agent.model_menu.fast")}
                 onClick={() => fast.onChange(!fast.on)}
                 className={cn(
-                  iconButton,
+                  "flex size-6 shrink-0 items-center justify-center rounded-full transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
                   fast.on
                     ? "text-primary hover:bg-primary/10"
                     : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
                 )}
               >
-                <Lightning aria-hidden weight={fast.on ? "fill" : "bold"} className="size-5" />
+                <Lightning aria-hidden weight={fast.on ? "fill" : "bold"} className="size-4" />
               </button>
             </TooltipButton>
-          ) : showReset ? (
-            // Balances the reset button so the level name stays centered.
-            <span aria-hidden className="size-9 shrink-0" />
-          ) : null}
-          <div className="flex min-w-0 flex-1 flex-col items-center gap-0.5 pt-1">
-            <span
-              key={level ?? "default"}
-              dir="auto"
+          ) : (
+            <span aria-hidden className="size-6 shrink-0" />
+          )}
+          {onPickModel ? (
+            <button
+              type="button"
+              aria-label={`${msg("agent.model_menu.label")}: ${modelName}`}
+              aria-expanded={modelsOpen}
+              onClick={onPickModel}
               className={cn(
-                "effort-level text-xl font-semibold leading-7 tracking-[-0.01em]",
-                "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-200",
+                "flex min-w-0 flex-1 cursor-pointer flex-col items-center rounded-lg px-2 text-muted-foreground transition-colors duration-150 motion-reduce:transition-none",
+                "hover:bg-accent/60",
+                "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
               )}
             >
-              {label}
-            </span>
-            {onPickModel ? (
-              <button
-                type="button"
-                aria-label={`${msg("agent.model_menu.label")}: ${modelName}`}
-                onClick={onPickModel}
-                className={cn(
-                  "flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-sm text-muted-foreground transition-colors",
-                  "hover:text-foreground",
-                  "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
-                )}
-              >
-                <span className="truncate" dir="ltr">
+              {levelLabel}
+              <span className="flex max-w-full items-center justify-center gap-1 text-base font-normal">
+                <span className="min-w-0 truncate" dir="ltr">
                   {modelName}
                 </span>
-                <CaretRight aria-hidden className="size-3.5 shrink-0 rtl:rotate-180" />
-              </button>
-            ) : modelName ? (
-              <span
-                className="max-w-full truncate px-1.5 py-0.5 text-sm text-muted-foreground"
-                dir="ltr"
-              >
-                {modelName}
+                <CaretRight
+                  aria-hidden
+                  className={cn(
+                    "size-3.5 shrink-0 transition-transform duration-200 motion-reduce:transition-none",
+                    modelsOpen && "-rotate-90",
+                  )}
+                />
               </span>
-            ) : null}
-          </div>
-          {showReset ? (
-            <TooltipButton side="top" tooltip={msg("agent.model_menu.effort_reset")}>
-              <button
-                type="button"
-                aria-label={msg("agent.model_menu.effort_reset")}
-                disabled={level === null}
-                onClick={() => onChange(null)}
-                className={cn(
-                  iconButton,
-                  "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-                  "disabled:pointer-events-none disabled:opacity-40",
-                )}
-              >
-                <ArrowCounterClockwise className="size-5 rtl:-scale-x-100" />
-              </button>
-            </TooltipButton>
-          ) : fast ? (
-            <span aria-hidden className="size-9 shrink-0" />
-          ) : null}
+            </button>
+          ) : (
+            <div className="flex min-w-0 flex-1 flex-col items-center">
+              {levelLabel}
+            </div>
+          )}
+          <TooltipButton side="top" tooltip={msg("agent.model_menu.effort_reset")}>
+            <button
+              type="button"
+              aria-label={msg("agent.model_menu.effort_reset")}
+              aria-disabled={level === null}
+              onClick={() => {
+                if (level !== null) onChange(null);
+              }}
+              className={cn(
+                "flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors",
+                "hover:bg-accent/60 hover:text-foreground aria-disabled:opacity-40",
+                "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
+              )}
+            >
+              <ArrowCounterClockwise aria-hidden className="size-4" />
+            </button>
+          </TooltipButton>
+
         </div>
+
+        {!onPickModel && modelName ? (
+          <span
+            className="max-w-full truncate px-1.5 py-0 text-sm text-muted-foreground"
+            dir="ltr"
+          >
+            {modelName}
+          </span>
+        ) : null}
 
         <div
           ref={(el) => {
@@ -319,7 +341,9 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
           }}
           onPointerMove={(e) => {
             if (dragging.current) pickAt(e.clientX);
+            else if (e.pointerType === "mouse") setHovered(stopAt(e.clientX));
           }}
+          onPointerLeave={() => setHovered(null)}
           onPointerUp={() => {
             dragging.current = false;
           }}
@@ -327,7 +351,7 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
             dragging.current = false;
           }}
           className={cn(
-            "group relative h-7 cursor-pointer touch-none rounded-full",
+            "group relative mt-2 h-5 cursor-pointer touch-none rounded-full",
             "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
           )}
         >
@@ -336,18 +360,22 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
             aria-hidden
             data-pulse={charge.pulse || undefined}
             className={cn(
-              "effort-glow pointer-events-none absolute start-0 top-1/2 h-[22px] -translate-y-1/2 rounded-full transition-[width]",
+              "effort-glow pointer-events-none absolute start-0 top-1/2 h-3.5 -translate-y-1/2 rounded-full transition-[width]",
               SPRING,
             )}
-            style={{ width: `calc(${TRACK_PX}px + (100% - ${TRACK_PX}px) * ${fill})` }}
+            style={{
+              width: `calc(${TRACK_PX}px + (100% - ${TRACK_PX}px) * ${fill})`,
+            }}
           />
-          <div className="absolute inset-x-0 top-1/2 h-[22px] -translate-y-1/2 overflow-hidden rounded-full bg-muted shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] dark:bg-foreground/10">
+          <div className="absolute inset-x-0 top-1/2 h-3.5 -translate-y-1/2 overflow-hidden rounded-full bg-muted shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] dark:bg-foreground/10">
             <div
               className={cn(
                 "effort-fill absolute inset-y-0 start-0 overflow-hidden rounded-full shadow-[inset_0_1px_0_rgb(255_255_255/0.16)] transition-[width]",
                 SPRING,
               )}
-              style={{ width: `calc(${TRACK_PX}px + (100% - ${TRACK_PX}px) * ${fill})` }}
+              style={{
+                width: `calc(${TRACK_PX}px + (100% - ${TRACK_PX}px) * ${fill})`,
+              }}
             >
               {charge.pulse &&
                 charge.heat === 1 &&
@@ -358,7 +386,7 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
                     className="effort-streak"
                     style={
                       {
-                        top: `calc(${s.y}% - 4px)`,
+                        top: `calc(${s.y}% - 3px)`,
                         "--streak-t": `${s.t}s`,
                         "--streak-delay": `${s.delay}s`,
                       } as React.CSSProperties
@@ -388,17 +416,25 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
               key={stop ?? "default"}
               aria-hidden
               className={cn(
-                "absolute top-1/2 size-[5px] -translate-x-1/2 -translate-y-1/2 rounded-full rtl:translate-x-1/2",
+                "pointer-events-none absolute top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full rtl:translate-x-1/2",
+                "transition-[scale,background-color] duration-150 ease-out motion-reduce:transition-none",
                 i <= index ? "bg-primary-foreground/60" : "bg-muted-foreground/45",
+                hovered === i &&
+                  i !== index &&
+                  (i < index
+                    ? "scale-[1.75] bg-primary-foreground"
+                    : "scale-[1.75] bg-foreground/80"),
               )}
-              style={{ insetInlineStart: at(i / Math.max(1, stops.length - 1)) }}
+              style={{
+                insetInlineStart: at(i / Math.max(1, stops.length - 1)),
+              }}
             />
           ))}
           <span
             aria-hidden
             data-pulse={charge.pulse || undefined}
             className={cn(
-              "effort-thumb-glow pointer-events-none absolute top-1/2 size-12 -translate-x-1/2 -translate-y-1/2 rounded-full rtl:translate-x-1/2",
+              "effort-thumb-glow pointer-events-none absolute top-1/2 size-9 -translate-x-1/2 -translate-y-1/2 rounded-full rtl:translate-x-1/2",
               "transition-[inset-inline-start]",
               SPRING,
             )}
@@ -407,9 +443,9 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
           <span
             aria-hidden
             className={cn(
-              "effort-thumb absolute top-1/2 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full rtl:translate-x-1/2",
+              "effort-thumb absolute top-1/2 size-5 -translate-x-1/2 -translate-y-1/2 rounded-full rtl:translate-x-1/2",
               "bg-white ring-1 ring-black/[0.06]",
-              "group-hover:scale-[1.04] group-active:scale-[1.1]",
+              "group-hover:scale-[1.06] group-active:scale-[1.12]",
               "transition-[inset-inline-start,scale]",
               SPRING,
             )}
@@ -446,7 +482,11 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
               <span key={seen.burst}>
                 <span
                   className="effort-flash"
-                  style={{ "--flash-o": 0.45 + charge.heat * 0.55 } as React.CSSProperties}
+                  style={
+                    {
+                      "--flash-o": 0.45 + charge.heat * 0.55,
+                    } as React.CSSProperties
+                  }
                 />
                 {Array.from({ length: charge.spray }, (_, i) => (
                   <span
@@ -469,6 +509,7 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
         <p id={hintId} className="sr-only">
           {hintFor(level)}
         </p>
+
       </div>
     );
   },

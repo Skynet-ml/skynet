@@ -1,5 +1,3 @@
-[Voir toutes les plateformes](/download)
-
 L'app Mac Skynet exécute Skynet sur votre propre ordinateur. Elle envoie les appels de modèle par l'intermédiaire d'une CLI de code connectée sur votre Mac, si bien que l'abonnement de votre CLI paie ces appels. Vous pouvez aussi associer l'app à votre compte Skynet hébergé.
 
 ## Prérequis

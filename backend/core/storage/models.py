@@ -720,18 +720,14 @@ class BillingCustomerModel(Base):
     # wallet read or run seeds it; seeding is lazy-evaluated on read, never
     # cron'd.
     grant_remaining: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer(), "sqlite"), nullable=True)
-    # Mirror of the account's Skynet Pro subscription, written only by the
-    # Stripe webhook. Stripe stays the source of truth; these columns exist so
-    # every quota check reads the plan from the local DB instead of calling
-    # Stripe on the request path.
+    # Retain retired subscription history without granting plan entitlements.
     stripe_subscription_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     subscription_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     subscription_current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     subscription_cancel_at_period_end: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
-    # When the subscription entered ``past_due``; anchors the bounded Pro grace
-    # period and is cleared once the status moves on.
+
     subscription_past_due_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Cents a refund or chargeback reversed after they were already spent.
     # The platform paid for those tokens, so the account owes them back: while

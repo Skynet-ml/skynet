@@ -594,40 +594,29 @@ def _set_subscription_status(
         session.commit()
 
 
-def test_pro_plan_lifts_storage_and_job_quota(store: _SQLiteJobStore) -> None:
-    """An entitled Pro account gets the Pro storage budget and the Pro job cap."""
-    _set_subscription_status(store, "alice", "active")
-    assert store.has_pro_plan("Alice") is True
-    assert store.get_effective_user_storage_quota("alice") == settings.pro_storage_quota_bytes
-    assert store.get_effective_user_quota("alice") == settings.pro_max_jobs_per_user
+@pytest.mark.parametrize("status", [None, "active", "trialing", "past_due", "canceled"])
+def test_historical_subscription_uses_common_limits(store: _SQLiteJobStore, status: str | None) -> None:
+    """Apply the same storage and job limits regardless of historical subscription status.
 
-
-def test_past_due_pro_plan_keeps_limits_inside_the_grace_period(store: _SQLiteJobStore) -> None:
-    """A subscription that just went past due still grants Pro limits."""
-    _set_subscription_status(store, "alice", "past_due", past_due_since=datetime.now(UTC) - timedelta(days=1))
-    assert store.has_pro_plan("alice") is True
-    assert store.get_effective_user_quota("alice") == settings.pro_max_jobs_per_user
-
-
-def test_past_due_pro_plan_lapses_after_the_grace_period(store: _SQLiteJobStore) -> None:
-    """Past the grace period a past-due subscription falls back to free limits."""
-    since = datetime.now(UTC) - timedelta(days=settings.pro_past_due_grace_days + 1)
-    _set_subscription_status(store, "alice", "past_due", past_due_since=since)
-    assert store.has_pro_plan("alice") is False
+    Args:
+        store: SQLite-backed store.
+        status: Archived subscription status.
+    """
+    _set_subscription_status(store, "alice", status)
     assert store.get_effective_user_storage_quota("alice") == settings.user_storage_quota_bytes
     assert store.get_effective_user_quota("alice") == settings.max_jobs_per_user
 
 
-def test_lapsed_pro_plan_falls_back_to_defaults(store: _SQLiteJobStore) -> None:
-    """A canceled subscription returns the account to the free limits."""
-    _set_subscription_status(store, "alice", "canceled")
-    assert store.has_pro_plan("alice") is False
-    assert store.get_effective_user_storage_quota("alice") == settings.user_storage_quota_bytes
-    assert store.get_effective_user_quota("alice") == settings.max_jobs_per_user
+def test_admin_overrides_remain_effective_with_historical_subscription(store: _SQLiteJobStore) -> None:
+    """Honor explicit storage and job overrides without consulting historical subscriptions.
 
-
-def test_admin_storage_override_beats_pro_plan(store: _SQLiteJobStore) -> None:
-    """An admin override still decides the budget for a Pro account."""
+    Args:
+        store: SQLite-backed store.
+    """
     _set_subscription_status(store, "alice", "active")
     store.set_user_storage_quota_override("alice", 4096)
+    store.set_user_quota_override("alice", 12)
     assert store.get_effective_user_storage_quota("alice") == 4096
+    assert store.get_effective_user_quota("alice") == 12
+    store.set_user_quota_override("alice", None)
+    assert store.get_effective_user_quota("alice") is None

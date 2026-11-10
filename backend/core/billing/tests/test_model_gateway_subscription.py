@@ -22,7 +22,7 @@ from core.billing.runtime import BudgetRuntime
 from core.billing.tests.test_cli_runners import CLAUDE_SUCCESS, fake_cli, local_settings, printing
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, WalletLedgerModel
 
-MODEL = "anthropic/claude-haiku-4.5"
+MODEL = "anthropic/claude-sonnet-4.6"
 REQUEST = {"model": MODEL, "messages": [{"role": "user", "content": "ping"}]}
 
 

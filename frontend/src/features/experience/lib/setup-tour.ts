@@ -75,7 +75,7 @@ export const SETUP_STOPS: readonly SetupStop[] = [
   },
   {
     id: "billing",
-    anchor: "balance",
+    anchor: "account",
     title: "experience.intake.billing.title",
     body: "experience.intake.billing.hint",
     question: "billing",

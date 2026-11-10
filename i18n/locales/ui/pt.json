@@ -4580,5 +4580,10 @@
   "usage.day.empty": "Nenhuma chamada cobrada neste dia.",
   "usage.day.load_error": "Não foi possível carregar as chamadas deste dia.",
   "usage.day.truncated": "Mostrando as {shown} mais recentes de {total} chamadas.",
-  "usage.day.loading": "Carregando as chamadas deste dia…"
+  "usage.day.loading": "Carregando as chamadas deste dia…",
+  "agent.model_menu.search": "Pesquisar modelos…",
+  "agent.model_menu.no_results": "Nenhum modelo correspondente",
+  "agent.model_menu.search_placeholder": "Pesquisar todos os modelos…",
+  "agent.model_menu.clear_search": "Limpar pesquisa",
+  "agent.model_menu.no_results_hint": "Tente outro nome ou fornecedor."
 }

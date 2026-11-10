@@ -13,7 +13,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${siteUrl}/tagger`, lastModified: now, changeFrequency: "weekly", priority: 0.6 },
     { url: `${siteUrl}/terms`, lastModified: now, changeFrequency: "yearly", priority: 0.3 },
     { url: `${siteUrl}/privacy`, lastModified: now, changeFrequency: "yearly", priority: 0.3 },
-    { url: `${siteUrl}/download`, lastModified: now, changeFrequency: "weekly", priority: 0.7 },
     ...DOCS_PAGES.flatMap((page) =>
       DOCS_LOCALES.map((locale) => ({
         url: `${siteUrl}${docsHref(page.slug, locale)}`,

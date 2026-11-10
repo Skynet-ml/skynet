@@ -4580,5 +4580,10 @@
   "usage.day.empty": "この日に課金された呼び出しはありません。",
   "usage.day.load_error": "この日の呼び出しを読み込めませんでした。",
   "usage.day.truncated": "{total} 件中、最新の {shown} 件を表示しています。",
-  "usage.day.loading": "この日の呼び出しを読み込んでいます…"
+  "usage.day.loading": "この日の呼び出しを読み込んでいます…",
+  "agent.model_menu.search": "モデルを検索…",
+  "agent.model_menu.no_results": "一致するモデルはありません",
+  "agent.model_menu.search_placeholder": "すべてのモデルを検索…",
+  "agent.model_menu.clear_search": "検索をクリア",
+  "agent.model_menu.no_results_hint": "別の名前やプロバイダーをお試しください。"
 }

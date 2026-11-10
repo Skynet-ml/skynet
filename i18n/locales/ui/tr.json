@@ -4580,5 +4580,10 @@
   "usage.day.empty": "Bu gün faturalanan çağrı yok.",
   "usage.day.load_error": "Bu günün çağrıları yüklenemedi.",
   "usage.day.truncated": "{total} çağrının en son {shown} tanesi gösteriliyor.",
-  "usage.day.loading": "Bu günün çağrıları yükleniyor…"
+  "usage.day.loading": "Bu günün çağrıları yükleniyor…",
+  "agent.model_menu.search": "Model ara…",
+  "agent.model_menu.no_results": "Eşleşen model yok",
+  "agent.model_menu.search_placeholder": "Tüm modellerde ara…",
+  "agent.model_menu.clear_search": "Aramayı temizle",
+  "agent.model_menu.no_results_hint": "Başka bir ad veya sağlayıcı deneyin."
 }

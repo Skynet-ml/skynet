@@ -20,7 +20,7 @@ def _catalog_with(*model_ids: str, default: str | None = None) -> ModelCatalogRe
     return ModelCatalogResponse(
         providers=[],
         models=[
-            CatalogModel(value=mid, label=mid, provider="test", available=True, is_default=mid == default)
+            CatalogModel(value=mid, label=mid, provider="test", available=True, supports_thinking=True, is_default=mid == default)
             for mid in ids
         ],
     )

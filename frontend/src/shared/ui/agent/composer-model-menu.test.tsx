@@ -77,9 +77,9 @@ void describe("ComposerModelMenu", () => {
     assert.doesNotMatch(html, /agent\.model_menu\.effort_default/);
   });
 
-  void it("names a listed subscription pick", () => {
+  void it("replaces a saved subscription pick without an effort slider", () => {
     const html = render("subscription/claude/anthropic/claude-opus-4.1", SUBSCRIPTION);
-    assert.match(html, />claude-opus-4\.1</);
+    assert.match(html, />Claude Sonnet 4\.5</);
   });
 
   void it("keeps the catalog default with no list, as in hosted builds", () => {

@@ -54,6 +54,7 @@ from ..agent_engine import engine_agent_model
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import ReasoningEffort, get_catalog_cached, is_hidden_model
+from ..model_fast_mode import with_fast_mode
 from ..model_router import (
     cli_fast_config,
     effective_reasoning_effort,
@@ -113,8 +114,8 @@ class InterviewRequest(BaseModel):
     fast_mode: bool = Field(
         default=False,
         description=(
-            "Run this turn in the CLI's fast mode. Applies only to a local CLI model that takes "
-            "fast mode; any other model ignores it."
+            "Run this turn in fast mode on a supported local CLI or OpenRouter priority endpoint. "
+            "Unsupported models ignore this flag."
         ),
     )
 
@@ -379,6 +380,9 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
         picked = engine_agent_model(job_store, user.username, req.model)
         byok_config = route_local_byok_model(picked, job_store=job_store, username=user.username, interview=True)
         model = byok_config.name if byok_config is not None else route_interview_model(picked)
+        fast_config = byok_config or cli_fast_config(model, req.fast_mode)
+        if req.fast_mode and model:
+            fast_config = with_fast_mode(fast_config or ModelConfig(name=model), True)
         usage_sink: list = []
         try:
             turn = tagging.interview_turn(
@@ -390,7 +394,7 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
                 model=model,
                 reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),
                 usage_sink=usage_sink,
-                model_config=byok_config or cli_fast_config(model, req.fast_mode),
+                model_config=fast_config,
             )
         except Exception as exc:
             logger.exception("interview turn failed for session %s", session_id)
@@ -447,6 +451,9 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
             route_local_byok_model, picked, job_store=job_store, username=user.username, interview=True
         )
         model = byok_config.name if byok_config is not None else await asyncio.to_thread(route_interview_model, picked)
+        fast_config = byok_config or cli_fast_config(model, req.fast_mode)
+        if req.fast_mode and model:
+            fast_config = await asyncio.to_thread(with_fast_mode, fast_config or ModelConfig(name=model), True)
         usage_sink: list = []
 
         async def source() -> Any:
@@ -461,7 +468,7 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
                     model=model,
                     reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),
                     usage_sink=usage_sink,
-                    model_config=byok_config or cli_fast_config(model, req.fast_mode),
+                    model_config=fast_config,
                 ):
                     yield event
             except Exception:

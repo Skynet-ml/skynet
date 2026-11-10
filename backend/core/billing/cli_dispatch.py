@@ -600,7 +600,7 @@ class CliDispatcher:
         if not settings.local_mode:
             raise UnpricedOperationError("Subscription models run only in local mode.")
         try:
-            cli_model_arg(cli, model)
+            cli_model_arg(cli, model, internal=role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE))
         except ValueError as error:
             raise UnpricedOperationError(str(error)) from error
         self.runtime = runtime
@@ -712,7 +712,9 @@ class CliDispatcher:
                 # The client already has one CLI's text; another CLI's would mix into it.
                 break
             try:
-                model_arg = cli_model_arg(provider, self.model)  # type: ignore[arg-type]
+                model_arg = cli_model_arg(
+                    provider, self.model, internal=self.role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE)
+                )  # type: ignore[arg-type]
             except ValueError:
                 continue
             reset = _future_reset(self.settings, provider)

@@ -49,7 +49,6 @@ from ..storage.models import (
 from ..telemetry import record_server_event
 from .budget_amounts import wallet_reserved_cents
 from .openrouter_float import check_float
-from .plans import PAST_DUE_STATUS, PLAN_FREE, PLAN_PRO, is_pro_status
 from .pricing import ModelUsage, cents_for_usage
 
 logger = logging.getLogger("app.billing.service")
@@ -274,16 +273,6 @@ def _is_test_account(username: str, target: str) -> bool:
     )
 
 
-# Subscription lifecycle events the webhook mirrors onto ``billing_customers``.
-# Each one re-reads the subscription, so they are order-independent.
-SUBSCRIPTION_EVENTS = frozenset(
-    {
-        "customer.subscription.created",
-        "customer.subscription.updated",
-        "customer.subscription.deleted",
-    }
-)
-
 # Ceiling handed to fee-less BYOK runs: far above any real run's full cost,
 # small enough to stay a safe int everywhere cents are summed.
 _BYOK_UNCAPPED_CEILING = 10**9
@@ -316,22 +305,6 @@ class LedgerRow:
 
 
 @dataclass(frozen=True)
-class PlanSnapshot:
-    """The account's platform plan as the wallet surfaces show it.
-
-    ``renews_at`` is the ISO-8601 end of the current billing period (when Pro
-    renews, or lapses if ``cancel_at_period_end``); ``available`` is whether a
-    Pro price is configured on this deploy, so the UI can hide the upgrade.
-    """
-
-    plan: str = PLAN_FREE
-    status: str | None = None
-    renews_at: str | None = None
-    cancel_at_period_end: bool = False
-    available: bool = False
-
-
-@dataclass(frozen=True)
 class WalletSnapshot:
     """The account's billing state as a single read for the wallet surfaces."""
 
@@ -339,7 +312,6 @@ class WalletSnapshot:
     free_grant_remaining: int
     free_grant_total: int
     usage: list[LedgerRow] = field(default_factory=list)
-    plan: PlanSnapshot = field(default_factory=PlanSnapshot)
 
 
 @dataclass(frozen=True)
@@ -466,52 +438,6 @@ def _stripe_value(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(key, default)
     return getattr(obj, key, default)
-
-
-def _subscription_period_end(subscription: Any) -> datetime | None:
-    """Return when the subscription's current billing period ends.
-
-    Stripe API versions from 2025-03-31 moved ``current_period_end`` from the
-    subscription onto each subscription item, so both places are read.
-
-    Args:
-        subscription: Stripe Subscription resource or test mapping.
-
-    Returns:
-        The period end as a UTC datetime, or ``None`` when Stripe sent none.
-    """
-    period_end = _stripe_value(subscription, "current_period_end")
-    if period_end is None:
-        items = _stripe_value(_stripe_value(subscription, "items", {}), "data", []) or []
-        if items:
-            period_end = _stripe_value(items[0], "current_period_end")
-    if period_end is None:
-        return None
-    return datetime.fromtimestamp(int(period_end), UTC)
-
-
-def _plan_snapshot(customer: BillingCustomerModel | None) -> PlanSnapshot:
-    """Project a billing row's mirrored subscription into the wallet's plan view.
-
-    Args:
-        customer: The account's billing row, or ``None`` for a new account.
-
-    Returns:
-        The plan the account is on and when it renews or lapses.
-    """
-    available = bool(settings.stripe_price_pro_monthly) and settings.is_stripe_configured
-    if customer is None or not is_pro_status(customer.subscription_status):
-        return PlanSnapshot(available=available)
-    period_end = customer.subscription_current_period_end
-    if period_end is not None and period_end.tzinfo is None:
-        period_end = period_end.replace(tzinfo=UTC)
-    return PlanSnapshot(
-        plan=PLAN_PRO,
-        status=customer.subscription_status,
-        renews_at=period_end.isoformat() if period_end else None,
-        cancel_at_period_end=bool(customer.subscription_cancel_at_period_end),
-        available=available,
-    )
 
 
 def _stripe_id(value: Any) -> str | None:
@@ -1157,48 +1083,6 @@ class StripeBillingService:
         }
         return self._create_checkout(username, line_item, "custom", cents)
 
-    def create_subscription_checkout(self, username: str) -> str:
-        """Create a Checkout Session that subscribes the account to Skynet Pro.
-
-        The subscription carries ``username`` in its own metadata so every
-        later lifecycle event resolves the account without the Checkout Session.
-
-        Args:
-            username: Subscriber identity.
-
-        Returns:
-            The hosted Stripe Checkout URL to redirect the subscriber to.
-
-        Raises:
-            DomainError: 503 when Stripe or the Pro price is unconfigured; 409
-                when the account is already on Pro; 502 when Stripe refuses.
-        """
-        price_id = settings.stripe_price_pro_monthly
-        if not price_id:
-            raise DomainError("billing.plan_unavailable", status=503)
-        stripe_mod = self._stripe()
-        with Session(self._engine) as session:
-            customer = session.get(BillingCustomerModel, username)
-            if customer is not None and is_pro_status(customer.subscription_status):
-                raise DomainError("billing.already_subscribed", status=409)
-        customer_id = self.get_or_create_customer(username)
-        metadata = {"username": username, "plan": PLAN_PRO}
-        try:
-            checkout = stripe_mod.checkout.Session.create(
-                customer=customer_id,
-                mode="subscription",
-                line_items=[{"price": price_id, "quantity": 1}],
-                billing_address_collection="required",
-                customer_update={"address": "auto", "name": "auto"},
-                success_url=self._return_url("pro"),
-                cancel_url=self._return_url("cancel"),
-                client_reference_id=username,
-                metadata=metadata,
-                subscription_data={"metadata": metadata},
-            )
-        except stripe.StripeError as exc:
-            raise DomainError("billing.provider_unavailable", status=502) from exc
-        return str(checkout.url)
 
     def _create_checkout(self, username: str, line_item: dict[str, Any], pack_id: str, cents: int) -> str:
         """Create the Stripe Checkout Session shared by pack and custom top-ups.
@@ -1299,7 +1183,6 @@ class StripeBillingService:
                 free_grant_remaining=grant_remaining,
                 free_grant_total=free_grant_cents(),
                 usage=usage,
-                plan=_plan_snapshot(customer),
             )
 
     def get_usage(self, username: str, start: datetime, end: datetime) -> UsageSnapshot:
@@ -1866,82 +1749,8 @@ class StripeBillingService:
             self._on_charge_refunded(session, event_id, obj)
         elif event_type == "charge.dispute.created":
             self._on_dispute_created(session, event_id, obj)
-        elif event_type in SUBSCRIPTION_EVENTS:
-            self._on_subscription_changed(session, obj)
         return None
 
-    def _on_subscription_changed(self, session: Session, obj: Any) -> None:
-        """Mirror a Pro subscription's current state onto the account's billing row.
-
-        Stripe delivers events out of order, so the handler re-reads the
-        subscription and writes its latest state rather than the event's
-        snapshot; the event copy is only a fallback when Stripe is unreachable.
-
-        Args:
-            session: Open session (caller commits).
-            obj: The Subscription object from the event.
-        """
-        subscription = self._latest_subscription(obj)
-        subscription_id = str(_stripe_value(subscription, "id", "") or "")
-        if not subscription_id:
-            return
-        metadata = _stripe_value(subscription, "metadata", {}) or {}
-        username = str(_stripe_value(metadata, "username", "") or "").lower()
-        customer_id = _stripe_id(_stripe_value(subscription, "customer"))
-        customer = session.get(BillingCustomerModel, username) if username else None
-        if customer is None and customer_id:
-            customer = session.scalars(
-                select(BillingCustomerModel).where(BillingCustomerModel.stripe_customer_id == customer_id)
-            ).first()
-        if customer is None:
-            logger.warning("Subscription %s has no matching billing account", subscription_id)
-            return
-        status = str(_stripe_value(subscription, "status", "") or "")
-        # A second, abandoned subscription must not overwrite the one the
-        # account is actually paying for.
-        if (
-            customer.stripe_subscription_id
-            and customer.stripe_subscription_id != subscription_id
-            and is_pro_status(customer.subscription_status)
-            and not is_pro_status(status)
-        ):
-            return
-        now = datetime.now(UTC)
-        if status != PAST_DUE_STATUS:
-            customer.subscription_past_due_since = None
-        elif customer.subscription_status != PAST_DUE_STATUS or customer.subscription_past_due_since is None:
-            customer.subscription_past_due_since = now
-        customer.stripe_subscription_id = subscription_id
-        customer.subscription_status = status
-        customer.subscription_current_period_end = _subscription_period_end(subscription)
-        customer.subscription_cancel_at_period_end = bool(
-            _stripe_value(subscription, "cancel_at_period_end", False) or _stripe_value(subscription, "cancel_at")
-        )
-        customer.updated_at = now
-        logger.info(
-            "Subscription synced: user=%s status=%s subscription=%s",
-            customer.username,
-            status,
-            subscription_id,
-        )
-
-    def _latest_subscription(self, obj: Any) -> Any:
-        """Return the subscription's current state from Stripe, or the event copy.
-
-        Args:
-            obj: The Subscription object carried by the event.
-
-        Returns:
-            The freshly retrieved subscription, or ``obj`` when the retrieve fails.
-        """
-        subscription_id = _stripe_value(obj, "id")
-        if not subscription_id:
-            return obj
-        try:
-            return self._stripe().Subscription.retrieve(str(subscription_id))
-        except stripe.StripeError:
-            logger.warning("Subscription %s re-read failed; applying the event copy", subscription_id)
-            return obj
 
     def _on_checkout_completed(self, session: Session, event_id: str, obj: Any) -> tuple[str, int, str] | None:
         """Credit a completed one-time pack purchase to the buyer's balance.

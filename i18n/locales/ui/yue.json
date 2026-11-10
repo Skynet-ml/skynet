@@ -4580,5 +4580,10 @@
   "usage.day.empty": "呢日冇收費嘅調用。",
   "usage.day.load_error": "載入唔到呢日嘅調用。",
   "usage.day.truncated": "顯示 {total} 次之中最新嘅 {shown} 次。",
-  "usage.day.loading": "載入緊呢日嘅調用…"
+  "usage.day.loading": "載入緊呢日嘅調用…",
+  "agent.model_menu.search": "搜尋模型…",
+  "agent.model_menu.no_results": "冇相符嘅模型",
+  "agent.model_menu.search_placeholder": "搜尋所有模型…",
+  "agent.model_menu.clear_search": "清除搜尋",
+  "agent.model_menu.no_results_hint": "試吓第二個名或者供應商。"
 }

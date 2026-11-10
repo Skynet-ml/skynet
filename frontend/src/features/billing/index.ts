@@ -1,6 +1,5 @@
 export { BalanceProvider, useBalance, usePricingTerms } from "./providers/balance-provider";
 export { ByokKeysProvider, useByokKeys } from "./providers/byok-provider";
-export { BalanceChip } from "./components/BalanceChip";
 export { WalletTab } from "./components/WalletTab";
 export { LinkAccountPrompt } from "./components/LinkAccountPrompt";
 export { UsageTab } from "./components/UsageTab";

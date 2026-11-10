@@ -2,9 +2,8 @@
 
 Hosted mode always runs on OpenRouter, so it never reads the stored setting.
 Local mode runs agent turns on the engine the user chose: a subscription CLI,
-or OpenRouter with the user's verified key. With no choice, it runs them on the
-first CLI that is ready on this machine, else on the user's verified OpenRouter
-key. A CLI engine never falls back to OpenRouter. In local mode an
+or OpenRouter with the user's verified key or signed-in Skynet account. With
+no choice, it runs them on the first ready CLI, then an available OpenRouter route. A CLI engine never falls back to OpenRouter. In local mode an
 optimization proposer with no CLI pick follows the same engine CLI.
 """
 
@@ -18,6 +17,7 @@ from ..billing.byok_vault import ProviderKeyVault
 from ..config import settings
 from ..local.cli_catalog import CLI_MODELS, CliProvider, parse_subscription_model_id
 from ..local.cli_probe import CliStatus, probe_clis
+from ..local.hosted_link import link_status
 from ..models.blackbox import BLACKBOX_HARNESS_CUSTOM
 from ..storage.models import AgentEnginePreferenceModel
 from .model_catalog import is_removed_model
@@ -95,13 +95,12 @@ def effective_agent_engine(job_store: object | None, username: str) -> AgentEngi
     Returns:
         The stored engine, else the default (see :func:`default_agent_engine`).
         In local mode with neither, ``openrouter`` when the caller has a
-        verified OpenRouter key, because the model router then runs the turn
-        on that key; else ``None``.
+        verified OpenRouter key or a signed-in Skynet account; else None.
     """
     chosen = stored_agent_engine(job_store, username) or default_agent_engine()
     if chosen is not None or not settings.local_mode:
         return chosen
-    return OPENROUTER_ENGINE if _has_verified_key(job_store, username) else None
+    return OPENROUTER_ENGINE if openrouter_available(job_store, username) else None
 
 
 def _has_verified_key(job_store: object | None, username: str) -> bool:
@@ -118,6 +117,22 @@ def _has_verified_key(job_store: object | None, username: str) -> bool:
     return engine is not None and ProviderKeyVault(engine=engine).has_verified_connection(username, OPENROUTER_ENGINE)
 
 
+def openrouter_available(job_store: object | None, username: str) -> bool:
+    """Check whether OpenRouter can use the saved key or the signed-in Skynet account.
+
+    Args:
+        job_store: Local store containing keys and the account link.
+        username: Authenticated local user.
+
+    Returns:
+        Whether either authorized inference route exists.
+    """
+    if _has_verified_key(job_store, username):
+        return True
+    engine = getattr(job_store, "engine", None)
+    return engine is not None and link_status(engine, username) is not None
+
+
 def _turn_engine(job_store: object | None, username: str) -> AgentEngine | None:
     """Return the engine that runs a local agent turn or proposer with no pick.
 
@@ -127,12 +142,11 @@ def _turn_engine(job_store: object | None, username: str) -> AgentEngine | None:
 
     Returns:
         The effective engine, except that a stored OpenRouter engine with no
-        saved, verified key gives the default engine.
+        saved key or account link gives the default engine.
     """
     engine = effective_agent_engine(job_store, username)
-    # Settings shows the default CLI, not OpenRouter, once the OpenRouter key
-    # is removed or unverified, so agent turns and proposers follow that CLI too.
-    if engine == OPENROUTER_ENGINE and not _has_verified_key(job_store, username):
+    # A lost key does not change the engine while the signed-in account can serve it.
+    if engine == OPENROUTER_ENGINE and not openrouter_available(job_store, username):
         return default_agent_engine()
     return engine
 
@@ -149,7 +163,7 @@ def engine_agent_model(job_store: object | None, username: str, model: str | Non
         ``model`` unchanged when it names a model, in hosted mode, or when the
         turn engine (see :func:`_turn_engine`) is OpenRouter or unknown (in
         local mode the model router then
-        runs the turn on the caller's verified OpenRouter key, or refuses it).
+        runs on the saved key or signed-in account, or refuses it).
         Otherwise ``subscription/<cli>/<slug>`` on the engine
         CLI's first catalog model.
     """

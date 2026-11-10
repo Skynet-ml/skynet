@@ -40,8 +40,7 @@ export function isRefusedLocalHost(
 // logged-out visitors, so
 // guarding them would bounce the POSTs to /login and the flow would never
 // complete. Terms and Privacy are public legal disclosures and must remain
-// readable before someone creates an account. ``download`` is the public app
-// installation page. ``docs`` (the public docs, their
+// readable before someone creates an account. ``docs`` (the public docs, their
 // ``.md`` twins, ``docs-md`` and ``docs-search``) and ``llms.txt`` /
 // ``llms-full.txt`` are public so readers, crawlers and language models can
 // read them signed-out. ``optimizations`` is excluded
@@ -57,7 +56,7 @@ export function isRefusedLocalHost(
 // ``share/chat/<token>`` is a read-only agent chat for anyone with the link;
 // the backend serves it without a session and checks only the token.
 export const AUTH_GATED_PATTERN =
-  "/((?!download/?$|login|terms|privacy|docs|share/chat/|llms(?:-full)?\\.txt|optimizations|api/auth|api/register|api/webauthn|api/2fa|api/password-reset|api/email-verify|api/version|_next/static|_next/image|fonts/|brand/|licenses/|THIRD_PARTY_NOTICES\\.txt|favicon\\.png|favicon-dark\\.png|apple-icon\\.png|notification-icon\\.png|sw\\.js|robots\\.txt|sitemap\\.xml).*)";
+  "/((?!login|terms|privacy|docs|share/chat/|llms(?:-full)?\\.txt|optimizations|api/auth|api/register|api/webauthn|api/2fa|api/password-reset|api/email-verify|api/version|_next/static|_next/image|fonts/|brand/|licenses/|THIRD_PARTY_NOTICES\\.txt|favicon\\.png|favicon-dark\\.png|apple-icon\\.png|notification-icon\\.png|sw\\.js|robots\\.txt|sitemap\\.xml).*)";
 const authGated = new RegExp(`^${AUTH_GATED_PATTERN}$`);
 
 /**

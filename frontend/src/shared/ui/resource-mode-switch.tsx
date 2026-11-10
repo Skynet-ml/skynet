@@ -58,6 +58,7 @@ export function ResourceModeSwitch() {
       value={mode}
       onChange={setMode}
       size="sm"
+      iconOnly
       label={msg("resource_mode.label")}
       options={[
         {

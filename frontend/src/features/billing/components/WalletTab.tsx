@@ -8,8 +8,6 @@ import {
   ArrowSquareOut,
   CircleNotch,
   ClockCounterClockwise,
-  Coins,
-  Crown,
   CreditCard,
   PencilSimple,
   Plus,
@@ -37,7 +35,6 @@ import { TOUCH_FIELD } from "@/shared/ui/touch";
 import {
   createBillingPortalSession,
   createCheckoutSession,
-  createSubscriptionCheckout,
   getBillingProfile,
   getBillingTransactions,
   removePaymentMethod,
@@ -57,7 +54,6 @@ import {
   formatCentsUsd,
   formatResetDate,
   formatUsd,
-  PRO_MONTHLY_USD,
   purchaseFeeUsd,
   purchaseTotalUsd,
   type TopUpPack,
@@ -225,92 +221,6 @@ function AddFundsControls() {
           {formatMsg("billing.upgrade.buy", { p1: priceLabel })}
         </Button>
       </div>
-    </SettingsRow>
-  );
-}
-
-/**
- * Skynet Pro — the flat monthly platform plan. The balance still pays for usage;
- * Pro lifts the storage, saved-job, and concurrent-run limits. Upgrading goes
- * through Stripe Checkout; managing or cancelling goes through the portal.
- */
-function ProPlanRow() {
-  const { wallet } = useBalance();
-  const { locale } = useLocale();
-  const [pending, setPending] = React.useState(false);
-  const { plan } = wallet;
-  const isPro = plan.plan === "pro";
-
-  if (!isPro && !plan.available) return null;
-
-  const onUpgrade = async () => {
-    setPending(true);
-    track(TelemetryEvent.CheckoutStarted, { pack_id: "pro_monthly", cents: 0 });
-    try {
-      const { url } = await createSubscriptionCheckout();
-      window.location.assign(url);
-    } catch {
-      setPending(false);
-      toast.error(msg("billing.checkout.error"));
-    }
-  };
-
-  const onManage = async () => {
-    setPending(true);
-    try {
-      const { url } = await createBillingPortalSession("manage");
-      window.location.assign(url);
-    } catch {
-      setPending(false);
-      toast.error(msg("billing.portal.error"));
-    }
-  };
-
-  const description = !isPro
-    ? msg("billing.pro.pitch")
-    : plan.renewsAt == null
-      ? msg("billing.pro.active")
-      : formatMsg(plan.cancelAtPeriodEnd ? "billing.pro.ends_on" : "billing.pro.renews_on", {
-          p1: formatResetDate(plan.renewsAt, locale),
-        });
-
-  return (
-    <SettingsRow
-      icon={Crown}
-      label={
-        <span className="flex items-center gap-2">
-          {msg("billing.pro.title")}
-          {isPro && (
-            <Badge variant="secondary" size="sm">
-              {msg("billing.pro.current")}
-            </Badge>
-          )}
-        </span>
-      }
-      description={description}
-    >
-      <Button
-        variant={isPro ? "outline" : "default"}
-        size="sm"
-        onClick={() => void (isPro ? onManage() : onUpgrade())}
-        disabled={pending}
-        data-telemetry={isPro ? "wallet-manage-pro" : "wallet-upgrade-pro"}
-        data-accent={isPro ? undefined : true}
-        className={cn(
-          "h-[44px] rounded-full px-2.5 text-[0.6875rem] font-semibold sm:h-6 [@media(hover:none)_and_(pointer:coarse)]:h-[44px] [&_svg:not([class*='size-'])]:size-3",
-        )}
-      >
-        {pending ? (
-          <CircleNotch className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-        ) : isPro ? (
-          <ArrowSquareOut aria-hidden="true" />
-        ) : (
-          <Crown aria-hidden="true" />
-        )}
-        {isPro
-          ? msg("billing.pro.manage")
-          : formatMsg("billing.pro.upgrade", { p1: formatUsdWhole(PRO_MONTHLY_USD, locale) })}
-      </Button>
     </SettingsRow>
   );
 }
@@ -898,7 +808,7 @@ function BillingDetails() {
  */
 export function WalletTab() {
   const { shown, syncing, loading, loadError, refresh } = useBalance();
-  const { totalCents, status, available, linkNeeded, hosted } = shown;
+  const { totalCents, status, available, linkNeeded } = shown;
   const { locale } = useLocale();
 
   return (
@@ -924,16 +834,7 @@ export function WalletTab() {
               {msg("billing.popover.title")}
             </span>
             <div className="flex items-center gap-2" aria-busy={syncing || undefined}>
-              {/* Same gold coin as the header chip so the balance reads the same in both places. */}
-              <Coins
-                className={cn(
-                  "size-6 shrink-0",
-                  syncing ? "text-muted-foreground" : "text-primary",
-                )}
-                aria-hidden="true"
-              />
-              {/* Post-checkout sync [FG-3]: shimmer over the prior balance until the
-                  webhook lands, mirroring the header chip so the two never disagree. */}
+              {/* Keep the prior balance visible until the checkout webhook arrives. */}
               <span
                 dir="ltr"
                 className={cn(
@@ -945,13 +846,6 @@ export function WalletTab() {
               </span>
             </div>
             {linkNeeded && <LinkAccountPrompt />}
-            {hosted && available && (
-              <span className="text-xs text-muted-foreground">
-                {msg("billing.local.hosted_note")}
-              </span>
-            )}
-            {/* Low balance stays an operational metric here too — same calm line as
-                the header chip, no red, no urgency. */}
             {available && status === "low" && (
               <span className="text-xs text-muted-foreground/80">
                 {msg("billing.chip.low_note")}
@@ -962,7 +856,6 @@ export function WalletTab() {
 
         <div>
           <AddFundsControls />
-          <ProPlanRow />
         </div>
       </section>
 

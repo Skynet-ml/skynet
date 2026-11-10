@@ -1771,6 +1771,58 @@ table {
   }
 }
 
+/* The list grows above a fixed panel so Popper does not chase its height each frame. */
+.model-panel {
+  --model-panel-scale: 0.9;
+  zoom: var(--model-panel-scale);
+}
+.model-panel:has(.model-fold:not([hidden])) {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.model-list:has(.model-fold[hidden]) {
+  visibility: hidden;
+}
+.model-panel[data-side="bottom"]:has(.model-fold:not([hidden])) {
+  border-radius: 1rem 1rem 0 0;
+}
+.model-panel[data-side="bottom"] .model-list {
+  top: 100%;
+  bottom: auto;
+  border-width: 0 1px 1px;
+  border-radius: 0 0 1rem 1rem;
+}
+/* A stable search viewport keeps the field and slider still as results change. */
+.model-search-list {
+  height: min(18rem, max(0px, calc(var(--radix-dropdown-menu-content-available-height, 40rem) / var(--model-panel-scale, 1) - 8rem)));
+}
+.model-search-results {
+  animation: model-search-update 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes model-search-update {
+  from { opacity: 0.72; }
+  to { opacity: 1; }
+}
+/* Keep the effort controls anchored while the model list unfolds above them. */
+.model-fold[data-state="open"] {
+  animation: model-fold-open 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.model-fold[data-state="closed"] {
+  animation: model-fold-close 170ms cubic-bezier(0.5, 0, 0.75, 0);
+  pointer-events: none;
+}
+@keyframes model-fold-open {
+  from { height: 0; opacity: 0; }
+  to { height: calc(var(--radix-collapsible-content-height) / var(--model-panel-scale)); opacity: 1; }
+}
+@keyframes model-fold-close {
+  from { height: calc(var(--radix-collapsible-content-height) / var(--model-panel-scale)); opacity: 1; }
+  to { height: 0; opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-fold[data-state], .model-search-results { animation: none; }
+}
+
 /* The effort slider's charge. The root sets --effort-heat (effortCharge,
    0 calm to 1 at the top level) and the registered property eases the
    whole ramp between levels. The fill runs from a neutral through the brand
@@ -1836,9 +1888,9 @@ table {
 .effort-fill::after {
   content: "";
   position: absolute;
-  inset-inline: 10px 6px;
-  top: calc(50% - 1.5px);
-  height: 3px;
+  inset-inline: 7px 4px;
+  top: calc(50% - 1px);
+  height: 2px;
   border-radius: 9999px;
   background: linear-gradient(to right, transparent, var(--effort-core));
   filter: blur(0.6px);
@@ -1849,7 +1901,7 @@ table {
 }
 .effort-glow {
   background: linear-gradient(to right, transparent, var(--effort-hot) 45%, var(--effort-tip));
-  filter: blur(9px);
+  filter: blur(6px);
   opacity: var(--effort-glow);
 }
 .effort-glow:dir(rtl) {
@@ -1859,10 +1911,10 @@ table {
 .effort-glow::after {
   content: "";
   position: absolute;
-  inset: -12px -8px;
+  inset: -8px -6px;
   border-radius: inherit;
   background: inherit;
-  filter: blur(18px);
+  filter: blur(12px);
   opacity: var(--effort-top);
 }
 .effort-thumb {
@@ -1875,7 +1927,7 @@ table {
     0 1px 2px rgb(0 0 0 / 0.16),
     0 3px 8px -1px rgb(0 0 0 / 0.16),
     0 0 0 calc(var(--effort-top) * 2px) var(--effort-tip),
-    0 0 calc(var(--effort-top) * 20px) calc(var(--effort-top) * 4px)
+    0 0 calc(var(--effort-top) * 14px) calc(var(--effort-top) * 3px)
       color-mix(in oklch, var(--effort-volt) calc(var(--effort-top) * 85%), transparent);
 }
 .effort-thumb-glow {
@@ -1907,9 +1959,9 @@ table {
     display: block;
     position: absolute;
     left: 0;
-    top: -4px;
-    width: 16px;
-    height: 8px;
+    top: -3px;
+    width: 12px;
+    height: 6px;
     transform-origin: 0 50%;
     opacity: 0;
     filter: drop-shadow(0 0 2px var(--effort-volt));
@@ -1923,10 +1975,10 @@ table {
   .effort-flash {
     display: block;
     position: absolute;
-    left: -22px;
-    top: -22px;
-    width: 44px;
-    height: 44px;
+    left: -16px;
+    top: -16px;
+    width: 32px;
+    height: 32px;
     border-radius: 9999px;
     background: radial-gradient(
       circle,
@@ -1942,7 +1994,7 @@ table {
     position: absolute;
     left: 0;
     width: 45%;
-    height: 8px;
+    height: 6px;
     color: var(--effort-core);
     opacity: 0;
     mask-image: linear-gradient(to right, transparent, black 70%, transparent);
@@ -1971,18 +2023,18 @@ table {
 @keyframes effort-spark {
   0% {
     opacity: 0;
-    transform: rotate(var(--spark-a)) translateX(14px) scaleX(0.3);
+    transform: rotate(var(--spark-a)) translateX(10px) scaleX(0.3);
   }
   6% {
     opacity: 1;
-    transform: rotate(var(--spark-a)) translateX(15px) scaleX(var(--spark-r, 1));
+    transform: rotate(var(--spark-a)) translateX(11px) scaleX(var(--spark-r, 1));
   }
   12% {
     opacity: 0.2;
   }
   18% {
     opacity: 1;
-    transform: rotate(var(--spark-a)) translateX(17px) scaleX(var(--spark-r, 1));
+    transform: rotate(var(--spark-a)) translateX(13px) scaleX(var(--spark-r, 1));
   }
   25% {
     opacity: 0.35;
@@ -1993,20 +2045,20 @@ table {
   36%,
   100% {
     opacity: 0;
-    transform: rotate(var(--spark-a)) translateX(19px) scaleX(0.5);
+    transform: rotate(var(--spark-a)) translateX(15px) scaleX(0.5);
   }
 }
 @keyframes effort-spray {
   from {
     opacity: 1;
-    transform: rotate(var(--spark-a)) translateX(12px) scaleX(0.5);
+    transform: rotate(var(--spark-a)) translateX(9px) scaleX(0.5);
   }
   55% {
     opacity: 1;
   }
   to {
     opacity: 0;
-    transform: rotate(var(--spark-a)) translateX(24px) scaleX(1);
+    transform: rotate(var(--spark-a)) translateX(19px) scaleX(1);
   }
 }
 @keyframes effort-flash {

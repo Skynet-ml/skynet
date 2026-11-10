@@ -9,6 +9,7 @@ import pytest
 
 from ...config import settings
 from .. import model_catalog as mc
+from ..errors import DomainError
 from ..model_catalog import (  # type: ignore[attr-defined]
     CatalogModel,
     CatalogProvider,
@@ -994,8 +995,8 @@ def test_practical_keeps_everything_without_benchmarks() -> None:
     assert mc._practical_probe_ids({"gw/model": _listed(_NOW)}) is None
 
 
-def test_get_catalog_hides_impractical_models_but_still_accepts_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A dropped model leaves the menu, yet a pick made before it dropped still validates."""
+def test_get_catalog_rejects_impractical_models_without_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject an old hidden pick when its provider declares no effort controls."""
     monkeypatch.setattr(litellm, "model_cost", {})
     monkeypatch.setattr(litellm, "get_valid_models", list)
     probe = {
@@ -1010,14 +1011,15 @@ def test_get_catalog_hides_impractical_models_but_still_accepts_them(monkeypatch
     monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)
 
     assert [m.value for m in catalog.models] == ["openrouter/acme/opus-5.5"]
-    assert mc.is_hidden_model("openrouter/hobby/finetune-7")
-    mc.require_known_model("openrouter/hobby/finetune-7")
+    assert not mc.is_hidden_model("openrouter/hobby/finetune-7")
+    with pytest.raises(DomainError):
+        mc.require_known_model("openrouter/hobby/finetune-7")
 
 
 def test_the_strongest_model_follows_the_operator_then_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator-set id wins; else the catalog's strongest model; else the best-value agent model."""
-    best = CatalogModel(value="openrouter/vendor/best", label="best", provider="openrouter", is_default=True)
-    strongest = CatalogModel(value="openrouter/vendor/strong", label="strong", provider="openrouter", is_strongest=True)
+    best = CatalogModel(value="openrouter/vendor/best", label="best", provider="openrouter", supports_thinking=True, is_default=True)
+    strongest = CatalogModel(value="openrouter/vendor/strong", label="strong", provider="openrouter", supports_thinking=True, is_strongest=True)
     monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[best, strongest]))
 
     assert mc.strongest_model_id(" vendor/picked ") == "vendor/picked"

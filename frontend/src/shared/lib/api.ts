@@ -1604,17 +1604,6 @@ export interface BillingUsageEntry {
   kind: string;
 }
 
-/** The caller's wallet as the backend reports it (snake_case mirrors the API). */
-/** The caller's platform plan, mirrored from their Stripe subscription. */
-export interface BillingPlanResponse {
-  plan: "free" | "pro";
-  status: string | null;
-  renews_at: string | null;
-  cancel_at_period_end: boolean;
-  /** Whether this deployment sells Pro at all (a price is configured). */
-  available: boolean;
-}
-
 /** The backend's live pricing terms (markup, BYOK fee, top-up fee). */
 export interface BillingPricingTerms {
   usage_markup: number;
@@ -1623,11 +1612,11 @@ export interface BillingPricingTerms {
   purchase_fee_fixed_cents: number;
 }
 
+/** The caller's wallet as the backend reports it (snake_case mirrors the API). */
 export interface BillingWalletResponse {
   paid_balance_cents: number;
   free_grant: BillingFreeGrant;
   usage: BillingUsageEntry[];
-  plan: BillingPlanResponse;
   /** Absent from a backend older than the frontend (e.g. mid-deploy). */
   pricing?: BillingPricingTerms;
 }
@@ -1791,11 +1780,6 @@ export function createCheckoutSession(purchase: { packId: string } | { cents: nu
       "packId" in purchase ? { pack_id: purchase.packId } : { cents: purchase.cents },
     ),
   });
-}
-
-/** Start a Stripe Checkout session for the Skynet Pro subscription; redirect to `.url`. */
-export function createSubscriptionCheckout() {
-  return request<{ url: string }>("/billing/subscription/checkout", { method: "POST" });
 }
 
 /** One stored BYOK provider connection as the backend reports it — masked, never the secret. */

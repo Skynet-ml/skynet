@@ -4580,5 +4580,10 @@
   "usage.day.empty": "در این روز هیچ فراخوانی پولی ثبت نشده است.",
   "usage.day.load_error": "بارگیری فراخوانی‌های این روز ممکن نشد.",
   "usage.day.truncated": "نمایش {shown} فراخوانی اخیر از {total}.",
-  "usage.day.loading": "در حال بارگیری فراخوانی‌های این روز…"
+  "usage.day.loading": "در حال بارگیری فراخوانی‌های این روز…",
+  "agent.model_menu.search": "جستجوی مدل‌ها…",
+  "agent.model_menu.no_results": "مدل منطبقی نیست",
+  "agent.model_menu.search_placeholder": "جستجو در همه مدل‌ها…",
+  "agent.model_menu.clear_search": "پاک کردن جستجو",
+  "agent.model_menu.no_results_hint": "نام یا ارائه‌دهنده دیگری را امتحان کنید."
 }

@@ -37,7 +37,14 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, Thread
 
 from ..config import settings
-from .model_catalog import CatalogModel, ModelCatalogResponse, agent_model_id, catalog_snapshot, featured_score
+from .model_catalog import (
+    CatalogModel,
+    ModelCatalogResponse,
+    agent_model_id,
+    catalog_snapshot,
+    featured_score,
+    supports_effort_control,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +92,7 @@ def small_candidates(catalog: ModelCatalogResponse) -> list[CatalogModel]:
         m
         for m in catalog.models
         if m.featured
+        and supports_effort_control(m)
         and m.available
         and m.value.startswith(_OPENROUTER_PREFIX)
         and m.input_cost_per_token is not None
@@ -280,6 +288,10 @@ def interview_model_id() -> str:
         return default
     with _lock:
         pick, stale = _pick, time.monotonic() - _picked_at >= _STATS_TTL_SECONDS
+    if pick and snapshot is not None and not any(
+        model.value == pick and supports_effort_control(model) for model in snapshot.models
+    ):
+        pick = None
     if pick is None or stale:
         _kick_refresh()
     if pick:

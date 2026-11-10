@@ -67,9 +67,6 @@ export function WalletCard({ call }: WalletCardProps) {
     const customBody = (
       <div className="space-y-1.5">
         {headline}
-        <p className="text-[0.6875rem] text-muted-foreground/70">
-          {msg("billing.local.hosted_note")}
-        </p>
         {view.low && (
           <p className="text-[0.6875rem] text-muted-foreground">{msg("billing.chip.low_note")}</p>
         )}

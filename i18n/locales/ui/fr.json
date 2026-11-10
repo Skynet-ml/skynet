@@ -4580,5 +4580,10 @@
   "usage.day.empty": "Aucun appel facturé ce jour-là.",
   "usage.day.load_error": "Impossible de charger les appels de ce jour.",
   "usage.day.truncated": "Affichage des {shown} derniers appels sur {total}.",
-  "usage.day.loading": "Chargement des appels de ce jour…"
+  "usage.day.loading": "Chargement des appels de ce jour…",
+  "agent.model_menu.search": "Rechercher des modèles…",
+  "agent.model_menu.no_results": "Aucun modèle correspondant",
+  "agent.model_menu.search_placeholder": "Rechercher dans tous les modèles…",
+  "agent.model_menu.clear_search": "Effacer la recherche",
+  "agent.model_menu.no_results_hint": "Essayez un autre nom ou fournisseur."
 }

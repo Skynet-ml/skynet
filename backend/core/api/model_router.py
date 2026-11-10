@@ -18,15 +18,20 @@ from ..billing.cli_dispatch import CLI_FAST_KEY
 from ..config import settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
 from ..local.cli_catalog import CLI_MODELS, RetiredEffort, parse_subscription_model_id
+from ..local.managed_models import hosted_model_config
 from ..models import ModelConfig
 from .errors import DomainError
 from .interview_model import interview_model_id
 from .model_catalog import (
     REASONING_EFFORTS,
     agent_model_id,
+    get_byok_catalog_cached,
     get_catalog_cached,
     is_removed_model,
+    narrow_models_to_served,
+    probe_byok_provider_models,
     require_known_model,
+    supports_effort_control,
     unpicked_effort,
 )
 
@@ -238,12 +243,10 @@ def route_local_byok_model(
     username: str,
     interview: bool = False,
 ) -> ModelConfig | None:
-    """Route a Mac app composer pick onto the caller's saved OpenRouter key.
+    """Route a Mac composer through its saved key or its signed-in Skynet account.
 
-    The Mac app has no managed key. A user who saved and verified an
-    OpenRouter key runs any OpenRouter model id, and the catalog default, on
-    that key.
-    It never falls back to a managed key.
+    A verified saved key takes precedence. Without one, model inference runs
+    on hosted using the linked account; platform credentials never reach the Mac.
 
     Args:
         model: The pick after the agent engine filled an empty one.
@@ -253,9 +256,9 @@ def route_local_byok_model(
             of the composer default.
 
     Returns:
-        A BYOK config with the decrypted key in memory only. ``None`` outside
-        local mode, for a subscription pick, with no store, or with no verified
-        OpenRouter key; the normal routes then apply.
+        A BYOK config, or a scoped hosted config when no verified key exists.
+        None outside local mode, for a subscription pick, with no store, or
+        without a saved key or account link.
 
     Raises:
         DomainError: 422 ``models.unknown_model`` when an explicit id is not
@@ -276,7 +279,12 @@ def route_local_byok_model(
         return None
     vault = ProviderKeyVault(engine=engine)
     if not vault.has_verified_connection(username, _LOCAL_BYOK_PROVIDER):
-        return None
+        if name and name != _RETIRED_AUTO_ID and not is_removed_model(name):
+            if not _OPENROUTER_MODEL_ID.fullmatch(name):
+                raise DomainError("models.unknown_model", status=422)
+        else:
+            name = ""
+        return hosted_model_config(engine, username, name or None)
     if name and name != _RETIRED_AUTO_ID and not is_removed_model(name):
         if not _OPENROUTER_MODEL_ID.fullmatch(name):
             raise DomainError("models.unknown_model", status=422)
@@ -284,10 +292,18 @@ def route_local_byok_model(
         name = (interview_model_id() if interview else default_model_id()) or agent_model_id()
     config = ModelConfig(name=name, token_source=TOKEN_SOURCE_BYOK, byok_provider=_LOCAL_BYOK_PROVIDER)
     try:
-        return resolve_byok_model_config(config, username=username, vault=vault)
+        resolved = resolve_byok_model_config(config, username=username, vault=vault)
     except ValueError as exc:
         # The key was deleted or failed a new check after the check above.
         raise DomainError("billing.byok_missing_connection", status=400, provider=_LOCAL_BYOK_PROVIDER) from exc
+    known = get_byok_catalog_cached().models
+    if not any(entry.value == name and supports_effort_control(entry) for entry in known):
+        # A provider may list a new model before LiteLLM's registry includes it.
+        listing = probe_byok_provider_models(_LOCAL_BYOK_PROVIDER, str(resolved.extra.get("api_key") or ""))
+        served = narrow_models_to_served(_LOCAL_BYOK_PROVIDER, known, listing or {}, byok_provider=_LOCAL_BYOK_PROVIDER)
+        if not any(entry.value == name for entry in served):
+            raise DomainError("models.unknown_model", status=422)
+    return resolved
 
 
 def metering_token_source(model_config: ModelConfig | None) -> str:

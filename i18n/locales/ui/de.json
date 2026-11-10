@@ -4580,5 +4580,10 @@
   "usage.day.empty": "Keine abgerechneten Aufrufe an diesem Tag.",
   "usage.day.load_error": "Die Aufrufe für diesen Tag konnten nicht geladen werden.",
   "usage.day.truncated": "Die neuesten {shown} von {total} Aufrufen werden angezeigt.",
-  "usage.day.loading": "Die Aufrufe für diesen Tag werden geladen…"
+  "usage.day.loading": "Die Aufrufe für diesen Tag werden geladen…",
+  "agent.model_menu.search": "Modelle suchen…",
+  "agent.model_menu.no_results": "Keine passenden Modelle",
+  "agent.model_menu.search_placeholder": "Alle Modelle durchsuchen…",
+  "agent.model_menu.clear_search": "Suche löschen",
+  "agent.model_menu.no_results_hint": "Versuche einen anderen Namen oder Anbieter."
 }

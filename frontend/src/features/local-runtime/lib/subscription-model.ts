@@ -8,7 +8,7 @@
  */
 import type { CliProvider } from "@/features/billing";
 import { CLI_PROVIDERS, isCliProvider } from "@/shared/lib/cli-providers";
-import { effortsFor } from "@/shared/lib/model-efforts";
+import { effortsFor, supportsEffortSlider } from "@/shared/lib/model-efforts";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import type { RunUsageRow } from "@/shared/types/run-usage";
 
@@ -38,8 +38,9 @@ export function isAgentEngine(value: unknown): value is AgentEngine {
 export function effectiveAgentEngine(
   engine: AgentEngine | null,
   keyVerified: boolean | null,
+  managedAvailable = false,
 ): AgentEngine | null {
-  return engine === OPENROUTER_ENGINE && keyVerified === false ? null : engine;
+  return engine === OPENROUTER_ENGINE && keyVerified === false && !managedAvailable ? null : engine;
 }
 
 /** One coding-agent CLI as `GET /local/status` reports it. */
@@ -160,7 +161,7 @@ export function catalogValueMatchesSlug(value: string, slug: string): boolean {
  * the catalog knows the model. The saved name is always the CLI's own slug.
  * Each model takes the levels the CLI takes for it (`cli.efforts`, from the
  * backend's one table), not the catalog's, so no picker offers a level the CLI
- * cannot run. A model with no levels takes no effort.
+ * cannot run. Models without effort controls are not offered.
  */
 export function subscriptionCatalogModels(
   cli: CliStatus | undefined,
@@ -185,15 +186,13 @@ export function subscriptionCatalogModels(
       reasoning_default_enabled: true,
       default_reasoning_effort: null,
     };
-  });
+  }).filter(supportsEffortSlider);
 }
 
 /**
  * The composer menu's list for an agent role that runs on `cli`: the CLI's
  * models as subscription ids, so the pick is the id the request sends. Each
- * row takes the CLI's levels from `subscriptionCatalogModels`. A model with
- * no levels gets a disabled Effort row, and the backend drops any level it
- * does not take.
+ * row takes the CLI's levels from `subscriptionCatalogModels`.
  */
 export function subscriptionMenuModels(
   cli: CliStatus | undefined,
@@ -223,6 +222,7 @@ export function isLocalKeyModel(model: CatalogModel): boolean {
   return (
     model.byok_provider === LOCAL_KEY_PROVIDER &&
     model.available !== false &&
+    supportsEffortSlider(model) &&
     isOpenRouterModelId(model.value)
   );
 }
@@ -725,6 +725,7 @@ export function agentEngineOptions(
   localMode: boolean,
   now: Date = new Date(),
   keyVerified: boolean | null = false,
+  managedAvailable = false,
 ): AgentEngineOption[] {
   if (!localMode) return [{ engine: OPENROUTER_ENGINE, disabled: false, keyPending: false }];
   const clis = CLI_PROVIDERS.map((cli): AgentEngineOption => {
@@ -736,7 +737,11 @@ export function agentEngineOptions(
   });
   return [
     ...clis,
-    { engine: OPENROUTER_ENGINE, disabled: keyVerified !== true, keyPending: keyVerified === null },
+    {
+      engine: OPENROUTER_ENGINE,
+      disabled: keyVerified !== true && !managedAvailable,
+      keyPending: keyVerified === null && !managedAvailable,
+    },
   ];
 }
 
