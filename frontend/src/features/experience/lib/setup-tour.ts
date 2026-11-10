@@ -37,12 +37,12 @@ export interface SetupStop {
 
 /*
  * The tour stays short: every stop past this is one the user would skip.
- * Eleven covers the two looks the user sees change behind the card (level
+ * Ten covers the two looks the user sees change behind the card (level
  * and theme), the one stop a billing answer can add (the key, or the CLIs)
- * and the three places the user connects things (data sources, the update
- * grid, Chrome and Slack).
+ * and the two places the user connects things (data sources and the update
+ * grid).
  */
-export const MAX_SETUP_STOPS = 11;
+export const MAX_SETUP_STOPS = 10;
 
 /*
  * The dashboard comes first because the level reshapes it (Guided hides its
@@ -120,14 +120,6 @@ export const SETUP_STOPS: readonly SetupStop[] = [
     settings: "notifications",
     title: "experience.setup.notifications.title",
     body: "experience.setup.notifications.body",
-  },
-  // Its own stop: the grid and these rows together are taller than a laptop's Settings.
-  {
-    id: "channels",
-    anchor: "notification-channels",
-    settings: "notifications",
-    title: "experience.setup.channels.title",
-    body: "experience.setup.channels.body",
   },
   {
     id: "trust",

@@ -70,7 +70,6 @@ const HANDS_ON: Record<string, string> = {
   clis: "features/settings/components/AgentEngineSetting.tsx",
   connectors: "features/connectors/components/ConnectorsTab.tsx",
   notifications: "features/settings/components/NotificationsTab.tsx",
-  channels: "features/settings/components/NotificationsTab.tsx",
 };
 
 test("each hands-on stop opens its Settings tab on the real controls, with no question", () => {
@@ -92,13 +91,6 @@ test("the Settings tabs the setup opens are ones every user sees", () => {
     const entry = tabs.slice(tabs.indexOf(`  ${stop.settings}: {`)).split("},")[0]!;
     assert.ok(!entry.includes("adminOnly"), `${stop.id}: Settings tab is admin-only`);
   }
-});
-
-test("the Chrome and Slack connections sit inside the channels frame", () => {
-  const tab = readFileSync(join(SRC, "features/settings/components/NotificationsTab.tsx"), "utf8");
-  const frame = tab.slice(tab.indexOf('data-setup="notification-channels"'));
-  assert.ok(frame.indexOf("turnOnChrome") > 0, "no Chrome switch-on in the frame");
-  assert.ok(frame.indexOf("<SlackConnectionSection") > 0, "no Slack section in the frame");
 });
 
 test("only stops about a Settings control open Settings", () => {
@@ -163,7 +155,7 @@ test("the theme stop follows the level and offers every Settings theme", () => {
 
 test("a setup back from a sign-in picks up at the stop it left", () => {
   const stops = setupStops("platform");
-  assert.equal(stops[resumeStopIndex(stops, "channels")]!.id, "channels");
+  assert.equal(stops[resumeStopIndex(stops, "notifications")]!.id, "notifications");
   assert.equal(stops[resumeStopIndex(stops, "connectors")]!.id, "connectors");
   assert.equal(resumeStopIndex(stops, undefined), 0);
   // The key stop is gone once the billing answer changed away from an own key.
