@@ -56,6 +56,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
+from ....sandbox.services import ComposeError, ComposeService, parse_compose
+
 CONSTRAINTS_FILE = "optimize.toml"
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_PATHS = 200
@@ -85,6 +87,8 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "metric": frozenset({"files", "exploits", "reference", "mcp", "services", "illegal"}),
     "run": frozenset({"entry", "timeout", "mcp", "services", "illegal"}),
     "data": frozenset({"cases"}),
+    # Compose services run beside the scorer; [services.<name>] stays the API relay.
+    "sandbox": frozenset({"compose"}),
 }
 # Every role names its MCP servers in a .mcp.json file, not catalog tool names (E46).
 _ROLE_SECTIONS = frozenset({"proposer", "run", "metric"})
@@ -259,6 +263,9 @@ class RepoConstraints:
     # keeps the path; read_constraints fills cases from the file in the snapshot.
     cases_file: str | None = None
     cases: tuple[dict[str, Any], ...] = ()
+    # parse_constraints keeps the path; read_constraints fills the services from the snapshot.
+    compose_file: str | None = None
+    compose_services: tuple[ComposeService, ...] = ()
 
     @property
     def rule_files(self) -> tuple[str, ...]:
@@ -1189,6 +1196,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     _check_secret_receivers(services, {})
     instructions_file = None if instructions is None else _one_file(instructions, "instructions")
     cases_file = _cases_file(document.get("data"))
+    sandbox = document.get("sandbox", {})
+    compose_file = _one_file(sandbox["compose"], "[sandbox] compose") if "compose" in sandbox else None
     rule_files = [("instructions", instructions_file)]
     rule_files += [
         (label, role["illegal_file"])
@@ -1227,6 +1236,7 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         services=services,
         metric=metric,
         cases_file=cases_file,
+        compose_file=compose_file,
     )
 
 
@@ -1245,14 +1255,43 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
             one secret goes to two hosts, when a named instructions or rule
             file is missing, not a regular text file, too large, empty, or not
             a list of top-level bullets, or when the ``[data] cases`` file is
-            missing, too large, empty, or has a line that is not one case.
+            missing, too large, empty, or has a line that is not one case,
+            or when the ``[sandbox] compose`` file is missing or not a
+            compose file the box can run.
     """
     raw = read_constraints_file(archive)
     if raw is None:
         return None
     constraints = _load_mcp_files(parse_constraints(raw), archive)
     _check_secret_receivers(constraints.services, constraints.mcp_roles)
-    return _load_cases(_load_rule_files(constraints, archive), archive)
+    return _load_compose(_load_cases(_load_rule_files(constraints, archive), archive), archive)
+
+
+def _load_compose(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
+    """Fill the compose services from the ``[sandbox] compose`` file.
+
+    Args:
+        constraints: The parsed proposal.
+        archive: Packed tree from :func:`fetch_snapshot`, the same snapshot the toml came from.
+
+    Returns:
+        The proposal with ``compose_services`` filled, unchanged when there is no compose file.
+
+    Raises:
+        ConstraintsError: When the file is missing, not a regular text file,
+            too large, or not a compose file the box can run.
+    """
+    path = constraints.compose_file
+    if path is None:
+        return constraints
+    with tarfile.open(archive, "r:gz") as packed:
+        members = {str(PurePosixPath(m.name)): m for m in packed.getmembers()}
+        text = _read_text_file(packed, members.get(path), "[sandbox] compose", path)
+    try:
+        services = parse_compose(text)
+    except ComposeError as error:
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [sandbox] compose names '{path}': {error}") from None
+    return replace(constraints, compose_services=services)
 
 
 def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:

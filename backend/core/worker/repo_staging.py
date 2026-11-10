@@ -56,6 +56,7 @@ from ..connectors.transport import label as host_label
 from ..exceptions import ServiceError
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
+from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import runner
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
@@ -154,6 +155,9 @@ class StagedRepository:
     secret_bindings: Mapping[str, str] = field(default_factory=dict)
     secret_hosts: Mapping[str, str] = field(default_factory=dict)
     secret_allowed_hosts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # The [sandbox] compose services start only next to the scorer box, read
+    # from the base commit, so a version cannot change what scores it.
+    compose_services: tuple[ComposeService, ...] = ()
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -448,6 +452,7 @@ def stage_repository(
         run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
         agent_archive=agent_archive,
         scorer_archive=scorer_archive,
+        compose_services=environment.constraints.compose_services if environment.constraints is not None else (),
         exploits_path=metric.exploits,
         secret_bindings=secret_bindings,
         secret_hosts=environment.constraints.secret_hosts if environment.constraints is not None else {},
@@ -778,6 +783,7 @@ def bind_repo_scorer(
                 network_disabled=not hosts,
                 allowed_hosts=hosts,
                 operation_key=f"repo-scorer:{owner_id}",
+                services=staged.compose_services,
             ),
             archive=staged.scorer_archive or staged.snapshot.archive,
             editable_paths=target["repo"]["editable_paths"],

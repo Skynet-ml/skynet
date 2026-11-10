@@ -33,6 +33,7 @@ from core.connectors.github_publish import HardeningSummary, PublishedChange, Re
 from core.connectors.github_repo import RepoFetchError, RepoRateLimitError, RepoSnapshot
 from core.exceptions import ServiceError
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import runner
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
 from core.service_gateway.optimization.blackbox.repo_constraints import (
@@ -613,6 +614,7 @@ class _Box:
         self._cutoff_works = cutoff_works
         self.commands: list[tuple[str, bool]] = []
         self.closed = False
+        self.service_bases: list[str] = []
 
     def write_files(self, files: dict[str, str]) -> None:
         """Accept files."""
@@ -628,7 +630,17 @@ class _Box:
             return CommandResult(exit_code=1) if self.online else CommandResult(exit_code=0, stdout=_PROBE_OK)
         if "hashlib.sha256" in command:
             return CommandResult(exit_code=0, stdout="0" * 64)
+        if "pwd -P" in command:
+            return CommandResult(exit_code=0, stdout="/box/.app-services\n")
         return CommandResult(exit_code=0)
+
+    def start_services(self, base_dir: str) -> None:
+        """Record the start of the compose services.
+
+        Args:
+            base_dir: The folder the services run in.
+        """
+        self.service_bases.append(base_dir)
 
     def disable_network(self) -> None:
         """Switch the network off, or fail like a provider that refused."""
@@ -807,6 +819,20 @@ def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> N
     staged.close_scorers()
     assert staged.scorers == []
     assert box.closed
+
+
+def test_binding_starts_the_base_compose_services_next_to_the_scorer(tmp_path: Path) -> None:
+    """The scorer box gets the base commit's ``[sandbox] compose`` services, and only those."""
+    payload, bare = _binding(tmp_path, None)
+    db = ComposeService(name="db", command="postgres -D /data")
+    staged = dataclasses.replace(bare, compose_services=(db,))
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert gateway.boxes[0].spec.services == (db,)
+    assert gateway.boxes[0].service_bases == ["/box/.app-services"]
+    staged.close_scorers()
 
 
 def test_binding_gives_the_scorer_the_secret_hosts_and_the_run_budget(tmp_path: Path) -> None:

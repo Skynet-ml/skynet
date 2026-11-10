@@ -198,7 +198,13 @@ def unhealthy_services(services: Collection[str], probe: Callable[[str], bool]) 
 
 
 def stage_spec(
-    name: str, stage: TargetStage, *, evaluation_id: str, lifetime_seconds: float, tags: Mapping[str, str]
+    name: str,
+    stage: TargetStage,
+    *,
+    evaluation_id: str,
+    lifetime_seconds: float,
+    tags: Mapping[str, str],
+    snapshot_id: str | None = None,
 ) -> SandboxSpec:
     """Build the spec of one stage box for one candidate evaluation.
 
@@ -220,6 +226,8 @@ def stage_spec(
         lifetime_seconds: The candidate evaluation's limit, which is also the
             box's hold (E31).
         tags: The job's labels, so the sweep finds the box.
+        snapshot_id: The stage tree's own after-setup snapshot, never the
+            scorer's, so the box gets no metric file; ``None`` opens it empty.
 
     Returns:
         The stage box's spec.
@@ -232,6 +240,7 @@ def stage_spec(
         vcpus=stage.vcpus,
         network_disabled=True,
         operation_key=f"stage:{evaluation_id}:{name}",
+        snapshot_id=snapshot_id,
     )
 
 
