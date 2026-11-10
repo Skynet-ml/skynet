@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { runHref, type ApiSource } from "@/shared/lib/api-route";
 import { toast } from "react-toastify";
 import {
   ArrowRight,
@@ -149,7 +150,13 @@ function errorText(err: unknown): string {
  * that finds no better model starts no run and is left out of the history. A
  * candidate becomes the incumbent only when the owner approves it.
  */
-export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
+export function ContinuousTab({
+  optimizationId,
+  source,
+}: {
+  optimizationId: string;
+  source?: ApiSource;
+}) {
   const [state, setState] = useState<ContinuousState | null>(null);
   const [turnedOn, setTurnedOn] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -157,7 +164,7 @@ export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    getContinuousState(optimizationId)
+    getContinuousState(optimizationId, source)
       .then((next) => {
         if (!cancelled) setState(next);
       })
@@ -167,14 +174,14 @@ export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [optimizationId]);
+  }, [optimizationId, source]);
 
   useEffect(() => {
     const delay = state?.plan ? refreshDelayMs(state.plan, Date.now()) : null;
     if (delay === null) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      getContinuousState(optimizationId)
+      getContinuousState(optimizationId, source)
         .then((next) => {
           if (!cancelled) setState(next);
         })
@@ -187,7 +194,7 @@ export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [state, optimizationId]);
+  }, [state, optimizationId, source]);
 
   const act: Act = async (run, success) => {
     setBusy(true);
@@ -208,11 +215,11 @@ export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
     if (!state?.plan) return;
     setBusy(true);
     try {
-      await deleteContinuous(state.plan.id);
+      await deleteContinuous(state.plan.id, source);
       toast.success(msg("continuous_tab.toast.deleted"));
       window.dispatchEvent(new Event("optimizations-changed"));
       setTurnedOn(false);
-      setState(await getContinuousState(optimizationId));
+      setState(await getContinuousState(optimizationId, source));
     } catch (err) {
       toast.error(errorText(err));
     } finally {
@@ -286,7 +293,7 @@ export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
               idPrefix="continuous-schedule"
               finishLabel="continuous_tab.walk.start"
               onFinish={(body) =>
-                act(() => enableContinuous(optimizationId, body), "continuous_tab.toast.enabled")
+                act(() => enableContinuous(optimizationId, body, source), "continuous_tab.toast.enabled")
               }
             />
           )}
@@ -297,7 +304,7 @@ export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
   if (state.plan.status === "waiting" || state.plan.status === "ended") {
     return <NotStartedView plan={state.plan} busy={busy} remove={remove} />;
   }
-  return <PlanView plan={state.plan} busy={busy} act={act} />;
+  return <PlanView plan={state.plan} busy={busy} act={act} source={source} />;
 }
 
 function StatusLabel({ tone, children }: { tone: "success" | "muted"; children: React.ReactNode }) {
@@ -395,7 +402,12 @@ function DeleteButton({ busy, remove }: { busy: boolean; remove: Remove }) {
   );
 }
 
-function PlanView({ plan, busy, act }: { plan: ContinuousPlan; busy: boolean; act: Act }) {
+function PlanView({ plan, busy, act, source }: {
+  plan: ContinuousPlan;
+  busy: boolean;
+  act: Act;
+  source?: ApiSource;
+}) {
   const paused = plan.status === "paused";
   const [editing, setEditing] = useState<ScheduleRule | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -405,7 +417,7 @@ function PlanView({ plan, busy, act }: { plan: ContinuousPlan; busy: boolean; ac
     <Card className="mt-4 overflow-hidden py-0">
       <CardContent className="divide-y divide-border/50 p-0">
         {pending.map((cycle) => (
-          <ReviewCard key={cycle.id} plan={plan} cycle={cycle} busy={busy} act={act} />
+          <ReviewCard key={cycle.id} plan={plan} cycle={cycle} busy={busy} act={act} source={source} />
         ))}
 
         <div className="space-y-2 p-5 sm:p-6">
@@ -440,7 +452,7 @@ function PlanView({ plan, busy, act }: { plan: ContinuousPlan; busy: boolean; ac
               disabled={busy}
               onCheckedChange={(on) =>
                 act(
-                  () => setContinuousPaused(plan.id, !on),
+                  () => setContinuousPaused(plan.id, !on, source),
                   on ? "continuous_tab.toast.resumed" : "continuous_tab.toast.paused",
                 )
               }
@@ -501,7 +513,7 @@ function PlanView({ plan, busy, act }: { plan: ContinuousPlan; busy: boolean; ac
                     disabled={busy || scheduleProblem(editing) != null}
                     onClick={() =>
                       act(async () => {
-                        const next = await updateContinuousSchedule(plan.id, editing);
+                        const next = await updateContinuousSchedule(plan.id, editing, source);
                         setEditing(null);
                         return next;
                       }, "continuous_tab.toast.schedule_saved")
@@ -519,7 +531,7 @@ function PlanView({ plan, busy, act }: { plan: ContinuousPlan; busy: boolean; ac
               <bdi className="font-mono text-[0.8125rem] break-all">
                 {plan.incumbent_optimization_id}
               </bdi>
-              <RunLink id={plan.incumbent_optimization_id} />
+              <RunLink id={plan.incumbent_optimization_id} source={source} />
             </span>
           </SettingRow>
         </dl>
@@ -559,7 +571,7 @@ function PlanView({ plan, busy, act }: { plan: ContinuousPlan; busy: boolean; ac
               ) : (
                 <ol className="divide-y divide-border/50 border-t border-border/50">
                   {plan.cycles.map((cycle) => (
-                    <CycleRow key={cycle.id} cycle={cycle} />
+                    <CycleRow key={cycle.id} cycle={cycle} source={source} />
                   ))}
                 </ol>
               )}
@@ -600,12 +612,12 @@ function SettingRow({
 }
 
 /** An icon link to a run, named by its tooltip. */
-function RunLink({ id }: { id: string }) {
+function RunLink({ id, source }: { id: string; source?: ApiSource }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <Button variant="ghost" size="icon-sm" asChild aria-label={msg("continuous_tab.open_run")}>
-          <Link href={`/optimizations/${id}`}>
+          <Link href={runHref(id, source)}>
             <LinkSimple className="size-4" aria-hidden />
           </Link>
         </Button>
@@ -723,11 +735,13 @@ function ReviewCard({
   cycle,
   busy,
   act,
+  source,
 }: {
   plan: ContinuousPlan;
   cycle: ContinuousCycle;
   busy: boolean;
   act: Act;
+  source?: ApiSource;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 bg-primary/[0.05] p-5 animate-in fade-in-0 slide-in-from-top-2 [animation-duration:400ms] [animation-timing-function:cubic-bezier(0.16,1,0.3,1)] motion-reduce:animate-none sm:p-6">
@@ -740,7 +754,7 @@ function ReviewCard({
         <ScoreChange cycle={cycle} size="lg" />
         <span className="flex items-center">
           <CycleChanges cycle={cycle} />
-          {cycle.optimization_id && <RunLink id={cycle.optimization_id} />}
+          {cycle.optimization_id && <RunLink id={cycle.optimization_id} source={source} />}
         </span>
         <span className="flex gap-2 ps-2">
           <Button
@@ -750,7 +764,7 @@ function ReviewCard({
             disabled={busy}
             onClick={() =>
               act(
-                () => reviewContinuousCycle(plan.id, cycle.id, false),
+                () => reviewContinuousCycle(plan.id, cycle.id, false, source),
                 "continuous_tab.toast.rejected",
               )
             }
@@ -763,7 +777,7 @@ function ReviewCard({
             disabled={busy}
             onClick={() =>
               act(
-                () => reviewContinuousCycle(plan.id, cycle.id, true),
+                () => reviewContinuousCycle(plan.id, cycle.id, true, source),
                 "continuous_tab.toast.approved",
               )
             }
@@ -776,7 +790,7 @@ function ReviewCard({
   );
 }
 
-function CycleRow({ cycle }: { cycle: ContinuousCycle }) {
+function CycleRow({ cycle, source }: { cycle: ContinuousCycle; source?: ApiSource }) {
   const StatusIcon = STATUS_ICONS[cycle.status] ?? CircleNotch;
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5 px-5 py-2.5 sm:grid-cols-[8.5rem_9rem_minmax(0,1fr)_auto] sm:px-6">
@@ -800,7 +814,7 @@ function CycleRow({ cycle }: { cycle: ContinuousCycle }) {
       </span>
       <span className="col-start-2 row-span-3 row-start-1 flex items-center sm:col-start-auto sm:row-span-1 sm:row-start-auto">
         <CycleChanges cycle={cycle} />
-        {cycle.optimization_id && <RunLink id={cycle.optimization_id} />}
+        {cycle.optimization_id && <RunLink id={cycle.optimization_id} source={source} />}
       </span>
     </li>
   );

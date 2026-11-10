@@ -455,13 +455,14 @@ def create_serve_router(*, job_store) -> APIRouter:
         summary="Describe an optimized program without running it",
         tags=["agent"],
     )
-    def serve_info(optimization_id: str, current_user: AuthenticatedUserDep) -> ServeInfoResponse:
+    def serve_info(optimization_id: str, request: Request, current_user: AuthenticatedUserDep) -> ServeInfoResponse:
         """Describe a finished repository run without running it.
 
         Metadata-only: no sandbox or LLM calls.
 
         Args:
             optimization_id: Optimization id whose program should be described.
+            request: Incoming request whose origin serves the API.
             current_user: Authenticated caller resolved from the bearer token.
 
         Returns:
@@ -485,6 +486,7 @@ def create_serve_router(*, job_store) -> APIRouter:
             input_fields=[],
             output_fields=[],
             serving_enabled=serving_enabled(job_data),
+            endpoint_url=f"{str(request.base_url).rstrip('/')}/serve/{optimization_id}",
         )
 
     @router.put(

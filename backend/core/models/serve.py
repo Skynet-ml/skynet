@@ -125,6 +125,7 @@ class ServeInfoResponse(BaseModel):
     demo_count: int = 0
     sample_inputs: dict[str, str] = Field(default_factory=dict)
     serving_enabled: bool = False
+    endpoint_url: str | None = None
 
 
 # Body of PUT /serve/{id}/enabled. Serving is opt-in per run because each call

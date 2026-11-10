@@ -4597,5 +4597,6 @@
   "usage.day.empty": "אין קריאות בחיוב ביום הזה.",
   "usage.day.load_error": "לא הצלחנו לטעון את הקריאות של היום הזה.",
   "usage.day.truncated": "מוצגות {shown} הקריאות האחרונות מתוך {total}.",
-  "usage.day.loading": "טוען את הקריאות של היום הזה…"
+  "usage.day.loading": "טוען את הקריאות של היום הזה…",
+  "optimization.program_repository.history": "ציון היסטורי מהתוכנית השמורה. שורות הנתונים ודוגמאות האימון אינן כלולות."
 }

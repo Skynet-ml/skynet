@@ -4597,5 +4597,6 @@
   "agent.model_menu.no_results": "Aucun modèle correspondant",
   "agent.model_menu.search_placeholder": "Rechercher dans tous les modèles…",
   "agent.model_menu.clear_search": "Effacer la recherche",
-  "agent.model_menu.no_results_hint": "Essayez un autre nom ou fournisseur."
+  "agent.model_menu.no_results_hint": "Essayez un autre nom ou fournisseur.",
+  "optimization.program_repository.history": "Score historique du programme enregistré. Les lignes du jeu de données et les exemples d’entraînement ne sont pas inclus."
 }

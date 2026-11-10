@@ -2458,33 +2458,41 @@ export function getRunUsage(optimizationId: string, pairIndex?: number | null) {
 }
 
 /** Continuous optimization of one run: its plan (or null) and whether one can start. */
-export function getContinuousState(optimizationId: string) {
+export function getContinuousState(optimizationId: string, source?: ApiSource) {
   return request<ContinuousState>(
     `/optimizations/${encodeURIComponent(optimizationId)}/continuous`,
+    undefined,
+    source,
   );
 }
 
-export function enableContinuous(optimizationId: string, body: ContinuousEnableRequest) {
+export function enableContinuous(
+  optimizationId: string,
+  body: ContinuousEnableRequest,
+  source?: ApiSource,
+) {
   return request<ContinuousPlan>(
     `/optimizations/${encodeURIComponent(optimizationId)}/continuous`,
     {
       method: "POST",
       body: JSON.stringify(body),
     },
+    source,
   );
 }
 
 /** Pause or resume a plan. */
-export function setContinuousPaused(planId: string, paused: boolean) {
+export function setContinuousPaused(planId: string, paused: boolean, source?: ApiSource) {
   return request<ContinuousPlan>(
     `/continuous/${encodeURIComponent(planId)}/${paused ? "pause" : "resume"}`,
     { method: "POST" },
+    source,
   );
 }
 
 /** Delete a plan and its check history; the runs it started stay. The route returns 204. */
-export async function deleteContinuous(planId: string): Promise<void> {
-  const res = await fetchWithAuthRetry(`${apiBase()}/continuous/${encodeURIComponent(planId)}`, {
+export async function deleteContinuous(planId: string, source?: ApiSource): Promise<void> {
+  const res = await fetchWithAuthRetry(apiUrl(`/continuous/${encodeURIComponent(planId)}`, source), {
     method: "DELETE",
   });
   if (!res.ok) {
@@ -2497,18 +2505,25 @@ export async function deleteContinuous(planId: string): Promise<void> {
 }
 
 /** Replace when a plan checks; a paused plan stays paused. */
-export function updateContinuousSchedule(planId: string, rule: ScheduleRule) {
-  return request<ContinuousPlan>(`/continuous/${encodeURIComponent(planId)}/schedule`, {
-    method: "PUT",
-    body: JSON.stringify(rule),
-  });
+export function updateContinuousSchedule(planId: string, rule: ScheduleRule, source?: ApiSource) {
+  return request<ContinuousPlan>(
+    `/continuous/${encodeURIComponent(planId)}/schedule`,
+    { method: "PUT", body: JSON.stringify(rule) },
+    source,
+  );
 }
 
 /** Approve (the candidate becomes the incumbent) or reject a candidate in review. */
-export function reviewContinuousCycle(planId: string, cycleId: string, approve: boolean) {
+export function reviewContinuousCycle(
+  planId: string,
+  cycleId: string,
+  approve: boolean,
+  source?: ApiSource,
+) {
   return request<ContinuousPlan>(
     `/continuous/${encodeURIComponent(planId)}/cycles/${encodeURIComponent(cycleId)}/${approve ? "approve" : "reject"}`,
     { method: "POST" },
+    source,
   );
 }
 
@@ -3998,15 +4013,16 @@ export async function claimSharedFolder(token: string) {
   return result;
 }
 
-export function getServeInfo(optimizationId: string) {
-  return request<ServeInfoResponse>(`/serve/${optimizationId}/info`);
+export function getServeInfo(optimizationId: string, source?: ApiSource) {
+  return request<ServeInfoResponse>(`/serve/${optimizationId}/info`, undefined, source);
 }
 
 /** Turn serving on or off for a finished repository run (owner only). */
-export function setServingEnabled(optimizationId: string, enabled: boolean) {
+export function setServingEnabled(optimizationId: string, enabled: boolean, source?: ApiSource) {
   return request<{ optimization_id: string; serving_enabled: boolean }>(
     `/serve/${optimizationId}/enabled`,
     { method: "PUT", body: JSON.stringify({ enabled }) },
+    source,
   );
 }
 
@@ -4025,12 +4041,17 @@ export function serveProgram(
   optimizationId: string,
   inputs: Record<string, unknown>,
   idempotencyKey: string,
+  source?: ApiSource,
 ) {
-  return request<ServeResponse>(`/serve/${optimizationId}`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
+  return request<ServeResponse>(
+    `/serve/${optimizationId}`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ inputs }),
+    },
+    source,
+  );
 }
 
 /** Run inference through one grid-search pair (non-streaming). */

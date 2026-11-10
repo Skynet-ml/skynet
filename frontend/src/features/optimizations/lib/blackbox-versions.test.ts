@@ -33,6 +33,14 @@ function runResult(overrides: Partial<BlackboxRunResult>): BlackboxRunResult {
 }
 
 describe("buildVersions", () => {
+  it("shows an unchanged repository as its starting version", () => {
+    const versions = buildVersions(runResult({ seed_candidate: "", best_candidate: "", baseline_score: 0.8, best_score: 0.8 }));
+    assert.equal(versions.length, 1);
+    assert.equal(versions[0].isSeed, true);
+    assert.equal(versions[0].isBest, true);
+    assert.equal(versions[0].score, 0.8);
+  });
+
   it("lays the history out as v0 seed then first-seen versions", () => {
     const versions = buildVersions(
       runResult({

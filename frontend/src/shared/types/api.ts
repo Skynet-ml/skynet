@@ -986,6 +986,7 @@ export interface OptimizationDatasetResponse {
 
 export interface ServeInfoResponse {
   optimization_id: string;
+  endpoint_url?: string | null;
   module_name: string;
   optimizer_name: string;
   model_name: string;

@@ -7,6 +7,8 @@ import { useSession } from "next-auth/react";
 import { motion, useReducedMotion } from "framer-motion";
 import { toast } from "react-toastify";
 import { ChartBar, Table } from "@/shared/ui/icons";
+import { InlineErrorRow } from "@/shared/ui/inline-error-row";
+import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { DashboardSkeleton, JobsTabSkeleton } from "./DashboardSkeleton";
 import { Card } from "@/shared/ui/primitives/card";
 import {
@@ -112,7 +114,8 @@ export function DashboardView() {
     fetchJobs,
   } = useJobsList({ sessionUser, isAdmin });
 
-  const { analyticsData, setAnalyticsData, analyticsLoading } = useDashboardAnalytics({
+  const { analyticsData, analyticsLoading, analyticsError, fetchDashboardAnalytics } = useDashboardAnalytics({
+    source: web ? "hosted" : "local",
     sessionUser,
     isAdmin,
     activeTab,
@@ -131,17 +134,15 @@ export function DashboardView() {
 
   const queueStatus = useQueueStatus();
 
-  // Cross-component sync (sidebar delete/rename, etc.): refetch the
-  // current jobs page and invalidate the analytics cache so the next
-  // analytics-tab visit re-pulls.
+  // Refresh visible analytics without removing the current charts.
   useEffect(() => {
     const onJobsChanged = () => {
       void fetchJobs();
-      setAnalyticsData(null);
+      if (activeTab === "analytics") void fetchDashboardAnalytics();
     };
     window.addEventListener("optimizations-changed", onJobsChanged);
     return () => window.removeEventListener("optimizations-changed", onJobsChanged);
-  }, [fetchJobs, setAnalyticsData]);
+  }, [fetchJobs, activeTab, fetchDashboardAnalytics]);
 
   useJobsRealtime({ data, fetchJobs });
 
@@ -519,6 +520,19 @@ export function DashboardView() {
               </TabsContent>
 
               <TabsContent value="analytics">
+                {analyticsError && (
+                  <InlineErrorRow
+                    message={msg("dashboard.load_error")}
+                    action={
+                      <RetryIconButton
+                        label={msg("billing.wallet.retry")}
+                        loading={analyticsLoading}
+                        onClick={() => void fetchDashboardAnalytics()}
+                      />
+                    }
+                  />
+                )}
+                {(!analyticsError || analyticsData !== null) && (
                 <AnalyticsTab
                   analyticsLoading={analyticsLoading}
                   analyticsData={analyticsData}
@@ -527,6 +541,7 @@ export function DashboardView() {
                   sessionUser={sessionUser}
                   onOpenJob={(id) => router.push(runHref(id, web ? "hosted" : "local"))}
                 />
+                )}
               </TabsContent>
             </Tabs>
           )}

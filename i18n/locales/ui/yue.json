@@ -4597,5 +4597,6 @@
   "agent.model_menu.no_results": "冇相符嘅模型",
   "agent.model_menu.search_placeholder": "搜尋所有模型…",
   "agent.model_menu.clear_search": "清除搜尋",
-  "agent.model_menu.no_results_hint": "試吓第二個名或者供應商。"
+  "agent.model_menu.no_results_hint": "試吓第二個名或者供應商。",
+  "optimization.program_repository.history": "嚟自已儲存程式嘅過往分數。唔包括數據集嘅行同訓練例子。"
 }

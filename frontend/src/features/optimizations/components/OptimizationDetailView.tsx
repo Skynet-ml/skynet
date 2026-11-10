@@ -9,6 +9,8 @@ import { useSession } from "next-auth/react";
 import {
   XCircle,
   Clock,
+  Hash,
+  TextAlignLeft,
   Code,
   Terminal,
   TrendUp,
@@ -36,7 +38,7 @@ import { PingDot } from "@/shared/ui/ping-dot";
 import { markRecentSession } from "@/shared/lib/recent-session";
 import { FadeIn } from "@/shared/ui/motion";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
-import { CopyButton } from "@/shared/ui/copy-button";
+import { CopyButton, useCopyToClipboard } from "@/shared/ui/copy-button";
 import {
   getJob,
   cancelJob,
@@ -355,6 +357,7 @@ export function OptimizationDetailView({
   // later with the token now in place.
   const { status: sessionStatus } = useSession();
   const authReady = isShare || sessionStatus === "authenticated";
+  const { copy: copyRunId } = useCopyToClipboard();
 
   const [job, setJob] = useState<OptimizationStatusResponse | null>(null);
   // Opening a run shared with the caller shows it in Shared with me again if
@@ -747,14 +750,13 @@ export function OptimizationDetailView({
       !jobIsBlackbox ||
       !jobId ||
       skipNetwork ||
-      isPairContext ||
-      source === "hosted"
+      isPairContext
     ) {
       setEndedRunHasPlan(false);
       return;
     }
     let cancelled = false;
-    getContinuousState(jobId)
+    getContinuousState(jobId, source)
       .then((state) => {
         if (!cancelled) setEndedRunHasPlan(state.plan != null);
       })
@@ -903,10 +905,8 @@ export function OptimizationDetailView({
   // Continuous optimization starts from the owner's own successful repository
   // run; the backend still decides whether this run can carry a plan. Legacy
   // DSPy program runs stay readable but get no new cycles.
-  // Continuous plans are managed on hosted itself, not through the Mac.
   const showContinuousTab =
     !skipNetwork &&
-    source === "local" &&
     !isPairContext &&
     jobIsBlackbox &&
     !isLegacyDspyRun &&
@@ -932,6 +932,9 @@ export function OptimizationDetailView({
   return (
     <div className="space-y-6 pb-12">
       {sharedTier && <RunAccessBanner tier={sharedTier} owner={sharedByOwner} />}
+      {job.blackbox_result?.details?.score_provenance === "saved_program_test" && (
+        <p className="text-xs text-muted-foreground">{msg("optimization.program_repository.history")}</p>
+      )}
       {/* Gate on the predicate too: an empty FadeIn div would add a space-y-6 gap above the summary. */}
       {jobIsBlackbox &&
         job.status === "success" &&
@@ -967,22 +970,29 @@ export function OptimizationDetailView({
                 )}
               </div>
               {job.description && (
-                <p className="text-sm text-muted-foreground/70 leading-relaxed">
-                  {job.description}
+                <p className="flex items-start gap-1.5 text-sm text-muted-foreground/70 leading-relaxed">
+                  <TextAlignLeft className="mt-1 size-3.5 shrink-0" aria-hidden="true" />
+                  <span dir="auto">{job.description}</span>
                 </p>
               )}
-              <span className="inline-flex items-center gap-1">
-                <code className="break-all font-mono text-xs text-muted-foreground/60" dir="ltr">
+              <button
+                type="button"
+                className="inline-flex max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground/60 transition-colors hover:text-primary focus-visible:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+                aria-label={formatMsg("auto.app.optimizations.id.page.template.3", {
+                  p1: TERMS.optimization,
+                })}
+                title={formatMsg("auto.app.optimizations.id.page.template.3", {
+                  p1: TERMS.optimization,
+                })}
+                onClick={async () => {
+                  if (await copyRunId(job.optimization_id)) notifyCopied();
+                }}
+              >
+                <Hash className="size-3.5 shrink-0" aria-hidden="true" />
+                <code className="break-all font-mono text-xs" dir="ltr">
                   {job.optimization_id}
                 </code>
-                <CopyButton
-                  text={job.optimization_id}
-                  ariaLabel={formatMsg("auto.app.optimizations.id.page.template.3", {
-                    p1: TERMS.optimization,
-                  })}
-                  onCopied={notifyCopied}
-                />
-              </span>
+              </button>
               <div className="flex items-center gap-3 flex-wrap text-sm text-muted-foreground">
                 {job.optimization_type === "grid_search" ? (
                   <span className="flex items-center gap-1.5">
@@ -1451,13 +1461,21 @@ export function OptimizationDetailView({
 
             {showServeTab && (
               <TabsContent value="playground">
-                <ServeTab optimizationId={job.optimization_id} />
+                <ServeTab
+                  key={`${source}:${job.optimization_id}`}
+                  optimizationId={job.optimization_id}
+                  source={source}
+                />
               </TabsContent>
             )}
 
             {!isPhone && showContinuousTab && (
               <TabsContent value="continuous">
-                <ContinuousTab optimizationId={job.optimization_id} />
+                <ContinuousTab
+                  key={`${source}:${job.optimization_id}`}
+                  optimizationId={job.optimization_id}
+                  source={source}
+                />
               </TabsContent>
             )}
 

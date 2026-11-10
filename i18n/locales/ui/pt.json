@@ -4597,5 +4597,6 @@
   "agent.model_menu.no_results": "Nenhum modelo correspondente",
   "agent.model_menu.search_placeholder": "Pesquisar todos os modelos…",
   "agent.model_menu.clear_search": "Limpar pesquisa",
-  "agent.model_menu.no_results_hint": "Tente outro nome ou fornecedor."
+  "agent.model_menu.no_results_hint": "Tente outro nome ou fornecedor.",
+  "optimization.program_repository.history": "Pontuação histórica do programa guardado. As linhas do conjunto de dados e os exemplos de treino não estão incluídos."
 }

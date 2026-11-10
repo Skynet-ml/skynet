@@ -65,7 +65,7 @@ export function buildVersions(result: BlackboxRunResult): CandidateVersion[] {
   const seen = new Set<string>();
   const versions: CandidateVersion[] = [];
 
-  if (result.seed_candidate != null && seedText.length > 0) {
+  if (result.seed_candidate != null) {
     const record = history.find((v) => candidateToText(v.candidate) === seedText) ?? null;
     versions.push(
       fromRecord(result.seed_candidate, seedText, record, result.baseline_score ?? result.baseline_test_metric ?? null, true),

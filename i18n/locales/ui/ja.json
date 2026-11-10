@@ -4597,5 +4597,6 @@
   "agent.model_menu.no_results": "一致するモデルはありません",
   "agent.model_menu.search_placeholder": "すべてのモデルを検索…",
   "agent.model_menu.clear_search": "検索をクリア",
-  "agent.model_menu.no_results_hint": "別の名前やプロバイダーをお試しください。"
+  "agent.model_menu.no_results_hint": "別の名前やプロバイダーをお試しください。",
+  "optimization.program_repository.history": "保存済みプログラムの過去のスコアです。データセットの行とトレーニング例は含まれません。"
 }

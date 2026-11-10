@@ -349,7 +349,9 @@ class UsageSnapshot:
     and per-model series the dashboard charts, plus the most recent raw ledger
     rows for the activity list. ``billed_cents`` is gross run spend (the
     absolute value of negative run rows). Top-ups and grants are excluded from
-    the spend rollups but still surface in ``entries``.
+    the spend rollups but still surface in ``entries``. ``runs`` counts owned
+    jobs created in the window. The per-day and per-model ``runs`` fields retain
+    their billed-call counts for the activity breakdowns.
     """
 
     start: str
@@ -1188,8 +1190,9 @@ class StripeBillingService:
     def get_usage(self, username: str, start: datetime, end: datetime) -> UsageSnapshot:
         """Aggregate the account's wallet ledger over a date window for the dashboard.
 
-        A pure DB read — no Stripe call. Sums run rows in ``[start, end]`` into
-        gross billed spend, a run count, a per-day series of billed cents, runs
+        A pure DB read — no Stripe call. Counts owned optimizations created in
+        ``[start, end]``, including runs without wallet charges. Sums ledger rows into
+        gross billed spend, a per-day series of billed cents, calls
         and tokens (ascending by date), and a per-model spend series (descending by spend); top-ups
         and grants are excluded from those rollups. The most recent :data:`USAGE_ENTRY_LIMIT` raw ledger rows in the
         window ride along as ``entries`` for the activity list and the per-run
@@ -1206,6 +1209,18 @@ class StripeBillingService:
             the most recent ledger rows.
         """
         with Session(self._engine) as session:
+            runs = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(JobModel)
+                    .where(
+                        JobModel.username == username,
+                        JobModel.created_at >= start,
+                        JobModel.created_at <= end,
+                    )
+                )
+                or 0
+            )
             # Project only the columns the fold below reads — the full entity
             # (with description text on every row) is materialized for
             # thousands of rows on a wide window, only to be reduced to sums.
@@ -1229,7 +1244,6 @@ class StripeBillingService:
                 .all()
             )
         billed = 0
-        runs = 0
         per_day: dict[str, list[int]] = {}
         per_model: dict[str | None, list[int]] = {}
         # Only debits count as spend; a positive ``run`` row (a legacy
@@ -1239,7 +1253,6 @@ class StripeBillingService:
                 continue
             spent = -row.delta_cents
             billed += spent
-            runs += 1
             day = row.created_at.date().isoformat()
             day_vals = per_day.setdefault(day, [0, 0, 0, 0])
             day_vals[0] += spent
