@@ -15,6 +15,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { cn } from "@/shared/lib/utils";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 
 /**
  * Compact account-wide storage gauge for the sidebar footer: a thin bar plus an
@@ -31,13 +32,17 @@ import { cn } from "@/shared/lib/utils";
 export function StorageMeter({ collapsed = false }: { collapsed?: boolean }) {
   const [usage, setUsage] = React.useState<StorageUsageResponse | null>(null);
   const active = usePathname().startsWith("/storage");
+  const source = useResourceMode().mode;
 
   React.useEffect(() => {
     let cancelled = false;
+    // The newest request wins, so a late answer for the other mode never shows.
+    let reqId = 0;
     const load = () => {
-      getStorageUsage()
+      const id = ++reqId;
+      getStorageUsage(source)
         .then((res) => {
-          if (!cancelled) setUsage(res);
+          if (!cancelled && id === reqId) setUsage(res);
         })
         .catch(() => {
           /* ambient gauge — stay silent if the figure is briefly unavailable */
@@ -54,7 +59,7 @@ export function StorageMeter({ collapsed = false }: { collapsed?: boolean }) {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener(STORAGE_CHANGED_EVENT, load);
     };
-  }, []);
+  }, [source]);
 
   if (!usage || usage.quota_bytes <= 0) return null;
 
