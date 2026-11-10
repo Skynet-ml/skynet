@@ -1,6 +1,6 @@
 "use client";
 
-import { ChartBar, Database, Plus, WarningCircle } from "@/shared/ui/icons";
+import { ChartBar, Database, WarningCircle } from "@/shared/ui/icons";
 import type { Icon } from "@/shared/ui/icons";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Card, CardContent } from "@/shared/ui/primitives/card";
@@ -36,7 +36,6 @@ export function AnalyticsEmpty({
       icon: Database,
       title: msg("auto.features.dashboard.components.analyticsempty.literal.1"),
       description: msg("dashboard.analytics.empty_body"),
-      action: { label: TERMS.notificationNewOpt, href: "/submit", icon: Plus },
     },
     "no-results": {
       icon: ChartBar,
@@ -71,12 +70,14 @@ export function AnalyticsEmpty({
       description={config.description}
       action={config.action}
       className={isNoData ? undefined : "min-h-[40dvh] justify-center"}
-    />
+    >
+      {isNoData && <div className="h-8" aria-hidden="true" />}
+    </EmptyState>
   );
 
-  // Same card, padding, toolbar-height spacer and content (description and
-  // action) as the Jobs tab empty state, so both cards are the same size and
-  // nothing moves when the user switches tabs.
+  // Same card, padding and toolbar-height spacer as the Jobs tab empty state.
+  // The h-8 spacer takes the place of the Jobs tab's small action button, so
+  // both cards are the same size and nothing moves when the user switches tabs.
   return (
     <FadeIn>
       {isNoData ? (
