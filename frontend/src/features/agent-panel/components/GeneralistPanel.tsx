@@ -54,6 +54,7 @@ import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-gener
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
 import { getConversation, isHostedConversation } from "../lib/conversation-api";
 import { isLocalMode } from "@/shared/lib/runtime-env";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
@@ -565,8 +566,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // its text changes with every chunk.
   const agentMessages = agent.messages;
   const agentConversationId = agent.conversationId;
-  // A web chat opens read-only on the Mac; it continues on the web.
-  const webChat = agentConversationId !== null && isHostedConversation(agentConversationId);
+  // A chat on the web account must not stage rows or act on the Mac's data.
+  // A new chat starts on the side picked in the header.
+  const { web } = useResourceMode();
+  const webChat =
+    agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
   const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
   React.useEffect(() => {
     liveChatRef.current = { id: agentConversationId, messages: agentMessages };
@@ -1116,7 +1120,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             key={chatView.key}
             messages={agent.messages}
             streaming={streaming}
-            editAndResend={webChat ? () => false : agent.editAndResend}
+            editAndResend={agent.editAndResend}
             renderToolCall={renderToolCall}
             isStepCall={isStepCall}
             isPinnedCall={isPinnedCall}
@@ -1125,7 +1129,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             animatePairs
             trailing={({ isEditingAny }) => (
               <>
-                {choices && !webChat && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
+                {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
                   <QuestionChoices
                     options={choices}
                     onSelect={(label) => agent.send(label)}
@@ -1143,7 +1147,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                       "auto.features.agent.panel.components.generalistpanel.error_retry",
                     )}
                     onRetry={
-                      webChat || agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
+                      agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
                         ? undefined
                         : agent.retry
                     }
@@ -1162,13 +1166,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </ChatSourceContext.Provider>
       </AgentThread>
 
-      {webChat && (
-        <p className="px-3 pb-1 text-[0.75rem] text-muted-foreground">
-          {msg("agent.web_chat.read_only")}
-        </p>
-      )}
       <Composer
-        disabled={webChat}
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}

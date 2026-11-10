@@ -11,7 +11,7 @@ import { parseMessageTime } from "@/shared/ui/agent/message-time";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { parseThinkingRows } from "@/shared/lib/thinking-segments";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
-import { apiUrl, fetchWithAuthRetry, hostedRunsAvailable } from "@/shared/lib/api";
+import { apiUrl, fetchWithAuthRetry, hostedRunsAvailable, webPicked } from "@/shared/lib/api";
 import { parseSourceKey, sourceKey } from "@/shared/lib/api-route";
 import type { ApiSource } from "@/shared/lib/api-route";
 
@@ -27,7 +27,7 @@ export interface ConversationSummary {
   createdAt: string;
   updatedAt: string;
   preview: string | null;
-  /** "hosted" for a web chat a linked Mac shows read-only; its id is a hosted key. */
+  /** "hosted" for a chat on the linked web account; its id is a hosted key. */
   source?: ApiSource;
 }
 
@@ -133,14 +133,10 @@ export async function listConversations(
   if (params?.offset) q.set("offset", String(params.offset));
   const qs = q.toString();
   const path = `/agent/conversations${qs ? `?${qs}` : ""}`;
-  // Chats made on the Mac stay local; a linked Mac only adds the web chats
-  // beside them. A failed hosted read keeps the local list.
-  const [local, hosted] = await Promise.all([
-    readSummaries(`${apiBase()}${path}`, "local", signal),
-    hostedRunsAvailable() ? readSummaries(apiUrl(path, "hosted"), "hosted", signal) : null,
-  ]);
-  if (local === null || hosted === null) return local;
-  return [...local, ...hosted].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  // A linked Mac lists the side picked in the header.
+  return webPicked()
+    ? readSummaries(apiUrl(path, "hosted"), "hosted", signal)
+    : readSummaries(`${apiBase()}${path}`, "local", signal);
 }
 
 /**
@@ -169,9 +165,16 @@ async function readSummaries(
   }
 }
 
-/** Whether `conversationId` is a web chat's hosted key: the Mac never writes to one. */
+/** Whether `conversationId` is a hosted key: a chat on the linked web account. */
 export function isHostedConversation(conversationId: string): boolean {
   return parseSourceKey(conversationId).source === "hosted";
+}
+
+/** The URL of one conversation route, on the source its key names. */
+function conversationUrl(conversationId: string, suffix = ""): string {
+  const { source, id } = parseSourceKey(conversationId);
+  const path = `/agent/conversations/${encodeURIComponent(id)}${suffix}`;
+  return source === "hosted" ? apiUrl(path, "hosted") : `${apiBase()}${path}`;
 }
 
 export async function getConversation(
@@ -207,31 +210,25 @@ export async function patchConversation(
   conversationId: string,
   patch: ConversationPatch,
 ): Promise<ConversationSummary | null> {
-  if (isHostedConversation(conversationId)) return null;
+  if (isHostedConversation(conversationId) && !hostedRunsAvailable()) return null;
   try {
-    const res = await fetchWithAuthRetry(
-      `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      },
-    );
+    const res = await fetchWithAuthRetry(conversationUrl(conversationId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
     if (!res.ok) return null;
     const raw = (await res.json()) as RawSummary;
-    return toSummary(raw);
+    return toSummary(raw, parseSourceKey(conversationId).source);
   } catch {
     return null;
   }
 }
 
 export async function deleteConversation(conversationId: string): Promise<boolean> {
-  if (isHostedConversation(conversationId)) return false;
+  if (isHostedConversation(conversationId) && !hostedRunsAvailable()) return false;
   try {
-    const res = await fetchWithAuthRetry(
-      `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
-      { method: "DELETE" },
-    );
+    const res = await fetchWithAuthRetry(conversationUrl(conversationId), { method: "DELETE" });
     return res.ok;
   } catch {
     return false;

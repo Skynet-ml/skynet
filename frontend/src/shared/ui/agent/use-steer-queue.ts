@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { postAgentSteer, withdrawAgentSteers } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 
 import { midTurnOf, SteerQueue, type MidTurnQueue, type SteerChannel } from "./steer-queue";
 
@@ -32,11 +33,15 @@ export function newSteerKey(): string {
 }
 
 /** The backend steer mailbox of the turn started with `steerKey`. */
-export function agentSteerChannel(steerKey: string, onApplied?: SteerChannel["onApplied"]): SteerChannel {
+export function agentSteerChannel(
+  steerKey: string,
+  onApplied?: SteerChannel["onApplied"],
+  source?: ApiSource,
+): SteerChannel {
   return {
     onApplied,
-    post: (text) => postAgentSteer(steerKey, text),
-    withdraw: (ids) => withdrawAgentSteers(steerKey, ids),
+    post: (text) => postAgentSteer(steerKey, text, source),
+    withdraw: (ids) => withdrawAgentSteers(steerKey, ids, source),
   };
 }
 

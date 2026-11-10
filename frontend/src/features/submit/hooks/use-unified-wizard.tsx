@@ -34,6 +34,7 @@ import {
   getLatestHardeningJob,
   getStagedDataset,
   hostedRunsAvailable,
+  webPicked,
   isInsufficientFundsError,
   isStorageQuotaError,
   setupDraftApi,
@@ -425,7 +426,7 @@ export function WizardV2Provider({
   const [, setLinkReads] = useState(0);
   useEffect(() => onLinkChange(() => setLinkReads((count) => count + 1)), []);
   const hostedChoice = hostedRunsAvailable();
-  const [runOn, setRunOn] = useState<ApiSource>("local");
+  const [runOn, setRunOn] = useState<ApiSource>(() => (webPicked() ? "hosted" : "local"));
   const runSource: ApiSource = hostedChoice && runOn === "hosted" ? "hosted" : "local";
   const modelCatalog = useModelCatalog(runSource);
   const [catalogEntry, setCatalogEntry] = useState<{

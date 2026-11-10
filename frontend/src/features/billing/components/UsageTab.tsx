@@ -22,7 +22,7 @@ import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { AppDatePicker, toISODate } from "@/shared/ui/app-date-picker";
 import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { Segmented } from "@/shared/ui/segmented";
-import { ResourceModeSwitch, useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 import { PanelHeading } from "@/shared/ui/panel-heading";
 import { Button } from "@/shared/ui/primitives/button";
 import { useBalance } from "../providers/balance-provider";
@@ -659,7 +659,6 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
           />
         </div>
         <div className="flex items-center gap-2">
-          <ResourceModeSwitch {...resources} />
           <ExportTableMenu
             iconOnly
             disabled={entries.length === 0}

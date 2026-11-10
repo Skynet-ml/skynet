@@ -46,7 +46,6 @@ import {
   resumeJob,
   listFolders,
   unhideSharedItem,
-  hostedRunsAvailable,
 } from "@/shared/lib/api";
 import { pairHref, runHref, sourceFromParam } from "@/shared/lib/api-route";
 import type { RunFolder, SidebarJobItem } from "@/shared/lib/api";
@@ -70,6 +69,7 @@ import {
   useHostedRetry,
 } from "@/features/sidebar";
 import { AccountMenu } from "@/shared/layout/account-menu";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ShareDialog } from "@/features/optimizations";
 import { StorageMeter } from "@/features/storage";
@@ -308,11 +308,11 @@ export function Sidebar() {
   }, []);
 
   const hostedRetry = useHostedRetry();
+  const { web } = useResourceMode();
   const fetchData = React.useCallback(async () => {
     void fetchFolders();
     try {
-      // The Mac app with a linked account lists hosted runs too; a hosted
-      // failure leaves the local runs alone.
+      // A linked Mac lists the side picked in the header.
       const res = await loadRuns((source) => {
         const limit = refreshLimit(loadedItemsRef.current, source, PAGE_SIZE, 200);
         return tab === "shared"
@@ -323,7 +323,7 @@ export function Sidebar() {
               offset: 0,
               source,
             });
-      }, hostedRunsAvailable());
+      }, web, !web);
       // Drop the response if the user has since toggled away — applying it
       // would clobber the newer tab's list with stale rows.
       if (tabRef.current !== tab) return;
@@ -337,7 +337,7 @@ export function Sidebar() {
     } catch (err) {
       console.warn("sidebar fetch failed:", err);
     }
-  }, [sessionUser, isAdmin, tab, fetchFolders, hostedRetry.failed]);
+  }, [sessionUser, isAdmin, tab, fetchFolders, hostedRetry.failed, web]);
 
   React.useEffect(() => {
     // Dep change (login / admin toggle) — reset depth so the next fetch
@@ -394,7 +394,8 @@ export function Sidebar() {
                 offset: countFrom(jobs, source),
                 source,
               }),
-        hostedRunsAvailable(),
+        web,
+        !web,
       );
       setJobs((prev) => {
         // Dedupe in case a new job was inserted above the offset between the

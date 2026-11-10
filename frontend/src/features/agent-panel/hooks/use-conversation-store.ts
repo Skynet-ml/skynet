@@ -18,6 +18,7 @@
 // conversation seen on pick + on every conversation_meta for the active row.
 
 import * as React from "react";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 
 import {
   deleteConversation,
@@ -84,6 +85,7 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
   const [loading, setLoading] = React.useState(false);
   const [activeId, setActiveId] = React.useState<string | null>(null);
   const [lastSeen, setLastSeen] = React.useState<LastSeenMap>(() => readLastSeen());
+  const { web } = useResourceMode();
 
   const refresh = React.useCallback(
     async (params?: ListConversationsParams) => {
@@ -93,7 +95,8 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
       setLoading(false);
       if (rows !== null) setConversations(rows);
     },
-    [enabled],
+    // `web` is not read here; a new pick must list the other side's chats.
+    [enabled, web],
   );
 
   React.useEffect(() => {

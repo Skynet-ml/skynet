@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getDashboardAnalytics, type DashboardAnalytics } from "@/shared/lib/api";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 import type { AnalyticsBucket, AnalyticsRange } from "./use-analytics-filters";
 
 type UseDashboardAnalyticsArgs = {
@@ -51,14 +52,23 @@ export function useDashboardAnalytics({
 }: UseDashboardAnalyticsArgs): UseDashboardAnalyticsReturn {
   const [analyticsData, setAnalyticsData] = useState<DashboardAnalytics | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const { web } = useResourceMode();
+  // The other side's figures must not stay on screen while the new side loads.
+  const [shownSide, setShownSide] = useState(web);
+  if (shownSide !== web) {
+    setShownSide(web);
+    setAnalyticsData(null);
+  }
 
   const fetchDashboardAnalytics = useCallback(async () => {
     const username = isAdmin ? undefined : sessionUser || undefined;
-    // Non-admins aggregate over their own + shared runs; admins see all.
-    const includeShared = !isAdmin;
+    // Non-admins aggregate over their own + shared runs; admins see all. The
+    // Mac's web token is never a web admin.
+    const includeShared = web || !isAdmin;
     setAnalyticsLoading(true);
     try {
       const result = await getDashboardAnalytics({
+        source: web ? "hosted" : "local",
         username,
         days: RANGE_DAYS[range],
         optimizer: optimizer !== "all" ? optimizer : undefined,
@@ -83,6 +93,7 @@ export function useDashboardAnalytics({
       setAnalyticsLoading(false);
     }
   }, [
+    web,
     isAdmin,
     sessionUser,
     range,

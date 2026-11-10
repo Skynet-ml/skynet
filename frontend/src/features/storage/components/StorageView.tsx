@@ -12,7 +12,7 @@ import { StackedUsageBar } from "./StackedUsageBar";
 import { StorageSkeleton } from "./StorageSkeleton";
 import { CATEGORY_META, STORAGE_CATEGORY_ORDER } from "../lib/categories";
 import { cn } from "@/shared/lib/utils";
-import { ResourceModeSwitch, useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 
 /**
  * Top-level /storage page: the account-wide cleanup surface. A usage gauge over
@@ -78,24 +78,11 @@ export function StorageView() {
     })).sort((a, b) => b.bytes - a.bytes);
   }, [usage]);
 
-  const modeBar = resources.switchable ? (
-    <div className="mt-6 flex justify-end">
-      <ResourceModeSwitch {...resources} />
-    </div>
-  ) : null;
-
-  if (loading)
-    return (
-      <>
-        {modeBar}
-        <StorageSkeleton />
-      </>
-    );
+  if (loading) return <StorageSkeleton />;
 
   if (error || !usage) {
     return (
       <div className="pb-16">
-        {modeBar}
         <div className="mt-8">
           <EmptyState icon={HardDrive} title={msg("storage.page.error")} />
         </div>
@@ -110,7 +97,6 @@ export function StorageView() {
 
   return (
     <div className="pb-16">
-      {modeBar}
       <section className="mt-8">
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-foreground">

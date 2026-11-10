@@ -70,6 +70,7 @@ import type { ApiSource } from "@/shared/lib/api-route";
 // A cycle (use-linked-account imports this module), safe because both sides
 // only call each other at request time, never while the modules load.
 import { wasLinked } from "@/shared/hooks/use-linked-account";
+import { readResourcePick, resolveResourceMode } from "@/shared/lib/resource-mode";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
 import { readServerSentEvents } from "@/shared/lib/sse";
 
@@ -87,6 +88,16 @@ const SIDEBAR_CACHE_MS = 3000;
 /** Whether the Mac app can read its linked hosted account's runs. Always false on the web. */
 export function hostedRunsAvailable(): boolean {
   return hostedAvailable(isLocalMode(), isLocalMode() && wasLinked());
+}
+
+/**
+ * Whether the app works on the linked web account: a linked Mac with Web
+ * picked in the header. Lists then read only web rows, and new runs and
+ * chats start on the web account.
+ */
+export function webPicked(): boolean {
+  if (!hostedRunsAvailable()) return false;
+  return resolveResourceMode(readResourcePick(), true, true) === "hosted";
 }
 
 /**
@@ -2359,6 +2370,7 @@ export interface DashboardAnalytics {
 
 export function getDashboardAnalytics(params?: {
   username?: string;
+  source?: ApiSource;
   optimizer?: string;
   model?: string;
   status?: string;
@@ -2378,7 +2390,8 @@ export function getDashboardAnalytics(params?: {
   dataset_max?: number | null;
 }) {
   const q = new URLSearchParams();
-  if (params?.username) q.set("username", params.username);
+  // The web account scopes its rows by the linked token, not by the Mac's username.
+  if (params?.username && params.source !== "hosted") q.set("username", params.username);
   if (params?.optimizer) q.set("optimizer", params.optimizer);
   if (params?.model) q.set("model", params.model);
   if (params?.status) q.set("status", params.status);
@@ -2402,7 +2415,11 @@ export function getDashboardAnalytics(params?: {
     if (value != null) q.set(key, String(value));
   }
   const qs = q.toString();
-  return cachedGet<DashboardAnalytics>(`/analytics/dashboard${qs ? `?${qs}` : ""}`);
+  return cachedGet<DashboardAnalytics>(
+    `/analytics/dashboard${qs ? `?${qs}` : ""}`,
+    undefined,
+    params?.source,
+  );
 }
 
 export function getJob(
@@ -4031,12 +4048,20 @@ export function servePairProgram(
 
 /** Deliver a message into the running turn opened with `steerKey`; resolves
  *  the message's id, which a later `steer_applied` event or withdraw names. */
-export async function postAgentSteer(steerKey: string, text: string): Promise<string> {
-  const res = await request<{ id: string }>("/optimizations/agent-steer", {
-    method: "POST",
-    signal: AbortSignal.timeout(30_000),
-    body: JSON.stringify({ steer_key: steerKey, text }),
-  });
+export async function postAgentSteer(
+  steerKey: string,
+  text: string,
+  source?: ApiSource,
+): Promise<string> {
+  const res = await request<{ id: string }>(
+    "/optimizations/agent-steer",
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ steer_key: steerKey, text }),
+    },
+    source,
+  );
   return String(res.id);
 }
 
@@ -4064,6 +4089,7 @@ export async function fetchNextPromptSuggestion(
 export async function withdrawAgentSteers(
   steerKey: string,
   ids: string[],
+  source?: ApiSource,
 ): Promise<{ ids: string[]; delivered?: string[] }> {
   const res = await request<{ ids: string[]; delivered?: string[] }>(
     "/optimizations/agent-steer/withdraw",
@@ -4072,6 +4098,7 @@ export async function withdrawAgentSteers(
       signal: AbortSignal.timeout(30_000),
       body: JSON.stringify({ steer_key: steerKey, ids }),
     },
+    source,
   );
   if (!Array.isArray(res.ids)) throw new Error("Invalid withdrawal outcome");
   if (res.delivered !== undefined && !Array.isArray(res.delivered))

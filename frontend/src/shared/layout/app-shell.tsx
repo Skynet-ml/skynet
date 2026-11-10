@@ -20,6 +20,7 @@ import { MobileShell } from "@/shared/layout/mobile-shell";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { BalanceChip } from "@/features/billing";
 import { NotificationBell } from "@/features/notifications";
+import { ResourceModeSwitch } from "@/shared/ui/resource-mode-switch";
 import {
   GeneralistPanel,
   GeneralistPanelProvider,
@@ -216,6 +217,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
               never more than a glance away; the chip's own popover carries the
               breakdown and the wallet path. */}
           <BalanceChip />
+          <ResourceModeSwitch />
           <NotificationBell />
           <Button
             type="button"

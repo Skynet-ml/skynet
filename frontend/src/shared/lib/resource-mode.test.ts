@@ -13,7 +13,7 @@ test("an unlinked Mac shows only this Mac, whatever was stored", () => {
   assert.equal(resolveResourceMode(null, true, false), "local");
 });
 
-test("a linked Mac starts on Remote and keeps a Local pick", () => {
+test("a linked Mac starts on Web and keeps a Local pick", () => {
   assert.equal(resolveResourceMode(null, true, true), "hosted");
   assert.equal(resolveResourceMode("junk", true, true), "hosted");
   assert.equal(resolveResourceMode("local", true, true), "local");

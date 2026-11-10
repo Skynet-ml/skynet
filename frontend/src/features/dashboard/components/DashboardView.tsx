@@ -44,6 +44,7 @@ import { DeleteDialogs } from "./DeleteDialogs";
 import { JobsTab } from "./JobsTab";
 import { AnalyticsTab } from "./AnalyticsTab";
 import { isVisible, useExperienceLevel } from "@/features/experience";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 
 function getJobField(job: OptimizationSummaryResponse, key: string): unknown {
   return (job as unknown as Record<string, unknown>)[key];
@@ -96,6 +97,7 @@ export function DashboardView() {
     [router, searchParams],
   );
   const analyticsFilters = useAnalyticsFilters();
+  const { web } = useResourceMode();
 
   const {
     data,
@@ -518,7 +520,7 @@ export function DashboardView() {
                   chartData={chartData}
                   filters={analyticsFilters}
                   sessionUser={sessionUser}
-                  onOpenJob={(id) => router.push(`/optimizations/${id}`)}
+                  onOpenJob={(id) => router.push(runHref(id, web ? "hosted" : "local"))}
                 />
               </TabsContent>
             </Tabs>
