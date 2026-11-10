@@ -727,6 +727,42 @@ async def test_deleted_snapshot_is_metered_as_sandbox_cost(database: Engine) -> 
     assert budget.billed_cents > 0
 
 
+class VercelLikeSnapshotHandle(FakeSnapshotHandle):
+    """Act like Vercel: the delete leaves ``updated_at`` at the creation time."""
+
+    def __init__(self, snapshot_id: str, size_bytes: int) -> None:
+        """Make a snapshot created one day ago.
+
+        Args:
+            snapshot_id: The snapshot id.
+            size_bytes: The stored size.
+        """
+        super().__init__(snapshot_id, size_bytes)
+        self.created_at = self.updated_at = int(time.time() * 1000) - 86_400_000
+        self.expires_at = self.created_at + 3 * 86_400_000
+
+    async def delete(self) -> None:
+        """Delete the snapshot without a change to its timestamps."""
+        self.status = "deleted"
+
+
+async def test_snapshot_storage_is_priced_to_our_delete_time(database: Engine) -> None:
+    """Check that a snapshot is billed for its stored day when Vercel keeps ``updated_at`` at creation."""
+    runtime = _runtime(database)
+    reservation = VercelSnapshotReservation(
+        runtime, {"session_id": "session-1", "retention_ms": 3 * 86_400_000}, operation_key="op-1:snapshot"
+    )
+    reservation.bind("snap-1")
+    client = SnapshotClient([], VercelLikeSnapshotHandle("snap-1", 10_000_000_000))
+    client.boxes["builder"] = FakeBox("builder", FakeSession())
+    built = BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", reservation=reservation)
+    await VercelEnvironment.delete_snapshot(built, client=client)
+    operation = _operation(database)
+    assert operation.state == "settled"
+    assert operation.actual_units > 0
+    assert runtime.service.get(runtime.budget_id, "alice").billed_cents > 0
+
+
 async def test_missing_builder_record_is_normal_after_the_delete(
     database: Engine, caplog: pytest.LogCaptureFixture
 ) -> None:

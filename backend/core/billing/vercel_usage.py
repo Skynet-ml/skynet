@@ -776,7 +776,8 @@ def vercel_snapshot_actual_usd(
     """Price a deleted snapshot from its provider size and lifetime.
 
     Args:
-        snapshot: The provider state of the snapshot after the delete call.
+        snapshot: The provider state of the snapshot after the delete call,
+            with ``deleted_at`` (epoch ms) when Skynet made the delete call.
         snapshot_id: The one admitted snapshot.
         price_snapshot: The admitted snapshot quote.
 
@@ -791,6 +792,9 @@ def vercel_snapshot_actual_usd(
     size = _integer(snapshot.get("size_bytes"), "snapshot size")
     created = _integer(snapshot.get("created_at"), "snapshot created_at")
     ended = _integer(snapshot.get("updated_at"), "snapshot updated_at")
+    deleted = snapshot.get("deleted_at")
+    if deleted is not None:
+        ended = max(ended, _integer(deleted, "snapshot deleted_at"))
     expires = snapshot.get("expires_at")
     if expires is not None:
         ended = min(ended, _integer(expires, "snapshot expires_at"))

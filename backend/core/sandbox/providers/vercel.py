@@ -1325,8 +1325,12 @@ class VercelEnvironment(SandboxEnvironment):
         try:
             try:
                 handle = await asyncio.wait_for(client.get_snapshot(snapshot_id=built.snapshot_id), STOP_TIMEOUT)
+                deleted_at = None
                 if handle.status != "deleted":
                     await asyncio.wait_for(handle.delete(), STOP_TIMEOUT)
+                    # Vercel keeps ``updated_at`` at the creation time on a
+                    # delete, so the storage ends at our own delete time.
+                    deleted_at = int(time.time() * 1000)
             except BaseException:
                 if built.reservation is not None:
                     with contextlib.suppress(Exception):
@@ -1337,6 +1341,7 @@ class VercelEnvironment(SandboxEnvironment):
                     name: getattr(handle, name, None)
                     for name in ("id", "status", "size_bytes", "created_at", "updated_at", "expires_at")
                 }
+                state["deleted_at"] = deleted_at
                 await asyncio.to_thread(built.reservation.settle, state)
             try:
                 box = await asyncio.wait_for(client.get_sandbox(name=built.builder_name), STOP_TIMEOUT)
