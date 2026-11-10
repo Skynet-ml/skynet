@@ -415,23 +415,11 @@ h1 {
   white-space: nowrap;
 }
 
-.tl-left {
-  font-size: 12.5px;
-  color: var(--text-3);
-}
-
 .tl-elapsed {
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 500;
   color: var(--text-1);
-}
-
-.tl-first {
-  margin: -4px 0 0;
-  font-size: 12.5px;
-  line-height: 1.45;
-  color: var(--text-2);
 }
 
 .tl-steps {
@@ -555,16 +543,6 @@ h1 {
 .tl-over .tl-sweep {
   opacity: 1;
   animation: tl-sweep 1.8s ease-in-out infinite;
-}
-
-.tl-note {
-  display: none;
-  font-size: 12px;
-  color: var(--text-2);
-}
-
-.tl-over .tl-note {
-  display: block;
 }
 
 @keyframes tl-fill {

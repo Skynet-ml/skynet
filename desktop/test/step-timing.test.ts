@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { finishSteps, loadStepTimes, newTimeline, saveStepTimes, startStep, STARTUP_STEPS } from "../src/main/step-timing";
-import { formatClock, remaining, runningView, shortSeconds, stepPhase, totalElapsed, type Timeline } from "../src/renderer/timeline";
+import { formatClock, runningView, shortSeconds, stepPhase, totalElapsed, type Timeline } from "../src/renderer/timeline";
 
 let dir: string;
 
@@ -89,18 +89,8 @@ describe("timeline display", () => {
     expect(timeline.steps.map(stepPhase)).toEqual(["done", "active", "pending"]);
   });
 
-  it("sums elapsed time and the time left", () => {
+  it("sums elapsed time", () => {
     expect(totalElapsed(timeline, now)).toBe(76_000);
-    expect(remaining(timeline, now)).toBe(220_000 - 72_000 + 48_000);
-  });
-
-  it("never counts a step past its estimate as negative time left", () => {
-    expect(remaining(timeline, 4_000 + 300_000)).toBe(48_000);
-  });
-
-  it("gives no time left when a step has no estimate", () => {
-    const partial: Timeline = { ...timeline, steps: [...timeline.steps, { name: "api" }] };
-    expect(remaining(partial, now)).toBeNull();
   });
 });
 
