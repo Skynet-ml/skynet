@@ -901,7 +901,7 @@ def test_a_kept_setup_box_starts_its_services_after_setup(tmp_path: Path) -> Non
 
 
 def test_services_use_their_copy_for_the_paths_that_setup_recorded(tmp_path: Path) -> None:
-    """Point a read-only venv script that names the work path at the services copy, and keep it runnable.
+    """Point a read-only venv script in a read-only folder at the services copy, and keep it runnable.
 
     Args:
         tmp_path: Scratch folder.
@@ -916,7 +916,7 @@ def test_services_use_their_copy_for_the_paths_that_setup_recorded(tmp_path: Pat
         readonly_paths=[],
         setup_command=(
             "mkdir -p .venv/bin; printf '#!%s/.venv/bin/python\\n' \"$(pwd -P)\" > .venv/bin/tool;"
-            " chmod 555 .venv/bin/tool; cat src/app.py > built.txt"
+            " chmod 555 .venv/bin/tool .venv/bin; cat src/app.py > built.txt"
         ),
         secrets={},
     )
@@ -930,6 +930,9 @@ def test_services_use_their_copy_for_the_paths_that_setup_recorded(tmp_path: Pat
         prepared = (box._inner.path / PREPARED_DIR / ".venv" / "bin" / "tool").read_text()
         assert prepared == f"#!{(box._inner.path / WORK_DIR).resolve()}/.venv/bin/python\n"
     finally:
+        for opened in runtime.boxes:
+            for folder in opened._inner.path.glob("**/.venv/bin"):
+                folder.chmod(0o755)
         space.close()
 
 

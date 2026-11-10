@@ -620,9 +620,9 @@ class RepoWorkspace:
         copied = session.run(
             f'set -e; work="$(pwd -P)/{WORK_DIR}"; lwork="$(pwd)/{WORK_DIR}"; rm -rf {SERVICES_DIR};'
             f' cp -a {PREPARED_DIR} {SERVICES_DIR}; cd {SERVICES_DIR}; here="$(pwd -P)";'
-            ' grep -rlIF -e "$work" -e "$lwork" . | while IFS= read -r f; do chmod u+w "$f"'
-            ' && sed -e "s#$work#$here#g" -e "s#$lwork#$here#g" "$f" > "$f.tmp" && cat "$f.tmp" > "$f"'
-            ' && rm -f "$f.tmp" || exit 1; done; pwd -P',
+            ' grep -rlIF -e "$work" -e "$lwork" . | while IFS= read -r f; do t="$(mktemp)"; chmod u+w "$f"'
+            ' && sed -e "s#$work#$here#g" -e "s#$lwork#$here#g" "$f" > "$t" && cat "$t" > "$f"'
+            ' || { rm -f "$t"; exit 1; }; rm -f "$t"; done; pwd -P',
             timeout_seconds=_SETUP_TIMEOUT_SECONDS,
         )
         lines = copied.stdout.strip().splitlines() if copied.ok else []
