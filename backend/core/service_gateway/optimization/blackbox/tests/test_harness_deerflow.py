@@ -66,6 +66,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from langgraph.errors import GraphRecursionError
+
 
 class DeerFlowClient:
     def __init__(self, **kwargs):
@@ -85,6 +87,8 @@ class DeerFlowClient:
         if os.environ.get("FAKE_DEERFLOW_EVENTS"):
             for kind, data in json.loads(os.environ["FAKE_DEERFLOW_EVENTS"]):
                 yield SimpleNamespace(type=kind, data=data)
+            if os.environ.get("FAKE_DEERFLOW_RECURSION"):
+                raise GraphRecursionError("Recursion limit of 1000 reached")
             return
         yield SimpleNamespace(type="values", data={"title": "x"})
         yield SimpleNamespace(
@@ -116,7 +120,7 @@ def _target(**extra: str) -> BlackboxTarget:
 
 
 def test_registry_lists_deerflow_with_its_pin() -> None:
-    """Register DeerFlow last among built-ins, pinned to its exact source commit."""
+    """Register DeerFlow after goose, before cline, pinned to its exact source commit."""
     assert REGISTRY[HARNESS_ID] is SPEC
     assert HARNESS_ID in BLACKBOX_HARNESSES
     assert SPEC.output_format == "pi"
@@ -130,7 +134,8 @@ def test_launch_runs_the_runner_on_the_gateway_only() -> None:
     launch = build_launch(_target(), _GATEWAY)
     assert launch.parse_output is parse_pi_output
     assert launch.run_command == (
-        'export DEERFLOW_DATA_DIR="$(mktemp -d)" && DEER_FLOW_PROJECT_ROOT="$DEERFLOW_DATA_DIR/project" '
+        'export DEERFLOW_DATA_DIR="$(mktemp -d)" && trap \'rm -rf "$DEERFLOW_DATA_DIR"\' EXIT && '
+        'DEER_FLOW_PROJECT_ROOT="$DEERFLOW_DATA_DIR/project" '
         f'DEER_FLOW_HOME="$DEERFLOW_DATA_DIR/home" "$HOME/.app/deerflow/venv/bin/python" {RUNNER_FILE}'
     )
     assert set(launch.files) == {CONFIG_FILE, RUNNER_FILE}
@@ -181,6 +186,28 @@ def test_effort_switches_thinking(effort: str, expected: str) -> None:
         expected: The thinking toggle the runner gets.
     """
     assert build_launch(_target(), _GATEWAY, reasoning_effort=effort).env[ENV_THINKING] == expected
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected"),
+    [
+        (None, {}),
+        ("none", {}),
+        ("NONE", {}),
+        ("low", {"supports_reasoning_effort": True, "reasoning_effort": "low"}),
+        ("high", {"supports_reasoning_effort": True, "reasoning_effort": "high"}),
+    ],
+)
+def test_effort_reaches_the_model_entry(effort: str | None, expected: dict[str, object]) -> None:
+    """Put the user's effort on the model entry, so DeerFlow's factory sends it to the gateway.
+
+    Args:
+        effort: Reasoning effort the user picked, or ``None``.
+        expected: The effort fields the model entry must carry.
+    """
+    entry = json.loads(build_launch(_target(), _GATEWAY, reasoning_effort=effort).files[CONFIG_FILE])["models"][0]
+    assert {key: entry[key] for key in ("supports_reasoning_effort", "reasoning_effort") if key in entry} == expected
+    assert entry["base_url"] == _GATEWAY.url
 
 
 def test_protected_launch_uses_the_pin_relay_and_offline_env(tmp_path: Path) -> None:
@@ -405,11 +432,26 @@ def test_runner_fails_on_deerflow_provider_error_fallback(tmp_path: Path) -> Non
     assert "upstream 503" in completed.stderr
 
 
-def test_run_command_keeps_deerflow_state_out_of_the_version_patch(tmp_path: Path) -> None:
-    """Write DeerFlow's config and state outside the checkout, so a run adds no patch line.
+def test_runner_fails_when_deerflow_hits_the_recursion_limit(tmp_path: Path) -> None:
+    """Exit non-zero with no ``message_end`` when the stream stops at the recursion limit.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    events = [_ai("m1", "partial")]
+    completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events), FAKE_DEERFLOW_RECURSION="1")
+    assert completed.returncode == 1
+    assert "message_end" not in completed.stdout
+    assert "recursion limit reached" in completed.stderr
+
+
+@pytest.mark.parametrize("recursion", [False, True])
+def test_run_command_keeps_deerflow_state_out_of_the_version_patch(tmp_path: Path, recursion: bool) -> None:
+    """Write DeerFlow's state outside the checkout, remove it at exit, and keep the exit status.
 
     Args:
         tmp_path: Shipped tree, checkout and fake package root.
+        recursion: Whether the fake DeerFlow stops at the recursion limit.
     """
     source = tmp_path / "source"
     source.mkdir()
@@ -446,20 +488,25 @@ def test_run_command_keeps_deerflow_state_out_of_the_version_patch(tmp_path: Pat
             **launch.env,
             "APP_PROMPT_FILE": str(prompt),
             "FAKE_DEERFLOW_RECORD": str(record),
+            **(
+                {"FAKE_DEERFLOW_EVENTS": json.dumps([_ai("m1", "x")]), "FAKE_DEERFLOW_RECURSION": "1"}
+                if recursion
+                else {}
+            ),
         },
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == (1 if recursion else 0), completed.stderr
     seen = json.loads(record.read_text())
     roots = [Path(root) for root in seen["roots"]]
     data_dir = roots[0].parent
     try:
         assert seen["config"]["models"][0]["base_url"] == _GATEWAY.url
         assert roots == [data_dir / "project", data_dir / "home"]
-        assert (roots[0] / "config.yaml").is_file()
+        assert not data_dir.exists()
         assert not data_dir.resolve().is_relative_to(checkout.resolve())
         assert repo_tree.version_patch(checkout) == ""
     finally:

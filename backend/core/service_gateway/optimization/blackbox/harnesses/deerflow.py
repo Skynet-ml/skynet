@@ -35,10 +35,12 @@ CONFIG_FILE = f"{STATE_DIR}/config.json"
 RUNNER_FILE = f"{STATE_DIR}/run_agent.py"
 _RUNNER = f'"{_VENV_PYTHON}" {RUNNER_FILE}'
 # DeerFlow writes config.yaml, threads and checkpoints under these roots. They
-# live outside the workspace, so none of it enters a version patch.
+# live outside the workspace, so none of it enters a version patch. The trap
+# removes them when the run's shell exits and keeps the runner's exit status.
 _DATA_DIR = "DEERFLOW_DATA_DIR"
 _RUN_COMMAND = (
     f'export {_DATA_DIR}="$(mktemp -d)" && '
+    f"trap 'rm -rf \"${_DATA_DIR}\"' EXIT && "
     f'DEER_FLOW_PROJECT_ROOT="${_DATA_DIR}/project" DEER_FLOW_HOME="${_DATA_DIR}/home" {_RUNNER}'
 )
 # The probe needs no workspace file, so the protected bootstrap can run it
@@ -196,7 +198,9 @@ def _run():
                     last_text = message_id
                     texts[last_text] = texts.get(last_text, "") + piece
     except errors.GraphRecursionError as exc:
-        print(f"deerflow: recursion limit reached: {{exc}}", file=sys.stderr)
+        # The stream stops before its ``end`` event, and tool-call-only AI events
+        # carry no usage, so a result here would undercount tokens. Fail the run.
+        sys.exit(f"deerflow: recursion limit reached: {{exc}}")
     if llm_error is not None:
         sys.exit(f"deerflow: model provider error: {{llm_error[:500]}}")
     answer = texts.get(last_text, "")
@@ -252,7 +256,7 @@ def _gateway_url(gateway: GatewayConfig) -> str:
     return url
 
 
-def _deerflow_config(model: str, gateway_url: str) -> str:
+def _deerflow_config(model: str, gateway_url: str, reasoning_effort: str | None = None) -> str:
     """Return DeerFlow's config with one gateway model and the file and bash tools.
 
     The URL sits in the file text, not the env, so the protected relay rewrite
@@ -262,10 +266,26 @@ def _deerflow_config(model: str, gateway_url: str) -> str:
     Args:
         model: Target model id as the gateway knows it.
         gateway_url: Validated gateway base URL.
+        reasoning_effort: The user's effort for the model, or ``None`` for the model's default.
 
     Returns:
         The config as JSON text.
     """
+    model_entry: dict[str, object] = {
+        "name": MODEL_NAME,
+        "use": "langchain_openai:ChatOpenAI",
+        "model": model,
+        "base_url": gateway_url,
+        # DeerFlow resolves ``$NAME`` from the env, so the token never sits in a file.
+        "api_key": f"${ENV_API_KEY}",
+        "request_timeout": 600.0,
+        "max_retries": 2,
+    }
+    if reasoning_effort and reasoning_effort.lower() != "none":
+        # DeerFlow's model factory drops ``reasoning_effort`` unless the entry sets
+        # ``supports_reasoning_effort``; then ChatOpenAI sends it to the gateway.
+        model_entry["supports_reasoning_effort"] = True
+        model_entry["reasoning_effort"] = reasoning_effort
     config = {
         "config_version": 15,
         "log_level": "info",
@@ -273,18 +293,7 @@ def _deerflow_config(model: str, gateway_url: str) -> str:
         "tools": [
             {"name": name, "group": group, "use": f"deerflow.sandbox.tools:{tool}"} for name, group, tool in _TOOLS
         ],
-        "models": [
-            {
-                "name": MODEL_NAME,
-                "use": "langchain_openai:ChatOpenAI",
-                "model": model,
-                "base_url": gateway_url,
-                # DeerFlow resolves ``$NAME`` from the env, so the token never sits in a file.
-                "api_key": f"${ENV_API_KEY}",
-                "request_timeout": 600.0,
-                "max_retries": 2,
-            }
-        ],
+        "models": [model_entry],
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider", "allow_host_bash": True, "mounts": []},
     }
     return json.dumps(config, indent=2)
@@ -340,7 +349,8 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
     Args:
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; DeerFlow sends every model call there.
-        reasoning_effort: The user's effort for the model; ``none`` turns thinking off.
+        reasoning_effort: The user's effort for the model; ``none`` turns thinking off,
+            and any other value goes to the gateway as ``reasoning_effort``.
 
     Returns:
         The launch.
@@ -356,7 +366,7 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
         instructions_file="AGENTS.md",
         install_command=_deerflow_install(),
         files={
-            CONFIG_FILE: _deerflow_config(model, gateway_url),
+            CONFIG_FILE: _deerflow_config(model, gateway_url, reasoning_effort),
             RUNNER_FILE: _runner_script(gateway_url),
         },
         run_command=_RUN_COMMAND,
