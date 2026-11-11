@@ -102,6 +102,7 @@ class I18nKey(StrEnum):
     CONNECTORS_PICKER_UNAVAILABLE = 'connectors.picker_unavailable'
     CONNECTORS_PROVIDER_ERROR = 'connectors.provider_error'
     CONNECTORS_QUERY_FAILED = 'connectors.query_failed'
+    CONNECTORS_RATE_LIMITED = 'connectors.rate_limited'
     CONNECTORS_RECONNECT_REQUIRED = 'connectors.reconnect_required'
     CONNECTORS_REJECTED = 'connectors.rejected'
     CONNECTORS_UNKNOWN_PROVIDER = 'connectors.unknown_provider'

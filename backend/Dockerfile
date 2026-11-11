@@ -43,7 +43,7 @@ RUN case "$TARGETARCH" in \
 # 3.12 for PEP 683 immortal objects: core interpreter objects stop taking
 # refcount writes, so job children fork()ed from the fat parent dirty far
 # fewer copy-on-write pages. Full test suite verified green on 3.12.
-FROM docker.io/python:3.12-slim
+FROM docker.io/python:3.12.15-slim
 
 WORKDIR /app
 
@@ -184,6 +184,17 @@ ARG GIT_SHA=unknown
 
 # Login shells must retain the same interpreter used to install the pinned dependencies.
 RUN printf '%s\n' 'export PATH="/app/.venv/bin:$PATH"' > /etc/profile.d/skynet-runtime.sh
+
+# Codex turns unified exec on unless a root-owned /etc/codex/requirements.toml
+# turns it off (SKY-389). The image ships that file, so a Vercel box needs no
+# root step and the image carries no sudo: Codex runs as appuser with its own
+# sandbox off, and any root path would let the model rewrite the file.
+# Keep the content equal to CODEX_REQUIREMENTS in
+# core/service_gateway/optimization/blackbox/sandbox_runtime.py.
+RUN install -d -o root -g root -m 0755 /etc/codex \
+    && printf '[features]\nunified_exec = false\n' > /etc/codex/requirements.toml \
+    && chown root:root /etc/codex/requirements.toml \
+    && chmod 0644 /etc/codex/requirements.toml
 
 USER 1001
 

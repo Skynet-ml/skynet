@@ -26,7 +26,7 @@ from core.sandbox import (
     SandboxSpecError,
     factory,
 )
-from core.sandbox.errors import RunTimeoutError, SandboxFatalError, SandboxInfraError, StartTimeoutError
+from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.factory import ProductionNotAllowedError
 from core.sandbox.providers import modal as modal_provider
 from core.sandbox.providers.modal import ModalEnvironment, egress_kwargs, resource_kwargs
@@ -460,15 +460,15 @@ async def test_exec_before_start_raises() -> None:
 
 
 async def test_modal_timeout_exit_code_becomes_a_run_timeout(fake_modal: FakeModal) -> None:
-    """Turn Modal's -1 exit code for an expired exec into RunTimeoutError."""
+    """Turn Modal's -1 exit code for an expired exec into a timed-out result."""
     async with ModalEnvironment(_SPEC) as env:
         _box(fake_modal).exit_override = -1
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=5)
+        result = await env.exec("true", timeout_sec=5)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_modal_exec_timeout_error_becomes_a_run_timeout(fake_modal: FakeModal) -> None:
-    """Turn Modal's ExecTimeoutError into RunTimeoutError."""
+    """Turn Modal's ExecTimeoutError into a timed-out result."""
 
     async def expire() -> None:
         """Raise the fake Modal timeout."""
@@ -476,12 +476,12 @@ async def test_modal_exec_timeout_error_becomes_a_run_timeout(fake_modal: FakeMo
 
     async with ModalEnvironment(_SPEC) as env:
         _box(fake_modal).exec_hook = expire
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=5)
+        result = await env.exec("true", timeout_sec=5)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_local_deadline_bounds_a_hung_exec(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Raise RunTimeoutError when Modal never answers within the limit and the grace."""
+    """Return a timed-out result when Modal never answers within the limit and the grace."""
     monkeypatch.setattr(modal_provider, "_TIMEOUT_GRACE_SEC", 0.0)
 
     async def hang() -> None:
@@ -490,8 +490,8 @@ async def test_local_deadline_bounds_a_hung_exec(fake_modal: FakeModal, monkeypa
 
     async with ModalEnvironment(_SPEC) as env:
         _box(fake_modal).exec_hook = hang
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.05)
+        result = await env.exec("true", timeout_sec=0.05)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_exit_137_after_a_failed_call_is_an_out_of_memory_error(fake_modal: FakeModal) -> None:

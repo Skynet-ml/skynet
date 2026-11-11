@@ -615,3 +615,44 @@ async def test_stop_job_sandboxes_skips_other_jobs(fake_state: Path) -> None:
     """Return 0 for a job with no live sandbox."""
     async with SingularityEnvironment(_spec(tags={JOB_TAG: "job-a"})):
         assert await SingularityEnvironment.stop_job_sandboxes(f"job-{uuid.uuid4().hex}") == 0
+
+
+async def test_stop_raises_the_first_of_two_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finish the teardown through two cancels, then raise the first cancel."""
+    finished: list[bool] = []
+    seen: list[tuple[object, ...]] = []
+
+    async def slow_teardown(staging: Path) -> None:
+        """Stand in for a teardown that takes a short time.
+
+        Args:
+            staging: The staging directory.
+        """
+        await asyncio.sleep(0.3)
+        finished.append(True)
+
+    env = SingularityEnvironment(_spec())
+    env._staging = tmp_path
+    monkeypatch.setattr(env, "_teardown", slow_teardown)
+
+    async def _stop() -> None:
+        """Stop the sandbox and record the cancel that it raises.
+
+        Raises:
+            asyncio.CancelledError: The cancel from ``stop``.
+        """
+        try:
+            await env.stop()
+        except asyncio.CancelledError as error:
+            seen.append(error.args)
+            raise
+
+    task = asyncio.create_task(_stop())
+    await asyncio.sleep(0.05)
+    task.cancel("first")
+    await asyncio.sleep(0.05)
+    task.cancel("second")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished == [True]
+    assert seen == [("first",)]

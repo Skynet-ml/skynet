@@ -216,7 +216,7 @@ class GepaEngine:
             """
             # Text targets keep the serial loop. Agent targets run each case in
             # its own sandbox, so their batch runs ``ctx.concurrency`` wide on the
-            # process pool, which also holds every run under ``POOL_BOX_LIMIT``.
+            # sandbox pool.
             if ctx.concurrency <= 1:
                 return score_batch(score_one, pairs, 1)
             calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]

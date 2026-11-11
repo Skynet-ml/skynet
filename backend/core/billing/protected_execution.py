@@ -4,20 +4,15 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
-from ..service_gateway.optimization.blackbox.docker_sandbox import (
-    DockerSandboxRuntime,
-    docker_sandbox_unavailable_reason,
-)
-from ..service_gateway.optimization.blackbox.sandbox import (
-    JOB_TAG,
-    VercelCredentials,
-    VercelSandboxRuntime,
-    sandbox_unavailable_reason,
-)
+from ..sandbox.bridge import protected_runtime, protected_unavailable_reason
+from ..sandbox.factory import load_provider
+from ..sandbox.snapshots import SnapshotCache
 from ..service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
+from ..service_gateway.optimization.blackbox.sandbox_contract import JOB_TAG
 from ..storage.run_call_store import PostgresRunCallStore
 from ..worker.scoped_relay import CallRecorder
 from .model_gateway import ModelGateway
@@ -74,10 +69,8 @@ def protected_vercel_unavailable_reason(settings: Settings, workflow: str) -> st
         A configuration reason, or None when real setup verification may proceed.
         Local mode reports the local Docker daemon and image instead of Vercel.
     """
-    if settings.local_mode:
-        return docker_sandbox_unavailable_reason(settings)
-    reason = sandbox_unavailable_reason(settings)
-    if reason:
+    reason = protected_unavailable_reason(settings)
+    if reason or settings.local_mode:
         return reason
     if protected_image(settings, workflow) is None:
         return "This deployment needs a pinned sandbox image with the optimizer dependencies installed."
@@ -194,26 +187,18 @@ def bind_protected_sandbox(
     )
     recorder = run_call_recorder(gateway, owner_id)
     gateway.recorder = recorder
-    runtime: DockerSandboxRuntime | VercelSandboxRuntime
-    if settings.local_mode:
-        runtime = DockerSandboxRuntime(
-            image,
-            docker_bin=settings.docker_bin,
-            budget=gateway.runtime,
-            recorder=recorder,
-        )
-    else:
-        assert settings.vercel_token is not None
-        runtime = VercelSandboxRuntime(
-            VercelCredentials(
-                token=settings.vercel_token.get_secret_value(),
-                team_id=str(settings.vercel_team_id),
-                project_id=str(settings.vercel_project_id),
-            ),
-            image=image,
-            budget=gateway.runtime,
-        )
+    runtime = protected_runtime(settings, image=image, budget=gateway.runtime, recorder=recorder)
     mailbox = ModelMailbox(gateway.dispatch_guest)
+    snapshots = None
+    if getattr(runtime, "supports_snapshots", False):
+        # The parent knows no run deadline, only the session ceiling. A box
+        # that opens from an expired snapshot fails, and the workspace then
+        # sets up a normal box again.
+        snapshots = SnapshotCache(
+            owner_id,
+            datetime.now(UTC) + timedelta(seconds=lifetime),
+            delete=load_provider(runtime.provider).delete_snapshot,
+        )
     broker = SandboxBroker(
         runtime,
         image=image,
@@ -221,6 +206,7 @@ def bind_protected_sandbox(
         tags={JOB_TAG: owner_id},
         command_runner=mailbox.run,
         parent_command_runner=ModelMailbox(gateway.dispatch_route).run,
+        snapshots=snapshots,
     )
     gateway.bind_sandbox(broker, image=image, lifetime_seconds=lifetime)
     if parent_hosts:

@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host}, {expected} नहीं है। Skynet केवल gitlab.com और Bitbucket Cloud से जुड़ता है, स्वयं-प्रबंधित सर्वर से नहीं। रिपॉज़िटरी का {expected} पता इस्तेमाल करें, या रिपॉज़िटरी को {expected} पर ले जाएँ।",
     "connectors.not_connected": "पहले अपना {provider} अकाउंट कनेक्ट करें।",
     "connectors.not_found": "वह आइटम {provider} पर नहीं मिला, या आपके अकाउंट के पास इसकी एक्सेस नहीं है।",
+    "connectors.rate_limited": "{provider} की रिक्वेस्ट सीमा पूरी हो गई है। बाद में फिर से कोशिश करें।",
     "connectors.oauth_failed": "{provider} साइन-इन पूरा नहीं हो सका। दोबारा कोशिश करें।",
     "connectors.oauth_not_configured": "इस डिप्लॉयमेंट पर {provider} से साइन-इन सेट अप नहीं है। इसके बजाय क्रेडेंशियल पेस्ट करें।",
     "connectors.oauth_state_invalid": "साइन-इन लिंक अमान्य है या समाप्त हो चुका है। फिर से शुरू करें।",

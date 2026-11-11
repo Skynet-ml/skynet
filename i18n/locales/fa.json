@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} همان {expected} نیست. Skynet فقط به gitlab.com و Bitbucket Cloud وصل می‌شود، نه به سرورهای خودمدیریت. از نشانی مخزن در {expected} استفاده کنید یا مخزن را به {expected} منتقل کنید.",
     "connectors.not_connected": "ابتدا حساب {provider} خود را متصل کنید.",
     "connectors.not_found": "این مورد در {provider} پیدا نشد یا حساب شما به آن دسترسی ندارد.",
+    "connectors.rate_limited": "به سقف درخواست‌های {provider} رسیده‌اید. بعداً دوباره امتحان کنید.",
     "connectors.oauth_failed": "ورود با {provider} کامل نشد. دوباره امتحان کنید.",
     "connectors.oauth_not_configured": "ورود با {provider} در این استقرار تنظیم نشده است. در عوض اطلاعات ورود را بچسبانید.",
     "connectors.oauth_state_invalid": "پیوند ورود نامعتبر یا منقضی شده است. دوباره شروع کنید.",

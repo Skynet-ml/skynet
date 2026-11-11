@@ -25,3 +25,25 @@ prompt that reads the log.
   `maintenance` matcher: `claude -p --maintenance`).
 - Codex, Factory, Pi and other harnesses: run `just setup` or
   `just maintain`, then follow the matching prompt file.
+
+## CI checks with Dagger
+
+GitHub Actions runs the CI gates as Dagger checks. You can run the same
+checks on your machine. You need Docker and the Dagger CLI v1.0.0-beta.25
+(`curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=v1.0.0-beta.25 sh`).
+
+```bash
+dagger generate -y                     # only after a module change
+dagger check -l                        # list the checks
+dagger check skynet-ci/frontend-lint   # run one check
+dagger check 'skynet-ci/*'             # run every check
+```
+
+- The module is `.dagger/modules/skynet-ci/`. `dagger.toml` and `dagger.lock`
+  are at the repo root. Commit `dagger.lock`.
+- The generated `sdk/`, `clients/` and `uv.lock` in the module are committed.
+  CI does not generate them. After a module change, run `dagger generate -y`
+  and commit the result.
+- The checks use cache volumes for uv, npm and pip. The second run is fast.
+- A check fails with exit code 1 and prints the failed command's output.
+- Do not log in to Dagger Cloud. The checks need no secrets.
