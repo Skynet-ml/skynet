@@ -59,20 +59,20 @@ _LOCAL_BIN = '"$HOME/.local/bin"'
 _WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
 # OpenHands 1.6.0 sends ``LLM_REASONING_EFFORT`` only for model names in its
 # own reasoning list, which misses models such as ``claude-opus-5.5`` and
-# ``gpt-6``. Its ``completion_kwargs`` reach every LiteLLM call, so the
-# effort goes there. For a model outside that list, OpenHands also sends its
-# defaults ``temperature=0.0`` and ``top_p=1.0``: Anthropic Opus 4.1 and later
-# reject the two together, and OpenAI reasoning models reject
-# ``temperature=0``. ``None`` overrides them, and LiteLLM drops a ``None``
-# parameter, so the gateway gets neither. LiteLLM drops ``reasoning_effort``
-# for a model name it does not know, so ``allowed_openai_params`` forces it
-# through. OpenHands also adds ``thinking`` for a model whose name is
-# ``gemini-2.5-pro`` (a 128-token budget, with ``allowed_openai_params``
-# set to ``["thinking"]``, because the harness never sets
-# ``LLM_REASONING_EFFORT``) or contains ``claude-opus-4-1`` (always
-# disabled). With ``LLM_DROP_PARAMS=false``, LiteLLM 1.80.10 refuses that
-# ``thinking`` on the ``openai/`` route, so every such run fails. ``None``
-# removes it. ``allowed_openai_params=None`` also removes the OpenHands ``["thinking"]``: with no effort, LiteLLM would
+# ``gpt-6``. Its ``completion_kwargs`` reach every LiteLLM call, so the effort
+# goes there. For a model outside that list, OpenHands also sends its defaults
+# ``temperature=0.0`` and ``top_p=1.0``: Anthropic Opus 4.1 and later reject
+# the two together, and OpenAI reasoning models reject ``temperature=0``.
+# ``None`` overrides them, and LiteLLM drops a ``None`` parameter, so the
+# gateway gets neither. LiteLLM drops ``reasoning_effort`` for a model name it
+# does not know, so ``allowed_openai_params`` forces it through. OpenHands
+# also adds ``thinking`` for a model whose name is ``gemini-2.5-pro`` (a
+# 128-token budget, with ``allowed_openai_params`` set to ``["thinking"]``,
+# because the harness never sets ``LLM_REASONING_EFFORT``) or contains
+# ``claude-opus-4-1`` (always disabled). With ``LLM_DROP_PARAMS=false``,
+# LiteLLM 1.80.10 refuses that ``thinking`` on the ``openai/`` route, so every
+# such run fails. ``None`` removes it. ``allowed_openai_params=None`` also
+# removes the OpenHands ``["thinking"]``: with no effort, LiteLLM would
 # otherwise pass ``thinking=None`` to the OpenAI client, which rejects it.
 _DEFAULTS_OFF = {"temperature": None, "top_p": None, "thinking": None, "allowed_openai_params": None}
 # LiteLLM reads these keys for its other providers. A protected run blanks
