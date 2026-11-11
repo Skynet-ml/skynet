@@ -8,7 +8,7 @@ the matching file below when the task needs it:
 
 | When you | Read |
 | --- | --- |
-| Open, update, describe, review, capture UI evidence for, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
+| Open, update, describe, review, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
 | Sign in to staging or a PR preview, or run acceptance checks there | `.agents/skills/skynet-test-accounts/SKILL.md` |
 | Work on or debug a PR preview environment | `docs/agents/pr-previews.md` |
 | Need the stack, layout, local URLs, persistence, auth or i18n facts | `docs/agents/architecture.md` |
@@ -32,7 +32,15 @@ cd frontend && npm run build                                   # production buil
 
 # i18n: catalog drift.
 just check-i18n
+
+# The same CI checks in Docker, as GitHub Actions runs them (Dagger v1.0.0-beta.25).
+dagger generate -y                          # after a module change; commit sdk/, clients/, uv.lock
+dagger check -l                             # list the checks
+dagger check skynet-ci/backend-gates        # one check; `dagger check 'skynet-ci/*'` runs all
 ```
+
+- CI jobs call `dagger check skynet-ci/<name>`. The module is in
+  `.dagger/modules/skynet-ci/`. Add a new CI gate there, not only in `ci.yml`.
 
 - New UI strings go into the source catalogs: `i18n/locales/ui/he.json` (base)
   **and** `en.json`. Then run `python3 scripts/generate_i18n.py`.
@@ -44,8 +52,8 @@ just check-i18n
   requirements files aligned, and pass the stable and preview Docker builds.
 - Lint, typecheck and build are not behavior tests. Say which is which.
 - Local frontend work: do not drive a browser unless the task asks for it.
-  Tell the user what to check at `localhost:3000`. PR acceptance checks and
-  UI evidence still follow the `skynet-pr-workflow` skill.
+  Tell the user what to check at `localhost:3000`. PR acceptance checks
+  still follow the `skynet-pr-workflow` skill.
 
 Local dev servers: backend `:8000` (`cd backend && .venv/bin/python main.py`
 or `just backend`), frontend `:3000` (`cd frontend && npm run dev` or `just
@@ -88,21 +96,26 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   (`.github/workflows/pr-files-scope.yml` checks this).
 - Never bypass branch protection or hooks. Never force-push.
 - The repository is **public**. Never commit secrets, passwords, tokens,
-  emails, account data, or evidence images or videos. Secret names are fine.
+  emails, account data, or screenshots or screen recordings. Secret names
+  are fine.
 
 ## Merge policy (MANDATORY)
 
 - Each PR gets a preview (staging copy, empty database) at
-  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks and capture UI
-  evidence there. A visual-only UI change may use simulated local renders
-  (`skynet-pr-workflow` section 5).
+  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks there. UI PRs
+  need no Before and After images or videos.
 - **Fix bugs locally, deploy once.** Each push rebuilds the preview and
   starts a new review. Test and review the full diff locally, then push once.
-- **Only the orchestrator merges**, in the daily window (03:00
+- **Among agents, only the orchestrator merges**, in the daily window (03:00
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
 - Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
-  gates pass. UI PRs (`frontend/`) and other PRs wait for the user's approval.
+  gates pass. UI PRs (`frontend/`) follow the same review loop. A UI PR is
+  ready for review when the `skynet-pr-workflow` section 5 conditions are
+  true. The PR stays unmerged until Gilad approves it or tells the
+  orchestrator to merge it. Gilad approves in chat, on GitHub or with
+  `Approved for merge` on the Linear issue. Other PRs wait for Gilad's
+  approval.
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
@@ -127,9 +140,21 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   coverage gap. Do not ask Gilad to create one. Never borrow a personal
   session. Never print or commit passwords, tokens, cookies or email codes.
 - New staging accounts get no credit. Run paid checks on the PR preview,
-  which gives new accounts a test grant, or record the gap.
-- Never add funds, grant credits, change balances or change live billing
-  configuration. Never deploy production.
+  which gives new accounts a test grant, or record the gap. Or, with
+  Gilad's approval in chat, fund the check account with the staging
+  test-credit grant (see `skynet-test-accounts`).
+- Never add funds, grant credits or change balances, with one exception: the
+  staging test-credit grant command (`skynet-test-accounts`, "Grant test
+  credit"). Use it only for a check account you created for this check,
+  only after Gilad approves that grant in chat, and within the one $50
+  UTC-day cap on the staging database. The command refuses PR previews.
+  Amounts depend on the check. Before each grant, ask Gilad in chat for
+  a specific dollar amount: the smallest amount the check needs, with a short
+  cost estimate. Gilad approves that amount, or a larger one if he thinks the
+  check needs more. Record his approval text. Spend as little as possible.
+  Never grant on production, to real customers or to manual accounts. Never
+  use a raw wallet INSERT, Stripe or any other path.
+- Never change live billing configuration. Never deploy production.
 - Create, sign in, delete, served-commit check: `skynet-test-accounts`.
 
 ## Writing rule (MANDATORY)

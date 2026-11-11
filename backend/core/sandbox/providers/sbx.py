@@ -56,7 +56,6 @@ import httpx
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -85,6 +84,8 @@ KILL_TIMEOUT = 30.0
 POLL_INTERVAL = 2.0
 RPC_TIMEOUT = 30.0
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+# The Docker provider has no download limit; this matches the Kernel provider's.
+MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 _MAX_LIFETIME_SECONDS = 43_200
 _MAX_LIST_PAGES = 1000
 _CONTROL_BYTES = 64 * 1024
@@ -97,6 +98,8 @@ _PRECONDITION_FAILED = frozenset({409, 412})
 _SAFE_CODE = re.compile(r"[A-Za-z_]+")
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 _CREDENTIAL_PERMISSIONS = ["sandboxesExec", "sandboxesFilesRead", "sandboxesFilesWrite"]
 _DOWNLOAD_PARTS = frozenset({b"metadata", b"content", b"error", b"stream-error"})
 # The sbx Cloud shapes as (vCPUs, memory in MiB).
@@ -669,11 +672,12 @@ class _Capture:
         if text:
             self.on_output(stream, text)
 
-    def result(self, exit_code: int) -> ExecResult:
+    def result(self, exit_code: int, *, timed_out: bool = False) -> ExecResult:
         """Build the command result.
 
         Args:
             exit_code: The process exit code.
+            timed_out: The command ran past its time limit.
 
         Returns:
             The exit code and the decoded output.
@@ -682,7 +686,52 @@ class _Capture:
             exit_code=exit_code,
             stdout=self.buffers["stdout"].decode("utf-8", "replace"),
             stderr=self.buffers["stderr"].decode("utf-8", "replace"),
+            timed_out=timed_out,
         )
+
+
+async def _read_download(response: httpx.Response, path: str) -> str | None:
+    """Check and decode one streamed multipart download answer.
+
+    Args:
+        response: The streamed answer, not read yet.
+        path: The path that the download asked for.
+
+    Returns:
+        The file text, or ``None`` when the file does not exist.
+
+    Raises:
+        SandboxInfraError: The answer is invalid, incomplete or above
+            ``MAX_DOWNLOAD_BYTES``.
+        SandboxError: The answer is not 2xx; see ``_status_error``.
+    """
+    if not response.is_success:
+        await response.aread()
+        if _not_found(response):
+            return None
+        raise _status_error(response, "read a file")
+    media_type, options = parse_options_header(response.headers.get("content-type"))
+    boundary = options.get(b"boundary", b"")
+    if media_type != b"multipart/mixed" or not 1 <= len(boundary) <= 70 or any(not 32 <= b <= 126 for b in boundary):
+        raise SandboxInfraError("sbx gave a download with no valid multipart boundary.")
+    decoder = _Download(path)
+    parser = MultipartParser(boundary, decoder.callbacks())
+    received = 0
+    try:
+        async for chunk in response.aiter_bytes():
+            received += len(chunk)
+            if received > MAX_DOWNLOAD_BYTES:
+                raise SandboxInfraError(f"The sbx download of {path!r} is above the {MAX_DOWNLOAD_BYTES} byte limit.")
+            parser.write(chunk)
+        parser.finalize()
+    except _MissingFileError:
+        return None
+    except ValueError:
+        raise SandboxInfraError("sbx gave a malformed multipart download.") from None
+    # finalize() accepts a cut stream, so the closing boundary must have arrived.
+    if not decoder.ended or decoder.phase != "complete":
+        raise SandboxInfraError("The sbx download ended before the whole file arrived.")
+    return bytes(decoder.content).decode("utf-8")
 
 
 class _Download:
@@ -1050,13 +1099,14 @@ class SbxEnvironment(SandboxEnvironment):
             sudo: Run the command as root instead of the sandbox user.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, it is killed first, and the result has exit code
+            124, ``timed_out`` set and the output so far.
 
         Raises:
             SandboxInfraError: The sandbox is not running, or sbx gave an
                 invalid process answer.
             SandboxRejectedError: An environment variable name is not valid.
-            RunTimeoutError: The command ran past the time limit. It is killed first.
         """
         runtime = self._runtime
         if runtime is None:
@@ -1077,6 +1127,7 @@ class SbxEnvironment(SandboxEnvironment):
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
         process_path: str | None = None
         finished = False
+        timed_out = False
         try:
             async with asyncio.timeout(limit) as deadline:
                 response = await _call(
@@ -1093,12 +1144,14 @@ class SbxEnvironment(SandboxEnvironment):
         except TimeoutError:
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit) from None
+            timed_out = True
         finally:
             # A timeout, a cancel or a lost wait must not leave the command
             # running. With no process name yet there is nothing to kill.
             if not finished and process_path is not None:
                 await asyncio.shield(_kill(runtime, process_path))
+        if timed_out:
+            return capture.result(_TIMEOUT_EXIT_CODE, timed_out=True)
         return capture.result(exit_code)
 
     @staticmethod
@@ -1190,43 +1243,23 @@ class SbxEnvironment(SandboxEnvironment):
             The file text, or ``None`` when the file does not exist.
 
         Raises:
-            SandboxInfraError: The sandbox is not running, or the download
-                answer is invalid or incomplete.
+            SandboxTransientError: The connection failed or timed out.
+            SandboxInfraError: The sandbox is not running, the download
+                answer is invalid or incomplete, or it is above
+                ``MAX_DOWNLOAD_BYTES``.
+            SandboxError: The answer is not 2xx; see ``_status_error``.
         """
         runtime = self._runtime
         if runtime is None:
             raise SandboxInfraError("The sbx sandbox is not running.")
-        response = await _call(
-            runtime,
-            "GET",
-            "/v1/files/download",
-            action="read a file",
-            allow_not_found=True,
-            params={"paths": path},
-        )
-        if response is None:
-            return None
-        media_type, options = parse_options_header(response.headers.get("content-type"))
-        boundary = options.get(b"boundary", b"")
-        if (
-            media_type != b"multipart/mixed"
-            or not 1 <= len(boundary) <= 70
-            or any(not 32 <= b <= 126 for b in boundary)
-        ):
-            raise SandboxInfraError("sbx gave a download with no valid multipart boundary.")
-        decoder = _Download(path)
-        parser = MultipartParser(boundary, decoder.callbacks())
+        # A streamed answer lets the size limit hold before the whole file is in memory.
         try:
-            parser.write(response.content)
-            parser.finalize()
-        except _MissingFileError:
-            return None
-        except ValueError:
-            raise SandboxInfraError("sbx gave a malformed multipart download.") from None
-        # finalize() accepts a cut stream, so the closing boundary must have arrived.
-        if not decoder.ended or decoder.phase != "complete":
-            raise SandboxInfraError("The sbx download ended before the whole file arrived.")
-        return bytes(decoder.content).decode("utf-8")
+            async with runtime.stream("GET", "/v1/files/download", params={"paths": path}) as response:
+                return await _read_download(response, path)
+        except httpx.TransportError as error:
+            raise SandboxTransientError(f"sbx could not read a file: {type(error).__name__}.") from None
+        except httpx.HTTPError as error:
+            raise SandboxInfraError(f"sbx could not read a file: {type(error).__name__}.") from None
 
     async def stop(self) -> None:
         """Delete the sandbox once and close the clients. Safe to call again."""

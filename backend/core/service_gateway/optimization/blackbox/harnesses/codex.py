@@ -32,11 +32,14 @@ def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     Returns:
         The launch.
     """
+    # The gateway prices only function and custom tools; without these settings
+    # Codex also sends tool_search and web_search tools, and the gateway rejects them.
     config_toml = (
         f"model = {json.dumps(model)}\n"
         f'model_provider = "{PROVIDER}"\n'
         + (f"model_reasoning_effort = {json.dumps(reasoning_effort)}\n" if reasoning_effort else "")
-        + "\n"
+        + 'web_search = "disabled"\n'
+        "\n"
         f"[model_providers.{PROVIDER}]\n"
         'name = "Model gateway"\n'
         f"base_url = {json.dumps(gateway.url)}\n"
@@ -45,6 +48,9 @@ def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         "request_max_retries = 0\n"
         "stream_max_retries = 0\n"
         "supports_websockets = false\n"
+        "\n"
+        "[features]\n"
+        "multi_agent = false\n"
     )
     return HarnessLaunch(
         instructions_file="AGENTS.md",
@@ -55,6 +61,9 @@ def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
             # Codex skips a new hooks.json hook until it is trusted, so the guard
             # needs the trust flag; without the guard no repository hook gets it.
             'CODEX_HOME="$PWD/.app/codex" codex exec --skip-git-repo-check '
+            # The sandbox run still sent web_search with only the config setting
+            # (SKY-529 check 8); a -c override wins over every config layer.
+            "-c 'web_search=\"disabled\"' -c features.multi_agent=false "
             "${APP_GUARD_CODEX:+--dangerously-bypass-hook-trust} "
             f"--dangerously-bypass-approvals-and-sandbox --json {_PROMPT_ARG}"
         ),

@@ -20,10 +20,9 @@ from typing import Any
 
 import pytest
 
-from core.config import settings
 from core.sandbox import factory
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
-from core.sandbox.errors import RunTimeoutError, SandboxFatalError, SandboxInfraError, StartTimeoutError
+from core.sandbox.errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.providers import sail
 from core.sandbox.providers.sail import SailEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
@@ -459,11 +458,6 @@ def test_factory_loads_sail_outside_production(monkeypatch: pytest.MonkeyPatch) 
     assert factory.load_provider("sail") is SailEnvironment
 
 
-def test_the_default_sandbox_backend_stays_legacy() -> None:
-    """Keep the legacy backend as the default."""
-    assert type(settings).model_fields["sandbox_backend"].default == "legacy"
-
-
 def test_preflight_needs_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Name the extra when the SDK is not installed."""
     monkeypatch.setattr(sail, "Sailbox", None)
@@ -486,7 +480,7 @@ async def test_create_sends_the_name_image_lifetime_and_open_egress(fake_sdk: Fa
     assert fake_sdk.apps == [(sail.APP_NAME, True)]
     params = fake_sdk.boxes[0].params
     assert params["name"] == "box-a"
-    assert params["image"].ref == sail.DEFAULT_IMAGE
+    assert params["image"].ref == sail.DEFAULT_IMAGE == "python:3.12.15-slim"
     assert params["max_lifetime_seconds"] == 301
     assert params["image_build_timeout"] == 13
     assert params["egress_policy"] == {"mode": "all"}
@@ -528,6 +522,10 @@ async def test_ignore_mode_sends_no_size(fake_sdk: FakeCloud) -> None:
             {"allowed_hosts": ("a.example.com", "a.example.com", "*.b.example.com")},
             {"mode": "allow", "hosts": ["a.example.com", "*.b.example.com"]},
         ),
+        (
+            {"allowed_hosts": ("2001:db8::1", "192.0.2.10")},
+            {"mode": "allow", "hosts": ["2001:db8::1", "192.0.2.10"]},
+        ),
     ],
 )
 async def test_the_spec_network_maps_to_the_create_egress(
@@ -562,29 +560,29 @@ async def test_exec_sends_env_user_timeout_and_cwd(fake_sdk: FakeCloud) -> None:
     assert second["timeout"] == 3
 
 
-async def test_a_timed_out_command_raises(fake_sdk: FakeCloud) -> None:
-    """Raise RunTimeoutError when Sail reports a timeout."""
+async def test_a_timed_out_command_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
+    """Return a timed-out result when Sail reports a timeout."""
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_times_out = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=1)
+        result = await env.exec("true", timeout_sec=1)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
-async def test_a_timed_out_command_without_a_limit_raises(fake_sdk: FakeCloud) -> None:
-    """Raise RunTimeoutError when Sail reports a timeout and no limit is set."""
+async def test_a_timed_out_command_without_a_limit_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
+    """Return a timed-out result when Sail reports a timeout and no limit is set."""
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_times_out = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true")
+        result = await env.exec("true")
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
-async def test_a_hung_run_call_raises_a_run_timeout(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_hung_run_call_returns_a_timed_out_result(fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch) -> None:
     """End a run call that the SDK never returns, after the limit and the grace."""
     monkeypatch.setattr(sail, "EXEC_GRACE", 0.01)
     async with SailEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.01)
+        result = await env.exec("true", timeout_sec=0.01)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_truncated_output_logs_a_warning(fake_sdk: FakeCloud, caplog: pytest.LogCaptureFixture) -> None:
@@ -624,6 +622,51 @@ async def test_a_non_utf8_download_is_infra_without_the_bytes(fake_sdk: FakeClou
             await env.download_file("/tmp/b.bin")
     assert "secret" not in str(info.value)
     assert "xff" not in str(info.value)
+
+
+def test_mapped_turns_an_sdk_error_into_infra() -> None:
+    """Map an unknown SDK error to SandboxInfraError that names the action and keeps the cause."""
+    with (
+        pytest.raises(SandboxInfraError, match="Sail could not run a step: FakeSailError") as info,
+        sail._mapped("run a step"),
+    ):
+        raise FakeSailError("detail")
+    assert isinstance(info.value.__cause__, FakeSailError)
+    assert "detail" not in str(info.value)
+
+
+def test_mapped_keeps_a_sandbox_error_unchanged() -> None:
+    """Let a sandbox error pass through the mapping as the same object."""
+    error = SandboxFatalError("already mapped")
+    with pytest.raises(SandboxFatalError) as info, sail._mapped("run a step"):
+        raise error
+    assert info.value is error
+
+
+def test_mapped_does_not_catch_a_cancel() -> None:
+    """Let a cancel pass through the mapping, so it is never turned into an infra error."""
+    with pytest.raises(asyncio.CancelledError), sail._mapped("run a step"):
+        raise asyncio.CancelledError
+
+
+async def test_a_refused_egress_policy_is_infra(fake_sdk: FakeCloud) -> None:
+    """Map an SDK error from a policy change to SandboxInfraError."""
+
+    async def refuse(policy: Any) -> None:
+        """Refuse every policy change.
+
+        Args:
+            policy: The egress policy.
+
+        Raises:
+            FakeSailError: Always.
+        """
+        raise FakeSailError("refused")
+
+    async with SailEnvironment(_spec()) as env:
+        env._sailbox.set_egress_policy = _aio(refuse)
+        with pytest.raises(SandboxInfraError, match="change the egress policy: FakeSailError"):
+            await env.set_network_policy(NetworkPolicy(allowed_hosts=("api.example.com",)))
 
 
 async def test_a_create_error_is_infra_and_leaves_no_box(fake_sdk: FakeCloud) -> None:

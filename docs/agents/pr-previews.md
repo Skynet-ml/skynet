@@ -8,13 +8,11 @@ Feature PRs target `staging`, never `main`. Each PR from this repository gets
 a PR environment (preview), a full copy of staging with an empty database, at
 `https://pr-<n>.staging.skynetml.com` (API `https://api-pr-<n>.staging.skynetml.com`).
 The preview helper scripts require Bash 5.1 or newer.
-Run the acceptance checks and capture the Before and After evidence there,
-before the merge. A visual-only UI change may use simulated local renders
-instead (`skynet-pr-workflow` section 5).
+Run the acceptance checks there, before the merge.
 `.github/workflows/preview.yml` builds it on every push and deletes it when the
 PR closes. At most 4 previews run at once; a preview with no push for 48 hours
 is deleted. PRs from forks or Dependabot, and PRs whose files cannot change
-the running app (docs, `droid-wiki/`, `tools/reel-skynet/`, tests), get no
+the running app (docs, `droid-wiki/`, tests), get no
 preview; add the label `preview` to ask for one.
 
 Preview builds run the backend and frontend lanes in parallel. Backend

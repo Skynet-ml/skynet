@@ -342,17 +342,6 @@ def test_build_rejects_unrouted_models_when_protected() -> None:
         )
 
 
-def _free_permits() -> int:
-    """Return how many box permits the process pool has free now."""
-
-    async def read() -> int:
-        """Read the free permits on the portal loop."""
-        pool, _ = workspace_scorer_mod._pool()
-        return pool._provider_slots[workspace_scorer_mod.POOL_PROVIDER]._value
-
-    return sync_bridge.run(read)
-
-
 @pytest.mark.parametrize("phase", [Phase.RUN, Phase.SCORE])
 def test_run_on_pool_keeps_the_call_order_and_the_callers_context(phase: Phase) -> None:
     """Calls that end in reverse order still come back in the calls' order, each in the caller's context."""
@@ -391,12 +380,11 @@ def test_run_on_pool_raises_the_earliest_failure_and_starts_no_more_calls() -> N
     assert set(started) <= {0, 1, 2}
 
 
-def test_run_on_pool_cancel_releases_every_permit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cancel holds the permits until the calls in flight end, then frees them all for later work."""
-    monkeypatch.setattr(workspace_scorer_mod, "POOL_BOX_LIMIT", 2)
-    monkeypatch.setattr(workspace_scorer_mod, "_pool_state", None)
+def test_run_on_pool_cancel_waits_for_the_calls_in_flight_and_starts_no_more() -> None:
+    """A cancel waits for the calls in flight to end, starts no queued call, and leaves the pool usable."""
     release = threading.Event()
     started = threading.Semaphore(0)
+    ended = threading.Event()
 
     def call() -> int:
         """Block until the test lets the call end."""
@@ -405,20 +393,54 @@ def test_run_on_pool_cancel_releases_every_permit(monkeypatch: pytest.MonkeyPatc
         return 1
 
     items = [(contextvars.copy_context(), call) for _ in range(3)]
-    future = sync_bridge.submit(workspace_scorer_mod._run_on_pool, Phase.RUN, items, 3)
+
+    async def tracked() -> Any:
+        """Run the fan-out two wide and mark when its task ends."""
+        try:
+            return await workspace_scorer_mod._run_on_pool(Phase.RUN, items, 2)
+        finally:
+            ended.set()
+
+    future = sync_bridge.submit(tracked)
     assert started.acquire(timeout=5)
     assert started.acquire(timeout=5)
     future.cancel()
     time.sleep(0.05)
-    assert _free_permits() == 0
+    assert not ended.is_set()
     release.set()
-    deadline = time.monotonic() + 5
-    while _free_permits() != 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
 
-    assert _free_permits() == 2
+    assert ended.wait(timeout=5)
     assert not started.acquire(timeout=0.1)
     assert workspace_scorer_mod.run_on_pool(Phase.RUN, [lambda: 7], 1) == [7]
+
+
+def test_run_on_pool_has_no_process_box_limit() -> None:
+    """Two fan-outs of 12 hold 24 slot boxes open at once; no process limit makes either wait (SKY-542)."""
+    width = 12
+    barrier = threading.Barrier(2 * width, timeout=10)
+
+    def call(n: int) -> int:
+        """Return only once every call of both fan-outs is in flight at the same time."""
+        barrier.wait()
+        return n
+
+    results: list[list[int]] = []
+    fan_outs = [
+        threading.Thread(
+            target=lambda: results.append(
+                workspace_scorer_mod.run_on_pool(Phase.SCORE, [lambda n=n: call(n) for n in range(width)], width)
+            )
+        )
+        for _ in range(2)
+    ]
+    for thread in fan_outs:
+        thread.start()
+    for thread in fan_outs:
+        thread.join(timeout=15)
+
+    assert not barrier.broken
+    assert results == [list(range(width)), list(range(width))]
+    assert not hasattr(workspace_scorer_mod, "POOL_BOX_LIMIT")
 
 
 async def _portal_echo() -> str:

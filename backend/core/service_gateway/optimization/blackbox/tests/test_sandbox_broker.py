@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from dataclasses import asdict
+import threading
+from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -13,8 +16,10 @@ from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
+from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
 
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS
 from ..sandbox import _CODEX_REQUIREMENTS_COMMAND, _CODEX_REQUIREMENTS_READBACK, CommandResult, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 
@@ -189,8 +194,38 @@ def test_the_parent_box_reaches_only_funded_registries_and_carries_no_credential
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("registry.npmjs.org",), operation_key="k"))
     with pytest.raises(ServiceError, match="credentials"):
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), env={"A": "b"}, operation_key="k"))
+    for bad in (0, -1, float("nan"), float("inf"), True, 600):
+        with pytest.raises(ServiceError, match="duration"):
+            narrow.open(SandboxSpec(lifetime_seconds=bad, allowed_hosts=("pypi.org",), operation_key="k"))
+
+
+def test_a_run_deadline_caps_only_the_guest_so_the_scorer_outlives_it() -> None:
+    """A 120 s deadline caps the guest box; the scorer and stage boxes keep the profile (SKY-572).
+
+    The scorer box opens during staging, 50 s before the guest. With the
+    deadline on every box it would expire first and end the run for the wrong
+    reason; here the guest box expires first, at its deadline.
+    """
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=3600, guest_lifetime_seconds=120)
+    parent = broker.parent_runtime(())
+    parent.open(SandboxSpec(lifetime_seconds=parent.max_lifetime_seconds, operation_key="repo-scorer:a"))
+    parent.open(SandboxSpec(lifetime_seconds=30.0 + _STAGE_LAYOUT_SECONDS, operation_key="stage:a"))
     with pytest.raises(ServiceError, match="duration"):
-        narrow.open(SandboxSpec(lifetime_seconds=600, allowed_hosts=("pypi.org",), operation_key="k"))
+        parent.open(SandboxSpec(lifetime_seconds=parent.max_lifetime_seconds + 1, operation_key="stage:b"))
+    broker.handle("open", _open_payload(lifetime_seconds=120))
+    with pytest.raises(ServiceError, match="duration"):
+        broker.handle("open", {"request_id": "two", "spec": {"lifetime_seconds": 121}})
+    scorer, stage, guest = (spec.lifetime_seconds for spec in runtime.specs)
+    assert (scorer, stage, guest) == (3600.0, 630.0, 120.0)
+    staging_seconds = 50
+    assert staging_seconds + guest < scorer
+
+
+def test_a_guest_lifetime_cannot_exceed_the_profile() -> None:
+    """A guest lifetime above the broker maximum is refused, so a deadline only shortens boxes."""
+    with pytest.raises(ServiceError, match="duration"):
+        SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=120, guest_lifetime_seconds=121)
 
 
 def test_a_parent_box_without_a_network_switch_fails_closed() -> None:
@@ -390,3 +425,138 @@ def test_a_parent_session_forwards_root_commands() -> None:
     assert session.run("id -u", sudo=True).stdout == _CODEX_REQUIREMENTS_READBACK
     assert session.run("true").stdout == "true"
     assert runtime.sessions[0].root_commands == ["id -u"]
+
+
+def test_more_than_sixteen_engine_boxes_open_at_once_with_no_wait() -> None:
+    """Skynet sets no platform box cap, so 24 engine opens over three job brokers all run together (SKY-540)."""
+    count = 24
+    # Every open waits here until all of them are inside the provider at once, so any
+    # cap below the count breaks the barrier and fails the test instead of hanging it.
+    together = threading.Barrier(count, timeout=10)
+
+    class TogetherRuntime(FakeRuntime):
+        """Hold each box creation until every other creation runs too."""
+
+        def open(self, spec: SandboxSpec) -> FakeSession:
+            """Wait for all creations, then create the box."""
+            together.wait()
+            with lock:
+                return super().open(spec)
+
+    lock = threading.Lock()
+    runtimes = [TogetherRuntime() for _ in range(3)]
+    brokers = [SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120) for runtime in runtimes]
+    opened: list[tuple[SandboxBroker, dict[str, Any]]] = []
+    errors: list[BaseException] = []
+
+    def one_open(index: int) -> None:
+        """Open one engine box the way a job child asks for it."""
+        broker = brokers[index % 3]
+        try:
+            # The old SKY-426 engine box identity, so this test fails if that cap comes back.
+            request = {"request_id": f"native-engine:{index}", "spec": {"lifetime_seconds": 60}}
+            result = broker.handle("open", request)
+            with lock:
+                opened.append((broker, result))
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=one_open, args=(index,), daemon=True) for index in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(opened) == count
+    assert sum(len(runtime.sessions) for runtime in runtimes) == count
+    for broker, result in opened:
+        broker.handle("close", result)
+    assert all(session.close_calls == 1 for runtime in runtimes for session in runtime.sessions)
+
+
+def test_a_cancelled_job_broker_closes_every_box_once_and_refuses_new_ones() -> None:
+    """A cancel closes the job broker: each open box closes once, and later opens and closes fail."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    first = broker.handle("open", {"request_id": "engine-a", "spec": {"lifetime_seconds": 60}})
+    broker.handle("open", {"request_id": "engine-b", "spec": {"lifetime_seconds": 60}})
+    broker.handle("close", first)
+
+    broker.close()
+
+    assert [session.close_calls for session in runtime.sessions] == [1, 1]
+    with pytest.raises(ServiceError, match="closed"):
+        broker.handle("open", {"request_id": "engine-c", "spec": {"lifetime_seconds": 60}})
+    with pytest.raises(ServiceError):
+        broker.handle("close", first)
+    assert len(runtime.sessions) == 2
+
+
+def test_after_the_run_deadline_boxes_use_no_snapshot_and_the_snapshots_are_deleted() -> None:
+    """Stop snapshot use at the run deadline, so no use stretches storage past its hold."""
+    deleted: list[str] = []
+
+    async def delete(built: BuiltSnapshot) -> None:
+        """Record a deleted snapshot."""
+        deleted.append(built.snapshot_id)
+
+    async def build(name: str) -> BuiltSnapshot:
+        """Build one fake snapshot."""
+        return BuiltSnapshot(snapshot_id="snap-1", builder_name=name)
+
+    cache = SnapshotCache("run", datetime.now(UTC) + timedelta(hours=1), delete=delete)
+    asyncio.run(cache.get_or_build("key", build))
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120, snapshots=cache)
+    parent = broker.parent_runtime(("pypi.org",))
+    spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), operation_key="k", snapshot_id="snap-1")
+    assert parent.supports_snapshots
+    parent.open(spec)
+    assert runtime.specs[-1].snapshot_id == "snap-1"
+
+    cache.run_deadline = datetime.now(UTC) - timedelta(seconds=1)
+    assert not parent.supports_snapshots
+    assert deleted == ["snap-1"]
+    parent.open(replace(spec, operation_key="k2"))
+    assert runtime.specs[-1].snapshot_id is None
+    assert parent.snapshot(runtime.sessions[-1], "key") is None
+    broker.close()
+    assert deleted == ["snap-1"]
+
+
+def test_after_the_run_deadline_a_failed_snapshot_delete_runs_once_until_the_run_end() -> None:
+    """Close the expired cache once, so a failing delete does not slow every later box."""
+    calls: list[str] = []
+
+    async def failing_delete(built: BuiltSnapshot) -> None:
+        """Fail every delete before the run end.
+
+        Args:
+            built: The snapshot to delete.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        calls.append(built.snapshot_id)
+        raise RuntimeError("provider error")
+
+    async def build(name: str) -> BuiltSnapshot:
+        """Build one fake snapshot."""
+        return BuiltSnapshot(snapshot_id="snap-1", builder_name=name)
+
+    cache = SnapshotCache("run", datetime.now(UTC) - timedelta(seconds=1), delete=failing_delete)
+    asyncio.run(cache.get_or_build("key", build))
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120, snapshots=cache)
+    parent = broker.parent_runtime(("pypi.org",))
+    spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), operation_key="k", snapshot_id="snap-1")
+    for number in range(4):
+        parent.open(replace(spec, operation_key=f"k{number}"))
+    assert not parent.supports_snapshots
+    assert calls == ["snap-1"]
+    assert all(opened.snapshot_id is None for opened in runtime.specs)
+    with pytest.raises(RuntimeError):
+        broker.close()
+    assert calls == ["snap-1", "snap-1"]

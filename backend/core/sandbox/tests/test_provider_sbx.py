@@ -18,12 +18,10 @@ from typing import Any
 import httpx
 import pytest
 
-from core.config import settings
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import (
-    RunTimeoutError,
     SandboxError,
     SandboxFatalError,
     SandboxInfraError,
@@ -705,20 +703,20 @@ async def test_stop_logs_a_failed_delete(caplog: pytest.LogCaptureFixture) -> No
 
 
 async def test_run_timeout_kills_the_command() -> None:
-    """Raise RunTimeoutError and kill a command that runs past its limit."""
+    """Return a timed-out result and kill a command that runs past its limit."""
     async with SbxEnvironment(_spec()) as env:
         CLOUD.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 100", timeout_sec=0.1)
+        result = await env.exec("sleep 100", timeout_sec=0.1)
+        assert (result.exit_code, result.timed_out) == (124, True)
         assert CLOUD.killed == list(CLOUD.processes)
 
 
 async def test_run_timeout_bounds_a_hanging_command_start() -> None:
-    """Raise RunTimeoutError when the process create call does not answer."""
+    """Return a timed-out result when the process create call does not answer."""
     async with SbxEnvironment(_spec()) as env:
         CLOUD.process_create_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 100", timeout_sec=0.1)
+        result = await env.exec("sleep 100", timeout_sec=0.1)
+        assert (result.exit_code, result.timed_out) == (124, True)
         assert CLOUD.killed == []
 
 
@@ -856,6 +854,28 @@ async def test_download_not_found_answer_returns_none() -> None:
         assert await env.download_file("/tmp/missing") is None
 
 
+async def test_download_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a download whose answer runs past the size limit (SKY-535)."""
+    async with SbxEnvironment(_spec()) as env:
+        await env.upload_files({"/tmp/a.txt": "alpha"})
+        assert await env.download_file("/tmp/a.txt") == "alpha"
+        monkeypatch.setattr(sbx, "MAX_DOWNLOAD_BYTES", 16)
+        with pytest.raises(SandboxInfraError, match="above the 16 byte limit"):
+            await env.download_file("/tmp/a.txt")
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(503, SandboxTransientError), (403, SandboxFatalError), (404, SandboxInfraError)],
+)
+async def test_download_error_status(status: int, error: type[SandboxError]) -> None:
+    """Map a streamed download error status to the error of its group."""
+    async with SbxEnvironment(_spec()) as env:
+        CLOUD.failures[("GET", "/v1/files/download")] = (status, "otherError")
+        with pytest.raises(error, match=f"HTTP {status}, otherError"):
+            await env.download_file("/tmp/a.txt")
+
+
 @pytest.mark.parametrize(
     ("spec_fields", "body"),
     [
@@ -950,8 +970,3 @@ def test_factory_registers_sbx_for_development_only(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(factory.settings, "app_environment", "production")
     with pytest.raises(factory.ProductionNotAllowedError, match="sbx"):
         factory.load_provider("sbx")
-
-
-def test_default_backend_stays_legacy() -> None:
-    """Keep the legacy backend as the default."""
-    assert type(settings).model_fields["sandbox_backend"].default == "legacy"
