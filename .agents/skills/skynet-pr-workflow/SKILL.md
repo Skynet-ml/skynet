@@ -47,8 +47,9 @@ locally, check them again, and then push them together in one push.
 ## 2. Required for every PR
 
 - State the problem, the resulting behavior and the linked Linear issue in
-  plain language. Put the decision for Gilad in plain language. He must not
-  need to read source code to understand the change or its evidence.
+  plain language. For a PR that waits for Gilad (section 7), put the
+  decision for him in plain language. He must not need to read source code
+  to understand the change or its evidence.
 - Name the tested head commit and the baseline commit. Refresh the evidence
   after changes that affect it.
 - Explain the test scope: which behaviors, failure cases and integration
@@ -238,13 +239,13 @@ gates pass:
    commit>`) and reopen its issue with the failure. The revert goes in its
    own PR and through the batch CI flow below.
 
-**UI PRs** (anything touching `frontend/`, including mixed PRs with
-`backend/`, plus optional Markdown under `docs/`) merge like backend PRs.
-The same five gates apply, and no human approval is needed (Gilad,
-2026-11-11).
+**UI PRs** touch `frontend/**`. They can also touch `backend/**` and
+`i18n/locales/ui/*.json`, plus optional `docs/**/*.md`. UI PRs merge like
+backend PRs. The same five gates apply, and no human approval is needed
+(Gilad, 2026-11-11).
 
-Any other PR (files outside `backend/`, `frontend/` and `docs/**/*.md`)
-waits for Gilad's approval.
+Any other PR (a file outside `backend/**`, `frontend/**`,
+`i18n/locales/ui/*.json` and `docs/**/*.md`) waits for Gilad's approval.
 
 **`staging` → `main`**: a change in `staging` is approved for production.
 The orchestrator promotes `staging` to `main` when the staging checks pass
@@ -259,9 +260,10 @@ A manual hold on a change or on a promotion still stops it.
   5.5 medium-effort approval of the current head and base, and the PR's own
   checks and its local test evidence pass. The full CI runs on the batch,
   not on the PR.
-- Automatic scope: `backend/**` and `frontend/**`, plus optional Markdown
-  under `docs/**`. At least one backend or frontend file. Unknown and
-  other-repository changes keep the human approval.
+- Automatic scope: `backend/**`, `frontend/**` and
+  `i18n/locales/ui/*.json`, plus optional `docs/**/*.md`. At least one
+  backend or frontend file. Unknown and other-repository changes keep the
+  human approval.
 - Just before a PR goes into the batch, check the full changed-file list,
   the current revision, base, evidence and review policy. Merge the reviewed
   head commit into the batch. Merge the batch PR with a command that requires
