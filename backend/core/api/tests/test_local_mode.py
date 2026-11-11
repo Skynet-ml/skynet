@@ -280,7 +280,8 @@ def _local_submit_client(monkeypatch: pytest.MonkeyPatch, *, local_mode: bool) -
 
     The billing database has no wallet for ``alice``, so the account has a $0
     Stripe balance. The setup check itself is replaced; its behavior is
-    covered by ``test_protected_submissions.py``.
+    covered by ``test_protected_submissions.py``. The payload's code check is
+    replaced too.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the stubs.
@@ -303,6 +304,9 @@ def _local_submit_client(monkeypatch: pytest.MonkeyPatch, *, local_mode: bool) -
             pending_reason=None, status="succeeded", id="preflight-fixture", fingerprint="fixture"
         ),
     )
+    # The real check runs the metric in a subprocess with a 30s limit, which a
+    # busy machine can miss; test_repo_submit.py covers that check.
+    monkeypatch.setattr(_sub_mod, "validate_blackbox_payload", lambda payload: None)
     return client, store
 
 

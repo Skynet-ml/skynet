@@ -59,7 +59,13 @@ export function SubmitEntry() {
     clearRetiredDrafts();
     let live = true;
     // A reload finds the tab's own setup, and a clone starts from its source run.
-    const reload = readSessionValue(WIZARD_SESSION_KEY) !== null;
+    // A tab copy this build cannot read does not hide the account's left setup.
+    const reload =
+      decodeWizardSession(
+        readSessionValue(WIZARD_SESSION_KEY),
+        accountId,
+        WIZARD_V2_STEPS as readonly string[],
+      ) !== null;
     void loadSetupDraft(accountId, setupDraftApi).then((draft) => {
       if (!live) return;
       const usable =

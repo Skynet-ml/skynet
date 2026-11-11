@@ -2,12 +2,6 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import {
-  decodeWizardSession,
-  encodeWizardSession,
-  setupWorthKeeping,
-} from "./session-state.ts";
-
 const srcUrl = new URL("../../../", import.meta.url).href;
 
 registerHooks({
@@ -15,11 +9,15 @@ registerHooks({
     if (specifier.startsWith("@/")) {
       return { shortCircuit: true, url: new URL(`${specifier.slice(2)}.ts`, srcUrl).href };
     }
+    if (specifier.startsWith("./") && !specifier.endsWith(".ts") && context.parentURL) {
+      return { shortCircuit: true, url: new URL(`${specifier}.ts`, context.parentURL).href };
+    }
     return nextResolve(specifier, context);
   },
 });
 
-const { WIZARD_V2_STEPS, initialWizardV2State } = await import("./wizard-v2.ts");
+const { WIZARD_V2_STEPS, emptyRepoDraft, initialWizardV2State } = await import("./wizard-v2.ts");
+const { decodeWizardSession, encodeWizardSession, setupWorthKeeping } = await import("./session-state.ts");
 
 const STEPS = WIZARD_V2_STEPS as readonly string[];
 
@@ -53,15 +51,36 @@ test("missing, broken or older setups are ignored", () => {
     decodeWizardSession(JSON.stringify({ account: "a", state: withoutInputs }), "a", STEPS),
     null,
   );
-  // A DSPy program draft saved before that target was retired has no repository.
-  assert.equal(
-    decodeWizardSession(
-      JSON.stringify({ account: "a", state: { ...good, task: { ...good.task, repo: null } } }),
-      "a",
-      STEPS,
-    ),
-    null,
-  );
+});
+
+test("a DSPy program draft from before that target was retired moves onto a repository", () => {
+  const good = initialWizardV2State("guided");
+  const old = {
+    ...good,
+    task: { ...good.task, objective: "Answer refund questions", background: "Support desk", repo: null },
+    inputs: { ...good.inputs, mode: "pairs" },
+    optimizer: { ...good.optimizer, choice: "dspy_miprov2" },
+    workspace: { ...good.workspace, metricCode: "def metric(x):\n    return 1.0\n" },
+    meta: { ...good.meta, name: "Refund bot" },
+  };
+  const restored = decodeWizardSession(JSON.stringify({ account: "a", state: old }), "a", STEPS);
+
+  assert.ok(restored);
+  assert.deepEqual(restored.task.repo, emptyRepoDraft());
+  assert.equal(restored.inputs.mode, "single");
+  assert.equal(restored.optimizer.choice, "auto");
+  assert.equal(restored.task.objective, "Answer refund questions");
+  assert.equal(restored.task.background, "Support desk");
+  assert.equal(restored.workspace.metricCode, "def metric(x):\n    return 1.0\n");
+  assert.equal(restored.meta.name, "Refund bot");
+});
+
+test("a repository draft keeps its optimizer and data mode", () => {
+  const good = initialWizardV2State("guided");
+  const state = { ...good, optimizer: { ...good.optimizer, choice: "gepa" as const } };
+  const restored = decodeWizardSession(encodeWizardSession("a", state), "a", STEPS);
+
+  assert.deepEqual(restored, state);
 });
 
 test("a draft with the retired metric picker still loads", () => {

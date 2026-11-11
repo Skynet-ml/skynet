@@ -1,4 +1,5 @@
-import type { WizardV2State } from "./wizard-v2";
+import { storedOptimizerChoice } from "@/shared/types/unified-run";
+import { emptyRepoDraft, type WizardV2State } from "./wizard-v2";
 
 /**
  * Where the open setup is kept for its tab, so a reload lands on the same
@@ -46,7 +47,8 @@ export function encodeWizardSession(account: string, state: WizardV2State): stri
 
 /**
  * Read back a setup kept for this tab, or nothing when it is missing,
- * malformed, from another account or from an older shape.
+ * malformed, from another account or from an older shape. A draft from
+ * before DSPy program setups were retired comes back on a repository target.
  *
  * Args:
  *   raw: The stored text, or null.
@@ -75,10 +77,17 @@ export function decodeWizardSession(
   if (typeof s.step !== "string" || !steps.includes(s.step)) return null;
   if (typeof s.furthestStep !== "string" || !steps.includes(s.furthestStep)) return null;
   if (!SLICES.every((slice) => s[slice] && typeof s[slice] === "object")) return null;
-  // A draft from before DSPy program setups were retired may have no repository.
+  const restored = state as WizardV2State;
   const repo = (s.task as Record<string, unknown>).repo;
-  if (!repo || typeof repo !== "object") return null;
-  return state as WizardV2State;
+  if (repo && typeof repo === "object") return restored;
+  // A draft from before DSPy program setups were retired has no repository.
+  // It moves onto a repository target and keeps its objective, metric and name.
+  return {
+    ...restored,
+    task: { ...restored.task, repo: emptyRepoDraft() },
+    inputs: { ...restored.inputs, mode: "single" },
+    optimizer: { ...restored.optimizer, choice: storedOptimizerChoice(restored.optimizer.choice) ?? "auto" },
+  };
 }
 
 /**
