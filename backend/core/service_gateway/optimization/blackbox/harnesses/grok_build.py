@@ -309,6 +309,7 @@ SPEC = register(
         version=GROK_VERSION,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
+        supported_efforts=GROK_EFFORTS,
         position=67,
     )
 )

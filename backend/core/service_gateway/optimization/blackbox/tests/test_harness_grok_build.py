@@ -13,12 +13,19 @@ from pathlib import Path
 import pytest
 
 from core.exceptions import ServiceError
-from core.models.blackbox import BLACKBOX_HARNESS_GROK_BUILD, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
+from core.models.blackbox import (
+    BLACKBOX_HARNESS_GROK_BUILD,
+    BLACKBOX_HARNESSES,
+    BLACKBOX_TARGET_AGENT,
+    BlackboxProposer,
+    BlackboxTarget,
+)
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_pi_output
 from ..harnesses import REGISTRY
 from ..harnesses.grok_build import _SESSION_ID, GROK_CONFIG_FILE, GROK_EFFORTS, GROK_SHA256, GROK_VERSION
+from ..service import _check_proposer_effort
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -375,6 +382,17 @@ def test_an_unsupported_effort_stops_the_launch(effort: str) -> None:
     """Refuse a level Grok Build does not know, rather than drop or remap it."""
     with pytest.raises(ServiceError, match="reasoning effort"):
         build_launch(_target(), _GATEWAY, reasoning_effort=effort)
+
+
+def test_submit_accepts_only_the_declared_grok_efforts() -> None:
+    """Declare Grok's levels on the spec, so submit refuses any other level before paid work."""
+    proposer = BlackboxProposer(harness=BLACKBOX_HARNESS_GROK_BUILD)
+
+    assert REGISTRY[BLACKBOX_HARNESS_GROK_BUILD].supported_efforts == GROK_EFFORTS
+    for effort in (*GROK_EFFORTS, None):
+        _check_proposer_effort(proposer, effort)
+    with pytest.raises(ServiceError, match="grok_build proposer does not support the 'turbo' effort level"):
+        _check_proposer_effort(proposer, "turbo")
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
