@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shlex
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_MINI_SWE_AGENT
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
@@ -42,6 +43,11 @@ MINI_SWE_AGENT_HELPER_ENV = "APP_MINI_SWE_AGENT_HELPER"
 # mini stops a model shell command after 30 s by default, which cuts off test
 # suites and builds.
 MINI_SWE_AGENT_COMMAND_TIMEOUT = 600
+# mini has no effort names of its own: the config hands the level to LiteLLM in
+# ``extra_body``, which sends it to the gateway unchanged. These are Skynet's
+# levels; the launch refuses any other, so a run never gets a level the user
+# did not pick.
+MINI_SWE_AGENT_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # mini runs on LiteLLM, which routes an ``openai/`` model to the ``api_base``
 # in the config file; the gateway receives the id after the prefix.
 _LITELLM_PREFIX = "openai/"
@@ -224,7 +230,15 @@ def _mini_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When ``reasoning_effort`` is not in :data:`MINI_SWE_AGENT_EFFORTS`.
     """
+    if reasoning_effort and reasoning_effort not in MINI_SWE_AGENT_EFFORTS:
+        raise ServiceError(
+            f"The mini-swe-agent harness does not support the effort level {reasoning_effort!r}. "
+            f"Supported levels: {', '.join(MINI_SWE_AGENT_EFFORTS)}."
+        )
     helper = f'"$mini_py" -I -c "${MINI_SWE_AGENT_HELPER_ENV}"'
     run_command = (
         f"{_MINI_PATH} && "
@@ -269,5 +283,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=52,
+        supported_efforts=MINI_SWE_AGENT_EFFORTS,
     )
 )

@@ -20,10 +20,13 @@ import litellm
 import pytest
 import yaml
 
+from core.api.model_catalog import REASONING_EFFORTS
+from core.exceptions import ServiceError
 from core.models.blackbox import (
     BLACKBOX_HARNESS_MINI_SWE_AGENT,
     BLACKBOX_HARNESSES,
     BLACKBOX_TARGET_AGENT,
+    BlackboxProposer,
     BlackboxTarget,
 )
 
@@ -34,10 +37,12 @@ from ..harnesses.mini_swe_agent import (
     _PROBE,
     _PROTECTED_ENV,
     MINI_SWE_AGENT_CONFIG_FILE,
+    MINI_SWE_AGENT_EFFORTS,
     MINI_SWE_AGENT_HELPER_ENV,
     MINI_SWE_AGENT_LITELLM_VERSION,
     MINI_SWE_AGENT_VERSION,
 )
+from ..service import _check_proposer_effort
 
 # mini-swe-agent is not a backend dependency. When it is installed, a test
 # checks its real built-in config and model class against the gateway.
@@ -436,6 +441,30 @@ def test_config_routes_litellm_to_the_gateway_without_a_cost_limit(effort: str |
     }
 
 
+def test_spec_declares_every_skynet_effort_level() -> None:
+    """Declare all of Skynet's effort levels, so submit offers and checks exactly these."""
+    assert REGISTRY[BLACKBOX_HARNESS_MINI_SWE_AGENT].supported_efforts == REASONING_EFFORTS
+    assert MINI_SWE_AGENT_EFFORTS == REASONING_EFFORTS
+
+
+@pytest.mark.parametrize("effort", ["ultra", "High", "auto"])
+def test_launch_refuses_an_unsupported_effort(effort: str) -> None:
+    """Refuse a level that is not in the harness's list instead of sending it to the gateway."""
+    with pytest.raises(ServiceError, match="does not support the effort level"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
+
+
+@pytest.mark.parametrize(("effort", "accepted"), [(None, True), ("max", True), ("none", True), ("ultra", False)])
+def test_submit_checks_the_effort_before_paid_work(effort: str | None, accepted: bool) -> None:
+    """Accept a declared level or no level at submit, and refuse any other before the run reserves budget."""
+    proposer = BlackboxProposer(harness=BLACKBOX_HARNESS_MINI_SWE_AGENT)
+    if accepted:
+        _check_proposer_effort(proposer, effort)
+    else:
+        with pytest.raises(ServiceError, match="does not support the 'ultra' effort level"):
+            _check_proposer_effort(proposer, effort)
+
+
 class _GatewayHandler(BaseHTTPRequestHandler):
     """Record each request body and answer with one ``bash`` tool call in the API's own shape."""
 
@@ -543,7 +572,7 @@ def _assert_effort_reached_the_gateway(bodies: list[tuple[str, dict]], model: st
 
 
 @pytest.mark.parametrize("model", [_CHAT_MODEL, _RESPONSES_MODEL])
-@pytest.mark.parametrize("effort", ["minimal", "high", "xhigh"])
+@pytest.mark.parametrize("effort", MINI_SWE_AGENT_EFFORTS)
 def test_effort_survives_mini_drop_params_through_litellm(
     mock_gateway: tuple[GatewayConfig, list[tuple[str, dict]]], model: str, effort: str
 ) -> None:
