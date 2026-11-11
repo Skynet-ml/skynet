@@ -164,6 +164,8 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[obje
     ):
         monkeypatch.setattr(module, "settings", current)
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status(cli) for cli in CLI_MODELS])
+    # An empty cache makes the effortless-model check build a real catalog, which reaches OpenRouter.
+    monkeypatch.setattr(model_catalog, "_cached_response", model_catalog.ModelCatalogResponse(providers=[], models=[]))
     monkeypatch.setattr(model_router, "get_catalog_cached", lambda: SimpleNamespace(models=[]))
     monkeypatch.setattr(model_router, "require_known_model", _require_catalog_model)
     monkeypatch.setattr(

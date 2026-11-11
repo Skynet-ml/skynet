@@ -1224,3 +1224,28 @@ def test_classifier_roles_do_not_unlock_other_routers(monkeypatch: pytest.Monkey
 
     with pytest.raises(mc.DomainError):
         mc.require_known_model("openrouter/other/some-router", role="judge")
+
+
+def test_cold_effort_check_joins_the_thread_the_kick_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold check joins the started thread from the kick, not a later global value."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    real_kick = mc._kick_background_refresh
+
+    def kick_then_replace() -> threading.Thread | None:
+        """Start the refresh, then store an unstarted thread, as a racing new refresh can.
+
+        Returns:
+            The thread the real kick returned.
+        """
+        thread = real_kick()
+        mc._refresh_thread = threading.Thread(target=lambda: None)
+        return thread
+
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+    monkeypatch.setattr(mc, "get_catalog", lambda: ModelCatalogResponse(providers=[], models=[plain]))
+    monkeypatch.setattr(mc, "zero_retention_models", set)
+    monkeypatch.setattr(mc, "_kick_background_refresh", kick_then_replace)
+
+    assert mc.is_effortless_model("openrouter/vendor/plain") is True

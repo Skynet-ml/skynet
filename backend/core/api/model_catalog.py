@@ -585,8 +585,7 @@ def is_effortless_model(name: str) -> bool:
         # Before the boot prewarm lands, wait for its build (or start one):
         # otherwise a stored effortless pick fails validation once with a 422.
         # Joining the shared refresh thread keeps it to one build at a time.
-        _kick_background_refresh()
-        refresh = _refresh_thread
+        refresh = _kick_background_refresh()
         if refresh is not None:
             refresh.join()
     if name in _hidden_effortless_values:
@@ -1831,12 +1830,17 @@ def _refresh_catalog_in_background() -> None:
         )
 
 
-def _kick_background_refresh() -> None:
-    """Spawn the background refresh thread if one isn't already running."""
+def _kick_background_refresh() -> Thread | None:
+    """Spawn the background refresh thread if one isn't already running.
+
+    Returns:
+        The current refresh thread, read under the cache lock, so it has
+        started; ``None`` only when no thread was ever recorded.
+    """
     global _refresh_in_flight, _refresh_thread
     with _cache_lock:
         if _refresh_in_flight:
-            return
+            return _refresh_thread
         _refresh_in_flight = True
         # Set with the flag, so a caller that sees the flag can join this thread.
         thread = _refresh_thread = Thread(target=_refresh_catalog_in_background, name="catalog-refresh", daemon=True)
@@ -1844,6 +1848,7 @@ def _kick_background_refresh() -> None:
         # and joining an unstarted thread raises. The thread takes the lock
         # only in its finally, so this cannot deadlock.
         thread.start()
+        return thread
 
 
 def with_zero_retention(catalog: ModelCatalogResponse) -> ModelCatalogResponse:
