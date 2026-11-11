@@ -311,6 +311,39 @@ for (const local of [false, true]) {
   });
 }
 
+const TWO_LABS_LOCAL: CatalogModel[] = [
+  ...CLI,
+  {
+    ...CLI[0]!,
+    value: "subscription/claude/anthropic/claude-sonnet-5.5",
+    label: "Claude Sonnet 5.5",
+    display_name: "Claude Sonnet 5.5",
+    provider: "anthropic",
+  },
+];
+
+// SKY-653: a search that spans two providers keeps one headed section per provider.
+for (const local of [false, true]) {
+  void test(`${local ? "local" : "web"} search across two providers shows both provider headers`, async () => {
+    const m = await mount(null, local ? TWO_LABS_LOCAL : null);
+    try {
+      await click(byLabel("Choose a model: GPT-5.5")!);
+      const input = document.querySelector<HTMLInputElement>('input[aria-label="Search models…"]')!;
+      await React.act(async () => {
+        Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, local ? "5.5" : "e");
+        input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+      });
+      const sections = [...document.querySelectorAll('[role="group"].model-section')].map((group) => [
+        group.getAttribute("aria-label"),
+        group.querySelectorAll('[role="menuitem"]').length,
+      ]);
+      assert.deepEqual(sections, local ? [["Codex", 1], ["Claude Code", 1]] : [["OpenAI", 2], ["Anthropic", 1]]);
+    } finally {
+      await m.unmount();
+    }
+  });
+}
+
 void test("the web catalog unfolds models above the slider and collapses after selection", async () => {
   const m = await mount("high", null);
   try {

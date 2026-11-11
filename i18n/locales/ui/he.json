@@ -4785,7 +4785,7 @@
   "agent.tool.profile.kind.categorical": "קטגוריות",
   "agent.tool.profile.kind.numeric": "מספר",
   "agent.tool.profile.kind.freeform": "טקסט חופשי",
-  "submit.draft.title": "להמשיך מההגדרה הקודמת שלך?",
+  "submit.draft.title": "להמשיך את ההגדרה האחרונה?",
   "submit.draft.continue": "להמשיך בטיוטה",
   "submit.draft.start_new": "להתחיל מחדש",
   "submit.draft.left_named": "עזבת את „{name}” {time}.",

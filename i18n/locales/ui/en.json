@@ -4785,7 +4785,7 @@
   "agent.tool.profile.kind.categorical": "Categories",
   "agent.tool.profile.kind.numeric": "Number",
   "agent.tool.profile.kind.freeform": "Free text",
-  "submit.draft.title": "Continue from your previous setup?",
+  "submit.draft.title": "Continue your last setup?",
   "submit.draft.continue": "Continue draft",
   "submit.draft.start_new": "Start new",
   "submit.draft.left_named": "You left “{name}” {time}.",
