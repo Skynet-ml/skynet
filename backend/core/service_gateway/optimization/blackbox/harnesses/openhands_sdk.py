@@ -70,6 +70,7 @@ _QUIET_ENV = {
     "LITELLM_LOCAL_MODEL_COST_MAP": "True",
     "DO_NOT_TRACK": "1",
     "ANONYMIZED_TELEMETRY": "false",
+    "OPENHANDS_SUPPRESS_BANNER": "1",
 }
 # A protected sandbox has no route to the internet: uv must use its cache and
 # the SDK must not phone home.
@@ -97,7 +98,6 @@ from pathlib import Path
 from openhands.sdk import LLM, Agent, AgentContext, Conversation, Tool
 from openhands.sdk.conversation.impl import local_conversation
 from openhands.sdk.event import ActionEvent, MessageEvent
-from openhands.sdk.skills import Skill
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
@@ -131,16 +131,15 @@ def _no_ambient_plugins(*args, **kwargs):
 local_conversation.load_available_plugins = _no_ambient_plugins
 
 
-def _skills():
-    \"\"\"Return the workspace instructions file as one always-on skill, or no skills.
+def _instructions():
+    \"\"\"Return the workspace instructions file text, or ``None`` when it is missing or empty.
 
     The SDK reads AGENTS.md only with ``load_project_skills``, which also pulls in
     other workspace skill files, so the runner passes this one file itself.
     \"\"\"
     if not INSTRUCTIONS_FILE.is_file():
-        return []
-    text = INSTRUCTIONS_FILE.read_text(encoding="utf-8")
-    return [Skill(name="agents", content=text, source=str(INSTRUCTIONS_FILE), trigger=None)]
+        return None
+    return INSTRUCTIONS_FILE.read_text(encoding="utf-8") or None
 
 
 def _text(content):
@@ -177,10 +176,13 @@ def _run(prompt, model, api_key):
         settings["reasoning_effort"] = effort
     llm = LLM(**settings)
     tools = [Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name), Tool(name=TaskTrackerTool.name)]
-    # Only the candidate instructions and the workspace tools: no other skills
+    # The candidate is the optimization target, so it goes in as raw system
+    # prompt text. A trigger-less skill would land in <REPO_CONTEXT>, which the
+    # SDK marks untrusted and limits to style and convention guidance. No skills
     # and no MCP servers.
-    agent = Agent(llm=llm, tools=tools, agent_context=AgentContext(skills=_skills()))
-    conversation = Conversation(agent=agent, workspace=str(Path.cwd().resolve()))
+    agent = Agent(llm=llm, tools=tools, agent_context=AgentContext(system_message_suffix=_instructions()))
+    # The default visualizer prints rich text to stdout around the Pi event.
+    conversation = Conversation(agent=agent, workspace=str(Path.cwd().resolve()), visualizer=None)
     conversation.send_message(prompt)
     conversation.run()
     usage = llm.metrics.accumulated_token_usage

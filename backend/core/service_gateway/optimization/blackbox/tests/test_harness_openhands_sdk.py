@@ -94,8 +94,9 @@ class Tool:
 
 
 class AgentContext:
-    def __init__(self, skills):
-        self.skills = skills
+    def __init__(self, system_message_suffix=None, skills=()):
+        self.system_message_suffix = system_message_suffix
+        self.skills = list(skills)
 
 
 class Agent:
@@ -111,9 +112,10 @@ class _State:
 
 
 class Conversation:
-    def __init__(self, agent, workspace):
+    def __init__(self, agent, workspace, visualizer="default"):
         self.agent = agent
         self.workspace = workspace
+        self.visualizer = visualizer
         self.state = _State()
 
     def send_message(self, prompt):
@@ -129,7 +131,10 @@ class Conversation:
             "env": {name: os.environ.get(name) for name in (
                 "LLM_API_KEY", "LLM_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")},
             "tools": [tool.name for tool in self.agent.tools],
-            "skills": [vars(skill) for skill in self.agent.agent_context.skills],
+            "skills": self.agent.agent_context.skills,
+            "system_message_suffix": self.agent.agent_context.system_message_suffix,
+            "visualizer": self.visualizer,
+            "banner_off": os.environ.get("OPENHANDS_SUPPRESS_BANNER"),
             "ambient_plugins": local_conversation.load_available_plugins(
                 work_dir=self.workspace, include_user=True, include_project=True),
             "workspace": self.workspace,
@@ -140,14 +145,6 @@ class Conversation:
         prompt = self.state.events[0].llm_message.content[0].text
         self.state.events.append(MessageEvent("agent", "working on " + prompt.strip()))
         self.state.events.append(ActionEvent("answer to " + prompt.strip()))
-""",
-    "openhands/sdk/skills.py": """
-class Skill:
-    def __init__(self, name, content, source, trigger):
-        self.name = name
-        self.content = content
-        self.source = source
-        self.trigger = trigger
 """,
     "openhands/sdk/conversation/__init__.py": "",
     "openhands/sdk/conversation/impl/__init__.py": "",
@@ -251,6 +248,7 @@ def test_launch_routes_through_the_gateway_without_a_direct_key() -> None:
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     assert launch.env["DO_NOT_TRACK"] == "1"
+    assert launch.env["OPENHANDS_SUPPRESS_BANNER"] == "1"
     assert ENV_REASONING_EFFORT not in launch.env
     assert list(launch.files) == [RUNNER_FILE]
     assert launch.run_command == f'PATH="$HOME/.local/bin:$PATH" uv run --quiet --script {RUNNER_FILE}'
@@ -341,6 +339,7 @@ def test_protected_launch_checks_the_pin_offline_and_rewrites_the_runner_to_the_
     assert "pip install" not in launch.install_command
     assert launch.env["UV_OFFLINE"] == "1"
     assert launch.env["DO_NOT_TRACK"] == "1"
+    assert launch.env["OPENHANDS_SUPPRESS_BANNER"] == "1"
     for name in _DIRECT_KEYS:
         assert launch.env[name] == ""
     for name, content in launch.files.items():
@@ -421,16 +420,20 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
     }
     assert seen["tools"] == ["terminal", "file_editor", "task_tracker"]
     assert seen["skills"] == []
+    assert seen["system_message_suffix"] is None
+    assert seen["visualizer"] is None
+    assert seen["banner_off"] == "1"
     assert seen["ambient_plugins"] == {}
     assert seen["workspace"] == str(workspace)
     assert Path(seen["scratch"]).resolve().is_relative_to(workspace / ".app/openhands_sdk")
     assert not Path(seen["scratch"]).exists()
     assert list((workspace / ".app/openhands_sdk").iterdir()) == [workspace / RUNNER_FILE]
     assert parse_pi_output(result.stdout) == ("answer to Fix the bug.", {"input_tokens": 11, "output_tokens": 7})
+    assert result.stdout.strip().count("\n") == 0
 
 
 def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) -> None:
-    """The AGENTS.md candidate reaches the agent context as one always-on skill."""
+    """The AGENTS.md candidate reaches the system prompt as raw suffix text, not as an untrusted repo skill."""
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix the bug.\n")
@@ -444,9 +447,9 @@ def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) ->
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(record.read_text())["skills"] == [
-        {"name": "agents", "content": candidate, "source": "AGENTS.md", "trigger": None}
-    ]
+    seen = json.loads(record.read_text())
+    assert seen["system_message_suffix"] == candidate
+    assert seen["skills"] == []
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
