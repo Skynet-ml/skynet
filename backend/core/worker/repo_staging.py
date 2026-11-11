@@ -427,6 +427,7 @@ def stage_repository(
         "secret_names": sorted(secrets),
         "constrained": environment.constraints is not None,
         "proposer_hosts": list(hosts),
+        "hidden_paths": list(hidden),
     }
     return result, StagedRepository(
         snapshot=snapshot,

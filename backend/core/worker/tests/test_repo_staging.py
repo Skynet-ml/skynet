@@ -1753,6 +1753,8 @@ def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: py
         assert _names(agent) == {"src/app.py", "eval/data.csv"}
         assert {"optimize.toml", "eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
         assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits")
+        # The proposer's tool guard refuses the same paths (E62, SKY-395).
+        assert staged_payload["_repo_snapshot"]["hidden_paths"] == list(staged.hidden_paths)
     finally:
         staged.cleanup()
 

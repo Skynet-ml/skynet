@@ -1050,18 +1050,6 @@ class BackgroundWorker:
                         )
                     except DomainError as error:
                         raise domain_service_error(error) from error
-                    host = host_proposer(payload_dict)
-                    if host is not None:
-                        # The CLI and permission come from the stored run settings,
-                        # never from the guest, and only this run's proposer gets the token.
-                        host_token = bind_host_agent(
-                            budget_gateway,
-                            settings,
-                            cli=host[0],
-                            permission=host[1],
-                            reasoning_effort=host_reasoning_effort(payload_dict),
-                        )
-                        attach_host_agent_token(payload_dict, host_token)
                     # The wizard leaves the ceiling unset for a budget without a
                     # limit, while the guest's proposer still plans its spend
                     # against one, so the parent hands it the ledger's allowance.
@@ -1115,6 +1103,20 @@ class BackgroundWorker:
                             # which now holds what staging recorded.
                             if recorded is not None:
                                 checkpoint_tracker["payload"] = dict(recorded)
+                    host = host_proposer(payload_dict)
+                    if host is not None:
+                        # The CLI and permission come from the stored run settings,
+                        # never from the guest, and only this run's proposer gets the token.
+                        # After staging, which works out the hidden paths the CLI must refuse.
+                        host_token = bind_host_agent(
+                            budget_gateway,
+                            settings,
+                            cli=host[0],
+                            permission=host[1],
+                            reasoning_effort=host_reasoning_effort(payload_dict),
+                            hidden_paths=staged_repository.hidden_paths if staged_repository is not None else (),
+                        )
+                        attach_host_agent_token(payload_dict, host_token)
                 if is_unified:
                     strip_unified_model_aliases(payload_dict)
                 if has_exposed_execution_credentials(

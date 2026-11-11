@@ -495,6 +495,34 @@ def test_the_proposer_box_reaches_only_its_staged_hosts(
     assert "raw.githubusercontent.com" not in runtime.spec.allowed_hosts
 
 
+@pytest.mark.parametrize(
+    ("repo_hidden", "expected"),
+    [(["optimize.toml", "eval/scorer.py"], ["optimize.toml", "eval/scorer.py"]), (None, [])],
+)
+def test_the_proposer_payload_carries_the_staged_hidden_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_hidden: list[str] | None, expected: list[str]
+) -> None:
+    """The guest's tool guard gets the one hidden list that staging made, and none without it (E62, SKY-395).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture.
+        repo_hidden: The staged hidden paths, or ``None`` for a snapshot without the key.
+        expected: The ``hidden_paths`` the proposer payload must hold.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = ""
+    ctx = _context(tmp_path, FakeRuntime(session))
+    repo: dict[str, Any] = {"chunks": [], "editable_paths": ["."], "readonly_paths": []}
+    if repo_hidden is not None:
+        repo["hidden_paths"] = repo_hidden
+    ctx.native_options = replace(ctx.native_options, repo=repo)
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    assert json.loads(session.files["native_input.json"])["proposer"]["hidden_paths"] == expected
+
+
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])
 def test_repository_only_engines_refuse_a_text_run(tmp_path: Path, engine_id: str) -> None:
     """GEPA's and Best-of-N's agent samplers edit a checkout, so a text run never reaches them."""

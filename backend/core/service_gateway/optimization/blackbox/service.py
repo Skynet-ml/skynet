@@ -1168,6 +1168,7 @@ def _run_job(
                     "readonly_paths": list(repo_snapshot.get("readonly_paths") or ()),
                     "constrained": bool(repo_snapshot.get("constrained")),
                     "proposer_hosts": list(repo_snapshot.get("proposer_hosts") or ()),
+                    "hidden_paths": list(repo_snapshot.get("hidden_paths") or ()),
                 }
                 if target.repo is not None and repo_snapshot is not None
                 else None

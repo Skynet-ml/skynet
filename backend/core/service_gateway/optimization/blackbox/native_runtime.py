@@ -1191,6 +1191,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 "ralph": proposer.ralph,
                 "max_no_eval_seconds": proposer.max_no_eval_seconds,
                 "max_tool_calls": proposer.max_tool_calls,
+                # The guest's tool guard refuses each read of these scoring-side paths (E62).
+                "hidden_paths": list((options.repo or {}).get("hidden_paths") or ()),
             },
             "task": native_task_payload(engine_id, task),
         }
