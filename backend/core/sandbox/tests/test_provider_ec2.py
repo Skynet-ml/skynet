@@ -13,6 +13,7 @@ import json
 import logging
 import stat
 import sys
+import tempfile
 import textwrap
 import threading
 from collections.abc import Callable, Iterator
@@ -137,6 +138,8 @@ class FakeEC2:
         self.root_device = "/dev/sda1"
         self.wait_gate: threading.Event | None = None
         self.run_gate: threading.Event | None = None
+        self.describe_gate: threading.Event | None = None
+        self.described = threading.Event()
 
     def _fail(self, name: str) -> None:
         """Raise the queued error of one operation.
@@ -246,6 +249,9 @@ class FakeEC2:
             The images.
         """
         self.calls.append(("describe_images", {"ImageIds": ImageIds}))
+        if self.describe_gate is not None:
+            self.describe_gate.wait(timeout=5)
+        self.described.set()
         return {"Images": [{"ImageId": ImageIds[0], "RootDeviceName": self.root_device}]}
 
     def terminate_instances(self, *, InstanceIds: list[str]) -> dict[str, Any]:  # noqa: N803
@@ -593,9 +599,9 @@ async def test_exec_ends_the_remote_command_at_the_limit(fake_ec2: FakeEC2) -> N
         limited_root = _ssh_calls(fake_ec2)[-1][-1]
         await env.exec("true")
         plain = _ssh_calls(fake_ec2)[-1][-1]
-    assert "timeout -k 5 3 bash -c" in limited
+    assert "timeout -k 5 3 bash -lc" in limited
     assert "sudo -n bash -lc" in limited_root
-    assert "timeout -k 5 3 bash -c" in limited_root
+    assert "timeout -k 5 3 bash -lc" in limited_root
     assert "timeout" not in plain
 
 
@@ -670,6 +676,46 @@ async def test_a_cancelled_start_terminates_the_pending_instance(
     await _until(lambda: not ec2_provider._LATE_TERMINATES and fake_ec2.ops().count("terminate_instances") >= 2)
     assert fake_ec2.live() == []
     assert env._instance_id is None
+
+
+async def test_a_start_cancelled_during_the_image_lookup_launches_nothing(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skip run_instances when the start is cancelled while describe_images runs."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_ec2.describe_gate = threading.Event()
+    env = EC2Environment(_spec(resources=ResourceRequest(cpus=1, disk_mb=8192)))
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "describe_images" in fake_ec2.ops())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    fake_ec2.describe_gate.set()
+    await _until(fake_ec2.described.is_set)
+    await asyncio.sleep(0.1)
+    assert "run_instances" not in fake_ec2.ops()
+    assert fake_ec2.instances == {}
+
+
+async def test_failed_start_and_empty_stop_remove_the_known_hosts_file(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Remove the temporary known hosts file after a failed start and on a stop with no instance."""
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    (fake_ec2.state / "ssh_down").touch()
+    env = EC2Environment(_spec())
+    env._connect_timeout = 0.2
+    with pytest.raises(StartTimeoutError):
+        await env.start()
+    assert list(temp.glob("skynet-ec2-*")) == []
+    assert env._temp_known_hosts is None
+    name = Path(env._known_hosts()).name
+    assert [item.name for item in temp.glob("skynet-ec2-*")] == [name]
+    await env.stop()
+    assert list(temp.glob("skynet-ec2-*")) == []
+    assert env._temp_known_hosts is None
 
 
 async def test_a_start_cancelled_during_run_instances_terminates_without_waiting(

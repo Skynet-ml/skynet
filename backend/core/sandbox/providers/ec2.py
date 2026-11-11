@@ -250,12 +250,15 @@ class EC2Environment(SandboxEnvironment):
     async def start(self) -> None:
         """Launch the instance and wait for SSH. Do nothing when the instance already runs.
 
-        A cancel terminates the launched instance at once when its id is
-        known. Otherwise the launch terminates it as soon as
-        ``run_instances`` returns. The cancel waits for the launch for at
-        most ``_CANCEL_GRACE_SEC``, also through repeat cancels. A launch
-        that is still open after that ends in the background, and it only
-        ever terminates its own instance.
+        A cancel before ``run_instances`` launches no instance. A cancel
+        terminates the launched instance at once when its id is known.
+        Otherwise the launch terminates it as soon as ``run_instances``
+        returns. The cancel passes on after at most twice
+        ``_CANCEL_GRACE_SEC``, also through repeat cancels: one grace time
+        for the launch to end and one for the terminate. A launch that is
+        still open after that ends in the background, and it only ever
+        terminates its own instance. A failed start removes its temporary
+        known hosts file.
 
         Raises:
             SandboxError: An AWS call failed, or the instance has no address.
@@ -278,15 +281,18 @@ class EC2Environment(SandboxEnvironment):
             # instance. An instance id that is known already ends now, so it
             # does not wait for the running state or SSH.
             state.cancelled = True
-            if state.instance_id is not None:
-                await _terminate_bounded(client, state.instance_id)
-            await _wait_through_cancels(launch, _CANCEL_GRACE_SEC)
-            if not launch.done():
-                launch.add_done_callback(lambda done: _terminate_late_launch(client, done))
-                raise
-            if launch.cancelled() or launch.exception() is not None:
-                raise
-            await _terminate_bounded(client, launch.result()[0])
+            try:
+                if state.instance_id is None:
+                    await _wait_through_cancels(launch, _CANCEL_GRACE_SEC)
+                if not launch.done():
+                    launch.add_done_callback(lambda done: _terminate_late_launch(client, done))
+                if state.instance_id is not None:
+                    await _terminate_bounded(client, state.instance_id)
+            finally:
+                self._remove_known_hosts()
+            raise
+        except BaseException:
+            self._remove_known_hosts()
             raise
         self._instance_id = instance_id
         self._host = host
@@ -299,12 +305,15 @@ class EC2Environment(SandboxEnvironment):
         ``_CANCEL_GRACE_SEC``, also through repeat cancels, then passes the
         cancel on with the terminate still running in the background.
 
+        With no instance, stop only removes a temporary known hosts file.
+
         Raises:
             SandboxError: The terminate failed for a reason other than a gone instance.
             asyncio.CancelledError: The task was cancelled during the terminate.
         """
         instance_id = self._instance_id
         if instance_id is None:
+            self._remove_known_hosts()
             return
         self._clear()
         terminate = asyncio.ensure_future(_terminate(self._client, instance_id))
@@ -366,7 +375,7 @@ class EC2Environment(SandboxEnvironment):
             # Killing the local ssh does not end the remote command, so the
             # instance ends it at the same limit.
             seconds = max(1, math.ceil(limit))
-            reader = f"timeout -k {_REMOTE_KILL_AFTER_SEC} {seconds} bash -c {shlex.quote(reader)}"
+            reader = f"timeout -k {_REMOTE_KILL_AFTER_SEC} {seconds} bash -lc {shlex.quote(reader)}"
         reader = wrap_script(reader, env={}, cwd=None, sudo=sudo)
         try:
             code, out, err = await _run_process(
@@ -493,6 +502,8 @@ class EC2Environment(SandboxEnvironment):
             asyncio.CancelledError: The start was cancelled during the launch.
         """
         kwargs = await _aws("describe_images", self._run_kwargs)
+        # A cancel during the image lookup must not start a paid instance.
+        _raise_if_cancelled(state)
         response = await _aws("run_instances", client.run_instances, **kwargs)
         instance_id = response["Instances"][0]["InstanceId"]
         state.instance_id = instance_id
@@ -665,6 +676,10 @@ class EC2Environment(SandboxEnvironment):
         self._instance_id = None
         self._host = None
         _LIVE.discard(self)
+        self._remove_known_hosts()
+
+    def _remove_known_hosts(self) -> None:
+        """Remove the temporary known hosts file when there is one."""
         if self._temp_known_hosts is not None:
             with contextlib.suppress(OSError):
                 Path(self._temp_known_hosts).unlink(missing_ok=True)
