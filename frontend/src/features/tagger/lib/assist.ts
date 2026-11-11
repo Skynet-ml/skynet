@@ -233,11 +233,11 @@ export function interviewComposerEffort(
 export function rememberInterviewPick(
   assist: Pick<AssistState, "interviewModel" | "interviewEffort">,
 ): void {
-  rememberComposerPick(
-    isLocalMode(),
-    interviewComposerModel(assist),
-    interviewComposerEffort(assist),
-  );
+  const model = interviewComposerModel(assist);
+  // The interview menu clears a pick it does not list (a BYOK panel pick on
+  // the Web side); that null must not erase the panel's saved pick.
+  if (model === null) return;
+  rememberComposerPick(isLocalMode(), model, interviewComposerEffort(assist));
 }
 
 /** A fresh assist state for a session starting in the interview phase. */

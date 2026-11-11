@@ -577,6 +577,29 @@ void test("OpenRouter priority support enables the fast toggle", async () => {
   }
 });
 
+void test("a pick keeps fast mode on an OpenRouter model with priority support", async () => {
+  const opus: CatalogModel = { ...WEB[0]!, value: "openrouter/anthropic/claude-opus-5.5", label: "Opus", display_name: "Opus", provider: "anthropic", supports_fast: undefined };
+  const mini: CatalogModel = { ...WEB[1]!, value: "openrouter/openai/gpt-5.4-mini" };
+  const m = await mount(null, [opus, mini]);
+  const settle = () => React.act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+  try {
+    await settle();
+    await click(byLabel("Fast mode")!);
+    await click(byLabel("Choose a model: Opus")!);
+    await click([...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent?.endsWith("Opus"))!);
+    await settle();
+    assert.deepEqual(m.calls.fast, [true]);
+    await click(byLabel("Choose a model: Opus")!);
+    await click([...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent?.endsWith("GPT-5.4 mini"))!);
+    await settle();
+    assert.deepEqual(m.calls.fast, [true, false]);
+  } finally {
+    await m.unmount();
+  }
+});
+
 void test("the right-side reset returns effort to the model default", async () => {
   const m = await mount("high");
   try {

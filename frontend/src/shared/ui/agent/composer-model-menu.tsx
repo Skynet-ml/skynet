@@ -191,24 +191,30 @@ export function ComposerModelMenu({
   const cliRow = !!current && isCliProvider(menuModelGroup(current));
   // A CLI row shows the level the backend runs, so Max on a model whose top is lower shows that top.
   const shownEffort = effortStale ? null : cliRow ? cliEffort(savedEffort, efforts) : effort;
-  const [fastModel, setFastModel] = React.useState<string | null>(null);
+  const [fastCheck, setFastCheck] = React.useState<{ model: string; supported: boolean } | null>(null);
   const hasFastControl = !!onFastChange;
   React.useEffect(() => {
     if (!hasFastControl || !effective?.startsWith("openrouter/")) return;
     let cancelled = false;
     getModelFastMode(effective)
       .then((supported) => {
-        if (!cancelled) setFastModel(supported ? effective : null);
+        if (!cancelled) setFastCheck({ model: effective, supported });
       })
       .catch(() => {
-        if (!cancelled) setFastModel(null);
+        if (!cancelled) setFastCheck({ model: effective, supported: false });
       });
     return () => {
       cancelled = true;
     };
   }, [effective, hasFastControl]);
   const fastShown =
-    !!onFastChange && (cliRow ? !!current?.supports_fast : !!effective && fastModel === effective);
+    !!onFastChange &&
+    (cliRow ? !!current?.supports_fast : fastCheck?.model === effective && fastCheck.supported);
+  // OpenRouter rows carry no fast flag; the async check decides once it answers for this model.
+  const fastRefused = !cliRow && fastCheck?.model === effective && !fastCheck.supported;
+  React.useEffect(() => {
+    if (fast && fastRefused) onFastChange?.(false);
+  }, [fast, fastRefused, onFastChange]);
   const sliderRef = React.useRef<HTMLDivElement>(null);
   const focusPanel = () => sliderRef.current?.focus({ preventScroll: true });
   const [modelsOpen, setModelsOpen] = React.useState(false);
@@ -231,7 +237,9 @@ export function ComposerModelMenu({
     ) {
       onEffortChange(null);
     }
-    if (fast && !available.find((m) => m.value === target)?.supports_fast) onFastChange?.(false);
+    const row = available.find((m) => m.value === target);
+    const keepsFast = row && isCliProvider(menuModelGroup(row)) ? !!row.supports_fast : !!target?.startsWith("openrouter/");
+    if (fast && !keepsFast) onFastChange?.(false);
   };
 
   const choose = (model: string | null) => {
