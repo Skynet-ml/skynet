@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import http.server
 import json
+import os
+import shutil
 import socket
 import threading
 import time
@@ -30,7 +32,7 @@ from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
 from core.billing.env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS, CONNECTORS_KEY
-from core.billing.guest_model_proxy import MCP_TOKEN_ENV, METHOD_HEADER
+from core.billing.guest_model_proxy import MCP_PATH, MCP_TOKEN_ENV, METHOD_HEADER
 from core.billing.mcp_oauth_client import McpOAuthError
 from core.billing.model_dispatch import ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
@@ -60,8 +62,11 @@ from core.billing.usage_tags import (
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from core.exceptions import InfrastructureInterruptionError, ServiceError
+from core.models.blackbox import BlackboxTarget
 from core.provider_registry import BYOK_PROVIDER_SLUGS
+from core.service_gateway.optimization.blackbox import harness_bridge
 from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
+from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
@@ -2248,6 +2253,191 @@ def test_a_box_uses_its_proposer_mcp_server_through_the_mailbox_relay(
     ]
     assert _MCP_KEY not in json.dumps(calls, default=str)
     assert route["token"] not in json.dumps(calls, default=str)
+
+
+# APP_TEST_CODEX can point at the pinned install (npm i @openai/codex@<CODEX_VERSION>).
+_CODEX = os.environ.get("APP_TEST_CODEX") or shutil.which("codex")
+
+
+class _ToolMcpServer:
+    """Serve an MCP streamable HTTP server with one ``lookup`` tool, as a real client expects."""
+
+    def __init__(self) -> None:
+        """Start the server on a free loopback port."""
+        self.methods: list[str] = []
+        mcp = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Answer initialize, tools/list and tools/call, and refuse the optional GET stream."""
+
+            def log_message(self, format: str, *args: object) -> None:
+                """Keep the test output quiet."""
+
+            def _reply(self, status: int, payload: dict[str, Any] | None = None) -> None:
+                """Send one JSON answer inside the session.
+
+                Args:
+                    status: HTTP status.
+                    payload: JSON-RPC answer, or ``None`` for an empty body.
+                """
+                body = json.dumps(payload).encode() if payload is not None else b""
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Mcp-Session-Id", "session-1")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:
+                """Answer one JSON-RPC message."""
+                message = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                method = message.get("method", "")
+                mcp.methods.append(method)
+                if "id" not in message:
+                    self._reply(202)
+                    return
+                if method == "initialize":
+                    result: dict[str, Any] = {
+                        "protocolVersion": message["params"].get("protocolVersion", "2025-06-18"),
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "search", "version": "1.0.0"},
+                    }
+                elif method == "tools/list":
+                    schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+                    result = {"tools": [{"name": "lookup", "description": "Look a word up.", "inputSchema": schema}]}
+                elif method == "tools/call":
+                    result = {"content": [{"type": "text", "text": "lookup-answer-7"}], "isError": False}
+                else:
+                    result = {}
+                self._reply(200, {"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+            def do_GET(self) -> None:
+                """Refuse the optional server event stream, as the MCP spec permits."""
+                mcp.methods.append("GET")
+                self.send_response(405)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_DELETE(self) -> None:
+                """End the session."""
+                mcp.methods.append("DELETE")
+                self.send_response(204)
+                self.end_headers()
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_port
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _responses_turn(body: dict[str, Any]) -> bytes:
+    """Answer one Responses API turn: call the ``lookup`` tool, then finish once its output is back.
+
+    Args:
+        body: The model request Codex sent.
+
+    Returns:
+        The turn as server-sent events.
+    """
+    if any(item.get("type") == "function_call_output" for item in body.get("input", [])):
+        item: dict[str, Any] = {
+            "type": "message",
+            "id": "m1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "done"}],
+        }
+    else:
+        # Newer Codex groups a server's tools under one namespace; older Codex lists each as mcp__<server>__<tool>.
+        tool = next(tool for tool in body.get("tools", []) if "lookup" in json.dumps(tool))
+        item = {"type": "function_call", "id": "f1", "call_id": "c1", "arguments": json.dumps({"query": "word"})}
+        if tool.get("type") == "namespace":
+            item.update(namespace=tool["name"], name="lookup")
+        else:
+            item["name"] = tool["name"]
+    usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    events = [
+        {"type": "response.created", "response": {"id": "r1"}},
+        {"type": "response.output_item.done", "item": item},
+        {"type": "response.completed", "response": {"id": "r1", "usage": usage}},
+    ]
+    return b"".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode() for event in events)
+
+
+@pytest.mark.skipif(_CODEX is None, reason="codex is not installed")
+def test_installed_codex_lists_and_calls_a_proposer_mcp_tool_through_the_box_relay(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drive the real Codex in a mailbox box: it lists and calls the [proposer] tool through the relay (SKY-610).
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        monkeypatch: Pins the test host to 127.0.0.1, as DNS would pin a public host.
+        tmp_path: Home for the box's Codex state.
+    """
+    assert _CODEX is not None
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    server = _ToolMcpServer()
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_proposer_relay(server.port))
+    model_requests: list[dict[str, Any]] = []
+
+    def dispatch(token: str, path: str, body: Any, headers: dict[str, str]) -> ModelHTTPResult:
+        """Send MCP paths to the gateway relay, and answer model paths with a scripted Codex turn."""
+        if path.startswith(MCP_PATH):
+            return gateway.dispatch_guest(token, path, body, headers)
+        model_requests.append(body)
+        return ModelHTTPResult(200, "text/event-stream", _responses_turn(body))
+
+    launch = build_launch(
+        BlackboxTarget(kind="agent", harness="codex", model="fake-model"),
+        GatewayConfig(url="http://127.0.0.1:9/v1", api_key="k"),
+        protected=True,
+        mcp_servers=("search",),
+    )
+    driver = (
+        "import json, pathlib, harness_bridge\n"
+        "proposer=json.loads(pathlib.Path('proposer.json').read_text())\n"
+        "outcome=harness_bridge.run_session(proposer, workspace=pathlib.Path('work'), prompt='Look the word up.',"
+        " model='fake-model', session_dir=pathlib.Path('session'), timeout_seconds=120, api_key='k')\n"
+        "print(json.dumps({'code': outcome.returncode, 'stderr': outcome.stderr[-2000:]}))\n"
+    )
+    session = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=150, image=IMAGE))
+    session.write_files(
+        {
+            "harness_bridge.py": Path(harness_bridge.__file__).read_text(),
+            "proposer.json": json.dumps(launch_payload(launch)),
+            "drive.py": driver,
+        }
+    )
+    path = f"{Path(_CODEX).parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    try:
+        result = ModelMailbox(dispatch).run(
+            session,
+            "python3 drive.py",
+            env={MCP_TOKEN_ENV: route["token"], "PATH": path, "HOME": str(tmp_path)},
+            timeout_seconds=140,
+        )
+    finally:
+        session.close()
+        server.close()
+
+    assert result.ok, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1])["code"] == 0
+    assert {"initialize", "tools/list", "tools/call"} <= set(server.methods)
+    outputs = [
+        item["output"]
+        for request in model_requests
+        for item in request.get("input", [])
+        if item.get("type") == "function_call_output"
+    ]
+    assert any("lookup-answer-7" in json.dumps(output) for output in outputs)
+    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert f"search@{_MCP_HOST}:{server.port}/lookup" in [call["target"] for call in calls]
+    assert _MCP_KEY not in json.dumps(model_requests) + json.dumps(calls, default=str)
 
 
 def test_the_mcp_relay_records_each_call_under_the_run_and_the_tagged_candidate(

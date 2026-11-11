@@ -53,3 +53,18 @@ def test_spec_declares_the_codex_efforts_for_the_submit_check() -> None:
     """Declare the levels on the spec, so submit refuses any other level before paid work."""
     assert REGISTRY["codex"].supported_efforts == CODEX_EFFORTS
     assert CODEX_EFFORTS == ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def test_codex_lists_each_proposer_mcp_server_at_the_gateway_relay_path() -> None:
+    """Give each [proposer] server only a gateway relay url: no real url, header or key (SKY-610)."""
+    config = tomllib.loads(SPEC.launch("m", _GATEWAY, mcp_servers=("search", "my tools")).files[_CONFIG])
+
+    assert config["mcp_servers"] == {
+        "search": {"url": "https://gw.example/v1/mcp/search"},
+        "my tools": {"url": "https://gw.example/v1/mcp/my%20tools"},
+    }
+
+
+def test_codex_without_proposer_mcp_servers_lists_none() -> None:
+    """Leave MCP out of the config when the proposer's file lists no server."""
+    assert "mcp_servers" not in tomllib.loads(SPEC.launch("m", _GATEWAY).files[_CONFIG])

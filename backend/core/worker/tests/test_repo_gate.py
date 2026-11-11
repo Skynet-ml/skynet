@@ -74,22 +74,22 @@ def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []
 
 
-def test_an_unenforceable_proposer_mcp_key_fails_on_local_docker(tmp_path: Path) -> None:
-    """No box gets the proposer's MCP servers yet (SKY-385), so the run stops instead of ignoring the key."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[proposer]\nmcp = ".mcp.json"\n', **_NAMED_FILES})
+def test_an_unenforceable_proposer_services_key_fails_on_local_docker(tmp_path: Path) -> None:
+    """No proposer box reaches [services] yet, so the run stops instead of ignoring the key."""
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b"[proposer]\nservices = []\n", **_NAMED_FILES})
 
     failures = check_repository(archive, (), place="local")
 
     assert failures == [
         GateFailure(
-            key="[proposer] mcp",
+            key="[proposer] services",
             place="local",
             reason=(
-                "optimize.toml sets [proposer] mcp. The local Docker sandbox cannot enforce "
+                "optimize.toml sets [proposer] services. The local Docker sandbox cannot enforce "
                 "this setting yet. Remove it to run."
             ),
             code=I18nKey.REPO_GATE_UNENFORCED_LOCAL,
-            params={"key": "[proposer] mcp"},
+            params={"key": "[proposer] services"},
         )
     ]
 
@@ -133,7 +133,6 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("raw", "key"),
     [
-        (b'[proposer]\nmcp = ".mcp.json"\n', "[proposer] mcp"),
         (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
         (b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n', "[target.planner] mcp"),
         (
@@ -183,6 +182,16 @@ def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert key not in [failure.key for failure in failures]
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_proposer_mcp_file_passes_and_proposer_services_still_fail(tmp_path: Path, place: str) -> None:
+    """The proposer's box reaches its MCP servers through the relay, so only ``[proposer] services`` fails (SKY-610)."""
+    raw = b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
+
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
+
+    assert [failure.key for failure in failures] == ["[proposer] services"]
 
 
 @pytest.mark.parametrize(

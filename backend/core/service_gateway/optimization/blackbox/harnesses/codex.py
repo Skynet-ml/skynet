@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CODEX
@@ -27,13 +28,22 @@ CODEX_VERSION = "0.153.0"
 CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
-def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _codex_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for Codex CLI (``@openai/codex``).
 
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Codex's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so Codex never holds the real url or a secret (SKY-610).
 
     Returns:
         The launch.
@@ -66,6 +76,9 @@ def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         "[features]\n"
         "multi_agent = false\n"
     )
+    for name in mcp_servers:
+        url = f"{gateway.url}/mcp/{quote(name, safe='')}"
+        config_toml += f"\n[mcp_servers.{json.dumps(name)}]\nurl = {json.dumps(url)}\n"
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_npm_install("codex", "@openai/codex", CODEX_VERSION),

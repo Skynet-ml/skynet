@@ -549,3 +549,50 @@ def test_launch_payload_names_the_parser_for_every_built_in_harness(harness: str
     assert payload["run_command"]
     assert payload["instructions_file"]
     assert set(payload) == {"instructions_file", "run_command", "install_command", "files", "env", "output_format"}
+
+
+@pytest.mark.parametrize("harness", [spec_id for spec_id in REGISTRY if spec_id != BLACKBOX_HARNESS_CODEX])
+def test_a_proposer_mcp_file_stops_every_other_harness_by_name(harness: str) -> None:
+    """Only Codex loads the [proposer] MCP servers, so any other harness stops before a model call (SKY-610)."""
+    with pytest.raises(ServiceError, match=f"The {harness} proposer harness cannot load the \\[proposer\\] mcp"):
+        build_launch(_target(harness), _GATEWAY, protected=True, mcp_servers=("search",))
+
+
+def test_a_proposer_mcp_file_stops_a_custom_or_host_harness_by_name() -> None:
+    """A custom command and a host CLI cannot load the relay's servers either."""
+    with pytest.raises(ServiceError, match="The custom proposer harness"):
+        build_launch(
+            _target(BLACKBOX_HARNESS_CUSTOM, run_command="true"), _GATEWAY, protected=True, mcp_servers=("search",)
+        )
+    with pytest.raises(ServiceError, match="The host CLI claude proposer harness"):
+        build_launch(
+            _target(BLACKBOX_HARNESS_CODEX), _GATEWAY, protected=True, host_cli="claude", mcp_servers=("search",)
+        )
+
+
+def test_an_unprotected_codex_cannot_load_proposer_mcp_servers() -> None:
+    """Without the box's proxy no request carries the relay token, so the launch stops."""
+    with pytest.raises(ServiceError, match="The codex proposer harness"):
+        build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, mcp_servers=("search",))
+
+
+def test_protected_codex_points_its_mcp_servers_at_the_box_proxy(tmp_path: Path) -> None:
+    """The relay rewrite maps each server's url to the proxy's ``/v1/mcp/<name>`` path (SKY-610)."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, protected=True, mcp_servers=("search",))
+    (tmp_path / ".app" / "codex").mkdir(parents=True)
+    config_path = tmp_path / ".app" / "codex" / "config.toml"
+    config_path.write_text(launch.files[".app/codex/config.toml"])
+    subprocess.run(
+        _with_relay_config("true", launch.files, _GATEWAY),
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
+            "APP_BUDGET_RELAY_URL": "http://127.0.0.1:3210/v1",
+        },
+        timeout=10,
+        check=True,
+    )
+
+    config = tomllib.loads(config_path.read_text())
+    assert config["mcp_servers"] == {"search": {"url": "http://127.0.0.1:3210/v1/mcp/search"}}

@@ -21,7 +21,7 @@ from typing import Any
 
 from ....config import settings, with_legacy_env
 from ....exceptions import ServiceError
-from ....models.blackbox import BLACKBOX_HARNESS_CUSTOM, BLACKBOX_HARNESS_PI, BlackboxTarget
+from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM, BLACKBOX_HARNESS_PI, BlackboxTarget
 from ....worker import host_agent_shim
 from .harness_bridge import PARSERS, parse_host_agent_output, parse_pi_output, parse_plain_output
 from .harnesses import REGISTRY, HarnessSpec
@@ -296,6 +296,7 @@ def build_launch(
     host_cli: str | None = None,
     host_agent_token: str | None = None,
     reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
 ) -> HarnessLaunch:
     """Resolve the launch for a job's target: catalog harness or custom command.
 
@@ -311,14 +312,25 @@ def build_launch(
         host_agent_token: The token the parent minted for that host proposer.
         reasoning_effort: The proposer model's effort level. Catalog harnesses apply it;
             a custom harness reads it from :data:`ENV_REASONING_EFFORT`.
+        mcp_servers: The ``[proposer]`` MCP server names the box's proxy relays.
 
     Returns:
         The launch.
 
     Raises:
-        ServiceError: When the harness id is unknown.
+        ServiceError: When the harness id is unknown, or when the proposer has
+            MCP servers and the harness cannot load them through the relay.
     """
     model = str(target.model).removeprefix(_OPENROUTER_PREFIX)
+    if mcp_servers:
+        # Only Codex loads the relay's servers yet, and only behind the box's
+        # proxy; any other harness would run without the tools the file lists (SKY-610).
+        name = f"host CLI {host_cli}" if host_cli is not None else target.harness
+        if host_cli is not None or target.harness != BLACKBOX_HARNESS_CODEX or not protected:
+            raise ServiceError(
+                f"The {name} proposer harness cannot load the [proposer] mcp servers yet. "
+                f"Use the {BLACKBOX_HARNESS_CODEX} harness, or remove [proposer] mcp from optimize.toml."
+            )
     if host_cli is not None:
         return host_cli_launch(model, gateway, host_cli, host_agent_token)
     if target.harness == BLACKBOX_HARNESS_CUSTOM:
@@ -338,7 +350,11 @@ def build_launch(
     spec = REGISTRY.get(target.harness)
     if spec is None:
         raise ServiceError(f"Unknown harness '{target.harness}'.")
-    launch = spec.launch(model, gateway, reasoning_effort=reasoning_effort)
+    launch = (
+        spec.launch(model, gateway, reasoning_effort=reasoning_effort, mcp_servers=mcp_servers)
+        if mcp_servers
+        else spec.launch(model, gateway, reasoning_effort=reasoning_effort)
+    )
     install_command = _fill(target.install_command, model, gateway, protected=protected) or launch.install_command
     run_command = _fill(target.run_command, model, gateway, protected=protected) or launch.run_command
     env = dict(launch.env)
