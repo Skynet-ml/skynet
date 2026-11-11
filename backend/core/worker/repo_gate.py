@@ -47,7 +47,10 @@ Place = Literal["local", "cloud"]
 # file only through its stage box's relay, which checks the stage's own role
 # (SKY-611). The proposer's box reaches the services ``[proposer] services``
 # lists only through the parent's relay, which checks the role and fills each
-# secret by host (SKY-612).
+# secret by host (SKY-612). The scorer runs each ``[run]`` entry under a
+# supervisor that stops it at its timeout, before the metric files go back in
+# (SKY-375); only the gate still refused it (SKY-635). No judge reads the
+# ``[run] illegal`` rules yet, so that key still stops the run.
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
 _PROPOSER_NETWORK = frozenset({"proposer.network"})
 _PROPOSER_MCP = frozenset({"proposer.mcp"})
@@ -55,6 +58,7 @@ _PROPOSER_SERVICES = frozenset({"proposer.services"})
 _STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
 _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "target.illegal"})
 _TARGET_MCP = frozenset({"target.mcp"})
+_RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
@@ -63,6 +67,7 @@ _ENFORCED_EVERYWHERE = (
     | _STAGE_SERVICES
     | _TARGET_STAGES
     | _TARGET_MCP
+    | _RUN_ENTRY
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
