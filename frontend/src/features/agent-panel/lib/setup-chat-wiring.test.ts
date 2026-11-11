@@ -39,6 +39,7 @@ const {
   unansweredTurn,
   keepHiddenTurns,
 } = await import("./screen-agent.ts");
+const { SteerQueue } = await import("../../../shared/ui/agent/steer-queue.ts");
 
 const hook = "src/features/agent-panel/hooks/use-generalist-agent.ts";
 const panel = "src/features/agent-panel/components/GeneralistPanel.tsx";
@@ -126,8 +127,12 @@ function setupChat(options: {
   load?: (id: string) => Promise<unknown>;
   active?: boolean;
   screen?: string | null;
+  kicked?: string[];
 } = {}) {
   const log: unknown[][] = [];
+  const moves: unknown[] = [];
+  const kickedScreensRef = { current: new Set(options.kicked ?? []) };
+  const kickoffTurnRef = { current: null as unknown };
   const setupChatRef = { current: options.setupId === undefined ? "c1" : options.setupId };
   const shownScreenRef = { current: options.screen === undefined ? "brief" : options.screen };
   const setupRunRef = { current: 0 };
@@ -137,15 +142,16 @@ function setupChat(options: {
     setupChatRef.current = id;
     log.push(["keep", id]);
   };
-  const openConversation = (id: string | null, messages: unknown[]) => {
+  const openConversation = (id: string | null, messages: unknown[], open?: unknown) => {
     liveChatRef.current = { id, messages, busy: false };
     log.push(["open", id, messages]);
+    moves.push(open);
   };
   const restartSetupChat = expression(panel, "restartSetupChat", {
     setupMessagesRef, keepSetupChat, newSetupChatId, openConversation,
   });
   const retryInNewSetupChat = expression(panel, "retryInNewSetupChat", {
-    unansweredTurn, restartSetupChat,
+    unansweredTurn, restartSetupChat, SCREEN_KICKOFF, shownScreenRef, kickoffTurnRef,
     sendToAgent: (text: string, _wizard: unknown, send: unknown) => log.push(["send", text, send]),
   });
   const settleSetupLoad = expression(panel, "settleSetupLoad", {
@@ -153,7 +159,7 @@ function setupChat(options: {
   });
   const openSetupChat = expression(panel, "openSetupChat", {
     keepSetupChat, newSetupChatId, isSavedSetupChat, openConversation, settleSetupLoad, setupChatRef,
-    shownScreenRef, setupRunRef,
+    shownScreenRef, setupRunRef, kickedScreensRef,
     newSession: () => log.push(["new"]),
     activateConversation: (id: string) => (log.push(["activate", id]), options.active ?? false),
     setSetupLoad: (id: string | null) => log.push(["loading", id]),
@@ -161,7 +167,7 @@ function setupChat(options: {
     loadConversation: (id: string) => (log.push(["load", id]), (options.load ?? (async () => ({ detail: null, missing: false })))(id)),
   });
   return {
-    log, setupChatRef, liveChatRef, setupMessagesRef, shownScreenRef,
+    log, moves, setupChatRef, liveChatRef, setupMessagesRef, shownScreenRef, kickedScreensRef, kickoffTurnRef,
     settleSetupLoad, openSetupChat, restartSetupChat, retryInNewSetupChat,
   };
 }
@@ -244,6 +250,64 @@ test("a setup chat restarted during its load still gets its screen's kickoff", a
   await done;
   assert.deepEqual(chat.log.at(-1), ["kickoff", "brief"]);
   assert.equal(chat.log.filter((entry) => entry[0] === "keep").length, 1);
+});
+
+test("a screen whose kickoff ran during the load gets no second kickoff when the load ends", async () => {
+  const { load, start } = pendingLoad();
+  const chat = setupChat({ live: { id: null, messages: [] }, load: start });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  // The user went to another screen and back; the screen effect sent this kickoff.
+  chat.kickedScreensRef.current.add("brief");
+  load.finish({ detail: { messages: server }, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "kickoff"), []);
+});
+
+test("a restarted setup chat takes the old chat's queued follow-ups", () => {
+  const chat = setupChat({ live: { id: "c1", messages: tab } });
+  chat.restartSetupChat(tab);
+  assert.deepEqual(chat.moves, [{ moveQueue: true }]);
+});
+
+test("openConversation moves the shown chat's queued follow-ups when asked, and holds them", async () => {
+  const queues = new Map<string, any>();
+  const queueFor = (key: string) => {
+    if (!queues.has(key)) queues.set(key, new SteerQueue());
+    return queues.get(key);
+  };
+  const sent: string[] = [];
+  const old = queueFor("k0");
+  old.setSend((text: string) => (sent.push(text), true));
+  old.setBusy(true);
+  old.enqueue("first");
+  old.enqueue("second");
+  old.setBusy(false, true);
+  const activeKeyRef = { current: "k0" };
+  let key = 1;
+  const open = expression(hook, "openConversation", {
+    nextKey: () => `k${key++}`, commit: () => {}, blankSession: expression(hook, "blankSession", {}),
+    pruneInactive: () => {}, setActive: (next: string) => { activeKeyRef.current = next; },
+    activeKeyRef, steerQueues: queues, steerQueueFor: queueFor,
+  });
+  open(null, tab, { moveQueue: true });
+  await Promise.resolve();
+  assert.deepEqual(old.getSnapshot().queued, []);
+  const moved = queueFor("k1").getSnapshot();
+  assert.deepEqual(moved.queued.map((item: { text: string }) => item.text), ["first", "second"]);
+  assert.equal(moved.paused, true);
+  assert.deepEqual(sent, []);
+  open("c2", []);
+  assert.equal(queueFor("k2").getSnapshot().queued.length, 0);
+});
+
+test("a kickoff sent again after not found counts as the kickoff of the screen on view", () => {
+  const kickoff = { role: "user", content: SCREEN_KICKOFF, hidden: true };
+  const chat = setupChat({ live: { id: "c1", messages: [...tab, kickoff] }, screen: "source" });
+  chat.retryInNewSetupChat([...tab, kickoff]);
+  assert.deepEqual(chat.kickoffTurnRef.current, { screen: "source", from: tab.length, started: false });
+  const plain = setupChat({ live: { id: "c1", messages: [...tab, { role: "user", content: "next" }] } });
+  plain.retryInNewSetupChat([...tab, { role: "user", content: "next" }]);
+  assert.equal(plain.kickoffTurnRef.current, null);
 });
 
 test("the server copy keeps the hidden mark of each turn the tab copy hid", () => {

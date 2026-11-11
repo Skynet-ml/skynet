@@ -99,7 +99,7 @@ export interface GeneralistAgentState {
    * Open a conversation as the displayed session. A null id shows messages
    * the server has no copy of: the next turn saves a new conversation.
    */
-  openConversation: (id: string | null, messages: AgentMessage[]) => void;
+  openConversation: (id: string | null, messages: AgentMessage[], options?: { moveQueue?: boolean }) => void;
   /** Drop a conversation's session (aborting its stream) after deletion. */
   discardConversation: (id: string) => void;
   /** Conversation ids with a stream running or waiting in the queue. */
@@ -1135,7 +1135,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const openConversation = React.useCallback(
-    (id: string | null, loaded: AgentMessage[]) => {
+    (id: string | null, loaded: AgentMessage[], options?: { moveQueue?: boolean }) => {
+      const from = options?.moveQueue ? steerQueues.get(activeKeyRef.current) : undefined;
+      const moved = (from?.getSnapshot().queued ?? []).flatMap((item) => from?.take(item.id) ?? []);
       const key = nextKey();
       commit((draft) => {
         draft.set(key, {
@@ -1146,8 +1148,13 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         pruneInactive(draft, key);
       });
       setActive(key);
+      if (moved.length === 0) return;
+      // Held, as on the old chat, so no follow-up runs ahead of a resent turn.
+      const queue = steerQueueFor(key);
+      for (const text of moved) queue.enqueue(text);
+      queue.pause();
     },
-    [commit, nextKey, pruneInactive, setActive],
+    [commit, nextKey, pruneInactive, setActive, steerQueues, steerQueueFor],
   );
 
   const discardConversation = React.useCallback(

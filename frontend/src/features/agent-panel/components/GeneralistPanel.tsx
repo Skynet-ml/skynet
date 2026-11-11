@@ -559,7 +559,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     (messages: AgentMessage[]) => {
       setupMessagesRef.current = messages;
       keepSetupChat(newSetupChatId());
-      openConversation(null, messages);
+      openConversation(null, messages, { moveQueue: true });
     },
     [keepSetupChat, openConversation],
   );
@@ -569,7 +569,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     (messages: AgentMessage[]) => {
       const { kept, turn } = unansweredTurn(messages);
       restartSetupChat(kept);
-      if (turn) sendToAgent(turn.content, undefined, { hidden: turn.hidden ?? false });
+      if (!turn) return;
+      const screen = shownScreenRef.current;
+      // Tracked like the first kickoff, so a reload while it runs sends it again.
+      if (turn.hidden && turn.content === SCREEN_KICKOFF && screen) {
+        kickoffTurnRef.current = { screen, from: kept.length, started: false };
+      }
+      sendToAgent(turn.content, undefined, { hidden: turn.hidden ?? false });
     },
     [restartSetupChat, sendToAgent],
   );
@@ -615,8 +621,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         if (run !== setupRunRef.current || setupChatRef.current === null) return;
         settleSetupLoad(saved, load);
       }
-      // A screen change during the load set that screen's own kickoff.
-      if (kickoff && shownScreenRef.current === kickoff) setKickoffScreen(kickoff);
+      // A screen change during the load set that screen's own kickoff, and a
+      // return to this screen during the load already sent its kickoff.
+      if (kickoff && shownScreenRef.current === kickoff && !kickedScreensRef.current.has(kickoff)) {
+        setKickoffScreen(kickoff);
+      }
     },
     [keepSetupChat, newSession, openConversation, activateConversation, settleSetupLoad],
   );
