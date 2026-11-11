@@ -89,8 +89,8 @@ def test_a_full_box_writes_only_the_summary_row() -> None:
 
 
 def test_the_run_cap_spans_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Share one row cap between all boxes of a run."""
-    monkeypatch.setattr(egress_record, "RUN_ROWS", 3)
+    """Share one row cap between all boxes of a run, summary rows included."""
+    monkeypatch.setattr(egress_record, "RUN_ROWS", 4)
     recorder, calls = _recorder()
     assert egress_record.record_calls(recorder, _log(2), [], box_rows=0) == 2
     assert egress_record.record_calls(recorder, _log(2), [], box_rows=0) == 1
@@ -99,6 +99,24 @@ def test_the_run_cap_spans_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
     other, other_calls = _recorder()
     assert egress_record.record_calls(other, _log(2), [], box_rows=0) == 2
     assert len(other_calls) == 2
+
+
+def test_a_full_run_writes_no_more_rows_from_later_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop all rows, summary rows too, once the run cap is used up."""
+    monkeypatch.setattr(egress_record, "RUN_ROWS", 3)
+    recorder, calls = _recorder()
+    for _ in range(5):
+        egress_record.record_calls(recorder, _log(2), [], box_rows=0)
+    assert [call["status"] for call in calls] == ["ok", "ok", egress_record.TRUNCATED_STATUS]
+
+
+def test_box_summaries_count_against_the_run_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Count each box's summary row against the run cap."""
+    monkeypatch.setattr(egress_record, "RUN_ROWS", 3)
+    recorder, calls = _recorder()
+    for _ in range(5):
+        egress_record.record_calls(recorder, _log(2), [], box_rows=egress_record.BOX_ROWS)
+    assert len(calls) == 3
 
 
 def test_the_summary_counts_lines_before_the_read_window() -> None:
@@ -115,13 +133,13 @@ def test_rows_under_the_caps_write_no_summary() -> None:
     assert [call["status"] for call in calls] == ["ok", "ok", "ok"]
 
 
-def test_a_long_host_is_cut_and_the_source_marks_each_row() -> None:
-    """Keep a target to a host name's length, and mark rows of a cooperative proxy."""
+def test_a_long_host_is_replaced_and_the_source_marks_each_row() -> None:
+    """Drop an overlong host whole, so no cut leaves part of a secret, and mark cooperative rows."""
     recorder, calls = _recorder()
     log = _line("a" * 5000, 0).encode()
     egress_record.record_calls(recorder, log, [], box_rows=0, source=egress_record.VERCEL_SOURCE)
     [call] = calls
-    assert len(call["target"]) == 253
+    assert call["target"] == egress_record.LONG_HOST
     assert json.loads(call["request"])["source"] == egress_record.VERCEL_SOURCE
 
 

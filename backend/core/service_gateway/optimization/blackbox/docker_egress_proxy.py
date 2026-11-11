@@ -16,13 +16,20 @@ the host, port, outcome, byte counts, start time, duration and a line number
 (``seq``), so the parent can write the call into the run record (E28). The
 parent reads only the end of the log; ``seq`` tells it how many lines came
 before. The proxy sees only TLS bytes, so a line never holds a body, a header
-or a path.
+or a path. The ``host`` field is the host exactly as the client sent it, so
+the parent masks a secret in it by an exact match.
+
+An allowlist tunnel closes when neither direction carries a byte for
+``_IDLE_SECONDS``, which frees its sidecar slot. A one-way stream, such as a
+long download to a silent client, keeps it open.
 
 With ``*`` as the host list the proxy runs in record-only mode inside a Vercel
 box: it tunnels any ``CONNECT`` target and checks nothing, because the Vercel
 edge enforces the allowlist on every connection the box makes. The proxy can
 reach only what the box itself can reach, so this mode never widens the
-allowlist. Code that ignores ``HTTPS_PROXY`` goes around it unrecorded.
+allowlist. Code that ignores ``HTTPS_PROXY`` goes around it unrecorded. Its
+tunnels have no idle limit, as a direct connection would have none; the box
+lifetime ends them. It also takes a bracketed IPv6 literal (``[::1]:443``).
 
 The sidecar runs this file with the image's own Python, so it must use the
 standard library only. It is also importable for unit tests.
@@ -62,6 +69,33 @@ _BAD_GATEWAY = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: cl
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 
 
+def _split_connect(head: bytes) -> tuple[str, int] | None:
+    """Read the host and port of a ``CONNECT host:port`` request head as sent.
+
+    Args:
+        head: The request bytes up to and including the blank line.
+
+    Returns:
+        The host exactly as sent and the port, or ``None`` for any other
+        method or a malformed line.
+    """
+    line = head.split(b"\r\n", 1)[0].decode("latin-1")
+    parts = line.split()
+    if len(parts) != 3 or parts[0] != "CONNECT" or not parts[2].startswith("HTTP/1."):
+        return None
+    host, sep, port = parts[1].rpartition(":")
+    if not sep or not port.isdigit():
+        return None
+    if host.startswith("["):
+        try:
+            ipaddress.IPv6Address(host.removesuffix("]")[1:])
+        except ValueError:
+            return None
+        if not host.endswith("]"):
+            return None
+    return host, int(port)
+
+
 def parse_connect(head: bytes) -> tuple[str, int] | None:
     """Read the target of a ``CONNECT host:port`` request head.
 
@@ -69,17 +103,16 @@ def parse_connect(head: bytes) -> tuple[str, int] | None:
         head: The request bytes up to and including the blank line.
 
     Returns:
-        The lower-case host without a trailing dot and the port, or ``None``
-        for any other method or a malformed line.
+        The lower-case host without a trailing dot or IPv6 brackets and the
+        port, or ``None`` for any other method or a malformed line.
     """
-    line = head.split(b"\r\n", 1)[0].decode("latin-1")
-    parts = line.split()
-    if len(parts) != 3 or parts[0] != "CONNECT" or not parts[2].startswith("HTTP/1."):
+    target = _split_connect(head)
+    if target is None:
         return None
-    host, sep, port = parts[1].rpartition(":")
-    if not sep or not port.isdigit() or host.startswith("["):
-        return None
-    return host.rstrip(".").lower(), int(port)
+    host, port = target
+    if host.startswith("["):
+        return host[1:-1].lower(), port
+    return host.rstrip(".").lower(), port
 
 
 def public_addresses(host: str, port: int, *, public_only: bool = True) -> list[tuple[int, tuple]] | None:
@@ -141,27 +174,60 @@ def _read_head(client: socket.socket) -> tuple[bytes, bytes] | None:
     return head + b"\r\n\r\n", rest
 
 
-def _pipe(source: socket.socket, sink: socket.socket, copied: list[int] | None = None) -> None:
-    """Copy bytes one way until either side closes or goes idle.
+def _pipe(source: socket.socket, sink: socket.socket, copied: list[int], last_byte: list[float]) -> None:
+    """Copy bytes one way until either side closes, or both directions go idle.
+
+    A read that times out ends the copy only when the other direction also
+    carried no byte for ``_IDLE_SECONDS``. A socket with no timeout never idles.
 
     Args:
         source: Socket to read from.
         sink: Socket to write to.
-        copied: Gets the count of bytes copied, when given.
+        copied: Gets the count of bytes copied.
+        last_byte: The monotonic time of the last byte in either direction,
+            shared by both copies of one tunnel.
     """
     total = 0
     try:
-        while chunk := source.recv(65536):
+        while True:
+            try:
+                chunk = source.recv(65536)
+            # socket.timeout, not TimeoutError: the box image's python3 can predate 3.10.
+            except socket.timeout:  # noqa: UP041
+                if time.monotonic() - last_byte[0] >= _IDLE_SECONDS:
+                    break
+                continue
+            if not chunk:
+                break
             sink.sendall(chunk)
             total += len(chunk)
+            last_byte[0] = time.monotonic()
     except OSError:
         pass
     finally:
-        if copied is not None:
-            copied.append(total)
+        copied.append(total)
         for side in (sink, source):
             with contextlib.suppress(OSError):
                 side.shutdown(socket.SHUT_RDWR)
+
+
+def _pipe_after(
+    answered: threading.Event, source: socket.socket, sink: socket.socket, copied: list[int], last_byte: list[float]
+) -> None:
+    """Copy upstream bytes to the client only after the client has its ``200`` answer.
+
+    Upstream bytes or an upstream close must not reach the client before the
+    answer; the start waits for ``answered``.
+
+    Args:
+        answered: Set once the answer is sent, or once sending it failed.
+        source: Socket to read from.
+        sink: Socket to write to.
+        copied: Gets the count of bytes copied.
+        last_byte: The tunnel's shared time of the last byte.
+    """
+    answered.wait()
+    _pipe(source, sink, copied, last_byte)
 
 
 def log_call(call: dict) -> None:
@@ -174,11 +240,12 @@ def log_call(call: dict) -> None:
         print(json.dumps({"event": CALL_EVENT, "seq": next(_SEQ), **call}, sort_keys=True), flush=True)
 
 
-def _open_upstream(addresses: list[tuple[int, tuple]]) -> socket.socket | None:
+def _open_upstream(addresses: list[tuple[int, tuple]], idle: float | None) -> socket.socket | None:
     """Connect to the first checked address that answers.
 
     Args:
         addresses: Public ``(family, sockaddr)`` pairs.
+        idle: The read timeout of the tunnel, or ``None`` for none.
 
     Returns:
         The connected socket, or ``None`` when none answers.
@@ -191,7 +258,7 @@ def _open_upstream(addresses: list[tuple[int, tuple]]) -> socket.socket | None:
         except OSError:
             upstream.close()
             continue
-        upstream.settimeout(_IDLE_SECONDS)
+        upstream.settimeout(idle)
         return upstream
     return None
 
@@ -218,8 +285,9 @@ def handle(client: socket.socket, allowed: frozenset[str] | None) -> None:
                 return
             head, rest = request
             target = parse_connect(head)
+            sent_target = _split_connect(head)
             # Only the host and port go in the log: a refused plain-HTTP line could carry a path or query.
-            call = {"host": target[0] if target else None, "port": target[1] if target else None}
+            call = {"host": sent_target[0] if sent_target else None, "port": target[1] if target else None}
             call.update(status="refused", code=403, reason="host or port is not allowed")
             if allowed is None:
                 addresses = public_addresses(*target, public_only=False) if target else None
@@ -229,23 +297,31 @@ def handle(client: socket.socket, allowed: frozenset[str] | None) -> None:
                 client.sendall(_FORBIDDEN)
                 return
             call.update(status="failed", code=502, reason="no checked address answered")
-            upstream = _open_upstream(addresses)
+            idle = None if allowed is None else _IDLE_SECONDS
+            upstream = _open_upstream(addresses, idle)
             if upstream is None:
                 client.sendall(_BAD_GATEWAY)
                 return
             call.update(reason="the tunnel could not start")
             with upstream:
-                back = threading.Thread(target=_pipe, args=(upstream, client, received), daemon=True)
+                last_byte = [time.monotonic()]
+                answered = threading.Event()
+                back = threading.Thread(
+                    target=_pipe_after, args=(answered, upstream, client, received, last_byte), daemon=True
+                )
                 try:
                     back.start()
                 except RuntimeError:
                     return
-                client.sendall(_ESTABLISHED)
-                call.update(status="ok", code=200, reason=None)
+                try:
+                    client.sendall(_ESTABLISHED)
+                    call.update(status="ok", code=200, reason=None)
+                finally:
+                    answered.set()
                 if rest:
                     upstream.sendall(rest)
-                client.settimeout(_IDLE_SECONDS)
-                _pipe(client, upstream, sent)
+                client.settimeout(idle)
+                _pipe(client, upstream, sent, last_byte)
                 back.join()
         except OSError as error:
             if call.get("status") == "failed":

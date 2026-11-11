@@ -657,10 +657,13 @@ class VercelEnvironment(SandboxEnvironment):
         script = f"{EGRESS_PREFIX}{token}.py"
         log = f"{EGRESS_PREFIX}{token}.log"
         lifetime = math.ceil(self.spec.lifetime_seconds)
+        # A box with no python3 or setsid, or a proxy that exits, ends the wait at once.
         launch = (
+            "command -v python3 setsid nohup > /dev/null || exit 1; "
             f"setsid nohup python3 -I {script} {EGRESS_PROXY_PORT} {lifetime} '*' > {log} 2>&1 < /dev/null & "
+            "proxy=$!; "
             f"for _ in $(seq {EGRESS_READY_POLLS}); do grep -qx {READY_MARKER} {log} 2>/dev/null && exit 0; "
-            "sleep 0.1; done; exit 1"
+            "kill -0 $proxy 2>/dev/null || exit 1; sleep 0.1; done; exit 1"
         )
         try:
             await self.upload_files({script: PROXY_SOURCE})
