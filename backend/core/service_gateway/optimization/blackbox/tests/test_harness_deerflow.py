@@ -351,6 +351,41 @@ def test_runner_joins_streamed_deltas_of_the_last_ai_message(
     assert parse_pi_output(completed.stdout)[0] == expected
 
 
+def test_runner_joins_deltas_that_carry_no_message_id(tmp_path: Path) -> None:
+    """Join id-less AI deltas into one answer instead of keeping only the last one.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    events = [
+        ["messages-tuple", {"type": "ai", "content": "The answer "}],
+        ["messages-tuple", {"type": "ai", "id": None, "content": "is 42."}],
+    ]
+    completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
+    assert completed.returncode == 0, completed.stderr
+    assert parse_pi_output(completed.stdout)[0] == "The answer is 42."
+
+
+def test_runner_sums_usage_once_per_message_without_an_end_event(tmp_path: Path) -> None:
+    """Without a final usage event, count each AI message's usage once, however many chunks repeat it.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    m1 = {"input_tokens": 10, "output_tokens": 2}
+    no_id = {"input_tokens": 7, "output_tokens": 3}
+    events = [
+        ["messages-tuple", {"type": "ai", "id": "m1", "content": "a", "usage_metadata": m1}],
+        ["messages-tuple", {"type": "ai", "id": "m1", "content": "b", "usage_metadata": m1}],
+        ["messages-tuple", {"type": "ai", "id": "m2", "content": "c", "usage_metadata": {"input_tokens": 5}}],
+        ["messages-tuple", {"type": "ai", "content": "d", "usage_metadata": no_id}],
+        ["messages-tuple", {"type": "ai", "id": None, "content": "e", "usage_metadata": no_id}],
+    ]
+    completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
+    assert completed.returncode == 0, completed.stderr
+    assert parse_pi_output(completed.stdout)[1] == {"input_tokens": 22, "output_tokens": 5}
+
+
 def test_run_command_keeps_deerflow_state_out_of_the_version_patch(tmp_path: Path) -> None:
     """Write DeerFlow's config and state outside the checkout, so a run adds no patch line.
 

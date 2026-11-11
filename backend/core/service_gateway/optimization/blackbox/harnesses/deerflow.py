@@ -180,11 +180,14 @@ def _run():
             if event.type == "end" and isinstance(data.get("usage"), dict):
                 end_usage = data["usage"]
             elif event.type == "messages-tuple" and data.get("type") == "ai":
+                # Chunks of one message repeat its id, and id-less chunks share
+                # one key, so usage counts once per message and deltas join.
+                message_id = data.get("id") or ""
                 if isinstance(data.get("usage_metadata"), dict):
-                    message_usage[data.get("id") or len(message_usage)] = data["usage_metadata"]
+                    message_usage[message_id] = data["usage_metadata"]
                 piece = _text(data.get("content"))
                 if piece:
-                    last_text = data.get("id") or ("no-id", len(texts))
+                    last_text = message_id
                     texts[last_text] = texts.get(last_text, "") + piece
     except errors.GraphRecursionError as exc:
         print(f"deerflow: recursion limit reached: {{exc}}", file=sys.stderr)
