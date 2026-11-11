@@ -39,7 +39,11 @@ MCP file: each gets ``SKYNET_MCP_<NAME>_URL`` on the same loopback port, and
 parent replaced that file before the box opened: each entry is a loopback url
 on ``RELAY_PORT``, never the real url, a header or a secret. In a stage box,
 ``python3 app_runner.py --stage <call_dir> <path/file.py:function>`` runs
-one stage call and writes ``{"output": ...}`` or ``{"error": ...}``.
+one stage call and writes ``{"output": ...}`` or ``{"error": ...}``. When the
+stage's own MCP file holds a server, the parent also writes ``relay.json``
+(the same relay config) into the call's folder: the stage then gets the same
+loopback relay, checked against the stage's own role, and a command stage
+runs as ``--stage-command <call_dir> <command> [<arg> ...]`` behind it.
 
 A repository with a ``[run]`` entry runs the candidate first, before the
 metric files are in the tree (E38). ``python3 app_runner.py --candidate
@@ -99,6 +103,11 @@ STAGE_HELPER_NAME = "call"
 STAGE_ERROR_NAME = "StageError"
 # ``app_runner.py --stage <call_dir> <path/file.py:function>`` runs one stage call.
 STAGE_FLAG = "--stage"
+# ``app_runner.py --stage-command <call_dir> <command> [<arg> ...]`` runs one
+# command stage call behind the stage's relay (SKY-611).
+STAGE_COMMAND_FLAG = "--stage-command"
+# A stage call's relay config, next to its input; only a stage whose own MCP file holds a server gets one.
+STAGE_RELAY_FILE = "relay.json"
 # The metric reaches each listed service at this variable's loopback address (E45).
 SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
 # Each server of the role's own MCP file is at this variable's loopback address (E49).
@@ -1263,6 +1272,8 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
         return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
+    if len(args) >= 3 and args[0] == STAGE_COMMAND_FLAG:
+        return run_stage_command(Path(args[1]), args[2:])
     if len(args) == 2 and args[0] == CANDIDATE_FLAG:
         call_dir = Path(args[1])
         payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
@@ -1594,6 +1605,8 @@ def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:
         The process exit code: 0 whenever the output was written.
     """
     try:
+        # Set before the entry loads, so its imports and child processes see the addresses.
+        os.environ.update(_stage_relay_env(call_dir))
         payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
         path, _, function = entry.rpartition(":")
         source = Path(path).resolve()
@@ -1610,6 +1623,54 @@ def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:
         text = json.dumps({"error": error})
     _write_output(call_dir, text)
     return 0
+
+
+def run_stage_command(call_dir: Path, command: Sequence[str]) -> int:
+    """Run one command stage call behind the stage's relay: ``input.json`` on stdin, stdout into ``output.json``.
+
+    Args:
+        call_dir: The call's folder in the stage box.
+        command: The stage's command and its arguments.
+
+    Returns:
+        The command's exit code, ``128 + n`` when signal ``n`` killed it, or
+        127 when it could not start.
+    """
+    env = {**os.environ, **_stage_relay_env(call_dir)}
+    with (call_dir / INPUT_FILE).open("rb") as stdin, (call_dir / OUTPUT_FILE).open("wb") as stdout:
+        try:
+            code = subprocess.run(list(command), env=env, stdin=stdin, stdout=stdout, check=False).returncode
+        except OSError as exc:
+            sys.stderr.write(f"The command could not start: {exc}\n")
+            return 127
+    return code if code >= 0 else 128 - code
+
+
+def _stage_relay_env(call_dir: Path) -> dict[str, str]:
+    """Start the stage's loopback relay when the parent wrote a relay config for this call.
+
+    Parallel calls to one stage share its box, and only one of them can hold
+    ``RELAY_PORT``; the others serve their variables on a free port. Every
+    proxy in the box sends its frames to the same parent relay, and each
+    answer file carries its own request's id, so no call gets another's answer.
+
+    Args:
+        call_dir: The call's folder in the stage box.
+
+    Returns:
+        The proxy's variables, or nothing when the call has no relay config.
+    """
+    path = call_dir / STAGE_RELAY_FILE
+    if not path.is_file():
+        return {}
+    config = json.loads(path.read_text(encoding="utf-8"))
+    # The stage's code may change its directory; the answer folder must not move with it.
+    config["response_dir"] = str(Path(str(config["response_dir"])).resolve())
+    client = StageClient(config)
+    try:
+        return _relay_env(client, config)
+    except OSError:
+        return _relay_env(client, {**config, "port": 0})
 
 
 if __name__ == "__main__":

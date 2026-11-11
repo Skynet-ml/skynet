@@ -142,8 +142,9 @@ class StagedRepository:
     # The services each role lists, by role name: [run] for the version's entry,
     # [metric] for the scorer. Each runs in its own process with its own relay (E37).
     service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    # Each role with the servers of its own MCP file: the relay checks each
-    # MCP request against the calling role only (E49, E55).
+    # Each role with the servers of its own MCP file, ``target.<name>`` for each
+    # stage: the relay checks each MCP request against the calling role only
+    # (E49, E55, SKY-611).
     mcp_roles: Mapping[str, RoleEnvironment] = field(default_factory=dict)
     # The proposer, whose box reaches the servers of its own MCP file only
     # through the parent's relay, behind its own token (SKY-610).
@@ -459,7 +460,11 @@ def stage_repository(
         }
         if environment.constraints is not None
         else {},
-        mcp_roles={"metric": environment.constraints.metric_role, "run": environment.constraints.run_role}
+        mcp_roles={
+            "metric": environment.constraints.metric_role,
+            "run": environment.constraints.run_role,
+            **{f"target.{name}": stage for name, stage in environment.constraints.targets.items()},
+        }
         if environment.constraints is not None
         else {},
         proposer_role=environment.constraints.proposer if environment.constraints is not None else None,

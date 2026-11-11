@@ -37,12 +37,18 @@ removes every filled value from the answer's headers and body before the box
 gets it (E56). The version's ``[run]`` entry reaches its own services the same
 way, checked against the ``[run]`` role. The scorer box never holds those
 secrets. Catalog connectors do not go through the relay.
+
+A stage whose own MCP file holds a server gets a relay of its own in each
+stage box: the stage's runner serves the same loopback proxy, the parent
+reads its frames from that box's output, checks each one against the
+``[target.<name>]`` role only, and writes the answer back into that box.
 """
 
 from __future__ import annotations
 
 import base64
 import contextlib
+import functools
 import json
 import logging
 import math
@@ -97,6 +103,11 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 _ISOLATED = "-I -B -u"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
+# A stage box's relay answers, relative to the box; one folder for every call,
+# since each answer file carries its own request's id.
+_STAGE_RELAY_DIR = f"{STAGE_DIR}/relay"
+# The box's working directory, seen from the stage tree that each call runs in.
+_FROM_STAGE_TREE = "../.."
 # The exit code of a stage box from the stage snapshot that has no tree, so
 # the scorer can tell a bad snapshot from a version that does not apply.
 _NO_STAGE_TREE_EXIT = 97
@@ -129,6 +140,8 @@ _DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection"
 # with its own relay, so each service frame is checked against its own role (E37).
 _METRIC_ROLE = "metric"
 _RUN_ROLE = "run"
+# Each stage's role is ``target.<name>``, checked against its own MCP file only (SKY-611).
+_TARGET_ROLE = "target."
 # The candidate supervisor's own allowance on top of the [run] timeout: it
 # still has to kill what the entry left and write its output.
 _RUN_STOP_SECONDS = 60.0
@@ -274,8 +287,9 @@ class RepoScorer:
             service_roles: The services each role lists, by role name;
                 ``run`` for the ``[run]`` entry and ``metric`` for the scorer.
             mcp_roles: Each role with the servers of its own MCP file, by
-                role name; each server goes through the relay, and its
-                secrets stay out of the box.
+                role name (``run``, ``metric`` and ``target.<name>``); each
+                server goes through the relay, and its secrets stay out of
+                the box.
             run_entry: The ``[run]`` entry: ``path/file.py:function`` or a
                 command; ``None`` runs no version code before the metric.
             run_timeout: Longest one ``[run]`` call may run.
@@ -719,18 +733,33 @@ class RepoScorer:
             relay.close()
 
     def _relay(
-        self, boxes: Mapping[str, SandboxSession], response_dir: str, *, role: str = _METRIC_ROLE
+        self,
+        boxes: Mapping[str, SandboxSession],
+        response_dir: str,
+        *,
+        role: str = _METRIC_ROLE,
+        box: SandboxSession | None = None,
     ) -> _StageRelay:
         """Build the relay for one call, checking service and MCP requests against one role.
+
+        Each stage box whose stage has MCP servers gets its own relay for the
+        ``target.<name>`` role. All are built here, in the scorer thread, so
+        each records the scorer's candidate.
 
         Args:
             boxes: Each stage's open box, by stage name.
             response_dir: The call's answer folder, relative to the box.
             role: The role whose services and MCP servers the caller may reach.
+            box: The stage box this relay answers in; ``None`` answers in the scorer box.
 
         Returns:
             The relay for this call.
         """
+        stage_relays = {
+            name: self._relay({}, _STAGE_RELAY_DIR, role=f"{_TARGET_ROLE}{name}", box=stage_box)
+            for name, stage_box in boxes.items()
+            if self._mcp_role(f"{_TARGET_ROLE}{name}").mcp_servers
+        }
         return _StageRelay(
             boxes,
             self._stages,
@@ -748,13 +777,15 @@ class RepoScorer:
             allowed_hosts=self._secret_allowed_hosts,
             budget=self._budget,
             recorder=self._recorder,
+            box=box,
+            stage_relays=stage_relays,
         )
 
     def _mcp_role(self, role: str) -> RoleEnvironment:
         """Return one role with the servers of its own MCP file, or an empty role.
 
         Args:
-            role: ``run`` or ``metric``.
+            role: ``run``, ``metric`` or ``target.<name>``.
 
         Returns:
             The role's environment.
@@ -993,6 +1024,8 @@ class _StageRelay:
     up to ``max_concurrency`` at a time (E34). Service requests run in their
     own pool with the same limit. An MCP GET event stream passes on in its own
     thread, up to ``_MCP_STREAMS`` at a time, so it never holds that pool.
+    A stage with MCP servers has its own relay, which reads the frames of
+    each call in that stage's box and answers them there.
     """
 
     def __init__(
@@ -1014,6 +1047,8 @@ class _StageRelay:
         allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
         budget: BudgetRuntime | None = None,
         recorder: CallRecorder | None = None,
+        box: SandboxSession | None = None,
+        stage_relays: Mapping[str, _StageRelay] | None = None,
     ) -> None:
         """Bind the open stage boxes to the scorer box that waits for their answers.
 
@@ -1040,8 +1075,14 @@ class _StageRelay:
             budget: The run budget, which meters a call with a Skynet key.
             recorder: Writes each relayed call into the run record under
                 ``role``; ``None`` records nothing.
+            box: The stage box whose frames this relay answers, in that
+                box; ``None`` answers in the scorer box through ``workspace``.
+            stage_relays: Each stage's own relay, by stage name, for the
+                stages whose MCP file holds a server; this relay closes them.
         """
         self._boxes = dict(boxes)
+        self._box = box
+        self._stage_relays = dict(stage_relays or {})
         self._stages = stages
         self._response_dir = response_dir
         self._env = dict(env)
@@ -1082,7 +1123,8 @@ class _StageRelay:
         self._open_streams: set[str] = set()
         # The streams whose box-side reader left; each stops at its next event.
         self._abandoned: set[str] = set()
-        self._pending = ""
+        # One partial line for each output source: parallel stage calls stream apart.
+        self._pending: dict[str, str] = {}
         self._seen: set[str] = set()
         self._lock = threading.Lock()
         self._workspace = workspace
@@ -1117,7 +1159,7 @@ class _StageRelay:
             "port": runner.RELAY_PORT,
         }
 
-    def output(self, stream: str, data: str) -> None:
+    def output(self, stream: str, data: str, *, source: str = "") -> None:
         """Take the scorer's output as it streams and hand each call frame to its stage's pool.
 
         The mailbox calls this under its own lock, so it only queues work.
@@ -1125,14 +1167,15 @@ class _StageRelay:
         Args:
             stream: ``stdout`` or ``stderr``.
             data: The next piece of output.
+            source: The command the output comes from, so the partial lines
+                of two parallel stage calls never join; ``""`` for the scorer.
         """
         if stream != "stdout":
             sandbox_log.ignore_output(stream, data)
             return
         with self._lock:
-            self._pending += data
-            lines = self._pending.split("\n")
-            self._pending = lines.pop()
+            lines = (self._pending.get(source, "") + data).split("\n")
+            self._pending[source] = lines.pop()
             for line in lines:
                 # Another thread of the scorer may have left a partial line just before the frame.
                 start = line.find(self._prefix)
@@ -1560,20 +1603,33 @@ class _StageRelay:
             passed its timeout, or returned no valid JSON.
         """
         stage, box = self._stages[name], self._boxes[name]
+        relay = self._stage_relays.get(name)
         folder = f"{STAGE_DIR}/calls/{identity}"
-        box.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(value)})
+        files = {f"{folder}/{runner.INPUT_FILE}": json.dumps(value)}
+        if relay is not None:
+            files[f"{folder}/{runner.STAGE_RELAY_FILE}"] = json.dumps(relay.config(_FROM_STAGE_TREE))
+        box.write_files(files)
         relative = f"../calls/{identity}"
+        stage_runner = f"python3 ../{RUNNER_PATH.rsplit('/', 1)[1]}"
         if isinstance(stage.entry, str):
+            command = f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_FLAG} {relative} {shlex.quote(stage.entry)}"
+        elif relay is not None:
+            # The runner serves the stage's relay, then runs the command with the same files.
             command = (
-                f"cd {_STAGE_TREE} && python3 ../{RUNNER_PATH.rsplit('/', 1)[1]} {runner.STAGE_FLAG}"
-                f" {relative} {shlex.quote(stage.entry)}"
+                f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_COMMAND_FLAG} {relative} {shlex.join(stage.entry)}"
             )
         else:
             command = (
                 f"cd {_STAGE_TREE} && {shlex.join(stage.entry)}"
                 f" < {relative}/{runner.INPUT_FILE} > {relative}/{runner.OUTPUT_FILE}"
             )
-        result = box.run(command, env=self._env, timeout_seconds=stage.timeout, on_output=sandbox_log.ignore_output)
+        sink = functools.partial(relay.output, source=identity) if relay is not None else sandbox_log.ignore_output
+        result = box.run(command, env=self._env, timeout_seconds=stage.timeout, on_output=sink)
+        if relay is not None and relay.control is not None:
+            # A budget stop of the stage's own MCP call stops the scorer too, whatever the stage did with its 503.
+            with self._answer_lock:
+                self.control = self.control or relay.control
+            return {"control": relay.control}
         if result.timed_out:
             return {"error": f"Stage {name!r} passed its {stage.timeout:g}s timeout."}
         if not result.ok:
@@ -1610,6 +1666,10 @@ class _StageRelay:
         with self._answer_lock:
             if self._closed:
                 return False
+            if self._box is not None:
+                # The protected-file check covers the scorer box; a stage box only runs the version.
+                self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
+                return True
             changes = self._workspace.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
             if changes is None:
                 # The scorer may wait until its own timeout; either way the version gets no score.
@@ -1622,6 +1682,8 @@ class _StageRelay:
         """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
         with self._answer_lock:
             self._closed = True
+        for relay in self._stage_relays.values():
+            relay.close()
         for pool in (*self._pools.values(), self._refusals, self._service_pool, self._stream_pool):
             pool.shutdown(wait=False, cancel_futures=True)
         for box in self._boxes.values():

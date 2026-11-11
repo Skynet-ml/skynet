@@ -537,6 +537,44 @@ def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pyt
     staged.cleanup()
 
 
+def test_staging_gives_each_stage_its_own_mcp_role_and_a_relay_only_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each [target.<name>] keeps its own MCP servers for its box relay, and its file in the tree holds relay urls only."""
+    files = {
+        "optimize.toml": (
+            '[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
+            '[target.planner]\nentry = "a.py:f"\nmcp = "agents/planner.mcp.json"\n'
+        ),
+        ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
+        "agents/planner.mcp.json": (
+            '{"mcpServers": {"maps": {"url": "https://maps.example.com/mcp",'
+            ' "headers": {"Authorization": "Bearer ${API_KEY}"}}}}'
+        ),
+        "a.py": "def f(x):\n    return x\n",
+    }
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["maps.example.com"]
+
+    _, staged = _stage_with(files, monkeypatch, payload)
+
+    assert [server.name for server in staged.mcp_roles["target.planner"].mcp_servers] == ["maps"]
+    assert staged.mcp_roles["target.planner"].mcp == "agents/planner.mcp.json"
+    assert [server.name for server in staged.mcp_roles["run"].mcp_servers] == ["search"]
+    assert staged.agent_archive is not None
+    with tarfile.open(staged.agent_archive) as packed:
+        texts = {
+            Path(member.name).as_posix(): packed.extractfile(member).read().decode()  # type: ignore[union-attr]
+            for member in packed
+            if member.isreg()
+        }
+    relay = f"http://127.0.0.1:{runner.RELAY_PORT}/mcp"
+    assert json.loads(texts["agents/planner.mcp.json"]) == {
+        "mcpServers": {"maps": {"type": "http", "url": f"{relay}/maps"}}
+    }
+    assert "example.com" not in "".join(texts.values())
+    assert "secret-value" not in "".join(texts.values())
+    staged.cleanup()
+
+
 def test_the_scorer_tree_holds_only_loopback_urls_in_each_roles_mcp_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
