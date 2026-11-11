@@ -44,12 +44,14 @@ _SDK_ENV = (
 _PROBE = f"uv run --quiet --offline {_SDK_ENV}"
 _WARM = f"uv run --quiet {_SDK_ENV}"
 ENV_REASONING_EFFORT = "OPENHANDS_SDK_REASONING_EFFORT"
+INSTRUCTIONS_FILE = "AGENTS.md"
 # The SDK hands the effort to LiteLLM, which knows these provider-neutral values.
 _EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 # Empty values override any key the host shell leaks into the box, so LiteLLM
 # cannot fall back to a direct provider route. The runner sets its own
 # ``LLM_API_KEY`` and ``LLM_BASE_URL`` from the gateway inside the process.
-# ``LMNR_PROJECT_API_KEY`` would turn on the SDK's Laminar trace export.
+# ``LMNR_PROJECT_API_KEY`` and the OTEL endpoints would turn on the SDK's
+# Laminar trace export (``should_enable_observability``); an empty value is off.
 _NO_DIRECT_KEYS = {
     "ANTHROPIC_API_KEY": "",
     "OPENAI_API_KEY": "",
@@ -59,6 +61,9 @@ _NO_DIRECT_KEYS = {
     "LLM_API_KEY": "",
     "LLM_BASE_URL": "",
     "LMNR_PROJECT_API_KEY": "",
+    "OTEL_ENDPOINT": "",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
 }
 _QUIET_ENV = {
     "UV_NO_PROGRESS": "1",
@@ -90,7 +95,9 @@ import tempfile
 from pathlib import Path
 
 from openhands.sdk import LLM, Agent, AgentContext, Conversation, Tool
+from openhands.sdk.conversation.impl import local_conversation
 from openhands.sdk.event import ActionEvent, MessageEvent
+from openhands.sdk.skills import Skill
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
@@ -106,7 +113,34 @@ DIRECT_ROUTES = (
     "GOOGLE_API_KEY",
     "OPENROUTER_API_KEY",
     "LMNR_PROJECT_API_KEY",
+    "OTEL_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
 )
+INSTRUCTIONS_FILE = Path({instructions_file!r})
+
+
+def _no_ambient_plugins(*args, **kwargs):
+    \"\"\"Return no plugins, so the SDK loads none from the home or workspace plugin folders.\"\"\"
+    return {{}}
+
+
+# The SDK always scans ~/.agents/plugins, ~/.openhands/plugins and the
+# workspace plugin folders, and has no switch to stop it. A found plugin can add
+# skills, MCP servers and shell hooks, so the runner replaces the scan.
+local_conversation.load_available_plugins = _no_ambient_plugins
+
+
+def _skills():
+    \"\"\"Return the workspace instructions file as one always-on skill, or no skills.
+
+    The SDK reads AGENTS.md only with ``load_project_skills``, which also pulls in
+    other workspace skill files, so the runner passes this one file itself.
+    \"\"\"
+    if not INSTRUCTIONS_FILE.is_file():
+        return []
+    text = INSTRUCTIONS_FILE.read_text(encoding="utf-8")
+    return [Skill(name="agents", content=text, source=str(INSTRUCTIONS_FILE), trigger=None)]
 
 
 def _text(content):
@@ -130,13 +164,22 @@ def _final_answer(events):
 def _run(prompt, model, api_key):
     \"\"\"Run the conversation and return the final answer and the token usage.\"\"\"
     effort = os.environ.get({env_reasoning_effort!r})
-    settings = {{"model": LITELLM_PREFIX + model, "base_url": GATEWAY_URL, "api_key": api_key, "usage_id": "agent"}}
+    # Skynet's CLI and BYOK routes reject /responses, so the SDK must not pick
+    # it for gpt-5* models in "auto" mode.
+    settings = {{
+        "model": LITELLM_PREFIX + model,
+        "base_url": GATEWAY_URL,
+        "api_key": api_key,
+        "usage_id": "agent",
+        "api_mode": "chat",
+    }}
     if effort:
         settings["reasoning_effort"] = effort
     llm = LLM(**settings)
     tools = [Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name), Tool(name=TaskTrackerTool.name)]
-    # No skills and no MCP servers: the agent gets only the workspace tools.
-    agent = Agent(llm=llm, tools=tools, agent_context=AgentContext(skills=[]))
+    # Only the candidate instructions and the workspace tools: no other skills
+    # and no MCP servers.
+    agent = Agent(llm=llm, tools=tools, agent_context=AgentContext(skills=_skills()))
     conversation = Conversation(agent=agent, workspace=str(Path.cwd().resolve()))
     conversation.send_message(prompt)
     conversation.run()
@@ -233,6 +276,7 @@ def _runner_script(gateway_url: str) -> str:
         env_model=ENV_MODEL,
         env_prompt_file=ENV_PROMPT_FILE,
         env_reasoning_effort=ENV_REASONING_EFFORT,
+        instructions_file=INSTRUCTIONS_FILE,
     )
 
 
@@ -268,7 +312,7 @@ def _openhands_sdk_launch(model: str, gateway: GatewayConfig, *, reasoning_effor
     if effort in _EFFORTS:
         env[ENV_REASONING_EFFORT] = effort
     return HarnessLaunch(
-        instructions_file="AGENTS.md",
+        instructions_file=INSTRUCTIONS_FILE,
         install_command=_openhands_sdk_install(),
         files={RUNNER_FILE: _runner_script(_gateway_url(gateway))},
         run_command=f"{_UV_PATH} {_RUNNER}",

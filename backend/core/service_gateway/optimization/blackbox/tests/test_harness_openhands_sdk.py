@@ -40,6 +40,9 @@ _DIRECT_KEYS = (
     "LLM_API_KEY",
     "LLM_BASE_URL",
     "LMNR_PROJECT_API_KEY",
+    "OTEL_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
 )
 _PINS = ("openhands-sdk==1.61.0", "openhands-tools==1.61.0", "fastapi==0.136.3")
 # Synthetic stdout of one runner turn: SDK visualizer noise around the single
@@ -118,6 +121,7 @@ class Conversation:
         self.state.events.append(MessageEvent("user", prompt))
 
     def run(self):
+        from openhands.sdk.conversation.impl import local_conversation
         from openhands.sdk.event import ActionEvent, MessageEvent
         scratch = tempfile.mkdtemp()
         record = {
@@ -125,7 +129,9 @@ class Conversation:
             "env": {name: os.environ.get(name) for name in (
                 "LLM_API_KEY", "LLM_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")},
             "tools": [tool.name for tool in self.agent.tools],
-            "skills": self.agent.agent_context.skills,
+            "skills": [vars(skill) for skill in self.agent.agent_context.skills],
+            "ambient_plugins": local_conversation.load_available_plugins(
+                work_dir=self.workspace, include_user=True, include_project=True),
             "workspace": self.workspace,
             "scratch": scratch,
         }
@@ -134,6 +140,20 @@ class Conversation:
         prompt = self.state.events[0].llm_message.content[0].text
         self.state.events.append(MessageEvent("agent", "working on " + prompt.strip()))
         self.state.events.append(ActionEvent("answer to " + prompt.strip()))
+""",
+    "openhands/sdk/skills.py": """
+class Skill:
+    def __init__(self, name, content, source, trigger):
+        self.name = name
+        self.content = content
+        self.source = source
+        self.trigger = trigger
+""",
+    "openhands/sdk/conversation/__init__.py": "",
+    "openhands/sdk/conversation/impl/__init__.py": "",
+    "openhands/sdk/conversation/impl/local_conversation.py": """
+def load_available_plugins(work_dir, include_user, include_project):
+    return {"ambient": "a plugin from the home or workspace plugin folders"}
 """,
     "openhands/sdk/event.py": """
 class _Part:
@@ -390,6 +410,7 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
         "base_url": _GATEWAY.url,
         "api_key": _GATEWAY.api_key,
         "usage_id": "agent",
+        "api_mode": "chat",
         "reasoning_effort": "high",
     }
     assert seen["env"] == {
@@ -400,11 +421,32 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
     }
     assert seen["tools"] == ["terminal", "file_editor", "task_tracker"]
     assert seen["skills"] == []
+    assert seen["ambient_plugins"] == {}
     assert seen["workspace"] == str(workspace)
     assert Path(seen["scratch"]).resolve().is_relative_to(workspace / ".app/openhands_sdk")
     assert not Path(seen["scratch"]).exists()
     assert list((workspace / ".app/openhands_sdk").iterdir()) == [workspace / RUNNER_FILE]
     assert parse_pi_output(result.stdout) == ("answer to Fix the bug.", {"input_tokens": 11, "output_tokens": 7})
+
+
+def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) -> None:
+    """The AGENTS.md candidate reaches the agent context as one always-on skill."""
+    launch = SPEC.launch("m", _GATEWAY)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix the bug.\n")
+    record = tmp_path / "record.json"
+    candidate = "Always run the tests before you finish. marker-7f3a"
+
+    result = _run_runner(
+        tmp_path,
+        {**launch.files, launch.instructions_file: candidate},
+        **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(record.read_text())["skills"] == [
+        {"name": "agents", "content": candidate, "source": "AGENTS.md", "trigger": None}
+    ]
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
