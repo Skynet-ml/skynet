@@ -46,8 +46,13 @@ def dollars_to_cents(dollars: str) -> int:
         raise GrantRefusedError(f"dollars must be a number, got {dollars!r}") from error
     if not amount.is_finite() or amount <= 0:
         raise GrantRefusedError("dollars must be a positive amount")
-    cents = amount * 100
-    if cents != cents.to_integral_value():
+    # A huge exponent such as "1e999999999" overflows the decimal context here.
+    try:
+        cents = amount * 100
+        whole = cents == cents.to_integral_value()
+    except ArithmeticError as error:
+        raise GrantRefusedError("dollars must be a positive amount in whole cents") from error
+    if not whole:
         raise GrantRefusedError("dollars must have at most 2 decimal places")
     return int(cents)
 

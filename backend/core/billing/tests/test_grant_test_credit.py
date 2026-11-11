@@ -582,6 +582,13 @@ def test_dollars_to_cents_refuses_bad_amounts(dollars: str) -> None:
         dollars_to_cents(dollars)
 
 
+def test_cli_refuses_an_overflowing_amount_with_exit_code_2(capsys: pytest.CaptureFixture[str]) -> None:
+    """An amount too large for the decimal context is a usage error, not a failed grant."""
+    argv = ["--account-id", STAGING_ID, "--dollars", "1e999999999", "--reason", "r", "--approval", "a"]
+    assert main([*argv, "--idempotency-key", "k"]) == 2
+    assert "dollars" in capsys.readouterr().err
+
+
 def test_cli_grants_and_prints_dollars_without_the_email(
     engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

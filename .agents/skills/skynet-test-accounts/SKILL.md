@@ -185,8 +185,10 @@ rules apply:
 - Never use a raw wallet INSERT, Stripe or any other path.
 
 The command refuses unless `APP_ENVIRONMENT` is `staging`, the database
-host is the `skynet-staging` RDS instance, the account id has the
-`account.py` staging shape, and the account has a user row. Amounts are
+host is the `skynet-staging` RDS instance, and the database is named
+`skynet`. No libpq override (`PGHOSTADDR`, `PGSERVICE`, `PGSERVICEFILE` or a
+`service` query key) may be set. The account id must have the `account.py`
+staging shape. The account must have a user row and no debt. Amounts are
 dollars with at most 2 decimals. A retry with the same `--idempotency-key`
 credits nothing more. Use a new key for each approved grant, for example
 `<account-id>-1`. The key has at most 54 characters. `--reason` has at most
