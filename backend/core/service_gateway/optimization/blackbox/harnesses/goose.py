@@ -35,7 +35,7 @@ _LOCAL_BIN = '"$HOME/.local/bin"'
 # (``ThinkingEffort::from_str``). Goose reads ``none`` as its ``off``, the same
 # level spelled differently. It reads ``xhigh`` as ``max``, a different Skynet
 # level, and has no ``minimal``, so those two are refused, not remapped.
-GOOSE_THINKING_LEVELS = frozenset({"none", "low", "medium", "high", "max"})
+GOOSE_THINKING_LEVELS = ("none", "low", "medium", "high", "max")
 # Goose reads these keys for its other providers. A protected run blanks them,
 # so an inherited key never gives goose a route around the gateway.
 _PROTECTED_ENV = {
@@ -106,7 +106,7 @@ def _goose_thinking(reasoning_effort: str | None) -> dict[str, str]:
     if not reasoning_effort:
         return {}
     if reasoning_effort not in GOOSE_THINKING_LEVELS:
-        supported = ", ".join(sorted(GOOSE_THINKING_LEVELS))
+        supported = ", ".join(GOOSE_THINKING_LEVELS)
         raise ServiceError(f"Goose does not support effort {reasoning_effort!r}. Supported efforts: {supported}.")
     return {"GOOSE_THINKING_EFFORT": reasoning_effort}
 
@@ -178,5 +178,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=64,
+        supported_efforts=GOOSE_THINKING_LEVELS,
     )
 )
