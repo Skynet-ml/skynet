@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import patch
 
 import litellm
@@ -1083,6 +1084,60 @@ def test_a_cold_effort_check_during_the_prewarm_waits_for_its_build(monkeypatch:
     checker.join(5)
 
     assert answers == [True]
+    assert len(builds) == 1
+
+
+def test_two_cold_effort_checks_at_once_share_one_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second cold check never joins the refresh thread before it starts."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    starting = threading.Event()
+    builds: list[int] = []
+
+    class SlowStartThread(threading.Thread):
+        """Widen the gap between storing the refresh thread and starting it."""
+
+        def start(self) -> None:
+            """Signal the test, wait, then start the thread."""
+            starting.set()
+            time.sleep(0.2)
+            super().start()
+
+    def build() -> ModelCatalogResponse:
+        """Count the build.
+
+        Returns:
+            A catalog with one model without an effort control.
+        """
+        builds.append(1)
+        return ModelCatalogResponse(providers=[], models=[plain])
+
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+    monkeypatch.setattr(mc, "get_catalog", build)
+    monkeypatch.setattr(mc, "zero_retention_models", set)
+    monkeypatch.setattr(mc, "Thread", SlowStartThread)
+
+    answers: list[bool] = []
+    errors: list[BaseException] = []
+
+    def check() -> None:
+        """Run one cold effort check and record its answer or error."""
+        try:
+            answers.append(mc.is_effortless_model("openrouter/vendor/plain"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=check)
+    second = threading.Thread(target=check)
+    first.start()
+    assert starting.wait(5)
+    second.start()
+    first.join(5)
+    second.join(5)
+
+    assert errors == []
+    assert answers == [True, True]
     assert len(builds) == 1
 
 

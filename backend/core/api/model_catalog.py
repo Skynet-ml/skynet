@@ -1840,7 +1840,10 @@ def _kick_background_refresh() -> None:
         _refresh_in_flight = True
         # Set with the flag, so a caller that sees the flag can join this thread.
         thread = _refresh_thread = Thread(target=_refresh_catalog_in_background, name="catalog-refresh", daemon=True)
-    thread.start()
+        # Start under the lock: a caller that sees the flag joins this thread,
+        # and joining an unstarted thread raises. The thread takes the lock
+        # only in its finally, so this cannot deadlock.
+        thread.start()
 
 
 def with_zero_retention(catalog: ModelCatalogResponse) -> ModelCatalogResponse:
