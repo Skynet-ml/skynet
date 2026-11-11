@@ -663,6 +663,7 @@ _BOX_TOKENS = ("CANDIDATE_TOKEN", "HOST_AGENT_TOKEN", "PACKAGE_RELAY_TOKEN", "TO
 # The task key and the ShinkaEvolve route keys that a box can also hold.
 _BOX_KEYS = (
     "TASK_API_KEY",
+    "METRIC_API_KEY",
     "SHINKA_KEY_0",
     "SHINKA_KEY_12",
     "SHINKA_META_KEY",
@@ -696,6 +697,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
             "APP_API_KEY": "secret-key",
             "SKYNET_API_KEY": "secret-key",
             "EVE_RUNNER_TOKEN": "runner-token",
+            "ANTHROPIC_AUTH_TOKEN": "secret-key",
             "EVE_PROJECT_DIR": str(project),
             "EVE_WORKSPACE": str(workspace),
             **{f"{prefix}_{name}": "box-token" for prefix in ("APP", "SKYNET") for name in _BOX_TOKENS + _BOX_KEYS},
@@ -708,7 +710,15 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     )
     result = json.loads(completed.stdout)
     names = {line.split("=", 1)[0] for line in result["env"].splitlines()}
-    assert not names & {"APP_API_KEY", "SKYNET_API_KEY", "EVE_RUNNER_TOKEN", "EVE_PROJECT_DIR", "EVE_WORKSPACE"}
+    assert not names & {
+        "APP_API_KEY",
+        "SKYNET_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "EVE_RUNNER_TOKEN",
+        "EVE_PROJECT_DIR",
+        "EVE_WORKSPACE",
+    }
+    assert "secret-key" not in result["env"]
     assert not {name for name in names if name.endswith(_BOX_TOKENS + _BOX_KEYS)}
     # A login shell reads /etc/profile, which resets PATH on Debian images and
     # would drop /opt/node24/bin and the venv from every tool command.

@@ -134,7 +134,9 @@ def test_run_session_reports_timeouts_and_budget_overruns(tmp_path: Path) -> Non
     assert outcome.duration_seconds < 4
 
 
-def _record_signals(monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[int, int, int]]) -> list[tuple]:
+def _record_signals(
+    monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[int, int, int]]
+) -> list[tuple[str, int, int]]:
     """Fake the process table and record each signal ``_stop_group`` sends.
 
     Args:
@@ -144,7 +146,7 @@ def _record_signals(monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[int,
     Returns:
         The list that collects ``("group", pgid, signum)`` and ``("pid", pid, signum)`` entries.
     """
-    sent: list[tuple] = []
+    sent: list[tuple[str, int, int]] = []
     monkeypatch.setattr(harness_bridge.os, "killpg", lambda pid, signum: sent.append(("group", pid, signum)))
     monkeypatch.setattr(harness_bridge.os, "kill", lambda pid, signum: sent.append(("pid", pid, signum)))
     monkeypatch.setattr(harness_bridge, "_proc_stats", lambda: dict(table))
@@ -253,6 +255,102 @@ def test_timeout_kills_a_background_job_that_a_finished_tool_command_left(tmp_pa
         if job is not None:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(job, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
+def test_normal_end_kills_a_background_job_that_a_detached_tool_command_left(tmp_path: Path) -> None:
+    """Kill an orphaned ``sleep`` from a detached tool when the harness ends on its own, with no stop."""
+    pid_file = tmp_path / "job.pid"
+    tool = (
+        "import os, subprocess; os.setsid(); "
+        "job = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"open({str(pid_file)!r}, 'w').write(str(job.pid))"
+    )
+    job = None
+    try:
+        outcome = run_session(
+            {"run_command": f"{shlex.quote(sys.executable)} -c {shlex.quote(tool)}", "output_format": "plain"},
+            workspace=tmp_path / "work",
+            prompt="x",
+            model="m",
+            session_dir=tmp_path / "session",
+            timeout_seconds=30,
+        )
+        assert outcome.returncode == 0
+        assert not outcome.timed_out
+        job = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while _alive(job):
+            assert time.monotonic() < deadline, "the orphaned background job outlived the session"
+            time.sleep(0.05)
+    finally:
+        if job is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(job, signal.SIGKILL)
+
+
+def test_normal_end_kills_a_background_job_left_in_the_harness_group(tmp_path: Path) -> None:
+    """Kill a ``sleep &`` that the harness shell left in its own group when the shell ends on its own."""
+    pid_file = tmp_path / "job.pid"
+    outcome = run_session(
+        {
+            "run_command": f"sleep 300 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}",
+            "output_format": "plain",
+        },
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=30,
+    )
+    job = int(pid_file.read_text())
+    try:
+        assert outcome.returncode == 0
+        deadline = time.monotonic() + 10
+        while _running(job):
+            assert time.monotonic() < deadline, "the background job outlived the session"
+            time.sleep(0.05)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(job, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
+def test_harness_pipelines_end_when_the_reader_closes_the_pipe(tmp_path: Path) -> None:
+    """Keep SIGPIPE at its default in the harness shell, so ``producer | head -1`` ends at once."""
+    outcome = run_session(
+        {
+            "run_command": "while true; do echo x; done | head -1; yes | head -1; echo status=$?",
+            "output_format": "plain",
+        },
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=20,
+    )
+
+    assert not outcome.timed_out
+    assert outcome.returncode == 0
+    assert outcome.stdout.splitlines() == ["x", "y", "status=0"]
+    assert "Broken pipe" not in outcome.stderr
+    assert outcome.duration_seconds < 10
+
+
+def _running(pid: int) -> bool:
+    """Tell whether a process runs and is not a zombie, on Linux and macOS.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        ``True`` while ``/proc`` or ``ps`` shows the process in a state other than zombie.
+    """
+    if Path("/proc/self/stat").exists():
+        # Slim Linux images can lack ``ps``.
+        return _alive(pid)
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    return bool(state.stdout.strip()) and not state.stdout.strip().startswith("Z")
 
 
 def _alive(pid: int) -> bool:

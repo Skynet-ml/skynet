@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import hashlib
 import json
 import os
@@ -407,15 +408,11 @@ _GUARD_MAX_LINK_DEPTH = 40
 _GUARD_DEADLINE_SECONDS = 5.0
 # Options of these commands that name the folder the command works in.
 _GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
-# On Linux the harness shell starts through this program, which marks it a
-# child subreaper (PR_SET_CHILD_SUBREAPER, 36) and then execs the shell with
-# the same pid. A background job that outlives its parent, for example
-# ``sleep 300 &`` in a detached eve tool command, then moves to the shell, not
-# to init, so the stop sweep still finds it in the tree.
-_SUBREAPER_EXEC = (
-    "import ctypes, os, sys; ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0); "
-    "os.execv(sys.argv[1], sys.argv[1:])"
-)
+# Linux prctl option that makes a process adopt the orphans of its descendants.
+_PR_SET_CHILD_SUBREAPER = 36
+# The reaper stops sweeping after this many rounds, so a descendant that keeps
+# forking cannot hold the session open.
+_REAPER_SWEEPS = 50
 # One check function shared by the Pi extension, the OpenCode plugin and the
 # eve sandbox. It asks this module for the verdict, so the matching lives in
 # one place.
@@ -1160,7 +1157,10 @@ def _stop_group(process: subprocess.Popen[str], signum: int, root_start: int | N
     # eve's sandbox starts each tool command detached, in its own session and
     # group, so the group signal misses it. The tree is read first: once a
     # parent dies, its children move to init and leave the tree.
-    descendants = _detached_descendants(stats, process.pid) if stats and process.pid in stats else []
+    descendants = []
+    if stats and process.pid in stats:
+        # killpg already reaches the members of the shell's group.
+        descendants = [pid for pid in _descendants(stats, process.pid) if stats[pid][1] != process.pid]
     # Signalling only the shell would leave a child holding the stdout pipe open.
     with contextlib.suppress(ProcessLookupError):
         os.killpg(process.pid, signum)
@@ -1220,16 +1220,15 @@ def _proc_stats() -> dict[int, tuple[int, int, int]] | None:
     return stats
 
 
-def _detached_descendants(stats: dict[int, tuple[int, int, int]], root: int) -> list[int]:
-    """List the descendants of a process that left its process group.
+def _descendants(stats: dict[int, tuple[int, int, int]], root: int) -> list[int]:
+    """List the descendants of a process.
 
     Args:
         stats: The process table from ``_proc_stats``.
-        root: Pid of the harness shell, which leads its own group.
+        root: Pid whose tree to walk.
 
     Returns:
-        The pids under ``root`` at any depth whose group is not ``root``'s;
-        ``killpg`` already reaches the others.
+        The pids under ``root`` at any depth.
     """
     children: dict[int, list[int]] = {}
     for pid, (parent, _, _) in stats.items():
@@ -1238,10 +1237,54 @@ def _detached_descendants(stats: dict[int, tuple[int, int, int]], root: int) -> 
     pending = [root]
     while pending:
         for child in children.get(pending.pop(), []):
+            found.append(child)
             pending.append(child)
-            if stats[child][1] != root:
-                found.append(child)
     return found
+
+
+def reaper_main(command: list[str]) -> int:
+    """Run the harness command as a child subreaper, then kill every process it left behind.
+
+    The bridge starts the harness shell through this entry point on Linux. A
+    background job that outlives its parent, for example ``sleep 300 &`` in a
+    detached eve tool command, moves to this process instead of to init, so
+    the bridge's stop sweep finds it in the tree, and this process kills it
+    when the shell ends normally. The native runtime runs many sessions in one
+    box, so a leftover job would otherwise outlive its session.
+
+    Args:
+        command: The harness shell and its arguments.
+
+    Returns:
+        The shell's exit code, or 128 plus the signal number when a signal ended it.
+    """
+    ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    # restore_signals (the default) puts SIGPIPE and SIGXFSZ back to their
+    # default action, which CPython ignores; an ignored SIGPIPE would leave
+    # ``producer | head -1`` writing forever.
+    returncode = subprocess.Popen(command, restore_signals=True).wait()
+    for _ in range(_REAPER_SWEEPS):
+        left = _descendants(_proc_stats() or {}, os.getpid())
+        if not left:
+            break
+        for pid in left:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        _reap_children()
+        time.sleep(0.05)
+    _reap_children()
+    return returncode if returncode >= 0 else 128 - returncode
+
+
+def _reap_children() -> None:
+    """Collect every finished child, including the orphans this subreaper adopted."""
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
 
 
 def run_session(
@@ -1312,7 +1355,7 @@ def run_session(
     shell = shutil.which("bash") or "/bin/sh"
     command = [shell, "-c", _with_key(proposer["run_command"], api_key)]
     if sys.platform == "linux" and sys.executable:
-        command = [sys.executable, "-I", "-c", _SUBREAPER_EXEC, *command]
+        command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
     with stderr_file.open("w", encoding="utf-8") as stderr:
@@ -1345,6 +1388,10 @@ def run_session(
             timed_out = True
             _stop_group(process, signal.SIGKILL, monitor.root_start)
             process.wait()
+        else:
+            # A job the shell left in its group would outlive the session, and
+            # the native runtime runs many sessions in one box.
+            _stop_group(process, signal.SIGKILL, monitor.root_start)
         # A child forked while the first signal landed can outlive the shell and
         # keep the pipe open, so keep sweeping the group until the reader sees EOF.
         deadline = time.monotonic() + 5.0
@@ -1581,6 +1628,8 @@ def main(argv: list[str]) -> int:
     """
     if argv[:1] == ["guard"]:
         return guard_main(argv[1:])
+    if argv[:1] == ["reaper"]:
+        return reaper_main(argv[1:])
     args, unknown = _cli_parser().parse_known_args(argv)
     if args.output_format not in (None, "json"):
         print(f"claude bridge: unsupported --output-format {args.output_format}", file=sys.stderr)

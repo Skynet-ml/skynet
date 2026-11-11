@@ -245,8 +245,9 @@ async function stopServer(child) {
 # of the commands it starts. ``with_legacy_env`` also copies APP_API_KEY to
 # SKYNET_API_KEY, so the provider removes that legacy twin too. The box
 # process can also hold the tool relay, package relay, candidate and host
-# agent tokens, the task key and the ShinkaEvolve route keys, so the provider
-# removes them and their SKYNET_ twins. eve's
+# agent tokens, the task and metric keys and the ShinkaEvolve route keys, so
+# the provider removes them and their SKYNET_ twins. The native runtime also
+# puts the gateway key in ANTHROPIC_AUTH_TOKEN, so the provider removes it too. eve's
 # contract says ``bash -lc``, but a login shell reads /etc/profile, which
 # resets PATH and drops the Node 24 directory that the launch adds. The
 # image's ENV PATH already holds the venv, so ``bash -c`` keeps the server
@@ -276,6 +277,9 @@ const DROPPED_ENV = [
   "SKYNET_TOOL_RELAY_TOKEN",
   "APP_TASK_API_KEY",
   "SKYNET_TASK_API_KEY",
+  "APP_METRIC_API_KEY",
+  "SKYNET_METRIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
   "EVE_PROJECT_DIR",
   "EVE_RUNNER_TOKEN",
   "EVE_WORKSPACE",
