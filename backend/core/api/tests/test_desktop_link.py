@@ -603,7 +603,6 @@ _POLICY_CASES: list[tuple[str, bool]] = [
     ("/account/package-registry", True),
     ("/agent/protected-settings", False),
     ("/billing/checkout", False),
-    ("/billing/subscription/checkout", False),
     ("/billing/portal", False),
     ("/billing/payment-methods/{payment_method_id}", False),
     ("/billing/byok/keys", False),
