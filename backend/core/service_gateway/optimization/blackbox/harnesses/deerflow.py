@@ -163,7 +163,9 @@ def _run():
     client = client_module.DeerFlowClient(
         model_name={model_name!r},
         subagent_enabled=False,
-        thinking_enabled=_flag({env_thinking!r}, True),
+        # The model entry has no ``supports_thinking`` or thinking settings, so DeerFlow
+        # sends no thinking parameters either way. Off by default matches that config.
+        thinking_enabled=_flag({env_thinking!r}, False),
         plan_mode=False,
     )
     end_usage = None
@@ -352,7 +354,7 @@ SPEC = register(
         version=DEERFLOW_REF,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
-        # Cline's own tests require it to stay the last built-in, so DeerFlow sorts before it.
+        # Built-ins sort by position; DeerFlow sorts after Prime (40) and before Cline (70).
         position=60,
     )
 )
