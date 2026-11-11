@@ -159,6 +159,22 @@ RUN umask 0002; \
         && RUNNER_JS=$("$PY" -c 'import os, dspy.primitives.python_interpreter as m; print(os.path.join(os.path.dirname(m.__file__), "runner.js"))') \
         && deno cache "$RUNNER_JS"
 
+# The setup agent's read-only GitHub repository tools (SKY-327). The version
+# and checksums match GITHUB_MCP_VERSION in core/service_gateway/agents/github_mcp.py.
+ARG GITHUB_MCP_VERSION=2.1.0
+RUN case "$(dpkg --print-architecture)" in \
+            amd64) GH_MCP_ARCH=x86_64; GH_MCP_SHA256=a442f9db287cea01008bcb55fe6bc0292270301046c3edbd1a8b22d6e4157b2b ;; \
+            arm64) GH_MCP_ARCH=arm64; GH_MCP_SHA256=34d5a268f65cd1e9b7107fa976f3571ccd575f9df00cec489fec79a039923a22 ;; \
+            *) echo "unsupported arch for github-mcp-server: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSL --retry 10 --retry-all-errors --retry-delay 2 \
+            "https://github.com/github/github-mcp-server/releases/download/v$GITHUB_MCP_VERSION/github-mcp-server_Linux_$GH_MCP_ARCH.tar.gz" \
+            -o /tmp/github-mcp-server.tar.gz \
+        && echo "$GH_MCP_SHA256  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
+        && tar -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server \
+        && rm /tmp/github-mcp-server.tar.gz \
+        && chmod 0755 /usr/local/bin/github-mcp-server
+
 COPY --chown=1001:0 . .
 
 # Install the project itself. pip does an editable --no-deps install (every

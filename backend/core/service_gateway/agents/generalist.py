@@ -39,7 +39,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Literal, TypedDict, cast
@@ -74,6 +74,7 @@ from .answer_options import normalize_options
 from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
+from .github_mcp import github_repo_tools
 from .pi_react import run_react_turn_on_pi
 from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
@@ -2459,7 +2460,10 @@ SCREEN_FOCUS: dict[str, str] = {
         "offer to create one with ``create_github_repository`` (a ``name`` the user agrees to and the "
         "``objective`` from ``task_objective``); the user approves it, and the wizard selects the new "
         "repository. When ``github_connected`` is false, tell the user to link GitHub with the Connect "
-        "GitHub button on this screen; never ask for a token."
+        "GitHub button on this screen; never ask for a token. "
+        "To check a candidate repository or answer a question about its code, read it with the GitHub tools "
+        "(``search_repositories``, ``search_code``, ``get_file_contents``, ``list_branches`` and the others); "
+        "they only read."
     ),
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "
@@ -2551,6 +2555,38 @@ def _history_from_chat(chat_history: list[dict]) -> dspy.History:
         for turn in chat_history
     ]
     return history_from_turns(turns, input_field="user_message", output_field="assistant_message")
+
+
+async def _github_repo_tools(
+    stack: AsyncExitStack,
+    wizard_state: dict,
+    allowed_names: set[str],
+    github_token: Callable[[], str | None] | None,
+) -> list[dspy.Tool]:
+    """Open the read-only GitHub MCP tools when this turn may look up a GitHub repository.
+
+    They come with the GitHub repository listing tool, and only for a GitHub
+    repository, so another host's token never reaches the GitHub server.
+    Without a linked token the turn gets none, and the screen prompt tells
+    the user to press Connect GitHub.
+
+    Args:
+        stack: The turn's exit stack; it closes the server with the turn.
+        wizard_state: Snapshot of the wizard state.
+        allowed_names: Names of the MCP tools this turn offers.
+        github_token: Returns the caller's repository host token, or ``None``.
+
+    Returns:
+        The GitHub tools, or an empty list.
+    """
+    if GITHUB_REPOS_TOOL not in allowed_names or github_token is None:
+        return []
+    if str(wizard_state.get("repo_provider") or "github") != "github":
+        return []
+    token = await asyncio.to_thread(github_token)
+    if not token:
+        return []
+    return await stack.enter_async_context(github_repo_tools(settings.github_mcp_binary, token))
 
 
 @asynccontextmanager
@@ -3383,9 +3419,10 @@ async def _drive_generalist_agent(
             (the model spent its turn thinking), so the user sees an error
             instead of an empty message.
     """
-    async with _mcp_session(mcp_url, auth_header=auth_header) as session:
+    async with _mcp_session(mcp_url, auth_header=auth_header) as session, AsyncExitStack() as stack:
         listing = await session.list_tools()
         allowed_names = screen_tools(tools_for(wizard_state), wizard_state)
+        github_tools = await _github_repo_tools(stack, wizard_state, allowed_names, github_token)
         staged_id = wizard_state.get("staged_dataset_id") or None
         # The MCP session is bound to THIS loop. The Pi relay runs tool
         # calls in a worker thread, so the wrapper has to marshal each call
@@ -3424,7 +3461,7 @@ async def _drive_generalist_agent(
                 authoring_flag=authoring_flag,
                 approval_owner=approval_owner,
             )
-            for tool in [*build_web_tools(), *build_docs_tools()]
+            for tool in [*build_web_tools(), *build_docs_tools(), *github_tools]
         ]
         if screen is not None:
             dspy_tools += [
