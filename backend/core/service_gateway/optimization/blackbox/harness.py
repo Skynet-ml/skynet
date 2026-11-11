@@ -25,6 +25,8 @@ from ....models.blackbox import (
     BLACKBOX_HARNESS_CLINE,
     BLACKBOX_HARNESS_CODEX,
     BLACKBOX_HARNESS_CUSTOM,
+    BLACKBOX_HARNESS_GOOSE,
+    BLACKBOX_HARNESS_HERMES,
     BLACKBOX_HARNESS_KIMI_CODE,
     BLACKBOX_HARNESS_OPENCODE,
     BLACKBOX_HARNESS_OPENCODE_V2,
@@ -92,7 +94,7 @@ _OPENROUTER_PREFIX = "openrouter/"
 
 # The catalog harnesses that load the [proposer] MCP servers from the relay
 # urls in their generated config. Any other harness would run without the
-# tools the file lists, so its launch stops (SKY-610, SKY-618, SKY-619).
+# tools the file lists, so its launch stops (SKY-610, SKY-618, SKY-619, SKY-620).
 MCP_HARNESSES = (
     BLACKBOX_HARNESS_CODEX,
     BLACKBOX_HARNESS_OPENCODE,
@@ -101,6 +103,8 @@ MCP_HARNESSES = (
     BLACKBOX_HARNESS_CLINE,
     BLACKBOX_HARNESS_KIMI_CODE,
     BLACKBOX_HARNESS_OPENHANDS,
+    BLACKBOX_HARNESS_HERMES,
+    BLACKBOX_HARNESS_GOOSE,
 )
 
 

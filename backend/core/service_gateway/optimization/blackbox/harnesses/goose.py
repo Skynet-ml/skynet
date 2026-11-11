@@ -11,6 +11,8 @@ OpenAI-compatible provider at the model gateway instead.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_GOOSE
 from ..harness_bridge import parse_plain_output
@@ -39,6 +41,8 @@ GOOSE_SHA256 = {
 # The gateway URL lives in this file rather than on the command line, so a
 # protected run's relay rewrite of generated files reaches it.
 GOOSE_BASE_URL_FILE = ".app/goose/base_url"
+# The [proposer] MCP relay urls, one per line, for the same reason (SKY-620).
+GOOSE_MCP_URLS_FILE = ".app/goose/mcp_urls"
 _LOCAL_BIN = '"$HOME/.local/bin"'
 # Skynet's effort names that goose 1.57.0 has its own level for
 # (``ThinkingEffort::from_str``). Goose reads ``none`` as its ``off``, the same
@@ -120,7 +124,13 @@ def _goose_thinking(reasoning_effort: str | None) -> dict[str, str]:
     return {"GOOSE_THINKING_EFFORT": reasoning_effort}
 
 
-def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _goose_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for Goose CLI (``goose``, pinned to :data:`GOOSE_VERSION`).
 
     Each run gets a fresh goose root directory outside the workspace, so the
@@ -134,6 +144,9 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for goose's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so goose never holds the real url or a secret (SKY-620).
 
     Returns:
         The launch.
@@ -141,6 +154,18 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     Raises:
         ServiceError: When goose has no level for the effort.
     """
+    # Each MCP server is a ``--with-streamable-http-extension`` flag, not a
+    # config ``extensions`` entry: config extensions need the profile, and
+    # ``--no-profile`` also skips the plugin MCP servers that a workspace can
+    # declare. The urls come from a launch file, the only place the protected
+    # relay rewrite reaches, one per line. A quoted name has no whitespace, so
+    # goose reads the whole line as the url. Goose 1.57.0 only prints an
+    # extension that fails to start and has no option to fail the run (SKY-620).
+    mcp_urls = [f"{gateway.url}/mcp/{quote(name, safe='')}" for name in mcp_servers]
+    mcp_flags = "".join(
+        f' --with-streamable-http-extension "$(sed -n {line}p {GOOSE_MCP_URLS_FILE})"'
+        for line in range(1, len(mcp_urls) + 1)
+    )
     # Goose 1.57.0 sends gpt-5*, gpt-6* and o* models to the Responses API
     # when the base path is the default ``v1/chat/completions``
     # (``OpenAiProvider::should_use_responses_api``), and Skynet's local CLI
@@ -156,7 +181,7 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         f"{_temp_root('GOOSE_PATH_ROOT', 'goose')} && "
         f'OPENAI_HOST="$(cat {GOOSE_BASE_URL_FILE})" OPENAI_BASE_PATH=chat/completions '
         f'OPENAI_API_KEY="${ENV_API_KEY}" '
-        "goose run --no-session --quiet --no-profile --with-builtin developer "
+        f"goose run --no-session --quiet --no-profile --with-builtin developer{mcp_flags} "
         f'--provider {GOOSE_PROVIDER} --model "${ENV_MODEL}" -i "${ENV_PROMPT_FILE}" < /dev/null'
     )
     env = _base_env(model, gateway)
@@ -171,7 +196,10 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_goose_install(),
-        files={GOOSE_BASE_URL_FILE: gateway.url},
+        files={
+            GOOSE_BASE_URL_FILE: gateway.url,
+            **({GOOSE_MCP_URLS_FILE: "".join(f"{url}\n" for url in mcp_urls)} if mcp_urls else {}),
+        },
         run_command=run_command,
         env=env,
         parse_output=parse_plain_output,

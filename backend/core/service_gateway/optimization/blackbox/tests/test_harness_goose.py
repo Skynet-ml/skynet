@@ -25,7 +25,7 @@ from core.models.blackbox import (
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
-from ..harnesses.goose import _PROTECTED_ENV, GOOSE_BASE_URL_FILE, GOOSE_SHA256, GOOSE_VERSION
+from ..harnesses.goose import _PROTECTED_ENV, GOOSE_BASE_URL_FILE, GOOSE_MCP_URLS_FILE, GOOSE_SHA256, GOOSE_VERSION
 from ..service import _check_proposer_effort
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
@@ -78,7 +78,12 @@ def _target() -> BlackboxTarget:
 
 
 def _run_with_fake_goose(
-    tmp_path: Path, *, protected: bool, gateway: GatewayConfig = _GATEWAY, fake_exit: int = 0
+    tmp_path: Path,
+    *,
+    protected: bool,
+    gateway: GatewayConfig = _GATEWAY,
+    fake_exit: int = 0,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[str, str, Path, int]:
     """Run the built goose command in a scratch workspace against a fake ``goose`` binary.
 
@@ -90,12 +95,13 @@ def _run_with_fake_goose(
         protected: Build the protected launch, with the sandbox-local relay set.
         gateway: Gateway URL and key for the launch.
         fake_exit: Exit status the fake binary returns.
+        mcp_servers: The ``[proposer]`` MCP server names.
 
     Returns:
         The command's stdout, the fake binary's call log, the workspace, and
         the command's exit status.
     """
-    launch = build_launch(_target(), gateway, protected=protected)
+    launch = build_launch(_target(), gateway, protected=protected, mcp_servers=mcp_servers)
     workspace = tmp_path / "work"
     for name, content in launch.files.items():
         path = workspace / name
@@ -355,6 +361,30 @@ def test_protected_run_points_goose_at_the_relay_and_returns_its_answer(tmp_path
         "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.",
         {},
     )
+
+
+def test_protected_run_gives_goose_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give each [proposer] server one streamable HTTP extension flag at the relay, next to developer (SKY-620)."""
+    _, calls, workspace, code = _run_with_fake_goose(tmp_path, protected=True, mcp_servers=("search", "my tools"))
+
+    assert code == 0
+    (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
+    assert run == (
+        "ARGS [run] [--no-session] [--quiet] [--no-profile] [--with-builtin] [developer] "
+        f"[--with-streamable-http-extension] [{_RELAY}/mcp/search] "
+        f"[--with-streamable-http-extension] [{_RELAY}/mcp/my%20tools] "
+        "[--provider] [openai] [--model] [target-model] [-i] [task/PROMPT.md]"
+    )
+    assert _GATEWAY.url not in calls
+    assert _GATEWAY.api_key not in (workspace / GOOSE_MCP_URLS_FILE).read_text()
+
+
+def test_launch_without_proposer_mcp_servers_keeps_the_files_and_command() -> None:
+    """Keep the files and the command as before when the proposer's file lists no server."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+
+    assert list(launch.files) == [GOOSE_BASE_URL_FILE]
+    assert "--with-streamable-http-extension" not in launch.run_command
 
 
 def test_open_run_reads_the_gateway_url_from_the_generated_file(tmp_path: Path) -> None:

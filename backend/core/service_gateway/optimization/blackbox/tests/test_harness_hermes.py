@@ -278,6 +278,7 @@ def _run_with_fake_hermes(
     relay_env: str = "APP_BUDGET_RELAY_URL",
     fake_exit: int = 0,
     prompt: str = _PROMPT,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Hermes command in a scratch workspace against a fake ``hermes`` binary.
 
@@ -291,11 +292,12 @@ def _run_with_fake_hermes(
         relay_env: The env name that carries the relay URL in a protected run.
         fake_exit: Exit status the fake binary returns.
         prompt: Text of the task's prompt file.
+        mcp_servers: The ``[proposer]`` MCP server names.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected)
+    launch = build_launch(_target(), _GATEWAY, protected=protected, mcp_servers=mcp_servers)
     workspace = tmp_path / "work"
     for name, content in launch.files.items():
         path = workspace / name
@@ -450,7 +452,7 @@ def test_install_pins_the_checksummed_wheel_and_uv_without_a_piped_script() -> N
     assert HERMES_WHEEL_URL in install
     assert HERMES_WHEEL_SHA256 in install
     assert HERMES_WHEEL_URL.endswith(HERMES_WHEEL)
-    assert f'tool install --force --python 3.12 "$d/{HERMES_WHEEL}"' in install
+    assert f'tool install --force --python 3.12 "hermes-agent[mcp] @ file://$d/{HERMES_WHEEL}"' in install
     assert f"uv=={UV_VERSION}" in install
     assert "--require-hashes" in install
     assert all(f"--hash=sha256:{digest}" in install for digest in UV_WHEEL_SHA256)
@@ -471,7 +473,7 @@ def test_install_without_uv_installs_hash_checked_uv_and_removes_the_download_fo
         assert flag in pip
     assert _logged(log, "REQ").startswith(f"uv=={UV_VERSION} --hash=sha256:")
     (uv,) = [line for line in log.splitlines() if line.startswith("uv ")]
-    assert uv.startswith("uv [tool] [install] [--force] [--python] [3.12] [")
+    assert uv.startswith("uv [tool] [install] [--force] [--python] [3.12] [hermes-agent[mcp] @ file://")
     assert uv.endswith(f"{HERMES_WHEEL}]")
     assert list(scratch.iterdir()) == []
 
@@ -624,6 +626,31 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
         == "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42."
     )
     assert "session_id" not in result.stdout
+
+
+def test_protected_run_gives_hermes_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give each [proposer] server one Streamable HTTP entry at the relay in the private config (SKY-620)."""
+    result, calls, workspace = _run_with_fake_hermes(tmp_path, protected=True, mcp_servers=("search", "my tools"))
+
+    assert result.returncode == 0
+    config = json.loads(_logged(calls, "CONFIG"))
+    assert config["mcp_servers"] == {
+        "search": {"url": f"{_RELAY_URL}/mcp/search"},
+        "my tools": {"url": f"{_RELAY_URL}/mcp/my%20tools"},
+    }
+    assert config["mcp_discovery_timeout"] == 60
+    assert _GATEWAY.url not in calls
+    assert _GATEWAY.api_key not in (workspace / HERMES_CONFIG_FILE).read_text()
+
+
+def test_launch_without_proposer_mcp_servers_keeps_the_config_unchanged() -> None:
+    """Keep the files and the command as before when the proposer's file lists no server."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+
+    config = json.loads(launch.files[HERMES_CONFIG_FILE])
+    assert "mcp_servers" not in config
+    assert "mcp_discovery_timeout" not in config
+    assert list(launch.files) == [HERMES_CONFIG_FILE, HERMES_BASE_URL_FILE]
 
 
 def test_prompt_that_starts_with_an_option_stays_the_query_value(tmp_path: Path) -> None:
