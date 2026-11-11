@@ -73,6 +73,7 @@ import inspect
 import io
 import json
 import os
+import shutil
 import signal
 import site
 import ssl
@@ -1421,7 +1422,11 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     try:
         if isinstance(entry, str):
             (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
-            argv = [sys.executable, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
+            # The supervisor runs on the base interpreter without site-packages;
+            # the entry is candidate code and needs the box's python3 from PATH,
+            # where [setup] installed its packages (SKY-642).
+            python = shutil.which("python3", path=env.get("PATH")) or sys.executable
+            argv = [python, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
             # Its prints go to stderr: the parent reads relay frames on stdout.
             child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True)
         else:

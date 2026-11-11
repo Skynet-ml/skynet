@@ -105,7 +105,8 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 _ISOLATED = "-I -B -u"
 # The supervisor needs the standard library alone. Without site-packages, a .pth
 # that an earlier call's version code planted there cannot patch the clock that
-# times the [run] entry; the entry's own python still loads them (SKY-642).
+# times the [run] entry. The supervisor starts a function entry with python3
+# from PATH, so the entry still gets the [setup] packages (SKY-642).
 _NO_SITE = "-S"
 # The supervisor starts with the image's root-owned base interpreter, not a
 # PATH lookup: /app/.venv/bin is group-writable for the box user, so a version
@@ -562,8 +563,8 @@ class RepoScorer:
             done = f"{root}/{supervisor}/{runner.OUTPUT_FILE}"
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
-                    f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec rm -rf {{}} +; rm -rf {shlex.quote(done)} {shlex.quote(done + '.part')}"
+                    f"/usr/bin/find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
+                    f" -exec /bin/rm -rf {{}} +; /bin/rm -rf {shlex.quote(done)} {shlex.quote(done + '.part')}"
                     f'; p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.

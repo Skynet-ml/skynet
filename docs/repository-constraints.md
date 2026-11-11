@@ -167,19 +167,25 @@ monotonic clock. The time starts just before the entry starts. It stops when
 the entry exits and the supervisor stopped every process that the entry
 left, so work in a left process also counts. It includes the Python start
 for a function entry. It does not include setup or the metric. The
-candidate's code runs in other processes, so it cannot patch this clock or
-change the time. A time that the candidate puts in its `output` is not
-trusted. Use `elapsed_s`.
+entry's code runs in other processes, so it cannot patch this clock. A time
+that the candidate puts in its `output` is not trusted. Use `elapsed_s`.
+
+`elapsed_s` is only as trusted as the metric's score. Until SKY-398 (run
+candidate code and the metric in separate sandboxes), candidate code from an
+earlier case can change both; see the residual risk below.
 
 The supervisor starts with the image's root-owned base interpreter
 (`/usr/local/bin/python3`), not with `python3` from `PATH`. The box user can
 write to `/app/.venv/bin`, so a `python3` there is not trusted. The
 supervisor also starts without site-packages (`-I -S`), and Skynet writes the
-runner again before each case. The shell that starts the supervisor replaces
-itself with it (`exec`), so no shell of Skynet's waits for its exit code.
-These steps keep version code from an earlier case out of the supervisor's
-files, interpreter and imports. They do not isolate the cases fully; see the
-residual risk below. Skynet trusts the supervisor's result
+runner again before each case. The supervisor starts a function entry with
+`python3` from `PATH`, so the entry gets the packages that `[setup]`
+installed. The entry is candidate code, so its interpreter does not need
+trust; the clock stays in the supervisor. The shell that starts the
+supervisor replaces itself with it (`exec`), so no shell of Skynet's waits
+for its exit code. These steps make the supervisor harder to change. They
+do not isolate the cases; see the residual risk below. Skynet trusts the
+supervisor's result
 only when the supervisor exits cleanly, so an entry that writes a false
 result and then kills the supervisor gets no score. On Linux the supervisor
 sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
@@ -190,10 +196,13 @@ Residual risk:
 - Code that gets root in the box (for example through `sudo`) could still
   trace or change the supervisor process.
 - A version's metric step or `[run]` entry can plant a `.pth` file in the
-  shared site-packages. That file runs in the entry's Python for later
-  versions, so it can slow their timed entries and make their times longer.
-  The supervisor's clock stays correct, but the entry is slower. SKY-398
-  (in progress) covers the root fix.
+  shared site-packages (`/app/.venv/lib/python3.12/site-packages`, which the
+  box user can write). That file runs in every later Python that loads
+  site-packages: the entry and the metric of later cases. In the metric it
+  can change `elapsed_s` and the score. It can also start a process that
+  rewrites the supervisor's result after the supervisor exits. SKY-398 (run
+  candidate code and the metric in separate sandboxes, in progress) covers
+  the root fix.
 - The box's command wrapper (`timeout` and the outer shell that records the
   exit code) runs as the same user as the version's code. Where the box
   allows same-user `ptrace` of that wrapper, version code could change the

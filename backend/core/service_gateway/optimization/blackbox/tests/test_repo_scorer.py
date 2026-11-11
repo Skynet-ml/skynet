@@ -3440,6 +3440,11 @@ def slows_the_clock(value):
     return {"elapsed_s": 0.0}
 
 
+def imports_a_venv_package(value):
+    import venv_only_pkg
+    return venv_only_pkg.VALUE + value
+
+
 def _supervisor_dirs():
     for name in os.listdir("../calls"):
         folder = os.path.join("../calls", name, "candidate")
@@ -3931,6 +3936,36 @@ def test_a_pth_that_a_version_plants_in_site_packages_cannot_slow_the_supervisor
         assert (folder / "skynet_clock.pth").is_file()
     finally:
         scorer.close()
+
+
+def test_a_function_entry_runs_on_the_python3_where_setup_installed_its_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supervisor runs on the base interpreter; the entry runs on python3 from PATH and imports its packages (SKY-642)."""
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, timeout=120)
+    env = {"PATH": os.pathsep.join([str(venv / "bin"), "/usr/bin", "/bin"])}
+    purelib = subprocess.run(
+        [str(venv / "bin" / "python3"), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout.strip()
+    folder = Path(purelib).resolve()
+    assert folder.is_relative_to(tmp_path.resolve()), folder
+    (folder / "venv_only_pkg.py").write_text("VALUE = 40\n")
+    # The host's own interpreter stands in for the box's base interpreter:
+    # it does not have the venv's package.
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", sys.executable)
+    scorer = _probed(tmp_path, "src/cand.py:imports_a_venv_package", code=_TIMED_METRIC, env=env)
+    try:
+        seen = json.loads(scorer.score("", {"input": 2})["feedback"])
+    finally:
+        scorer.close()
+    assert seen["output"] == 42
+    assert seen["elapsed_s"] >= 0
 
 
 def _forged_python3(folder: Path, marker: Path) -> None:
