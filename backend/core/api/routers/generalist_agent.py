@@ -83,6 +83,10 @@ TITLE_MAX_CHARS = 40
 _COMPOSER_BLOCK_RE = re.compile(
     r'<pasted_text>.*?</pasted_text>|<attached_file name="([^"]*)">.*?</attached_file>', re.DOTALL
 )
+# Hidden setup wizard turns (frontend ``features/agent-panel/lib/screen-agent.ts``).
+# The kickoff holds no user words; a Back turn carries the agent's request.
+_WIZARD_KICKOFF_MARK = "[The wizard opened this screen; I typed nothing.]"
+_WIZARD_BACK_MARK = "[The wizard went back to this screen for your request; I typed nothing.]"
 
 # The history is re-sent in full every turn, so an unbounded thread grows the
 # prompt without limit. Recent turns carry the working context.
@@ -399,7 +403,8 @@ def _derive_title(user_message: str) -> str:
     Truncates whitespace-collapsed text to ``TITLE_MAX_CHARS`` and appends an
     ellipsis when truncation actually loses characters. Attached-file and
     pasted-text blocks are left out; a message with only files is titled
-    from the first file's name.
+    from the first file's name. A setup wizard kickoff gives no title, and a
+    wizard Back turn is titled from its request without the marker.
 
     Args:
         user_message: The first user turn's text.
@@ -407,6 +412,9 @@ def _derive_title(user_message: str) -> str:
     Returns:
         A short, single-line title suitable for the conversation header.
     """
+    if user_message.lstrip().startswith(_WIZARD_KICKOFF_MARK):
+        return ""
+    user_message = user_message.lstrip().removeprefix(_WIZARD_BACK_MARK)
     typed = _COMPOSER_BLOCK_RE.sub(" ", user_message)
     if not typed.strip():
         files = [m.group(1) for m in _COMPOSER_BLOCK_RE.finditer(user_message) if m.group(1)]

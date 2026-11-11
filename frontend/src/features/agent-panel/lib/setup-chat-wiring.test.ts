@@ -22,6 +22,7 @@ registerHooks({
 });
 
 const {
+  SCREEN_KICKOFF,
   SETUP_CHAT_KEY,
   encodeSetupChat,
   decodeSetupChat,
@@ -29,11 +30,22 @@ const {
   newSetupChatStart,
   opensWithKickoff,
   setupChatLedger,
+  adoptedSetupChatId,
+  isSavedSetupChat,
+  setupChatUnchanged,
+  newSetupChatId,
+  hideKickoffs,
+  setupChatGone,
+  unansweredTurn,
+  keepHiddenTurns,
+  backRequest,
 } = await import("./screen-agent.ts");
+const { SteerQueue } = await import("../../../shared/ui/agent/steer-queue.ts");
 
 const hook = "src/features/agent-panel/hooks/use-generalist-agent.ts";
 const panel = "src/features/agent-panel/components/GeneralistPanel.tsx";
 const wizard = "src/features/submit/hooks/use-unified-wizard.tsx";
+const conversationApi = "src/features/agent-panel/lib/conversation-api.ts";
 
 function source(file: string): string {
   return readFileSync(new URL(`../../../../${file}`, import.meta.url), "utf8");
@@ -57,18 +69,10 @@ function expression(file: string, name: string, context: Record<string, unknown>
   return new Function(...Object.keys(context), `return ${code}`)(...Object.values(context));
 }
 
-test("an unsaved session's turns go out with persist false and no conversation id", () => {
-  const text = source(hook);
-  assert.match(text, /const unsaved = sessionsRef\.current\.get\(key\)\?\.unsaved === true;/);
-  assert.match(text, /const savedId = unsaved \? null : \(sessionsRef\.current\.get\(key\)\?\.conversationId \?\? null\);/);
-  assert.match(text, /conversation_id: saved\?\.id \?\? null,/);
-  assert.match(text, /persist: unsaved \? false : undefined,/);
-});
-
-test("pruning keeps an idle unsaved session, which the server cannot reload", () => {
+test("pruning keeps an idle chat with messages and no server id, which the server cannot reload", () => {
   const blankSession = expression(hook, "blankSession", {});
   const sessions = new Map<string, any>([
-    ["setup", { ...blankSession("setup"), conversationId: "setup-1", unsaved: true, messages: [{ role: "user", content: "hi" }] }],
+    ["setup", { ...blankSession("setup"), messages: [{ role: "user", content: "hi" }] }],
     ["saved", { ...blankSession("saved"), conversationId: "saved-1", messages: [{ role: "user", content: "hi" }] }],
   ]);
   const prune = expression(hook, "pruneInactive", {
@@ -79,26 +83,459 @@ test("pruning keeps an idle unsaved session, which the server cannot reload", ()
   assert.deepEqual([...sessions.keys()], ["setup"]);
 });
 
-test("openConversation stores the unsaved flag only when asked", () => {
+test("openConversation with no id shows the messages with no server id", () => {
   const draft = new Map<string, any>();
   let key = 0;
   const open = expression(hook, "openConversation", {
     nextKey: () => `k${key++}`, commit: (mutate: (d: Map<string, any>) => void) => mutate(draft),
     blankSession: expression(hook, "blankSession", {}), pruneInactive: () => {}, setActive: () => {},
   });
-  open("setup-1", [], { unsaved: true });
-  open("saved-1", []);
-  assert.equal(draft.get("k0")?.unsaved, true);
-  assert.equal(draft.get("k1")?.unsaved, undefined);
+  const messages = [{ role: "user", content: "q" }];
+  open(null, messages);
+  open("c1", []);
+  assert.equal(draft.get("k0")?.conversationId, null);
+  assert.equal(draft.get("k0")?.messages, messages);
+  assert.equal(draft.get("k1")?.conversationId, "c1");
 });
 
-test("the panel opens every setup chat as unsaved", () => {
-  const text = source(panel);
-  assert.ok(text.includes("openConversation(id, [], { unsaved: true })"));
-  assert.ok(text.includes("openConversation(id, saved.messages, { unsaved: true })"));
-  const meta = /const handleConversationMeta = React\.useCallback\(([\s\S]*?)\n  \);/.exec(text)?.[1] ?? "";
-  assert.ok(meta.includes("upsertFromMeta"));
-  assert.ok(!meta.includes("keepSetupChat"));
+test("the setup chat takes the server's id from its first saved turn", () => {
+  assert.equal(adoptedSetupChatId("setup-1", "c1", true), "c1");
+  assert.equal(adoptedSetupChatId("setup-1", "c1", false), null);
+  assert.equal(adoptedSetupChatId("c0", "c1", true), null);
+  assert.equal(adoptedSetupChatId(null, "c1", true), null);
+  const kept: (string | null)[] = [];
+  const seen: string[] = [];
+  const meta = expression(panel, "handleConversationMeta", {
+    store: { upsertFromMeta: () => {}, setActiveId: () => {}, markSeen: (id: string) => seen.push(id) },
+    setupChatRef: { current: "setup-1" }, adoptedSetupChatId, keepSetupChat: (id: string | null) => kept.push(id),
+  });
+  meta("c1", "Title", { isActive: true, conversationId: "c1" });
+  meta("c2", "Other", { isActive: false, conversationId: "c2" });
+  assert.deepEqual(kept, ["c1"]);
+  assert.deepEqual(seen, ["c1"]);
+});
+
+test("only a setup chat with a server id counts as saved", () => {
+  assert.equal(isSavedSetupChat("c1"), true);
+  assert.equal(isSavedSetupChat("hosted:c1"), true);
+  assert.equal(isSavedSetupChat("setup-1"), false);
+});
+
+// The panel's setup chat callbacks, wired to each other, with the hook and the API stubbed.
+function setupChat(options: {
+  setupId?: string | null;
+  live?: { id: string | null; messages: unknown[]; busy?: boolean };
+  load?: (id: string) => Promise<unknown>;
+  active?: boolean;
+  screen?: string | null;
+  kicked?: string[];
+} = {}) {
+  const log: unknown[][] = [];
+  const moves: unknown[] = [];
+  const kickedScreensRef = { current: new Set(options.kicked ?? []) };
+  const kickoffTurnRef = { current: null as unknown };
+  const setupChatRef = { current: options.setupId === undefined ? "c1" : options.setupId };
+  const shownScreenRef = { current: options.screen === undefined ? "brief" : options.screen };
+  const setupRunRef = { current: 0 };
+  const liveChatRef = { current: { busy: false, ...(options.live ?? { id: "c1", messages: [] }) } };
+  const setupMessagesRef = { current: [] as unknown[] };
+  const keepSetupChat = (id: string | null) => {
+    setupChatRef.current = id;
+    log.push(["keep", id]);
+  };
+  const openConversation = (id: string | null, messages: unknown[], open?: unknown) => {
+    liveChatRef.current = { id, messages, busy: false };
+    log.push(["open", id, messages]);
+    moves.push(open);
+  };
+  const restartSetupChat = expression(panel, "restartSetupChat", {
+    setupMessagesRef, keepSetupChat, newSetupChatId, openConversation,
+  });
+  const retryInNewSetupChat = expression(panel, "retryInNewSetupChat", {
+    unansweredTurn, restartSetupChat, SCREEN_KICKOFF, shownScreenRef, kickoffTurnRef,
+    sendToAgent: (text: string, _wizard: unknown, send: unknown) => log.push(["send", text, send]),
+  });
+  const settleSetupLoad = expression(panel, "settleSetupLoad", {
+    setupChatUnchanged, hideKickoffs, keepHiddenTurns, setupChatRef, liveChatRef, openConversation, restartSetupChat,
+  });
+  const openSetupChat = expression(panel, "openSetupChat", {
+    keepSetupChat, newSetupChatId, isSavedSetupChat, openConversation, settleSetupLoad, setupChatRef,
+    shownScreenRef, setupRunRef, kickedScreensRef,
+    newSession: () => log.push(["new"]),
+    activateConversation: (id: string) => (log.push(["activate", id]), options.active ?? false),
+    setSetupLoad: (id: string | null) => log.push(["loading", id]),
+    setKickoffScreen: (screen: string) => log.push(["kickoff", screen]),
+    loadConversation: (id: string) => (log.push(["load", id]), (options.load ?? (async () => ({ detail: null, missing: false })))(id)),
+  });
+  return {
+    log, moves, setupChatRef, liveChatRef, setupMessagesRef, shownScreenRef, kickedScreensRef, kickoffTurnRef,
+    settleSetupLoad, openSetupChat, restartSetupChat, retryInNewSetupChat,
+  };
+}
+
+// A load the test finishes by hand.
+function pendingLoad() {
+  const load = { finish: (_: unknown) => {} };
+  return { load, start: () => new Promise((resolve) => { load.finish = resolve; }) };
+}
+
+const tab = [{ role: "user", content: "tab" }];
+const server = [{ role: "user", content: "server" }];
+
+test("a new setup chat starts with no server id and its kickoff, so its first turn saves it", async () => {
+  const chat = setupChat({ setupId: null });
+  await chat.openSetupChat(null, "brief");
+  assert.equal(chat.log.length, 4);
+  assert.deepEqual(chat.log[0], ["loading", null]);
+  assert.match(String(chat.log[1][1]), /^setup-/);
+  assert.deepEqual(chat.log.slice(2), [["new"], ["kickoff", "brief"]]);
+});
+
+test("a tab-only setup chat from an older build opens with no server id", async () => {
+  const chat = setupChat({ setupId: "setup-1" });
+  await chat.openSetupChat({ id: "setup-1", messages: tab }, "brief");
+  assert.deepEqual(chat.log, [["loading", null], ["open", null, tab], ["kickoff", "brief"]]);
+});
+
+test("a reopened setup chat shows the tab copy, loads the server copy, then sends its kickoff", async () => {
+  const chat = setupChat({ live: { id: null, messages: [] }, load: async () => ({ detail: { messages: server }, missing: false }) });
+  await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  assert.deepEqual(chat.log, [
+    ["loading", null], ["activate", "c1"], ["open", "c1", tab], ["loading", "c1"], ["load", "c1"],
+    ["loading", null], ["open", "c1", server], ["kickoff", "brief"],
+  ]);
+});
+
+test("a setup chat already open in the panel sends its kickoff at once", async () => {
+  const chat = setupChat({ active: true });
+  await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  assert.deepEqual(chat.log, [["loading", null], ["activate", "c1"], ["kickoff", "brief"]]);
+});
+
+test("a load for a setup that closed changes nothing and sends no kickoff", async () => {
+  const { load, start } = pendingLoad();
+  const chat = setupChat({ load: start });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  chat.setupChatRef.current = null;
+  load.finish({ detail: null, missing: true });
+  await done;
+  assert.deepEqual(chat.log.slice(-2), [["load", "c1"], ["loading", null]]);
+});
+
+test("a load for a setup that opened again leaves the new setup's chat and kickoff alone", async () => {
+  const first = pendingLoad();
+  let calls = 0;
+  const chat = setupChat({ load: () => (calls++ === 0 ? first.start() : new Promise(() => {})) });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  void chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  first.load.finish({ detail: { messages: server }, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "kickoff" || entry[2] === server), []);
+});
+
+test("a load that ends after the screen changed leaves the new screen's kickoff alone", async () => {
+  const { load, start } = pendingLoad();
+  const chat = setupChat({ live: { id: null, messages: [] }, load: start });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  chat.shownScreenRef.current = "source";
+  load.finish({ detail: { messages: server }, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "kickoff"), []);
+});
+
+test("a setup chat restarted during its load still gets its screen's kickoff", async () => {
+  const { load, start } = pendingLoad();
+  const chat = setupChat({ load: start });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  chat.restartSetupChat(tab);
+  load.finish({ detail: null, missing: true });
+  await done;
+  assert.deepEqual(chat.log.at(-1), ["kickoff", "brief"]);
+  assert.equal(chat.log.filter((entry) => entry[0] === "keep").length, 1);
+});
+
+test("a screen whose kickoff ran during the load gets no second kickoff when the load ends", async () => {
+  const { load, start } = pendingLoad();
+  const chat = setupChat({ live: { id: null, messages: [] }, load: start });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  // The user went to another screen and back; the screen effect sent this kickoff.
+  chat.kickedScreensRef.current.add("brief");
+  load.finish({ detail: { messages: server }, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "kickoff"), []);
+});
+
+test("a restarted setup chat takes the old chat's queued follow-ups", () => {
+  const chat = setupChat({ live: { id: "c1", messages: tab } });
+  chat.restartSetupChat(tab);
+  assert.deepEqual(chat.moves, [{ moveQueue: true }]);
+});
+
+test("openConversation moves the shown chat's queued follow-ups when asked, and holds them", async () => {
+  const queues = new Map<string, any>();
+  const queueFor = (key: string) => {
+    if (!queues.has(key)) queues.set(key, new SteerQueue());
+    return queues.get(key);
+  };
+  const sent: string[] = [];
+  const old = queueFor("k0");
+  old.setSend((text: string) => (sent.push(text), true));
+  old.setBusy(true);
+  old.enqueue("first");
+  old.enqueue("second");
+  old.setBusy(false, true);
+  const activeKeyRef = { current: "k0" };
+  let key = 1;
+  const open = expression(hook, "openConversation", {
+    nextKey: () => `k${key++}`, commit: () => {}, blankSession: expression(hook, "blankSession", {}),
+    pruneInactive: () => {}, setActive: (next: string) => { activeKeyRef.current = next; },
+    activeKeyRef, steerQueues: queues, steerQueueFor: queueFor,
+  });
+  open(null, tab, { moveQueue: true });
+  await Promise.resolve();
+  assert.deepEqual(old.getSnapshot().queued, []);
+  const moved = queueFor("k1").getSnapshot();
+  assert.deepEqual(moved.queued.map((item: { text: string }) => item.text), ["first", "second"]);
+  assert.equal(moved.paused, true);
+  assert.deepEqual(sent, []);
+  open("c2", []);
+  assert.equal(queueFor("k2").getSnapshot().queued.length, 0);
+});
+
+test("a kickoff sent again after not found counts as the kickoff of the screen on view", () => {
+  const kickoff = { role: "user", content: SCREEN_KICKOFF, hidden: true };
+  const chat = setupChat({ live: { id: "c1", messages: [...tab, kickoff] }, screen: "source" });
+  chat.retryInNewSetupChat([...tab, kickoff]);
+  assert.deepEqual(chat.kickoffTurnRef.current, { screen: "source", from: tab.length, started: false });
+  const plain = setupChat({ live: { id: "c1", messages: [...tab, { role: "user", content: "next" }] } });
+  plain.retryInNewSetupChat([...tab, { role: "user", content: "next" }]);
+  assert.equal(plain.kickoffTurnRef.current, null);
+});
+
+test("the agent's Back request stays hidden in a shared link and in the chat history", async () => {
+  const back = backRequest("Change the metric to accuracy");
+  assert.match(back, /Change the metric to accuracy$/);
+  const stored = [
+    { role: "user", content: SCREEN_KICKOFF },
+    { role: "assistant", content: "ok" },
+    { role: "user", content: back },
+    { role: "user", content: "Change the metric to accuracy" },
+  ];
+  const sharedView = "src/features/agent-panel/components/SharedChatView.tsx";
+  const visible = expression(sharedView, "visible", { hideKickoffs, messages: stored })();
+  assert.deepEqual(visible.map((m: { hidden?: boolean }) => m.hidden === true), [true, false, true, false]);
+  const opened: unknown[][] = [];
+  const pick = expression(panel, "handlePickConversation", {
+    setDrawerOpen: () => {}, hideKickoffs,
+    getConversation: async () => ({ messages: stored }),
+    agent: { activateConversation: () => false, openConversation: (id: string, m: unknown[]) => opened.push([id, m]) },
+    store: { setActiveId: () => {}, markSeen: () => {} },
+  });
+  await pick("c1");
+  const shown = opened[0][1] as { hidden?: boolean }[];
+  assert.deepEqual(shown.map((m) => m.hidden === true), [true, false, true, false]);
+});
+
+test("Copy chat on a share page gets the wizard's kickoff and Back turns as hidden turns", () => {
+  const sharePage = "src/app/share/chat/[token]/page.tsx";
+  const tree = ts.createSourceFile(sharePage, source(sharePage), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let found: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "CopyChatMenu") {
+      for (const attr of node.attributes.properties) {
+        if (ts.isJsxAttribute(attr) && attr.name.getText(tree) === "messages" && attr.initializer
+          && ts.isJsxExpression(attr.initializer)) found = attr.initializer.expression;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.ok(found, "CopyChatMenu messages");
+  const chat = {
+    messages: [
+      { role: "user", content: SCREEN_KICKOFF },
+      { role: "user", content: backRequest("Change the metric") },
+      { role: "user", content: "typed" },
+    ],
+  };
+  const copied = new Function("hideKickoffs", "chat", `return ${found.getText(tree)}`)(hideKickoffs, chat);
+  assert.deepEqual(copied.map((m: { hidden?: boolean }) => m.hidden === true), [true, true, false]);
+});
+
+test("closing the setup stops its chat, even before the server gave it an id", () => {
+  const log: unknown[][] = [];
+  const end = expression(panel, "endSetupChat", {
+    isSavedSetupChat,
+    discardConversation: (id: string) => log.push(["discard", id]),
+    discardActive: () => log.push(["discardActive"]),
+  });
+  end("setup-1");
+  end("c1");
+  end(null);
+  assert.deepEqual(log, [["discardActive"], ["discard", "c1"]]);
+});
+
+test("discardActive stops and drops the chat on view and shows a new one", () => {
+  const draft = new Map<string, any>([["k0", { key: "k0" }], ["k1", { key: "k1" }]]);
+  const aborted: string[] = [];
+  const dropped: string[] = [];
+  const activeKeyRef = { current: "k0" };
+  const runtimesRef = { current: new Map([["k0", {}]]) };
+  let key = 2;
+  const blankSession = expression(hook, "blankSession", {});
+  const discardSession = expression(hook, "discardSession", {
+    abortSession: (k: string) => aborted.push(k), runtimesRef, dropSteerQueue: (k: string) => dropped.push(k),
+    activeKeyRef, nextKey: () => `k${key++}`, blankSession,
+    commit: (mutate: (d: Map<string, any>) => void) => mutate(draft),
+    setActive: (k: string) => { activeKeyRef.current = k; },
+  });
+  const discardActive = expression(hook, "discardActive", { discardSession, activeKeyRef });
+  discardActive();
+  assert.deepEqual(aborted, ["k0"]);
+  assert.deepEqual(dropped, ["k0"]);
+  assert.equal(runtimesRef.current.has("k0"), false);
+  assert.deepEqual([...draft.keys()], ["k1", "k2"]);
+  assert.equal(activeKeyRef.current, "k2");
+});
+
+test("an old load that ends late leaves the newer load's Share block on", async () => {
+  const first = pendingLoad();
+  let calls = 0;
+  const chat = setupChat({ load: () => (calls++ === 0 ? first.start() : new Promise(() => {})) });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  void chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  first.load.finish({ detail: null, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [
+    ["loading", null], ["loading", "c1"], ["loading", null], ["loading", "c1"],
+  ]);
+});
+
+test("a Back request of only spaces stays hidden after send trims it", () => {
+  const sent = backRequest("   ").trim();
+  assert.deepEqual(hideKickoffs([{ role: "user", content: sent }]).map((m) => m.hidden), [true]);
+});
+
+test("a new setup chat clears the Share block an old load left on", async () => {
+  const first = pendingLoad();
+  const chat = setupChat({ load: first.start });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  void chat.openSetupChat(null, null);
+  first.load.finish({ detail: null, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [["loading", null], ["loading", "c1"], ["loading", null]]);
+});
+
+test("the server copy keeps the hidden mark of each turn the tab copy hid", () => {
+  const back = "Go back to the source screen";
+  const tabCopy = [
+    { role: "user", content: back, hidden: true },
+    { role: "assistant", content: "ok" },
+    { role: "user", content: back },
+  ];
+  const serverCopy = [
+    { role: "user", content: back },
+    { role: "assistant", content: "ok" },
+    { role: "user", content: back },
+    { role: "user", content: SCREEN_KICKOFF },
+  ];
+  const chat = setupChat({ live: { id: "c1", messages: tabCopy } });
+  chat.settleSetupLoad({ id: "c1", messages: tabCopy }, { detail: { messages: serverCopy }, missing: false });
+  const shown = chat.log[0][2] as { hidden?: boolean }[];
+  assert.deepEqual(shown.map((m) => m.hidden === true), [true, false, false, true]);
+});
+
+test("a turn refused as not found is sent again in the new chat, hidden if it was hidden", () => {
+  for (const hidden of [false, true]) {
+    const failed = { role: "user", content: "next", ...(hidden ? { hidden } : {}) };
+    const chat = setupChat({ live: { id: "c1", messages: [...tab, failed] } });
+    chat.retryInNewSetupChat([...tab, failed]);
+    assert.match(String(chat.setupChatRef.current), /^setup-/);
+    assert.deepEqual(chat.log.slice(1), [["open", null, tab], ["send", "next", { hidden }]]);
+  }
+  const answered = setupChat({ live: { id: "c1", messages: tab } });
+  const messages = [...tab, { role: "assistant", content: "reply" }];
+  answered.retryInNewSetupChat(messages);
+  assert.deepEqual(answered.log.slice(1), [["open", null, messages]]);
+});
+
+test("the server copy replaces the tab copy only while nothing changed", () => {
+  const same = setupChat({ live: { id: "c1", messages: tab } });
+  same.settleSetupLoad({ id: "c1", messages: tab }, { detail: { messages: server }, missing: false });
+  assert.deepEqual(same.log, [["open", "c1", server]]);
+  const sent = setupChat({ live: { id: "c1", messages: [...tab, { role: "user", content: "new" }] } });
+  sent.settleSetupLoad({ id: "c1", messages: tab }, { detail: { messages: server }, missing: false });
+  assert.deepEqual(sent.log, []);
+});
+
+test("a setup chat the server lost moves its live messages to a new browser id, even after a turn", () => {
+  const live = [...tab, { role: "user", content: "new" }];
+  const chat = setupChat({ live: { id: "c1", messages: live } });
+  chat.settleSetupLoad({ id: "c1", messages: tab }, { detail: null, missing: true });
+  assert.equal(chat.log.length, 2);
+  assert.match(String(chat.log[0][1]), /^setup-/);
+  assert.deepEqual(chat.log[1], ["open", null, live]);
+  assert.equal(chat.setupMessagesRef.current, live);
+  // The next saved turn gives the chat its new server id.
+  assert.equal(adoptedSetupChatId(chat.setupChatRef.current, "c9", true), "c9");
+});
+
+test("a lost setup chat stays while a turn runs, or when it is not on view", () => {
+  for (const options of [
+    { live: { id: "c1", messages: tab, busy: true } },
+    { live: { id: "other", messages: tab } },
+    { setupId: null, live: { id: "c1", messages: tab } },
+  ]) {
+    const chat = setupChat(options);
+    chat.settleSetupLoad({ id: "c1", messages: tab }, { detail: null, missing: true });
+    assert.deepEqual(chat.log, []);
+  }
+});
+
+test("a load that fails for another reason keeps the server id, so no second chat starts", () => {
+  const chat = setupChat({ live: { id: "c1", messages: tab } });
+  chat.settleSetupLoad({ id: "c1", messages: tab }, { detail: null, missing: false });
+  assert.deepEqual(chat.log, []);
+  assert.equal(chat.setupChatRef.current, "c1");
+});
+
+test("a setup chat turn the server refuses as not found moves the chat to a new browser id", () => {
+  assert.equal(setupChatGone("c1", "c1", "agent.conversation.not_found"), true);
+  assert.equal(setupChatGone("c1", "c1", "context_too_long"), false);
+  assert.equal(setupChatGone("c1", "c2", "agent.conversation.not_found"), false);
+  assert.equal(setupChatGone(null, "c1", "agent.conversation.not_found"), false);
+  const chat = setupChat({ live: { id: "c1", messages: tab } });
+  chat.restartSetupChat(tab);
+  assert.match(String(chat.setupChatRef.current), /^setup-/);
+  assert.deepEqual(chat.liveChatRef.current, { id: null, messages: tab, busy: false });
+});
+
+test("only a 404 marks a conversation as gone", async () => {
+  const load = (respond: () => Promise<any>) =>
+    expression(conversationApi, "loadConversation", {
+      parseSourceKey: (id: string) => ({ source: "local", id }), hostedRunsAvailable: () => true,
+      apiUrl: () => "", apiBase: () => "", fetchWithAuthRetry: respond,
+      toSummary: (raw: any) => ({ id: raw.id }), toMessage: (m: unknown) => m,
+    })("c1");
+  assert.deepEqual(await load(async () => ({ ok: false, status: 404 })), { detail: null, missing: true });
+  assert.deepEqual(await load(async () => ({ ok: false, status: 502 })), { detail: null, missing: false });
+  assert.deepEqual(await load(async () => { throw new Error("offline"); }), { detail: null, missing: false });
+  assert.deepEqual(
+    await load(async () => ({ ok: true, status: 200, json: async () => ({ id: "c1", messages: server }) })),
+    { detail: { id: "c1", messages: server }, missing: false },
+  );
+});
+
+test("the setup chat shows Share only once the server saved it and its load ended", () => {
+  const share = (conversationId: string | null, setupLoad: string | null = null) =>
+    expression(panel, "canShareChat", {
+      canShare: true, webChat: false, setupLoad,
+      agent: { conversationId, messages: [{ role: "user", content: "q" }] },
+    });
+  assert.equal(share("c1"), true);
+  // An older build's tab-only chat, or one the server lost, opens with no id.
+  assert.equal(share(null), false);
+  assert.equal(share("c1", "c1"), false);
 });
 
 function keepWith(
@@ -192,7 +629,7 @@ test("a new setup chat on a screen the wizard did not reopen starts with a kicko
 test("the panel starts a new setup chat through newSetupChatStart", () => {
   const text = source(panel);
   assert.ok(text.includes("const start = newSetupChatStart(shownScreen, reopenedScreenRef.current);"));
-  assert.ok(text.indexOf("kickedScreensRef.current = new Set(start.kicked);") < text.indexOf("keepSetupChat(id);\n      openConversation(id, [], { unsaved: true });"));
+  assert.ok(text.indexOf("kickedScreensRef.current = new Set(start.kicked);") < text.indexOf("void openSetupChat(null, start.kickoff ? shownScreen : null);"));
 });
 
 test("a chat deep link waits while the setup is open", () => {

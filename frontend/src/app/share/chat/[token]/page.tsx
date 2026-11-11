@@ -7,6 +7,7 @@ import { useSession } from "next-auth/react";
 import {
   SharedChatView,
   getSharedConversation,
+  hideKickoffs,
   openSharedConversation,
   type SharedConversation,
 } from "@/features/agent-panel";
@@ -85,7 +86,7 @@ export default function SharedChatPage() {
           </h1>
           <p className="text-xs text-muted-foreground">{msg("shared.agent.share_read_only")}</p>
         </div>
-        <CopyChatMenu messages={chat.messages} title={chat.title} />
+        <CopyChatMenu messages={hideKickoffs(chat.messages)} title={chat.title} />
       </header>
       <SharedChatView messages={chat.messages} />
     </div>
