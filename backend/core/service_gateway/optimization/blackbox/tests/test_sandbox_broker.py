@@ -15,7 +15,6 @@ import pytest
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
-from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
 
@@ -195,7 +194,7 @@ def test_the_parent_box_reaches_only_funded_registries_and_carries_no_credential
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("registry.npmjs.org",), operation_key="k"))
     with pytest.raises(ServiceError, match="credentials"):
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), env={"A": "b"}, operation_key="k"))
-    for bad in (0, -1, float("nan"), float("inf"), True):
+    for bad in (0, -1, float("nan"), float("inf"), True, 600):
         with pytest.raises(ServiceError, match="duration"):
             narrow.open(SandboxSpec(lifetime_seconds=bad, allowed_hosts=("pypi.org",), operation_key="k"))
 
@@ -210,8 +209,10 @@ def test_a_run_deadline_caps_only_the_guest_so_the_scorer_outlives_it() -> None:
     runtime = FakeRuntime()
     broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=3600, guest_lifetime_seconds=120)
     parent = broker.parent_runtime(())
-    parent.open(SandboxSpec(lifetime_seconds=VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, operation_key="repo-scorer:a"))
+    parent.open(SandboxSpec(lifetime_seconds=parent.max_lifetime_seconds, operation_key="repo-scorer:a"))
     parent.open(SandboxSpec(lifetime_seconds=30.0 + _STAGE_LAYOUT_SECONDS, operation_key="stage:a"))
+    with pytest.raises(ServiceError, match="duration"):
+        parent.open(SandboxSpec(lifetime_seconds=parent.max_lifetime_seconds + 1, operation_key="stage:b"))
     broker.handle("open", _open_payload(lifetime_seconds=120))
     with pytest.raises(ServiceError, match="duration"):
         broker.handle("open", {"request_id": "two", "spec": {"lifetime_seconds": 121}})

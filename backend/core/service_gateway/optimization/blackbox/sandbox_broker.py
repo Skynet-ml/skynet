@@ -276,6 +276,14 @@ class _ParentSandboxRuntime:
         return self._broker._open_parent(spec)
 
     @property
+    def max_lifetime_seconds(self) -> float:
+        """Return the longest lifetime a box opened here may ask for, the profile maximum.
+
+        A per-run deadline caps only guest boxes (SKY-572), so it does not lower this.
+        """
+        return self._broker._maximum
+
+    @property
     def supports_snapshots(self) -> bool:
         """Return whether the run has a snapshot cache before its deadline, so ``snapshot`` can save a box."""
         return self._broker._snapshots_live()
@@ -510,9 +518,7 @@ class SandboxBroker:
             The box, closed with the broker if the parent never closes it.
 
         Raises:
-            ServiceError: When the spec carries credentials or a lifetime that is
-                not finite and positive. A longer lifetime is capped at the
-                broker maximum.
+            ServiceError: When the spec carries credentials or exceeds the profile.
         """
         if spec.inject_headers or spec.env:
             raise ServiceError("A parent box must not carry credentials in its environment or network.")
@@ -525,11 +531,7 @@ class SandboxBroker:
         session = ParentSandboxSession(
             self._runtime.open(
                 SandboxSpec(
-                    # A per-run deadline caps only guest boxes (SKY-572): the scorer box
-                    # opens during staging, before the guest, and must outlive it. Parent
-                    # boxes may ask for more than the profile, such as a stage box's
-                    # timeout plus layout time, and get the profile maximum.
-                    lifetime_seconds=min(_duration(spec.lifetime_seconds, math.inf), self._maximum),
+                    lifetime_seconds=_duration(spec.lifetime_seconds, self._maximum),
                     image=self._image,
                     vcpus=self._vcpus,
                     tags=self._tags,

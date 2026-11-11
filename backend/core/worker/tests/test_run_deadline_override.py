@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from core.api.routers.submissions import _persistable_payload
 from core.billing.protected_execution import bind_protected_sandbox
 from core.billing.tests.test_protected_execution_local import _Gateway, local_settings  # noqa: F401
-from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
+from core.config import Settings
 from core.models.blackbox import BlackboxRunRequest
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from core.storage.base import JobStore
@@ -169,18 +169,14 @@ def test_override_only_shortens_the_configured_deadline(
 
 
 def test_scorer_box_does_not_take_the_guest_deadline(tmp_path: Path) -> None:
-    """The scorer box opens before the guest, so it asks for the ceiling, not the 120 s guest lifetime.
-
-    The broker caps a parent box at the configured profile
-    (``test_a_run_deadline_caps_only_the_guest_so_the_scorer_outlives_it``).
-    """
+    """The scorer box opens before the guest, so it asks for the profile maximum, not the 120 s guest lifetime."""
     payload, staged = _binding(tmp_path, None)
     payload["_budget_gateway_descriptor"]["lifetime_seconds"] = 120
     gateway = _ScorerGateway()
 
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
 
-    assert gateway.boxes[0].spec.lifetime_seconds == VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
+    assert gateway.boxes[0].spec.lifetime_seconds == gateway.parent_sandbox_runtime().max_lifetime_seconds == 3600
     staged.close_scorers()
 
 
