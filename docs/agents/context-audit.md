@@ -8,6 +8,8 @@ and list what to cut.
 
 - A Claude Code session in this repo loads about **119k tokens before the
   first action**. About 54k of it is the desktop app's own tool schemas.
+  About 6k of these go with one documented app switch. About 15k more
+  can go with deny rules that I did not test in the desktop app (§6).
 - The user controls about **24–28k tokens** of the rest. Unused MCP servers
   and connectors cost about 14–18k. Global and repo instruction trims save
   about 7.3k. Unused plugin skills cost about 2k, and MCP server instructions
@@ -31,9 +33,13 @@ and list what to cut.
 - **Gap:** I did not run a Droid session. The Droid side comes from the public
   Factory docs and from the local Droid configuration files. I mark each Droid
   fact DOCUMENTED, INFERRED, UNCONFIRMED or UNKNOWN.
-- **Gap:** The desktop app's built-in tools (Artifact, Browser, iOS
-  Simulator, Workflow and others) have no documented on/off switch that I
-  could find. I list them, but I do not estimate a saving for them.
+- **Gap:** I did not test the deny rules for the desktop app's tools
+  (§6). The docs describe them for the CLI only. The one tested-by-docs
+  switch is the app's Browser tools setting.
+- **Gap:** Two measures of the loaded tool schemas differ. The first turn
+  shows 195 KB. A later API request record shows 146 KB for 57 loaded
+  tools. I did not find the cause. §6 uses the request record for the size
+  of each tool group.
 - This report copies no transcript content and no private file content. It
   reports only sizes and general descriptions.
 
@@ -46,7 +52,7 @@ says otherwise.
 | Layer | Before | After | Purpose | Action | Reason | Est. saving |
 | --- | --- | --- | --- | --- | --- | --- |
 | System prompt (harness) | 35 KB | 35 KB | Claude Code rules | Keep | Not user-controlled | 0 |
-| Loaded tool schemas (desktop built-ins) | 195 KB | 195 KB | Artifact (59 KB), Browser (32 KB), Workflow, Agent, iOS Simulator (8 KB), ScheduleWakeup and others | Keep (gap) | No known switch; iOS Simulator is unused in Skynet | 0 |
+| Loaded tool schemas (desktop built-ins) | 195 KB | up to about 76 KB less | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
 | Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 14–18k |
 | Global user instruction file | 17.6 KB | 1.1 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.4 KB workflow table; Skynet-only rules | 4.6k, every repo |
 | Shared conventions file (also read by Codex) | 21.7 KB | 16.5 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.4k, every repo |
@@ -100,17 +106,20 @@ keeps more recent context after each compaction.
 
 ## 5. Ranked wins
 
-1. **Turn off unused MCP servers and connectors in Skynet sessions.**
+1. **Turn off unused desktop tool groups.** About 6k tokens for the
+   built-in browser (documented switch). Up to about 15k more with deny
+   rules that need a test first. See §6.
+2. **Turn off unused MCP servers and connectors in Skynet sessions.**
    About 14k tokens (about 18k with Vercel). See §6.
-2. **Apply the global instruction trims.** About 6.6k tokens on every session
+3. **Apply the global instruction trims.** About 6.6k tokens on every session
    in every repo, plus about 0.65k in Skynet. See §7.
-3. **Make the per-PR policy file defer to the repo skill for Skynet.** About
+4. **Make the per-PR policy file defer to the repo skill for Skynet.** About
    5.5k tokens per PR task. See §7.
-4. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
-5. **Remove MCP servers with long instructions that Skynet does not use.**
-   About 1.1k tokens (part of win 1 when those servers go).
-6. **Compress the memory tree** on old nodes. Not estimated.
-7. **Repo trims in this PR.** About 0.16k tokens (repo `CLAUDE.md` and the two
+5. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
+6. **Remove MCP servers with long instructions that Skynet does not use.**
+   About 1.1k tokens (part of win 2 when those servers go).
+7. **Compress the memory tree** on old nodes. Not estimated.
+8. **Repo trims in this PR.** About 0.16k tokens (repo `CLAUDE.md` and the two
    skill descriptions). Small on purpose.
 
 ## 6. What to turn off for Skynet
@@ -149,6 +158,33 @@ How to turn them off:
 - **User-scope MCP servers:** use `/mcp` in a terminal `claude` session in
   the Skynet folder to disable them for this project, or move them from user
   scope to the projects that use them.
+
+### Desktop-app tool schemas
+
+These tools load in full at every session start. Tool search does not
+defer them. Sizes come from one API request record (bytes in the request).
+
+| Tool group | Size | Est. tokens | Used in Skynet? | Switch | Status |
+| --- | --- | --- | --- | --- | --- |
+| Built-in browser (19 tools) | 22.4 KB | about 6.2k | No; UI checks use Chrome or a headless browser | Settings > Code > Browser tools: off | DOCUMENTED |
+| Artifact | 37.1 KB | about 10.3k | No; UI evidence goes to Linear | Deny rule `"Artifact"` | DOCUMENTED for the CLI; not tested in the desktop app |
+| iOS Simulator | 6.9 KB | about 1.9k | No | Deny rule `"mcp__Claude_Code_iOS_Simulator__*"`, or an app setting for mobile simulators | Deny rule as above; app setting UNCONFIRMED |
+| Workflow | 5.5 KB | about 1.5k | Rarely; only when Gilad asks | Deny rule `"Workflow"` | As for Artifact |
+| visualize (2 tools) | 4.2 KB | about 1.2k | Rarely | Deny rule `"mcp__visualize__*"` | As for Artifact |
+| Session, plan, PR and terminal tools of the app | about 17 KB | about 4.7k | Yes | Keep | — |
+| Other CLI built-ins (Bash, Read, Edit, Agent and others) | about 38 KB | about 10.6k | Yes | Keep | — |
+
+- The docs say a bare tool name in `permissions.deny` removes the tool
+  from context. A scoped rule only blocks calls. The desktop app reads
+  `permissions` from the settings files.
+- Put the deny rules in `.claude/settings.local.json` in the Skynet
+  checkout. Merge them into the existing file; do not replace it.
+- Test first: add the rules, start a new session, and check that the tools
+  are gone. One public user report says a browser deny rule did not work
+  in the desktop app.
+- The Browser tools switch also turns off dev-server previews in the app.
+- The app turns tool search on, but its own tools still load in full. I
+  found no user switch that defers them.
 
 ## 7. Global file changes (wait for Gilad's decision)
 
