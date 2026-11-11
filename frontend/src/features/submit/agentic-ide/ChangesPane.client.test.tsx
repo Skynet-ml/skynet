@@ -131,12 +131,12 @@ function props(files: readonly DraftFile[]): Props {
   };
 }
 
-async function mount(files: readonly DraftFile[]) {
+async function mount(files: readonly DraftFile[], extra: Partial<Props> = {}) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   const render = (next: Props) => React.act(async () => root.render(<ChangesPane {...next} />));
-  await render(props(files));
+  await render({ ...props(files), ...extra });
   return {
     container,
     render,
@@ -265,6 +265,40 @@ void test("picking a large file in the tree expands it", async () => {
   assert.equal(large.querySelector("button[aria-expanded]")?.getAttribute("aria-expanded"), "true");
   await show("data/large.py");
   assert.ok(drawnRows(large) > 0);
+  await pane.unmount();
+});
+
+void test("a file keeps its first open state when its change grows or shrinks", async () => {
+  const draft = bigDraft();
+  const pane = await mount(draft);
+  const expanded = (path: string) =>
+    section(pane.container, path)
+      .querySelector("button[aria-expanded]")
+      ?.getAttribute("aria-expanded");
+  assert.equal(expanded("src/mod00.py"), "true");
+  assert.equal(expanded("data/large.py"), "false");
+  // The agent writes 500 more lines to a small file; a hunk revert shrinks the large one.
+  const grown = draft.map((file) =>
+    file.path === "src/mod00.py"
+      ? { ...file, after: `${file.after}\n${lines(500, "more").join("\n")}` }
+      : file.path === "data/large.py"
+        ? { ...file, after: `${file.before}\nnew last line` }
+        : file,
+  );
+  await pane.render(props(grown));
+  assert.equal(expanded("src/mod00.py"), "true");
+  assert.equal(expanded("data/large.py"), "false");
+  await pane.unmount();
+});
+
+void test("a large file that still loads its base is open and says it loads", async () => {
+  const draft = bigDraft().map((file) =>
+    file.path === "data/large.py" ? { ...file, before: "" } : file,
+  );
+  const pane = await mount(draft, { loading: new Set(["data/large.py"]) });
+  const large = section(pane.container, "data/large.py");
+  assert.equal(large.querySelector("button[aria-expanded]")?.getAttribute("aria-expanded"), "true");
+  assert.match(large.textContent ?? "", /Loading the file…/);
   await pane.unmount();
 });
 

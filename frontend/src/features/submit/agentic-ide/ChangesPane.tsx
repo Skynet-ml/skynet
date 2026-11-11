@@ -129,7 +129,7 @@ export function ChangesPane({
   const [filter, setFilter] = React.useState("");
   // The user's expand or collapse choice; without one, only a large file starts collapsed.
   const [open, setOpen] = React.useState<ReadonlyMap<string, boolean>>(new Map());
-  // Files that came near the visible list; only they compute and draw their diff.
+  // Files that came near the visible list; only they build and draw their diff rows.
   const [seen, setSeen] = React.useState<ReadonlySet<string>>(new Set());
   const listRef = React.useRef<HTMLDivElement | null>(null);
   const [setList, listWidth] = useWidth();
@@ -149,7 +149,22 @@ export function ChangesPane({
   const split = listWidth >= SPLIT_MIN_PX;
   const showTree = paneWidth >= TREE_MIN_PX;
 
-  const isCollapsed = (file: DraftFile) => !(open.get(file.path) ?? !isLarge(file));
+  // Each file's first open state, pinned once its base loads, so a change that
+  // grows or shrinks later does not open or close it by itself.
+  const [firstOpen, setFirstOpen] = React.useState<ReadonlyMap<string, boolean>>(new Map());
+  const unpinned = shown.filter((file) => !loading.has(file.path) && !firstOpen.has(file.path));
+  if (unpinned.length > 0) {
+    setFirstOpen(
+      new Map([...firstOpen, ...unpinned.map((file) => [file.path, !isLarge(file)] as const)]),
+    );
+  }
+  // A loading file has no real counts yet; it stays open and shows that it loads.
+  const isCollapsed = (file: DraftFile) =>
+    !(
+      open.get(file.path) ??
+      firstOpen.get(file.path) ??
+      (loading.has(file.path) || !isLarge(file))
+    );
 
   const shownPaths = shown.map((file) => file.path).join("\n");
   React.useEffect(() => {

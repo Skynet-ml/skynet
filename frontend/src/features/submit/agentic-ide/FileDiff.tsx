@@ -218,7 +218,7 @@ export function FileDiff({
   loading: boolean;
   split: boolean;
   collapsed: boolean;
-  /** The file is near the visible list; until then its diff is not computed or drawn. */
+  /** The file is near the visible list; until then its diff rows are not built or drawn. */
   onScreen: boolean;
   /** The agent is writing; reverts wait for its turn to end. */
   locked: boolean;
