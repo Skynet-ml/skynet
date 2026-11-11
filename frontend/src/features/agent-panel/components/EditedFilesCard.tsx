@@ -19,9 +19,9 @@ function Counts({ added, removed }: { added: number; removed: number }) {
 }
 
 /**
- * The receipt under a setup turn that edited files, as Codex shows it:
- * "Edited N files" with the line counts, one row per file, and View changes,
- * which opens the Changes pane beside the chat.
+ * The receipt under a setup turn that edited files: "Edited N files" with
+ * the line counts, one row per file, and View changes, which opens the
+ * Changes pane beside the chat.
  */
 export function EditedFilesCard({
   edits,

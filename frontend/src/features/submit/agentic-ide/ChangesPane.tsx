@@ -21,8 +21,9 @@ import type { SetupCheckState } from "./setup-check";
 
 export type ChangeScope = "last" | "all";
 
-// Below these pane widths the diff goes unified and the file tree hides.
-const SPLIT_MIN_PX = 760;
+// Below this diff column width the diff goes unified.
+const SPLIT_MIN_PX = 640;
+// Below this pane width the file tree hides.
 const TREE_MIN_PX = 640;
 
 function useWidth(): [(el: HTMLElement | null) => void, number] {
@@ -66,7 +67,7 @@ function TreeRow({ file, onPick }: { file: DraftFile; onPick: () => void }) {
 }
 
 /**
- * The Changes pane beside the setup chat, as Codex shows it: the scope
+ * The Changes pane beside the setup chat: the scope
  * (the last turn, or the whole draft), each changed file's diff, a filtered
  * file tree, the setup check, and the editor for direct edits.
  */
@@ -117,6 +118,7 @@ export function ChangesPane({
   const [filter, setFilter] = React.useState("");
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(new Set());
   const listRef = React.useRef<HTMLDivElement | null>(null);
+  const [setList, listWidth] = useWidth();
 
   const shown = files.filter((file) => loading.has(file.path) || file.before !== file.after);
   const tree = orderFiles(files, filter);
@@ -130,7 +132,7 @@ export function ChangesPane({
     },
     { added: 0, removed: 0 },
   );
-  const split = paneWidth >= SPLIT_MIN_PX;
+  const split = listWidth >= SPLIT_MIN_PX;
   const showTree = paneWidth >= TREE_MIN_PX;
 
   const scrollTo = React.useCallback((path: string) => {
@@ -159,6 +161,17 @@ export function ChangesPane({
       else next.add(path);
       return next;
     });
+
+  // Up and Down move between the tree's files; Enter opens one, as any button does.
+  const moveInTree = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const rows = [...event.currentTarget.querySelectorAll<HTMLElement>("li > button")];
+    const at = rows.indexOf(document.activeElement as HTMLElement);
+    const next = rows[at < 0 ? 0 : at + (event.key === "ArrowDown" ? 1 : -1)];
+    if (!next) return;
+    event.preventDefault();
+    next.focus();
+  };
 
   const scopeLabel = msg(
     scope === "last" ? "submit.agentic_ide.scope.last_turn" : "submit.agentic_ide.scope.all",
@@ -206,7 +219,13 @@ export function ChangesPane({
       <div className={cn("min-h-0 flex-1", editorOpen ? "flex flex-col" : "hidden")}>{editor}</div>
       {!editorOpen && (
         <div className="flex min-h-0 flex-1">
-          <div ref={listRef} className="min-w-0 flex-1 overflow-y-auto">
+          <div
+            ref={(el) => {
+              listRef.current = el;
+              setList(el);
+            }}
+            className="min-w-0 flex-1 overflow-y-auto"
+          >
             {shown.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                 <GitDiff className="size-6 text-muted-foreground/60" aria-hidden />
@@ -254,7 +273,7 @@ export function ChangesPane({
                   className="h-7 ps-7 text-xs"
                 />
               </div>
-              <div className="min-h-0 flex-1 overflow-y-auto p-1.5 text-xs">
+              <div className="min-h-0 flex-1 overflow-y-auto p-1.5 text-xs" onKeyDown={moveInTree}>
                 {changedTree.length > 0 && (
                   <>
                     <p className="px-2 pb-1 pt-1.5 text-[0.6875rem] font-medium text-muted-foreground">

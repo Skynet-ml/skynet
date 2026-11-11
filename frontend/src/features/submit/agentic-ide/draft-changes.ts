@@ -29,6 +29,11 @@ export type SplitRow =
     }
   | { type: "gap"; count: number };
 
+// A final newline ends the last line; it is not an empty line of its own.
+function body(text: string): string {
+  return text.endsWith("\n") ? text.slice(0, -1) : text;
+}
+
 function numbered(lines: readonly DiffLine[]): DiffRow[] {
   const rows: DiffRow[] = [];
   let oldNo = 0;
@@ -66,7 +71,7 @@ function numbered(lines: readonly DiffLine[]): DiffRow[] {
  *   unchanged lines it folds.
  */
 export function diffRows(before: string, after: string, context = 3): DiffRow[] {
-  const rows = numbered(lineDiff(before, after));
+  const rows = numbered(lineDiff(body(before), body(after)));
   const keep = rows.map(() => false);
   rows.forEach((row, idx) => {
     if (row.type === "same") return;
@@ -132,16 +137,45 @@ export function splitRows(rows: readonly DiffRow[]): SplitRow[] {
  *   hunk: The hunk's number in ``diffRows``.
  *
  * Returns:
- *   The new text with that hunk reverted.
+ *   The new text with that hunk reverted; it ends in a newline when the
+ *   new text does.
  */
 export function revertHunk(before: string, after: string, hunk: number): string {
   const kept: string[] = [];
-  for (const row of numbered(lineDiff(before, after))) {
+  for (const row of numbered(lineDiff(body(before), body(after)))) {
     if (row.type === "same") kept.push(row.text);
     else if (row.type === "add" && row.hunk !== hunk) kept.push(row.text);
     else if (row.type === "del" && row.hunk === hunk) kept.push(row.text);
   }
-  return kept.join("\n");
+  if (kept.length === 0) return "";
+  return kept.join("\n") + (after.endsWith("\n") ? "\n" : "");
+}
+
+/**
+ * Find the screen row that starts each hunk, where its revert button sits.
+ *
+ * Args:
+ *   rows: Rows from ``diffRows`` (unified) or ``splitRows`` (side by side).
+ *
+ * Returns:
+ *   The hunk number at the index of each hunk's first row.
+ */
+export function hunkStarts(rows: ReadonlyArray<DiffRow | SplitRow>): Map<number, number> {
+  const starts = new Map<number, number>();
+  const seen = new Set<number>();
+  rows.forEach((row, idx) => {
+    const hunk =
+      row.type === "add" || row.type === "del"
+        ? row.hunk
+        : row.type === "pair"
+          ? ((row.left?.type === "del" ? row.left.hunk : undefined) ??
+            (row.right?.type === "add" ? row.right.hunk : undefined))
+          : undefined;
+    if (hunk === undefined || seen.has(hunk)) return;
+    seen.add(hunk);
+    starts.set(idx, hunk);
+  });
+  return starts;
 }
 
 /**
@@ -154,7 +188,9 @@ export function revertHunk(before: string, after: string, hunk: number): string 
  *   The added and removed line counts.
  */
 export function fileStats(file: DraftFile): { added: number; removed: number } {
-  return file.before === file.after ? { added: 0, removed: 0 } : diffStats(lineDiff(file.before, file.after));
+  return file.before === file.after
+    ? { added: 0, removed: 0 }
+    : diffStats(lineDiff(body(file.before), body(file.after)));
 }
 
 /**

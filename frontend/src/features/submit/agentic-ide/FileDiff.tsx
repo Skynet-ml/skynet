@@ -19,12 +19,21 @@ import {
   FileCode,
 } from "@/shared/ui/icons";
 
-import { diffRows, fileStats, splitRows, type DiffRow, type DraftFile } from "./draft-changes";
+import {
+  diffRows,
+  fileStats,
+  hunkStarts,
+  splitRows,
+  type DiffRow,
+  type DraftFile,
+} from "./draft-changes";
 
 export const ADDED_TONE = "text-[#5A7247] dark:text-[#adc899]";
-const ADDED_FILL = "bg-[#5A7247]/12 dark:bg-[#adc899]/12";
-const REMOVED_FILL = "bg-destructive/10";
-// The empty side of a split row, hatched as Codex draws it.
+// A 2px bar on the start side marks each changed row; the diff body is always LTR.
+const ADDED_FILL =
+  "bg-[color-mix(in_oklab,var(--success)_18%,transparent)] shadow-[inset_2px_0_0_var(--success)]";
+const REMOVED_FILL = "bg-destructive/12 shadow-[inset_2px_0_0_var(--destructive)]";
+// The empty side of a split row is hatched, so it does not read as a blank line.
 const HATCH =
   "bg-[repeating-linear-gradient(135deg,transparent_0_5px,color-mix(in_oklab,var(--border)_55%,transparent)_5px_6px)]";
 
@@ -124,14 +133,18 @@ export function FileDiff({
   const changed = file.before !== file.after;
 
   const marked = (newNo: number | null) => (newNo !== null ? markerAt.get(newNo) : undefined);
-  const hunkStart = new Set<number>();
-  const seen = new Set<number>();
-  rows.forEach((row, idx) => {
-    if ((row.type === "add" || row.type === "del") && !seen.has(row.hunk)) {
-      seen.add(row.hunk);
-      hunkStart.add(idx);
-    }
-  });
+  const pairs = React.useMemo(() => (split ? splitRows(rows) : []), [split, rows]);
+  const starts = React.useMemo(() => hunkStarts(split ? pairs : rows), [split, pairs, rows]);
+  const withRevert = (i: number, line: React.ReactNode) => {
+    const hunk = starts.get(i);
+    if (hunk === undefined) return <React.Fragment key={i}>{line}</React.Fragment>;
+    return (
+      <div key={i} className="group/hunk relative">
+        <RevertHunk onRevert={() => onRevertHunk(hunk)} disabled={locked} />
+        {line}
+      </div>
+    );
+  };
 
   return (
     <section data-path={file.path} className="border-b border-border/70">
@@ -199,44 +212,48 @@ export function FileDiff({
           >
             {split ? (
               <div className="min-w-full">
-                {splitRows(rows).map((row, i) =>
+                {pairs.map((row, i) =>
                   row.type === "gap" ? (
                     <Gap key={i} count={row.count} />
                   ) : (
-                    <div key={i} className="grid grid-cols-2">
-                      {[row.left, row.right].map((side, s) => {
-                        const newNo = side && side.type !== "del" ? side.newNo : null;
-                        const note = s === 1 ? marked(newNo) : undefined;
-                        return (
-                          <div
-                            key={s}
-                            title={note}
-                            className={cn(
-                              "flex min-w-0",
-                              s === 1 && "border-s border-border/50",
-                              !side && HATCH,
-                              side && side.type !== "same" && rowTone(side.type),
-                              note && "bg-destructive/15 shadow-[inset_2px_0_0_var(--destructive)]",
-                            )}
-                          >
-                            <LineNo
-                              n={
-                                side
-                                  ? s === 0
-                                    ? side.type === "add"
-                                      ? null
-                                      : side.oldNo
-                                    : newNo
-                                  : null
-                              }
-                            />
-                            <span className="min-w-0 flex-1 whitespace-pre-wrap pe-3 [overflow-wrap:anywhere]">
-                              {side?.text || " "}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
+                    withRevert(
+                      i,
+                      <div className="grid grid-cols-2">
+                        {[row.left, row.right].map((side, s) => {
+                          const newNo = side && side.type !== "del" ? side.newNo : null;
+                          const note = s === 1 ? marked(newNo) : undefined;
+                          return (
+                            <div
+                              key={s}
+                              title={note}
+                              className={cn(
+                                "flex min-w-0",
+                                s === 1 && "border-s border-border/50",
+                                !side && HATCH,
+                                side && side.type !== "same" && rowTone(side.type),
+                                note &&
+                                  "bg-destructive/15 shadow-[inset_2px_0_0_var(--destructive)]",
+                              )}
+                            >
+                              <LineNo
+                                n={
+                                  side
+                                    ? s === 0
+                                      ? side.type === "add"
+                                        ? null
+                                        : side.oldNo
+                                      : newNo
+                                    : null
+                                }
+                              />
+                              <span className="min-w-0 flex-1 whitespace-pre-wrap pe-3 [overflow-wrap:anywhere]">
+                                {side?.text || " "}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>,
+                    )
                   ),
                 )}
               </div>
@@ -263,14 +280,7 @@ export function FileDiff({
                       <span className="whitespace-pre pe-3">{row.text || " "}</span>
                     </div>
                   );
-                  if (!hunkStart.has(i) || row.type === "same")
-                    return <React.Fragment key={i}>{line}</React.Fragment>;
-                  return (
-                    <div key={i} className="group/hunk relative">
-                      <RevertHunk onRevert={() => onRevertHunk(row.hunk)} disabled={locked} />
-                      {line}
-                    </div>
-                  );
+                  return withRevert(i, line);
                 })}
               </div>
             )}

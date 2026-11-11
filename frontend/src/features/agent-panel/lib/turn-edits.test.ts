@@ -41,9 +41,46 @@ test("a turn's edits run from the first write's before-state to the last write's
   });
   assert.deepEqual(edits, [
     { path: "metric.py", before: "x = 0\n", after: "x = 2\n", added: 1, removed: 1 },
-    { path: "optimize.toml", before: "", after: "version = 1\n", added: 2, removed: 0 },
+    { path: "optimize.toml", before: "", after: "version = 1\n", added: 1, removed: 0 },
   ]);
-  assert.deepEqual(editTotals(edits), { added: 3, removed: 1 });
+  assert.deepEqual(editTotals(edits), { added: 2, removed: 1 });
+});
+
+test("a file the draft did not hold diffs against the repository's text", () => {
+  const repoToml = 'version = 1\n[metric]\nname = "acc"\n';
+  const message = {
+    role: "assistant" as const,
+    content: "",
+    toolCalls: [call("a", { optimize_toml: repoToml.replace("acc", "f1") })],
+  };
+  const writeBefore = { a: { optimize_toml: null } };
+  const base = new Map([["optimize.toml", repoToml]]);
+  assert.deepEqual(messageEdits(message, writeBefore, base), [
+    {
+      path: "optimize.toml",
+      before: repoToml,
+      after: repoToml.replace("acc", "f1"),
+      added: 1,
+      removed: 1,
+    },
+  ]);
+  assert.equal(latestTurnEdits([message], writeBefore, base)[0]!.before, repoToml);
+});
+
+test("a final newline is not an added line", () => {
+  const message = {
+    role: "assistant" as const,
+    content: "",
+    toolCalls: [call("a", { metric_code: "a\nb\nc\n" }), call("b", { run_code: "a\nb\n" })],
+  };
+  const edits = messageEdits(message, { a: { metric_code: "" }, b: { run_code: "a\nb" } });
+  assert.deepEqual(
+    edits.map(({ path, added, removed }) => ({ path, added, removed })),
+    [
+      { path: "metric.py", added: 3, removed: 0 },
+      { path: "run.py", added: 0, removed: 0 },
+    ],
+  );
 });
 
 test("a call with no recorded before-state and a write that changes nothing show no edit", () => {
@@ -56,7 +93,11 @@ test("a call with no recorded before-state and a write that changes nothing show
 });
 
 test("the latest turn is the newest message that edited a file", () => {
-  const older = { role: "assistant" as const, content: "", toolCalls: [call("a", { metric_code: "1" })] };
+  const older = {
+    role: "assistant" as const,
+    content: "",
+    toolCalls: [call("a", { metric_code: "1" })],
+  };
   const user = { role: "user" as const, content: "thanks" };
   const reply = { role: "assistant" as const, content: "done" };
   const edits = latestTurnEdits([older, user, reply], { a: { metric_code: "" } });

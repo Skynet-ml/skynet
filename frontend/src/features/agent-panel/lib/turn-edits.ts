@@ -19,6 +19,11 @@ export interface FileEdit {
   removed: number;
 }
 
+// A final newline ends the last line; it is not an empty line of its own.
+function body(text: string): string {
+  return text.endsWith("\n") ? text.slice(0, -1) : text;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -31,6 +36,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *   writeBefore: What each write's fields held on the form when it landed,
  *     by tool call id. A call with no entry is left out: its before-state is
  *     unknown, as in a chat reopened after a reload.
+ *   base: The repository's text of each file, the before-state of a file
+ *     the draft did not hold yet (the repository's own optimize.toml).
  *
  * Returns:
  *   One edit per file whose text changed, in the order the turn first wrote them.
@@ -38,6 +45,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function messageEdits(
   message: AgentMessage,
   writeBefore: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+  base?: ReadonlyMap<string, string> | null,
 ): FileEdit[] {
   if (message.role !== "assistant") return [];
   const byPath = new Map<string, { before: string; after: string }>();
@@ -51,12 +59,23 @@ export function messageEdits(
       if (typeof after !== "string") continue;
       const held = byPath.get(path);
       if (held) held.after = after;
-      else byPath.set(path, { before: typeof before[field] === "string" ? before[field] : "", after });
+      else {
+        const prior = before[field];
+        byPath.set(path, {
+          before: typeof prior === "string" ? prior : (base?.get(path) ?? ""),
+          after,
+        });
+      }
     }
   }
   return [...byPath]
     .filter(([, { before, after }]) => before !== after)
-    .map(([path, { before, after }]) => ({ path, before, after, ...diffStats(lineDiff(before, after)) }));
+    .map(([path, { before, after }]) => ({
+      path,
+      before,
+      after,
+      ...diffStats(lineDiff(body(before), body(after))),
+    }));
 }
 
 /**
@@ -65,6 +84,7 @@ export function messageEdits(
  * Args:
  *   messages: The chat on view.
  *   writeBefore: As for ``messageEdits``.
+ *   base: As for ``messageEdits``.
  *
  * Returns:
  *   That turn's edits, empty when no turn edited a file.
@@ -72,9 +92,10 @@ export function messageEdits(
 export function latestTurnEdits(
   messages: readonly AgentMessage[],
   writeBefore: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+  base?: ReadonlyMap<string, string> | null,
 ): FileEdit[] {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const edits = messageEdits(messages[i]!, writeBefore);
+    const edits = messageEdits(messages[i]!, writeBefore, base);
     if (edits.length > 0) return edits;
   }
   return [];

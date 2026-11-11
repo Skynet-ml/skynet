@@ -93,6 +93,9 @@ interface WizardStateContextValue {
   /** Opens the Changes pane, at one file when given; null while no pane is mounted. */
   viewChanges: ((path?: string) => void) | null;
   setViewChanges: (open: ((path?: string) => void) | null) => void;
+  /** The repository's text of the setup draft's files, by path; null while no Changes pane is mounted. */
+  repoBase: ReadonlyMap<string, string> | null;
+  setRepoBase: (base: ReadonlyMap<string, string> | null) => void;
   /** A failed setup check the composer offers to send to the agent; null when there is none. */
   setupCheckIssue: SetupCheckIssue | null;
   setSetupCheckIssue: (issue: SetupCheckIssue | null) => void;
@@ -158,6 +161,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const setViewChanges = React.useCallback((open: ((path?: string) => void) | null) => {
     setViewChangesState(() => open);
   }, []);
+  const [repoBase, setRepoBase] = React.useState<ReadonlyMap<string, string> | null>(null);
   const [setupCheckIssue, setSetupCheckIssueState] = React.useState<SetupCheckIssue | null>(null);
   const setSetupCheckIssue = React.useCallback((issue: SetupCheckIssue | null) => {
     setSetupCheckIssueState((prev) =>
@@ -321,6 +325,8 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setLastTurnEdits,
       viewChanges,
       setViewChanges,
+      repoBase,
+      setRepoBase,
       setupCheckIssue,
       setSetupCheckIssue,
     }),
@@ -352,6 +358,8 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setLastTurnEdits,
       viewChanges,
       setViewChanges,
+      repoBase,
+      setRepoBase,
       setupCheckIssue,
       setSetupCheckIssue,
     ],

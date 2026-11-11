@@ -703,20 +703,21 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   }, [writingKey, setAgentWritingFields]);
   // The Changes pane's "Last turn" reads the newest turn that edited files.
   const writeBefore = wizardCtx?.writeBefore;
+  const repoBase = wizardCtx?.repoBase;
   const setLastTurnEdits = wizardCtx?.setLastTurnEdits;
   React.useEffect(() => {
     if (!inSetup || !setLastTurnEdits || !writeBefore) return;
-    setLastTurnEdits(latestTurnEdits(agent.messages, writeBefore));
-  }, [inSetup, agent.messages, writeBefore, setLastTurnEdits]);
+    setLastTurnEdits(latestTurnEdits(agent.messages, writeBefore, repoBase));
+  }, [inSetup, agent.messages, writeBefore, repoBase, setLastTurnEdits]);
   const renderEditedFiles = React.useCallback(
     (message: AgentMessage) => {
       if (!writeBefore) return null;
-      const edits = messageEdits(message, writeBefore);
+      const edits = messageEdits(message, writeBefore, repoBase);
       return edits.length > 0 ? (
         <EditedFilesCard edits={edits} onView={wizardCtx?.viewChanges ?? null} />
       ) : null;
     },
-    [writeBefore, wizardCtx?.viewChanges],
+    [writeBefore, repoBase, wizardCtx?.viewChanges],
   );
   const setupCheckIssue = inSetup ? (wizardCtx?.setupCheckIssue ?? null) : null;
   // Deleting the conversation you're currently viewing must drop you back to a

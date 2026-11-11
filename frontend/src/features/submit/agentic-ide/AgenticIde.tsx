@@ -100,10 +100,10 @@ function useWidth(): [(el: HTMLElement | null) => void, number] {
 }
 
 /**
- * The submission step of a repository run as an agentic IDE, after the Codex
- * app: the setup chat on one side and, from its first edit, the Changes pane
- * on the other. The pane shows what the last turn or the whole draft changed,
- * reverts files and hunks, runs the setup check, and opens the editor.
+ * The submission step of a repository run as an agentic IDE: the setup chat
+ * on one side and, from its first edit, the Changes pane on the other. The
+ * pane shows what the last turn or the whole draft changed, reverts files and
+ * hunks, runs the setup check, and opens the editor.
  */
 export function AgenticIde({
   chat,
@@ -129,6 +129,7 @@ export function AgenticIde({
   const lastTurn: readonly FileEdit[] = agent?.lastTurnEdits ?? [];
   const setViewChanges = agent?.setViewChanges;
   const setSetupCheckIssue = agent?.setSetupCheckIssue;
+  const setRepoBase = agent?.setRepoBase;
 
   const [setRoot, width] = useWidth();
   const rootRef = React.useRef<HTMLDivElement | null>(null);
@@ -150,6 +151,12 @@ export function AgenticIde({
     [repo, draftPaths],
   );
   const base = useRepoBase(repo, basePaths);
+  // The chat's "Edited N files" card and "Last turn" diff a file the draft
+  // did not hold yet (the repository's optimize.toml) against this base.
+  React.useEffect(() => {
+    setRepoBase?.(base);
+  }, [setRepoBase, base]);
+  React.useEffect(() => () => setRepoBase?.(null), [setRepoBase]);
 
   const lastFiles = React.useMemo<DraftFile[]>(
     () =>

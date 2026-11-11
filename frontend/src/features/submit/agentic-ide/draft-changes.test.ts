@@ -11,7 +11,9 @@ registerHooks({
   },
 });
 
-const { diffRows, fileStats, orderFiles, revertHunk, splitRows } = await import("./draft-changes.ts");
+const { diffRows, fileStats, hunkStarts, orderFiles, revertHunk, splitRows } = await import(
+  "./draft-changes.ts"
+);
 
 const lines = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `line ${i + from}`);
 
@@ -70,4 +72,43 @@ test("the file tree lists changed files first and applies the filter", () => {
   );
   assert.deepEqual(fileStats(files[2]!), { added: 1, removed: 1 });
   assert.deepEqual(fileStats(files[0]!), { added: 0, removed: 0 });
+});
+
+test("unified and side-by-side views both give every hunk a revert row", () => {
+  const before = lines(20).join("\n");
+  const after = before.replace("line 3", "LINE 3").replace("line 15\n", "") + "\nline 21";
+  const rows = diffRows(before, after, 1);
+  const pairs = splitRows(rows);
+  const unified = hunkStarts(rows);
+  const split = hunkStarts(pairs);
+  assert.deepEqual([...unified.values()], [0, 1, 2]);
+  assert.deepEqual([...split.values()], [0, 1, 2]);
+  for (const [idx, hunk] of split) {
+    const row = pairs[idx]!;
+    assert.equal(row.type, "pair");
+    if (row.type === "pair") {
+      const change = row.left?.type === "del" ? row.left : row.right;
+      assert.ok(change && change.type !== "same" && change.hunk === hunk);
+    }
+  }
+});
+
+test("a final newline is not a line: a new 3-line file counts +3", () => {
+  assert.deepEqual(fileStats({ path: "a.py", before: "", after: "x\ny\nz\n" }), {
+    added: 3,
+    removed: 0,
+  });
+  assert.equal(diffRows("", "x\ny\nz\n").filter((row) => row.type === "add").length, 3);
+  const rows = diffRows("a\nb", "a\nb\n");
+  assert.ok(!rows.some((row) => row.type === "add" || row.type === "del"));
+  assert.deepEqual(fileStats({ path: "a.py", before: "a\nb", after: "a\nb\n" }), {
+    added: 0,
+    removed: 0,
+  });
+});
+
+test("reverting a hunk keeps the new text's final newline", () => {
+  assert.equal(revertHunk("a\nb\nc\n", "a\nB\nc\n", 0), "a\nb\nc\n");
+  assert.equal(revertHunk("a\n", "a\nb\n", 0), "a\n");
+  assert.equal(revertHunk("", "x\ny\n", 0), "");
 });
