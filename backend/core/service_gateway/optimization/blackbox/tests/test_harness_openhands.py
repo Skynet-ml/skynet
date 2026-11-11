@@ -284,31 +284,26 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.env["LLM_NATIVE_TOOL_CALLING"] == "true"
     assert launch.env["LOG_ALL_EVENTS"] == "true"
     assert "LLM_REASONING_EFFORT" not in launch.env
-    assert "LLM_COMPLETION_KWARGS" not in launch.env
+    assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == {"temperature": None, "top_p": None}
     assert not set(_PROVIDER_KEYS) & set(launch.env)
     assert launch.parse_output is parse_plain_output
 
 
-@pytest.mark.parametrize(
-    ("effort", "level"),
-    [(None, None), ("minimal", "low"), ("medium", "medium"), ("xhigh", "high"), ("max", "high"), ("turbo", None)],
-)
-def test_reasoning_effort_maps_to_the_litellm_level(effort: str | None, level: str | None) -> None:
-    """Force the user's effort through ``LLM_COMPLETION_KWARGS``, or set nothing for the model default.
+@pytest.mark.parametrize("effort", [None, "", "none", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_completion_kwargs_unset_sampling_and_pass_the_effort_unchanged(effort: str | None) -> None:
+    """Always unset ``temperature`` and ``top_p``, and add the user's effort unchanged when there is one.
 
     OpenHands drops ``LLM_REASONING_EFFORT`` for models outside its own list,
-    so the launch must not rely on it.
+    and sends ``temperature=0.0`` with ``top_p=1.0`` to them, which Anthropic
+    Opus 4.1+ and OpenAI reasoning models reject. So the launch must not rely
+    on ``LLM_REASONING_EFFORT``, and must unset both even with no effort.
     """
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
     assert "LLM_REASONING_EFFORT" not in launch.env
-    if level is None:
-        assert "LLM_COMPLETION_KWARGS" not in launch.env
-    else:
-        assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == {
-            "reasoning_effort": level,
-            "temperature": None,
-            "top_p": None,
-        }
+    expected: dict[str, str | None] = {"temperature": None, "top_p": None}
+    if effort:
+        expected["reasoning_effort"] = effort
+    assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == expected
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:

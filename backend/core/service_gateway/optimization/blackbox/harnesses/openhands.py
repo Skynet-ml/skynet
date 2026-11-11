@@ -53,13 +53,15 @@ _LOCAL_BIN = '"$HOME/.local/bin"'
 # ``-P`` keeps the workspace off ``sys.path``: ``python -m`` puts the working
 # directory first, so a candidate's ``json.py`` would shadow the stdlib.
 _WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
-# LiteLLM's ``reasoning_effort`` takes only low, medium and high here; other
-# Skynet effort names map to the closest one, and unknown names set nothing.
 # OpenHands 1.6.0 sends ``LLM_REASONING_EFFORT`` only for model names in its
 # own reasoning list, which misses models such as ``claude-opus-5.5`` and
 # ``gpt-6``. Its ``completion_kwargs`` reach every LiteLLM call, so the
-# effort goes there.
-_REASONING_LEVELS = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
+# effort goes there. For a model outside that list, OpenHands also sends its
+# defaults ``temperature=0.0`` and ``top_p=1.0``: Anthropic Opus 4.1 and later
+# reject the two together, and OpenAI reasoning models reject
+# ``temperature=0``. ``None`` overrides them, and LiteLLM drops a ``None``
+# parameter, so the gateway gets neither.
+_SAMPLING_DEFAULTS_OFF = {"temperature": None, "top_p": None}
 # LiteLLM reads these keys for its other providers. A protected run blanks
 # them, so an inherited key never gives OpenHands a route around the gateway.
 _PROTECTED_ENV = {
@@ -113,23 +115,24 @@ def _openhands_install() -> str:
     )
 
 
-def _openhands_reasoning(reasoning_effort: str | None) -> dict[str, str]:
-    """Return the ``LLM_COMPLETION_KWARGS`` setting for the user's effort, or nothing for the model default.
+def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]:
+    """Return the ``LLM_COMPLETION_KWARGS`` setting for every run.
 
-    OpenHands parses the value with ``ast.literal_eval``. It also unsets
-    ``temperature`` and ``top_p``, as OpenHands does for the models it sends
-    an effort to, because reasoning models reject them.
+    OpenHands parses the value with ``ast.literal_eval``. It always unsets
+    ``temperature`` and ``top_p``. It adds the user's effort unchanged, as the
+    Codex, OpenCode and Aider harnesses do, so the gateway gets the same
+    ``reasoning_effort`` from every harness.
 
     Args:
-        reasoning_effort: The user's effort for the model, or ``None``.
+        reasoning_effort: The user's effort for the model, or ``None`` for the model default.
 
     Returns:
-        The env entry, or an empty dict.
+        The env entry.
     """
-    level = _REASONING_LEVELS.get(reasoning_effort or "")
-    if not level:
-        return {}
-    return {"LLM_COMPLETION_KWARGS": repr({"reasoning_effort": level, "temperature": None, "top_p": None})}
+    kwargs: dict[str, str | None] = dict(_SAMPLING_DEFAULTS_OFF)
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+    return {"LLM_COMPLETION_KWARGS": repr(kwargs)}
 
 
 def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
@@ -209,7 +212,7 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
             # Without it, OpenHands logs actions at debug level, so the log
             # the bridge returns has no agent message or final answer.
             "LOG_ALL_EVENTS": "true",
-            **_openhands_reasoning(reasoning_effort),
+            **_openhands_completion_kwargs(reasoning_effort),
         }
     )
     return HarnessLaunch(
