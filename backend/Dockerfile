@@ -1,6 +1,10 @@
 FROM docker.io/node:22.22.0-bookworm-slim AS node-runtime
 FROM docker.io/node:24.21.0-bookworm-slim AS node24-runtime
 
+# npm ci stays on Node 22 although eve's engines field asks for Node >=24.
+# npm only warns (EBADENGINE) and still installs eve, and the eve harness runs
+# it with /opt/node24 at run time. Node 24's npm 11 skips the install scripts
+# that the other harnesses need (opencode-ai, koffi, prime-agent).
 FROM node-runtime AS harness-deps
 
 # npm installs only the opencode binary packages that match the build CPU, so

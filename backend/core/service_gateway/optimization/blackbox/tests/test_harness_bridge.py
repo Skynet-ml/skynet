@@ -601,6 +601,7 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
     assert "guard hook" in hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert Path(env["APP_GUARD_PI"]).exists()
     assert (Path(env["OPENCODE_CONFIG_DIR"]) / "plugin" / "app-guard.js").exists()
+    assert Path(env["APP_GUARD_EVE"]).name == "eve-guard.mjs"
 
 
 def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
@@ -838,7 +839,7 @@ _NODE = shutil.which("node")
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) -> None:
-    """Block a hidden read in the Pi extension and throw in the OpenCode plugin; let others run."""
+    """Block a hidden read in the Pi extension, the OpenCode plugin and the eve module; let others run."""
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
     pi_module = tmp_path / "pi-guard.mjs"
@@ -847,6 +848,9 @@ def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) ->
     plugin_module = tmp_path / "app-guard.mjs"
     plugin_module.write_text(plugin.read_text())
     script = f"""
+const {{ appGuardReason }} = await import({json.dumps(Path(env["APP_GUARD_EVE"]).as_uri())});
+const eveRefused = appGuardReason("read_file", {{ path: "data/cases.jsonl" }});
+const eveAllowed = appGuardReason("read_file", {{ path: "src/app.py" }});
 const pi = (await import({json.dumps(pi_module.as_uri())})).default;
 let handler;
 pi({{ on: (name, fn) => {{ handler = fn; }} }});
@@ -858,13 +862,15 @@ let thrown = null;
 try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "optimize.toml" }} }}); }}
 catch (error) {{ thrown = error.message; }}
 await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "src/app.py" }} }});
-console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown }}));
+console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown, eveRefused, eveAllowed }}));
 """
     completed = subprocess.run([_NODE, "--input-type=module", "-e", script], capture_output=True, text=True, check=True)
     result = json.loads(completed.stdout)
     assert result["blocked"] == {"block": True, "reason": harness_bridge.GUARD_REFUSAL}
     assert result["allowed"] is None
     assert result["thrown"] == harness_bridge.GUARD_REFUSAL
+    assert result["eveRefused"] == harness_bridge.GUARD_REFUSAL
+    assert result["eveAllowed"] is None
 
 
 @pytest.mark.parametrize("mode", ["hook", "check"])

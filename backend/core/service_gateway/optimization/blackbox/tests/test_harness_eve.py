@@ -18,11 +18,21 @@ from core.models.blackbox import BLACKBOX_HARNESS_EVE, BLACKBOX_HARNESSES, BLACK
 
 from .. import repo_tree
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
-from ..harness_bridge import _Monitor, parse_output, parse_pi_output, tool_call_ids, workspace_files
+from ..harness_bridge import (
+    GUARD_REFUSAL,
+    _Monitor,
+    install_guard,
+    parse_output,
+    parse_pi_output,
+    tool_call_ids,
+    workspace_files,
+)
 from ..harnesses import REGISTRY
 from ..harnesses.eve import (
+    _NODE_CHECK,
     AI_SDK_VERSION,
     EVE_CHANNEL,
+    EVE_DISABLE_AGENT_TOOL,
     EVE_IMAGE_DEPS,
     EVE_INSTRUCTIONS_FILE,
     EVE_RUNNER,
@@ -33,6 +43,7 @@ from ..harnesses.eve import (
 )
 
 _SANDBOX_RUNTIME = Path(__file__).resolve().parents[5] / "sandbox-runtime"
+_NODE = shutil.which("node")
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 _PROVIDER_KEYS = (
@@ -90,6 +101,7 @@ def test_eve_is_registered_after_prime_and_before_cline() -> None:
 # Fake ``npm`` and ``node`` for the run command: npm leaves node_modules and a
 # lockfile in its cwd, ``eve build`` leaves build output, and the runner copies
 # the project it got to $RECORD_DIR, then edits main.py as the agent would.
+# ``node -e`` is the Node version check, which passes unless $FAKE_NODE_OLD is set.
 _FAKE_NPM = """#!/bin/sh
 if [ -n "$FAKE_NPM_FAILS" ]; then exit 1; fi
 mkdir -p node_modules/.bin node_modules/eve
@@ -99,6 +111,10 @@ printf '#!/bin/sh\\nmkdir -p .eve && echo built > .eve/server.mjs\\n' > node_mod
 chmod +x node_modules/.bin/eve
 """
 _FAKE_NODE = """#!/bin/sh
+if [ "$1" = "-e" ]; then
+  if [ -n "$FAKE_NODE_OLD" ]; then echo "eve needs Node 24 or newer; found v22.0.0" >&2; exit 1; fi
+  exit 0
+fi
 cp -R "$EVE_PROJECT_DIR/." "$RECORD_DIR/"
 echo "$EVE_PROJECT_DIR" > "$RECORD_DIR/.project_dir"
 echo "$EVE_WORKSPACE" > "$RECORD_DIR/.workspace"
@@ -106,13 +122,14 @@ if [ -f main.py ]; then echo 'print(2)' > main.py; fi
 """
 
 
-def _run_with_fakes(run_command: str, workspace: Path, tmp_path: Path, **env: str) -> Path:
+def _run_with_fakes(run_command: str, workspace: Path, tmp_path: Path, *, check: bool = True, **env: str) -> Path:
     """Run the real eve run command with fake ``npm`` and ``node`` on PATH.
 
     Args:
         run_command: The launch run command.
         workspace: The run workspace, which holds the launch files.
         tmp_path: Test folder for the fakes, TMPDIR and the record.
+        check: Fail the test when the run command exits non-zero.
         **env: Extra environment variables.
 
     Returns:
@@ -138,7 +155,7 @@ def _run_with_fakes(run_command: str, workspace: Path, tmp_path: Path, **env: st
             **env,
         },
         timeout=30,
-        check=True,
+        check=check,
     )
     return record
 
@@ -185,6 +202,7 @@ def test_launch_generates_a_pinned_eve_project(tmp_path: Path) -> None:
     assert (record / "agent/instructions.md").read_text() == "instructions\n"
     assert (record / "agent/sandbox.ts").read_text() == EVE_SANDBOX
     assert (record / "agent/channels/eve.ts").read_text() == EVE_CHANNEL
+    assert (record / "agent/tools/agent.ts").read_text() == EVE_DISABLE_AGENT_TOOL
     assert (record / ".eve/server.mjs").is_file()
     project_dir = Path((record / ".project_dir").read_text().strip())
     assert project_dir.is_absolute()
@@ -271,6 +289,7 @@ def test_sandbox_runs_tools_in_the_run_workspace_without_the_gateway_key() -> No
     assert "export default defineSandbox(" in EVE_SANDBOX
     for name in ("APP_API_KEY", "EVE_RUNNER_TOKEN"):
         assert f'"{name}"' in EVE_SANDBOX
+    assert "process.env.APP_GUARD_EVE" in EVE_SANDBOX
     assert "eveChannel({ auth: [runnerToken] })" in EVE_CHANNEL
     assert "process.env.EVE_RUNNER_TOKEN" in EVE_CHANNEL
     assert "timingSafeEqual" in EVE_CHANNEL
@@ -367,26 +386,34 @@ def test_version_patch_holds_only_the_code_change(tmp_path: Path) -> None:
     assert "+print(2)" in patch
 
 
-# A fake ``eve`` package for the real runner: ``eve start`` answers the health
-# check, and the client streams the events that $FAKE_EVE_SCENARIO names.
+# A fake ``eve`` package for the real runner: ``eve start`` answers the
+# health check without auth and the info route only with the runner token
+# (never with $FAKE_EVE_REFUSE set), and the client streams the protocol v27
+# events that $FAKE_EVE_SCENARIO names.
 _FAKE_EVE_SERVER = """#!/usr/bin/env node
 import { createServer } from "node:http";
 const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
-createServer((request, response) => response.end("ok")).listen(port, "127.0.0.1");
+const bearer = "Bearer " + process.env.EVE_RUNNER_TOKEN;
+createServer((request, response) => {
+  if (request.url === "/eve/v1/health") return response.end("ok");
+  const accepted = !process.env.FAKE_EVE_REFUSE && request.headers.authorization === bearer;
+  response.statusCode = accepted ? 200 : 401;
+  response.end(accepted ? "{}" : "unauthorized");
+}).listen(port, "127.0.0.1");
 """
 _FAKE_EVE_CLIENT = """
 const SCENARIOS = {
   done: [
-    { type: "actions.requested", data: { actions: [{ id: "a1" }] } },
-    { type: "call.requested", data: { callId: "c9" } },
-    { type: "step.completed", data: { usage: { inputTokens: 10, outputTokens: 2 } } },
-    { type: "usage.recorded", data: { inputTokens: 99, outputTokens: 99 } },
+    { type: "call.requested", data: { callId: "c1" } },
+    { type: "usage.recorded", data: { usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0 } } },
+    { type: "turn.settled", data: { outcome: "completed" } },
   ],
+  failed: [{ type: "turn.settled", data: { outcome: "failed", error: { message: "the model call failed" } } }],
   tools: [
     { type: "call.requested", data: { callId: "c1" } },
     { type: "call.requested", data: { callId: "c2" } },
   ],
-  cost: [{ type: "usage.recorded", data: { inputTokens: 5000, outputTokens: 0 } }],
+  cost: [{ type: "usage.recorded", data: { usage: { inputTokens: 5000, outputTokens: 0 } } }],
 };
 const hang = () => new Promise(() => setInterval(() => {}, 1000));
 export class Client {
@@ -403,7 +430,7 @@ export class Client {
           delivery: {
             async *stream() {
               for (const event of SCENARIOS[scenario]) yield event;
-              if (scenario !== "done") await hang();
+              if (scenario === "tools" || scenario === "cost") await hang();
             },
             async result() {
               return { status: "completed", reply: "done" };
@@ -442,33 +469,37 @@ def _fake_eve_project(tmp_path: Path) -> Path:
     return project
 
 
-def _monitor_runner(tmp_path: Path, scenario: str, **caps: object) -> _Monitor:
+def _monitor_runner(tmp_path: Path, scenario: str, env: dict[str, str] | None = None, **caps: object) -> _Monitor:
     """Run the real runner against the fake eve under the bridge monitor.
 
     Args:
         tmp_path: Test folder.
         scenario: The fake client's event list.
+        env: Extra environment variables for the runner and the fake server.
         **caps: ``price``, ``max_cost_usd`` and ``max_tool_calls`` for the monitor.
 
     Returns:
-        The monitor after the runner exits.
+        The monitor after the runner exits; its ``stderr`` attribute holds the runner's stderr.
     """
     project = _fake_eve_project(tmp_path)
-    process = subprocess.Popen(
-        ["node", str(project / "runner.mjs")],
-        cwd=tmp_path,
-        env={
-            "PATH": os.environ.get("PATH", os.defpath),
-            "EVE_PROJECT_DIR": str(project),
-            "APP_PROMPT_FILE": str(tmp_path / "prompt.txt"),
-            "FAKE_EVE_SCENARIO": scenario,
-        },
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        start_new_session=True,
-    )
+    stderr = tmp_path / "stderr.txt"
+    with stderr.open("w") as stderr_file:
+        process = subprocess.Popen(
+            ["node", str(project / "runner.mjs")],
+            cwd=tmp_path,
+            env={
+                "PATH": os.environ.get("PATH", os.defpath),
+                "EVE_PROJECT_DIR": str(project),
+                "APP_PROMPT_FILE": str(tmp_path / "prompt.txt"),
+                "FAKE_EVE_SCENARIO": scenario,
+                **(env or {}),
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            text=True,
+            start_new_session=True,
+        )
     monitor = _Monitor(
         process,
         "pi",
@@ -485,20 +516,33 @@ def _monitor_runner(tmp_path: Path, scenario: str, **caps: object) -> _Monitor:
             os.killpg(process.pid, 9)
             process.wait()
     reader.join(timeout=5)
+    monitor.stderr = stderr.read_text()  # type: ignore[attr-defined]
     return monitor
 
 
-# eve start listens on a fixed port, so the runner scenarios share one test
-# and never run at the same time on parallel workers.
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_runner_streams_events_so_the_caps_stop_a_running_session(tmp_path: Path) -> None:
-    """Stream calls and usage once per event family, and let both caps stop a turn that never ends."""
-    done = _monitor_runner(tmp_path / "done", "done")
-    stdout = "".join(done.chunks)
-    assert done.process.returncode == 0
-    ids = [call_id for line in stdout.splitlines() for call_id in tool_call_ids("pi", json.loads(line))]
-    assert ids == ["a1"]
-    assert parse_pi_output(stdout) == ("done", {"input_tokens": 10, "output_tokens": 2})
+    """Stream v27 calls and usage, fail a failed turn, and let both caps stop a turn that never ends."""
+    runs: dict[str, _Monitor] = {}
+    # Two runners at once each pick their own free port.
+    threads = [
+        threading.Thread(target=lambda name=name: runs.__setitem__(name, _monitor_runner(tmp_path / name, "done")))
+        for name in ("done", "done2")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for done in runs.values():
+        stdout = "".join(done.chunks)
+        assert done.process.returncode == 0
+        ids = [call_id for line in stdout.splitlines() for call_id in tool_call_ids("pi", json.loads(line))]
+        assert ids == ["c1"]
+        assert parse_pi_output(stdout) == ("done", {"input_tokens": 10, "output_tokens": 2})
+
+    failed = _monitor_runner(tmp_path / "failed", "failed")
+    assert failed.process.returncode != 0
+    assert "the model call failed" in failed.stderr  # type: ignore[attr-defined]
 
     tools = _monitor_runner(tmp_path / "tools", "tools", max_tool_calls=1)
     assert tools.tool_cap_reached
@@ -508,3 +552,120 @@ def test_runner_streams_events_so_the_caps_stop_a_running_session(tmp_path: Path
     cost = _monitor_runner(tmp_path / "cost", "cost", price={"input": 0.001, "output": 0.0}, max_cost_usd=1.0)
     assert cost.budget_exceeded
     assert cost.process.returncode != 0
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_runner_stops_when_the_server_on_its_port_refuses_the_token(tmp_path: Path) -> None:
+    """Stop before the prompt when the server that answers health does not accept the runner token."""
+    refused = _monitor_runner(tmp_path, "done", {"FAKE_EVE_REFUSE": "1"})
+    assert refused.process.returncode != 0
+    assert "refused the runner token (401)" in refused.stderr  # type: ignore[attr-defined]
+    assert "".join(refused.chunks) == ""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_node_check_needs_node_24_or_newer() -> None:
+    """Pass the setup Node check on Node 24 or newer and stop older Node with a clear message."""
+    completed = subprocess.run(["sh", "-c", _NODE_CHECK], capture_output=True, text=True, check=False)
+    version = subprocess.run([_NODE, "-p", "process.versions.node"], capture_output=True, text=True, check=True)
+    major = int(version.stdout.split(".")[0])
+    if major >= 24:
+        assert completed.returncode == 0
+    else:
+        assert completed.returncode == 1
+        assert "eve needs Node 24 or newer" in completed.stderr
+
+
+def test_launch_stops_on_old_node_before_the_eve_build(tmp_path: Path) -> None:
+    """Stop the run command before the install, the build and the runner when the Node check fails."""
+    launch = build_launch(_target(), _GATEWAY)
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    _write_launch_files(launch.files, launch.instructions_file, workspace)
+    record = _run_with_fakes(launch.run_command, workspace, tmp_path, check=False, FAKE_NODE_OLD="1")
+    assert not any(record.iterdir())
+
+
+# Stubs of the two eve entry points that the sandbox module imports, so the
+# test drives the real provider code without the eve package.
+_SANDBOX_STUBS = {
+    "package.json": json.dumps(
+        {
+            "name": "eve",
+            "type": "module",
+            "exports": {"./sandbox": "./sandbox.mjs", "./sandbox/provider": "./provider.mjs"},
+        }
+    ),
+    "sandbox.mjs": "export const defineSandbox = (open) => open;\n",
+    "provider.mjs": (
+        "export const SANDBOX_AGENT_ENV = {};\n"
+        "export const defineSandboxProvider = (definition) => ({ environment: () => definition.environment() });\n"
+    ),
+}
+_SANDBOX_DRIVER = """
+const { environment } = await import(process.argv[1]);
+const { connection } = await environment.start();
+const run = async (command) => {
+  const child = await connection.spawn({ command, env: {}, workingDirectory: process.env.EVE_WORKSPACE });
+  const [stdout] = await Promise.all([new Response(child.stdout).text(), child.wait()]);
+  return stdout;
+};
+const refusal = async (call) => {
+  try {
+    await call();
+    return null;
+  } catch (error) {
+    return error.message;
+  }
+};
+const workspace = process.env.EVE_WORKSPACE;
+console.log(JSON.stringify({
+  env: await run("env"),
+  readRefused: await refusal(() => connection.readFile({ path: workspace + "/optimize.toml" })),
+  bashRefused: await refusal(() => run("cat optimize.toml")),
+  writeRefused: await refusal(() => connection.writeFiles({ files: [{ path: workspace + "/optimize.toml", content: "x" }] })),
+  removeRefused: await refusal(() => connection.removePath({ path: workspace + "/optimize.toml", force: true })),
+  allowed: new TextDecoder().decode(await connection.readFile({ path: workspace + "/main.py" })),
+}));
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_path: Path) -> None:
+    """Run the real sandbox provider: drop the key and token from commands and refuse hidden paths in every tool."""
+    project = tmp_path / "eve"
+    stubs = project / "node_modules/eve"
+    stubs.mkdir(parents=True)
+    for name, text in _SANDBOX_STUBS.items():
+        (stubs / name).write_text(text)
+    (project / "sandbox.mjs").write_text(EVE_SANDBOX)
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "optimize.toml").write_text("hidden = true\n")
+    (workspace / "main.py").write_text("print(1)\n")
+    guard_env = install_guard(tmp_path / "session", workspace, ["optimize.toml"])
+
+    completed = subprocess.run(
+        [_NODE, "--input-type=module", "-e", _SANDBOX_DRIVER, str((project / "sandbox.mjs").as_uri())],
+        cwd=project,
+        env={
+            "PATH": os.environ.get("PATH", os.defpath),
+            "APP_API_KEY": "secret-key",
+            "EVE_RUNNER_TOKEN": "runner-token",
+            "EVE_PROJECT_DIR": str(project),
+            "EVE_WORKSPACE": str(workspace),
+            "APP_GUARD_EVE": guard_env["APP_GUARD_EVE"],
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    result = json.loads(completed.stdout)
+    names = {line.split("=", 1)[0] for line in result["env"].splitlines()}
+    assert not names & {"APP_API_KEY", "EVE_RUNNER_TOKEN", "EVE_PROJECT_DIR", "EVE_WORKSPACE"}
+    assert "PATH" in names
+    for key in ("readRefused", "bashRefused", "writeRefused", "removeRefused"):
+        assert result[key] == GUARD_REFUSAL, key
+    assert result["allowed"] == "print(1)\n"
+    assert (workspace / "optimize.toml").read_text() == "hidden = true\n"

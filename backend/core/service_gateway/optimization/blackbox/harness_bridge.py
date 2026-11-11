@@ -407,8 +407,9 @@ _GUARD_MAX_LINK_DEPTH = 40
 _GUARD_DEADLINE_SECONDS = 5.0
 # Options of these commands that name the folder the command works in.
 _GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
-# One check function shared by the Pi extension and the OpenCode plugin. It
-# asks this module for the verdict, so the matching lives in one place.
+# One check function shared by the Pi extension, the OpenCode plugin and the
+# eve sandbox. It asks this module for the verdict, so the matching lives in
+# one place.
 _GUARD_JS_CHECK = """import {{ execFileSync }} from "node:child_process";
 
 const APP_GUARD_REFUSAL = {refusal};
@@ -446,6 +447,11 @@ export const AppGuard = async () => ({
     if (reason) throw new Error(reason);
   },
 });
+"""
+# The eve workspace sandbox imports this module and asks the check before each
+# tool call, because eve has no hook that the bridge can configure.
+_GUARD_EVE_MODULE = """
+export { appGuardReason };
 """
 
 
@@ -983,11 +989,14 @@ def install_guard(
     pi_extension = guard_dir / "pi-guard.ts"
     pi_extension.write_text(check + _GUARD_PI_EXTENSION, encoding="utf-8")
     (guard_dir / "plugin" / "app-guard.js").write_text(check + _GUARD_OPENCODE_PLUGIN, encoding="utf-8")
+    eve_module = guard_dir / "eve-guard.mjs"
+    eve_module.write_text(check + _GUARD_EVE_MODULE, encoding="utf-8")
     codex_file = guard_dir / "codex-hooks.json"
     codex_file.write_text(json.dumps(codex_hooks(policy_file, digest)), encoding="utf-8")
     return {
         "APP_GUARD_PI": str(pi_extension),
         "APP_GUARD_CODEX": str(codex_file),
+        "APP_GUARD_EVE": str(eve_module),
         "OPENCODE_CONFIG_DIR": str(guard_dir),
     }
 

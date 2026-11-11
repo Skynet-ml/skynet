@@ -51,18 +51,21 @@ _PROTECTED_ENV = {
 # The runner starts ``eve start``, sends the case prompt as one session turn
 # and prints Pi's ``tool_execution_start`` and ``message_end`` events as the
 # session streams them, so the bridge's tool-call and cost caps can stop a
-# running session. It accepts both the older event names (``actions.requested``,
-# ``step.completed``) and the newer ones (``call.requested``,
-# ``usage.recorded``), and counts only the first name family it sees so a
-# stream that sends both is not counted twice. It drops every direct provider
+# running session. eve 1.0.0-rc.6 streams protocol v27, which sends one
+# ``call.requested`` per tool call and the step usage in
+# ``usage.recorded``'s ``data.usage``. The runner drops every direct provider
 # credential from the server env, so the AI SDK can only reach the model
 # through the Skynet gateway that agent.ts names. ``eve start`` rejects every
 # caller without a channel auth, so the runner makes a per-run bearer token,
-# gives it to the server, and signs its own session with it.
+# gives it to the server, and signs its own session with it. The server
+# listens on a free port that the OS picks, and the health route has no auth,
+# so the runner also checks that the server on that port accepts its token
+# before it sends the prompt.
 EVE_RUNNER = r"""import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -77,21 +80,19 @@ const PROVIDER_ENV_KEYS = [
 const OK_STATUSES = new Set(["completed"]);
 const projectDir = process.env.EVE_PROJECT_DIR;
 const host = "127.0.0.1";
-const port = 3024;
+const port = await freePort();
 const serverUrl = `http://${host}:${port}`;
 const startupTimeoutMs = 60000;
 const runnerToken = randomBytes(32).toString("hex");
 
-const FAILURE_TYPES = new Set(["turn.failed", "session.failed"]);
-const INPUT_TYPES = new Set(["input.requested", "interaction.opened"]);
 const SETTLED_TYPES = new Set(["turn.settled", "session.ended"]);
-const counted = { calls: null, usage: null };
+const FAILED_OUTCOMES = new Set(["failed", "cancelled"]);
 let failure = null;
 
 let server;
 try {
   server = startServer();
-  await waitForHealth(server);
+  await waitForServer(server);
   const prompt = await readFile(process.env.APP_PROMPT_FILE, "utf8");
   const require = createRequire(join(projectDir, "package.json"));
   const { Client } = await import(pathToFileURL(require.resolve("eve/client")).href);
@@ -111,26 +112,13 @@ try {
 function handleEvent(event) {
   const type = event?.type;
   const data = event?.data ?? {};
-  if (type === "actions.requested" || type === "call.requested") {
-    counted.calls ??= type;
-    if (type !== counted.calls) return;
-    const calls = type === "call.requested" ? [data] : actionsOf(data);
-    for (const call of calls) {
-      const id = call.callId ?? call.id ?? call.toolCallId ?? call.actionId ?? "";
-      console.log(JSON.stringify({ type: "tool_execution_start", toolCallId: String(id) }));
-    }
-  } else if (type === "step.completed" || type === "usage.recorded") {
-    counted.usage ??= type;
-    if (type !== counted.usage) return;
-    const source = data.usage ?? data;
-    printMessage("", {
-      input: firstNumber(source.inputTokens, source.input_tokens, source.promptTokens, source.prompt_tokens),
-      output: firstNumber(source.outputTokens, source.output_tokens, source.completionTokens, source.completion_tokens),
-    });
-  } else if (INPUT_TYPES.has(type)) {
-    failure ??= "eve asked for human input during a non-interactive run";
-  } else if (FAILURE_TYPES.has(type) || (SETTLED_TYPES.has(type) && ["failed", "cancelled"].includes(data.outcome))) {
-    failure ??= data.message ?? data.error?.message ?? `${type} during the eve run`;
+  if (type === "call.requested") {
+    console.log(JSON.stringify({ type: "tool_execution_start", toolCallId: String(data.callId ?? "") }));
+  } else if (type === "usage.recorded") {
+    const usage = data.usage ?? {};
+    printMessage("", { input: tokenCount(usage.inputTokens), output: tokenCount(usage.outputTokens) });
+  } else if (SETTLED_TYPES.has(type) && FAILED_OUTCOMES.has(data.outcome)) {
+    failure ??= data.error?.message ?? `${type} ended ${data.outcome} during the eve run`;
   }
 }
 
@@ -152,28 +140,39 @@ function startServer() {
   return child;
 }
 
-async function waitForHealth(child) {
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, host, () => {
+      const { port: picked } = probe.address();
+      probe.close(() => resolve(picked));
+    });
+  });
+}
+
+async function waitForServer(child) {
   const deadline = Date.now() + startupTimeoutMs;
   let lastError;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`eve start exited before it was healthy (code ${child.exitCode})`);
+    if (child.exitCode !== null) throw new Error(`eve start exited before it was ready (code ${child.exitCode})`);
+    let health;
     try {
-      const response = await fetch(`${serverUrl}/eve/v1/health`);
-      if (response.ok) return;
-      lastError = new Error(`health returned ${response.status}`);
+      health = await fetch(`${serverUrl}/eve/v1/health`);
     } catch (error) {
       lastError = error;
     }
+    if (health?.ok) {
+      // Another process can take the port between freePort and eve start;
+      // only this run's server accepts the runner token.
+      const info = await fetch(`${serverUrl}/eve/v1/info`, { headers: { authorization: `Bearer ${runnerToken}` } });
+      if (info.ok) return;
+      throw new Error(`the server on port ${port} refused the runner token (${info.status})`);
+    }
+    if (health) lastError = new Error(`health returned ${health.status}`);
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error(`timed out waiting for eve start: ${lastError?.message ?? "unknown"}`);
-}
-
-function actionsOf(data) {
-  for (const key of ["actions", "toolCalls", "tool_calls", "requests"]) {
-    if (Array.isArray(data[key])) return data[key].filter((item) => item && typeof item === "object");
-  }
-  return [];
 }
 
 function messageText(message) {
@@ -183,8 +182,8 @@ function messageText(message) {
   return "";
 }
 
-function firstNumber(...values) {
-  return values.find((value) => typeof value === "number" && Number.isFinite(value)) ?? 0;
+function tokenCount(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 async function stopServer(child) {
@@ -200,17 +199,37 @@ async function stopServer(child) {
 
 # eve's default sandbox has no provider in a production ``eve build`` without
 # Docker or Vercel, so its tools would fail on first use. This provider runs
-# them on the host, inside the Skynet run workspace (``EVE_WORKSPACE``), which
-# is itself the isolated sandbox box. Commands never see the gateway key or the
-# runner token, so the agent cannot read them through its bash tool.
+# them as host processes of the Skynet sandbox box, and that box is the
+# isolation boundary. The provider does not keep paths inside
+# ``EVE_WORKSPACE``; it only starts there. When the run has hidden paths, the
+# bridge sets ``APP_GUARD_EVE``, and every tool call asks the shared guard
+# check first, so a call that names a hidden path fails. The eve server must
+# keep APP_API_KEY (agent.ts reads it) and EVE_RUNNER_TOKEN (the channel reads
+# it), so the provider removes them, with the project paths, only from the env
+# of the commands it starts.
 EVE_SANDBOX = r"""import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { defineSandbox } from "eve/sandbox";
 import { defineSandboxProvider, SANDBOX_AGENT_ENV } from "eve/sandbox/provider";
 
 const DROPPED_ENV = ["APP_API_KEY", "EVE_PROJECT_DIR", "EVE_RUNNER_TOKEN", "EVE_WORKSPACE"];
+let guardModule;
+
+async function guard(tool, input) {
+  const file = process.env.APP_GUARD_EVE;
+  if (!file) return;
+  let reason;
+  try {
+    guardModule ??= import(pathToFileURL(file).href);
+    reason = (await guardModule).appGuardReason(tool, input);
+  } catch {
+    reason = "the Skynet guard could not check this call";
+  }
+  if (reason) throw new Error(reason);
+}
 
 function workspaceRoot() {
   const root = process.env.EVE_WORKSPACE;
@@ -226,6 +245,7 @@ function connect(root) {
   return {
     workspaceRoot: root,
     async spawn({ signal, stdin, command, env, workingDirectory }) {
+      await guard("bash", { command, cwd: workingDirectory });
       const child = spawn("bash", ["-lc", command], {
         cwd: workingDirectory,
         env: { ...base, ...SANDBOX_AGENT_ENV, ...env },
@@ -248,6 +268,7 @@ function connect(root) {
       };
     },
     async readFile({ path }) {
+      await guard("read_file", { path });
       try {
         return new Uint8Array(await readFile(path));
       } catch (error) {
@@ -256,12 +277,14 @@ function connect(root) {
       }
     },
     async writeFiles({ files }) {
+      for (const file of files) await guard("write_file", { path: file.path });
       for (const file of files) {
         await mkdir(dirname(file.path), { recursive: true });
         await writeFile(file.path, file.content);
       }
     },
     async removePath({ force, path, recursive }) {
+      await guard("remove", { path });
       await rm(path, { force, recursive });
     },
     async stop() {},
@@ -303,6 +326,19 @@ const runnerToken = (request) => {
 
 export default eveChannel({ auth: [runnerToken] });
 """
+
+# eve's default ``agent`` tool starts subagents whose tool calls stream in
+# their own sessions, so the runner would not count them against the tool-call
+# and cost caps. A file in ``agent/tools/`` that exports ``disableTool()``
+# removes that default tool.
+EVE_DISABLE_AGENT_TOOL = 'import { disableTool } from "eve/tools";\n\nexport default disableTool();\n'
+# The image can lack the Node 24 binary (for example a local run), and eve on
+# an older Node fails late with a syntax or engine error, so the run stops
+# first with a clear message.
+_NODE_CHECK = (
+    'node -e \'if (+process.versions.node.split(".")[0] < 24) '
+    '{ console.error("eve needs Node 24 or newer; found " + process.version); process.exit(1); }\''
+)
 
 
 def _reasoning_level(reasoning_effort: str | None) -> str | None:
@@ -399,13 +435,15 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
     # directory gets the relay URL.
     setup = (
         'export EVE_WORKSPACE="$PWD" && EVE_DIR="$(mktemp -d)" && trap \'rm -rf "$EVE_DIR"\' EXIT && '
-        'mkdir -p "$EVE_DIR/agent/channels" && '
+        'mkdir -p "$EVE_DIR/agent/channels" "$EVE_DIR/agent/tools" && '
         f'cp {_AGENT_FILE} {EVE_INSTRUCTIONS_FILE} "$EVE_DIR/agent/" && '
         f"printf '%s' {shlex.quote(EVE_SANDBOX)} > \"$EVE_DIR/agent/sandbox.ts\" && "
         f"printf '%s' {shlex.quote(EVE_CHANNEL)} > \"$EVE_DIR/agent/channels/eve.ts\" && "
+        f"printf '%s' {shlex.quote(EVE_DISABLE_AGENT_TOOL)} > \"$EVE_DIR/agent/tools/agent.ts\" && "
         f"printf '%s' {shlex.quote(_package_json())} > \"$EVE_DIR/package.json\" && "
         f"printf '%s' {shlex.quote(EVE_RUNNER)} > \"$EVE_DIR/runner.mjs\" && "
-        f'if [ -x {_IMAGE_NODE24_BIN}/node ]; then PATH="{_IMAGE_NODE24_BIN}:$PATH"; fi'
+        f'if [ -x {_IMAGE_NODE24_BIN}/node ]; then PATH="{_IMAGE_NODE24_BIN}:$PATH"; fi && '
+        f"{_NODE_CHECK}"
     )
     # The image's node_modules is read-only and ``eve build`` writes its cache
     # under node_modules/.cache, so the project gets its own node_modules that
