@@ -194,10 +194,10 @@ for review until the evidence is there.
 - UI PRs use the same flow as backend PRs: build, fresh review, then verify
   and fix (sections 1a and 3). The acceptance checks in section 4 still
   apply.
-- When the Opus 5.5 review gate (section 3) approves the current head, CI
-  passes, and the acceptance checks pass (or a section 4 exemption applies),
-  the orchestrator marks the PR ready for review (not draft). It does not
-  merge it. Gilad reviews the finished UI PRs. He approves them (in chat, on
+- A UI PR is done when three conditions are true. The Opus 5.5 review gate
+  (section 3) approves the current head. CI passes. The acceptance checks
+  pass, or a section 4 exemption applies. Then the orchestrator marks the PR
+  ready for review (not draft). It does not merge it. Gilad reviews the finished UI PRs. He approves them (in chat, on
   GitHub or with `Approved for merge` on the Linear issue), or tells the
   orchestrator to merge them.
 
@@ -219,7 +219,7 @@ for review until the evidence is there.
 - Bounded file-repair sessions keep their exact manifests. Expanded work
   needs a separate authorized session.
 
-## 7. Merging (orchestrator only)
+## 7. Merging
 
 ### Merge gates (MANDATORY)
 
@@ -236,9 +236,10 @@ gates pass:
    PR's merge right away and reopen its issue with the failure.
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) follow
-section 5. When the Opus 5.5 review gate (section 3) approves the current
-head, CI passes, and the acceptance checks pass (or a section 4 exemption
-applies), the PR is ready for review but not merged. Attach a proof card: one
+section 5. A UI PR is done when three conditions are true. The Opus 5.5
+review gate (section 3) approves the current head. CI passes. The acceptance
+checks pass, or a section 4 exemption applies. Then the PR is ready for review
+but not merged. Attach a proof card: one
 line naming the decision and the Linear issue, the acceptance check results,
 the review verdict, and the diff size. Merge only after Gilad approves that
 specific PR in chat or on GitHub (or with `Approved for merge` on the Linear
@@ -272,8 +273,8 @@ A manual hold on a change or on a promotion still stops it.
   revision, base, evidence and review policy. Use a merge command that
   requires the reviewed head commit. Never bypass branch protection or queue
   an unchecked future merge.
-- **Only the orchestrator merges** (through its cloud merger routine, in the
-  daily merge window below). Implementation and review agents leave the
+- **Among agents, only the orchestrator merges** (through its cloud merger
+  routine, in the daily merge window below). Gilad can also merge. Implementation and review agents leave the
   final action to the orchestrator.
 
 ### Linear approval and revisions (2026-10-19)

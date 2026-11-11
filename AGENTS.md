@@ -109,12 +109,12 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
 - Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
-  gates pass. UI PRs (`frontend/`) follow the same review loop. When the
-  Opus 5.5 review gate approves the current head, CI passes and the
-  acceptance checks pass (or an exemption applies), they are ready for
-  review and stay unmerged. Gilad approves them (in chat, on GitHub or with
-  `Approved for merge` on the Linear issue), or tells the orchestrator to
-  merge them. Other PRs wait for the user's approval.
+  gates pass. UI PRs (`frontend/`) follow the same review loop. A UI PR is
+  done when three conditions are true. The Opus 5.5 review gate approves the
+  current head. CI passes. The acceptance checks pass, or an exemption
+  applies. Then the PR is ready for review and stays unmerged. Gilad approves
+  it (in chat, on GitHub or with `Approved for merge` on the Linear issue),
+  or tells the orchestrator to merge it. Other PRs wait for Gilad's approval.
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
