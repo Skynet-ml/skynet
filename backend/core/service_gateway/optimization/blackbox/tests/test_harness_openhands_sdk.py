@@ -72,6 +72,9 @@ import json
 import os
 import tempfile
 
+# The real SDK freezes its user state folder at import time.
+_PERSISTENCE_DIR = os.environ.get("OH_PERSISTENCE_DIR")
+
 
 class _Usage:
     prompt_tokens = 11
@@ -139,6 +142,8 @@ class Conversation:
                 work_dir=self.workspace, include_user=True, include_project=True),
             "workspace": self.workspace,
             "scratch": scratch,
+            "persistence_dir": _PERSISTENCE_DIR,
+            "persistence_files": os.listdir(_PERSISTENCE_DIR) if _PERSISTENCE_DIR else None,
         }
         with open(os.environ["FAKE_SDK_RECORD"], "w") as handle:
             json.dump(record, handle)
@@ -427,6 +432,9 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
     assert seen["workspace"] == str(workspace)
     assert Path(seen["scratch"]).resolve().is_relative_to(workspace / ".app/openhands_sdk")
     assert not Path(seen["scratch"]).exists()
+    assert Path(seen["persistence_dir"]).is_relative_to(workspace / ".app/openhands_sdk")
+    assert seen["persistence_files"] == []
+    assert not Path(seen["persistence_dir"]).exists()
     assert list((workspace / ".app/openhands_sdk").iterdir()) == [workspace / RUNNER_FILE]
     assert parse_pi_output(result.stdout) == ("answer to Fix the bug.", {"input_tokens": 11, "output_tokens": 7})
     assert result.stdout.strip().count("\n") == 0
@@ -462,6 +470,7 @@ def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "gateway" in result.stderr
     assert not record.exists()
+    assert list((tmp_path / "ws/.app/openhands_sdk").iterdir()) == [tmp_path / "ws" / RUNNER_FILE]
 
 
 # A fake uv that refuses the workspace script, needs the exact pins, and

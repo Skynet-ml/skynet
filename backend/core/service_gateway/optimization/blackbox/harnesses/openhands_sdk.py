@@ -89,21 +89,32 @@ _RUNNER_SCRIPT = """#!/usr/bin/env -S uv run --script
 Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/openhands_sdk_runner.
 \"\"\"
 
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-from openhands.sdk import LLM, Agent, AgentContext, Conversation, Tool
-from openhands.sdk.conversation.impl import local_conversation
-from openhands.sdk.event import ActionEvent, MessageEvent
-from openhands.tools.file_editor import FileEditorTool
-from openhands.tools.task_tracker import TaskTrackerTool
-from openhands.tools.terminal import TerminalTool
+STATE_DIR = Path({state_dir!r})
+# The SDK reads saved LLM profiles, SOUL.md and other user state from
+# ~/.openhands, and freezes that folder when it is imported. A saved vision
+# profile adds a tool that calls the profile's own base URL and key, not the
+# gateway, so the SDK gets an empty folder that goes away with the run.
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+PERSISTENCE_DIR = tempfile.mkdtemp(prefix="home-", dir=STATE_DIR.resolve())
+atexit.register(shutil.rmtree, PERSISTENCE_DIR, True)
+os.environ["OH_PERSISTENCE_DIR"] = PERSISTENCE_DIR
+
+from openhands.sdk import LLM, Agent, AgentContext, Conversation, Tool  # noqa: E402
+from openhands.sdk.conversation.impl import local_conversation  # noqa: E402
+from openhands.sdk.event import ActionEvent, MessageEvent  # noqa: E402
+from openhands.tools.file_editor import FileEditorTool  # noqa: E402
+from openhands.tools.task_tracker import TaskTrackerTool  # noqa: E402
+from openhands.tools.terminal import TerminalTool  # noqa: E402
 
 GATEWAY_URL = {gateway_url!r}
-STATE_DIR = Path({state_dir!r})
 # LiteLLM sends an ``openai/`` model to the OpenAI-style base URL as is.
 LITELLM_PREFIX = "openai/"
 DIRECT_ROUTES = (
@@ -205,7 +216,6 @@ def main():
     os.environ["LLM_API_KEY"] = api_key
     os.environ["LLM_BASE_URL"] = GATEWAY_URL
     prompt = Path(os.environ[{env_prompt_file!r}]).read_text(encoding="utf-8")
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
     # Tool scratch files land here and go away with the run.
     with tempfile.TemporaryDirectory(dir=STATE_DIR.resolve()) as scratch:
         os.environ["TMPDIR"] = scratch
