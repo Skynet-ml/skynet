@@ -66,24 +66,6 @@ def fake_original_program(name: str = "original_program") -> MagicMock:
     return MagicMock(name=name)
 
 
-def fake_evaluate_on_test(_program, _examples, _metric, collect_per_example=False):
-    """Stand in for ``evaluate_on_test`` with a score of 0.0 and no rows.
-
-    The mock LM makes every real example raise, and a run where every example
-    fails now ends as failed (SKY-221). Tests of the run plumbing need a score.
-
-    Args:
-        _program: Ignored program.
-        _examples: Ignored examples.
-        _metric: Ignored metric.
-        collect_per_example: When True, also return an empty per-row list.
-
-    Returns:
-        ``(0.0, [])`` when ``collect_per_example`` is True, else ``0.0``.
-    """
-    return (0.0, []) if collect_per_example else 0.0
-
-
 def fake_capture_tqdm() -> MagicMock:
     """Return a ``MagicMock`` shaped like the ``capture_tqdm`` context manager.
 
@@ -102,7 +84,7 @@ def patch_core_dependencies(
     fake_lm: MagicMock | None = None,
     compiled_program: MagicMock | None = None,
 ):
-    """Patch the six external collaborators of ``core.service_gateway.optimization.core``.
+    """Patch the five external collaborators of ``core.service_gateway.optimization.core``.
 
     Args:
         fake_lm: Optional pre-built mock LM; defaults to ``fake_language_model()``.
@@ -123,7 +105,6 @@ def patch_core_dependencies(
         patch("core.service_gateway.optimization.core.persist_program", return_value=None) as p_persist,
         patch("core.service_gateway.optimization.core.instantiate_optimizer", return_value=MagicMock()) as p_opt,
         patch("core.service_gateway.optimization.core.capture_tqdm", tqdm_ctx) as p_tqdm,
-        patch("core.service_gateway.optimization.core.evaluate_on_test", side_effect=fake_evaluate_on_test),
     ):
 
         class _Mocks:

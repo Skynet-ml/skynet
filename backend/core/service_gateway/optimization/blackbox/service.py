@@ -103,6 +103,7 @@ from .harnesses import REGISTRY
 from .native_runtime import NATIVE_ENGINES, NativeOptions, native_runtime_unavailable_reason
 from .protocol import (
     METRIC_ERROR,
+    STATUS_KEY,
     Candidate,
     EngineContext,
     EvalServer,
@@ -113,7 +114,7 @@ from .protocol import (
     is_metric_error,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
-from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
+from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, RUN_FAILED_STATUS, SETUP_ALLOWANCE_SECONDS
 from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime, sandbox_runtime_from_settings
 from .scorer import JobScorer, RemoteScorer, build_scorer
@@ -523,10 +524,12 @@ class FinalRun:
 
 
 def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
-    """Fail the run when the reported version failed on every case (SKY-221).
+    """Fail the run when a version failed on every case of its final run (SKY-221).
 
-    A version that failed everywhere has no real score, so the run must not
-    end as a success. Some failed cases keep the run and its score.
+    The run checks the starting point before the search and the reported
+    version after it. A version that failed everywhere has no real score, so
+    the run must not go on or end as a success. A valid 0.0 score is not a
+    failure, and some failed cases keep the run and its score.
 
     Args:
         final: The version's final run, if it had one.
@@ -541,7 +544,7 @@ def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
         if final.failures:
             logger.warning("%s failed on %d of %d run(s)", label, len(final.failures), final.runs)
         return
-    lines = [failure.removeprefix(RUN_FAILED).strip().splitlines() or [""] for failure in final.failures]
+    lines = [failure.strip().splitlines() or [""] for failure in final.failures]
     cause, count = Counter(text[-1].strip()[:500] for text in lines).most_common(1)[0]
     raise ServiceError(
         f"The {label} failed on every case ({final.runs} of {final.runs}), so the run has no valid score. "
@@ -684,9 +687,10 @@ def _final_run(
         observations=[observation for _, _, observation in scored] if cases else [],
         failures=errors
         + [
-            feedback
-            for (score, _, _), feedback in zip(scored, feedbacks, strict=True)
-            if score is not None and feedback.startswith(RUN_FAILED)
+            # Pending rule-judge notes can come before the failure text.
+            feedback.rpartition(RUN_FAILED)[2]
+            for (score, side_info, _), feedback in zip(scored, feedbacks, strict=True)
+            if score is not None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
         ],
     )
 
@@ -1288,6 +1292,21 @@ def _run_job(
         iterations,
     )
     selection_scope = "validation" if splits.val else "training"
+    select_on = selection_cases(splits)
+    baseline_val: FinalRun | None = None
+    if seed_candidate is not None:
+        # SKY-221: the starting point's final-run pass runs before the search,
+        # so a run whose entry fails on every case stops before it spends the
+        # search budget. The final run reuses this pass; it costs nothing extra.
+        baseline_val = _final_run(
+            scorer,
+            seed_candidate,
+            select_on,
+            label="starting point",
+            phase=PHASE_BASELINE,
+            concurrency=concurrency,
+        )
+        _raise_if_every_run_failed(baseline_val, "starting point")
     stop: BudgetReached | None = None
     try:
         with dspy.context(callbacks=callbacks):
@@ -1320,25 +1339,14 @@ def _run_job(
     logger.info("optimization finished after %d scorer run(s): best score %s", server.used, server.best_score)
     if progress_callback is not None:
         progress_callback(PROGRESS_EVALUATION_STARTED, {})
-    select_on = selection_cases(splits)
     report_on = report_cases(splits)
     reuse_selection = report_on == select_on
-    baseline_val: FinalRun | None = None
     best_val: FinalRun | None = None
     baseline_run: FinalRun | None = None
     best_run: FinalRun | None = None
     regression_guard_applied = False
     if stop is None:
         try:
-            if seed_candidate is not None:
-                baseline_val = _final_run(
-                    scorer,
-                    seed_candidate,
-                    select_on,
-                    label="starting point",
-                    phase=PHASE_BASELINE,
-                    concurrency=concurrency,
-                )
             best_val = (
                 baseline_val
                 if baseline_val is not None and best_candidate == seed_candidate

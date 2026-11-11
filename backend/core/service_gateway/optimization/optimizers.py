@@ -8,7 +8,6 @@ programs on the test split, and injecting reflection LMs for GEPA.
 
 import inspect
 import logging
-from collections import Counter
 from collections.abc import Callable
 from typing import Any, Literal, overload
 
@@ -297,49 +296,19 @@ def evaluate_on_test(
         ``log_metrics`` — a ``logged_metrics`` name→value map.
 
     Raises:
-        ServiceError: If the evaluator returns a non-numeric score, or when
-            every example failed (the program or the metric raised), since
-            a score made only of failures measures nothing (SKY-221).
+        ServiceError: If the evaluator returns a non-numeric score.
     """
 
     if not test_examples:
         return (None, []) if collect_per_example else None
 
-    recorder = LoggedScoreRecorder(metric)
-    # dspy.Evaluate scores a raising program 0 and keeps going, so the
-    # failures are counted here to tell "all failed" from "all scored 0".
-    program_errors: list[str] = []
-
-    def run_program(**inputs: Any) -> Any:
-        """Call ``program`` and record the error text when it raises.
-
-        Args:
-            **inputs: The example's input fields.
-
-        Returns:
-            The program's prediction.
-        """
-        try:
-            return program(**inputs)
-        except Exception as exc:
-            program_errors.append(f"{type(exc).__name__}: {exc}"[:500])
-            raise
-
+    recorder = LoggedScoreRecorder(metric) if collect_per_example else None
     evaluator = dspy.Evaluate(
         devset=test_examples,
-        metric=recorder,
+        metric=recorder if recorder is not None else metric,
         display_progress=True,
     )
-    eval_result = evaluator(run_program)
-    errors = program_errors + [error for example in test_examples if (error := recorder.error_for(example))]
-    if errors and len(errors) >= len(test_examples):
-        cause, count = Counter(errors).most_common(1)[0]
-        raise ServiceError(
-            f"Every example failed ({len(test_examples)} of {len(test_examples)}), so the run has no valid score. "
-            f"Most common cause ({count} of {len(errors)}): {cause}"
-        )
-    if errors:
-        logger.warning("%d of %d example(s) failed during evaluation", len(errors), len(test_examples))
+    eval_result = evaluator(program)
 
     raw_results: list[Any]
     if isinstance(eval_result, int | float):
@@ -392,12 +361,12 @@ def evaluate_on_test(
                 "score": ex_score,
                 "pass": ex_score > 0,
             }
-            logged = recorder.scores_for(example)
+            logged = recorder.scores_for(example) if recorder is not None else {}
             if logged:
                 row["logged_metrics"] = logged
             # A metric crash was scored 0 by dspy.Evaluate; carry the crash
             # text so the row can say why instead of rendering a silent zero.
-            metric_error = recorder.error_for(example)
+            metric_error = recorder.error_for(example) if recorder is not None else None
             if metric_error:
                 row["error"] = metric_error
             per_example.append(row)

@@ -157,6 +157,10 @@ _TARGET_ROLE = "target."
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
 RUN_FAILED = "Run failed: "
+# SKY-221: the side info ``status`` of a case whose entry failed. The final run
+# reads it, not the feedback, because pending rule-judge notes go in front of
+# the feedback.
+RUN_FAILED_STATUS = "run_failed"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -407,6 +411,7 @@ class RepoScorer:
                     return {
                         "score": 0.0,
                         "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
+                        STATUS_KEY: RUN_FAILED_STATUS,
                     }
                 document["output"] = ran.get("output")
                 # The version's code could rewrite the runner, swap the calls
