@@ -2063,6 +2063,8 @@ class _McpServer:
     def __init__(self) -> None:
         """Start the server on a free loopback port."""
         self.requests: list[tuple[str, str, str]] = []
+        # Seconds a GET stream stays quiet after its first event.
+        self.hold = 0.0
         mcp = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -2114,6 +2116,7 @@ class _McpServer:
                 for event in (b"data: first\n\n", b"data: " + self.headers["Authorization"].encode() + b"\n\n"):
                     self.wfile.write(event)
                     self.wfile.flush()
+                    time.sleep(mcp.hold)
 
             def do_DELETE(self) -> None:
                 """End the session."""
@@ -2497,3 +2500,38 @@ def test_the_mailbox_stops_a_pinged_stream_when_the_box_reader_leaves() -> None:
     assert result.stdout.strip() == "True"
     assert pings.closed_at is not None
     assert pings.closed_at < ended - 1
+
+
+def test_a_quiet_upstream_stream_ends_cleanly_at_the_gateway(
+    gateway: ModelGateway, mcp_server: _McpServer, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An event stream whose server goes quiet past the read timeout ends without a handler traceback.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        monkeypatch: Shortens the relay's read timeout.
+        capfd: Captures the handler's error output.
+    """
+    monkeypatch.setattr(scoped_relay, "_SERVICE_TIMEOUT_SECONDS", 0.5)
+    mcp_server.hold = 3.0
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+
+    with httpx.stream(
+        "GET",
+        f"{route['url']}/mcp/search",
+        headers={"Authorization": f"Bearer {route['token']}", "Mcp-Session-Id": "session-1"},
+        trust_env=False,
+        timeout=10,
+    ) as reply:
+        events = reply.read()
+
+    assert reply.status_code == 200
+    assert events == b"data: first\n\n"
+    assert "Traceback" not in capfd.readouterr().err
+    answer = gateway.dispatch_guest(
+        route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", "mcp-session-id": "session-1"}
+    )
+    assert answer.status == 200
+    assert answer.stream is not None
+    answer.stream.close()

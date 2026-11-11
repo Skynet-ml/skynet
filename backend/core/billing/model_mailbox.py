@@ -162,6 +162,8 @@ class ModelMailbox:
                 logger.warning("An MCP event stream ended early in the sandbox mailbox: %s", type(error).__name__)
             finally:
                 stream.close()
+            if finished.is_set():
+                return
             # A box that went away cannot take the end part; the guest proxy is gone with it.
             with contextlib.suppress(Exception):
                 session.write_files({f"{base}.{part + 1}.json": json.dumps({"more": False})})

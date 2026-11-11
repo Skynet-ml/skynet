@@ -357,6 +357,9 @@ class ModelGateway:
                         self.wfile.flush()
                 except OSError:
                     pass  # The reader closed its event stream.
+                except Exception as error:
+                    # A quiet or broken upstream ends the stream; only the type, as a message could hold a body.
+                    logger.warning("An MCP event stream ended early in the gateway: %s", type(error).__name__)
                 finally:
                     response.stream.close()
 
