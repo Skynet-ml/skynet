@@ -11,6 +11,7 @@ import binascii
 import contextlib
 import json
 import logging
+import string
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping
@@ -74,6 +75,8 @@ _SERVICE_DROPPED_HEADERS = (
 )
 # The answer's content type travels on its own, and each server on the way back sets its own date and name.
 _SERVICE_ANSWER_DROPPED = frozenset({"content-type", "date", "server"})
+# A server may decode a path again, so a fully decoded service path may hold only plain URL path characters.
+_SERVICE_PATH_CHARS = frozenset(string.ascii_letters + string.digits + "-._~!$&'()*+,=:@/")
 
 
 class RunCallSink(Protocol):
@@ -714,21 +717,20 @@ def _decoded(path: str) -> str:
 def _unsafe_path(path: str) -> bool:
     """Check a relative service path for anything a server could read as a way out of the service.
 
-    Some servers (Node, Bun, Deno, IIS, ASP.NET) read ``\\`` as ``/``, and
-    Tomcat and Spring drop ``;params``, so ``..\\x`` and ``..;/x`` climb as
-    ``../x`` does. A control character can end the path early.
+    Only the characters of ``_SERVICE_PATH_CHARS`` may stay after full
+    decoding. So ``?``, ``#``, ``\\``, ``;``, ``%``, spaces, control
+    characters and all non-ASCII characters fail: a server that decodes
+    again could read them as a query, a separator or a dot.
 
     Args:
         path: The path after the service name, with its query.
 
     Returns:
-        True when the decoded path has a ``.`` or ``..`` segment, a ``\\``,
-        a ``;`` or a control character.
+        True when the decoded path has a character outside the allowlist,
+        or a ``.`` or ``..`` segment.
     """
     path = _decoded(path)
-    return any(char in "\\;" or ord(char) < 0x20 or ord(char) == 0x7F for char in path) or bool(
-        {".", ".."} & set(path.split("/"))
-    )
+    return not _SERVICE_PATH_CHARS.issuperset(path) or bool({".", ".."} & set(path.split("/")))
 
 
 def _under(target: httpx.URL, base: httpx.URL) -> bool:

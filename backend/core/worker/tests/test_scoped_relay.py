@@ -303,6 +303,15 @@ def test_the_mcp_route_refuses_a_path_that_leaves_one_server_name(client: type[_
         "/v1/service/echo/x/..%5c..%5cadmin",
         "/v1/service/echo/..%00/admin",
         "/v1/service/echo/a;b",
+        "/v1/service/echo/..%3F",
+        "/v1/service/echo/..%3Fx",
+        "/v1/service/echo/..%253F/x",
+        "/v1/service/echo/..%23",
+        "/v1/service/echo/..%2523",
+        "/v1/service/echo/x/..%3F/..%3F",
+        "/v1/service/echo/%c0%ae%c0%ae/x",
+        "/v1/service/echo/a%20b",
+        "/v1/service/echo/%EF%BC%8E%EF%BC%8E/x",
         "/v1/service/echo/./a",
         "/v1/service/echo?x/",
         "/v1/service/echo#x/",
@@ -321,6 +330,16 @@ def test_the_service_route_refuses_a_path_that_leaves_one_service(client: type[_
         dispatch(_MCP_ROUTE["token"], path, b"", {})
 
     assert client.timeouts == []
+
+
+@pytest.mark.parametrize("path", ["/v1/service/echo/v2/a..b/item.json", "/v1/service/echo/item?q=a;b"])
+def test_the_service_route_allows_a_plain_sub_path_and_any_query(path: str) -> None:
+    """A deeper path of plain characters passes, and the allowlist does not read the query.
+
+    Args:
+        path: The path the box asks for.
+    """
+    assert scoped_relay._service_path_safe(path)
 
 
 @pytest.mark.parametrize(
