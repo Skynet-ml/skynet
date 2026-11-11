@@ -495,6 +495,14 @@ class BlackboxRunRequest(BaseModel):
             "user's own OpenRouter key run normally."
         ),
     )
+    deadline_seconds: int | None = Field(
+        default=None,
+        ge=60,
+        description=(
+            "A shorter run deadline in seconds for this run only. The deployment's sandbox "
+            "lifetime still caps it, so it can only shorten the run."
+        ),
+    )
     # The setup's metric-hardening job (SKY-356). A finished job of the same
     # owner ships its exploit suite and counts in the repository run's PR.
     hardening_job_id: str | None = Field(default=None, min_length=1, max_length=36)

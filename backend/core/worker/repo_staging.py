@@ -774,11 +774,15 @@ def bind_repo_scorer(
     target = payload["target"]
     scorer_spec = payload["scorer"]
     hosts = PACKAGE_REGISTRY_HOSTS if (target.get("setup_command") or "").strip() else ()
+    parent_runtime = gateway.parent_sandbox_runtime()
     scorer = RepoScorer(
         RepoWorkspace(
-            runtime=gateway.parent_sandbox_runtime(),
+            runtime=parent_runtime,
             spec=SandboxSpec(
-                lifetime_seconds=descriptor["lifetime_seconds"],
+                # The descriptor's lifetime is the guest's, which a per-run deadline
+                # shortens (SKY-572). This box opens before the guest and must outlive
+                # it, so it asks for the parent profile maximum.
+                lifetime_seconds=parent_runtime.max_lifetime_seconds,
                 image=descriptor["image"],
                 network_disabled=not hosts,
                 allowed_hosts=hosts,
