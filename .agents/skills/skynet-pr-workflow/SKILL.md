@@ -197,9 +197,9 @@ for review until the evidence is there.
 - A UI PR is done when three conditions are true. The Opus 5.5 review gate
   (section 3) approves the current head. CI passes. The acceptance checks
   pass, or a section 4 exemption applies. Then the orchestrator marks the PR
-  ready for review (not draft). It does not merge it. Gilad reviews the finished UI PRs. He approves them (in chat, on
-  GitHub or with `Approved for merge` on the Linear issue), or tells the
-  orchestrator to merge them.
+  ready for review (not draft). It does not merge it. Gilad reviews the
+  finished UI PRs. He approves them (in chat, on GitHub or with `Approved for
+  merge` on the Linear issue), or tells the orchestrator to merge them.
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -274,8 +274,8 @@ A manual hold on a change or on a promotion still stops it.
   requires the reviewed head commit. Never bypass branch protection or queue
   an unchecked future merge.
 - **Among agents, only the orchestrator merges** (through its cloud merger
-  routine, in the daily merge window below). Gilad can also merge. Implementation and review agents leave the
-  final action to the orchestrator.
+  routine, in the daily merge window below). Gilad can also merge.
+  Implementation and review agents leave the final action to the orchestrator.
 
 ### Linear approval and revisions (2026-10-19)
 
