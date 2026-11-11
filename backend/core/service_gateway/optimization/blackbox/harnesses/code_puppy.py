@@ -22,7 +22,16 @@ from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CODE_PUPPY
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
-from .base import ENV_API_KEY, ENV_PROMPT_FILE, PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import (
+    ENV_API_KEY,
+    ENV_PROMPT_FILE,
+    PROVIDER,
+    GatewayConfig,
+    HarnessLaunch,
+    _base_env,
+    _temp_root,
+    _version_check,
+)
 
 CODE_PUPPY_PACKAGE = "code-puppy"
 # PyPI ``info.version`` for ``code-puppy`` on 2026-11-08 (MIT).
@@ -268,8 +277,7 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
     xdg_exports = " ".join(f'{name}="$_cp_dir/{folder}"' for name, folder in _XDG_DIRS.items())
     run_command = (
         f"{_CODE_PUPPY_PATH}; "
-        '_cp_dir="$(mktemp -d)" || exit 1; '
-        """trap 'rm -rf "$_cp_dir"' EXIT; """
+        f"{_temp_root('_cp_dir', 'code_puppy')} || exit 1; "
         f"export {xdg_exports}; "
         'mkdir -p "$XDG_CONFIG_HOME/code_puppy" "$XDG_DATA_HOME/code_puppy" && '
         f"{_RANDOM_KEY_ENV} && "

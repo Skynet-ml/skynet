@@ -32,6 +32,7 @@ from ..harness_bridge import (
     workspace_files,
 )
 from ..harnesses import REGISTRY
+from ..harnesses.base import _temp_root
 from ..harnesses.eve import (
     _NODE_CHECK,
     AI_SDK_VERSION,
@@ -107,6 +108,9 @@ def test_eve_is_registered_after_prime_and_before_cline() -> None:
 # lockfile in its cwd, ``eve build`` leaves build output, and the runner copies
 # the project it got to $RECORD_DIR, then edits main.py as the agent would.
 # ``node -e`` is the Node version check, which passes unless $FAKE_NODE_OLD is set.
+# With $FAKE_KILL_SHELL set, the check SIGKILLs the run's shell, as the bridge
+# does at a timeout, so the EXIT trap does not run. The check is not the
+# shell's last command, so its parent is that shell.
 _FAKE_NPM = """#!/bin/sh
 if [ -n "$FAKE_NPM_FAILS" ]; then exit 1; fi
 mkdir -p node_modules/.bin node_modules/eve
@@ -117,6 +121,7 @@ chmod +x node_modules/.bin/eve
 """
 _FAKE_NODE = """#!/bin/sh
 if [ "$1" = "-e" ]; then
+  if [ -n "$FAKE_KILL_SHELL" ]; then kill -KILL "$PPID"; exit 0; fi
   if [ -n "$FAKE_NODE_OLD" ]; then echo "eve needs Node 24 or newer; found v22.0.0" >&2; exit 1; fi
   exit 0
 fi
@@ -127,7 +132,9 @@ if [ -f main.py ]; then echo 'print(2)' > main.py; fi
 """
 
 
-def _run_with_fakes(run_command: str, workspace: Path, tmp_path: Path, *, check: bool = True, **env: str) -> Path:
+def _run_with_fakes(
+    run_command: str, workspace: Path, tmp_path: Path, *, check: bool = True, temp: Path | None = None, **env: str
+) -> Path:
     """Run the real eve run command with fake ``npm`` and ``node`` on PATH.
 
     Args:
@@ -135,6 +142,7 @@ def _run_with_fakes(run_command: str, workspace: Path, tmp_path: Path, *, check:
         workspace: The run workspace, which holds the launch files.
         tmp_path: Test folder for the fakes, TMPDIR and the record.
         check: Fail the test when the run command exits non-zero.
+        temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
         **env: Extra environment variables.
 
     Returns:
@@ -147,8 +155,8 @@ def _run_with_fakes(run_command: str, workspace: Path, tmp_path: Path, *, check:
         (fakes / name).chmod(0o755)
     record = tmp_path / "record"
     record.mkdir()
-    temp = tmp_path / "tmp"
-    temp.mkdir()
+    temp = temp or tmp_path / "tmp"
+    temp.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["/bin/sh", "-c", run_command],
         cwd=workspace,
@@ -227,9 +235,7 @@ def test_launch_installs_the_pinned_cli_and_runs_the_runner() -> None:
     assert launch.install_command == (
         "eve --version 2>/dev/null | grep -Eq '(^| )1[.]0[.]0-rc[.]6( |$)' || npm install -g eve@1.0.0-rc.6"
     )
-    assert launch.run_command.startswith(
-        'export EVE_WORKSPACE="$PWD" && EVE_DIR="$(mktemp -d)" && trap \'rm -rf "$EVE_DIR"\' EXIT && '
-    )
+    assert launch.run_command.startswith(f'export EVE_WORKSPACE="$PWD" && {_temp_root("EVE_DIR", "eve")} && ')
     assert f'if [ -d "{EVE_IMAGE_DEPS}/eve" ]; then ' in launch.run_command
     assert "else npm install " in launch.run_command
     assert "node_modules/.bin/eve build) >&2 && " in launch.run_command
@@ -614,6 +620,36 @@ def test_launch_stops_on_old_node_before_the_eve_build(tmp_path: Path) -> None:
     _write_launch_files(launch.files, launch.instructions_file, workspace)
     record = _run_with_fakes(launch.run_command, workspace, tmp_path, check=False, FAKE_NODE_OLD="1")
     assert not any(record.iterdir())
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_next_run_removes_the_project_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the temp project that a SIGKILL left behind when the next run starts (SKY-613).
+
+    The bridge kills a timed-out run with SIGKILL, so the EXIT trap does not
+    run and the project stays until the next run sweeps it.
+    """
+    launch = build_launch(_target(), _GATEWAY)
+    temp = tmp_path / "tmp"
+    for tag in ("killed", "after"):
+        (tmp_path / tag / "work").mkdir(parents=True)
+        _write_launch_files(launch.files, launch.instructions_file, tmp_path / tag / "work")
+    _run_with_fakes(
+        launch.run_command,
+        tmp_path / "killed" / "work",
+        tmp_path / "killed",
+        check=False,
+        temp=temp,
+        FAKE_KILL_SHELL="1",
+    )
+    (killed_dir,) = temp.iterdir()
+    assert killed_dir.name.startswith("app-eve-")
+
+    record = _run_with_fakes(launch.run_command, tmp_path / "after" / "work", tmp_path / "after", temp=temp)
+
+    assert not killed_dir.exists()
+    assert Path((record / ".project_dir").read_text().strip()).parent == temp
+    assert list(temp.iterdir()) == []
 
 
 # Stubs of the two eve entry points that the sandbox module imports, so the

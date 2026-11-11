@@ -15,7 +15,16 @@ from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CLINE
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
-from .base import _PROMPT_ARG, ENV_API_KEY, ENV_MODEL, GatewayConfig, HarnessLaunch, _base_env, _npm_install
+from .base import (
+    _PROMPT_ARG,
+    ENV_API_KEY,
+    ENV_MODEL,
+    GatewayConfig,
+    HarnessLaunch,
+    _base_env,
+    _npm_install,
+    _temp_root,
+)
 
 # npm registry ``dist-tags.latest`` for ``cline`` on 2026-11-08 (Apache-2.0).
 CLINE_VERSION = "3.0.74"
@@ -68,7 +77,9 @@ def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     """Build the launch for Cline CLI (``cline``, pinned to :data:`CLINE_VERSION`).
 
     Each run gets a fresh Cline data directory outside the workspace, so the
-    saved gateway token never lands in the files the run hands back. Cline's
+    saved gateway token never lands in the files the run hands back. An EXIT
+    trap removes it when the run's shell exits, and the next run removes it
+    when a timeout's SIGKILL skipped the trap. Cline's
     plain one-shot output is the answer; the bridge has no parser for its
     NDJSON stream.
 
@@ -86,7 +97,7 @@ def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     key = f'"${ENV_API_KEY}"'
     model_arg = f'"${ENV_MODEL}"'
     run_command = (
-        'export CLINE_DATA_DIR="$(mktemp -d)" && '
+        f"{_temp_root('CLINE_DATA_DIR', 'cline')} && "
         f'printf %s {shlex.quote(_GLOBAL_STATE)} > "$CLINE_DATA_DIR/globalState.json" && '
         f"cline auth --provider {CLINE_PROVIDER} --apikey {key} --modelid {model_arg} "
         f'--baseurl "$(cat {CLINE_BASE_URL_FILE})" >/dev/null && '
