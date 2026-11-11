@@ -2464,7 +2464,6 @@ class RemoteDBJobStore:
             return quota
         return settings.get_user_quota(username)
 
-
     def get_effective_user_storage_quota(self, username: str) -> int:
         """Return the unified storage budget in bytes the user is held to.
 

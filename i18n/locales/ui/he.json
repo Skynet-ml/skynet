@@ -4555,7 +4555,7 @@
   "localUsage.resets": "מתאפס {time}",
   "localUsage.used": "{percent} בשימוש",
   "localUsage.noWindows": "{cli} לא מדווח על חלון מגבלה למנוי הזה.",
-  "localUsage.reconnect": "{cli} לא מחובר. הרץ את {command} בטרמינל כדי להתחבר.",
+  "localUsage.reconnect": "{cli} לא מחובר. הריצו את {command} בטרמינל כדי להתחבר.",
   "localUsage.account": "חשבון",
   "localUsage.accountInfo": "פרטי החשבון",
   "localUsage.plan": "תוכנית",
@@ -4581,6 +4581,5 @@
   "usage.day.empty": "אין קריאות בחיוב ביום הזה.",
   "usage.day.load_error": "לא הצלחנו לטעון את הקריאות של היום הזה.",
   "usage.day.truncated": "מוצגות {shown} הקריאות האחרונות מתוך {total}.",
-  "usage.day.loading": "טוען את הקריאות של היום הזה…",
-  "optimization.program_repository.history": "ציון היסטורי מהתוכנית השמורה. שורות הנתונים ודוגמאות האימון אינן כלולות."
+  "usage.day.loading": "טוען את הקריאות של היום הזה…"
 }

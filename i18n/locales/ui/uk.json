@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "Немає відповідних моделей",
   "agent.model_menu.search_placeholder": "Шукати серед усіх моделей…",
   "agent.model_menu.clear_search": "Очистити пошук",
-  "agent.model_menu.no_results_hint": "Спробуйте іншу назву або постачальника.",
-  "optimization.program_repository.history": "Попередня оцінка зі збереженої програми. Рядки набору даних і навчальні приклади не включено."
+  "agent.model_menu.no_results_hint": "Спробуйте іншу назву або постачальника."
 }

@@ -288,8 +288,10 @@ def interview_model_id() -> str:
         return default
     with _lock:
         pick, stale = _pick, time.monotonic() - _picked_at >= _STATS_TTL_SECONDS
-    if pick and snapshot is not None and not any(
-        model.value == pick and supports_effort_control(model) for model in snapshot.models
+    if (
+        pick
+        and snapshot is not None
+        and not any(model.value == pick and supports_effort_control(model) for model in snapshot.models)
     ):
         pick = None
     if pick is None or stale:

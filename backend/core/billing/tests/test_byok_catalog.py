@@ -59,8 +59,12 @@ def _static_catalog() -> ModelCatalogResponse:
             CatalogProvider(slug="openrouter", label="OpenRouter"),
         ],
         models=[
-            CatalogModel(value="openai/gpt-4o", label="gpt-4o", provider="openai", available=True, supports_thinking=True),
-            CatalogModel(value="openai/gpt-4.1", label="gpt-4.1", provider="openai", available=True, supports_thinking=True),
+            CatalogModel(
+                value="openai/gpt-4o", label="gpt-4o", provider="openai", available=True, supports_thinking=True
+            ),
+            CatalogModel(
+                value="openai/gpt-4.1", label="gpt-4.1", provider="openai", available=True, supports_thinking=True
+            ),
             CatalogModel(
                 value="openrouter/anthropic/claude-3-haiku",
                 label="anthropic/claude-3-haiku",

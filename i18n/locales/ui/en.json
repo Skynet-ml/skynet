@@ -4581,6 +4581,5 @@
   "usage.day.empty": "No billed calls on this day.",
   "usage.day.load_error": "We couldn't load the calls for this day.",
   "usage.day.truncated": "Showing the latest {shown} of {total} calls.",
-  "usage.day.loading": "Loading the calls for this day…",
-  "optimization.program_repository.history": "Historical score from the saved program. Dataset rows and training examples are not included."
+  "usage.day.loading": "Loading the calls for this day…"
 }

@@ -49,6 +49,7 @@ import {
 } from "@/shared/lib/api";
 import { onLinkChange } from "@/shared/hooks/use-linked-account";
 import { isLocalMode } from "@/shared/lib/runtime-env";
+import { RESOURCE_MODE_EVENT } from "@/shared/lib/resource-mode";
 import { hostedAppUrl } from "@/shared/lib/share-link";
 import { msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
@@ -276,6 +277,7 @@ export function NotificationsTab() {
     };
     refresh();
     const unsubscribe = onLinkChange(refresh);
+    window.addEventListener(RESOURCE_MODE_EVENT, refresh);
     const onFocus = () => {
       if (isLocalMode()) void load();
     };
@@ -284,6 +286,7 @@ export function NotificationsTab() {
       ++loadVersion.current;
       reloadCurrent.current = null;
       unsubscribe();
+      window.removeEventListener(RESOURCE_MODE_EVENT, refresh);
       window.removeEventListener("focus", onFocus);
     };
   }, [load, session?.user?.email]);

@@ -53,7 +53,7 @@ from ...worker.tagging_job import TaggingAutotagPayload, untagged_rows
 from ..agent_engine import engine_agent_model
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..model_catalog import ReasoningEffort, get_catalog_cached, is_hidden_model
+from ..model_catalog import ReasoningEffort, get_catalog_cached, is_effortless_model, is_hidden_model
 from ..model_fast_mode import with_fast_mode
 from ..model_router import (
     cli_fast_config,
@@ -270,7 +270,11 @@ def _require_known_model(assist: dict[str, Any]) -> None:
     model = str((assist or {}).get("model") or "").strip()
     if not model:
         return
-    if not is_hidden_model(model) and all(entry.value != model for entry in get_catalog_cached().models):
+    if (
+        not is_hidden_model(model)
+        and not is_effortless_model(model)
+        and all(entry.value != model for entry in get_catalog_cached().models)
+    ):
         raise DomainError("tagger.assist.unknown_model", status=422)
 
 

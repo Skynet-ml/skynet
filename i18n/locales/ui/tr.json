@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "Eşleşen model yok",
   "agent.model_menu.search_placeholder": "Tüm modellerde ara…",
   "agent.model_menu.clear_search": "Aramayı temizle",
-  "agent.model_menu.no_results_hint": "Başka bir ad veya sağlayıcı deneyin.",
-  "optimization.program_repository.history": "Kaydedilen programdan geçmiş puan. Veri kümesi satırları ve eğitim örnekleri dahil değildir."
+  "agent.model_menu.no_results_hint": "Başka bir ad veya sağlayıcı deneyin."
 }

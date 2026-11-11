@@ -180,12 +180,18 @@ def test_replacement_default_keeps_score_per_input_dollar_policy() -> None:
     """Choose the eligible replacement by the existing input-price ranking."""
     removed = _model("openrouter/acme/fixed", reasoning_efforts=[], is_default=True)
     best_input_value = _model(
-        "openrouter/acme/value", featured=True, intelligence_index=10,
-        input_cost_per_token=1, output_cost_per_token=100,
+        "openrouter/acme/value",
+        featured=True,
+        intelligence_index=10,
+        input_cost_per_token=1,
+        output_cost_per_token=100,
     )
     expensive_input = _model(
-        "openrouter/acme/expensive", featured=True, intelligence_index=10,
-        input_cost_per_token=2, output_cost_per_token=0.01,
+        "openrouter/acme/expensive",
+        featured=True,
+        intelligence_index=10,
+        input_cost_per_token=2,
+        output_cost_per_token=0.01,
     )
     result = model_catalog.with_effort_controls(
         ModelCatalogResponse(providers=[], models=[removed, best_input_value, expensive_input])

@@ -995,8 +995,8 @@ def test_practical_keeps_everything_without_benchmarks() -> None:
     assert mc._practical_probe_ids({"gw/model": _listed(_NOW)}) is None
 
 
-def test_get_catalog_rejects_impractical_models_without_effort(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject an old hidden pick when its provider declares no effort controls."""
+def test_get_catalog_treats_impractical_models_without_effort_as_withdrawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an old hidden pick without effort controls valid, but route it as withdrawn."""
     monkeypatch.setattr(litellm, "model_cost", {})
     monkeypatch.setattr(litellm, "get_valid_models", list)
     probe = {
@@ -1012,14 +1012,45 @@ def test_get_catalog_rejects_impractical_models_without_effort(monkeypatch: pyte
 
     assert [m.value for m in catalog.models] == ["openrouter/acme/opus-5.5"]
     assert not mc.is_hidden_model("openrouter/hobby/finetune-7")
+    assert mc.is_effortless_model("openrouter/hobby/finetune-7")
+    assert mc.is_removed_model("openrouter/hobby/finetune-7")
+    mc.require_known_model("openrouter/hobby/finetune-7")
     with pytest.raises(DomainError):
-        mc.require_known_model("openrouter/hobby/finetune-7")
+        mc.require_known_model("openrouter/hobby/never-listed")
+
+
+def test_a_stored_pick_without_effort_control_still_validates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A listed model without an effort control leaves the menus but passes validation."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    thinker = CatalogModel(
+        value="openrouter/vendor/thinker",
+        label="thinker",
+        provider="openrouter",
+        available=True,
+        supports_thinking=True,
+    )
+    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[plain, thinker]))
+    monkeypatch.setattr(mc, "_cached_at_monotonic", float("inf"))
+
+    assert [m.value for m in mc.get_catalog_cached().models] == ["openrouter/vendor/thinker"]
+    assert mc.is_effortless_model("openrouter/vendor/plain")
+    assert not mc.is_effortless_model("openrouter/vendor/thinker")
+    mc.require_known_model("openrouter/vendor/plain")
+    mc.require_known_model("openrouter/vendor/plain", role="judge")
 
 
 def test_the_strongest_model_follows_the_operator_then_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator-set id wins; else the catalog's strongest model; else the best-value agent model."""
-    best = CatalogModel(value="openrouter/vendor/best", label="best", provider="openrouter", supports_thinking=True, is_default=True)
-    strongest = CatalogModel(value="openrouter/vendor/strong", label="strong", provider="openrouter", supports_thinking=True, is_strongest=True)
+    best = CatalogModel(
+        value="openrouter/vendor/best", label="best", provider="openrouter", supports_thinking=True, is_default=True
+    )
+    strongest = CatalogModel(
+        value="openrouter/vendor/strong",
+        label="strong",
+        provider="openrouter",
+        supports_thinking=True,
+        is_strongest=True,
+    )
     monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[best, strongest]))
 
     assert mc.strongest_model_id(" vendor/picked ") == "vendor/picked"

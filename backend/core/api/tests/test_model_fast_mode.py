@@ -8,7 +8,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.api import model_fast_mode as fast
+from core.api.model_catalog import CatalogModel, ModelCatalogResponse
+from core.api.routers import models as models_router
 from core.api.routers.models import create_models_router
+from core.api.tests.conftest import bypass_auth
 from core.billing.cli_dispatch import CLI_FAST_KEY
 from core.billing.openrouter_quotes import price_text_request
 from core.billing.tests.test_openrouter_quotes import FAST_CATALOG, POLICY, REQUEST
@@ -143,16 +146,34 @@ def test_off_unsupported_and_cli_modes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_capability_route(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Expose the selected model's support without an account or provider key.
+    """Expose a signed-in caller's catalog model support; skip OpenRouter for other ids.
 
     Args:
-        monkeypatch: Replace metadata discovery with known capability results.
+        monkeypatch: Replace metadata discovery and the catalogs with known results.
     """
-    monkeypatch.setattr(fast, "_fetch_fast_providers", lambda model, window: ("anthropic/fast",))
+    fetched: list[str] = []
+
+    def fetch(model: str, window: int) -> tuple[str, ...]:
+        """Record each metadata fetch and report one priority tier."""
+        fetched.append(model)
+        return ("anthropic/fast",)
+
+    catalog = ModelCatalogResponse(
+        providers=[], models=[CatalogModel(value=MODEL, label="Opus", provider="openrouter", supports_thinking=True)]
+    )
+    monkeypatch.setattr(fast, "_fetch_fast_providers", fetch)
+    monkeypatch.setattr(models_router, "get_catalog_cached", lambda: catalog)
+    monkeypatch.setattr(models_router, "get_byok_catalog_cached", lambda: ModelCatalogResponse(providers=[], models=[]))
     app = FastAPI()
     app.include_router(create_models_router())
     client = TestClient(app)
+    assert client.get("/models/fast-mode", params={"model": MODEL}).status_code == 401
+    bypass_auth(app)
     assert client.get("/models/fast-mode", params={"model": MODEL}).json() == {"supports_fast": True}
+    assert client.get("/models/fast-mode", params={"model": "openrouter/vendor/not-listed"}).json() == {
+        "supports_fast": False
+    }
     assert client.get("/models/fast-mode", params={"model": "anthropic/claude-opus-5.5"}).json() == {
         "supports_fast": False
     }
+    assert fetched == [MODEL]

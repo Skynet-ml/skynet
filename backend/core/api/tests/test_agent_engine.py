@@ -485,8 +485,13 @@ _COMPOSER_ROUTES = [
 @pytest.mark.parametrize("fast", [True, False])
 @pytest.mark.parametrize("openrouter", [False, True])
 def test_composer_route_passes_effort_and_fast_mode_to_the_engine(
-    path: str, module: Any, engine_fn: str, body: dict[str, Any], fast: bool,
-    openrouter: bool, monkeypatch: pytest.MonkeyPatch
+    path: str,
+    module: Any,
+    engine_fn: str,
+    body: dict[str, Any],
+    fast: bool,
+    openrouter: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pass effort and fast mode through each composer route for CLI and OpenRouter BYOK.
 
@@ -516,8 +521,12 @@ def test_composer_route_passes_effort_and_fast_mode_to_the_engine(
     monkeypatch.setattr(tagger_mod, "_load_for_role", lambda *_args: SimpleNamespace(columns=[], data=[]))
     monkeypatch.setattr(tagger_mod, "_interview_config", lambda _row: {})
     if openrouter:
-        byok = ModelConfig(name="openrouter/anthropic/claude-opus-5.5", token_source="byok",
-                           byok_provider="openrouter", extra={"api_key": "synthetic"})
+        byok = ModelConfig(
+            name="openrouter/anthropic/claude-opus-5.5",
+            token_source="byok",
+            byok_provider="openrouter",
+            extra={"api_key": "synthetic"},
+        )
         monkeypatch.setattr(tagger_mod, "route_local_byok_model", lambda *args, **kwargs: byok)
         monkeypatch.setattr(tagger_mod, "effective_reasoning_effort", lambda model, effort: effort)
         monkeypatch.setattr(model_fast_mode, "fast_providers", lambda model: ("anthropic/fast",))

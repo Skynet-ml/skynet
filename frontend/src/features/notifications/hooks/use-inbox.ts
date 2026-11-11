@@ -15,6 +15,7 @@ import {
   type NotificationUnreadCounts,
 } from "@/shared/lib/api";
 import { onLinkChange } from "@/shared/hooks/use-linked-account";
+import { RESOURCE_MODE_EVENT } from "@/shared/lib/resource-mode";
 import { msg } from "@/shared/lib/messages";
 
 import { appendPage, mergeHead } from "../lib/catalog";
@@ -91,7 +92,16 @@ export function useInbox({
 }): Inbox {
   const [accountRevision, setAccountRevision] = React.useState(0);
   const identity = `${tab}:${accountRevision}`;
-  React.useEffect(() => onLinkChange(() => setAccountRevision((n) => n + 1)), []);
+  // A link change or a Local/Web switch moves the inbox to another side.
+  React.useEffect(() => {
+    const bump = () => setAccountRevision((n) => n + 1);
+    const unsubscribe = onLinkChange(bump);
+    window.addEventListener(RESOURCE_MODE_EVENT, bump);
+    return () => {
+      unsubscribe();
+      window.removeEventListener(RESOURCE_MODE_EVENT, bump);
+    };
+  }, []);
   const [counts, setCounts] = React.useState<NotificationUnreadCounts>(NO_UNREAD);
   const [items, setItems] = React.useState<NotificationItem[]>([]);
   const [status, setStatus] = React.useState<InboxStatus>("loading");

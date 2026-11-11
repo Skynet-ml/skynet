@@ -434,16 +434,23 @@ def create_models_router(*, http_client: Callable[[], httpx.Client] | None = Non
         return with_artificial_analysis_links(with_interview_default(with_zero_retention(get_catalog_cached())))
 
     @router.get("/models/fast-mode", summary="Check priority endpoint availability")
-    def model_fast_mode(model: str) -> dict[str, bool]:
+    def model_fast_mode(model: str, current_user: AuthenticatedUserDep) -> dict[str, bool]:
         """Report whether the selected OpenRouter model offers priority routing.
+
+        Only catalog models reach OpenRouter, so a caller cannot make the
+        server fetch metadata for arbitrary ids.
 
         Args:
             model: The frontend's fully qualified model id.
+            current_user: The signed-in caller.
 
         Returns:
             Whether public endpoint metadata lists an available priority tier.
         """
-        return {"supports_fast": bool(fast_providers(model))}
+        known = any(entry.value == model for entry in get_catalog_cached().models) or any(
+            entry.value == model for entry in get_byok_catalog_cached().models
+        )
+        return {"supports_fast": known and bool(fast_providers(model))}
 
     @router.get(
         "/models/byok",

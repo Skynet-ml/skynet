@@ -727,7 +727,6 @@ class BillingCustomerModel(Base):
     subscription_cancel_at_period_end: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
-
     subscription_past_due_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Cents a refund or chargeback reversed after they were already spent.
     # The platform paid for those tokens, so the account owes them back: while

@@ -932,9 +932,6 @@ export function OptimizationDetailView({
   return (
     <div className="space-y-6 pb-12">
       {sharedTier && <RunAccessBanner tier={sharedTier} owner={sharedByOwner} />}
-      {job.blackbox_result?.details?.score_provenance === "saved_program_test" && (
-        <p className="text-xs text-muted-foreground">{msg("optimization.program_repository.history")}</p>
-      )}
       {/* Gate on the predicate too: an empty FadeIn div would add a space-y-6 gap above the summary. */}
       {jobIsBlackbox &&
         job.status === "success" &&

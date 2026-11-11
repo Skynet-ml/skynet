@@ -1,5 +1,5 @@
 import type { CatalogModel, ModelCatalogResponse } from "@/shared/types/api";
-import { getByokModels, getHostedModels } from "@/shared/lib/api";
+import { fetchWithAuthRetry, getByokModels, getHostedModels } from "@/shared/lib/api";
 import { supportsEffortSlider } from "@/shared/lib/model-efforts";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 
@@ -61,7 +61,7 @@ const _ready: Promise<ModelCatalogResponse> =
 
 /** Check live priority support for the selected OpenRouter model. */
 export async function getModelFastMode(model: string): Promise<boolean> {
-  const res = await fetch(`${apiBase()}/models/fast-mode?model=${encodeURIComponent(model)}`);
+  const res = await fetchWithAuthRetry(`${apiBase()}/models/fast-mode?model=${encodeURIComponent(model)}`, {});
   if (!res.ok) return false;
   const data: unknown = await res.json();
   return (

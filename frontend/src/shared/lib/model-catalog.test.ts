@@ -8,7 +8,7 @@ import type { CatalogModel } from "@/shared/types/api";
 const stubs: Record<string, string> = {
   "@/shared/lib/messages": "export const msg = (key) => key;",
   "@/shared/lib/api":
-    "export const getByokModels = async () => ({ providers: [], models: [] }); export const getHostedModels = getByokModels;",
+    "export const getByokModels = async () => ({ providers: [], models: [] }); export const getHostedModels = getByokModels; export const fetchWithAuthRetry = (url, init) => fetch(url, init);",
   "@/shared/lib/runtime-env": "export const getRuntimeEnv = () => ({ apiUrl: '' });",
 };
 

@@ -820,7 +820,6 @@ def create_billing_router(*, job_store) -> APIRouter:
             raise DomainError("billing.invalid_amount", status=400)
         return CheckoutSessionResponse(url=url)
 
-
     @router.post(
         "/billing/portal",
         response_model=CheckoutSessionResponse,

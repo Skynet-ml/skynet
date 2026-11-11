@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "Keine passenden Modelle",
   "agent.model_menu.search_placeholder": "Alle Modelle durchsuchen…",
   "agent.model_menu.clear_search": "Suche löschen",
-  "agent.model_menu.no_results_hint": "Versuche einen anderen Namen oder Anbieter.",
-  "optimization.program_repository.history": "Historischer Score aus dem gespeicherten Programm. Datensatzzeilen und Trainingsbeispiele sind nicht enthalten."
+  "agent.model_menu.no_results_hint": "Versuche einen anderen Namen oder Anbieter."
 }

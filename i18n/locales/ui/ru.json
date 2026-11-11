@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "Нет подходящих моделей",
   "agent.model_menu.search_placeholder": "Искать среди всех моделей…",
   "agent.model_menu.clear_search": "Очистить поиск",
-  "agent.model_menu.no_results_hint": "Попробуйте другое название или провайдера.",
-  "optimization.program_repository.history": "Прошлая оценка из сохранённой программы. Строки набора данных и обучающие примеры не включены."
+  "agent.model_menu.no_results_hint": "Попробуйте другое название или провайдера."
 }

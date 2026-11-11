@@ -2897,10 +2897,12 @@ def build_local_suggest_lm(turn_config: ModelConfig | None, timeout: float) -> A
     if turn_config is None:
         return None
     if turn_config.extra.get(HOSTED_INFERENCE_KEY):
-        config = turn_config.model_copy(update={
-            "max_tokens": _suggest_max_tokens(turn_config.name),
-            "extra": _byok_side_extra(turn_config, turn_config.name),
-        })
+        config = turn_config.model_copy(
+            update={
+                "max_tokens": _suggest_max_tokens(turn_config.name),
+                "extra": _byok_side_extra(turn_config, turn_config.name),
+            }
+        )
     elif turn_config.token_source == TOKEN_SOURCE_BYOK:
         model = byok_suggest_model()
         if model is None:

@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "Nessun modello corrispondente",
   "agent.model_menu.search_placeholder": "Cerca tra tutti i modelli…",
   "agent.model_menu.clear_search": "Cancella ricerca",
-  "agent.model_menu.no_results_hint": "Prova un altro nome o fornitore.",
-  "optimization.program_repository.history": "Punteggio storico dal programma salvato. Le righe del dataset e gli esempi di addestramento non sono inclusi."
+  "agent.model_menu.no_results_hint": "Prova un altro nome o fornitore."
 }

@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "कोई मिलता-जुलता मॉडल नहीं",
   "agent.model_menu.search_placeholder": "सभी मॉडल खोजें…",
   "agent.model_menu.clear_search": "खोज साफ़ करें",
-  "agent.model_menu.no_results_hint": "कोई दूसरा नाम या प्रदाता आज़माएँ।",
-  "optimization.program_repository.history": "सहेजे गए प्रोग्राम का पिछला स्कोर। डेटासेट की पंक्तियाँ और प्रशिक्षण उदाहरण शामिल नहीं हैं।"
+  "agent.model_menu.no_results_hint": "कोई दूसरा नाम या प्रदाता आज़माएँ।"
 }

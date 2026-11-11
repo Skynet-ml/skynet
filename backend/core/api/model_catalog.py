@@ -258,19 +258,26 @@ def with_effort_controls(catalog: ModelCatalogResponse) -> ModelCatalogResponse:
                 not model.featured,
                 model.lab_tier,
                 model.input_cost_per_token / model.intelligence_index
-                if model.input_cost_per_token and model.intelligence_index else float("inf"),
+                if model.input_cost_per_token and model.intelligence_index
+                else float("inf"),
                 model.value,
             ),
         )
         models = [model.model_copy(update={"is_default": model.value == default.value}) for model in models]
-    if models and any(model.is_strongest for model in catalog.models) and not any(model.is_strongest for model in models):
+    if (
+        models
+        and any(model.is_strongest for model in catalog.models)
+        and not any(model.is_strongest for model in models)
+    ):
         strongest = max(models, key=lambda model: model.intelligence_index or 0)
         models = [model.model_copy(update={"is_strongest": model.value == strongest.value}) for model in models]
     providers = {(model.provider, model.data_center) for model in models}
     return catalog.model_copy(
         update={
             "models": models,
-            "providers": [provider for provider in catalog.providers if (provider.slug, provider.data_center) in providers],
+            "providers": [
+                provider for provider in catalog.providers if (provider.slug, provider.data_center) in providers
+            ],
         }
     )
 
@@ -553,9 +560,33 @@ def is_removed_model(name: str) -> bool:
         name: Catalog model id, e.g. ``openrouter/x-ai/grok-build``.
 
     Returns:
-        ``True`` when the id matches the removed-model pattern.
+        ``True`` when the id matches the removed-model pattern, or names a
+        catalog model without an effort control, which the menus no longer
+        offer.
     """
-    return bool(_REMOVED_MODEL_RE.search(name))
+    return bool(_REMOVED_MODEL_RE.search(name)) or is_effortless_model(name)
+
+
+def is_effortless_model(name: str) -> bool:
+    """Return whether a model id is a real catalog model without an effort control.
+
+    The menus offer only models with an effort control. Saved prefs, stored
+    conversations, tagging sessions and hardening jobs may still name one of
+    the others; they must not fail validation on every turn.
+
+    Args:
+        name: Catalog model id.
+
+    Returns:
+        ``True`` when the last catalog build listed or hid the id and the
+        model has no usable effort control.
+    """
+    if name in _hidden_effortless_values:
+        return True
+    snapshot = _cached_response
+    return snapshot is not None and any(
+        model.value == name and not supports_effort_control(model) for model in snapshot.models
+    )
 
 
 # D50: TypeSafe Jev is a router, so the removed-model rule hides it, but its
@@ -611,6 +642,11 @@ _LAB_TIERS: dict[str, int] = {
 # never offer them, but a session or saved pick made before they dropped out
 # keeps running rather than failing validation.
 _hidden_model_values: frozenset[str] = frozenset()
+
+# Real models the last build hid as impractical that also lack an effort
+# control. Like the listed models without one, a stored pick of them is
+# treated as withdrawn (see :func:`is_effortless_model`).
+_hidden_effortless_values: frozenset[str] = frozenset()
 
 # Benchmark score of each featured model, from the last catalog build. The
 # interview-model pick ranks on it without the catalog exposing the score.
@@ -1552,7 +1588,7 @@ def get_catalog() -> ModelCatalogResponse:
                 )
             )
 
-    global _hidden_model_values, _featured_scores
+    global _hidden_model_values, _hidden_effortless_values, _featured_scores
     featured_values: set[str] = set()
     practical_by_dc: dict[tuple[str, str | None], set[str]] = {}
     best_value: tuple[str, tuple[int, float]] | None = None
@@ -1594,8 +1630,17 @@ def get_catalog() -> ModelCatalogResponse:
         return allowed is None or m.value in allowed
 
     _hidden_model_values = frozenset(
-        m.value for m in models
+        m.value
+        for m in models
         if m.available and supports_effort_control(m) and not _REMOVED_MODEL_RE.search(m.value) and not _practical(m)
+    )
+    _hidden_effortless_values = frozenset(
+        m.value
+        for m in models
+        if m.available
+        and not supports_effort_control(m)
+        and not _REMOVED_MODEL_RE.search(m.value)
+        and not _practical(m)
     )
     models = [m for m in models if _practical(m) and not excluded_from_managed(m.value)]
     models = [
@@ -2116,7 +2161,10 @@ def require_known_model(model: str | None, *, role: str | None = None) -> None:
     name = str(model or "").strip()
     if role in CLASSIFIER_ROLES and name in CLASSIFIER_ONLY_MODELS:
         return
-    if name and not is_hidden_model(name) and not any(
-        entry.value == name and supports_effort_control(entry) for entry in get_catalog_cached().models
+    if (
+        name
+        and not is_hidden_model(name)
+        and not is_effortless_model(name)
+        and all(entry.value != name for entry in get_catalog_cached().models)
     ):
         raise DomainError("models.unknown_model", status=422)

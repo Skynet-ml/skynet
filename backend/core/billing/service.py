@@ -1085,7 +1085,6 @@ class StripeBillingService:
         }
         return self._create_checkout(username, line_item, "custom", cents)
 
-
     def _create_checkout(self, username: str, line_item: dict[str, Any], pack_id: str, cents: int) -> str:
         """Create the Stripe Checkout Session shared by pack and custom top-ups.
 
@@ -1763,7 +1762,6 @@ class StripeBillingService:
         elif event_type == "charge.dispute.created":
             self._on_dispute_created(session, event_id, obj)
         return None
-
 
     def _on_checkout_completed(self, session: Session, event_id: str, obj: Any) -> tuple[str, int, str] | None:
         """Credit a completed one-time pack purchase to the buyer's balance.

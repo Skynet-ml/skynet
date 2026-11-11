@@ -49,6 +49,14 @@ CLI_MODELS: dict[CliProvider, dict[str, str]] = {
     },
 }
 
+# Slugs removed from CLI_MODELS. Saved prefs, stored conversations and run
+# configs may still name one; it runs on the CLI's default model instead of
+# failing with billing.subscription_unmapped_model.
+REMOVED_CLI_MODELS: dict[CliProvider, frozenset[str]] = {
+    "codex": frozenset(),
+    "claude": frozenset({"anthropic/claude-sonnet-4.5", "anthropic/claude-haiku-4.5"}),
+}
+
 _FULL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Retired levels: Codex's ``ultra`` and Claude Code's ``ultracode``. They only
 # add subagents, which Skynet keeps off, so a stored or sent one runs at the
@@ -129,6 +137,25 @@ def parse_subscription_model_id(model_id: str) -> tuple[CliProvider, str] | None
     return cli, slug  # type: ignore[return-value]
 
 
+def current_cli_slug(cli: CliProvider, slug: str) -> str | None:
+    """Return the slug ``cli`` runs for a stored slug, mapping a removed one to the default.
+
+    Args:
+        cli: The CLI that runs the call.
+        slug: OpenRouter catalog slug from a request or a stored config.
+
+    Returns:
+        ``slug`` when ``cli`` runs it; the CLI's default (first) model when
+        the slug was removed from ``CLI_MODELS``; ``None`` for any other slug.
+    """
+    models = CLI_MODELS.get(cli, {})
+    if slug in models:
+        return slug
+    if slug in REMOVED_CLI_MODELS.get(cli, frozenset()):
+        return next(iter(models))
+    return None
+
+
 def cli_model_arg(cli: CliProvider, slug: str, *, internal: bool = False) -> str:
     """Return the ``--model`` argument ``cli`` takes for a catalog slug.
 
@@ -148,7 +175,7 @@ def cli_model_arg(cli: CliProvider, slug: str, *, internal: bool = False) -> str
         raise ValueError(f"Unknown CLI {cli!r}")
     if internal and cli == "claude" and slug == "anthropic/claude-haiku-4.5":
         return "claude-haiku-4-5"
-    try:
-        return models[slug]
-    except KeyError:
-        raise ValueError(f"{cli} has no model for {slug!r}") from None
+    current = current_cli_slug(cli, slug)
+    if current is None:
+        raise ValueError(f"{cli} has no model for {slug!r}")
+    return models[current]

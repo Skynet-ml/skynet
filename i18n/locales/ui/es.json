@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "No hay modelos que coincidan",
   "agent.model_menu.search_placeholder": "Buscar en todos los modelos…",
   "agent.model_menu.clear_search": "Borrar búsqueda",
-  "agent.model_menu.no_results_hint": "Prueba con otro nombre o proveedor.",
-  "optimization.program_repository.history": "Puntuación histórica del programa guardado. No incluye las filas del conjunto de datos ni los ejemplos de entrenamiento."
+  "agent.model_menu.no_results_hint": "Prueba con otro nombre o proveedor."
 }

@@ -26,3 +26,16 @@ export function useSourceSwap(source: unknown): boolean {
   }, [swapping, shown]);
   return swapping;
 }
+
+/**
+ * Return a check that tells whether a reply asked for `side` still matches the
+ * current Local/Web pick. A slow reply from the side the user left must not
+ * replace the rows of the side they are on.
+ */
+export function useIsCurrentSide<T>(side: T): (asked: T) => boolean {
+  const current = React.useRef(side);
+  React.useLayoutEffect(() => {
+    current.current = side;
+  }, [side]);
+  return React.useCallback((asked: T) => asked === current.current, []);
+}

@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "لا توجد نماذج مطابقة",
   "agent.model_menu.search_placeholder": "ابحث في كل النماذج…",
   "agent.model_menu.clear_search": "مسح البحث",
-  "agent.model_menu.no_results_hint": "جرّب اسمًا أو مزوّدًا آخر.",
-  "optimization.program_repository.history": "نتيجة سابقة من البرنامج المحفوظ. لا تتضمن صفوف مجموعة البيانات وأمثلة التدريب."
+  "agent.model_menu.no_results_hint": "جرّب اسمًا أو مزوّدًا آخر."
 }

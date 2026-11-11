@@ -12,7 +12,7 @@ const fixture = {
   ],
 };
 const stubs: Record<string, string> = {
-  "@/shared/lib/api": `export const getByokModels = async () => (${JSON.stringify(fixture)}); export const getHostedModels = getByokModels;`,
+  "@/shared/lib/api": `export const getByokModels = async () => (${JSON.stringify(fixture)}); export const getHostedModels = getByokModels; export const fetchWithAuthRetry = (url, init) => fetch(url, init);`,
   "@/shared/lib/runtime-env": "export const getRuntimeEnv = () => ({ apiUrl: 'https://catalog.example.test' });",
   "@/shared/lib/messages": "export const msg = (key) => key;",
 };

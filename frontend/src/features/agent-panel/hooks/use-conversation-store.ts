@@ -19,7 +19,7 @@
 
 import * as React from "react";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
-import { useSourceSwap } from "@/shared/hooks/use-source-swap";
+import { useIsCurrentSide, useSourceSwap } from "@/shared/hooks/use-source-swap";
 
 import {
   deleteConversation,
@@ -91,17 +91,19 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
   const { web } = useResourceMode();
   const [rowsSide, setRowsSide] = React.useState(web);
   const swapping = useSourceSwap(web) || rowsSide !== web;
+  const isCurrentSide = useIsCurrentSide(web);
 
   const refresh = React.useCallback(
     async (params?: ListConversationsParams) => {
       if (!enabled) return;
       setLoading(true);
       const rows = await listConversations(params);
+      if (!isCurrentSide(web)) return;
       setLoading(false);
       if (rows !== null) setConversations(rows);
       setRowsSide(web);
     },
-    [enabled, web],
+    [enabled, web, isCurrentSide],
   );
 
   React.useEffect(() => {

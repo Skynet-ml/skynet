@@ -281,13 +281,7 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         # that's still carrying the old name and the UI never updates. The
         # caller's role is folded in too so two users sharing a run (different
         # tiers) never collide on a cached 304 with the wrong effective_role.
-        overview_sig = (
-            overview.get("name"),
-            overview.get("description"),
-            overview.get("pinned"),
-            overview.get("optimization_type"),
-            overview.get("program_repository"),
-        )
+        overview_sig = overview.get("name"), overview.get("description"), overview.get("pinned")
         etag_src = f"{_RESPONSE_SCHEMA_VERSION}:{status}:{log_count}:{progress_count}:{latest_metrics!s}:{overview_sig!s}:{effective_role}"
         etag = '"' + hashlib.md5(etag_src.encode()).hexdigest()[:12] + '"'
         if_none_match = request.headers.get("if-none-match")

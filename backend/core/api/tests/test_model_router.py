@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ...config import DEFAULT_AGENT_MODEL_ID
+from ...local.cli_catalog import CLI_MODELS
 from .. import model_catalog
 from .. import model_router as mr
 from ..errors import DomainError
@@ -20,7 +21,9 @@ def _catalog_with(*model_ids: str, default: str | None = None) -> ModelCatalogRe
     return ModelCatalogResponse(
         providers=[],
         models=[
-            CatalogModel(value=mid, label=mid, provider="test", available=True, supports_thinking=True, is_default=mid == default)
+            CatalogModel(
+                value=mid, label=mid, provider="test", available=True, supports_thinking=True, is_default=mid == default
+            )
             for mid in ids
         ],
     )
@@ -176,3 +179,24 @@ def test_cli_fast_config(
     assert config is not None
     assert (config.token_source, config.cli_provider, config.name) == ("subscription", *expected)
     assert config.extra == {"extra_body": {mr.CLI_FAST_KEY: True}}
+
+
+def test_a_stored_pick_without_effort_control_runs_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A saved pick the menus no longer offer runs the default instead of a 422 on every turn."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="test", available=True)
+    catalog = _catalog_with("openai/gpt-5.5", default=_DEFAULT_ID)
+    monkeypatch.setattr(
+        model_catalog, "_cached_response", catalog.model_copy(update={"models": [*catalog.models, plain]})
+    )
+    monkeypatch.setattr(mr, "get_catalog_cached", lambda: catalog)
+    assert route_menu_model("openrouter/vendor/plain") == _DEFAULT_ID
+
+
+def test_a_stored_removed_cli_model_routes_to_the_cli_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored subscription id for a removed Claude slug runs on the CLI's default model."""
+    monkeypatch.setattr(mr.settings, "local_mode", True)
+    default = next(iter(CLI_MODELS["claude"]))
+    assert route_menu_model("subscription/claude/anthropic/claude-sonnet-4.5") == f"subscription/claude/{default}"
+    with pytest.raises(DomainError) as caught:
+        route_menu_model("subscription/claude/anthropic/claude-unknown-1")
+    assert caught.value.code == "billing.subscription_unmapped_model"

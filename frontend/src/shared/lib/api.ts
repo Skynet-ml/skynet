@@ -119,6 +119,20 @@ function accountRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return request<T>(isLocalMode() ? apiPath(path, "hosted") : path, init);
 }
 
+/** The side the inbox and its settings live on: the Local/Web pick, local when not linked. */
+function inboxSource(): ApiSource {
+  return webPicked() ? "hosted" : "local";
+}
+
+/**
+ * Inbox and notification-settings calls follow the Local/Web pick: local
+ * runs write their alerts to the Mac's own inbox, and an unlinked Mac has
+ * only that one.
+ */
+function inboxRequest<T>(path: string, init?: RequestInit, source: ApiSource = inboxSource()): Promise<T> {
+  return request<T>(path, init, source);
+}
+
 /** Hosted revoked the Mac's link: let the link state re-read instead of refreshing the local token. */
 const HOSTED_LINK_REVOKED_CODE = "hosted_link.revoked";
 
@@ -1217,12 +1231,12 @@ export interface NotificationPreferencesPatch {
 
 /** Fetch where each notification event is routed. */
 export function getNotificationPreferences() {
-  return accountRequest<NotificationPreferences>("/account/notification-preferences");
+  return inboxRequest<NotificationPreferences>("/account/notification-preferences");
 }
 
 /** Change grid cells and hold settings; untouched fields keep their value. */
 export function updateNotificationPreferences(patch: NotificationPreferencesPatch) {
-  return accountRequest<NotificationPreferences>("/account/notification-preferences", {
+  return inboxRequest<NotificationPreferences>("/account/notification-preferences", {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
@@ -1386,8 +1400,9 @@ export interface NotificationUnreadCounts {
 export function listNotifications(tab: NotificationTab, cursor?: string | null) {
   const q = new URLSearchParams({ tab });
   if (cursor) q.set("cursor", cursor);
-  return accountRequest<NotificationPage>(`/notifications?${q.toString()}`).then((page) => {
-    if (!isLocalMode()) return page;
+  const source = inboxSource();
+  return inboxRequest<NotificationPage>(`/notifications?${q.toString()}`, undefined, source).then((page) => {
+    if (!isLocalMode() || source !== "hosted") return page;
     return {
       ...page,
       items: page.items.map((item) => {
@@ -1401,29 +1416,29 @@ export function listNotifications(tab: NotificationTab, cursor?: string | null) 
 }
 
 export function getNotificationUnreadCount() {
-  return accountRequest<NotificationUnreadCounts>("/notifications/unread-count");
+  return inboxRequest<NotificationUnreadCounts>("/notifications/unread-count");
 }
 
 export function markNotificationRead(id: string) {
-  return accountRequest<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
+  return inboxRequest<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
     method: "POST",
   });
 }
 
 export function markAllNotificationsRead(tab: NotificationTab) {
-  return accountRequest<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
+  return inboxRequest<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
 }
 
 /** Take one item out of the caller's inbox; held email, Chrome and Slack sends still go out. */
 export function removeNotification(id: string) {
-  return accountRequest<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
+  return inboxRequest<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
 /** Take every item on a tab out of the caller's inbox. */
 export function clearNotifications(tab: NotificationTab) {
-  return accountRequest<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
+  return inboxRequest<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
 }
 
 /** The VAPID key browsers subscribe with; null while web push is off on the server. */

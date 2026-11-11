@@ -4581,6 +4581,5 @@
   "agent.model_menu.no_results": "مدل منطبقی نیست",
   "agent.model_menu.search_placeholder": "جستجو در همه مدل‌ها…",
   "agent.model_menu.clear_search": "پاک کردن جستجو",
-  "agent.model_menu.no_results_hint": "نام یا ارائه‌دهنده دیگری را امتحان کنید.",
-  "optimization.program_repository.history": "امتیاز پیشین از برنامهٔ ذخیره‌شده. ردیف‌های مجموعه‌داده و نمونه‌های آموزشی شامل نمی‌شوند."
+  "agent.model_menu.no_results_hint": "نام یا ارائه‌دهنده دیگری را امتحان کنید."
 }

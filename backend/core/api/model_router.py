@@ -17,7 +17,7 @@ from ..billing.byok_vault import ProviderKeyVault
 from ..billing.cli_dispatch import CLI_FAST_KEY
 from ..config import settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
-from ..local.cli_catalog import CLI_MODELS, RetiredEffort, parse_subscription_model_id
+from ..local.cli_catalog import RetiredEffort, current_cli_slug, parse_subscription_model_id
 from ..local.managed_models import hosted_model_config
 from ..models import ModelConfig
 from .errors import DomainError
@@ -186,7 +186,8 @@ def route_menu_model(model: str | None) -> str | None:
         The validated catalog id, the catalog default when none was picked
         (or a retired / withdrawn id was sent), or ``None`` when the catalog flags no default (the engine's
         configured default runs). In local mode a ``subscription/<cli>/<slug>``
-        id is returned as is.
+        id is returned as is, or on the CLI's default model when its slug was
+        removed from the CLI catalog.
 
     Raises:
         DomainError: 422 when an explicit id is not a catalog model, or names
@@ -198,9 +199,10 @@ def route_menu_model(model: str | None) -> str | None:
     subscription = parse_subscription_model_id(name) if settings.local_mode else None
     if subscription is not None:
         cli, slug = subscription
-        if slug not in CLI_MODELS[cli]:
+        current = current_cli_slug(cli, slug)
+        if current is None:
             raise DomainError("billing.subscription_unmapped_model", status=422, provider=cli)
-        return name
+        return f"subscription/{cli}/{current}"
     _refuse_local_managed()
     # Saved prefs and stored conversations may still name a withdrawn model;
     # run the default instead of failing every turn with a 422.

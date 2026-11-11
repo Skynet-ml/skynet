@@ -70,7 +70,7 @@ import {
 } from "@/features/sidebar";
 import { AccountMenu } from "@/shared/layout/account-menu";
 import { useResourceMode } from "@/shared/ui/resource-mode-switch";
-import { useSourceSwap } from "@/shared/hooks/use-source-swap";
+import { useIsCurrentSide, useSourceSwap } from "@/shared/hooks/use-source-swap";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ShareDialog } from "@/features/optimizations";
 import { StorageMeter } from "@/features/storage";
@@ -313,6 +313,7 @@ export function Sidebar() {
   // The side the listed runs belong to; the other side's runs never show.
   const [jobsSide, setJobsSide] = React.useState(web);
   const swapping = useSourceSwap(web) || jobsSide !== web;
+  const isCurrentSide = useIsCurrentSide(web);
   const fetchData = React.useCallback(async () => {
     void fetchFolders();
     try {
@@ -328,9 +329,9 @@ export function Sidebar() {
               source,
             });
       }, web, !web);
-      // Drop the response if the user has since toggled away — applying it
-      // would clobber the newer tab's list with stale rows.
-      if (tabRef.current !== tab) return;
+      // Drop the response if the user has since toggled away (tab or side) —
+      // applying it would clobber the newer list with stale rows.
+      if (tabRef.current !== tab || !isCurrentSide(web)) return;
       hostedRetry.failed(res.hostedFailed);
       setJobs(res.items);
       setJobsSide(web);
@@ -341,9 +342,9 @@ export function Sidebar() {
       setRenderedTab(tab);
     } catch (err) {
       console.warn("sidebar fetch failed:", err);
-      setJobsSide(web);
+      if (isCurrentSide(web)) setJobsSide(web);
     }
-  }, [sessionUser, isAdmin, tab, fetchFolders, hostedRetry.failed, web]);
+  }, [sessionUser, isAdmin, tab, fetchFolders, hostedRetry.failed, web, isCurrentSide]);
 
   React.useEffect(() => {
     // Dep change (login / admin toggle) — reset depth so the next fetch
@@ -403,6 +404,7 @@ export function Sidebar() {
         web,
         !web,
       );
+      if (!isCurrentSide(web)) return;
       setJobs((prev) => {
         // Dedupe in case a new job was inserted above the offset between the
         // previous fetch and this one.
@@ -417,7 +419,7 @@ export function Sidebar() {
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [loadedAll, isAdmin, sessionUser, jobs, tab]);
+  }, [loadedAll, isAdmin, sessionUser, jobs, tab, web, isCurrentSide]);
 
   // Infinite-scroll sentinel. The sidebar scrolls in its own container
   // (``listRef``), so the observer's root must point at that element — not
