@@ -29,18 +29,18 @@ and list what to cut.
 - **Gap:** I did not count compactions across past sessions. Some
   transcripts are about 400 MB and the scan did not finish in time.
 - **Gap:** I did not run a Droid session. The Droid side comes from the public
-  Factory docs and from the local Droid configuration files. Each Droid fact
-  is marked DOCUMENTED, INFERRED, UNCONFIRMED or UNKNOWN.
+  Factory docs and from the local Droid configuration files. I mark each Droid
+  fact DOCUMENTED, INFERRED, UNCONFIRMED or UNKNOWN.
 - **Gap:** The desktop app's built-in tools (Artifact, Browser, iOS
   Simulator, Workflow and others) have no documented on/off switch that I
   could find. I list them, but I do not estimate a saving for them.
-- No transcript content and no private file content is copied here. Only
-  sizes and general descriptions are reported.
+- This report copies no transcript content and no private file content. It
+  reports only sizes and general descriptions.
 
 ## 3. Layers, sizes and actions
 
-"Before" is the measured size. "After" is the size when all actions in this
-report are applied. Savings are tokens on every session start, unless the row
+"Before" is the measured size. "After" is the size after you apply all actions in
+this report. Savings are tokens on every session start, unless the row
 says otherwise.
 
 | Layer | Before | After | Purpose | Action | Reason | Est. saving |
@@ -92,7 +92,7 @@ Local Droid setup:
 - The Droid MCP configuration has 5 servers. Claude Code has about 40 servers
   and connectors in this session.
 - All Droid hooks run a notify script that adds no context.
-- No `compactionTokenLimit` is set. The repo has no `.factory/` folder.
+- The Droid settings set no `compactionTokenLimit`. The repo has no `.factory/` folder.
 
 Conclusion: Droid starts with about one third of the instruction text, far
 fewer tool names and no desktop-app tool schemas. Rolling compaction also
@@ -130,22 +130,22 @@ Deferred tool names by source (unique names, bytes in context):
 How to turn them off:
 
 - **Connectors (claude.ai):** the desktop app can turn a connector off for
-  one session (`set_session_connector_enabled`). A default for each project
-  is not documented. Turn them off in the app's Connectors settings if you
+  one session (`set_session_connector_enabled`). I found no default for each
+  project in the docs. Turn them off in the app's Connectors settings if you
   never use them in Code sessions.
-- **Plugins from the user settings file:** add a gitignored
-  `.claude/settings.local.json` in the Skynet checkout. Project settings
+- **Plugins from the user settings file:** merge these keys into
+  `.claude/settings.local.json` in the Skynet checkout (gitignored; create
+  it if it does not exist). Do not replace the file. Project settings
   override user settings for `enabledPlugins`. Set each unused plugin to
   false, for example `"<plugin>@<marketplace>": false`. Candidates: the
   vercel, chrome-devtools-mcp and semgrep plugins, and the media-generation
-  plugins. Merge these keys into the existing `settings.local.json`. Do not
-  replace the file.
+  plugins.
 - **Desktop-app plugins** (sales, finance, marketing, productivity,
   product-management, engineering, data, design and others) do not appear in
   the user settings file. Most of their MCP servers need sign-in or fail to
   connect, so they add no tool names. They still add about 220 entries to
-  the skill listing. Turn them off in the app's plugin settings. The exact
-  switch is not confirmed.
+  the skill listing. Turn them off in the app's plugin settings. I did not
+  confirm the exact switch.
 - **User-scope MCP servers:** use `/mcp` in a terminal `claude` session in
   the Skynet folder to disable them for this project, or move them from user
   scope to the projects that use them.
@@ -175,8 +175,8 @@ files.
 - **Per-PR policy file (20.8 KB, read per PR task).** Many sections repeat
   the `skynet-pr-workflow` skill. Recommended change: at the top, add "For
   Skynet PRs, the repo's `skynet-pr-workflow` skill is the full policy. Read
-  it instead of this file." No diff is given, because the cut depends on
-  whether other repos still use it.
+  it instead of this file." This report gives no diff, because the cut
+  depends on whether other repos still use it.
 
 ## 8. Changes in this PR
 
