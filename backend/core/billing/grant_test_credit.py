@@ -15,9 +15,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Sequence
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from sqlalchemy import Engine, create_engine
 
@@ -26,6 +27,7 @@ from core.config import settings
 
 EXIT_FAILED = 1
 EXIT_REFUSED = 2
+_AMOUNT = re.compile(r"[0-9]{1,9}(\.[0-9]{1,2})?", re.ASCII)
 
 
 def dollars_to_cents(dollars: str) -> int:
@@ -40,21 +42,15 @@ def dollars_to_cents(dollars: str) -> int:
     Raises:
         GrantRefusedError: The text is not a positive amount in whole cents.
     """
-    try:
-        amount = Decimal(dollars.strip())
-    except InvalidOperation as error:
-        raise GrantRefusedError(f"dollars must be a number, got {dollars!r}") from error
-    if not amount.is_finite() or amount <= 0:
+    text = dollars.strip()
+    # Decimal() accepts exponents, underscores and non-ASCII digits, and rounds
+    # long fractions in its context, so only plain ASCII amounts pass.
+    if not _AMOUNT.fullmatch(text):
+        raise GrantRefusedError(f"dollars must be a plain amount with at most 2 decimal places, got {dollars!r}")
+    cents = int(Decimal(text) * 100)
+    if cents <= 0:
         raise GrantRefusedError("dollars must be a positive amount")
-    # A huge exponent such as "1e999999999" overflows the decimal context here.
-    try:
-        cents = amount * 100
-        whole = cents == cents.to_integral_value()
-    except ArithmeticError as error:
-        raise GrantRefusedError("dollars must be a positive amount in whole cents") from error
-    if not whole:
-        raise GrantRefusedError("dollars must have at most 2 decimal places")
-    return int(cents)
+    return cents
 
 
 def _engine() -> Engine:

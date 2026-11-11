@@ -575,9 +575,26 @@ def test_dollars_to_cents(dollars: str, cents: int) -> None:
     assert dollars_to_cents(dollars) == cents
 
 
-@pytest.mark.parametrize("dollars", ["0", "-1", "1.234", "abc", "nan", "inf", ""])
+@pytest.mark.parametrize(
+    "dollars",
+    [
+        "0",
+        "0.00",
+        "-1",
+        "1.234",
+        "abc",
+        "nan",
+        "inf",
+        "",
+        "1.0000000000000000000000000001",
+        "1_000",
+        "1e2",
+        "١٢",
+        "1e5000",
+    ],
+)
 def test_dollars_to_cents_refuses_bad_amounts(dollars: str) -> None:
-    """Zero, negative, sub-cent and non-numeric amounts are refused."""
+    """Zero, negative, sub-cent, rounded, exponent, underscore and non-ASCII amounts are refused."""
     with pytest.raises(GrantRefusedError, match="dollars"):
         dollars_to_cents(dollars)
 
