@@ -1068,7 +1068,6 @@ class ModelGateway:
         names: Any,
         *,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None,
-        on_tool_event: Callable[[dict[str, Any]], None] | None,
         allow_private: bool = False,
     ) -> dict[str, dict[str, str]]:
         """Open one parent-keyed broker for each of the owner's OAuth MCP connections.
@@ -1082,7 +1081,6 @@ class ModelGateway:
         Args:
             names: OAuth connection names from the run's tool list.
             authorize_tool: Optional blocking approval gate for protected chat tools.
-            on_tool_event: Optional lifecycle event receiver for protected chat tools.
             allow_private: Deployment opt-in for private MCP destinations.
 
         Returns:
@@ -1112,7 +1110,6 @@ class ModelGateway:
                     allow_private=allow_private,
                     check_admission=self.runtime.check_admission,
                     authorize_tool=authorize_tool,
-                    on_tool_event=on_tool_event,
                 )
                 self._connector_tokens[name] = token
             routes[name] = {"url": self.url, "token": token}
@@ -1146,7 +1143,6 @@ class ModelGateway:
         managed_key: str,
         allow_private_tools: bool = False,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
-        on_tool_event: Callable[[dict[str, Any]], None] | None = None,
         allow_batch: bool = True,
     ) -> dict[str, Any]:
         """Replace resolved provider credentials with fixed, metered model-role routes.
@@ -1156,7 +1152,6 @@ class ModelGateway:
             managed_key: Platform OpenRouter credential used only for managed roles.
             allow_private_tools: Explicit deployment opt-in for private MCP destinations.
             authorize_tool: Optional blocking approval gate for protected chat tools.
-            on_tool_event: Optional lifecycle event receiver for protected chat tools.
             allow_batch: Whether economy choices may route managed models through batches.
 
         Returns:
@@ -1196,7 +1191,6 @@ class ModelGateway:
                 allow_private=allow_private_tools,
                 check_admission=self.runtime.check_admission,
                 authorize_tool=authorize_tool,
-                on_tool_event=on_tool_event,
             )
             source["mcp_url"] = "https://scoped-tools.invalid/mcp"
             result["_skynet_tools_route"] = {"url": self.url, "token": self._tool_token}
@@ -1204,7 +1198,6 @@ class ModelGateway:
             result[CONNECTOR_ROUTES_KEY] = self._connector_routes(
                 result[CONNECTORS_KEY],
                 authorize_tool=authorize_tool,
-                on_tool_event=on_tool_event,
                 allow_private=allow_private_tools,
             )
         if self._descriptor is not None:

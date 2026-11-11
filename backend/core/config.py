@@ -1142,6 +1142,11 @@ class Settings(BaseSettings):
         default="",
         description="Optional custom base URL for the generalist agent LM (an OpenAI-compatible gateway)",
     )
+    pi_binary: str = Field(default="pi", description="Name or path of the Pi agent harness executable")
+    github_mcp_binary: str = Field(
+        default="github-mcp-server",
+        description="Name or path of the github-mcp-server executable that serves the setup agent's GitHub tools",
+    )
 
     interview_agent_model: str = Field(
         default="",

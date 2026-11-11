@@ -15,7 +15,7 @@ import pytest
 from core.api.errors import DomainError
 from core.config import settings
 from core.service_gateway.agents import generalist as generalist_module
-from core.service_gateway.agents import repo_browser, workspace_coder
+from core.service_gateway.agents import pi_react, repo_browser, workspace_coder
 from core.service_gateway.agents.generalist import (
     REPO_COLUMN_MAPPING,
     SCREEN_FOCUS,
@@ -30,6 +30,19 @@ from core.service_gateway.agents.generalist import (
     tools_for,
 )
 from core.service_gateway.agents.workspace_coder import CODING_AGENT_TOOL, coder_tools, open_repo
+
+from .test_pi_react import _simulated_pi
+
+
+@pytest.fixture(autouse=True)
+def _simulated_pi_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the agent turns on the in-process Pi stand-in, so no ``pi`` binary is needed.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
+
 
 _REPO_METRIC: dict[str, Any] = {
     "wizard_screen": "metric",

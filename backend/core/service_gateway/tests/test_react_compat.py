@@ -17,7 +17,6 @@ from core.service_gateway import react_compat
 from core.service_gateway.react_compat import (
     configure_native_tool_calling,
     native_react_adapter,
-    native_tool_calling_active,
 )
 
 
@@ -32,19 +31,11 @@ def test_native_react_adapter_enables_native_fc_without_parallel() -> None:
     assert adapter.parallel_tool_calls is None
 
 
-def test_native_tool_calling_active_reflects_context_adapter() -> None:
-    """The probe tracks the live adapter, honouring context overrides both ways."""
-    with dspy.context(adapter=ChatAdapter(use_native_function_calling=True)):
-        assert native_tool_calling_active() is True
-    with dspy.context(adapter=ChatAdapter(use_native_function_calling=False)):
-        assert native_tool_calling_active() is False
-
-
 def test_configure_native_tool_calling_is_noop_when_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the flag off, configuring leaves the active adapter untouched."""
     monkeypatch.setattr(react_compat.settings, "react_native_tool_calling", False)
-    before = native_tool_calling_active()
+    before = dspy.settings.adapter
 
     configure_native_tool_calling()
 
-    assert native_tool_calling_active() == before
+    assert dspy.settings.adapter is before

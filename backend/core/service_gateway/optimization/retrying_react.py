@@ -15,8 +15,8 @@ original error is re-raised, so the stock forced-submit fallback still runs
 exactly as before — the retry only ever adds attempts, never changes terminal
 behavior.
 
-Both the optimization rollout (``gepa_adapter``) and the three serve builders
-(``react_serve``, ``_helpers``, ``tool_overlay``) drive the program through the
+Both the optimization rollout (``gepa_adapter``) and the two serve builders
+(``_helpers``, ``tool_overlay``) drive the program through the
 synchronous ``Predict.forward`` — serve via ``dspy.streamify``'s asyncify path,
 which runs the sync loop in a worker thread — so overriding ``forward`` covers
 every site.
@@ -34,7 +34,6 @@ import logging
 import dspy
 from dspy.utils.exceptions import AdapterParseError
 
-from ..agents.steering import deliver_steering
 from ..react_compat import without_text_reasoning
 from ..stable_roster_adapter import StableRosterChatAdapter
 
@@ -93,7 +92,6 @@ class RetryingPredict(dspy.Predict):
             AdapterParseError: When every attempt fails to parse.
             ValueError: When every attempt raises a value error from the adapter.
         """
-        deliver_steering(self, kwargs)
         if dspy.settings.adapter is None:
             with dspy.context(adapter=_STABLE_ROSTER_ADAPTER):
                 return self._forward_with_retries(**kwargs)

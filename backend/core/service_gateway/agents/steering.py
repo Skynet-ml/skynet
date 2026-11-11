@@ -25,7 +25,6 @@ from itertools import islice
 from typing import Any
 from uuid import uuid4
 
-import dspy
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
@@ -455,9 +454,6 @@ class SteerInbox:
     emit: Callable[[dict[str, Any]], None]
     store: SteerStore
     max_chars: int | None = None
-    # Text handed to a step as its input but not yet written into the history
-    # event ReActV2 appends for that step.
-    unrecorded: str | None = None
 
 
 async def open_steer_inbox(
@@ -518,89 +514,3 @@ def claim_delivery(inbox: SteerInbox, taken: list[tuple[str, str]]) -> bool:
             logger.exception("Failed to return undelivered steer messages")
         return False
     return True
-
-
-def attach_steering(react: dspy.Module, inbox: SteerInbox | None) -> None:
-    """Let a ReActV2 loop read steer messages between its steps.
-
-    Args:
-        react: The loop; its step predictor gets the inbox.
-        inbox: The turn's inbox, or ``None`` for a turn that cannot be steered.
-    """
-    if inbox is None:
-        return
-    react.react.steer_inbox = inbox
-    # Read through the class so DSPy does not flag a direct ``forward`` access.
-    run = type(react).forward.__get__(react)
-
-    def forward(**input_args: Any) -> Any:
-        """Run the loop, then record a steer the final step consumed.
-
-        Args:
-            **input_args: The loop's inputs.
-
-        Returns:
-            The loop's prediction.
-        """
-        prediction = run(**input_args)
-        history = getattr(prediction, "history", None)
-        if isinstance(history, dspy.History):
-            _record_unrecorded(inbox, history)
-        return prediction
-
-    react.forward = forward
-
-
-def _record_unrecorded(inbox: SteerInbox, history: dspy.History) -> None:
-    """Write the last steered text into the history event of the step that read it.
-
-    ReActV2 records a step's inputs from its own bookkeeping, which never saw
-    the steer, so the event it appended right after that step lacks it.
-
-    Args:
-        inbox: The turn's inbox.
-        history: The loop history; its last event belongs to the steered step.
-    """
-    if inbox.unrecorded is None:
-        return
-    if history.messages and inbox.input_field not in history.messages[-1]:
-        history.messages[-1][inbox.input_field] = inbox.unrecorded
-    inbox.unrecorded = None
-
-
-def deliver_steering(predictor: Any, kwargs: dict[str, Any]) -> None:
-    """Hand waiting steer messages to the step about to run as its user input.
-
-    The steer becomes the step's ``input_field`` value, so the model reads it
-    as the newest user message right after the last tool result. A separate
-    history event would replay as an empty assistant message after it.
-
-    The first step still carries the turn's own message, so delivery starts
-    at the second step.
-
-    Args:
-        predictor: The loop's step predictor, possibly carrying an inbox.
-        kwargs: The step's inputs, updated in place.
-    """
-    inbox: SteerInbox | None = getattr(predictor, "steer_inbox", None)
-    if inbox is None:
-        return
-    history = kwargs.get("history")
-    if not isinstance(history, dspy.History):
-        return
-    _record_unrecorded(inbox, history)
-    if inbox.input_field in kwargs:
-        return
-    try:
-        taken = inbox.store.take(inbox.owner, inbox.steer_key, max_chars=inbox.max_chars)
-    except Exception:
-        logger.exception("Failed to read steer messages for an agent turn")
-        return
-    if not taken:
-        return
-    if not claim_delivery(inbox, taken):
-        return
-    text = "\n\n".join(message for _, message in taken)
-    kwargs[inbox.input_field] = text
-    inbox.unrecorded = text
-    inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [message_id for message_id, _ in taken], "text": text}})

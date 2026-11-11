@@ -3,8 +3,7 @@
 ``ReActV2`` runs a single inner ``react`` predictor whose final answer is an
 argument of an internal ``submit`` tool call. This module owns the process-wide
 switch that routes those tool calls through the provider's native function
-calling API instead of DSPy's text protocol, plus the probe the reply streamer
-uses to tell which of the two is in force.
+calling API instead of DSPy's text protocol.
 """
 
 from __future__ import annotations
@@ -56,20 +55,6 @@ def configure_native_tool_calling() -> None:
         logger.info("ReActV2 native function calling enabled (global ChatAdapter).")
 
 
-def native_tool_calling_active() -> bool:
-    """Report whether the currently active DSPy adapter uses native function calling.
-
-    Inspects the live ``dspy.settings.adapter`` rather than the config flag, so
-    reply-streaming adapts to whatever adapter is actually in force at call time
-    (context override or global default).
-
-    Returns:
-        ``True`` when an adapter with ``use_native_function_calling`` is active.
-    """
-    adapter = getattr(dspy.settings, "adapter", None)
-    return bool(getattr(adapter, "use_native_function_calling", False))
-
-
 def without_text_reasoning(signature: type[dspy.Signature], kwargs: dict) -> dict:
     """Drop the ``dspy.Reasoning`` output field when a call turns native reasoning off.
 
@@ -103,6 +88,5 @@ def without_text_reasoning(signature: type[dspy.Signature], kwargs: dict) -> dic
 __all__ = [
     "configure_native_tool_calling",
     "native_react_adapter",
-    "native_tool_calling_active",
     "without_text_reasoning",
 ]

@@ -6,7 +6,8 @@ of the generalist agent: its only tool is ``search_docs`` (the BM25 docs index
 of :mod:`...service_gateway.agents.docs_tools`, no model call). The route runs
 the first search on the question itself; the model, which thinks at a low
 effort, may then search again before it answers from the passages only, with
-relative ``/docs/...`` links, or says it does not know.
+relative ``/docs/...`` links, or says it does not know. The search-and-answer
+loop runs on the Pi agent harness (SKY-327); the router keeps every limit.
 
 The platform pays for every answer on the interview pick. Nothing is debited
 from user balances. Three limits bound the spend: a per-IP hourly cap for
@@ -51,6 +52,8 @@ from ...service_gateway.agents.docs_retrieval import DocsCorpus
 from ...service_gateway.agents.docs_tools import SEARCH_DOCS_TOOL, search_corpus
 from ...service_gateway.agents.generalist import build_hosted_suggest_lm
 from ...service_gateway.agents.next_prompt import suggest_next_prompt
+from ...service_gateway.agents.pi_bridge import PiEventTranslator, ToolOutcome, run_pi_turn
+from ...service_gateway.agents.pi_react import output_chunk, stop_chunk
 from ...service_gateway.agents.steering import (
     STEER_APPLIED_EVENT,
     STEER_KEY_MAX_CHARS,
@@ -459,6 +462,151 @@ def _record_spend(lm: Any) -> None:
         logger.exception("docs agent spend could not be recorded")
 
 
+class _DocsTurn:
+    """The Pi handlers of one docs answer: its bounded steps, searches and steers.
+
+    Pi runs the loop; this class keeps every limit of the docs agent. Each
+    model call is one step. A step before the last offers ``search_docs``
+    while searches remain; a step that calls it gets the results and goes on,
+    and a step without a call is the answer. The relay sends the model its
+    own message list, not Pi's: search results go back as a new ``<docs>``
+    user message, not as native tool messages, so a provider that thinks
+    needs no signed thinking blocks replayed, and the passages keep the same
+    data framing as the first search.
+    """
+
+    def __init__(
+        self,
+        lm: Any,
+        messages: list[dict[str, str]],
+        search: Callable[[str], dict[str, Any]],
+        emit: Emit,
+        stop: threading.Event,
+        inbox: SteerInbox | None,
+    ) -> None:
+        """Bind the answer's model, first messages, search and stream.
+
+        Args:
+            lm: The metered LM for this answer.
+            messages: The chat messages for the first step.
+            search: Runs one docs search.
+            emit: Sends one stream event; safe to call from any thread.
+            stop: Set when the client has left; no new step starts after it.
+            inbox: The signed-in caller's optional mailbox, read only at steps.
+        """
+        self._lm = lm
+        self._messages = messages
+        self._search = search
+        self._emit = emit
+        self._stop = stop
+        self._inbox = inbox
+        self._steps = 0
+        self._searches = 1
+        self._lock = asyncio.Lock()
+
+    def tool_specs(self) -> list[dict[str, Any]]:
+        """Return ``search_docs`` as Pi registers it.
+
+        Returns:
+            One ``{name, description, parameters}`` dict.
+        """
+        function = SEARCH_DOCS_SCHEMA["function"]
+        return [
+            {"name": function["name"], "description": function["description"], "parameters": function["parameters"]}
+        ]
+
+    async def call_tool(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+        """Run one docs search and add its passages to the next step's messages.
+
+        Args:
+            name: The tool name; only ``search_docs`` exists.
+            args: The call's arguments.
+
+        Returns:
+            A short note for Pi; the model reads the passages from the messages.
+        """
+        query = str(args.get("query") or "").strip()[:MAX_QUERY_CHARS]
+        if name != SEARCH_DOCS_TOOL or not query:
+            return ToolOutcome("No search ran.", is_error=True)
+        async with self._lock:
+            events, results = await asyncio.to_thread(_search_events, query, self._search)
+            for event, data in events:
+                self._emit(event, data)
+            self._messages = [
+                *self._messages,
+                {"role": "assistant", "content": f"I searched the docs for: {_escape(query)}"},
+                {
+                    "role": "user",
+                    "content": f"{_docs_block(results)}\n\nThese are the search_docs results. "
+                    "Answer the question from the docs only, or search again.",
+                },
+            ]
+        return ToolOutcome(f"{len(results)} passages found.")
+
+    def _take_steers(self) -> bool:
+        """Add a waiting steer to the messages as a new question.
+
+        Returns:
+            ``False`` when the client left while the steers were read; the
+            steers then go back unread.
+        """
+        inbox = self._inbox
+        if inbox is None:
+            return True
+        try:
+            taken = inbox.store.take(inbox.owner, inbox.steer_key, max_chars=inbox.max_chars)
+        except Exception:
+            logger.exception("Failed to read steer messages for a docs turn")
+            taken = []
+        if self._stop.is_set():
+            if taken:
+                inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
+            return False
+        if taken and claim_delivery(inbox, taken):
+            text = "\n\n".join(text for _, text in taken)
+            self._messages = [*self._messages, {"role": "user", "content": f"<question>\n{_escape(text)}\n</question>"}]
+            inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [mid for mid, _ in taken], "text": text}})
+        return True
+
+    async def complete(self, body: dict[str, Any]) -> AsyncIterator[str]:
+        """Run one bounded step through the metered LM.
+
+        Args:
+            body: Pi's chat-completions request; its messages are not used.
+
+        Yields:
+            One OpenAI stream chunk: the step's searches, or the answer.
+        """
+        if self._stop.is_set() or self._steps >= MAX_STEPS or not await asyncio.to_thread(self._take_steers):
+            yield stop_chunk()
+            return
+        offer = self._steps < MAX_STEPS - 1 and self._searches < MAX_SEARCHES
+        self._steps += 1
+        kwargs: dict[str, Any] = {"messages": self._messages, "max_tokens": MAX_OUTPUT_TOKENS}
+        if offer:
+            kwargs["tools"] = [SEARCH_DOCS_SCHEMA]
+        # The output cap goes on the call: dspy rejects a small max_tokens at
+        # construction for OpenAI reasoning models, but not per call.
+        output = _first_output(await asyncio.to_thread(self._lm, **kwargs))
+        reasoning = output.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            self._emit("reasoning_patch", {"chunk": reasoning})
+        queries = _search_queries(output)[: MAX_SEARCHES - self._searches] if offer else []
+        self._searches += len(queries)
+        if not queries:
+            text = output.get("text")
+            yield output_chunk({"text": text if isinstance(text, str) else ""})
+            return
+        calls = [
+            {
+                "id": f"docs_{self._steps}_{index}",
+                "function": {"name": SEARCH_DOCS_TOOL, "arguments": json.dumps({"query": query})},
+            }
+            for index, query in enumerate(queries)
+        ]
+        yield output_chunk({"text": "", "tool_calls": calls})
+
+
 def _run_answer(
     lm: Any,
     messages: list[dict[str, str]],
@@ -467,19 +615,13 @@ def _run_answer(
     stop: threading.Event,
     inbox: SteerInbox | None = None,
 ) -> str:
-    """Run the bounded search-and-answer loop, then record its spend, in one worker thread.
+    """Run the bounded search-and-answer turn on Pi, then record its spend, in one worker thread.
 
-    Each step is one model call. A step before the last offers ``search_docs``
-    while searches remain; a step that calls it gets the results and goes on,
-    and a step without a call is the answer. Search results go back as a new
-    ``<docs>`` user message, not as native tool messages: a provider that
-    thinks then needs no signed thinking blocks replayed, and the passages
-    keep the same data framing as the first search.
-
-    A client disconnect cancels the awaiting stream, but the thread keeps
-    running until the current step ends. Recording here, after the last step,
-    counts the spend of every step even then; ``lm.history`` holds the usage
-    of each call, thinking tokens included.
+    :class:`_DocsTurn` holds the step, search and steer limits. A client
+    disconnect cancels the awaiting stream, but the thread keeps running
+    until the current step ends. Recording here, after the last step, counts
+    the spend of every step even then; ``lm.history`` holds the usage of
+    each call, thinking tokens included.
 
     Args:
         lm: The metered LM for this answer.
@@ -493,58 +635,12 @@ def _run_answer(
         The answer text, or ``""`` when the client left first.
     """
     try:
-        searches = 1
-        for step in range(MAX_STEPS):
-            if stop.is_set():
-                return ""
-            taken = []
-            if inbox is not None:
-                try:
-                    taken = inbox.store.take(inbox.owner, inbox.steer_key, max_chars=inbox.max_chars)
-                except Exception:
-                    logger.exception("Failed to read steer messages for a docs turn")
-                    taken = []
-                if stop.is_set():
-                    if taken:
-                        inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
-                    return ""
-            if stop.is_set():
-                if inbox is not None and taken:
-                    inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
-                return ""
-            if inbox is not None and taken and claim_delivery(inbox, taken):
-                text = "\n\n".join(text for _, text in taken)
-                messages = [*messages, {"role": "user", "content": f"<question>\n{_escape(text)}\n</question>"}]
-                inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [mid for mid, _ in taken], "text": text}})
-            offer = step < MAX_STEPS - 1 and searches < MAX_SEARCHES
-            kwargs: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
-            if offer:
-                kwargs["tools"] = [SEARCH_DOCS_SCHEMA]
-            # The output cap goes on the call: dspy rejects a small max_tokens at
-            # construction for OpenAI reasoning models, but not per call.
-            output = _first_output(lm(**kwargs))
-            reasoning = output.get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning.strip():
-                emit("reasoning_patch", {"chunk": reasoning})
-            queries = _search_queries(output)[: MAX_SEARCHES - searches] if offer else []
-            if not queries:
-                text = output.get("text")
-                return text if isinstance(text, str) else ""
-            for query in queries:
-                searches += 1
-                events, results = _search_events(query, search)
-                for name, data in events:
-                    emit(name, data)
-                messages = [
-                    *messages,
-                    {"role": "assistant", "content": f"I searched the docs for: {_escape(query)}"},
-                    {
-                        "role": "user",
-                        "content": f"{_docs_block(results)}\n\nThese are the search_docs results. "
-                        "Answer the question from the docs only, or search again.",
-                    },
-                ]
-        return ""
+        handlers = _DocsTurn(lm, messages, search, emit, stop, inbox)
+        # The answer streams from the returned text, so Pi's own events stay unsent.
+        translator = PiEventTranslator(lambda _event: None, reply_tool="", reply_arg="", pending_skip=frozenset())
+        # The relay sends the model the handlers' messages, so Pi's prompt never reaches it.
+        asyncio.run(run_pi_turn(binary=settings.pi_binary, handlers=handlers, translator=translator, prompt="Answer."))
+        return translator.text_reply
     finally:
         _record_spend(lm)
 

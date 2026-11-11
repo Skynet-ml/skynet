@@ -11,6 +11,7 @@ from that result.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -20,10 +21,12 @@ import dspy
 
 from ...api.errors import DomainError
 from ...brand import APP_NAME
+from ...config import settings
 from ...connectors import github, repo_hosts
 from ...connectors.github_repo import rate_limit_message
 from ...connectors.transport import label
-from .conversation_react import ConversationReAct
+from .agent_program import AgentProgram
+from .pi_react import run_react_program_on_pi
 from .repo_browser import RepoBrowser
 
 logger = logging.getLogger(__name__)
@@ -251,15 +254,20 @@ def run_coding_agent(
     browser, no_repo = open_repo(context, github_token)
     if browser is not None:
         browser.bind(emit)
-    react = ConversationReAct(WorkspaceCoderSig, tools=coder_tools(browser), max_iters=CODER_MAX_ITERS)
+    react = AgentProgram(WorkspaceCoderSig, tools=coder_tools(browser), max_iters=CODER_MAX_ITERS)
+    inputs = {
+        "context": json.dumps(context, ensure_ascii=False),
+        "request": request,
+        "repo": browser.summary() if browser is not None else no_repo,
+    }
     # The setup turn streams its own reply; the coding agent's tokens and
     # status lines must not leak into it.
     with dspy.context(lm=lm, send_stream=None, stream_listeners=[], callbacks=[]):
-        prediction = react(
-            context=json.dumps(context, ensure_ascii=False),
-            request=request,
-            repo=browser.summary() if browser is not None else no_repo,
+        # This runs in a worker thread with no event loop, so the Pi turn gets its own.
+        outputs = asyncio.run(
+            run_react_program_on_pi(react, inputs, lm, input_field="request", binary=settings.pi_binary)
         )
+    prediction = dspy.Prediction(**outputs) if isinstance(outputs, dict) else dspy.Prediction(summary=outputs)
     is_repo = context.get("artifact_kind") == "repo"
     patch: dict[str, str] = {}
     for field in CODE_FIELDS:
