@@ -179,7 +179,7 @@ defer them. Sizes come from one API request record (bytes in the request).
 | Tool group | Size | Est. tokens | Used in Skynet? | Switch | Status |
 | --- | --- | --- | --- | --- | --- |
 | Built-in browser (19 tools) | 22.4 KB | about 6.2k | No; UI checks use Chrome or a headless browser | Settings > Code > Browser tools: off | DOCUMENTED |
-| Artifact | 37.1 KB | about 10.3k | No; UI evidence goes to Linear | Deny rule `"Artifact"` | DOCUMENTED for the CLI; not tested in the desktop app |
+| Artifact | 37.1 KB | about 10.3k | No; agents do not publish Artifacts | Deny rule `"Artifact"` | DOCUMENTED for the CLI; not tested in the desktop app |
 | iOS Simulator | 6.9 KB | about 1.9k | No | Deny rule `"mcp__Claude_Code_iOS_Simulator__*"`, or an app setting for mobile simulators | Deny rule as above; app setting UNCONFIRMED |
 | Workflow | 5.5 KB | about 1.5k | Rarely; only when Gilad asks | Deny rule `"Workflow"` | As for Artifact |
 | visualize (2 tools) | 4.2 KB | about 1.2k | Rarely | Deny rule `"mcp__visualize__*"` | As for Artifact |
