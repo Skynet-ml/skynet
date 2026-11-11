@@ -98,6 +98,7 @@ import {
   SETUP_CHAT_KEY,
   adoptedSetupChatId,
   autoFeedbackAction,
+  backRequest,
   decodeSetupChat,
   encodeSetupChat,
   hideKickoffs,
@@ -548,6 +549,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     openConversation,
     newSession,
     discardConversation,
+    discardActive,
     send: sendToAgent,
   } = agent;
   const setActiveConversation = store.setActiveId;
@@ -599,6 +601,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     },
     [openConversation, restartSetupChat],
   );
+  // Before the first turn saves it, the setup chat has only a browser id, so
+  // it is found as the chat on view: the setup's panel shows no other chat.
+  const endSetupChat = React.useCallback(
+    (id: string | null) => {
+      if (!id) return;
+      if (isSavedSetupChat(id)) discardConversation(id);
+      else discardActive();
+    },
+    [discardConversation, discardActive],
+  );
   // Open the setup's chat: a new one, or the tab's copy. A copy the server
   // saved shows at once, so a turn sent meanwhile goes to it; its kickoff
   // waits for the server's copy, which may replace it.
@@ -615,7 +627,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         openConversation(saved.id, saved.messages);
         setSetupLoad(saved.id);
         const load = await loadConversation(saved.id);
-        setSetupLoad(null);
+        if (run === setupRunRef.current) setSetupLoad(null);
         // A load for a setup that closed or opened again must not touch the
         // new one. A restart to a new id during the load keeps the setup.
         if (run !== setupRunRef.current || setupChatRef.current === null) return;
@@ -644,13 +656,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       kickoffTurnRef.current = null;
       sentFeedbackRef.current = autoFeedbackRef.current?.id ?? 0;
       autoTurnRef.current = null;
-      if (id) discardConversation(id);
+      endSetupChat(id);
       newSession();
       setActiveConversation(null);
       return;
     }
     if (from !== null) {
-      if (opening) sendToAgent(opening, undefined, { hidden: true });
+      if (opening) sendToAgent(backRequest(opening), undefined, { hidden: true });
       else if (!kickedScreensRef.current.has(shownScreen) && opensWithKickoff(shownScreen)) {
         setKickoffScreen(shownScreen);
       }
@@ -703,6 +715,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     keepSetupChat,
     restoreWriteBefore,
     openSetupChat,
+    endSetupChat,
   ]);
 
   // The tab's copy of the setup chat follows each settled turn; a turn still

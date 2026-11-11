@@ -38,6 +38,7 @@ const {
   setupChatGone,
   unansweredTurn,
   keepHiddenTurns,
+  backRequest,
 } = await import("./screen-agent.ts");
 const { SteerQueue } = await import("../../../shared/ui/agent/steer-queue.ts");
 
@@ -308,6 +309,77 @@ test("a kickoff sent again after not found counts as the kickoff of the screen o
   const plain = setupChat({ live: { id: "c1", messages: [...tab, { role: "user", content: "next" }] } });
   plain.retryInNewSetupChat([...tab, { role: "user", content: "next" }]);
   assert.equal(plain.kickoffTurnRef.current, null);
+});
+
+test("the agent's Back request stays hidden in a shared link and in the chat history", async () => {
+  const back = backRequest("Change the metric to accuracy");
+  assert.match(back, /Change the metric to accuracy$/);
+  const stored = [
+    { role: "user", content: SCREEN_KICKOFF },
+    { role: "assistant", content: "ok" },
+    { role: "user", content: back },
+    { role: "user", content: "Change the metric to accuracy" },
+  ];
+  const sharedView = "src/features/agent-panel/components/SharedChatView.tsx";
+  const visible = expression(sharedView, "visible", { hideKickoffs, messages: stored })();
+  assert.deepEqual(visible.map((m: { hidden?: boolean }) => m.hidden === true), [true, false, true, false]);
+  const opened: unknown[][] = [];
+  const pick = expression(panel, "handlePickConversation", {
+    setDrawerOpen: () => {}, hideKickoffs,
+    getConversation: async () => ({ messages: stored }),
+    agent: { activateConversation: () => false, openConversation: (id: string, m: unknown[]) => opened.push([id, m]) },
+    store: { setActiveId: () => {}, markSeen: () => {} },
+  });
+  await pick("c1");
+  const shown = opened[0][1] as { hidden?: boolean }[];
+  assert.deepEqual(shown.map((m) => m.hidden === true), [true, false, true, false]);
+});
+
+test("closing the setup stops its chat, even before the server gave it an id", () => {
+  const log: unknown[][] = [];
+  const end = expression(panel, "endSetupChat", {
+    isSavedSetupChat,
+    discardConversation: (id: string) => log.push(["discard", id]),
+    discardActive: () => log.push(["discardActive"]),
+  });
+  end("setup-1");
+  end("c1");
+  end(null);
+  assert.deepEqual(log, [["discardActive"], ["discard", "c1"]]);
+});
+
+test("discardActive stops and drops the chat on view and shows a new one", () => {
+  const draft = new Map<string, any>([["k0", { key: "k0" }], ["k1", { key: "k1" }]]);
+  const aborted: string[] = [];
+  const dropped: string[] = [];
+  const activeKeyRef = { current: "k0" };
+  const runtimesRef = { current: new Map([["k0", {}]]) };
+  let key = 2;
+  const blankSession = expression(hook, "blankSession", {});
+  const discardSession = expression(hook, "discardSession", {
+    abortSession: (k: string) => aborted.push(k), runtimesRef, dropSteerQueue: (k: string) => dropped.push(k),
+    activeKeyRef, nextKey: () => `k${key++}`, blankSession,
+    commit: (mutate: (d: Map<string, any>) => void) => mutate(draft),
+    setActive: (k: string) => { activeKeyRef.current = k; },
+  });
+  const discardActive = expression(hook, "discardActive", { discardSession, activeKeyRef });
+  discardActive();
+  assert.deepEqual(aborted, ["k0"]);
+  assert.deepEqual(dropped, ["k0"]);
+  assert.equal(runtimesRef.current.has("k0"), false);
+  assert.deepEqual([...draft.keys()], ["k1", "k2"]);
+  assert.equal(activeKeyRef.current, "k2");
+});
+
+test("an old load that ends late leaves the newer load's Share block on", async () => {
+  const first = pendingLoad();
+  let calls = 0;
+  const chat = setupChat({ load: () => (calls++ === 0 ? first.start() : new Promise(() => {})) });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  void chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  first.load.finish({ detail: null, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [["loading", "c1"], ["loading", "c1"]]);
 });
 
 test("the server copy keeps the hidden mark of each turn the tab copy hid", () => {

@@ -14,6 +14,15 @@ import { stopToolCalls } from "./pending-tool-calls";
 export const SCREEN_KICKOFF =
   "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in and continue; otherwise ask me the one thing you need.";
 
+// Starts the hidden turn that carries the agent's Back request to the screen
+// it reopens. The server stores no hidden flag, so this text marks the turn.
+const SCREEN_BACK = "[The wizard went back to this screen for your request; I typed nothing.] ";
+
+/** The hidden turn that hands the agent's Back request to the reopened screen. */
+export function backRequest(request: string): string {
+  return `${SCREEN_BACK}${request.trim()}`;
+}
+
 /**
  * Whether a screen opens with a kickoff turn. The Check screen does not: its
  * check starts as it opens, so a kickoff turn would have no result to explain
@@ -44,10 +53,12 @@ export function newSetupChatStart(
   return { kickoff: false, kicked: [shown] };
 }
 
-/** A reopened chat stores the wizard's kickoff as a user turn; it stays unshown. */
+/** A reopened chat stores the wizard's kickoff and Back turns as user turns; they stay unshown. */
 export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((m) =>
-    m.role === "user" && m.content.trim() === SCREEN_KICKOFF ? { ...m, hidden: true } : m,
+    m.role === "user" && (m.content.trim() === SCREEN_KICKOFF || m.content.startsWith(SCREEN_BACK))
+      ? { ...m, hidden: true }
+      : m,
   );
 }
 

@@ -102,6 +102,8 @@ export interface GeneralistAgentState {
   openConversation: (id: string | null, messages: AgentMessage[], options?: { moveQueue?: boolean }) => void;
   /** Drop a conversation's session (aborting its stream) after deletion. */
   discardConversation: (id: string) => void;
+  /** Drop the displayed session (aborting its stream), even one with no server id yet. */
+  discardActive: () => void;
   /** Conversation ids with a stream running or waiting in the queue. */
   busyConversationIds: ReadonlySet<string>;
   /** Busy sessions other than the displayed one (badge / pill signal). */
@@ -1157,17 +1159,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     [commit, nextKey, pruneInactive, setActive, steerQueues, steerQueueFor],
   );
 
-  const discardConversation = React.useCallback(
-    (id: string) => {
-      let found: string | null = null;
-      for (const [key, session] of sessionsRef.current) {
-        if (session.conversationId === id) {
-          found = key;
-          break;
-        }
-      }
-      if (found === null) return;
-      const key = found;
+  const discardSession = React.useCallback(
+    (key: string) => {
       abortSession(key);
       runtimesRef.current.delete(key);
       dropSteerQueue(key);
@@ -1187,6 +1180,20 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     },
     [abortSession, commit, nextKey, setActive, dropSteerQueue],
   );
+
+  const discardConversation = React.useCallback(
+    (id: string) => {
+      for (const [key, session] of sessionsRef.current) {
+        if (session.conversationId === id) {
+          discardSession(key);
+          return;
+        }
+      }
+    },
+    [discardSession],
+  );
+
+  const discardActive = React.useCallback(() => discardSession(activeKeyRef.current), [discardSession]);
 
   const active = sessions.get(activeKey) ?? blankSession(activeKey);
 
@@ -1260,6 +1267,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activateConversation,
     openConversation,
     discardConversation,
+    discardActive,
     busyConversationIds,
     backgroundBusyCount,
   };
