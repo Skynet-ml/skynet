@@ -161,7 +161,7 @@ of an id with no secret changes nothing and exits 0.
 - Never add funds except through "Grant test credit" below.
 - Staging keeps the setup intake for new accounts. Previews skip it.
 
-### Grant test credit (staging only)
+### Grant test credit (documented for staging)
 
 A staging check that needs a paid run can fund its own check account with
 the grant command `python -m core.billing.grant_test_credit`. All of these
@@ -185,7 +185,7 @@ the account id has the `account.py` shape for that target, and the account
 has a user row. Amounts are dollars with at most 2 decimals. A retry with
 the same `--idempotency-key` credits nothing more. Use a new key for each
 approved grant, for example `<account-id>-1`. The key has at most 54
-characters. `--reason` and `--approval` together have at most about 220
+characters. `--reason` and `--approval` together have at most 230
 characters.
 
 Run it on staging as a one-off ECS task. It uses the migrate task

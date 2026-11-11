@@ -1577,7 +1577,8 @@ class StripeBillingService:
         transaction. The row records the reason and the approval text, and its
         ``settlement_key`` (``testgrant:<key>``) makes a retry a no-op. A grant
         row carries no payment intent and no ``topup`` kind, so revenue reports
-        and refund clawbacks never count it.
+        and refund clawbacks never count it. Unlike a top-up, a grant does not
+        repay ``debt_cents``.
 
         Args:
             username: Test-account email, as built by :func:`check_account_email`.
@@ -1591,7 +1592,8 @@ class StripeBillingService:
 
         Raises:
             GrantRefusedError: The environment, account, amount, text, key or
-                daily cap fails a guard. Nothing is written.
+                daily cap fails a guard, or the key was used for a different
+                account or amount. Nothing is written.
         """
         target = _test_grant_target()
         if target is None:
@@ -1610,8 +1612,9 @@ class StripeBillingService:
             )
         description = f"Test grant: {reason} | approval: {approval}"
         if len(description) > _LEDGER_DESCRIPTION_MAX_LENGTH:
+            text_limit = _LEDGER_DESCRIPTION_MAX_LENGTH - len("Test grant:  | approval: ")
             raise GrantRefusedError(
-                f"reason and approval are too long: keep them under {_LEDGER_DESCRIPTION_MAX_LENGTH - 30} characters"
+                f"reason and approval are too long: together they may have at most {text_limit} characters"
             )
         username = username.strip().lower()
         if not _is_test_account(username, target):
@@ -1623,12 +1626,16 @@ class StripeBillingService:
             if session.get(UserModel, username) is None:
                 raise GrantRefusedError("the test account has no user row; sign it up first")
             customer = session.get(BillingCustomerModel, username, with_for_update=True)
-            prior = session.scalar(
-                select(WalletLedgerModel.delta_cents).where(WalletLedgerModel.settlement_key == settlement_key)
-            )
+            prior = session.execute(
+                select(WalletLedgerModel.username, WalletLedgerModel.delta_cents).where(
+                    WalletLedgerModel.settlement_key == settlement_key
+                )
+            ).first()
             if prior is not None:
+                if prior.username != username or int(prior.delta_cents) != cents:
+                    raise GrantRefusedError("idempotency key already used for a different account or amount")
                 balance = int(customer.balance_cents) if customer is not None else 0
-                return GrantResult(credited_cents=int(prior), balance_cents=balance, replayed=True)
+                return GrantResult(credited_cents=int(prior.delta_cents), balance_cents=balance, replayed=True)
             day_start = datetime.combine(now.date(), time.min, tzinfo=UTC)
             granted_today = int(
                 session.scalar(

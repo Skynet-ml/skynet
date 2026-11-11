@@ -225,6 +225,21 @@ def test_retry_with_the_same_key_credits_once(engine: Engine, staging: None) -> 
     assert len(_ledger(engine)) == 1
 
 
+@pytest.mark.parametrize(("account_id", "cents"), [("staging-other-check-0f0f0f", 500), (STAGING_ID, 999)])
+def test_refuses_a_reused_key_for_another_account_or_amount(
+    engine: Engine, staging: None, account_id: str, cents: int
+) -> None:
+    """A key reused with a different account or amount is refused, not reported as a replay."""
+    _add_user(engine, check_account_email(STAGING_ID))
+    _add_user(engine, check_account_email("staging-other-check-0f0f0f"))
+    _grant(engine, cents=500)
+    with pytest.raises(GrantRefusedError, match="different account or amount"):
+        _grant(engine, account_id, cents=cents)
+    assert _balance(engine, check_account_email(STAGING_ID)) == 500
+    assert _balance(engine, check_account_email("staging-other-check-0f0f0f")) is None
+    assert len(_ledger(engine)) == 1
+
+
 def test_daily_cap_counts_every_account(engine: Engine, staging: None) -> None:
     """Grants on all accounts share one $50 UTC-day cap; the grant that would pass it is refused."""
     other = "staging-other-check-0f0f0f"
@@ -275,8 +290,9 @@ def test_refuses_a_key_that_does_not_fit(engine: Engine, staging: None, key: str
 def test_refuses_audit_text_longer_than_the_column(engine: Engine, staging: None) -> None:
     """The audit text is never cut: too long a reason plus approval is refused."""
     _add_user(engine, check_account_email(STAGING_ID))
-    with pytest.raises(GrantRefusedError, match="too long"):
-        _grant(engine, reason="r" * 200, approval="a" * 100)
+    with pytest.raises(GrantRefusedError, match="at most 230 characters"):
+        _grant(engine, reason="r" * 200, approval="a" * 31)
+    _grant(engine, reason="r" * 200, approval="a" * 30)
 
 
 @pytest.mark.parametrize(
