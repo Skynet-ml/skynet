@@ -141,7 +141,11 @@ function laterScreen(a: string | null, b: string | null): string | null {
  * Returns:
  *   The return screen after the move.
  */
-export function nextReturnScreen(current: string | null, nav: ScreenNav, shown: string | null = null): string | null {
+export function nextReturnScreen(
+  current: string | null,
+  nav: ScreenNav,
+  shown: string | null = null,
+): string | null {
   if (nav.action !== "back") return current;
   return laterScreen(current, laterScreen(nav.from || null, shown));
 }
@@ -178,6 +182,36 @@ export interface SetupChat {
   id: string;
   kicked: string[];
   messages: AgentMessage[];
+  /**
+   * What each of the chat's wizard writes found on the form, by tool call
+   * id: the before-state of each turn's edits, so the "Edited N files" card,
+   * its Undo and the Changes pane's "Last turn" survive a reload.
+   */
+  ledger?: Record<string, Record<string, unknown>>;
+}
+
+/**
+ * Keep only the before-states of the tool calls a chat still holds.
+ *
+ * Args:
+ *   messages: The chat's messages.
+ *   writeBefore: What each wizard write found on the form, by tool call id.
+ *
+ * Returns:
+ *   The entries of the chat's own tool calls.
+ */
+export function setupChatLedger(
+  messages: readonly AgentMessage[],
+  writeBefore: Readonly<Record<string, Record<string, unknown>>>,
+): Record<string, Record<string, unknown>> {
+  const ledger: Record<string, Record<string, unknown>> = {};
+  for (const message of messages) {
+    for (const call of message.toolCalls ?? []) {
+      const before = writeBefore[call.id];
+      if (before) ledger[call.id] = before;
+    }
+  }
+  return ledger;
 }
 
 // Browser storage holds about 5 MB per origin. The left setup's copy goes to
@@ -192,17 +226,21 @@ export function newSetupChatId(): string {
 
 /**
  * Write the setup's chat for the tab, within ``SETUP_CHAT_MAX_CHARS``. A chat
- * too long first loses its tool results, then its oldest messages.
+ * too long first loses its tool results and its ledger, then its oldest messages.
  */
 export function encodeSetupChat(chat: SetupChat): string {
   const full = JSON.stringify(chat);
   if (full.length <= SETUP_CHAT_MAX_CHARS) return full;
-  const messages = chat.messages.map((m) =>
-    m.toolCalls?.length ? { ...m, toolCalls: m.toolCalls.map(({ payload: _, ...call }) => call) } : m,
+  // The edits read each write's result, so without results the ledger is dead weight.
+  const { ledger: _ledger, ...lean } = chat;
+  const messages = lean.messages.map((m) =>
+    m.toolCalls?.length
+      ? { ...m, toolCalls: m.toolCalls.map(({ payload: _, ...call }) => call) }
+      : m,
   );
   // Each message costs its own text plus one comma. The array has one comma
   // fewer than messages, so starting one below the empty chat makes the sum exact.
-  let size = JSON.stringify({ ...chat, messages: [] }).length - 1;
+  let size = JSON.stringify({ ...lean, messages: [] }).length - 1;
   let start = messages.length;
   while (start > 0) {
     const next = size + JSON.stringify(messages[start - 1]).length + 1;
@@ -210,7 +248,7 @@ export function encodeSetupChat(chat: SetupChat): string {
     size = next;
     start--;
   }
-  return JSON.stringify({ ...chat, messages: messages.slice(start) });
+  return JSON.stringify({ ...lean, messages: messages.slice(start) });
 }
 
 /** Read the setup's chat back; null when nothing usable is kept. */
@@ -225,9 +263,21 @@ export function decodeSetupChat(raw: string | null): SetupChat | null {
       : [];
     const messages = value.messages.filter(
       (m): m is AgentMessage =>
-        isRecord(m) && (m.role === "user" || m.role === "assistant") && typeof m.content === "string",
+        isRecord(m) &&
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string",
     );
-    return { id: value.id, kicked, messages };
+    const ledger = isRecord(value.ledger)
+      ? Object.fromEntries(Object.entries(value.ledger).filter(([, before]) => isRecord(before)))
+      : {};
+    return Object.keys(ledger).length
+      ? {
+          id: value.id,
+          kicked,
+          messages,
+          ledger: ledger as Record<string, Record<string, unknown>>,
+        }
+      : { id: value.id, kicked, messages };
   } catch {
     return null;
   }
@@ -281,7 +331,9 @@ export function setupChatSnapshot(
   const ended: AgentMessage = {
     ...last,
     ...(last.toolCalls ? { toolCalls: stopToolCalls(last.toolCalls, now) } : {}),
-    ...(last.thinkingSegments ? { thinkingSegments: closeThinking(last.thinkingSegments, now) } : {}),
+    ...(last.thinkingSegments
+      ? { thinkingSegments: closeThinking(last.thinkingSegments, now) }
+      : {}),
   };
   if (!ended.content && !ended.toolCalls?.length) kept.pop();
   else kept[kept.length - 1] = ended;
@@ -310,7 +362,10 @@ export function trackKickoffTurn(turn: KickoffTurn | null, busy: boolean): Kicko
 }
 
 /** The screens the tab's copy counts as started: a kickoff still running does not count. */
-export function storedKickedScreens(kicked: Iterable<string>, running: KickoffTurn | null): string[] {
+export function storedKickedScreens(
+  kicked: Iterable<string>,
+  running: KickoffTurn | null,
+): string[] {
   return [...kicked].filter((s) => s !== running?.screen);
 }
 

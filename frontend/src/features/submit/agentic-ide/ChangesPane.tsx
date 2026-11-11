@@ -12,9 +12,10 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/primitives/dropdown-menu";
 import { Input } from "@/shared/ui/primitives/input";
+import type { LineComment } from "@/shared/ui/agent/line-comments";
 import { ArrowLeft, CaretDown, FileCode, GitDiff, MagnifyingGlass } from "@/shared/ui/icons";
 
-import { fileStats, orderFiles, type DraftFile } from "./draft-changes";
+import { fileStats, isChanged, orderFiles, type DraftFile } from "./draft-changes";
 import { ChangeCounts, FileDiff, type LineMarker } from "./FileDiff";
 import { CheckStateIcon, checkStateLabel } from "./SetupCheckConsole";
 import type { SetupCheckState } from "./setup-check";
@@ -42,7 +43,7 @@ function useWidth(): [(el: HTMLElement | null) => void, number] {
 
 function TreeRow({ file, onPick }: { file: DraftFile; onPick: () => void }) {
   const stats = fileStats(file);
-  const changed = file.before !== file.after;
+  const changed = isChanged(file);
   return (
     <li>
       <button
@@ -86,6 +87,9 @@ export function ChangesPane({
   onRevertHunk,
   onOpenEditor,
   onCopyPath,
+  comments,
+  onComment,
+  onDeleteComment,
   editorOpen,
   editor,
   onBackToChanges,
@@ -108,6 +112,11 @@ export function ChangesPane({
   onRevertHunk: (file: DraftFile, hunk: number) => void;
   onOpenEditor: (path: string, line?: number) => void;
   onCopyPath: (path: string) => void;
+  /** Line comments that wait for the next message. */
+  comments: readonly LineComment[];
+  /** Leave a comment on a line of a file's current text; absent when no chat takes comments. */
+  onComment?: (path: string, line: number, text: string) => void;
+  onDeleteComment?: (comment: LineComment) => void;
   editorOpen: boolean;
   /** The workbench, kept mounted once opened; null until the first Open in editor. */
   editor: React.ReactNode;
@@ -120,10 +129,10 @@ export function ChangesPane({
   const listRef = React.useRef<HTMLDivElement | null>(null);
   const [setList, listWidth] = useWidth();
 
-  const shown = files.filter((file) => loading.has(file.path) || file.before !== file.after);
+  const shown = files.filter((file) => loading.has(file.path) || isChanged(file));
   const tree = orderFiles(files, filter);
-  const changedTree = tree.filter((file) => file.before !== file.after);
-  const otherTree = tree.filter((file) => file.before === file.after);
+  const changedTree = tree.filter(isChanged);
+  const otherTree = tree.filter((file) => !isChanged(file));
   const totals = shown.reduce(
     (sum, file) => {
       if (loading.has(file.path)) return sum;
@@ -251,6 +260,9 @@ export function ChangesPane({
                   onRevertHunk={(hunk) => onRevertHunk(file, hunk)}
                   onOpenEditor={(line) => onOpenEditor(file.path, line)}
                   onCopyPath={() => onCopyPath(file.path)}
+                  comments={comments.filter((c) => c.path === file.path)}
+                  onComment={onComment && ((line, text) => onComment(file.path, line, text))}
+                  onDeleteComment={onDeleteComment}
                 />
               ))
             )}

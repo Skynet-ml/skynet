@@ -75,6 +75,8 @@ export interface WizardState {
   screen_issue?: string;
   /** The later screen a go-back left from; Continue returns there. */
   return_screen?: string;
+  /** The failed setup check's errors, as the "Ask the agent to fix" turn words them. */
+  setup_check?: string;
   /** The setup is a copy of an earlier run, so the agent waits for the user. */
   cloned_run?: boolean;
 }

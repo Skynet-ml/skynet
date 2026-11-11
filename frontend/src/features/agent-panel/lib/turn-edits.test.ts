@@ -14,7 +14,7 @@ registerHooks({
   },
 });
 
-const { editTotals, latestTurnEdits, messageEdits } = await import("./turn-edits.ts");
+const { editTotals, latestTurnEdits, messageEdits, turnUndone } = await import("./turn-edits.ts");
 
 const call = (id: string, wizard_state: Record<string, unknown>) => ({
   id,
@@ -67,7 +67,7 @@ test("a file the draft did not hold diffs against the repository's text", () => 
   assert.equal(latestTurnEdits([message], writeBefore, base)[0]!.before, repoToml);
 });
 
-test("a final newline is not an added line", () => {
+test("a final newline is not an added line, and a newline-only change is no edit", () => {
   const message = {
     role: "assistant" as const,
     content: "",
@@ -76,10 +76,7 @@ test("a final newline is not an added line", () => {
   const edits = messageEdits(message, { a: { metric_code: "" }, b: { run_code: "a\nb" } });
   assert.deepEqual(
     edits.map(({ path, added, removed }) => ({ path, added, removed })),
-    [
-      { path: "metric.py", added: 3, removed: 0 },
-      { path: "run.py", added: 0, removed: 0 },
-    ],
+    [{ path: "metric.py", added: 3, removed: 0 }],
   );
 });
 
@@ -104,4 +101,16 @@ test("the latest turn is the newest message that edited a file", () => {
   assert.equal(edits.length, 1);
   assert.equal(edits[0]!.path, "metric.py");
   assert.deepEqual(latestTurnEdits([user, reply], {}), []);
+});
+
+test("a turn is undone when every file holds its before-state again", () => {
+  const edits = [
+    { path: "metric.py", before: "x = 0\n", after: "x = 1\n", added: 1, removed: 1 },
+    { path: "run.py", before: "", after: "run()\n", added: 1, removed: 0 },
+  ];
+  const now = (texts: Record<string, string>) => (path: string) => texts[path] ?? "";
+  assert.equal(turnUndone(edits, now({ "metric.py": "x = 0", "run.py": "" })), true);
+  assert.equal(turnUndone(edits, now({ "metric.py": "x = 0\n", "run.py": "run()\n" })), false);
+  assert.equal(turnUndone(edits, now({ "metric.py": "x = 1\n", "run.py": "run()\n" })), false);
+  assert.equal(turnUndone([], now({})), false);
 });

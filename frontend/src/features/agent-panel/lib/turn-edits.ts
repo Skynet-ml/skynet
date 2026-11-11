@@ -69,7 +69,7 @@ export function messageEdits(
     }
   }
   return [...byPath]
-    .filter(([, { before, after }]) => before !== after)
+    .filter(([, { before, after }]) => body(before) !== body(after))
     .map(([path, { before, after }]) => ({
       path,
       before,
@@ -115,4 +115,19 @@ export function editTotals(edits: readonly FileEdit[]): { added: number; removed
     (sum, edit) => ({ added: sum.added + edit.added, removed: sum.removed + edit.removed }),
     { added: 0, removed: 0 },
   );
+}
+
+/**
+ * Tell whether a turn's edits are undone: each file holds its text from
+ * before the turn again.
+ *
+ * Args:
+ *   edits: The turn's edits.
+ *   text: A file's text now, by path.
+ *
+ * Returns:
+ *   True when there are edits and every file is back to its before-state.
+ */
+export function turnUndone(edits: readonly FileEdit[], text: (path: string) => string): boolean {
+  return edits.length > 0 && edits.every((edit) => body(text(edit.path)) === body(edit.before));
 }

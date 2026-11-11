@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "react-toastify";
 
-import { useWizardStateOptional, type FileEdit } from "@/features/agent-panel";
+import { useWizardStateOptional, type DraftFiles, type FileEdit } from "@/features/agent-panel";
 import { checkOptimizeToml } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -12,7 +12,7 @@ import { GitDiff } from "@/shared/ui/icons";
 import type { RepoSource } from "../ide/repo-files";
 import { METRIC_FILE, RUN_FILE } from "../lib/wizard-v2";
 import { ChangesPane, type ChangeScope } from "./ChangesPane";
-import { revertHunk, type DraftFile } from "./draft-changes";
+import { isChanged, revertHunk, type DraftFile } from "./draft-changes";
 import type { LineMarker } from "./FileDiff";
 import { SetupCheckConsole } from "./SetupCheckConsole";
 import { checkFeedback, errorLine, setupCheckState, type SetupCheckRun } from "./setup-check";
@@ -130,6 +130,8 @@ export function AgenticIde({
   const setViewChanges = agent?.setViewChanges;
   const setSetupCheckIssue = agent?.setSetupCheckIssue;
   const setRepoBase = agent?.setRepoBase;
+  const setDraftFiles = agent?.setDraftFiles;
+  const addLineComment = agent?.addLineComment;
 
   const [setRoot, width] = useWidth();
   const rootRef = React.useRef<HTMLDivElement | null>(null);
@@ -178,8 +180,7 @@ export function AgenticIde({
     [scope, draftPaths, base],
   );
   const anyChange =
-    lastFiles.some((f) => f.before !== f.after) ||
-    allFiles.some((f) => base.has(f.path) && f.before !== f.after);
+    lastFiles.some(isChanged) || allFiles.some((f) => base.has(f.path) && isChanged(f));
 
   // The pane opens by itself once, on the first change; after that the user decides.
   const autoOpened = React.useRef(false);
@@ -266,11 +267,31 @@ export function AgenticIde({
   );
 
   // A file that was not in the draft before goes away when its change is undone.
-  const write = (file: DraftFile, text: string) => {
-    if (busy) return;
-    if (text === "" && file.before === "" && !DRAFT_ONLY.has(file.path)) onWrite(file.path, null);
-    else onWrite(file.path, text);
-  };
+  const write = React.useCallback(
+    (file: Pick<DraftFile, "path" | "before">, text: string) => {
+      if (busy) return;
+      if (text === "" && file.before === "" && !DRAFT_ONLY.has(file.path)) onWrite(file.path, null);
+      else onWrite(file.path, text);
+    },
+    [busy, onWrite],
+  );
+
+  // The chat's Undo and Reapply read and write the draft through these.
+  const draftFiles = React.useMemo<DraftFiles>(
+    () => ({
+      text: (path) => texts[path] ?? "",
+      write: (edits, side) => {
+        if (busy) return false;
+        for (const edit of edits) write(edit, side === "before" ? edit.before : edit.after);
+        return true;
+      },
+    }),
+    [texts, busy, write],
+  );
+  React.useEffect(() => {
+    setDraftFiles?.(draftFiles);
+  }, [setDraftFiles, draftFiles]);
+  React.useEffect(() => () => setDraftFiles?.(null), [setDraftFiles]);
 
   const copyPath = (path: string) => {
     void navigator.clipboard
@@ -294,6 +315,11 @@ export function AgenticIde({
       onRevertHunk={(file, hunk) => write(file, revertHunk(file.before, file.after, hunk))}
       onOpenEditor={openEditor}
       onCopyPath={copyPath}
+      comments={agent?.lineComments ?? []}
+      onDeleteComment={agent?.removeLineComment}
+      onComment={
+        addLineComment ? (path, line, text) => addLineComment({ path, line, text }) : undefined
+      }
       editorOpen={editorOpen}
       editor={editorMounted ? renderEditor(openRequest) : null}
       onBackToChanges={() => setEditorOpen(false)}
@@ -311,7 +337,7 @@ export function AgenticIde({
   );
 
   const totals = allFiles.reduce(
-    (sum, file) => (file.before === file.after || !base.has(file.path) ? sum : sum + 1),
+    (sum, file) => (!isChanged(file) || !base.has(file.path) ? sum : sum + 1),
     0,
   );
 

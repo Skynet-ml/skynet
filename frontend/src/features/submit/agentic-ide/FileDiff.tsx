@@ -3,7 +3,10 @@
 import * as React from "react";
 
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
+import type { LineComment } from "@/shared/ui/agent/line-comments";
+import { Button } from "@/shared/ui/primitives/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,12 +20,14 @@ import {
   CaretRight,
   DotsThree,
   FileCode,
+  Plus,
 } from "@/shared/ui/icons";
 
 import {
   diffRows,
   fileStats,
   hunkStarts,
+  isChanged,
   splitRows,
   type DiffRow,
   type DraftFile,
@@ -75,11 +80,106 @@ function RevertHunk({ onRevert, disabled }: { onRevert: () => void; disabled: bo
       type="button"
       onClick={onRevert}
       disabled={disabled}
-      className="absolute end-2 top-0 z-10 hidden items-center gap-1 rounded border border-border bg-popover px-1.5 py-px font-sans text-[0.625rem] text-muted-foreground shadow-sm transition-colors hover:text-foreground disabled:opacity-50 group-hover/hunk:flex focus-visible:flex"
+      className="absolute end-2 top-0 z-10 flex items-center gap-1 rounded border border-border bg-popover px-1.5 py-px font-sans text-[0.625rem] text-muted-foreground opacity-0 shadow-sm transition-[color,opacity] hover:text-foreground focus-visible:opacity-100 disabled:opacity-50 group-hover/hunk:opacity-100"
     >
       <ArrowCounterClockwise className="size-3" aria-hidden />
       {msg("submit.agentic_ide.revert_hunk")}
     </button>
+  );
+}
+
+// Sits over the line-number gutter; a keyboard user reaches it with Tab.
+function AddComment({ line, onClick }: { line: number; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={formatMsg("submit.agentic_ide.comment.title", { line })}
+      className="absolute start-0.5 top-1/2 z-10 flex size-4 -translate-y-1/2 cursor-pointer items-center justify-center rounded bg-primary-fill text-primary-foreground opacity-0 shadow-sm transition-opacity focus-visible:opacity-100 group-hover/row:opacity-100"
+    >
+      <Plus className="size-3" aria-hidden />
+    </button>
+  );
+}
+
+// The comment box follows the page's direction, inside the LTR diff.
+function CommentBox({
+  line,
+  onCancel,
+  onSubmit,
+}: {
+  line: number;
+  onCancel: () => void;
+  onSubmit: (text: string) => void;
+}) {
+  const [text, setText] = React.useState("");
+  const send = () => {
+    if (text.trim()) onSubmit(text.trim());
+  };
+  return (
+    <div className="sticky start-0 w-full max-w-md px-3 py-2 font-sans">
+      <div
+        dir={getActiveDir()}
+        className="rounded-lg border border-border bg-popover p-2.5 text-xs shadow-sm"
+      >
+        <p className="mb-1.5 text-muted-foreground">
+          {formatMsg("submit.agentic_ide.comment.title", { line })}
+        </p>
+        <textarea
+          autoFocus
+          dir="auto"
+          rows={2}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              onCancel();
+            } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              send();
+            }
+          }}
+          placeholder={msg("submit.agentic_ide.comment.placeholder")}
+          aria-label={formatMsg("submit.agentic_ide.comment.title", { line })}
+          className="w-full resize-none bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground/60"
+        />
+        <div className="mt-1.5 flex justify-end gap-1.5">
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={onCancel}>
+            {msg("submit.agentic_ide.comment.cancel")}
+          </Button>
+          <Button size="sm" className="h-6 px-2 text-xs" disabled={!text.trim()} onClick={send}>
+            {msg("submit.agentic_ide.comment.submit")}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// A comment that waits for the next message, under its line.
+function CommentNote({ comment, onDelete }: { comment: LineComment; onDelete?: () => void }) {
+  return (
+    <div className="sticky start-0 w-full max-w-md px-3 py-1 font-sans">
+      <div
+        dir={getActiveDir()}
+        className="flex items-start gap-2 rounded-lg border border-border/70 bg-muted/50 px-2.5 py-1.5 text-xs"
+      >
+        <p dir="auto" className="min-w-0 flex-1 whitespace-pre-wrap text-foreground">
+          {comment.text}
+        </p>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={onDelete}
+            className="shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-destructive"
+          >
+            {msg("submit.agentic_ide.comment.delete")}
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -108,6 +208,9 @@ export function FileDiff({
   onRevertHunk,
   onOpenEditor,
   onCopyPath,
+  comments = [],
+  onComment,
+  onDeleteComment,
 }: {
   file: DraftFile;
   /** The file's base is still loading from the repository. */
@@ -122,6 +225,11 @@ export function FileDiff({
   onRevertHunk: (hunk: number) => void;
   onOpenEditor: (line?: number) => void;
   onCopyPath: () => void;
+  /** This file's comments that wait for the next message. */
+  comments?: readonly LineComment[];
+  /** Leave a comment on a line of the new text; absent when no chat takes comments. */
+  onComment?: (line: number, text: string) => void;
+  onDeleteComment?: (comment: LineComment) => void;
 }) {
   // Diffs build only for the files on view, so a large draft loads per file.
   const rows = React.useMemo(
@@ -130,11 +238,41 @@ export function FileDiff({
   );
   const stats = React.useMemo(() => fileStats(file), [file]);
   const markerAt = React.useMemo(() => new Map(markers.map((m) => [m.line, m.message])), [markers]);
-  const changed = file.before !== file.after;
+  const changed = isChanged(file);
 
   const marked = (newNo: number | null) => (newNo !== null ? markerAt.get(newNo) : undefined);
   const pairs = React.useMemo(() => (split ? splitRows(rows) : []), [split, rows]);
   const starts = React.useMemo(() => hunkStarts(split ? pairs : rows), [split, pairs, rows]);
+  const [commentAt, setCommentAt] = React.useState<number | null>(null);
+  const addButton = (newNo: number | null) =>
+    onComment && newNo !== null ? (
+      <AddComment line={newNo} onClick={() => setCommentAt(newNo)} />
+    ) : null;
+  // The open comment box and the waiting comments sit under their line.
+  const below = (newNo: number | null) =>
+    newNo === null ? null : (
+      <>
+        {comments
+          .filter((c) => c.line === newNo)
+          .map((c, k) => (
+            <CommentNote
+              key={k}
+              comment={c}
+              onDelete={onDeleteComment && (() => onDeleteComment(c))}
+            />
+          ))}
+        {commentAt === newNo && onComment && (
+          <CommentBox
+            line={newNo}
+            onCancel={() => setCommentAt(null)}
+            onSubmit={(text) => {
+              onComment(newNo, text);
+              setCommentAt(null);
+            }}
+          />
+        )}
+      </>
+    );
   const withRevert = (i: number, line: React.ReactNode) => {
     const hunk = starts.get(i);
     if (hunk === undefined) return <React.Fragment key={i}>{line}</React.Fragment>;
@@ -218,41 +356,45 @@ export function FileDiff({
                   ) : (
                     withRevert(
                       i,
-                      <div className="grid grid-cols-2">
-                        {[row.left, row.right].map((side, s) => {
-                          const newNo = side && side.type !== "del" ? side.newNo : null;
-                          const note = s === 1 ? marked(newNo) : undefined;
-                          return (
-                            <div
-                              key={s}
-                              title={note}
-                              className={cn(
-                                "flex min-w-0",
-                                s === 1 && "border-s border-border/50",
-                                !side && HATCH,
-                                side && side.type !== "same" && rowTone(side.type),
-                                note &&
-                                  "bg-destructive/15 shadow-[inset_2px_0_0_var(--destructive)]",
-                              )}
-                            >
-                              <LineNo
-                                n={
-                                  side
-                                    ? s === 0
-                                      ? side.type === "add"
-                                        ? null
-                                        : side.oldNo
-                                      : newNo
-                                    : null
-                                }
-                              />
-                              <span className="min-w-0 flex-1 whitespace-pre-wrap pe-3 [overflow-wrap:anywhere]">
-                                {side?.text || " "}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>,
+                      <>
+                        <div className="grid grid-cols-2">
+                          {[row.left, row.right].map((side, s) => {
+                            const newNo = side && side.type !== "del" ? side.newNo : null;
+                            const note = s === 1 ? marked(newNo) : undefined;
+                            return (
+                              <div
+                                key={s}
+                                title={note}
+                                className={cn(
+                                  "group/row relative flex min-w-0",
+                                  s === 1 && "border-s border-border/50",
+                                  !side && HATCH,
+                                  side && side.type !== "same" && rowTone(side.type),
+                                  note &&
+                                    "bg-destructive/15 shadow-[inset_2px_0_0_var(--destructive)]",
+                                )}
+                              >
+                                {s === 1 && addButton(newNo)}
+                                <LineNo
+                                  n={
+                                    side
+                                      ? s === 0
+                                        ? side.type === "add"
+                                          ? null
+                                          : side.oldNo
+                                        : newNo
+                                      : null
+                                  }
+                                />
+                                <span className="min-w-0 flex-1 whitespace-pre-wrap pe-3 [overflow-wrap:anywhere]">
+                                  {side?.text || " "}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {below(row.right ? row.right.newNo : null)}
+                      </>,
                     )
                   ),
                 )}
@@ -264,21 +406,25 @@ export function FileDiff({
                   const newNo = row.type === "del" ? null : row.newNo;
                   const note = marked(newNo);
                   const line = (
-                    <div
-                      title={note}
-                      className={cn(
-                        "flex",
-                        rowTone(row.type),
-                        note && "bg-destructive/15 shadow-[inset_2px_0_0_var(--destructive)]",
-                      )}
-                    >
-                      <LineNo n={row.type === "add" ? null : row.oldNo} />
-                      <LineNo n={newNo} />
-                      <span className="w-4 shrink-0 select-none opacity-60" aria-hidden>
-                        {row.type === "add" ? "+" : row.type === "del" ? "−" : ""}
-                      </span>
-                      <span className="whitespace-pre pe-3">{row.text || " "}</span>
-                    </div>
+                    <>
+                      <div
+                        title={note}
+                        className={cn(
+                          "group/row relative flex",
+                          rowTone(row.type),
+                          note && "bg-destructive/15 shadow-[inset_2px_0_0_var(--destructive)]",
+                        )}
+                      >
+                        {addButton(newNo)}
+                        <LineNo n={row.type === "add" ? null : row.oldNo} />
+                        <LineNo n={newNo} />
+                        <span className="w-4 shrink-0 select-none opacity-60" aria-hidden>
+                          {row.type === "add" ? "+" : row.type === "del" ? "−" : ""}
+                        </span>
+                        <span className="whitespace-pre pe-3">{row.text || " "}</span>
+                      </div>
+                      {below(newNo)}
+                    </>
                   );
                   return withRevert(i, line);
                 })}

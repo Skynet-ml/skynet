@@ -25,7 +25,7 @@ export {
 export { isGeneralistAgentEnabled } from "./lib/feature-flag";
 export { lockedCodeFiles } from "./lib/wizard-write";
 export type { FileEdit } from "./lib/turn-edits";
-export type { SetupCheckIssue } from "./hooks/use-wizard-state";
+export type { DraftFiles, SetupCheckIssue } from "./hooks/use-wizard-state";
 export { SETUP_CHAT_KEY, flushSetupChat, legacySetupChatId } from "./lib/screen-agent";
 export {
   deleteConversation,
