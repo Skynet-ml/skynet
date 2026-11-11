@@ -231,8 +231,7 @@ def clone_payload(
         for key, value in source_payload.items()
         if not key.startswith("_budget")
         and not key.startswith("execution_budget_")
-        # A deadline override shortens only the run that asked for it (SKY-572).
-        and key not in {"preflight_id", "preflight_fingerprint", "deadline_seconds"}
+        and key not in {"preflight_id", "preflight_fingerprint"}
     }
     if new_name is not None:
         copy["name"] = new_name

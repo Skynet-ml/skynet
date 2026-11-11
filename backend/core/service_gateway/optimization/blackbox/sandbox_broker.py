@@ -503,7 +503,9 @@ class SandboxBroker:
             The box, closed with the broker if the parent never closes it.
 
         Raises:
-            ServiceError: When the spec carries credentials or exceeds the profile.
+            ServiceError: When the spec carries credentials or a lifetime that is
+                not finite and positive. A longer lifetime is capped at the
+                broker maximum.
         """
         if spec.inject_headers or spec.env:
             raise ServiceError("A parent box must not carry credentials in its environment or network.")
@@ -516,7 +518,10 @@ class SandboxBroker:
         session = ParentSandboxSession(
             self._runtime.open(
                 SandboxSpec(
-                    lifetime_seconds=_duration(spec.lifetime_seconds, self._maximum),
+                    # Stage boxes ask for the scorer timeout plus layout time, which can
+                    # exceed a short per-run deadline (SKY-572). The run ends at the
+                    # deadline anyway, so cap the box there instead of failing the stage.
+                    lifetime_seconds=min(_duration(spec.lifetime_seconds, math.inf), self._maximum),
                     image=self._image,
                     vcpus=self._vcpus,
                     tags=self._tags,

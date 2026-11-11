@@ -19,6 +19,7 @@ from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
 
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS
 from ..sandbox import _CODEX_REQUIREMENTS_COMMAND, _CODEX_REQUIREMENTS_READBACK, CommandResult, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 
@@ -193,8 +194,18 @@ def test_the_parent_box_reaches_only_funded_registries_and_carries_no_credential
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("registry.npmjs.org",), operation_key="k"))
     with pytest.raises(ServiceError, match="credentials"):
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), env={"A": "b"}, operation_key="k"))
-    with pytest.raises(ServiceError, match="duration"):
-        narrow.open(SandboxSpec(lifetime_seconds=600, allowed_hosts=("pypi.org",), operation_key="k"))
+    for bad in (0, -1, float("nan"), float("inf"), True):
+        with pytest.raises(ServiceError, match="duration"):
+            narrow.open(SandboxSpec(lifetime_seconds=bad, allowed_hosts=("pypi.org",), operation_key="k"))
+
+
+def test_a_stage_sized_parent_box_opens_capped_at_a_short_run_deadline() -> None:
+    """A stage box asks for the scorer timeout plus layout time; a short deadline caps it instead of failing the stage."""
+    runtime = FakeRuntime()
+    parent = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120).parent_runtime(())
+    parent.open(SandboxSpec(lifetime_seconds=30.0 + _STAGE_LAYOUT_SECONDS, operation_key="stage:a"))
+    parent.open(SandboxSpec(lifetime_seconds=60, operation_key="stage:b"))
+    assert [spec.lifetime_seconds for spec in runtime.specs] == [120.0, 60.0]
 
 
 def test_a_parent_box_without_a_network_switch_fails_closed() -> None:
