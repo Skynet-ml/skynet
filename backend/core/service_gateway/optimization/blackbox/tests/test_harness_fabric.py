@@ -65,13 +65,18 @@ result = json.loads(os.environ["FAKE_RESULT"])
 open(args.result, "w").write(json.dumps(result))
 sys.exit(0 if result.get("status") == "succeeded" else 1)
 """
-# Stand-in for uv: ``venv`` makes a real stdlib venv, ``pip install`` copies the
-# fake Fabric package into it and logs the requested pins. No network.
+# Stand-in for uv: ``--version`` answers as the pinned release does, ``venv``
+# makes a real stdlib venv, and ``pip install`` copies the fake Fabric package
+# into it and logs the requested pins. No network.
 _FAKE_UV = """#!/bin/sh
+if [ "$1" = "--version" ]; then echo "uv 0.13.7 (0123abcd 2026-01-01)"; exit 0; fi
 printf '%s\\n' "$*" >> "$FAKE_UV_LOG"
 if [ "$1" = "venv" ]; then exec "$REAL_PYTHON" -m venv --without-pip "$4"; fi
 if [ "$1" = "pip" ]; then
-  exec "$4" -c 'import shutil, sys, sysconfig; shutil.copytree(sys.argv[1], sysconfig.get_paths()["purelib"], dirs_exist_ok=True)' "$FAKE_PACKAGE"
+  exec "$4" -c \\
+    'import shutil, sys, sysconfig; '\\
+'shutil.copytree(sys.argv[1], sysconfig.get_paths()["purelib"], dirs_exist_ok=True)' \\
+    "$FAKE_PACKAGE"
 fi
 exit 2
 """
@@ -108,7 +113,7 @@ def _fake_package(root: Path) -> Path:
 
 
 def _install(tmp_path: Path, launch_install: str) -> tuple[dict[str, str], Path]:
-    """Run the install command with fake uv and no ``curl``, so it builds a local stand-in Fabric.
+    """Run the install with the pinned fake uv in place and no ``curl``, so it builds a stand-in Fabric.
 
     Args:
         tmp_path: Scratch directory for the home, the fakes and their logs.
@@ -117,14 +122,14 @@ def _install(tmp_path: Path, launch_install: str) -> tuple[dict[str, str], Path]
     Returns:
         The env that later commands share, and the fake uv call log.
     """
-    bin_dir = tmp_path / "fake-bin"
-    bin_dir.mkdir()
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     uv = bin_dir / "uv"
     uv.write_text(_FAKE_UV)
     uv.chmod(uv.stat().st_mode | stat.S_IEXEC)
     uv_log = tmp_path / "uv.log"
     env = {
-        "PATH": f"{bin_dir}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
         "REAL_PYTHON": sys.executable,
         "FAKE_PACKAGE": str(_fake_package(tmp_path)),
@@ -201,7 +206,8 @@ def test_open_launch_pins_the_packages_and_sends_model_calls_only_to_the_gateway
     assert "install.sh" not in launch.install_command
     assert "| sh;" not in launch.install_command
     assert launch.install_command.index("sha256sum -c -") < launch.install_command.index("tar -xzf")
-    assert "uv venv --python 3.12" in launch.install_command
+    assert '"$HOME/.local/bin/uv" venv --python 3.12' in launch.install_command
+    assert "command -v uv" not in launch.install_command
     assert "harbor" not in launch.install_command
     assert launch.install_command.endswith("&& fabric --version")
     assert set(launch.files) == {FABRIC_CONFIG_FILE}
@@ -367,6 +373,43 @@ def test_uv_install_unpacks_uv_when_the_digest_matches(tmp_path: Path) -> None:
     uv = home / ".local" / "bin" / "uv"
     assert subprocess.run([str(uv)], capture_output=True, text=True, check=True).stdout == "uv 0.13.7\n"
     assert list(tmp_path.glob("tmp.*")) == []
+
+
+def test_install_downloads_the_pinned_uv_over_another_release(tmp_path: Path) -> None:
+    """Download uv over another release at ``$HOME/.local/bin/uv``, and never build the venv with it."""
+    install = build_launch(_target(), _GATEWAY).install_command or ""
+    home_bin = tmp_path / "home" / ".local" / "bin"
+    home_bin.mkdir(parents=True)
+    path_bin = tmp_path / "fake-bin"
+    path_bin.mkdir()
+    curl_log = tmp_path / "curl.log"
+    uv_log = tmp_path / "uv.log"
+    old_uv = f'#!/bin/sh\necho "uv 0.9.0"\necho "$*" >> {uv_log}\n'
+    for path, body in (
+        (home_bin / "uv", old_uv),
+        (path_bin / "uv", old_uv),
+        (path_bin / "curl", f"#!/bin/sh\necho called >> {curl_log}\nexit 22\n"),
+    ):
+        path.write_text(body)
+        path.chmod(0o755)
+    finished = subprocess.run(
+        install,
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{path_bin}{os.pathsep}{os.defpath}",
+            "HOME": str(tmp_path / "home"),
+            "TMPDIR": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert finished.returncode != 0
+    assert curl_log.read_text().splitlines() == ["called"]
+    assert uv_log.read_text().splitlines() == ["--version"]
 
 
 def test_uv_install_pins_one_digest_per_architecture() -> None:

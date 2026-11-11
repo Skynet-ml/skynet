@@ -41,6 +41,9 @@ FABRIC_CONFIG_FILE = ".app/fabric/config.json"
 FABRIC_KEY_ENV = "MODEL_API_KEY"
 # The uv installer puts uv here, and the install puts the ``fabric`` launcher here.
 _FABRIC_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
+# The install calls uv by this path, never through ``PATH``, so an unpinned uv
+# that the box already has never builds the venv.
+_FABRIC_UV = '"$HOME/.local/bin/uv"'
 # Fabric has no CLI of its own (``fabric-agent-ctl`` has no ``--version``), so
 # the install writes this launcher. It answers the pinned version probe with the
 # installed runtime release and otherwise runs the venv's Python. It finds the
@@ -84,8 +87,9 @@ _PROTECTED_ENV = {
 # goes inline on the command line, not as a launch file: the protected relay
 # rewrite needs every launch file to carry the gateway URL.
 # Fabric's state, Codex's home (the adapter puts it under the artifacts
-# folder) and the logs go to a fresh directory outside the workspace, so they never show up in the scored workspace. The script
-# removes it on exit: one box runs many proposer turns.
+# folder) and the logs go to a fresh directory outside the workspace, so they
+# never show up in the scored workspace. The script removes it on exit: one box
+# runs many proposer turns.
 _FABRIC_RUN_SCRIPT = """\
 import json
 import os
@@ -181,11 +185,14 @@ def _fabric_install() -> str:
     venv = '"$HOME/.local/share/app-fabric"'
     venv_python = '"$HOME/.local/share/app-fabric/bin/python"'
     packages = " ".join(shlex.quote(package) for package in FABRIC_PACKAGES)
+    # A release build prints ``uv 0.13.7 (<commit> <date>)``; any other answer
+    # (no uv, or another release) downloads the pinned one over it.
+    pinned_uv = f'"uv {FABRIC_UV_VERSION}"|"uv {FABRIC_UV_VERSION} "*'
     return (
         f"{_FABRIC_PATH}; {_version_check('fabric', FABRIC_VERSION)} || "
-        f"{{ {{ command -v uv >/dev/null 2>&1 || {{ {_uv_install()}; }}; }} && "
-        f"rm -rf {venv} && uv venv --python {FABRIC_PYTHON} {venv} >/dev/null && "
-        f"uv pip install --python {venv_python} {packages} >/dev/null && "
+        f'{{ {{ case "$({_FABRIC_UV} --version 2>/dev/null)" in {pinned_uv}) ;; *) {_uv_install()};; esac; }} && '
+        f"rm -rf {venv} && {_FABRIC_UV} venv --python {FABRIC_PYTHON} {venv} >/dev/null && "
+        f"{_FABRIC_UV} pip install --python {venv_python} {packages} >/dev/null && "
         f'mkdir -p "$HOME/.local/bin" && printf %s {shlex.quote(_FABRIC_LAUNCHER)} > "$HOME/.local/bin/fabric" && '
         'chmod 755 "$HOME/.local/bin/fabric"; } && fabric --version'
     )
