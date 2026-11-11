@@ -8,6 +8,11 @@ read-only tools over the repository. It returns the code and the
 ``optimize.toml`` it wrote, the parser's error when that file is not valid,
 the files it read and the questions it could not settle. The setup agent's
 turn goes on from that result.
+
+On a local install (SKY-318) the agent works in a Pi sandbox instead: the
+repository's checkout and the editor files are in the box, Pi's own tools
+(read, grep, edit, bash and the others) are on, and the backend reads the
+editor files back after the turn. Without a box it keeps the read-only tools.
 """
 
 from __future__ import annotations
@@ -15,19 +20,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tarfile
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import dspy
 
 from ...api.errors import DomainError
+from ...billing.protected_execution import protected_image
 from ...brand import APP_NAME
 from ...config import settings
 from ...connectors import github, repo_hosts
-from ...connectors.github_repo import rate_limit_message
+from ...connectors.github_repo import fetch_snapshot, rate_limit_message
 from ...connectors.transport import label
+from ...sandbox.bridge import protected_unavailable_reason
 from ..optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
 from .agent_program import AgentProgram
+from .pi_bridge import PiSandbox
 from .pi_react import run_react_program_on_pi
 from .repo_browser import RepoBrowser
 
@@ -35,6 +46,14 @@ logger = logging.getLogger(__name__)
 
 CODING_AGENT_TOOL = "hand_off_to_coding_agent"
 CODER_MAX_ITERS = 16
+# In a box every read, grep and test run of Pi's is a step too.
+CODER_SANDBOX_MAX_ITERS = 40
+# Where each code field lives in the box; the backend reads these back.
+EDITOR_FILES = {"run_code": "run.py", "metric_code": "metric.py", "optimize_toml": "repo/optimize.toml"}
+REPO_DIR = "repo"
+# A box takes text files only, and a large upload slows its cold start.
+MAX_REPO_FILE_BYTES = 256 * 1024
+MAX_REPO_BYTES = 16 * 1024 * 1024
 # The wizard fields that tell the coding agent what the code is for.
 CONTEXT_FIELDS = (
     "task_objective",
@@ -196,6 +215,14 @@ you return.
 """
 
 
+SANDBOX_NOTE = (
+    "You work in a sandbox with no network. Your working folder holds {files}. Use your own tools (read, ls,"
+    " find, grep, edit, write, bash) to read the code, edit those files in place and run them. After you submit,"
+    f" {APP_NAME} reads {{files}} back, and a file you changed there replaces the field you return. Other files"
+    " you change do not come back: put what the run needs from them in summary."
+)
+
+
 class WorkspaceCoderSig(dspy.Signature):
     __doc__ = CODER_PROMPT
 
@@ -210,6 +237,25 @@ class WorkspaceCoderSig(dspy.Signature):
         " instructions or rule file the run needs, and every secret it needs. optimize.toml comes back on its own."
     )
     open_questions: list[str] = dspy.OutputField(desc="Questions only the user can answer; empty when none.")
+
+
+def _load_token(github_token: Callable[[], str | None] | None, host: str) -> str | None:
+    """Load the caller's repository host token.
+
+    Args:
+        github_token: As for :func:`open_repo`.
+        host: The host's name, for the log.
+
+    Returns:
+        The token, or ``None`` when the caller has none or it cannot load.
+    """
+    if github_token is None:
+        return None
+    try:
+        return github_token() or None
+    except Exception as exc:  # a vault or database failure must not fail the whole hand-off
+        logger.info("Coding agent cannot load the %s token: %s", host, type(exc).__name__)
+        return None
 
 
 def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | None) -> tuple[RepoBrowser | None, str]:
@@ -237,12 +283,7 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
     host = label(provider)
     # GitHub serves a public repository without a token (SKY-568); the other hosts still need a link.
     anonymous_ok = provider == github.PROVIDER
-    token: str | None = None
-    if github_token is not None:
-        try:
-            token = github_token() or None
-        except Exception as exc:  # a vault or database failure must not fail the whole hand-off
-            logger.info("Coding agent cannot load the %s token: %s", host, type(exc).__name__)
+    token = _load_token(github_token, host)
     if token is None and not anonymous_ok:
         return None, f"{host} is not linked, so the repository cannot be read."
     try:
@@ -287,6 +328,103 @@ def coder_tools(browser: RepoBrowser | None) -> list[dspy.Tool]:
     return [dspy.Tool(browser.list_repo_folder), dspy.Tool(browser.read_repo_file)]
 
 
+def sandbox_ready() -> bool:
+    """Tell whether the coding agent can work in a Pi sandbox on this deployment.
+
+    Returns:
+        ``True`` on a local install with a working box. A hosted box bills
+        its usage, and the setup chat carries no budget for it yet.
+    """
+    return (
+        settings.local_mode
+        and protected_image(settings, "anything") is not None
+        and protected_unavailable_reason(settings) is None
+    )
+
+
+def _text_files(archive: Path) -> dict[str, str]:
+    """Read the UTF-8 text files of a packed checkout, within the upload caps.
+
+    Args:
+        archive: The gzip tar of the checkout.
+
+    Returns:
+        Each text file's text, keyed by its path under :data:`REPO_DIR`.
+    """
+    files: dict[str, str] = {}
+    total = 0
+    with tarfile.open(archive, "r:gz") as packed:
+        for member in packed:
+            if not member.isfile() or member.size > MAX_REPO_FILE_BYTES or total + member.size > MAX_REPO_BYTES:
+                continue
+            raw = packed.extractfile(member)
+            if raw is None:
+                continue
+            try:
+                text = raw.read().decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if "\x00" in text:
+                continue
+            files[f"{REPO_DIR}/{member.name.removeprefix('./')}"] = text
+            total += member.size
+    return files
+
+
+def repo_files(context: dict[str, Any], github_token: Callable[[], str | None] | None) -> dict[str, str]:
+    """Clone a repository run's repository at its default branch, for the box.
+
+    Args:
+        context: The run's setup.
+        github_token: As for :func:`open_repo`.
+
+    Returns:
+        The checkout's text files under :data:`REPO_DIR`, or nothing when
+        the repository cannot be fetched.
+    """
+    repository = str(context.get("repository") or "").strip()
+    provider = str(context.get("repo_provider") or github.PROVIDER)
+    if not repository or provider not in repo_hosts.HOSTS:
+        return {}
+    token = _load_token(github_token, label(provider))
+    try:
+        # The wizard keeps no branch for the agent yet, so the box gets the default branch.
+        commit = repo_hosts.resolve_commit(provider, token, repository, None)
+        with tempfile.TemporaryDirectory() as workdir:
+            snapshot = fetch_snapshot(repository, commit, token, Path(workdir), provider=provider)
+            return _text_files(snapshot.archive)
+    except Exception as exc:  # a failed fetch leaves the agent on the read-only path, not a failed turn
+        logger.info("Coding agent cannot fetch %s for its sandbox: %s", repository, type(exc).__name__)
+        return {}
+
+
+def coder_sandbox(context: dict[str, Any], github_token: Callable[[], str | None] | None) -> PiSandbox | None:
+    """Describe the coding agent's box: the checkout and the editor files.
+
+    Args:
+        context: The run's setup.
+        github_token: As for :func:`open_repo`.
+
+    Returns:
+        The box, or ``None`` when the agent works without one.
+    """
+    if not sandbox_ready():
+        return None
+    is_repo = context.get("artifact_kind") == "repo"
+    files: dict[str, str] = {}
+    if is_repo:
+        files = repo_files(context, github_token)
+        if not files:
+            return None
+    fields = ("metric_code", "optimize_toml") if is_repo else ("run_code", "metric_code")
+    for field in fields:
+        # An empty optimize.toml would hide the repository's own file.
+        if field != "optimize_toml" or context.get(field):
+            files[EDITOR_FILES[field]] = str(context.get(field) or "")
+    # The local box is free, so it needs no budget; sandbox_ready() keeps a billable box out.
+    return PiSandbox(settings, None, files=files, read_back=[EDITOR_FILES[field] for field in fields])
+
+
 def run_coding_agent(
     context: dict[str, Any],
     request: str,
@@ -314,27 +452,49 @@ def run_coding_agent(
         parser's ``optimize_toml_error`` for a changed file it refuses and,
         when the agent could not read the repository, ``repository_access``.
     """
-    browser, no_repo = open_repo(context, github_token)
+    sandbox = coder_sandbox(context, github_token)
+    browser, no_repo = (None, "") if sandbox is not None else open_repo(context, github_token)
     if browser is not None:
         browser.bind(emit)
-    react = AgentProgram(WorkspaceCoderSig, tools=coder_tools(browser), max_iters=CODER_MAX_ITERS)
-    inputs = {
-        "context": json.dumps(context, ensure_ascii=False),
-        "request": request,
-        "repo": browser.summary() if browser is not None else no_repo,
-    }
+    max_iters = CODER_SANDBOX_MAX_ITERS if sandbox is not None else CODER_MAX_ITERS
+    react = AgentProgram(WorkspaceCoderSig, tools=coder_tools(browser), max_iters=max_iters)
+    if sandbox is not None:
+        listing = ", ".join(path for path in sandbox.read_back)
+        if context.get("artifact_kind") == "repo":
+            listing = f"the repository's default branch in {REPO_DIR}/, {listing}"
+        repo = SANDBOX_NOTE.format(files=listing)
+    else:
+        repo = browser.summary() if browser is not None else no_repo
+    inputs = {"context": json.dumps(context, ensure_ascii=False), "request": request, "repo": repo}
+
+    async def turn() -> dict[str, Any] | str:
+        """Run the agent's Pi turn, and close its box after it.
+
+        Returns:
+            The program's outputs, or its text reply.
+        """
+        try:
+            return await run_react_program_on_pi(
+                react, inputs, lm, input_field="request", binary=settings.pi_binary, sandbox=sandbox
+            )
+        finally:
+            if sandbox is not None:
+                await sandbox.aclose()
+
     # The setup turn streams its own reply; the coding agent's tokens and
     # status lines must not leak into it.
     with dspy.context(lm=lm, send_stream=None, stream_listeners=[], callbacks=[]):
         # This runs in a worker thread with no event loop, so the Pi turn gets its own.
-        outputs = asyncio.run(
-            run_react_program_on_pi(react, inputs, lm, input_field="request", binary=settings.pi_binary)
-        )
+        outputs = asyncio.run(turn())
+    written = sandbox.read_back_files if sandbox is not None else {}
     prediction = dspy.Prediction(**outputs) if isinstance(outputs, dict) else dspy.Prediction(summary=outputs)
     is_repo = context.get("artifact_kind") == "repo"
     patch: dict[str, str] = {}
     for field in CODE_FIELDS:
         code = str(getattr(prediction, field, "") or "")
+        path = EDITOR_FILES[field]
+        if sandbox is not None and written.get(path) is not None and written[path] != sandbox.files.get(path):
+            code = str(written[path])
         if is_repo and field == "run_code":
             continue
         if not is_repo and field == "optimize_toml":
