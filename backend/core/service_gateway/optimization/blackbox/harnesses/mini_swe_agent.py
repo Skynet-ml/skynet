@@ -192,7 +192,11 @@ def _mini_config(gateway: GatewayConfig, reasoning_effort: str | None) -> str:
         "timeout": 3600,
     }
     if reasoning_effort:
-        model_kwargs["reasoning_effort"] = reasoning_effort
+        # mini's built-in config sets LiteLLM ``drop_params``, which drops a
+        # top-level ``reasoning_effort`` for a model id LiteLLM knows as
+        # non-reasoning (``gpt-4o``). ``extra_body`` survives it; LiteLLM still
+        # sends it as ``reasoning.effort`` on its ``/responses`` route.
+        model_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
     config = {
         # Skynet's run budget bounds the spend. LiteLLM has no prices for
         # gateway model ids, and mini's default $3 limit would stop a run early.

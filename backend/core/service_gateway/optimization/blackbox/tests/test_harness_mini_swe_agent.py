@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import re
@@ -9,8 +10,13 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
+import time
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import litellm
 import pytest
 import yaml
 
@@ -29,8 +35,18 @@ from ..harnesses.mini_swe_agent import (
     _PROTECTED_ENV,
     MINI_SWE_AGENT_CONFIG_FILE,
     MINI_SWE_AGENT_HELPER_ENV,
+    MINI_SWE_AGENT_LITELLM_VERSION,
     MINI_SWE_AGENT_VERSION,
 )
+
+# mini-swe-agent is not a backend dependency. When it is installed, a test
+# checks its real built-in config and model class against the gateway.
+try:
+    from minisweagent.config import builtin_config_dir, get_config_from_spec
+    from minisweagent.models import get_model
+    from minisweagent.utils.serialize import recursive_merge
+except ImportError:
+    builtin_config_dir = get_config_from_spec = get_model = recursive_merge = None
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -86,6 +102,24 @@ case "$1 $2" in
 esac
 """
 _SHELL = shutil.which("bash") or "/bin/sh"
+# ``model.model_kwargs`` of mini 2.4.6's built-in ``config/mini.yaml``.
+# ``test_real_mini_sends_the_effort_to_the_gateway`` checks it against the
+# installed package when mini is installed.
+_MINI_BUILTIN_MODEL_KWARGS = {"drop_params": True}
+# mini's ``BASH_TOOL``; LiteLLM sends it on every call.
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Execute a bash command",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+}
+_TOOL_ARGS = json.dumps({"command": "echo hi"})
+# ``gpt-4o`` is a model LiteLLM knows as non-reasoning, so ``drop_params``
+# drops a top-level effort for it. LiteLLM sends ``gpt-5-codex`` to ``/responses``.
+_CHAT_MODEL = "gpt-4o"
+_RESPONSES_MODEL = "gpt-5-codex"
 
 
 def _target() -> BlackboxTarget:
@@ -394,12 +428,159 @@ def test_config_routes_litellm_to_the_gateway_without_a_cost_limit(effort: str |
 
     expected_kwargs: dict[str, object] = {"api_base": _GATEWAY.url, "timeout": 3600}
     if effort:
-        expected_kwargs["reasoning_effort"] = effort
+        expected_kwargs["extra_body"] = {"reasoning_effort": effort}
     assert config == {
         "agent": {"cost_limit": 0},
         "environment": {"timeout": 600},
         "model": {"model_class": "litellm", "cost_tracking": "ignore_errors", "model_kwargs": expected_kwargs},
     }
+
+
+class _GatewayHandler(BaseHTTPRequestHandler):
+    """Record each request body and answer with one ``bash`` tool call in the API's own shape."""
+
+    bodies: list[tuple[str, dict]]
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Keep the test output free of request logs.
+
+        Args:
+            format: The log format string.
+            *args: The format arguments.
+        """
+
+    def do_POST(self) -> None:
+        """Record the body and answer as chat completions or as the Responses API."""
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.bodies.append((self.path, body))
+        if self.path.endswith("/responses"):
+            reply: dict[str, object] = {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": int(time.time()),
+                "status": "completed",
+                "model": body.get("model"),
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "bash",
+                        "arguments": _TOOL_ARGS,
+                        "status": "completed",
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        else:
+            call = {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": _TOOL_ARGS}}
+            reply = {
+                "id": "chat_1",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": body.get("model"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {"role": "assistant", "content": "", "tool_calls": [call]},
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        data = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+@pytest.fixture
+def mock_gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[GatewayConfig, list[tuple[str, dict]]]]:
+    """Serve a local gateway that records every request body.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+
+    Yields:
+        The gateway config for the server, and the list of recorded paths and bodies.
+    """
+    bodies: list[tuple[str, dict]] = []
+    handler = type("Handler", (_GatewayHandler,), {"bodies": bodies})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # mini passes the gateway key to LiteLLM through this variable.
+    monkeypatch.setenv("OPENAI_API_KEY", "gateway-token")
+    try:
+        yield GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="gateway-token"), bodies
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _assert_effort_reached_the_gateway(bodies: list[tuple[str, dict]], model: str, effort: str) -> None:
+    """Check that the one request carries the effort exactly once, in the form its API expects.
+
+    Args:
+        bodies: The recorded paths and bodies.
+        model: The gateway model id.
+        effort: The effort the user chose.
+    """
+    assert len(bodies) == 1
+    path, body = bodies[0]
+    assert body["model"] == model
+    assert "extra_body" not in body
+    if model == _RESPONSES_MODEL:
+        assert path == "/v1/responses"
+        assert body["reasoning"] == {"effort": effort}
+        assert "reasoning_effort" not in body
+    else:
+        assert path == "/v1/chat/completions"
+        assert body["reasoning_effort"] == effort
+        assert "reasoning" not in body
+
+
+@pytest.mark.parametrize("model", [_CHAT_MODEL, _RESPONSES_MODEL])
+@pytest.mark.parametrize("effort", ["minimal", "high", "xhigh"])
+def test_effort_survives_mini_drop_params_through_litellm(
+    mock_gateway: tuple[GatewayConfig, list[tuple[str, dict]]], model: str, effort: str
+) -> None:
+    """Send the user's effort to the gateway through the pinned LiteLLM with mini's built-in ``drop_params``."""
+    gateway, bodies = mock_gateway
+    assert importlib.metadata.version("litellm") == MINI_SWE_AGENT_LITELLM_VERSION
+    config = json.loads(build_launch(_target(), gateway, reasoning_effort=effort).files[MINI_SWE_AGENT_CONFIG_FILE])
+    # mini merges the config files in order, then calls LiteLLM as below.
+    model_kwargs = {**_MINI_BUILTIN_MODEL_KWARGS, **config["model"]["model_kwargs"]}
+    assert model_kwargs["drop_params"] is True
+
+    litellm.completion(
+        model=f"openai/{model}", messages=[{"role": "user", "content": "hi"}], tools=[_BASH_TOOL], **model_kwargs
+    )
+
+    _assert_effort_reached_the_gateway(bodies, model, effort)
+
+
+@pytest.mark.skipif(get_model is None, reason="mini-swe-agent is not installed")
+@pytest.mark.parametrize("model", [_CHAT_MODEL, _RESPONSES_MODEL])
+def test_real_mini_sends_the_effort_to_the_gateway(
+    mock_gateway: tuple[GatewayConfig, list[tuple[str, dict]]], model: str
+) -> None:
+    """Merge the launch config over mini's real built-in config and send one call through mini's model class."""
+    gateway, bodies = mock_gateway
+    builtin = get_config_from_spec(str(builtin_config_dir / "mini.yaml"))
+    assert builtin["model"]["model_kwargs"] == _MINI_BUILTIN_MODEL_KWARGS
+    config = recursive_merge(
+        builtin,
+        json.loads(build_launch(_target(), gateway, reasoning_effort="high").files[MINI_SWE_AGENT_CONFIG_FILE]),
+        {"model": {"model_name": f"openai/{model}"}},
+    )
+    assert config["model"]["model_kwargs"]["drop_params"] is True
+
+    get_model(config=config["model"]).query([{"role": "user", "content": "hi"}])
+
+    _assert_effort_reached_the_gateway(bodies, model, "high")
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
