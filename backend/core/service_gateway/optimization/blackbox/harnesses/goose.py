@@ -127,6 +127,9 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When goose has no level for the effort.
     """
     # Goose 1.57.0 sends gpt-5*, gpt-6* and o* models to the Responses API
     # when the base path is the default ``v1/chat/completions``
