@@ -126,7 +126,8 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     """Build the launch for OpenHands (``openhands``, pinned to :data:`OPENHANDS_VERSION`).
 
     Each run gets a fresh OpenHands root outside the workspace for the file
-    store, the cache, the task file, ``HOME`` and an empty config file. So
+    store, the cache, the task file and ``HOME``. The config path points into
+    that root but does not exist, so no user config loads. So
     session files never land in the files the run hands back, a
     ``config.toml`` in the workspace cannot change the model route, and
     OpenHands loads no user microagents, ``AGENTS.md`` or ``config.toml``
