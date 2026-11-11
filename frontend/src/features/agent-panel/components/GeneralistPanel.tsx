@@ -9,8 +9,14 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
+  Brain,
   ClockCounterClockwise,
+  Copy,
+  Cpu,
+  DownloadSimple,
+  Gear,
   SidebarSimple,
+  PencilSimple,
   Plus,
   MagicWand,
   ShareNetwork,
@@ -33,7 +39,12 @@ import { chatToMarkdown } from "@/shared/lib/chat-export";
 import { liveEffort } from "@/shared/lib/effort-slider";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
 import { effortLabel, effortsFor } from "@/shared/lib/model-efforts";
-import { catalogFallbackModel, modelDisplayName } from "@/shared/lib/model-provider";
+import {
+  catalogFallbackModel,
+  modelDisplayName,
+  modelProviderSlug,
+} from "@/shared/lib/model-provider";
+import { ProviderLogo } from "@/shared/ui/provider-logo";
 import type { CatalogModel } from "@/shared/types/api";
 import { QuestionChoices } from "@/shared/ui/agent/question-choices";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
@@ -959,6 +970,18 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     };
   }, []);
   const slashModels = localMenu.models ?? catalogModels;
+  // /model offers what the model menu lists: its featured shortlist (the
+  // first 50 when the catalog flags none) and a current pick outside it.
+  const slashMenuModels = React.useMemo(() => {
+    if (localMenu.models) return localMenu.models;
+    const featured = catalogModels.filter((m) => m.featured);
+    const rows = featured.length ? featured : catalogModels.slice(0, 50);
+    const extra =
+      agent.model && !rows.some((m) => m.value === agent.model)
+        ? catalogModels.find((m) => m.value === agent.model)
+        : undefined;
+    return extra ? [extra, ...rows] : rows;
+  }, [localMenu.models, catalogModels, agent.model]);
   const canShareChat =
     !inSetup && canShare && !webChat && !!agent.conversationId && agent.messages.length > 0;
   const slashCommands = React.useMemo(() => {
@@ -973,9 +996,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         name: "model",
         argHint: "<model>",
         description: msg("agent.slash.model"),
-        options: slashModels.map((m) => ({
+        icon: Cpu,
+        current: effective ?? undefined,
+        options: slashMenuModels.map((m) => ({
           value: m.value,
           label: modelDisplayName(m.value, slashModels),
+          icon: <ProviderLogo slug={modelProviderSlug(m.value)} size={16} />,
         })),
       },
     ];
@@ -984,30 +1010,48 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         name: "thinking",
         argHint: "<level>",
         description: msg("agent.slash.thinking"),
+        icon: Brain,
+        current: liveEffort(agent.reasoningEffort) ?? "default",
         options: [
           { value: "default", label: msg("agent.model_menu.effort_default") },
           ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
         ],
       });
     if (!inSetup) {
-      commands.push({ name: "new", description: msg("agent.slash.new") });
-      commands.push({ name: "resume", description: msg("agent.slash.resume") });
+      commands.push({ name: "new", description: msg("agent.slash.new"), icon: Plus });
+      commands.push({
+        name: "resume",
+        description: msg("agent.slash.resume"),
+        icon: ClockCounterClockwise,
+      });
       if (agent.conversationId)
-        commands.push({ name: "name", argHint: "<name>", description: msg("agent.slash.name") });
+        commands.push({
+          name: "name",
+          argHint: "<name>",
+          description: msg("agent.slash.name"),
+          icon: PencilSimple,
+        });
     }
-    if (canShareChat) commands.push({ name: "share", description: msg("agent.slash.share") });
+    if (canShareChat)
+      commands.push({ name: "share", description: msg("agent.slash.share"), icon: ShareNetwork });
     if (agent.messages.length) {
-      commands.push({ name: "copy", description: msg("agent.slash.copy") });
-      commands.push({ name: "export", description: msg("agent.slash.export") });
+      commands.push({ name: "copy", description: msg("agent.slash.copy"), icon: Copy });
+      commands.push({
+        name: "export",
+        description: msg("agent.slash.export"),
+        icon: DownloadSimple,
+      });
     }
-    commands.push({ name: "settings", description: msg("agent.slash.settings") });
+    commands.push({ name: "settings", description: msg("agent.slash.settings"), icon: Gear });
     return commands;
   }, [
     agent.model,
+    agent.reasoningEffort,
     agent.conversationId,
     agent.messages.length,
     localMenu.models,
     slashModels,
+    slashMenuModels,
     inSetup,
     canShareChat,
     locale,
@@ -1066,7 +1110,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           return;
         }
         case "export": {
-          const blob = new Blob([chatToMarkdown(agent.messages, "messages")], {
+          const title = store.conversations.find((c) => c.id === agent.conversationId)?.title;
+          const blob = new Blob([chatToMarkdown(agent.messages, "messages", title)], {
             type: "text/markdown",
           });
           const url = URL.createObjectURL(blob);
@@ -1074,7 +1119,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           link.href = url;
           link.download = "skynet-chat.md";
           link.click();
-          URL.revokeObjectURL(url);
+          // Revoke after the click's download starts, as api.ts does.
+          setTimeout(() => URL.revokeObjectURL(url), 0);
           return;
         }
         case "settings":

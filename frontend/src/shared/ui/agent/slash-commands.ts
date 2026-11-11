@@ -1,14 +1,18 @@
-// The chat's slash commands. Kept free of React so `node --test` covers them.
+// The chat's slash commands. Only React types here, so `node --test` covers them.
 //
 // Every agent runs on the Pi harness (SKY-327), one RPC process per turn. Pi
 // runs its built-in commands only in its own terminal UI, so the composer
 // runs the ones that fit a hosted chat itself, on the controls the chat
 // already has (SKY-604).
 
+import type { ComponentType, ReactNode } from "react";
+
 /** One value a command's argument may take. */
 export interface SlashOption {
   value: string;
   label: string;
+  /** Shown before the label, e.g. a model's provider logo. */
+  icon?: ReactNode;
 }
 
 /** A slash command the composer offers. */
@@ -20,6 +24,10 @@ export interface SlashCommand {
   argHint?: string;
   /** The values the argument may take; the menu lists them after "/name ". */
   options?: readonly SlashOption[];
+  /** The option in use now; the menu marks it with a check. */
+  current?: string;
+  /** Shown before the name in the menu. */
+  icon?: ComponentType<{ className?: string }>;
 }
 
 /** What the slash menu lists for a draft. */
@@ -32,7 +40,8 @@ const CALL = /^\/(\S+)(?:\s+([\s\S]*))?$/;
 /**
  * The command a draft calls and its argument, or `null` when the draft does
  * not start with the name of an offered command. Other text that starts with
- * a slash (a path, say) stays a normal message.
+ * a slash (a path, say) stays a normal message. A command that takes no
+ * argument matches only alone, as in Pi's terminal, so "/new idea" is a message.
  */
 export function parseSlashCommand(
   text: string,
@@ -42,13 +51,17 @@ export function parseSlashCommand(
   if (!match) return null;
   const name = match[1]!.toLowerCase();
   const command = commands.find((c) => c.name === name);
-  return command ? { command, arg: (match[2] ?? "").trim() } : null;
+  if (!command) return null;
+  const arg = (match[2] ?? "").trim();
+  return arg && !command.argHint ? null : { command, arg };
 }
 
 /**
  * The menu for a one-line draft that starts with a slash: the commands whose
  * name starts with what was typed, or, after a command with options and a
- * space, the options that contain the typed argument. `null` hides the menu.
+ * space, the options that contain the typed argument. The option the
+ * argument names exactly comes first, so Enter picks what resolveSlashOption
+ * would. `null` hides the menu.
  */
 export function slashMenu(text: string, commands: readonly SlashCommand[]): SlashMenu | null {
   if (!text.startsWith("/") || text.includes("\n")) return null;
@@ -64,6 +77,9 @@ export function slashMenu(text: string, commands: readonly SlashCommand[]): Slas
   const items = command.options.filter(
     (o) => o.value.toLowerCase().includes(typed) || o.label.toLowerCase().includes(typed),
   );
+  const exact = resolveSlashOption(typed, items);
+  const first = items.findIndex((o) => o.value === exact);
+  if (first > 0) items.unshift(...items.splice(first, 1));
   return items.length ? { kind: "options", command, items } : null;
 }
 

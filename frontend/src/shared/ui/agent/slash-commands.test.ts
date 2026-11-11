@@ -37,6 +37,34 @@ test("parseSlashCommand leaves other text as a message", () => {
   assert.equal(parseSlashCommand("/", commands), null);
 });
 
+test("parseSlashCommand leaves a command without an argument plus text as a message", () => {
+  // Pi's terminal runs /new only alone; the text must reach the model, not vanish.
+  assert.equal(parseSlashCommand("/new idea for a chat", commands), null);
+  assert.equal(parseSlashCommand("/new ", commands)?.command.name, "new");
+});
+
+test("slashMenu puts the exactly named option first, so Enter picks it", () => {
+  const options = [
+    { value: "xhigh", label: "Extra high" },
+    { value: "high", label: "High" },
+  ];
+  const cmds = [{ name: "thinking", description: "Effort", argHint: "<level>", options }];
+  const menu = slashMenu("/thinking high", cmds)!;
+  assert.deepEqual(
+    menu.items.map((o) => ("value" in o ? o.value : "")),
+    ["high", "xhigh"],
+  );
+  assert.equal(completeSlash(menu, 0), "/thinking high");
+  assert.equal(resolveSlashOption("high", options), "high");
+  // An exact label moves its option up too.
+  const models = [
+    { value: "openai/gpt-5.5-mini", label: "GPT-5.5 mini" },
+    { value: "openai/gpt-5.5", label: "GPT-5.5" },
+  ];
+  const byLabel = slashMenu("/model gpt-5.5", [{ ...cmds[0]!, name: "model", options: models }])!;
+  assert.equal(completeSlash(byLabel, 0), "/model openai/gpt-5.5");
+});
+
 test("slashMenu lists the commands that match the typed prefix", () => {
   assert.deepEqual(
     slashMenu("/", commands)?.items.map((c) => ("name" in c ? c.name : c.value)),
