@@ -5,19 +5,25 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
+from core.api.routers.optimizations._local import clone_payload
+from core.api.routers.submissions import _persistable_payload
 from core.billing.protected_execution import bind_protected_sandbox
 from core.billing.tests.test_protected_execution_local import _Gateway, local_settings  # noqa: F401
 from core.config import Settings
 from core.models.blackbox import BlackboxRunRequest
+from core.models.submissions import RunRequest
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from core.storage.base import JobStore
+from core.storage.models import ContinuousPlanModel
 
+from .. import continuous
 from .. import engine as engine_module
 from ..engine import BackgroundWorker, reset_worker_for_tests
 from .conftest import FakeJobStore
@@ -154,3 +160,44 @@ def test_override_only_shortens_the_configured_deadline(
 
     assert short["lifetime_seconds"] == 120
     assert long["lifetime_seconds"] == default["lifetime_seconds"] == configured
+
+
+def test_stored_payload_keeps_the_override() -> None:
+    """The stored run payload keeps the field, so a resumed run gets the same deadline."""
+    stored = _persistable_payload(_request(deadline_seconds=120), job_store=None)
+
+    assert stored["deadline_seconds"] == 120
+
+
+def test_continuous_cycle_drops_the_override() -> None:
+    """A continuous check copies the incumbent's request without its deadline override."""
+    incumbent = {
+        "payload": _request(deadline_seconds=120).model_dump(mode="json", by_alias=True),
+        "payload_overview": {},
+        "result": {},
+    }
+    plan = cast(ContinuousPlanModel, SimpleNamespace(cycle_budget_cents=500))
+
+    copy = continuous._cycle_payload(plan, incumbent, {}, 1)
+
+    assert copy.deadline_seconds is None
+
+
+def test_clone_drops_the_override() -> None:
+    """A clone or retry validates a copy of the stored request without the deadline override."""
+    source = {
+        "username": "alice",
+        "module_name": "predict",
+        "signature_code": "question -> answer",
+        "metric_code": "def metric(example, pred, trace=None): return 1.0",
+        "optimizer_name": "gepa",
+        "dataset": [{"question": "Q", "answer": "A"}],
+        "column_mapping": {"inputs": {"question": "question"}, "outputs": {"answer": "answer"}},
+        "model_config": {"name": "fixture/model"},
+        "deadline_seconds": 120,
+    }
+
+    with patch.object(RunRequest, "model_validate", side_effect=RunRequest.model_validate) as validate:
+        clone_payload(source, optimization_type="run", new_name="retry")
+
+    assert "deadline_seconds" not in validate.call_args.args[0]
