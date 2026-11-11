@@ -11,13 +11,20 @@ from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_OPENHANDS, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from ..agent_eval import candidate_files
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
-from ..harnesses.openhands import _PROTECTED_ENV, OPENHANDS_BASE_URL_FILE, OPENHANDS_LITELLM_VERSION, OPENHANDS_VERSION
+from ..harnesses.openhands import (
+    _PROTECTED_ENV,
+    OPENHANDS_BASE_URL_FILE,
+    OPENHANDS_EFFORTS,
+    OPENHANDS_LITELLM_VERSION,
+    OPENHANDS_VERSION,
+)
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -297,7 +304,7 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.parse_output is parse_plain_output
 
 
-@pytest.mark.parametrize("effort", [None, "", "none", "minimal", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("effort", [None, "", "none", "minimal", "low", "medium", "high", "xhigh"])
 def test_completion_kwargs_unset_sampling_and_pass_the_effort_unchanged(effort: str | None) -> None:
     """Always unset ``temperature`` and ``top_p``, and force the user's effort through unchanged when there is one.
 
@@ -317,6 +324,26 @@ def test_completion_kwargs_unset_sampling_and_pass_the_effort_unchanged(effort: 
         expected["reasoning_effort"] = effort
         expected["allowed_openai_params"] = ["reasoning_effort"]
     assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == expected
+
+
+def test_spec_declares_the_litellm_effort_levels() -> None:
+    """Declare the pinned LiteLLM ``reasoning_effort`` levels, so submit refuses any other level (SKY-585)."""
+    assert REGISTRY[BLACKBOX_HARNESS_OPENHANDS].supported_efforts == (
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    )
+    assert REGISTRY[BLACKBOX_HARNESS_OPENHANDS].supported_efforts == OPENHANDS_EFFORTS
+
+
+@pytest.mark.parametrize("effort", ["max", "auto", "HIGH"])
+def test_unsupported_effort_raises_before_the_launch(effort: str) -> None:
+    """Refuse a level that the pinned LiteLLM does not accept, rather than send it to the gateway."""
+    with pytest.raises(ServiceError, match="does not support the effort level"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 @pytest.mark.parametrize(

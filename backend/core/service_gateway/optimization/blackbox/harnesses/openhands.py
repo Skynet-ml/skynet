@@ -17,6 +17,7 @@ microagents in a temporary copy. So the run puts the candidate's
 
 from __future__ import annotations
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_OPENHANDS
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
@@ -40,6 +41,10 @@ OPENHANDS_BASE_URL_FILE = ".app/openhands/base_url"
 # OpenAI-style base URL; the gateway receives the id after the prefix.
 _LITELLM_PREFIX = "openai/"
 _INSTRUCTIONS_FILE = "AGENTS.md"
+# The ``reasoning_effort`` levels of the pinned LiteLLM 1.80.10 ``completion``,
+# without its ``default``. It has no ``max``. The launch passes a level
+# unchanged, so a level outside this list never reaches the gateway (SKY-585).
+OPENHANDS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 # Prints the ``agent_state`` of the last ``agent_state_changed`` event in the
 # session's event files (``<id>.json``, one ``json.dumps`` line each).
 # ``openhands.core.main`` exits 0 when the agent ends in ``error``, so the run
@@ -181,7 +186,15 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When ``reasoning_effort`` is not in :data:`OPENHANDS_EFFORTS`.
     """
+    if reasoning_effort and reasoning_effort not in OPENHANDS_EFFORTS:
+        raise ServiceError(
+            f"The OpenHands harness does not support the effort level {reasoning_effort!r}. "
+            f"Supported levels: {', '.join(OPENHANDS_EFFORTS)}."
+        )
     run_command = (
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
         'export OPENHANDS_ROOT="$(mktemp -d)" && '
@@ -255,5 +268,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=54,
+        supported_efforts=OPENHANDS_EFFORTS,
     )
 )
