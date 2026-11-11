@@ -1554,7 +1554,12 @@ def _service_relay(
 
 
 def _service_answer(
-    relay: _StageRelay, workspace: _Workspace, name: str, path: str = "grade", method: str = "POST"
+    relay: _StageRelay,
+    workspace: _Workspace,
+    name: str,
+    path: str = "grade",
+    method: str = "POST",
+    headers: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     """Send one service frame through the relay and wait for its answer.
 
@@ -1564,11 +1569,12 @@ def _service_answer(
         name: The service the frame names.
         path: The request path under the service url.
         method: The request method.
+        headers: The guest's headers.
 
     Returns:
         The answer the scorer box gets.
     """
-    frame = {"id": "d" * 32, "service": name, "path": path, "method": method, "headers": [], "body": ""}
+    frame = {"id": "d" * 32, "service": name, "path": path, "method": method, "headers": headers or [], "body": ""}
     relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
     deadline = time.monotonic() + 10
     while not workspace.writes and time.monotonic() < deadline:
@@ -1649,6 +1655,7 @@ class _Echo:
     def __init__(self) -> None:
         """Start the server on a free port."""
         self.paths: list[str] = []
+        self.headers: list[dict[str, str]] = []
         self.location = "/leak"
         self.release = threading.Event()
         echo = self
@@ -1659,6 +1666,7 @@ class _Echo:
             def do_GET(self) -> None:
                 """Record the path and answer it."""
                 echo.paths.append(self.path)
+                echo.headers.append({key.lower(): value for key, value in self.headers.items()})
                 if self.path.endswith("/redirect"):
                     self.send_response(302)
                     self.send_header("Location", echo.location)
@@ -1781,6 +1789,98 @@ def test_an_upstream_that_echoes_the_key_gives_the_box_only_the_redacted_form(ec
     assert ["X-Echo", "[REDACTED]"] in answer["headers"]
     assert "judge-secret-value" not in json.dumps(answer)
     assert echo.paths == ["/echo"]
+
+
+# The proposer relay's refused paths (test_scoped_relay.py), relative to one service or MCP server.
+_LEAVING_PATHS = [
+    "../_sandbox",
+    "%2e%2e/x",
+    "../other/",
+    "a/%2E%2E/b",
+    "%252e%252e/x",
+    "..\\x",
+    "..%5cx",
+    "..;/x",
+    "x/..%5c..%5cadmin",
+    "..%00/admin",
+    "a;b",
+    "..%3F",
+    "..%3Fx",
+    "..%253F/x",
+    "..%23",
+    "..%2523",
+    "x/..%3F/..%3F",
+    "%c0%ae%c0%ae/x",
+    "a%20b",
+    "%EF%BC%8E%EF%BC%8E/x",
+    "./a",
+    "x#y",
+]
+
+
+@pytest.mark.parametrize("path", _LEAVING_PATHS)
+def test_a_service_path_that_could_leave_the_service_is_refused(echo: _Echo, path: str) -> None:
+    """A [run] or [metric] service path gets the proposer relay's check, so nothing leaves the parent (SKY-622)."""
+    sink = _CallSink()
+    workspace = _Workspace()
+    relay = _echo_relay(workspace, echo.port, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
+
+    answer = _service_answer(relay, workspace, "judge", path=path, method="GET")
+
+    assert answer == {"status": 400, "error": "Service 'judge' got a path outside its url."}
+    assert echo.paths == []
+    assert sink.calls == []
+
+
+@pytest.mark.parametrize(("path", "sent"), [("v2/a..b/item.json", "/v2/a..b/item.json"), ("item?q=a;b", "/item?q=a;b")])
+def test_a_plain_service_sub_path_and_any_query_go_out(echo: _Echo, path: str, sent: str) -> None:
+    """A deeper path of plain characters passes, and the allowlist does not read the query."""
+    workspace = _Workspace()
+
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path=path, method="GET")
+
+    assert answer["status"] == 200
+    assert echo.paths == [sent]
+
+
+@pytest.mark.parametrize(
+    ("base", "target", "under"),
+    [
+        ("http://h/api", "http://h/api", True),
+        ("http://h/api", "http://h/api/x?q=1", True),
+        ("http://h/api/", "http://h/api/x", True),
+        ("http://h", "http://h/anything", True),
+        ("http://h/api", "http://h/apix", False),
+        ("http://h/api", "http://h/ap%69x", False),
+        ("http://h/api", "http://h/", False),
+    ],
+)
+def test_a_service_url_stays_under_its_declared_path_as_a_directory(base: str, target: str, under: bool) -> None:
+    """Base ``/api`` allows ``/api`` and ``/api/x``, never a sibling such as ``/apix``.
+
+    Args:
+        base: The service's declared url.
+        target: The url the relay would call.
+        under: Whether the relay may call it.
+    """
+    assert repo_scorer._under(httpx.URL(target), httpx.URL(base)) is under
+
+
+def test_a_service_never_gets_the_guest_accept_encoding_or_range(echo: _Echo) -> None:
+    """The answer comes back decoded and whole, so the masker sees each filled secret in one piece (SKY-622)."""
+    workspace = _Workspace()
+    headers = [["Accept-Encoding", "br-from-guest"], ["Range", "bytes=0-3"], ["X-Guest", "kept"]]
+
+    answer = _service_answer(
+        _echo_relay(workspace, echo.port), workspace, "judge", path="echo", method="GET", headers=headers
+    )
+
+    assert answer["status"] == 200
+    [sent] = echo.headers
+    assert "range" not in sent
+    assert sent.get("accept-encoding") != "br-from-guest"
+    assert sent["x-guest"] == "kept"
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
 
 
 _REDIRECT_TARGETS = pytest.mark.parametrize(
@@ -2224,6 +2324,30 @@ def test_an_mcp_path_that_names_another_host_stays_on_the_declared_host(echo: _E
     assert answer["status"] == 200
     assert echo.paths == ["/echo/" + path.lstrip("/")]
     assert "judge-secret-value" not in json.dumps(answer)
+
+
+@pytest.mark.parametrize("path", _LEAVING_PATHS)
+def test_an_mcp_path_that_could_leave_the_server_is_refused(echo: _Echo, path: str) -> None:
+    """An MCP path gets the same check as a service path, so the server's secret never goes elsewhere (SKY-622)."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+
+    answer = _mcp_answer(relay, workspace, "search", path=path)
+
+    assert answer == {"status": 400, "error": "MCP server 'search' got a path outside its url."}
+    assert echo.paths == []
+
+
+def test_a_plain_mcp_sub_path_still_reaches_the_server(echo: _Echo) -> None:
+    """A plain path under the declared url goes out with the key filled, and the echo comes back redacted."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+
+    answer = _mcp_answer(relay, workspace, "search", path="v2/a..b/item?q=a;b")
+
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    assert echo.paths == ["/echo/v2/a..b/item?q=a;b"]
 
 
 class _CallSink:

@@ -54,12 +54,14 @@ import logging
 import math
 import re
 import shlex
+import string
 import threading
 import uuid
 from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -136,6 +138,10 @@ _HOP_HEADERS = frozenset(
     {"connection", "content-length", "host", "keep-alive", "proxy-authorization", "te", "transfer-encoding", "upgrade"}
 )
 _DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection", "keep-alive", "transfer-encoding"})
+# The answer must come back decoded and whole, or the masker cannot find a filled secret in it.
+_GUEST_DROPPED_HEADERS = frozenset({"accept-encoding", "range"})
+# A server may decode a path again, so a fully decoded service path may hold only plain URL path characters.
+_SERVICE_PATH_CHARS = frozenset(string.ascii_letters + string.digits + "-._~!$&'()*+,=:@/")
 # The version's [run] entry and the metric run in separate processes, each
 # with its own relay, so each service frame is checked against its own role (E37).
 _METRIC_ROLE = "metric"
@@ -1001,6 +1007,60 @@ def _control_answer(error: BaseException) -> dict[str, Any] | None:
     }
 
 
+def _decoded(path: str) -> str:
+    """Return a path without its query, percent-decoded until nothing changes.
+
+    A server may decode ``%252e`` to ``%2e`` and then to ``.``, so one pass is not enough.
+
+    Args:
+        path: A path, with or without a query.
+
+    Returns:
+        The fully decoded path.
+    """
+    path = path.partition("?")[0]
+    while (decoded := unquote(path)) != path:
+        path = decoded
+    return path
+
+
+def _unsafe_path(path: str) -> bool:
+    """Check a relative service path for anything a server could read as a way out of the service.
+
+    Only the characters of ``_SERVICE_PATH_CHARS`` may stay after full
+    decoding. So ``?``, ``#``, ``\\``, ``;``, ``%``, spaces, control
+    characters and all non-ASCII characters fail: a server that decodes
+    again could read them as a query, a separator or a dot.
+
+    Args:
+        path: The path after the service name, with its query.
+
+    Returns:
+        True when the decoded path has a character outside the allowlist,
+        or a ``.`` or ``..`` segment.
+    """
+    path = _decoded(path)
+    return not _SERVICE_PATH_CHARS.issuperset(path) or bool({".", ".."} & set(path.split("/")))
+
+
+def _under(target: httpx.URL, base: httpx.URL) -> bool:
+    """Check that a request url stays under the service's declared path, as a directory.
+
+    It compares the paths as :func:`_unsafe_path` reads them, fully decoded.
+
+    Args:
+        target: The url the relay is about to call.
+        base: The service's declared url.
+
+    Returns:
+        True when the target path is the base path or below it: base
+        ``/api`` allows ``/api`` and ``/api/x``, not ``/apix``.
+    """
+    root = _decoded(base.raw_path.decode("ascii")).rstrip("/")
+    path = _decoded(target.raw_path.decode("ascii"))
+    return path == root or path.startswith(root + "/")
+
+
 def _json_object(body: bytes) -> dict[str, Any]:
     """Read an MCP request body as one JSON-RPC object, for its run-call target.
 
@@ -1460,7 +1520,12 @@ class _StageRelay:
         # An empty path is the declared url itself: an MCP endpoint may not answer with a slash added.
         url = origin.rstrip("/") + "/" + path.lstrip("/") if path else origin
         base, target = httpx.URL(origin), httpx.URL(url)
-        if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port):
+        # The secret headers go with every path, so a service and an MCP server get the same path check.
+        if (
+            (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
+            or _unsafe_path(path)
+            or not _under(target, base)
+        ):
             return {"status": 400, "error": f"{label} got a path outside its url."}
         overrides = {key.lower() for key in declared}
         guest = [
@@ -1469,7 +1534,7 @@ class _StageRelay:
             if isinstance(pair, list | tuple)
             and len(pair) == 2
             and all(isinstance(part, str) for part in pair)
-            and pair[0].lower() not in _HOP_HEADERS
+            and pair[0].lower() not in _HOP_HEADERS | _GUEST_DROPPED_HEADERS
             and pair[0].lower() not in overrides
         ]
         body = base64.b64decode(frame.get("body") or "", validate=True)
