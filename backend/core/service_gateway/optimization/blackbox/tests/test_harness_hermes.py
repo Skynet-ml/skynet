@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -16,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from core.models.blackbox import BLACKBOX_TARGET_AGENT, BlackboxTarget
+from core.exceptions import ServiceError
+from core.models.blackbox import BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from .. import repo_tree
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
@@ -27,23 +29,64 @@ from ..harnesses.hermes import (
     _WHEEL_FETCH,
     HERMES_BASE_URL_FILE,
     HERMES_CONFIG_FILE,
+    HERMES_EFFORTS,
     HERMES_VERSION,
     HERMES_WHEEL,
     HERMES_WHEEL_SHA256,
     HERMES_WHEEL_URL,
     SPEC,
+    UV_VERSION,
+    UV_WHEEL_SHA256,
 )
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 _RELAY_URL = "http://127.0.0.1:3210/v1"
 # A synthetic recording of Hermes 0.19 stdout for ``chat -q ... -Q``: quiet mode
-# prints the final answer and the session line.
-_RECORDED_STDOUT = """\
-The answer is 42.
-
-session_id: 20261108_120000_abcdef
-"""
+# prints only the final answer there and the ``session_id:`` line on stderr.
+_RECORDED_STDOUT = "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.\n"
+_RECORDED_STDERR = "\nsession_id: 20261108_120000_abcdef\n"
 _DIRECT_PROVIDER_KEYS = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "KIMI_API_KEY", "GLM_API_KEY"}
+_PROMPT = "Fix `solution.py` and say $(echo done)."
+# Stand-in for the hermes binary: it records its call and prints a fixed answer.
+_FAKE_HERMES = """#!/bin/sh
+{
+  printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
+  printf 'OPENAI_BASE_URL=%s\\n' "$OPENAI_BASE_URL"
+  printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
+  printf 'ANTHROPIC_API_KEY=%s\\n' "$ANTHROPIC_API_KEY"
+  printf 'HERMES_HOME=%s\\n' "$HERMES_HOME"
+  printf 'CONFIG=%s\\n' "$(tr -d '\\n' < "$HERMES_HOME/config.yaml")"
+} >> "$FAKE_LOG"
+printf '%s' "$FAKE_ANSWER"
+printf '%s' "$FAKE_STDERR" >&2
+exit "${FAKE_EXIT:-0}"
+"""
+# Stand-ins for the install step's tools. The fake ``python3`` plays pip and
+# the wheel fetch, and logs both; the fake uv installs a fake ``hermes``. macOS
+# ``mktemp -d`` ignores ``TMPDIR``, so a fake one keeps the folder in scratch.
+_FAKE_INSTALL_TOOLS = {
+    "mktemp": '#!/bin/sh\nd="$TMPDIR/download.$$"\nmkdir "$d" && echo "$d"\n',
+    "python3": """#!/bin/sh
+{ printf 'python3'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'; } >> "$FAKE_LOG"
+if [ "$1" = "-m" ]; then
+  [ "${FAKE_PIP_EXIT:-0}" -eq 0 ] || exit "$FAKE_PIP_EXIT"
+  for a in "$@"; do last="$a"; done
+  printf 'REQ=%s\\n' "$(cat "$last")" >> "$FAKE_LOG"
+  for a in "$@"; do [ "$prev" = "--target" ] && t="$a"; prev="$a"; done
+  mkdir -p "$t/bin" && cp "$FAKE_UV" "$t/bin/uv" && chmod +x "$t/bin/uv"
+  exit 0
+fi
+[ "${FAKE_FETCH_EXIT:-0}" -eq 0 ] || exit "$FAKE_FETCH_EXIT"
+for a in "$@"; do last="$a"; done
+printf wheel > "$last"
+""",
+}
+_FAKE_UV = """#!/bin/sh
+{ printf 'uv'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'; } >> "$FAKE_LOG"
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\\necho "Hermes Agent v0.19.0 (2026.7.20)"\\n' > "$HOME/.local/bin/hermes"
+chmod +x "$HOME/.local/bin/hermes"
+"""
 
 
 def _target(**overrides: object) -> BlackboxTarget:
@@ -105,14 +148,141 @@ def _fetch(tmp_path: Path, sha: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_registry_lists_hermes_with_its_pin_and_plain_parser() -> None:
-    """Hermes registers at position 68 with the version token its ``--version`` prints."""
+def _run_install(
+    tmp_path: Path, *, uv_on_path: bool = False, pip_exit: int = 0, fetch_exit: int = 0
+) -> tuple[int, str, Path, str]:
+    """Run the open install command under ``set -eu`` with fake install tools.
+
+    The command runs inside a ``set -eu`` script, as in the native bootstrap,
+    and ``TMPDIR`` points at a scratch folder, so the test can see every
+    folder ``mktemp -d`` leaves behind.
+
+    Args:
+        tmp_path: Scratch directory for the fake tools, ``HOME`` and ``TMPDIR``.
+        uv_on_path: Put the fake uv on ``PATH``, so the install must not run pip.
+        pip_exit: Exit status the fake pip returns.
+        fetch_exit: Exit status the fake wheel fetch returns.
+
+    Returns:
+        The exit status, the stdout, the ``TMPDIR`` folder and the tool log.
+    """
+    install = build_launch(_target(), _GATEWAY).install_command
+    assert install is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    tools = dict(_FAKE_INSTALL_TOOLS, **({"uv": _FAKE_UV} if uv_on_path else {}))
+    for name, script in tools.items():
+        tool = bin_dir / name
+        tool.write_text(script)
+        tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+    fake_uv = tmp_path / "fake_uv"
+    fake_uv.write_text(_FAKE_UV)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    log = tmp_path / "tools.log"
+    log.touch()
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(scratch),
+        "FAKE_LOG": str(log),
+        "FAKE_UV": str(fake_uv),
+        "FAKE_PIP_EXIT": str(pip_exit),
+        "FAKE_FETCH_EXIT": str(fetch_exit),
+    }
+    result = subprocess.run(
+        [shutil.which("bash") or "/bin/sh", "-c", f"set -eu; {install}; echo after-install"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return result.returncode, result.stdout, scratch, log.read_text()
+
+
+def _run_with_fake_hermes(
+    tmp_path: Path, *, protected: bool, relay_env: str = "APP_BUDGET_RELAY_URL", fake_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], str, Path]:
+    """Run the built Hermes command in a scratch workspace against a fake ``hermes`` binary.
+
+    The env also carries an inherited OpenAI URL and an Anthropic key, which
+    the run must not pass on.
+
+    Args:
+        tmp_path: Scratch directory for the workspace, the fake binary and its log.
+        protected: Build the protected launch, with the sandbox-local relay set.
+        relay_env: The env name that carries the relay URL in a protected run.
+        fake_exit: Exit status the fake binary returns.
+
+    Returns:
+        The finished process, the fake binary's call log, and the workspace.
+    """
+    launch = build_launch(_target(), _GATEWAY, protected=protected)
+    workspace = tmp_path / "work"
+    for name, content in launch.files.items():
+        path = workspace / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    (workspace / "task").mkdir(parents=True)
+    (workspace / "task" / "PROMPT.md").write_text(_PROMPT)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "hermes"
+    fake.write_text(_FAKE_HERMES)
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    log = tmp_path / "calls.log"
+    env = {
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "ANTHROPIC_API_KEY": "inherited-key",
+        **launch.env,
+        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        "HOME": str(tmp_path / "home"),
+        "FAKE_LOG": str(log),
+        "FAKE_ANSWER": _RECORDED_STDOUT,
+        "FAKE_STDERR": _RECORDED_STDERR,
+        "FAKE_EXIT": str(fake_exit),
+    }
+    if protected:
+        env[relay_env] = _RELAY_URL
+    # The sandbox runs the command with bash, not /bin/sh.
+    result = subprocess.run(
+        [shutil.which("bash") or "/bin/sh", "-c", launch.run_command],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return result, log.read_text(), workspace
+
+
+def _logged(calls: str, name: str) -> str:
+    """Return the value the fake binary logged for ``name``.
+
+    Args:
+        calls: The fake binary's call log.
+        name: The logged variable name.
+
+    Returns:
+        The logged value.
+    """
+    return next(line for line in calls.splitlines() if line.startswith(f"{name}=")).split("=", 1)[1]
+
+
+def test_registry_lists_hermes_after_goose_with_its_pin_and_plain_parser() -> None:
+    """Hermes registers after goose and before cline, with the version token its ``--version`` prints."""
     assert REGISTRY["hermes"] is SPEC
     assert SPEC.binary == "hermes"
     assert HERMES_VERSION == "0.19.0"
     assert SPEC.version == "v0.19.0"
     assert SPEC.output_format == "plain"
-    assert SPEC.position == 68
+    assert SPEC.position == 65
+    ids = list(REGISTRY)
+    assert ids.index("goose") < ids.index("hermes") < ids.index("cline")
+    assert BLACKBOX_HARNESSES.index("goose") < BLACKBOX_HARNESSES.index("hermes") < BLACKBOX_HARNESSES.index("cline")
 
 
 def test_pinned_check_matches_the_printed_version_only() -> None:
@@ -181,13 +351,15 @@ def test_launch_never_writes_the_gateway_key_or_a_provider_key() -> None:
     assert _GATEWAY.api_key not in launch.run_command
     assert _GATEWAY.api_key not in launch.install_command
     assert all(_GATEWAY.api_key not in content for content in launch.files.values())
-    assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
-    assert launch.env["APP_MODEL"] == "target-model"
+    for prefix in ("APP", "SKYNET"):
+        assert launch.env[f"{prefix}_API_KEY"] == _GATEWAY.api_key
+        assert launch.env[f"{prefix}_MODEL"] == "target-model"
+        assert launch.env[f"{prefix}_GATEWAY_URL"] == _GATEWAY.url
     assert not _DIRECT_PROVIDER_KEYS & set(launch.env)
 
 
-def test_install_pins_the_checksummed_wheel_without_a_piped_script() -> None:
-    """The open install skips work when the pin is present and otherwise installs the verified wheel."""
+def test_install_pins_the_checksummed_wheel_and_uv_without_a_piped_script() -> None:
+    """The open install skips work when the pin is present and otherwise installs hash-checked uv and wheel."""
     install = build_launch(_target(), _GATEWAY).install_command
 
     assert "hermes --version" in install
@@ -195,10 +367,53 @@ def test_install_pins_the_checksummed_wheel_without_a_piped_script() -> None:
     assert HERMES_WHEEL_URL in install
     assert HERMES_WHEEL_SHA256 in install
     assert HERMES_WHEEL_URL.endswith(HERMES_WHEEL)
-    assert f'uv tool install --force --python 3.12 "$_hermes_wheel/{HERMES_WHEEL}"' in install
-    assert "uv==0.9.13" in install
+    assert f'tool install --force --python 3.12 "$d/{HERMES_WHEEL}"' in install
+    assert f"uv=={UV_VERSION}" in install
+    assert "--require-hashes" in install
+    assert all(f"--hash=sha256:{digest}" in install for digest in UV_WHEEL_SHA256)
     assert "curl" not in install
     assert "| sh" not in install and "| bash" not in install
+    assert "sudo" not in install
+
+
+def test_install_without_uv_installs_hash_checked_uv_and_removes_the_download_folder(tmp_path: Path) -> None:
+    """Pip installs the pinned uv with hashes into the download folder; the folder is gone after the install."""
+    code, stdout, scratch, log = _run_install(tmp_path)
+
+    assert code == 0
+    assert stdout.splitlines() == ["Hermes Agent v0.19.0 (2026.7.20)", "after-install"]
+    (pip,) = [line for line in log.splitlines() if line.startswith("python3 [-m]")]
+    assert "[--require-hashes]" in pip and "[--no-deps]" in pip and "[--only-binary]" in pip
+    assert _logged(log, "REQ").startswith(f"uv=={UV_VERSION} --hash=sha256:")
+    (uv,) = [line for line in log.splitlines() if line.startswith("uv ")]
+    assert uv.startswith("uv [tool] [install] [--force] [--python] [3.12] [")
+    assert uv.endswith(f"{HERMES_WHEEL}]")
+    assert list(scratch.iterdir()) == []
+
+
+def test_install_with_uv_on_path_skips_pip(tmp_path: Path) -> None:
+    """A uv already on PATH installs the wheel; pip never runs."""
+    code, stdout, scratch, log = _run_install(tmp_path, uv_on_path=True)
+
+    assert code == 0
+    assert stdout.splitlines()[-1] == "after-install"
+    assert "python3 [-m]" not in log
+    assert "uv [tool] [install]" in log
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize(("pip_exit", "fetch_exit", "code"), [(1, 0, 1), (0, 1, 1)])
+def test_failed_uv_install_or_wheel_check_removes_the_download_folder_and_fails(
+    tmp_path: Path, pip_exit: int, fetch_exit: int, code: int
+) -> None:
+    """A failed pip step or wheel digest check stops the install, removes the folder, and installs nothing."""
+    exit_code, stdout, scratch, log = _run_install(tmp_path, pip_exit=pip_exit, fetch_exit=fetch_exit)
+
+    assert exit_code == code
+    assert "after-install" not in stdout
+    assert "uv [tool]" not in log
+    assert not (tmp_path / "home" / ".local" / "bin" / "hermes").exists()
+    assert list(scratch.iterdir()) == []
 
 
 def test_wheel_fetch_keeps_a_matching_file_and_rejects_a_mismatch(tmp_path: Path) -> None:
@@ -214,13 +429,26 @@ def test_wheel_fetch_keeps_a_matching_file_and_rejects_a_mismatch(tmp_path: Path
     assert not (tmp_path / "out.whl").exists()
 
 
-@pytest.mark.parametrize(("effort", "expected"), [("high", "high"), ("max", "max"), ("turbo", None), (None, None)])
-def test_reasoning_effort_reaches_the_config_only_for_known_levels(effort: str | None, expected: str | None) -> None:
-    """A Hermes effort level is set in ``agent.reasoning_effort``; an unknown one keeps Hermes's default."""
+@pytest.mark.parametrize("effort", HERMES_EFFORTS)
+def test_supported_reasoning_effort_reaches_the_config_unchanged(effort: str) -> None:
+    """Every Hermes effort level goes into ``agent.reasoning_effort`` as given."""
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
-    config = json.loads(launch.files[HERMES_CONFIG_FILE])
-    assert config.get("agent", {}).get("reasoning_effort") == expected
+    assert json.loads(launch.files[HERMES_CONFIG_FILE])["agent"] == {"reasoning_effort": effort}
+
+
+def test_no_reasoning_effort_keeps_the_hermes_default() -> None:
+    """Without an effort the config has no ``agent`` block."""
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort=None)
+
+    assert "agent" not in json.loads(launch.files[HERMES_CONFIG_FILE])
+
+
+@pytest.mark.parametrize("effort", ["turbo", "High", "auto"])
+def test_unsupported_reasoning_effort_is_refused(effort: str) -> None:
+    """An effort Hermes does not know fails the launch instead of a silent drop or remap."""
+    with pytest.raises(ServiceError, match="Hermes does not support the reasoning effort"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Path) -> None:
@@ -232,7 +460,8 @@ def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Pat
     for key, value in _PROTECTED_ENV.items():
         assert launch.env[key] == value
     assert launch.env["DO_NOT_TRACK"] == "1"
-    assert "OPENAI_API_KEY" not in _PROTECTED_ENV
+    assert _DIRECT_PROVIDER_KEYS <= {name for name, value in _PROTECTED_ENV.items() if value == ""}
+    assert {"CLAUDE_CODE_OAUTH_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} <= set(_PROTECTED_ENV)
     for name, content in launch.files.items():
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,13 +486,44 @@ def test_open_build_keeps_the_protected_env_out() -> None:
     assert not set(_PROTECTED_ENV) & set(launch.env)
 
 
+@pytest.mark.parametrize("relay_env", ["APP_BUDGET_RELAY_URL", "SKYNET_BUDGET_RELAY_URL"])
+def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path: Path, relay_env: str) -> None:
+    """Against a fake hermes, the run passes the prompt as one unparsed argument and uses only the relay."""
+    result, calls, workspace = _run_with_fake_hermes(tmp_path, protected=True, relay_env=relay_env)
+
+    assert result.returncode == 0
+    (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
+    assert run == (
+        f"ARGS [--yolo] [chat] [-q] [{_PROMPT}] [-Q] [--model] [target-model] [--provider] [custom:runtime]"
+    )
+    assert _logged(calls, "OPENAI_BASE_URL") == _RELAY_URL
+    assert _logged(calls, "OPENAI_API_KEY") == _GATEWAY.api_key
+    assert _logged(calls, "ANTHROPIC_API_KEY") == ""
+    assert _RELAY_URL in _logged(calls, "CONFIG")
+    assert _GATEWAY.url not in calls
+    home = Path(_logged(calls, "HERMES_HOME"))
+    assert not home.is_relative_to(workspace)
+    assert parse_plain_output(result.stdout)[0] == "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42."
+    assert "session_id" not in result.stdout
+
+
+@pytest.mark.parametrize("fake_exit", [0, 3])
+def test_run_removes_hermes_home_and_keeps_the_exit_status(tmp_path: Path, fake_exit: int) -> None:
+    """The EXIT trap removes the per-run HERMES_HOME after a good or a failed run, and keeps Hermes's status."""
+    result, calls, _ = _run_with_fake_hermes(tmp_path, protected=False, fake_exit=fake_exit)
+
+    assert result.returncode == fake_exit
+    assert result.stdout == _RECORDED_STDOUT
+    assert _logged(calls, "OPENAI_BASE_URL") == _GATEWAY.url
+    assert not Path(_logged(calls, "HERMES_HOME")).exists()
+
+
 def test_plain_parser_keeps_the_recorded_hermes_answer() -> None:
     """The bridge keeps Hermes's quiet stdout as the answer and reports no usage."""
     launch = build_launch(_target(), _GATEWAY)
 
     answer, usage = launch.parse_output(_RECORDED_STDOUT)
-    assert answer == _RECORDED_STDOUT.strip()
-    assert answer.startswith("The answer is 42.")
+    assert answer == "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42."
     assert usage == {}
     assert launch.parse_output("") == (None, {})
 
