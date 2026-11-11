@@ -26,6 +26,10 @@ from .base import ENV_API_KEY, ENV_MODEL, ENV_PROMPT_FILE, GatewayConfig, Harnes
 # the headless ``openhands.core.main`` entry point; 1.7.0 removed it.
 OPENHANDS_VERSION = "1.6.0"
 OPENHANDS_PACKAGE = "openhands-ai"
+# ``openhands-ai`` 1.6.0 asks only for ``litellm>=1.74.3``, and its ``openai==2.8``
+# pin caps LiteLLM at 1.80.10 today. The pin keeps the effort and sampling
+# behavior that the tests and the PR checked from moving with new releases.
+OPENHANDS_LITELLM_VERSION = "1.80.10"
 OPENHANDS_PYTHON = "3.12"
 OPENHANDS_UV_VERSION = "0.13.7"
 OPENHANDS_VENV = '"$HOME/.local/share/openhands-venv"'
@@ -60,7 +64,9 @@ _WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
 # defaults ``temperature=0.0`` and ``top_p=1.0``: Anthropic Opus 4.1 and later
 # reject the two together, and OpenAI reasoning models reject
 # ``temperature=0``. ``None`` overrides them, and LiteLLM drops a ``None``
-# parameter, so the gateway gets neither.
+# parameter, so the gateway gets neither. LiteLLM drops ``reasoning_effort``
+# for a model name it does not know, so ``allowed_openai_params`` forces it
+# through.
 _SAMPLING_DEFAULTS_OFF = {"temperature": None, "top_p": None}
 # LiteLLM reads these keys for its other providers. A protected run blanks
 # them, so an inherited key never gives OpenHands a route around the gateway.
@@ -107,7 +113,7 @@ def _openhands_install() -> str:
         f"curl -LsSf https://astral.sh/uv/{OPENHANDS_UV_VERSION}/install.sh | sh; }} && "
         f"uv venv --clear --python {OPENHANDS_PYTHON} {OPENHANDS_VENV} >/dev/null && "
         f"SKIP_VSCODE_BUILD=true uv pip install --python {OPENHANDS_VENV}/bin/python "
-        f"{OPENHANDS_PACKAGE}=={OPENHANDS_VERSION} >/dev/null && "
+        f"{OPENHANDS_PACKAGE}=={OPENHANDS_VERSION} litellm=={OPENHANDS_LITELLM_VERSION} >/dev/null && "
         f"mkdir -p {_LOCAL_BIN} && "
         f"printf '{_WRAPPER}' {OPENHANDS_VENV} > {_LOCAL_BIN}/openhands && "
         f'chmod 755 {_LOCAL_BIN}/openhands || exit "$?"; }}; '
@@ -121,7 +127,8 @@ def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]
     OpenHands parses the value with ``ast.literal_eval``. It always unsets
     ``temperature`` and ``top_p``. It adds the user's effort unchanged, as the
     Codex, OpenCode and Aider harnesses do, so the gateway gets the same
-    ``reasoning_effort`` from every harness.
+    ``reasoning_effort`` from every harness. ``LLM_DROP_PARAMS=false`` makes a level that
+    LiteLLM refuses fail the call rather than vanish.
 
     Args:
         reasoning_effort: The user's effort for the model, or ``None`` for the model default.
@@ -129,9 +136,10 @@ def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]
     Returns:
         The env entry.
     """
-    kwargs: dict[str, str | None] = dict(_SAMPLING_DEFAULTS_OFF)
+    kwargs: dict[str, object] = dict(_SAMPLING_DEFAULTS_OFF)
     if reasoning_effort:
         kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["allowed_openai_params"] = ["reasoning_effort"]
     return {"LLM_COMPLETION_KWARGS": repr(kwargs)}
 
 
@@ -139,7 +147,7 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     """Build the launch for OpenHands (``openhands``, pinned to :data:`OPENHANDS_VERSION`).
 
     Each run gets a fresh OpenHands root outside the workspace for the file
-    store, the cache, the task file and ``HOME``. The config path points into
+    store, the cache, the task file, ``TMPDIR`` and ``HOME``. The config path points into
     that root but does not exist, so no user config loads. So
     session files never land in the files the run hands back, a
     ``config.toml`` in the workspace cannot change the model route, and
@@ -170,13 +178,13 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
         'export OPENHANDS_ROOT="$(mktemp -d)" && '
         "trap 'rm -rf \"$OPENHANDS_ROOT\"' EXIT && "
-        'mkdir "$OPENHANDS_ROOT/home" && '
+        'mkdir "$OPENHANDS_ROOT/home" "$OPENHANDS_ROOT/tmp" && '
         f"{{ if [ -f {_INSTRUCTIONS_FILE} ]; then cat {_INSTRUCTIONS_FILE}; printf '\\n\\n'; fi; "
         f'cat "${ENV_PROMPT_FILE}"; }} > "$OPENHANDS_ROOT/task.md" && '
         f'LLM_BASE_URL="$(cat {OPENHANDS_BASE_URL_FILE})" LLM_API_KEY="${ENV_API_KEY}" '
         f'LLM_MODEL="{_LITELLM_PREFIX}${ENV_MODEL}" '
         'FILE_STORE_PATH="$OPENHANDS_ROOT/store" CACHE_DIR="$OPENHANDS_ROOT/cache" '
-        'SANDBOX_VOLUMES="$PWD:/workspace:rw" USER="$(id -un)" HOME="$OPENHANDS_ROOT/home" '
+        'SANDBOX_VOLUMES="$PWD:/workspace:rw" USER="$(id -un)" HOME="$OPENHANDS_ROOT/home" TMPDIR="$OPENHANDS_ROOT/tmp" '
         'openhands --config-file "$OPENHANDS_ROOT/config.toml" '
         '-f "$OPENHANDS_ROOT/task.md" 2>&1 < /dev/null; '
         'status=$?; [ "$status" -eq 0 ] || exit "$status"; '
@@ -212,6 +220,11 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
             # Without it, OpenHands logs actions at debug level, so the log
             # the bridge returns has no agent message or final answer.
             "LOG_ALL_EVENTS": "true",
+            # OpenHands defaults to ``drop_params=True``, so LiteLLM would
+            # silently drop an effort that it knows a model does not take,
+            # such as ``xhigh`` for ``gpt-5.1``. The call fails instead, and
+            # the run ends in a state that is not ``finished``.
+            "LLM_DROP_PARAMS": "false",
             **_openhands_completion_kwargs(reasoning_effort),
         }
     )

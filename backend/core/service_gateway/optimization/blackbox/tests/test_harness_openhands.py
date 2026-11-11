@@ -17,7 +17,7 @@ from ..agent_eval import candidate_files
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
-from ..harnesses.openhands import _PROTECTED_ENV, OPENHANDS_BASE_URL_FILE, OPENHANDS_VERSION
+from ..harnesses.openhands import _PROTECTED_ENV, OPENHANDS_BASE_URL_FILE, OPENHANDS_LITELLM_VERSION, OPENHANDS_VERSION
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -58,6 +58,8 @@ fi
   printf 'FILE_STORE_PATH=%s\\n' "$FILE_STORE_PATH"
   printf 'CACHE_DIR=%s\\n' "$CACHE_DIR"
   printf 'HOME=%s\\n' "$HOME"
+  printf 'TMPDIR=%s\\n' "$TMPDIR"
+  if [ -d "$TMPDIR" ]; then echo 'TMPDIR_DIR=yes'; else echo 'TMPDIR_DIR=no'; fi
   printf 'ROOT=%s\\n' "$OPENHANDS_ROOT"
   if [ -d "$OPENHANDS_ROOT" ]; then echo 'ROOT_DIR=yes'; else echo 'ROOT_DIR=no'; fi
 } >> "$log"
@@ -224,13 +226,13 @@ def test_openhands_is_registered_after_aider_with_its_pin() -> None:
 
 
 def test_open_install_pins_uv_and_the_package() -> None:
-    """Install the pinned uv and ``openhands-ai`` release into a virtualenv, without the VS Code build."""
+    """Install the pinned uv, ``openhands-ai`` and LiteLLM releases into a virtualenv, without the VS Code build."""
     install = build_launch(_target(), _GATEWAY).install_command
 
     assert install is not None
     assert install.startswith(f'export PATH="$HOME/.local/bin":"$PATH"; {pinned_harness_check("openhands")} || ')
     assert "https://astral.sh/uv/0.13.7/install.sh" in install
-    assert f"openhands-ai=={OPENHANDS_VERSION}" in install
+    assert f"openhands-ai=={OPENHANDS_VERSION} litellm=={OPENHANDS_LITELLM_VERSION} " in install
     assert "SKIP_VSCODE_BUILD=true uv pip install" in install
     assert install.endswith('|| exit "$?"; }; openhands --version')
     assert "sudo" not in install
@@ -283,6 +285,7 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.env["ENABLE_BROWSER"] == "false"
     assert launch.env["LLM_NATIVE_TOOL_CALLING"] == "true"
     assert launch.env["LOG_ALL_EVENTS"] == "true"
+    assert launch.env["LLM_DROP_PARAMS"] == "false"
     assert "LLM_REASONING_EFFORT" not in launch.env
     assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == {"temperature": None, "top_p": None}
     assert not set(_PROVIDER_KEYS) & set(launch.env)
@@ -291,18 +294,23 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
 
 @pytest.mark.parametrize("effort", [None, "", "none", "minimal", "low", "medium", "high", "xhigh", "max"])
 def test_completion_kwargs_unset_sampling_and_pass_the_effort_unchanged(effort: str | None) -> None:
-    """Always unset ``temperature`` and ``top_p``, and add the user's effort unchanged when there is one.
+    """Always unset ``temperature`` and ``top_p``, and force the user's effort through unchanged when there is one.
 
     OpenHands drops ``LLM_REASONING_EFFORT`` for models outside its own list,
     and sends ``temperature=0.0`` with ``top_p=1.0`` to them, which Anthropic
     Opus 4.1+ and OpenAI reasoning models reject. So the launch must not rely
     on ``LLM_REASONING_EFFORT``, and must unset both even with no effort.
+    LiteLLM drops the effort for a model name it does not know unless
+    ``allowed_openai_params`` names it, and ``LLM_DROP_PARAMS=false`` turns a
+    refused level into a failed call rather than a silent drop.
     """
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
     assert "LLM_REASONING_EFFORT" not in launch.env
-    expected: dict[str, str | None] = {"temperature": None, "top_p": None}
+    assert launch.env["LLM_DROP_PARAMS"] == "false"
+    expected: dict[str, object] = {"temperature": None, "top_p": None}
     if effort:
         expected["reasoning_effort"] = effort
+        expected["allowed_openai_params"] = ["reasoning_effort"]
     assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == expected
 
 
@@ -338,6 +346,8 @@ def test_protected_run_points_openhands_at_the_relay_and_returns_its_log(tmp_pat
     assert _logged(calls, "FILE_STORE_PATH") == f"{root}/store"
     assert _logged(calls, "CACHE_DIR") == f"{root}/cache"
     assert _logged(calls, "HOME") == f"{root}/home"
+    assert _logged(calls, "TMPDIR") == f"{root}/tmp"
+    assert _logged(calls, "TMPDIR_DIR") == "yes"
     assert _logged(calls, "ROOT_DIR") == "yes"
     assert not Path(root).exists()
     assert not Path(root).is_relative_to(workspace.resolve())
