@@ -1791,33 +1791,34 @@ def test_an_upstream_that_echoes_the_key_gives_the_box_only_the_redacted_form(ec
     assert echo.paths == ["/echo"]
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "../_sandbox",
-        "%2e%2e/x",
-        "../other/",
-        "a/%2E%2E/b",
-        "%252e%252e/x",
-        "..\\x",
-        "..%5cx",
-        "..;/x",
-        "x/..%5c..%5cadmin",
-        "..%00/admin",
-        "a;b",
-        "..%3F",
-        "..%3Fx",
-        "..%253F/x",
-        "..%23",
-        "..%2523",
-        "x/..%3F/..%3F",
-        "%c0%ae%c0%ae/x",
-        "a%20b",
-        "%EF%BC%8E%EF%BC%8E/x",
-        "./a",
-        "x#y",
-    ],
-)
+# The proposer relay's refused paths (test_scoped_relay.py), relative to one service or MCP server.
+_LEAVING_PATHS = [
+    "../_sandbox",
+    "%2e%2e/x",
+    "../other/",
+    "a/%2E%2E/b",
+    "%252e%252e/x",
+    "..\\x",
+    "..%5cx",
+    "..;/x",
+    "x/..%5c..%5cadmin",
+    "..%00/admin",
+    "a;b",
+    "..%3F",
+    "..%3Fx",
+    "..%253F/x",
+    "..%23",
+    "..%2523",
+    "x/..%3F/..%3F",
+    "%c0%ae%c0%ae/x",
+    "a%20b",
+    "%EF%BC%8E%EF%BC%8E/x",
+    "./a",
+    "x#y",
+]
+
+
+@pytest.mark.parametrize("path", _LEAVING_PATHS)
 def test_a_service_path_that_could_leave_the_service_is_refused(echo: _Echo, path: str) -> None:
     """A [run] or [metric] service path gets the proposer relay's check, so nothing leaves the parent (SKY-622)."""
     sink = _CallSink()
@@ -2323,6 +2324,30 @@ def test_an_mcp_path_that_names_another_host_stays_on_the_declared_host(echo: _E
     assert answer["status"] == 200
     assert echo.paths == ["/echo/" + path.lstrip("/")]
     assert "judge-secret-value" not in json.dumps(answer)
+
+
+@pytest.mark.parametrize("path", _LEAVING_PATHS)
+def test_an_mcp_path_that_could_leave_the_server_is_refused(echo: _Echo, path: str) -> None:
+    """An MCP path gets the same check as a service path, so the server's secret never goes elsewhere (SKY-622)."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+
+    answer = _mcp_answer(relay, workspace, "search", path=path)
+
+    assert answer == {"status": 400, "error": "MCP server 'search' got a path outside its url."}
+    assert echo.paths == []
+
+
+def test_a_plain_mcp_sub_path_still_reaches_the_server(echo: _Echo) -> None:
+    """A plain path under the declared url goes out with the key filled, and the echo comes back redacted."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+
+    answer = _mcp_answer(relay, workspace, "search", path="v2/a..b/item?q=a;b")
+
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    assert echo.paths == ["/echo/v2/a..b/item?q=a;b"]
 
 
 class _CallSink:

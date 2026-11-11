@@ -1520,8 +1520,11 @@ class _StageRelay:
         # An empty path is the declared url itself: an MCP endpoint may not answer with a slash added.
         url = origin.rstrip("/") + "/" + path.lstrip("/") if path else origin
         base, target = httpx.URL(origin), httpx.URL(url)
-        if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port) or (
-            kind == "host" and (_unsafe_path(path) or not _under(target, base))
+        # The secret headers go with every path, so a service and an MCP server get the same path check.
+        if (
+            (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
+            or _unsafe_path(path)
+            or not _under(target, base)
         ):
             return {"status": 400, "error": f"{label} got a path outside its url."}
         overrides = {key.lower() for key in declared}
