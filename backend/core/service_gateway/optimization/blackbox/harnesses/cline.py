@@ -112,5 +112,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=70,
+        supported_efforts=CLINE_THINKING_LEVELS,
     )
 )

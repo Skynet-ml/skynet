@@ -12,12 +12,19 @@ from pathlib import Path
 import pytest
 
 from core.exceptions import ServiceError
-from core.models.blackbox import BLACKBOX_HARNESS_CLINE, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
+from core.models.blackbox import (
+    BLACKBOX_HARNESS_CLINE,
+    BLACKBOX_HARNESSES,
+    BLACKBOX_TARGET_AGENT,
+    BlackboxProposer,
+    BlackboxTarget,
+)
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
 from ..harnesses.cline import CLINE_BASE_URL_FILE, CLINE_THINKING_LEVELS, CLINE_VERSION
+from ..service import _check_proposer_effort
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -120,8 +127,22 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
 
 
 def test_supported_levels_are_the_pinned_release_thinking_levels() -> None:
-    """Declare exactly the ``--thinking`` levels of Cline 3.0.74."""
+    """Declare exactly the ``--thinking`` levels of Cline 3.0.74, on the spec the submit check reads."""
     assert CLINE_THINKING_LEVELS == ("none", "low", "medium", "high", "xhigh")
+    assert REGISTRY[BLACKBOX_HARNESS_CLINE].supported_efforts == CLINE_THINKING_LEVELS
+
+
+@pytest.mark.parametrize("effort", [None, "none", "low", "medium", "high", "xhigh"])
+def test_submit_accepts_the_supported_levels(effort: str | None) -> None:
+    """Let a Cline proposer submit with no effort or a level Cline supports."""
+    _check_proposer_effort(BlackboxProposer(harness=BLACKBOX_HARNESS_CLINE), effort)
+
+
+@pytest.mark.parametrize("effort", ["minimal", "max", "High"])
+def test_submit_refuses_an_unsupported_level_before_paid_work(effort: str) -> None:
+    """Refuse at submit a level Cline does not support, before the run reserves budget."""
+    with pytest.raises(ServiceError, match=f"cline proposer does not support the '{effort}' effort level"):
+        _check_proposer_effort(BlackboxProposer(harness=BLACKBOX_HARNESS_CLINE), effort)
 
 
 @pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh"])
@@ -140,8 +161,8 @@ def test_no_effort_keeps_clines_default(effort: str | None) -> None:
 
 
 @pytest.mark.parametrize("effort", ["minimal", "max", "auto", "High", "extreme"])
-def test_unsupported_effort_raises_before_launch(effort: str) -> None:
-    """Refuse a level Cline does not support, instead of a silent remap or drop."""
+def test_unsupported_effort_raises_in_build_launch(effort: str) -> None:
+    """Refuse in the launch too, as a backstop, instead of a silent remap or drop."""
     with pytest.raises(ServiceError, match=f"Cline does not support the effort level '{effort}'"):
         build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
