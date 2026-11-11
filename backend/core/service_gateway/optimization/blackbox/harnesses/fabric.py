@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import shlex
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_FABRIC
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
@@ -62,9 +63,9 @@ _FABRIC_LAUNCHER = (
     "fi\n"
     'PATH="$venv/bin:$PATH" exec "$venv/bin/python" "$@"\n'
 )
-# Codex knows these efforts. Fabric passes them unchanged and sets no effort
-# for any other name, so Codex uses its default.
-_FABRIC_EFFORTS_KNOWN = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+# The Codex efforts. Fabric passes them unchanged and refuses any other effort,
+# so a run never gets an effort the user did not pick.
+FABRIC_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 # The Codex adapter passes ``OPENAI_API_KEY`` through to Codex, so a protected
 # run blanks it and an inherited key never gives Codex a route around the
 # gateway. The other flags stop OpenTelemetry export and opt-in usage tracking.
@@ -242,6 +243,9 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
 
     Returns:
         The JSON text.
+
+    Raises:
+        ServiceError: When Codex has no effort with that name.
     """
     settings: dict[str, object] = {
         # The sandbox is the isolation boundary, and no one is there to approve.
@@ -249,7 +253,12 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
         "approval_mode": "deny_all",
         "config_overrides": _FABRIC_CODEX_OVERRIDES,
     }
-    if reasoning_effort in _FABRIC_EFFORTS_KNOWN:
+    if reasoning_effort:
+        if reasoning_effort not in FABRIC_EFFORTS:
+            raise ServiceError(
+                f"The Fabric harness does not support the effort '{reasoning_effort}'. "
+                f"Pick one of: {', '.join(FABRIC_EFFORTS)}."
+            )
         settings["reasoning_effort"] = reasoning_effort
     config = {
         "metadata": {"name": "skynet-fabric"},
@@ -276,6 +285,9 @@ def _fabric_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When Codex has no effort with that name.
     """
     return HarnessLaunch(
         instructions_file="AGENTS.md",

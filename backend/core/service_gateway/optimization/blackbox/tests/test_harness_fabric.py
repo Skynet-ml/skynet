@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_FABRIC, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
@@ -262,14 +263,19 @@ def test_open_launch_pins_the_packages_and_sends_model_calls_only_to_the_gateway
         ("minimal", "minimal"),
         ("high", "high"),
         ("xhigh", "xhigh"),
-        ("max", None),
-        ("turbo", None),
     ],
 )
 def test_reasoning_effort_maps_to_the_codex_setting(effort: str | None, setting: str | None) -> None:
-    """Pass the user's effort as Codex's ``reasoning_effort``, or no setting for Codex's default."""
+    """Pass the user's effort unchanged as Codex's ``reasoning_effort``, or no setting when there is none."""
     config = json.loads(build_launch(_target(), _GATEWAY, reasoning_effort=effort).files[FABRIC_CONFIG_FILE])
     assert config["harness"]["settings"].get("reasoning_effort") == setting
+
+
+@pytest.mark.parametrize("effort", ["max", "turbo", "HIGH"])
+def test_reasoning_effort_that_codex_lacks_is_refused(effort: str) -> None:
+    """Refuse an effort Codex does not have, with its name, instead of a silent remap or drop."""
+    with pytest.raises(ServiceError, match=f"does not support the effort '{effort}'"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_fallbacks_and_telemetry() -> None:
