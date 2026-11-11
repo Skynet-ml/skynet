@@ -35,7 +35,7 @@ class HostedModelGateway:
             def log_message(self, format: str, *args: Any) -> None:
                 """Keep model prompts and scoped tokens out of access logs."""
 
-            def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler protocol method
+            def do_POST(self) -> None:
                 """Forward one completion through the account link with automatic token refresh."""
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 route = gateway.routes.get(token)
