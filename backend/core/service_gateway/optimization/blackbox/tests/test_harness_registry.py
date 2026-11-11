@@ -27,6 +27,8 @@ from ..harness import (
 )
 from ..harness_bridge import PARSERS
 from ..harnesses import REGISTRY, HarnessSpec, register
+from ..harnesses.deerflow import DEERFLOW_REF
+from ..harnesses.deerflow import SPEC as DEERFLOW_SPEC
 
 _GATEWAYS = {
     "gw": GatewayConfig(url="https://gw.example/v1", api_key="secret-key"),
@@ -39,7 +41,17 @@ _OVERRIDES: dict[str, dict[str, str]] = {
 }
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
-_BUILT_INS = (*_PRE_REGISTRY, "aider", "openhands_sdk", "antigravity_sdk", "fx", "goose", "cline", "code_puppy")
+_BUILT_INS = (
+    *_PRE_REGISTRY,
+    "aider",
+    "openhands_sdk",
+    "antigravity_sdk",
+    "fx",
+    "goose",
+    "deerflow",
+    "cline",
+    "code_puppy",
+)
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
 # SKY-529 changed the codex digests: Codex turns off web_search and multi_agent,
@@ -275,6 +287,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         ),
         "fx": ("fx", "0.0.16"),
         "goose": ("goose", "1.57.0"),
+        "deerflow": (DEERFLOW_SPEC.binary, DEERFLOW_REF),
         "cline": ("cline", "3.0.74"),
         "code_puppy": ("code-puppy", "0.0.967"),
     }
