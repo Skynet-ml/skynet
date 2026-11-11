@@ -472,6 +472,38 @@ def test_runner_sums_usage_once_per_message_and_ignores_the_end_total(tmp_path: 
     assert parse_pi_output(completed.stdout)[1] == {"input_tokens": 22, "output_tokens": 5}
 
 
+def test_runner_answers_after_a_tool_call_turn_that_ends_with_an_end_event(tmp_path: Path) -> None:
+    """Answer with the message after a tool call and count both model calls once.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    call = {"name": "bash", "args": {"command": "ls"}, "id": "c1"}
+    events = [
+        [
+            "messages-tuple",
+            {
+                "type": "ai",
+                "id": "m1",
+                "content": "",
+                "tool_calls": [call],
+                "usage_metadata": {"input_tokens": 10, "output_tokens": 4},
+            },
+        ],
+        ["messages-tuple", {"type": "tool", "id": "t1", "tool_call_id": "c1", "content": "README.md"}],
+        [
+            "messages-tuple",
+            {"type": "ai", "id": "m2", "content": "Done.", "usage_metadata": {"input_tokens": 20, "output_tokens": 3}},
+        ],
+        ["end", {"usage": {"input_tokens": 99, "output_tokens": 99}}],
+    ]
+    completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
+    assert completed.returncode == 0, completed.stderr
+    answer, usage = parse_pi_output(completed.stdout)[:2]
+    assert answer == "Done."
+    assert usage == {"input_tokens": 30, "output_tokens": 7}
+
+
 def test_runner_fails_on_deerflow_provider_error_fallback(tmp_path: Path) -> None:
     """Exit non-zero with no ``message_end`` when DeerFlow replaces the reply with its error fallback.
 
