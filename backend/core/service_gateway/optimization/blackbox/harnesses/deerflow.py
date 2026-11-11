@@ -107,6 +107,9 @@ from pathlib import Path
 CONFIG_FILE = Path({config_file!r})
 GATEWAY_URL = {gateway_url!r}
 DIRECT_ROUTES = {direct_routes!r}
+# DeerFlow reads these before the project root, so a host value would load
+# another config or extensions file instead of the checked one.
+CONFIG_PATH_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_EXTENSIONS_CONFIG_PATH")
 INSTRUCTIONS_FILE = {instructions_file!r}
 STEERING = (
     "You are operating directly on a real Linux machine through the bash and file tools. "
@@ -121,7 +124,9 @@ def _instructions(workdir):
     path = Path(workdir) / INSTRUCTIONS_FILE
     text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
     # The closing tag ends the candidate's text, so a ``Task:`` line inside it
-    # cannot pass for the real task that follows.
+    # cannot pass for the real task that follows. A closing tag in the candidate
+    # is escaped, so it cannot end the block early.
+    text = text.replace(f"</{{INSTRUCTIONS_FILE}}>", f"<\\\\/{{INSTRUCTIONS_FILE}}>")
     return f"Follow these instructions from {{INSTRUCTIONS_FILE}}:\\n<{{INSTRUCTIONS_FILE}}>\\n{{text}}\\n</{{INSTRUCTIONS_FILE}}>\\n\\n" if text else ""
 
 
@@ -174,7 +179,7 @@ def _run():
     \"\"\"Stream one DeerFlow turn and print one Pi-shaped ``message_end`` event.\"\"\"
     if not os.environ.get({env_api_key!r}):
         sys.exit("The DeerFlow harness needs the gateway token.")
-    for name in DIRECT_ROUTES:
+    for name in (*DIRECT_ROUTES, *CONFIG_PATH_VARS):
         os.environ.pop(name, None)
     workdir = str(Path.cwd().resolve())
     _write_config(workdir)
@@ -205,15 +210,19 @@ def _run():
             if event.type == "end" and isinstance(data.get("usage"), dict):
                 end_usage = data["usage"]
             elif event.type == "messages-tuple" and data.get("type") == "ai":
-                # Chunks of one message repeat its id, and id-less chunks share
-                # one key, so usage counts once per message and deltas join.
+                # Chunks of one message repeat its id, so usage counts once per
+                # message. Id-less deltas share one key, so their text joins.
                 message_id = data.get("id") or ""
                 extra = data.get("additional_kwargs")
                 # DeerFlow's LLMErrorHandlingMiddleware replaces a failed provider call
                 # with this flagged message; Harbor's runner treats it as a failed run.
                 if isinstance(extra, dict) and extra.get("deerflow_error_fallback"):
                     llm_error = str(extra.get("error_detail") or _text(data.get("content")) or "LLM provider failed")
-                if isinstance(data.get("usage_metadata"), dict):
+                # Some providers stream chunks with no id. DeerFlow then repeats the
+                # finished message under a real id in the next state snapshot (its
+                # test_none_id_chunks_produce_duplicates_known_limitation), so id-less
+                # usage is skipped here and counted once from that copy.
+                if message_id and isinstance(data.get("usage_metadata"), dict):
                     message_usage[message_id] = data["usage_metadata"]
                 piece = _text(data.get("content"))
                 if piece:
@@ -223,9 +232,10 @@ def _run():
                 # DeerFlow puts usage only on AI text deltas, but OpenAI-style streams
                 # send it in a final empty chunk, so tool-call turns report it only in
                 # these state snapshots. The same id holds the same total in both.
+                # The state's add_messages reducer gives every message an id.
                 for message in data.get("messages") or []:
-                    if isinstance(message, dict) and message.get("type") == "ai" and isinstance(message.get("usage_metadata"), dict):
-                        message_usage[message.get("id") or ""] = message["usage_metadata"]
+                    if isinstance(message, dict) and message.get("type") == "ai" and message.get("id") and isinstance(message.get("usage_metadata"), dict):
+                        message_usage[message["id"]] = message["usage_metadata"]
     except errors.GraphRecursionError as exc:
         # The stream stops before its ``end`` event, so the per-message sum from
         # the deltas and the finished nodes' snapshots stands in for it. Report it
@@ -301,7 +311,7 @@ def _deerflow_config(model: str, gateway_url: str, reasoning_effort: str | None 
         "request_timeout": 600.0,
         "max_retries": 2,
     }
-    if reasoning_effort and reasoning_effort.lower() != "none":
+    if reasoning_effort:
         # DeerFlow's model factory drops ``reasoning_effort`` unless the entry sets
         # ``supports_reasoning_effort``; then ChatOpenAI sends it to the gateway.
         model_entry["supports_reasoning_effort"] = True
@@ -369,8 +379,8 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
     Args:
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; DeerFlow sends every model call there.
-        reasoning_effort: The user's effort for the model; any value but ``none`` goes
-            to the gateway as ``reasoning_effort``.
+        reasoning_effort: The user's effort for the model; any non-empty value,
+            ``none`` included, goes to the gateway unchanged as ``reasoning_effort``.
 
     Returns:
         The launch.
