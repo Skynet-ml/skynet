@@ -7,7 +7,8 @@ a ``preexisting`` repo on a ``local`` deployment, the LiteLLM ``openai/``
 route, the zero cost limits, ``top_p=null``, and ``temperature=1`` with an
 active reasoning effort. Harbor floats uv and the dependencies, gives SWE-agent
 a direct provider key and keeps the trajectory in the agent logs; Skynet pins
-uv, the tag and its commit, LiteLLM, SWE-ReX and a resolution date, points
+uv, the tag and its commit, LiteLLM, SWE-ReX and a resolution date, sends the
+effort in ``extra_body`` with temperature 1 for every level, points
 LiteLLM at the model gateway through a launch file, reads the key from the
 environment, and keeps the task and the trajectory in a per-run folder it
 removes. SWE-agent's transcript goes to stderr; stdout carries only the patch
@@ -152,13 +153,15 @@ def _swe_agent_install() -> str:
 def _effort_flags(reasoning_effort: str | None) -> str:
     """Return the ``sweagent run`` flags for the user's effort.
 
-    The level goes into ``completion_kwargs`` as is. LiteLLM 1.103.1 sends
-    it unchanged for an ``openai/`` model id that it does not know. For a known
-    id it refuses an unsupported level with ``UnsupportedParamsError`` (for
-    example ``gpt-5`` with ``xhigh``, or ``gpt-4o`` with any level), because
-    SWE-agent does not set ``drop_params``. It never remaps or drops a level.
-    SWE-agent's default temperature 0 is rejected by OpenAI reasoning models,
-    so an active effort also sets temperature 1, as Harbor does.
+    The level goes into ``completion_kwargs.extra_body``, so LiteLLM 1.103.1
+    puts it in the request body as is. As a ``reasoning_effort`` argument,
+    LiteLLM checks it against the model id: any id with ``gpt-5`` goes through
+    ``OpenAIGPT5Config``, which refuses ``xhigh`` for ``gpt-5``, ``gpt-5-mini``
+    and ``gpt-5.1`` and ``minimal`` for ``gpt-5.1``, ``gpt-5.2`` and
+    ``gpt-5.5``, and ``gpt-4o`` refuses every level. The gateway, not LiteLLM,
+    decides on the level. LiteLLM also refuses SWE-agent's default temperature
+    0 for OpenAI reasoning models when it does not see the level, so every
+    level, ``none`` too, sets temperature 1.
 
     Args:
         reasoning_effort: The user's effort for the model, or ``None`` for the model's default.
@@ -176,11 +179,8 @@ def _effort_flags(reasoning_effort: str | None) -> str:
             f"The SWE-agent harness does not support the effort level '{reasoning_effort}'. "
             f"Supported levels: {', '.join(SWE_AGENT_EFFORTS)}."
         )
-    kwargs = shlex.quote(json.dumps({"reasoning_effort": reasoning_effort}))
-    flags = f" --agent.model.completion_kwargs={kwargs}"
-    if reasoning_effort != "none":
-        flags += " --agent.model.temperature=1"
-    return flags
+    kwargs = shlex.quote(json.dumps({"extra_body": {"reasoning_effort": reasoning_effort}}))
+    return f" --agent.model.completion_kwargs={kwargs} --agent.model.temperature=1"
 
 
 def _swe_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:

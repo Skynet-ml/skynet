@@ -557,12 +557,12 @@ def test_probe_prints_the_release_only_for_the_pinned_litellm_and_swe_rex(tmp_pa
 
 @pytest.mark.parametrize("effort", _EFFORTS)
 def test_reasoning_effort_passes_unchanged(tmp_path: Path, effort: str) -> None:
-    """Send every Skynet effort level to LiteLLM as is; an active one also sets temperature 1."""
+    """Send every Skynet effort level in ``extra_body`` as is, with temperature 1."""
     _, calls, _ = _run_with_fake_sweagent(tmp_path, protected=False, reasoning_effort=effort)
 
     args = _args(calls)
-    assert f'--agent.model.completion_kwargs={{"reasoning_effort": "{effort}"}}' in args
-    assert ("--agent.model.temperature=1" in args) is (effort != "none")
+    assert f'--agent.model.completion_kwargs={{"extra_body": {{"reasoning_effort": "{effort}"}}}}' in args
+    assert "--agent.model.temperature=1" in args
 
 
 def test_registry_declares_the_litellm_effort_levels() -> None:
