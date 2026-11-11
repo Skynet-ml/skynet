@@ -23,7 +23,7 @@ export function LegalActionLink({
   if (kind === "home") {
     return (
       <LinkButton href={href} size="sm" className="min-h-[44px] lg:min-h-0" aria-label={label}>
-        <ArrowLeft className="size-4" aria-hidden="true" />
+        <ArrowLeft className="size-4 rtl:rotate-180" aria-hidden="true" />
         <span className="hidden sm:inline">{label}</span>
       </LinkButton>
     );
