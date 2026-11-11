@@ -3,10 +3,14 @@
   "private": true,
   "version": "1.0.0",
   "dependencies": {
+    "@ai-sdk/openai-compatible": "3.0.87",
     "@earendil-works/pi-coding-agent": "0.87.1",
     "@openai/codex": "0.153.0",
+    "ai": "7.0.165",
+    "eve": "1.0.0-rc.6",
     "opencode-ai": "1.18.27",
-    "prime-agent": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.7/prime-agent-0.9.7.tgz"
+    "prime-agent": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.7/prime-agent-0.9.7.tgz",
+    "zod": "4.6.7"
   },
   "overrides": {
     "basic-ftp": "6.2.1",
