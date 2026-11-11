@@ -187,7 +187,8 @@ def test_fx_is_registered_before_cline_with_its_pin() -> None:
     """List fx in the registry and the request model, pinned to the exact release."""
     spec = REGISTRY[BLACKBOX_HARNESS_FX]
     assert (spec.binary, spec.version, spec.output_format, spec.position) == ("fx", "0.0.16", "pi", 62)
-    assert list(REGISTRY)[-2:] == [BLACKBOX_HARNESS_FX, "cline"]
+    ids = list(REGISTRY)
+    assert ids.index("antigravity_sdk") < ids.index(BLACKBOX_HARNESS_FX) < ids.index("cline")
     assert BLACKBOX_HARNESS_FX in BLACKBOX_HARNESSES
     assert pinned_harness_check(BLACKBOX_HARNESS_FX) == "fx --version 2>/dev/null | grep -Eq '(^| )0[.]0[.]16( |$)'"
 

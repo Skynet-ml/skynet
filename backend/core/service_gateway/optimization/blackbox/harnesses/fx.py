@@ -37,8 +37,10 @@ FX_SETTINGS_FILE = ".app/fx/settings.json"
 # ``fx ask --json`` prints one result object at the end; only a completed turn
 # fills ``final_output``, while ``output`` also holds interim text. The bridge
 # has no fx parser, so this script reads the object with ``json`` and prints one
-# Pi ``message_end`` line, the shape the Antigravity runner also uses. It runs inline (``python3 -c '...'``), so it
-# holds no single quote; a generated file would have to carry the relay URL.
+# Pi ``message_end`` line, the shape the Antigravity runner also uses. A script
+# in ``files`` would land in the working directory that ``fx --yolo`` can edit
+# and would go through a protected run's relay rewrite, so it runs inline
+# (``python3 -I -c '...'``) and must hold no single quote.
 FX_TO_PI = """import json
 import sys
 
