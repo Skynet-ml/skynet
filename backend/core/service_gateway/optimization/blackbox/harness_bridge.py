@@ -1139,11 +1139,51 @@ def _stop_group(process: subprocess.Popen[str], signum: int) -> None:
 
     Args:
         process: The shell running the harness command, started in its own session.
-        signum: Signal to deliver to the whole process group.
+        signum: Signal to deliver to the process group and to every descendant.
     """
+    # eve's sandbox starts each tool command detached, in its own session and
+    # group, so the group signal misses it. The tree is read first: once a
+    # parent dies, its children move to init and leave the tree.
+    descendants = _descendant_pids(process.pid)
     # Signalling only the shell would leave a child holding the stdout pipe open.
     with contextlib.suppress(ProcessLookupError):
         os.killpg(process.pid, signum)
+    for pid in descendants:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signum)
+
+
+def _descendant_pids(root: int) -> list[int]:
+    """List the live descendants of a process.
+
+    Args:
+        root: Pid of the harness shell.
+
+    Returns:
+        The pids under ``root`` at any depth, or an empty list where ``/proc`` is absent (macOS).
+    """
+    children: dict[int, list[int]] = {}
+    try:
+        entries = list(Path("/proc").iterdir())
+    except FileNotFoundError:
+        return []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            # The command name in field 2 can hold spaces and parentheses, so
+            # the parent pid is read after its closing parenthesis.
+            parent = int(entry.joinpath("stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(parent, []).append(int(entry.name))
+    found: list[int] = []
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.append(child)
+            pending.append(child)
+    return found
 
 
 def run_session(

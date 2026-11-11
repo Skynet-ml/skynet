@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tarfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_EVE, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from .. import repo_tree
@@ -35,6 +39,7 @@ from ..harnesses.eve import (
     EVE_DISABLE_AGENT_TOOL,
     EVE_IMAGE_DEPS,
     EVE_INSTRUCTIONS_FILE,
+    EVE_REASONING_LEVELS,
     EVE_RUNNER,
     EVE_SANDBOX,
     EVE_VERSION,
@@ -267,18 +272,27 @@ def test_image_lock_pins_the_same_eve_packages_as_the_harness() -> None:
     assert all(lock[f"node_modules/{name}"].get("integrity") for name in pins)
 
 
-@pytest.mark.parametrize(
-    ("effort", "level"),
-    [(None, None), ("none", "none"), ("minimal", "minimal"), ("high", "high"), ("max", "xhigh"), ("turbo", None)],
-)
-def test_reasoning_effort_reaches_the_agent_config(effort: str | None, level: str | None) -> None:
-    """Pass the user's effort as eve's ``reasoning`` level, or leave the model's default."""
+def test_reasoning_levels_match_eve() -> None:
+    """Offer exactly eve's own levels, without ``provider-default``, which no effort already means."""
+    assert EVE_REASONING_LEVELS == ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
+@pytest.mark.parametrize("effort", [None, *EVE_REASONING_LEVELS])
+def test_reasoning_effort_reaches_the_agent_config_unchanged(effort: str | None) -> None:
+    """Pass each eve level unchanged as ``reasoning``, or leave the model's default."""
     agent = build_launch(_target(), _GATEWAY, reasoning_effort=effort).files[".app/eve/agent/agent.ts"]
     assert "modelContextWindowTokens: 200_000" in agent
-    if level is None:
+    if effort is None:
         assert "reasoning:" not in agent
     else:
-        assert f'reasoning: "{level}"' in agent
+        assert f'reasoning: "{effort}"' in agent
+
+
+@pytest.mark.parametrize("effort", ["max", "turbo", "provider-default", "HIGH"])
+def test_reasoning_effort_that_eve_lacks_is_refused(effort: str) -> None:
+    """Refuse a level eve does not have, with its name, instead of a silent remap or drop."""
+    with pytest.raises(ServiceError, match=f"does not support the effort '{effort}'"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_sandbox_runs_tools_in_the_run_workspace_without_the_gateway_key() -> None:
@@ -330,7 +344,10 @@ def test_protected_launch_checks_the_pin_relays_the_gateway_and_blocks_updates(t
     assert 'baseURL: "http://127.0.0.1:3210/v1"' in (record / "agent/agent.ts").read_text()
     assert launch.env["NPM_CONFIG_OFFLINE"] == "true"
     assert launch.env["EVE_TELEMETRY_DISABLED"] == "1"
-    assert not set(_PROVIDER_KEYS) & set(launch.env)
+    # A protected run blanks the direct provider credentials, like goose.
+    credentials = [key for key in _PROVIDER_KEYS if key != "OPENAI_BASE_URL"]
+    assert {key: launch.env.get(key) for key in credentials} == dict.fromkeys(credentials, "")
+    assert "OPENAI_BASE_URL" not in launch.env
 
 
 def test_pi_parser_reads_the_recorded_runner_sample() -> None:
@@ -414,7 +431,10 @@ const SCENARIOS = {
     { type: "call.requested", data: { callId: "c2" } },
   ],
   cost: [{ type: "usage.recorded", data: { usage: { inputTokens: 5000, outputTokens: 0 } } }],
+  silent: [{ type: "turn.settled", data: { outcome: "failed", error: { message: "" } } }],
+  waiting: [],
 };
+const RESULTS = { waiting: { status: "awaiting-input" } };
 const hang = () => new Promise(() => setInterval(() => {}, 1000));
 export class Client {
   constructor(options) {
@@ -433,7 +453,7 @@ export class Client {
               if (scenario === "tools" || scenario === "cost") await hang();
             },
             async result() {
-              return { status: "completed", reply: "done" };
+              return RESULTS[scenario] ?? { status: "completed", reply: "done" };
             },
           },
         };
@@ -544,6 +564,14 @@ def test_runner_streams_events_so_the_caps_stop_a_running_session(tmp_path: Path
     assert failed.process.returncode != 0
     assert "the model call failed" in failed.stderr  # type: ignore[attr-defined]
 
+    silent = _monitor_runner(tmp_path / "silent", "silent")
+    assert silent.process.returncode != 0
+    assert "turn.settled ended failed during the eve run" in silent.stderr  # type: ignore[attr-defined]
+
+    waiting = _monitor_runner(tmp_path / "waiting", "waiting")
+    assert waiting.process.returncode != 0
+    assert "eve run ended with status awaiting-input" in waiting.stderr  # type: ignore[attr-defined]
+
     tools = _monitor_runner(tmp_path / "tools", "tools", max_tool_calls=1)
     assert tools.tool_cap_reached
     assert tools.tool_calls == 2
@@ -631,6 +659,9 @@ console.log(JSON.stringify({
 """
 
 
+_BOX_TOKENS = ("CANDIDATE_TOKEN", "HOST_AGENT_TOKEN", "PACKAGE_RELAY_TOKEN", "TOOL_RELAY_TOKEN")
+
+
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_path: Path) -> None:
     """Run the real sandbox provider: drop the key and token from commands, keep PATH, and refuse hidden paths."""
@@ -658,6 +689,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
             "EVE_RUNNER_TOKEN": "runner-token",
             "EVE_PROJECT_DIR": str(project),
             "EVE_WORKSPACE": str(workspace),
+            **{f"{prefix}_{name}": "box-token" for prefix in ("APP", "SKYNET") for name in _BOX_TOKENS},
             "APP_GUARD_EVE": guard_env["APP_GUARD_EVE"],
         },
         capture_output=True,
@@ -668,6 +700,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     result = json.loads(completed.stdout)
     names = {line.split("=", 1)[0] for line in result["env"].splitlines()}
     assert not names & {"APP_API_KEY", "SKYNET_API_KEY", "EVE_RUNNER_TOKEN", "EVE_PROJECT_DIR", "EVE_WORKSPACE"}
+    assert not {name for name in names if name.endswith(_BOX_TOKENS)}
     # A login shell reads /etc/profile, which resets PATH on Debian images and
     # would drop /opt/node24/bin and the venv from every tool command.
     assert result["path"].split(os.pathsep)[0] == str(tools_bin)
@@ -675,3 +708,83 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
         assert result[key] == GUARD_REFUSAL, key
     assert result["allowed"] == "print(1)\n"
     assert (workspace / "optimize.toml").read_text() == "hidden = true\n"
+
+
+# Starts a command whose background ``sleep`` holds the stdout pipe, reads the
+# sleep's pid from the first line, then stops the command through ``kill()``
+# or through the abort signal and waits for it to end.
+_KILL_DRIVER = """
+const { environment } = await import(process.argv[1]);
+const { connection } = await environment.start();
+const stop = async (how) => {
+  const controller = new AbortController();
+  const child = await connection.spawn({
+    command: "sleep 60 & echo $!; wait",
+    env: {},
+    signal: controller.signal,
+    workingDirectory: process.env.EVE_WORKSPACE,
+  });
+  const reader = child.stdout.getReader();
+  const { value } = await reader.read();
+  const pid = Number(new TextDecoder().decode(value).trim());
+  if (how === "kill") await child.kill();
+  else controller.abort();
+  const ended = await Promise.race([
+    child.wait().then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 10000)),
+  ]);
+  await reader.cancel();
+  return { pid, ended };
+};
+console.log(JSON.stringify({ kill: await stop("kill"), abort: await stop("abort") }));
+process.exit(0);
+"""
+
+
+def _running(pid: int) -> bool:
+    """Tell whether a process runs and is not a zombie.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        ``True`` while ``ps`` lists the process in a state other than zombie.
+    """
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    return bool(state.stdout.strip()) and not state.stdout.strip().startswith("Z")
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_sandbox_kill_and_abort_stop_the_processes_a_command_started(tmp_path: Path) -> None:
+    """Kill the whole process group of a tool command, so a child it started dies with it."""
+    project = tmp_path / "eve"
+    stubs = project / "node_modules/eve"
+    stubs.mkdir(parents=True)
+    for name, text in _SANDBOX_STUBS.items():
+        (stubs / name).write_text(text)
+    (project / "sandbox.mjs").write_text(EVE_SANDBOX)
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+
+    completed = subprocess.run(
+        [_NODE, "--input-type=module", "-e", _KILL_DRIVER, str((project / "sandbox.mjs").as_uri())],
+        cwd=project,
+        env={"PATH": os.environ.get("PATH", os.defpath), "EVE_WORKSPACE": str(workspace)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    result = json.loads(completed.stdout)
+    for how in ("kill", "abort"):
+        pid = result[how]["pid"]
+        try:
+            # The sleep holds stdout, so the command ends only once it dies.
+            assert result[how]["ended"], f"{how}: the command did not end"
+            deadline = time.monotonic() + 10
+            while _running(pid):
+                assert time.monotonic() < deadline, f"{how}: the child process outlived the command"
+                time.sleep(0.05)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)

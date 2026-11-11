@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import shlex
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_EVE
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
@@ -32,17 +33,41 @@ EVE_IMAGE_DEPS = "/usr/local/lib/skynet-harnesses/node_modules"
 # eve needs Node >=24, but the other harness CLIs run on the image's Node 22,
 # so the image keeps a second Node binary for eve alone.
 _IMAGE_NODE24_BIN = "/opt/node24/bin"
-# eve accepts these ``reasoning`` levels; Skynet's ``max`` is its top level.
-_REASONING_LEVELS = {"max": "xhigh"}
-_REASONING_KNOWN = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+# eve 1.0.0-rc.6's ``AgentReasoningDefinition`` levels. Skynet passes them
+# unchanged and refuses any other level, so a run never gets an effort the
+# user did not pick. ``provider-default`` is left out: no effort means that.
+EVE_REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh")
 _NPM_FLAGS = "--no-fund --no-audit --loglevel=error --progress=false"
 _ENV = {
     "EVE_TELEMETRY_DISABLED": "1",
     "NPM_CONFIG_UPDATE_NOTIFIER": "false",
 }
+# The direct provider credentials that eve's AI SDK providers read. A
+# protected run blanks them, like goose, so no tool command or eve process can
+# reach a model outside the Skynet gateway; the runner also drops them.
+_PROVIDER_KEYS = (
+    "AI_GATEWAY_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "VERCEL_OIDC_TOKEN",
+    "XAI_API_KEY",
+)
 # A protected sandbox has no route to the internet, so the project install
 # must come from the npm cache and fail fast instead of waiting on the registry.
 _PROTECTED_ENV = {
+    **dict.fromkeys(_PROVIDER_KEYS, ""),
     "EVE_TELEMETRY_DISABLED": "1",
     "NPM_CONFIG_UPDATE_NOTIFIER": "false",
     "NPM_CONFIG_OFFLINE": "true",
@@ -101,10 +126,8 @@ try {
   for await (const event of delivery.stream()) handleEvent(event);
   const result = await delivery.result();
   printMessage(messageText(result.reply), { input: 0, output: 0 });
-  failure ??= OK_STATUSES.has(result.status)
-    ? null
-    : (result.error?.message ?? `eve run ended with status ${result.status ?? "unknown"}`);
-  if (failure) throw new Error(failure);
+  if (failure === null && !OK_STATUSES.has(result.status)) failure = statusFailure(result);
+  if (failure !== null) throw new Error(failure);
 } finally {
   if (server) await stopServer(server);
 }
@@ -118,8 +141,21 @@ function handleEvent(event) {
     const usage = data.usage ?? {};
     printMessage("", { input: tokenCount(usage.inputTokens), output: tokenCount(usage.outputTokens) });
   } else if (SETTLED_TYPES.has(type) && FAILED_OUTCOMES.has(data.outcome)) {
-    failure ??= data.error?.message ?? `${type} ended ${data.outcome} during the eve run`;
+    failure ??= withDetail(`${type} ended ${data.outcome} during the eve run`, data.error?.message);
   }
+}
+
+function statusFailure(result) {
+  const status = result.status ?? "unknown";
+  const detail = status === "awaiting-input"
+    ? "the agent asked for input that this run cannot give"
+    : result.error?.message;
+  return withDetail(`eve run ended with status ${status}`, detail);
+}
+
+// eve can send an empty error message, so the status always names the failure.
+function withDetail(text, detail) {
+  return detail ? `${text}: ${detail}` : text;
 }
 
 function printMessage(text, usage) {
@@ -207,7 +243,15 @@ async function stopServer(child) {
 # keep APP_API_KEY (agent.ts reads it) and EVE_RUNNER_TOKEN (the channel reads
 # it), so the provider removes them, with the project paths, only from the env
 # of the commands it starts. ``with_legacy_env`` also copies APP_API_KEY to
-# SKYNET_API_KEY, so the provider removes that legacy twin too.
+# SKYNET_API_KEY, so the provider removes that legacy twin too. The box
+# process can also hold the tool relay, package relay, candidate and host
+# agent tokens, so the provider removes them and their SKYNET_ twins. eve's
+# contract says ``bash -lc``, but a login shell reads /etc/profile, which
+# resets PATH and drops the Node 24 directory that the launch adds. The
+# image's ENV PATH already holds the venv, so ``bash -c`` keeps the server
+# PATH and every image tool. Each command starts detached, in its own session
+# and process group, so an abort or ``kill()`` stops the whole group. The
+# bridge's stop sweep finds these groups through the process tree.
 EVE_SANDBOX = r"""import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
@@ -219,6 +263,14 @@ import { defineSandboxProvider, SANDBOX_AGENT_ENV } from "eve/sandbox/provider";
 const DROPPED_ENV = [
   "APP_API_KEY",
   "SKYNET_API_KEY",
+  "APP_CANDIDATE_TOKEN",
+  "SKYNET_CANDIDATE_TOKEN",
+  "APP_HOST_AGENT_TOKEN",
+  "SKYNET_HOST_AGENT_TOKEN",
+  "APP_PACKAGE_RELAY_TOKEN",
+  "SKYNET_PACKAGE_RELAY_TOKEN",
+  "APP_TOOL_RELAY_TOKEN",
+  "SKYNET_TOOL_RELAY_TOKEN",
   "EVE_PROJECT_DIR",
   "EVE_RUNNER_TOKEN",
   "EVE_WORKSPACE",
@@ -238,6 +290,17 @@ async function guard(tool, input) {
   if (reason) throw new Error(reason);
 }
 
+// Each command leads its own process group, so a kill also stops the
+// processes it started; killing only bash would leave them running.
+function killProcessGroup(pid) {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
 function workspaceRoot() {
   const root = process.env.EVE_WORKSPACE;
   if (!root || !isAbsolute(root)) throw new Error("EVE_WORKSPACE must name the absolute run workspace");
@@ -255,13 +318,19 @@ function connect(root) {
       await guard("bash", { command, cwd: workingDirectory });
       const child = spawn("bash", ["-c", command], {
         cwd: workingDirectory,
+        detached: true,
         env: { ...base, ...SANDBOX_AGENT_ENV, ...env },
-        signal,
         stdio: [stdin ? "pipe" : "ignore", "pipe", "pipe"],
       });
+      const killGroup = () => killProcessGroup(child.pid);
+      if (signal?.aborted) killGroup();
+      else signal?.addEventListener("abort", killGroup, { once: true });
       const exit = new Promise((resolve, reject) => {
         child.once("error", (error) => (child.pid === undefined ? reject(error) : undefined));
-        child.once("close", (code) => resolve({ exitCode: code ?? 1 }));
+        child.once("close", (code) => {
+          signal?.removeEventListener("abort", killGroup);
+          resolve({ exitCode: code ?? 1 });
+        });
       });
       return {
         pid: child.pid,
@@ -269,9 +338,7 @@ function connect(root) {
         stdout: Readable.toWeb(child.stdout),
         stderr: Readable.toWeb(child.stderr),
         wait: () => exit,
-        kill: async () => {
-          child.kill("SIGKILL");
-        },
+        kill: async () => killGroup(),
       };
     },
     async readFile({ path }) {
@@ -356,11 +423,18 @@ def _reasoning_level(reasoning_effort: str | None) -> str | None:
 
     Returns:
         The level, or ``None`` to keep the model's default.
+
+    Raises:
+        ServiceError: When eve has no level with that name.
     """
     if not reasoning_effort:
         return None
-    level = _REASONING_LEVELS.get(reasoning_effort, reasoning_effort)
-    return level if level in _REASONING_KNOWN else None
+    if reasoning_effort not in EVE_REASONING_LEVELS:
+        raise ServiceError(
+            f"The eve harness does not support the effort '{reasoning_effort}'. "
+            f"Pick one of: {', '.join(EVE_REASONING_LEVELS)}."
+        )
+    return reasoning_effort
 
 
 def _agent_source(model: str, gateway: GatewayConfig, reasoning: str | None = None) -> str:
@@ -424,6 +498,8 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
     channel, then builds it there, since ``eve build`` compiles those
     instructions. So package.json, the runner, node_modules and the build
     output never reach the version patch, and an exit trap removes the project.
+    A SIGKILL skips that trap, so the project can stay in the box's temp
+    directory until the box ends; ``mktemp -d`` makes it mode 0700.
     The runner then sends the case prompt.
 
     Args:
@@ -434,6 +510,9 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When eve has no level with the effort's name.
     """
     env = _base_env(model, gateway)
     env.update(_ENV)

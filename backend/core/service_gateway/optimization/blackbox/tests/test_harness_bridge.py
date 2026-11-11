@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.server
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -128,6 +131,74 @@ def test_run_session_reports_timeouts_and_budget_overruns(tmp_path: Path) -> Non
     assert outcome.usage == {"input_tokens": 1000, "output_tokens": 0}
     assert outcome.cost_usd == pytest.approx(10.0)
     assert outcome.duration_seconds < 4
+
+
+def test_stop_group_reads_the_tree_before_it_signals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read the descendants first, then signal the group and each descendant."""
+    sent: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(harness_bridge.os, "killpg", lambda pid, signum: sent.append(("group", pid, signum)))
+    monkeypatch.setattr(harness_bridge.os, "kill", lambda pid, signum: sent.append(("pid", pid, signum)))
+    monkeypatch.setattr(
+        harness_bridge, "_descendant_pids", lambda root: sent.append(("tree", root, 0)) or [root + 1, root + 2]
+    )
+
+    shell = subprocess.Popen(["true"])
+    shell.wait()
+    harness_bridge._stop_group(shell, signal.SIGKILL)
+
+    pid = shell.pid
+    assert sent == [
+        ("tree", pid, 0),
+        ("group", pid, signal.SIGKILL),
+        ("pid", pid + 1, signal.SIGKILL),
+        ("pid", pid + 2, signal.SIGKILL),
+    ]
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the descendant sweep reads /proc")
+def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> None:
+    """Kill a grandchild that left the harness group and session, the way eve's sandbox starts a tool command."""
+    pid_file = tmp_path / "job.pid"
+    detached = f"import os, time; os.setsid(); open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    process = subprocess.Popen(
+        ["bash", "-c", f"{shlex.quote(sys.executable)} -c {shlex.quote(detached)} & wait"],
+        start_new_session=True,
+        text=True,
+    )
+    deadline = time.monotonic() + 10
+    while not (pid_file.exists() and pid_file.read_text().strip()):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    job = int(pid_file.read_text())
+    try:
+        assert os.getsid(job) != process.pid
+
+        harness_bridge._stop_group(process, signal.SIGKILL)
+        process.wait(timeout=10)
+
+        deadline = time.monotonic() + 10
+        # The killed job's parent is gone, so init reaps it; until then it is a zombie.
+        while _alive(job):
+            assert time.monotonic() < deadline, "the detached job outlived the harness"
+            time.sleep(0.05)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(job, signal.SIGKILL)
+
+
+def _alive(pid: int) -> bool:
+    """Tell whether a process runs and is not a zombie.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        ``True`` while ``/proc`` shows the process in a state other than zombie.
+    """
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
 
 
 def test_result_document_and_transcript_match_what_upstream_reads(tmp_path: Path) -> None:
