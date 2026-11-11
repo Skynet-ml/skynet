@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_QWEN_CODE, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
@@ -23,6 +24,7 @@ from ..harnesses.qwen_code import (
     _PROTECTED_KEY_VALUE,
     _STASH_DIR,
     QWEN_CODE_BASE_URL_FILE,
+    QWEN_CODE_EFFORTS,
     QWEN_CODE_SETTINGS_FILE,
 )
 
@@ -299,7 +301,7 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.parse_output is parse_plain_output
 
 
-@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("effort", QWEN_CODE_EFFORTS)
 def test_qwen_code_effort_goes_unchanged_into_the_system_settings(effort: str) -> None:
     """Write a Qwen Code effort name as ``model.reasoningEffort`` next to the model pin, and change nothing else."""
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
@@ -312,10 +314,26 @@ def test_qwen_code_effort_goes_unchanged_into_the_system_settings(effort: str) -
     assert launch.env == default.env
 
 
-@pytest.mark.parametrize("effort", [None, "", "minimal", "HIGH", "extra-high"])
-def test_other_effort_names_send_no_effort(effort: str | None) -> None:
-    """Send no effort for a name that is not one of Qwen Code's own values."""
-    assert build_launch(_target(), _GATEWAY, reasoning_effort=effort) == build_launch(_target(), _GATEWAY)
+def test_spec_declares_exactly_the_levels_it_passes() -> None:
+    """Declare the Qwen Code settings schema levels, so submit refuses any other level before paid work."""
+    assert REGISTRY[BLACKBOX_HARNESS_QWEN_CODE].supported_efforts == QWEN_CODE_EFFORTS
+    assert QWEN_CODE_EFFORTS == ("none", "low", "medium", "high", "xhigh", "max")
+
+
+@pytest.mark.parametrize("effort", ["minimal", "HIGH", "extra-high", " high", "auto"])
+def test_unsupported_effort_is_refused(effort: str) -> None:
+    """Stop the launch for a level Qwen Code does not support, instead of a silent drop or remap."""
+    with pytest.raises(ServiceError, match="does not support the effort level"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_keeps_the_qwen_code_default(effort: str | None) -> None:
+    """Send no effort when the user chose none, so Qwen Code keeps its default."""
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
+
+    assert launch == build_launch(_target(), _GATEWAY)
+    assert "reasoningEffort" not in json.loads(launch.files[QWEN_CODE_SETTINGS_FILE])["model"]
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:

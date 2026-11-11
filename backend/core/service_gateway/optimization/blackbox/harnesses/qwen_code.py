@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_QWEN_CODE
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
@@ -85,9 +86,9 @@ _STASH_DIR = ".skynet-qwen-stash"
 # only a folder with this mark, so a candidate repo's own file or folder at
 # :data:`_STASH_DIR` stops the run and stays.
 _STASH_MARK = "# Skynet Qwen Code stash"
-# Qwen Code's own ``model.reasoningEffort`` values (``normalizeReasoningEffort``
-# plus ``none``); Skynet sends no effort for any other name.
-_QWEN_CODE_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
+# The ``model.reasoningEffort`` values that the Qwen Code 0.27.2 settings
+# schema accepts. Skynet passes them unchanged and refuses any other level.
+QWEN_CODE_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
 def _qwen_code_settings(base_url: str, reasoning_effort: str | None) -> str:
@@ -101,7 +102,7 @@ def _qwen_code_settings(base_url: str, reasoning_effort: str | None) -> str:
         The settings JSON. It names the key's env variable and holds no key.
     """
     model: dict[str, str] = {"name": f"${{{ENV_MODEL}}}", "baseUrl": base_url}
-    if reasoning_effort in _QWEN_CODE_EFFORTS:
+    if reasoning_effort:
         model["reasoningEffort"] = reasoning_effort
     # ``$version`` 4 is the current settings schema, so Qwen Code does not
     # write a migrated copy back to the file.
@@ -159,10 +160,10 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     back. The run first puts back a stash that a killed run left, then moves
     the workspace :data:`_WORKSPACE_QWEN_FILES` into :data:`_STASH_DIR`. It
     stops before Qwen Code starts if :data:`_STASH_DIR` exists and is not a
-    Skynet stash. An
-    EXIT trap puts them back, removes the temp folder and keeps Qwen Code's
-    exit status. A restore that fails keeps the stash and says so on stderr.
-    The plain text that ``--prompt`` mode prints is the answer.
+    Skynet stash. An EXIT trap puts them back, removes the temp folder and
+    keeps Qwen Code's exit status. A restore that fails keeps the stash and
+    says so on stderr. The plain text that ``--prompt`` mode prints is the
+    answer.
 
     Args:
         model: Target model id.
@@ -172,7 +173,15 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When ``reasoning_effort`` is not a level Qwen Code supports.
     """
+    if reasoning_effort and reasoning_effort not in QWEN_CODE_EFFORTS:
+        raise ServiceError(
+            f"The Qwen Code harness does not support the effort level {reasoning_effort!r}. "
+            f"Supported levels: {', '.join(QWEN_CODE_EFFORTS)}."
+        )
     # The token goes in OPENAI_API_KEY, never ``--openai-api-key``, so it stays
     # out of the process arguments. The inline OPENAI_BASE_URL replaces any
     # inherited one, so model calls reach only the gateway or its relay. The
@@ -261,5 +270,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=58,
+        supported_efforts=QWEN_CODE_EFFORTS,
     )
 )
