@@ -2480,7 +2480,7 @@ async def test_the_proxy_start_launches_nothing_when_one_tool_is_missing(
     await env.stop()
     code, _ = await asyncio.to_thread(_run_start_script, start, tmp_path / "bin", "#!/bin/sh\nexit 1\n", missing)
     assert code == 1
-    # A check that passes when only some tools exist runs setsid or nohup first.
+    # The old check passed when any one tool existed, so the launch ran; a stub records a launch that reaches it.
     assert not (tmp_path / "launched").exists()
 
 
