@@ -128,38 +128,14 @@ _AUTOSADDLER_PLUGIN_DIR = "autosaddler_plugin"
 # fully pinned, dependency-free install of exactly what the v2 core imports.
 AUTOSADDLER_PYTHON_FLOOR = (3, 12)
 _AUTOSADDLER_PYTHON = "3.12.12"
-_AUTOSADDLER_PINS = (
-    f"autosaddler @ https://github.com/microsoft/AutoSaddler/archive/{AUTOSADDLER_REVISION}.tar.gz",
-    "annotated-types==0.8.0",
-    "anyio==4.15.1",
-    "attrs==26.1.0",
-    "cffi==2.1.1",
-    "click==8.5.0",
-    "cryptography==50.0.1",
-    "h11==0.16.0",
-    "httpcore2==2.13.0",
-    "httpx2==2.13.0",
-    "idna==3.19",
-    "jsonschema==4.26.0",
-    "jsonschema-specifications==2025.9.1",
-    "mcp==2.2.0",
-    "mcp-types==2.2.0",
-    "opentelemetry-api==1.44.0",
-    "pycparser==3.0",
-    "pydantic==2.13.5",
-    "pydantic_core==2.46.5",
-    "PyJWT==2.14.0",
-    "python-multipart==0.0.32",
-    "PyYAML==6.0.3",
-    "referencing==0.37.0",
-    "rpds-py==2026.6.3",
-    "sniffio==1.3.1",
-    "sse-starlette==3.4.11",
-    "starlette==1.6.0",
-    "truststore==0.10.4",
-    "typing_extensions==4.16.0",
-    "typing-inspection==0.4.4",
-    "uvicorn==0.53.0",
+_AUTOSADDLER_REQUIREMENTS_FILE = "autosaddler_requirements.txt"
+# The protected image bakes the same pins into their own venv (backend/Dockerfile),
+# because a protected sandbox has no network to build it at run time (SKY-645).
+AUTOSADDLER_IMAGE_PYTHON = "/opt/autosaddler/venv/bin/python"
+_AUTOSADDLER_PINS = tuple(
+    line
+    for line in Path(__file__).with_name(_AUTOSADDLER_REQUIREMENTS_FILE).read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.startswith("#")
 )
 
 
@@ -384,9 +360,10 @@ def _bootstrap_command(
             '"$HOME/.local/bin/uv" python find 3.11.9 > native-python.txt; fi; '
             "node -e 'if (+process.versions.node.split(\".\")[0] < 22) process.exit(1)'; " + harness_install
         )
-    elif shinka:
+    elif own_venv:
+        image_python = SHINKA_IMAGE_PYTHON if shinka else AUTOSADDLER_IMAGE_PYTHON
         prepare += (
-            f"if [ -x {SHINKA_IMAGE_PYTHON} ]; then printf '%s\\n' {SHINKA_IMAGE_PYTHON} > native-python.txt; "
+            f"if [ -x {image_python} ]; then printf '%s\\n' {image_python} > native-python.txt; "
             "else command -v python3 > native-python.txt; fi; "
         )
     else:
@@ -497,19 +474,19 @@ def check_native_runtime(options: NativeOptions) -> dict[str, Any]:
                 + _failure_detail(installed, install_timeout)
             )
         probe = (
-            "import importlib.util,json,os,subprocess,sys; "
+            "import json,os,subprocess,sys; "
             "import native_runner, autosaddler_runner, shinka_runner, native_engines; "
             "native_engines.check_assets(); "
-            f"autosaddler=sys.version_info >= {AUTOSADDLER_PYTHON_FLOOR!r} "
-            "and importlib.util.find_spec('autosaddler') is not None; "
-            f"shinka_python={SHINKA_IMAGE_PYTHON!r} if os.access({SHINKA_IMAGE_PYTHON!r},os.X_OK) else sys.executable; "
-            "shinka=subprocess.run([shinka_python,'-c',"
+            "own_venv=lambda python,package: subprocess.run("
+            "[python if os.access(python,os.X_OK) else sys.executable,'-c',"
             + repr(
                 "import importlib.util,sys; "
                 f"sys.exit(0 if sys.version_info >= {AUTOSADDLER_PYTHON_FLOOR!r} "
-                "and importlib.util.find_spec('shinka') else 1)"
+                "and importlib.util.find_spec(sys.argv[1]) else 1)"
             )
-            + "],capture_output=True,timeout=20).returncode == 0; "
+            + ",package],capture_output=True,timeout=20).returncode == 0; "
+            f"autosaddler=own_venv({AUTOSADDLER_IMAGE_PYTHON!r},'autosaddler'); "
+            f"shinka=own_venv({SHINKA_IMAGE_PYTHON!r},'shinka'); "
             "print(json.dumps({'ready':True,'autosaddler':autosaddler,'shinka':shinka}))"
         )
         remaining = lifetime - (time.monotonic() - started) - 1

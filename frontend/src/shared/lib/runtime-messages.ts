@@ -34,6 +34,10 @@
  *
  * The merge across the fallback chain happens once, server-side (see
  * `messages.server.ts`); the value here is already a flat, complete map.
+ *
+ * The window shim leaves out the server-only keys (`SERVER_ONLY_KEY_PREFIXES`):
+ * the Terms and Privacy text renders only in Server Components, and it added
+ * about 9 to 13 KB gzip to every HTML page (SKY-639).
  */
 
 import { cache } from "react";
@@ -50,7 +54,35 @@ declare global {
   var __APP_PUBLISHED_CATALOGS__: Record<string, UiCatalog> | undefined;
 }
 
+// Key prefixes that only Server Components resolve: the legal page text
+// (`LegalDocument` and the legal pages' metadata). The browser never needs them.
+const SERVER_ONLY_KEY_PREFIXES = ["legal.terms.", "legal.privacy.", "legal.chrome."];
+
 let clientMessages: UiCatalog | null = null;
+
+// One browser copy for each pinned catalog object: the root layout and
+// `generateMetadata` pin the same per-request catalog more than once.
+const browserCatalogs = new WeakMap<UiCatalog, UiCatalog>();
+
+/**
+ * Return the part of a catalog that the browser needs.
+ *
+ * Args:
+ *   catalog: The full active catalog.
+ *
+ * Returns:
+ *   A copy of the catalog without the server-only keys.
+ */
+function browserCatalog(catalog: UiCatalog): UiCatalog {
+  let filtered = browserCatalogs.get(catalog);
+  if (filtered === undefined) {
+    filtered = Object.fromEntries(
+      Object.entries(catalog).filter(([key]) => !SERVER_ONLY_KEY_PREFIXES.some((p) => key.startsWith(p))),
+    );
+    browserCatalogs.set(catalog, filtered);
+  }
+  return filtered;
+}
 
 // Lazily created so cache() is only ever invoked during a server render, never
 // when this module loads in the client bundle. Mirrors runtime-locale.ts. The
@@ -68,12 +100,12 @@ function getServerSlot(): { current: UiCatalog | null } {
  * the root layout (and `generateMetadata`) before any descendant resolves a
  * message. Sets both the RSC-graph `cache()` slot (read by Server Components,
  * race-free) and the `globalThis` value SSR of client components reads, and
- * publishes the catalog under its locale for `MessagesShim`.
+ * publishes the browser part of the catalog under its locale for `MessagesShim`.
  */
 export function setServerMessages(catalog: UiCatalog, locale: string): void {
   getServerSlot().current = catalog;
   globalThis.__APP_REQUEST_MESSAGES__ = catalog;
-  (globalThis.__APP_PUBLISHED_CATALOGS__ ??= {})[locale] = catalog;
+  (globalThis.__APP_PUBLISHED_CATALOGS__ ??= {})[locale] = browserCatalog(catalog);
 }
 
 /**

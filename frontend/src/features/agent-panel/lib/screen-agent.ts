@@ -14,6 +14,15 @@ import { stopToolCalls } from "./pending-tool-calls";
 export const SCREEN_KICKOFF =
   "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in and continue; otherwise ask me the one thing you need.";
 
+// Starts the hidden turn that carries the agent's Back request to the screen
+// it reopens. The server stores no hidden flag, so this text marks the turn.
+const SCREEN_BACK = "[The wizard went back to this screen for your request; I typed nothing.] ";
+
+/** The hidden turn that hands the agent's Back request to the reopened screen. */
+export function backRequest(request: string): string {
+  return `${SCREEN_BACK}${request.trim()}`;
+}
+
 /**
  * Whether a screen opens with a kickoff turn. The Check screen does not: its
  * check starts as it opens, so a kickoff turn would have no result to explain
@@ -44,11 +53,52 @@ export function newSetupChatStart(
   return { kickoff: false, kicked: [shown] };
 }
 
-/** A reopened chat stores the wizard's kickoff as a user turn; it stays unshown. */
+/** A reopened chat stores the wizard's kickoff and Back turns as user turns; they stay unshown. */
 export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((m) =>
-    m.role === "user" && m.content.trim() === SCREEN_KICKOFF ? { ...m, hidden: true } : m,
+    m.role === "user" && (m.content.trim() === SCREEN_KICKOFF || m.content.startsWith(SCREEN_BACK.trim()))
+      ? { ...m, hidden: true }
+      : m,
   );
+}
+
+/**
+ * Copy the tab copy's hidden marks onto the server copy. The server stores a
+ * hidden turn (such as the agent's Back request) as a plain user turn.
+ *
+ * Args:
+ *   server: The server's messages.
+ *   tab: The tab copy's messages.
+ *
+ * Returns:
+ *   The server's messages, each user turn hidden when its matching tab turn was.
+ */
+export function keepHiddenTurns(server: AgentMessage[], tab: readonly AgentMessage[]): AgentMessage[] {
+  const tabTurns = tab.filter((m) => m.role === "user");
+  let next = 0;
+  return server.map((m) => {
+    if (m.role !== "user") return m;
+    // The user turns keep their order, so each one matches the next tab turn with its text.
+    const at = tabTurns.findIndex((t, i) => i >= next && t.content === m.content);
+    if (at < 0) return m;
+    next = at + 1;
+    return tabTurns[at]?.hidden && !m.hidden ? { ...m, hidden: true } : m;
+  });
+}
+
+/**
+ * Split off a chat's last user turn when no reply follows it.
+ *
+ * Args:
+ *   messages: The chat's messages.
+ *
+ * Returns:
+ *   The messages before that turn, and the turn (null when the last message is no user turn).
+ */
+export function unansweredTurn(messages: AgentMessage[]): { kept: AgentMessage[]; turn: AgentMessage | null } {
+  const last = messages[messages.length - 1];
+  if (last?.role !== "user") return { kept: messages, turn: null };
+  return { kept: messages.slice(0, -1), turn: last };
 }
 
 /** A move the screen agent asked for, read from its tool result. */
@@ -167,9 +217,9 @@ export function reachedReturnScreen(returnScreen: string, screen: string | null)
 
 /**
  * Where the setup's chat is kept for the tab: its id, the screens its agent
- * already had a turn on, and its messages. The server never saves a setup
- * chat, so a reload that reopens the setup reopens its chat from here and
- * does not start those screens over.
+ * already had a turn on, and its messages. The server saves the chat like
+ * any other, and the draft carries this copy to a reload or another device:
+ * its id finds the server copy, and its started screens are not started over.
  */
 export const SETUP_CHAT_KEY = "skynet.agent.setup-chat.v1";
 
@@ -215,9 +265,103 @@ export function setupChatLedger(
 // else the app keeps there.
 export const SETUP_CHAT_MAX_CHARS = 300_000;
 
-/** A new id for a setup chat; it never reaches the server's conversation list. */
+/** The browser's own id for a setup chat until its first turn saves it on the server. */
 export function newSetupChatId(): string {
   return `setup-${crypto.randomUUID()}`;
+}
+
+/** Whether an `open_page` route opens the setup wizard (SKY-631). */
+export function opensSetup(path: string): boolean {
+  return path.replace(/\/+$/, "") === "/submit";
+}
+
+/**
+ * The chat that becomes the setup chat when the wizard opens after the agent
+ * opened it from a chat (SKY-631). The same conversation continues in the
+ * setup, so the chat history keeps one entry.
+ *
+ * Args:
+ *   handoff: The chat whose agent opened the setup, or null.
+ *   live: The chat on view as the wizard opens.
+ *
+ * Returns:
+ *   The setup chat's id and messages, or null when the setup starts a new
+ *   chat: no handoff, or the user moved to another chat. A chat that the
+ *   server did not save gets a browser id; its next turn's server id
+ *   replaces it.
+ */
+export function handedOverSetupChat(
+  handoff: { id: string | null } | null,
+  live: { id: string | null; messages: AgentMessage[] },
+): { id: string; messages: AgentMessage[] } | null {
+  if (!handoff || handoff.id !== live.id || live.messages.length === 0) return null;
+  return { id: live.id ?? newSetupChatId(), messages: live.messages };
+}
+
+/**
+ * The id the setup chat keeps when a turn's server conversation arrives. A
+ * chat with no server copy yet takes the server's id, so the tab's copy and
+ * the Share button point at the saved conversation.
+ *
+ * Args:
+ *   current: The setup chat's id, or null when no setup is open.
+ *   serverId: The conversation the server saved the turn in.
+ *   isActive: The turn's chat is the one on view, which in a setup is the setup chat.
+ *
+ * Returns:
+ *   The id to keep, or null when nothing changes.
+ */
+export function adoptedSetupChatId(
+  current: string | null,
+  serverId: string,
+  isActive: boolean,
+): string | null {
+  return current !== null && !isSavedSetupChat(current) && isActive ? serverId : null;
+}
+
+/**
+ * Whether a setup chat id names a server conversation. A ``setup-`` id is the
+ * browser's own: no turn saved the chat yet, its server copy failed to load,
+ * or an older build kept the chat only in the tab. Its next turn saves it.
+ */
+export function isSavedSetupChat(id: string): boolean {
+  return !id.startsWith("setup-");
+}
+
+/**
+ * Whether the server's copy of a reopened setup chat may replace the tab's
+ * copy on view: the chat is still the setup's, and no turn changed it.
+ *
+ * Args:
+ *   setupId: The setup chat's id now.
+ *   live: The chat on view.
+ *   opened: The setup chat's id and the messages it opened with.
+ *
+ * Returns:
+ *   True when the loaded copy may take over.
+ */
+export function setupChatUnchanged(
+  setupId: string | null,
+  live: { id: string | null; messages: readonly AgentMessage[] },
+  opened: { id: string; messages: readonly AgentMessage[] },
+): boolean {
+  return setupId === opened.id && live.id === opened.id && live.messages === opened.messages;
+}
+
+/**
+ * Whether the setup chat on view lost its server copy: its last turn failed
+ * because the server has no conversation under its id (deleted elsewhere).
+ *
+ * Args:
+ *   setupId: The setup chat's id now.
+ *   liveId: The id of the chat on view.
+ *   errorCode: The machine code of the chat's last error.
+ *
+ * Returns:
+ *   True when the setup chat must move to a new browser id.
+ */
+export function setupChatGone(setupId: string | null, liveId: string | null, errorCode: string | null): boolean {
+  return setupId !== null && liveId === setupId && errorCode === "agent.conversation.not_found";
 }
 
 /**

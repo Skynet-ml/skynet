@@ -146,6 +146,17 @@ RUN if [ "$INCLUDE_SHINKA_EVOLVE" = "1" ] || [ "$INCLUDE_SHINKA_EVOLVE" = "true"
         && /opt/shinka/venv/bin/python -c "import shinka.core.async_runner"; \
     fi
 
+# AutoSaddler v2 needs Python 3.12+ and pins its own closure (pydantic, starlette,
+# mcp, ...) apart from the backend's, so it also gets its own venv. Protected
+# sandboxes have no network to build it at run time; the native runtime uses
+# this interpreter when present (native_runtime.AUTOSADDLER_IMAGE_PYTHON) and the
+# readiness probe reports autosaddler_ready from it (SKY-645).
+COPY core/service_gateway/optimization/blackbox/autosaddler_requirements.txt /opt/autosaddler/requirements.txt
+RUN python -m venv /opt/autosaddler/venv \
+    && /opt/autosaddler/venv/bin/python -m pip install --no-cache-dir --no-deps \
+        -r /opt/autosaddler/requirements.txt \
+    && /opt/autosaddler/venv/bin/python -c "import autosaddler.v2.core.engine"
+
 # dspy.Flex serve-time dependency. An optimized Flex program ALWAYS executes
 # its generated Python in a Deno/Pyodide WASM sandbox (dspy.PythonInterpreter
 # shells out to `deno` on PATH) — even the un-optimized baseline runs through
