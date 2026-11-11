@@ -334,6 +334,6 @@ SPEC = register(
         version=HARBOR_VERSION,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
-        position=66,
+        position=63,
     )
 )
