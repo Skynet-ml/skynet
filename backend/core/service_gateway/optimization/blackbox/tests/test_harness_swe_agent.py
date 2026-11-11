@@ -526,11 +526,13 @@ def test_probe_prints_the_release_only_for_the_pinned_litellm_and_swe_rex(tmp_pa
     site = next(venv.glob("lib/python*/site-packages"))
 
     def install(name: str, version: str) -> None:
+        """Write a fake dist-info so the probe sees the package at this version."""
         dist = site / f"{name.replace('-', '_')}-{version}.dist-info"
         dist.mkdir(exist_ok=True)
         (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
 
     def probe() -> str:
+        """Run the version probe script in a clean env and return its output."""
         result = subprocess.run(
             [shutil.which("bash") or "/bin/sh", "-c", _PROBE],
             env={"PATH": os.defpath, "HOME": str(tmp_path)},
