@@ -37,8 +37,9 @@ FABRIC_UV_SHA256 = {
 FABRIC_PYTHON = "3.12"
 FABRIC_CONFIG_FILE = ".app/fabric/config.json"
 # The Codex adapter reads a custom provider's key from the variable that
-# ``api_key_env`` names; the run fills it from the gateway token.
-FABRIC_KEY_ENV = "MODEL_API_KEY"
+# ``api_key_env`` names and passes that one variable through to Codex. The
+# runner path puts no rule on the name, so it reads the gateway token directly.
+FABRIC_KEY_ENV = "APP_API_KEY"
 # The uv installer puts uv here, and the install puts the ``fabric`` launcher here.
 _FABRIC_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
 # The install calls uv by this path, never through ``PATH``, so an unpinned uv
@@ -46,14 +47,18 @@ _FABRIC_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
 _FABRIC_UV = '"$HOME/.local/bin/uv"'
 # Fabric has no CLI of its own (``fabric-agent-ctl`` has no ``--version``), so
 # the install writes this launcher. It answers the pinned version probe with the
-# installed runtime release and otherwise runs the venv's Python. It finds the
-# venv next to itself, so a later run with another ``$HOME`` still finds it.
+# installed runtime release and otherwise runs the venv's Python. The probe
+# fails when the Codex adapter release differs from the runtime's, so a venv
+# with a mismatched adapter fails the pin check. It finds the venv next to
+# itself, so a later run with another ``$HOME`` still finds it.
 _FABRIC_LAUNCHER = (
     "#!/bin/sh\n"
     'venv="$(cd "$(dirname "$0")/../share/app-fabric" && pwd)" || exit 127\n'
     'if [ "$1" = "--version" ]; then\n'
     '  exec "$venv/bin/python" -I -c '
-    '\'import importlib.metadata as m; print("fabric", m.version("nemo-fabric-runtime"))\'\n'
+    "'import importlib.metadata as m, sys; "
+    'r = m.version("nemo-fabric-runtime"); a = m.version("nemo-fabric-adapters-codex"); '
+    'sys.exit("fabric: adapters-codex " + a + " differs from runtime " + r) if a != r else print("fabric", r)\'\n'
     "fi\n"
     'PATH="$venv/bin:$PATH" exec "$venv/bin/python" "$@"\n'
 )
@@ -89,8 +94,13 @@ _PROTECTED_ENV = {
 # Fabric's state, Codex's home (the adapter puts it under the artifacts
 # folder) and the logs go to a fresh directory outside the workspace, so they
 # never show up in the scored workspace. The script removes it on exit: one box
-# runs many proposer turns.
+# runs many proposer turns. A SIGKILL at the turn timeout skips that cleanup, so
+# each run first removes the folders of dead runs. A live run holds an flock on
+# its ``owner.lock``, and the kernel drops the lock when the run dies, so a
+# concurrent run's folder stays. The lock file gets its final name only after
+# it is locked, so a sweep never sees an unlocked lock of a live run.
 _FABRIC_RUN_SCRIPT = """\
+import fcntl
 import json
 import os
 import shutil
@@ -100,10 +110,32 @@ import tempfile
 from pathlib import Path
 
 
+def sweep(root):
+    for old in root.glob("app-fabric-*"):
+        if old.is_symlink():
+            continue
+        try:
+            fd = os.open(old / "owner.lock", os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            continue
+        else:
+            shutil.rmtree(old, ignore_errors=True)
+        finally:
+            os.close(fd)
+
+
 def main():
     config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     prompt = Path(os.environ["APP_PROMPT_FILE"]).read_text(encoding="utf-8")
+    sweep(Path(tempfile.gettempdir()))
     state = Path(tempfile.mkdtemp(prefix="app-fabric-"))
+    lock = os.open(state / "owner.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    os.rename(state / "owner.tmp", state / "owner.lock")
     try:
         config["environment"]["workspace"] = os.getcwd()
         config["environment"]["artifacts"] = str(state / "artifacts")
@@ -254,8 +286,7 @@ def _fabric_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
         run_command=(
             # ``&&`` and not ``;``: the protected relay rewrite goes in front with
             # ``&&``, and a failed rewrite must stop the run before Fabric starts.
-            f'{_FABRIC_PATH} && {FABRIC_KEY_ENV}="$APP_API_KEY" OPENAI_API_KEY= '
-            f"fabric -I -c {shlex.quote(_FABRIC_RUN_SCRIPT)} {FABRIC_CONFIG_FILE}"
+            f"{_FABRIC_PATH} && OPENAI_API_KEY= fabric -I -c {shlex.quote(_FABRIC_RUN_SCRIPT)} {FABRIC_CONFIG_FILE}"
         ),
         env=_base_env(model, gateway),
         parse_output=parse_plain_output,

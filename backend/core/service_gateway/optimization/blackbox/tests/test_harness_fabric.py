@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import io
 import json
@@ -92,7 +93,7 @@ def _target() -> BlackboxTarget:
 
 
 def _fake_package(root: Path) -> Path:
-    """Write a fake ``nemo_fabric`` package with ``nemo-fabric-runtime`` 0.5.0 metadata.
+    """Write a fake ``nemo_fabric`` package with runtime and Codex adapter 0.5.0 metadata.
 
     Args:
         root: Directory to hold the package tree.
@@ -106,9 +107,10 @@ def _fake_package(root: Path) -> Path:
     for directory in (package / "nemo_fabric", package / "nemo_fabric" / "integrations", harbor):
         (directory / "__init__.py").write_text("")
     (harbor / "runner.py").write_text(_FAKE_RUNNER)
-    dist = package / f"nemo_fabric_runtime-{FABRIC_VERSION}.dist-info"
-    dist.mkdir()
-    (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: nemo-fabric-runtime\nVersion: {FABRIC_VERSION}\n")
+    for name in ("nemo-fabric-runtime", "nemo-fabric-adapters-codex"):
+        dist = package / f"{name.replace('-', '_')}-{FABRIC_VERSION}.dist-info"
+        dist.mkdir()
+        (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {FABRIC_VERSION}\n")
     return package
 
 
@@ -164,7 +166,7 @@ def _run(tmp_path: Path, *, protected: bool, result: dict) -> tuple[subprocess.C
     (workspace / "task" / "PROMPT.md").write_text("Fix `solution.py` and say $(echo done).")
     runner_log = tmp_path / "runner.json"
     tmp_dir = tmp_path / "tmp"
-    tmp_dir.mkdir()
+    tmp_dir.mkdir(exist_ok=True)
     env = {
         **env,
         **launch.env,
@@ -234,7 +236,7 @@ def test_open_launch_pins_the_packages_and_sends_model_calls_only_to_the_gateway
             "provider": "app",
             "model": "target-model",
             "base_url": _GATEWAY.url,
-            "api_key_env": "MODEL_API_KEY",
+            "api_key_env": "APP_API_KEY",
         }
     }
     assert "telemetry" not in config
@@ -242,7 +244,8 @@ def test_open_launch_pins_the_packages_and_sends_model_calls_only_to_the_gateway
     assert all(_GATEWAY.api_key not in content for content in launch.files.values())
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
-    assert 'MODEL_API_KEY="$APP_API_KEY" OPENAI_API_KEY= fabric -I -c ' in launch.run_command
+    assert "&& OPENAI_API_KEY= fabric -I -c " in launch.run_command
+    assert "MODEL_API_KEY" not in launch.run_command
     assert launch.run_command.endswith(f" {FABRIC_CONFIG_FILE}")
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert launch.env["APP_GATEWAY_URL"] == _GATEWAY.url
@@ -425,7 +428,7 @@ def test_protected_run_points_codex_at_the_relay_and_returns_the_response(tmp_pa
 
     assert finished.returncode == 0, finished.stderr
     assert seen["isolated"] == 1
-    assert seen["env"] == {"MODEL_API_KEY": "gateway-token", "OPENAI_API_KEY": "", "APP_API_KEY": "gateway-token"}
+    assert seen["env"] == {"MODEL_API_KEY": None, "OPENAI_API_KEY": "", "APP_API_KEY": "gateway-token"}
     spec = seen["spec"]
     assert spec["config"]["models"]["default"]["base_url"] == _RELAY
     assert _GATEWAY.url not in json.dumps(spec)
@@ -476,6 +479,54 @@ def test_run_removes_its_state_directory(tmp_path: Path, result: dict) -> None:
     assert seen["spec"]["config_base_dir"].startswith(str(tmp_path / "tmp"))
     assert finished.returncode == (0 if result is _RECORDED_RESULT else 1), finished.stderr
     assert list((tmp_path / "tmp").glob("app-fabric-*")) == []
+
+
+def test_run_removes_state_folders_of_dead_runs_and_keeps_live_ones(tmp_path: Path) -> None:
+    """Remove a killed run's folder, and keep a live run's folder and folders without a lock."""
+    tmp_dir = tmp_path / "tmp"
+    folders = {name: tmp_dir / name for name in ("app-fabric-dead", "app-fabric-live", "app-fabric-nolock", "other")}
+    for folder in folders.values():
+        folder.mkdir(parents=True)
+        (folder / "spec.json").write_text('{"request": {"input": "old prompt"}}')
+    for name in ("app-fabric-dead", "app-fabric-live", "other"):
+        (folders[name] / "owner.lock").write_text("")
+    # A killed run leaves an unlocked lock file. A live run holds the flock,
+    # here through this test's own open file.
+    with (folders["app-fabric-live"] / "owner.lock").open() as live_lock:
+        fcntl.flock(live_lock, fcntl.LOCK_EX)
+        finished, _, _ = _run(tmp_path, protected=False, result=_RECORDED_RESULT)
+
+    assert finished.returncode == 0, finished.stderr
+    assert sorted(path.name for path in tmp_dir.iterdir()) == ["app-fabric-live", "app-fabric-nolock", "other"]
+
+
+@pytest.mark.parametrize("adapter_version", ["0.4.0", None], ids=["mismatched", "missing"])
+def test_version_probe_fails_when_the_codex_adapter_is_not_the_runtime_release(
+    tmp_path: Path, adapter_version: str | None
+) -> None:
+    """Fail the pin check when the venv's Codex adapter release differs from the runtime or is missing."""
+    env, _ = _install(tmp_path, build_launch(_target(), _GATEWAY).install_command or "")
+    (dist,) = (tmp_path / "home" / ".local" / "share" / "app-fabric").glob(
+        "lib/python*/site-packages/nemo_fabric_adapters_codex-*.dist-info"
+    )
+    if adapter_version is None:
+        shutil.rmtree(dist)
+    else:
+        (dist / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: nemo-fabric-adapters-codex\nVersion: {adapter_version}\n"
+        )
+    env = {**env, "PATH": f"{env['HOME']}/.local/bin{os.pathsep}{env['PATH']}"}
+
+    check = subprocess.run(
+        pinned_harness_check(BLACKBOX_HARNESS_FABRIC), shell=True, env=env, capture_output=True, text=True, check=False
+    )
+    version = subprocess.run(["fabric", "--version"], env=env, capture_output=True, text=True, check=False)
+
+    assert check.returncode != 0
+    assert version.returncode != 0
+    assert version.stdout == ""
+    if adapter_version is not None:
+        assert "fabric: adapters-codex 0.4.0 differs from runtime 0.5.0" in version.stderr
 
 
 @pytest.mark.skipif(
