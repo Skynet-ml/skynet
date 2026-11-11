@@ -282,6 +282,7 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     ) in launch.run_command
     assert all(launch.env[name] == "" for name in _DIRECT_KEYS)
     assert launch.env["GROK_DISABLE_AUTOUPDATER"] == "1"
+    assert launch.env["DO_NOT_TRACK"] == "1"
     assert launch.parse_output is parse_pi_output
 
 

@@ -304,7 +304,7 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
     )
     env = _base_env(model, gateway)
     env.update(_NO_DIRECT_KEYS)
-    env.update({"GROK_DISABLE_AUTOUPDATER": "1", "RUST_LOG": "warn"})
+    env.update({"GROK_DISABLE_AUTOUPDATER": "1", "DO_NOT_TRACK": "1", "RUST_LOG": "warn"})
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_grok_install(),
