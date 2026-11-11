@@ -139,8 +139,9 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 - Never add funds, grant credits or change balances, with one exception: the
   staging test-credit grant command (`skynet-test-accounts`, "Grant test
   credit"). Use it only for a check account you created for this check,
-  only after Gilad approves that grant in chat, and within the $50 UTC-day
-  cap. Amounts depend on the check. Before each grant, ask Gilad in chat for
+  only after Gilad approves that grant in chat, and within the one $50
+  UTC-day cap on the staging database. The command refuses PR previews.
+  Amounts depend on the check. Before each grant, ask Gilad in chat for
   a specific dollar amount: the smallest amount the check needs, with a short
   cost estimate. Gilad approves that amount, or a larger one if he thinks the
   check needs more. Record his approval text. Spend as little as possible.

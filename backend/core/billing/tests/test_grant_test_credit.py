@@ -1,6 +1,6 @@
 """Verify the staging test-credit grant: its guards, its daily cap and its idempotency.
 
-The grant funds a temporary staging or PR-preview check account through
+The grant funds a temporary staging check account through
 :meth:`StripeBillingService.grant_test_credit`. Each test checks one guard or
 one effect. With ``APP_BUDGET_TEST_DB_URL`` set, the same tests also run on
 PostgreSQL, where the grant takes the advisory lock that serializes the cap,
@@ -26,6 +26,7 @@ from core.billing.grant_test_credit import dollars_to_cents, main
 from core.billing.service import (
     TEST_GRANT_DAILY_CAP_CENTS,
     GrantRefusedError,
+    GrantResult,
     StripeBillingService,
     check_account_email,
 )
@@ -88,6 +89,9 @@ def test_database_host(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The grant refuses any PostgreSQL host but the staging RDS instance. Tests
     that check that guard set the real label back.
+
+    Args:
+        monkeypatch: Replaces the staging host label for this test.
     """
     host = make_url(PG_URL).host if PG_URL and PG_URL.startswith("postgresql") else None
     monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", (host or "localhost").lower().split(".")[0])
@@ -132,7 +136,15 @@ def _add_user(engine: Engine, email: str) -> None:
         session.commit()
 
 
-def _grant(engine: Engine, account_id: str = STAGING_ID, cents: int = 500, key: str = "k1", **overrides: str):
+def _grant(
+    engine: Engine,
+    account_id: str = STAGING_ID,
+    cents: int = 500,
+    key: str = "k1",
+    *,
+    reason: str = "Run a paid optimization check",
+    approval: str = "Gilad approved $5 in chat",
+) -> GrantResult:
     """Call the grant with valid defaults, overridden per test.
 
     Args:
@@ -140,7 +152,8 @@ def _grant(engine: Engine, account_id: str = STAGING_ID, cents: int = 500, key: 
         account_id: Test-account id from the account tool.
         cents: Amount to grant, in cents.
         key: Idempotency key.
-        **overrides: Replacement ``reason`` or ``approval`` text.
+        reason: Reason text for the ledger description.
+        approval: Approval text for the operator log.
 
     Returns:
         The grant result.
@@ -148,8 +161,8 @@ def _grant(engine: Engine, account_id: str = STAGING_ID, cents: int = 500, key: 
     return StripeBillingService(engine=engine).grant_test_credit(
         check_account_email(account_id),
         cents,
-        reason=overrides.get("reason", "Run a paid optimization check"),
-        approval=overrides.get("approval", "Gilad approved $5 in chat"),
+        reason=reason,
+        approval=approval,
         idempotency_key=key,
     )
 
@@ -183,9 +196,7 @@ def _ledger(engine: Engine) -> list[WalletLedgerModel]:
 
 
 @pytest.mark.parametrize("environment", ["production", "", "dev", "skynet-staging", "staging-pr-x"])
-def test_refuses_outside_staging_and_previews(
-    engine: Engine, monkeypatch: pytest.MonkeyPatch, environment: str
-) -> None:
+def test_refuses_outside_staging(engine: Engine, monkeypatch: pytest.MonkeyPatch, environment: str) -> None:
     """A production, empty or unknown environment refuses before any write."""
     monkeypatch.setattr(settings, "app_environment", environment)
     _add_user(engine, check_account_email(STAGING_ID))
@@ -220,14 +231,14 @@ def test_refuses_a_test_account_with_no_user_row(engine: Engine, staging: None) 
     assert _balance(engine, check_account_email(STAGING_ID)) is None
 
 
-def test_preview_accepts_only_its_own_pr_accounts(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A PR preview grants to ``pr-<n>-`` accounts of that PR and refuses staging ones."""
+@pytest.mark.parametrize("account_id", [PREVIEW_ID, STAGING_ID])
+def test_refuses_a_preview_environment(engine: Engine, monkeypatch: pytest.MonkeyPatch, account_id: str) -> None:
+    """A PR preview refuses every grant: its own database would get a second $50 cap."""
     monkeypatch.setattr(settings, "app_environment", "skynet-pr-107")
-    _add_user(engine, check_account_email(PREVIEW_ID))
-    _add_user(engine, check_account_email(STAGING_ID))
-    assert _grant(engine, PREVIEW_ID).credited_cents == 500
-    with pytest.raises(GrantRefusedError, match="test account"):
-        _grant(engine, STAGING_ID, key="k2")
+    _add_user(engine, check_account_email(account_id))
+    with pytest.raises(GrantRefusedError, match="PR preview environments are refused"):
+        _grant(engine, account_id)
+    assert _ledger(engine) == []
 
 
 @pytest.mark.parametrize("field", ["approval", "reason"])
@@ -236,7 +247,10 @@ def test_refuses_missing_approval_or_reason(engine: Engine, staging: None, field
     """Approval and reason text are both required and recorded."""
     _add_user(engine, check_account_email(STAGING_ID))
     with pytest.raises(GrantRefusedError, match=field):
-        _grant(engine, **{field: value})
+        if field == "approval":
+            _grant(engine, approval=value)
+        else:
+            _grant(engine, reason=value)
     assert _ledger(engine) == []
 
 
@@ -360,24 +374,24 @@ def test_refuses_a_reason_longer_than_the_column(engine: Engine, staging: None) 
         ("postgresql://app@localhost:5432/skynet", False),
         ("postgresql:///skynet", False),
         ("sqlite:///:memory:", True),
+        (f"{STAGING_RDS_URL}?host=skynet-production.abc123.us-east-2.rds.amazonaws.com", False),
+        (f"{STAGING_RDS_URL}?hostaddr=10.0.0.5", False),
     ],
 )
 def test_staging_database_host_check(monkeypatch: pytest.MonkeyPatch, url: str, staging_database: bool) -> None:
-    """Only the staging RDS host passes; production, copies, tunnels and socket URLs do not."""
+    """Only the staging RDS host passes; production, copies, tunnels, socket URLs and query host overrides do not."""
     monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", "skynet-staging")
     assert billing_service._is_staging_database(make_url(url)) is staging_database
 
 
-@pytest.mark.parametrize("environment", ["staging", "skynet-pr-107"])
 def test_refuses_the_production_database_even_with_a_staging_environment(
-    monkeypatch: pytest.MonkeyPatch, environment: str
+    staging: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An overridden ``APP_ENVIRONMENT`` cannot grant against the production RDS host."""
-    monkeypatch.setattr(settings, "app_environment", environment)
     monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", "skynet-staging")
     production = create_engine(PRODUCTION_RDS_URL)
     with pytest.raises(GrantRefusedError, match="not the staging database") as refused:
-        _grant(production, PREVIEW_ID if environment != "staging" else STAGING_ID)
+        _grant(production)
     assert "skynet-production" not in str(refused.value)
     production.dispose()
 
@@ -489,12 +503,15 @@ def _advisory_lock_waiters(engine: Engine) -> int:
     Returns:
         The number of ungranted advisory locks on the grant lock id.
     """
+    # PostgreSQL splits a bigint advisory key into classid (high 32 bits) and
+    # objid (low 32 bits), with objsubid 1; the key does not fit objid alone.
     with engine.connect() as connection:
         return int(
             connection.scalar(
                 text(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "
-                    "AND objid = :lock_id AND database = (SELECT oid FROM pg_database "
+                    "AND ((classid::bigint << 32) | objid::bigint) = :lock_id AND objsubid = 1 "
+                    "AND database = (SELECT oid FROM pg_database "
                     "WHERE datname = current_database())"
                 ),
                 {"lock_id": billing_service._TEST_GRANT_LOCK_ID},

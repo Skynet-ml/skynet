@@ -157,26 +157,29 @@ def _is_customerless(customer_id: str) -> bool:
 
 
 # Staging test-credit grants (SKY-573). The test-account tool signs up
-# ``<target>-<label>-<6 hex>@`` this inbox, where the target is ``staging`` or
-# ``pr-<n>``; nothing else may receive a grant. The cap is one shared total per
-# UTC day across all accounts, so an agent loop cannot drain more than $50.
+# ``staging-<label>-<6 hex>@`` this inbox; nothing else may receive a grant.
+# The cap is one shared total per UTC day across all accounts in the staging
+# database, so an agent loop cannot drain more than $50. PR previews are
+# refused: each preview has its own database on the same RDS instance, and the
+# cap and advisory lock are per database, so previews would multiply the cap.
 TEST_ACCOUNT_INBOX = "eegeupelae.resend.app"
 TEST_GRANT_DAILY_CAP_CENTS = 5000
 TEST_GRANT_KEY_PREFIX = "testgrant:"
-_TEST_ACCOUNT_ID = re.compile(r"(staging|pr-\d+)-[a-z0-9-]+-[0-9a-f]{6}")
+_TEST_ACCOUNT_ID = re.compile(r"staging-[a-z0-9-]+-[0-9a-f]{6}")
 _SETTLEMENT_KEY_MAX_LENGTH = 64
 _LEDGER_DESCRIPTION_MAX_LENGTH = 255
 # The account sees the ledger description in its wallet history, so it holds
 # only this label and the reason. The approval text goes to the operator log.
 _TEST_GRANT_LABEL = "Test grant: "
-# Arbitrary constant id for ``pg_advisory_xact_lock``: it serializes grants on
-# different accounts, which the per-account row lock cannot, so two grants
-# cannot both read a total under the cap and together pass it.
-_TEST_GRANT_LOCK_ID = 573_000_573
+# Continues the 7421370000xx advisory-lock series (worker/engine uses ...07).
+# It serializes grants on different accounts, which the per-account row lock
+# cannot, so two grants cannot both read a total under the cap and together
+# pass it.
+_TEST_GRANT_LOCK_ID = 742137000008
 # Terraform names each RDS instance ``skynet-<environment>``, and its address
-# starts with that identifier. Staging and every PR preview use the staging
-# instance, so a grant refuses any other PostgreSQL host even when
-# ``APP_ENVIRONMENT`` is overridden. A tunnel to ``localhost`` is refused too.
+# starts with that identifier. A grant refuses any other PostgreSQL host even
+# when ``APP_ENVIRONMENT`` is overridden. A tunnel to ``localhost`` is refused
+# too.
 _STAGING_DB_HOST_LABEL = "skynet-staging"
 
 
@@ -215,12 +218,9 @@ def _test_grant_target() -> str | None:
     """Return the account-id prefix this deployment may grant to.
 
     Returns:
-        ``"staging"`` on staging, ``"pr-<n>"`` on a PR preview, else ``None``.
+        ``"staging"`` on staging, else ``None`` (PR previews included).
     """
-    if settings.app_environment == "staging":
-        return "staging"
-    match = re.search(r"-(pr-\d+)$", settings.app_environment)
-    return match.group(1) if match else None
+    return "staging" if settings.app_environment == "staging" else None
 
 
 def _is_staging_database(url: URL) -> bool:
@@ -230,13 +230,18 @@ def _is_staging_database(url: URL) -> bool:
     the production database.
 
     Args:
-        url: The engine URL. Only its backend and host are read.
+        url: The engine URL. Only its backend, host and query are read.
 
     Returns:
-        ``True`` for SQLite or a host whose first label is the staging RDS identifier.
+        ``True`` for SQLite or a host whose first label is the staging RDS
+        identifier, with no ``host`` or ``hostaddr`` query key.
     """
     if url.get_backend_name() == "sqlite":
         return True
+    # libpq lets a ``host`` or ``hostaddr`` query key override the URL host, so
+    # such a URL could reach another server while its host looks like staging.
+    if "host" in url.query or "hostaddr" in url.query:
+        return False
     return (url.host or "").lower().split(".")[0] == _STAGING_DB_HOST_LABEL
 
 
@@ -245,7 +250,7 @@ def _is_test_account(username: str, target: str) -> bool:
 
     Args:
         username: Account email.
-        target: ``staging`` or ``pr-<n>``, from :func:`_test_grant_target`.
+        target: ``staging``, from :func:`_test_grant_target`.
 
     Returns:
         ``True`` when the email has the tool's shape and this deployment's target.
@@ -1596,7 +1601,7 @@ class StripeBillingService:
         approval: str,
         idempotency_key: str,
     ) -> GrantResult:
-        """Credit a staging or PR-preview test account, once per idempotency key.
+        """Credit a staging test account, once per idempotency key.
 
         This is the only allowed way to fund a check account. It raises the
         purchased balance and writes one ``grant`` ledger row in one
@@ -1626,7 +1631,7 @@ class StripeBillingService:
         """
         target = _test_grant_target()
         if target is None:
-            raise GrantRefusedError("APP_ENVIRONMENT must be staging or a PR preview environment")
+            raise GrantRefusedError("APP_ENVIRONMENT must be staging; PR preview environments are refused")
         if not _is_staging_database(self._engine.url):
             raise GrantRefusedError("the database is not the staging database")
         reason, approval, idempotency_key = reason.strip(), approval.strip(), idempotency_key.strip()
@@ -1682,10 +1687,12 @@ class StripeBillingService:
             IntegrityError: A concurrent writer inserted the same billing row or
                 key first; nothing from this attempt is kept.
         """
-        now = datetime.now(UTC)
         with Session(self._engine) as session:
             if session.get_bind().dialect.name == "postgresql":
                 session.execute(select(func.pg_advisory_xact_lock(_TEST_GRANT_LOCK_ID)))
+            # Read the clock after the lock wait, so the UTC day matches the
+            # moment the cap total is read.
+            now = datetime.now(UTC)
             if session.get(UserModel, username) is None:
                 raise GrantRefusedError("the test account has no user row; sign it up first")
             customer = session.get(BillingCustomerModel, username, with_for_update=True)

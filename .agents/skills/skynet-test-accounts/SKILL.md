@@ -161,7 +161,7 @@ of an id with no secret changes nothing and exits 0.
 - Never add funds except through "Grant test credit" below.
 - Staging keeps the setup intake for new accounts. Previews skip it.
 
-### Grant test credit (documented for staging)
+### Grant test credit (staging only)
 
 A staging check that needs a paid run can fund its own check account with
 the grant command `python -m core.billing.grant_test_credit`. All of these
@@ -177,16 +177,19 @@ rules apply:
 - Grant only after Gilad approves that grant in chat. Put his approval text
   in `--approval`. The command writes it to the task log only. The account
   sees the ledger row, so the row holds only `Test grant: <reason>`.
-- All grants on all accounts share a $50 cap for each UTC day. The command
-  refuses a grant that passes it.
+- All grants on all accounts share one $50 cap for each UTC day, kept in the
+  staging database. The command refuses a grant that passes it.
+- The command refuses every grant on a PR preview. Each preview has its own
+  database, so a preview grant would get its own $50 cap.
 - Never use a raw wallet INSERT, Stripe or any other path.
 
-The command refuses unless `APP_ENVIRONMENT` is `staging` or a PR preview,
-the database host is the `skynet-staging` RDS instance, the account id has the `account.py` shape for that target, and the account
-has a user row. Amounts are dollars with at most 2 decimals. A retry with
-the same `--idempotency-key` credits nothing more. Use a new key for each
-approved grant, for example `<account-id>-1`. The key has at most 54
-characters. `--reason` has at most 243 characters.
+The command refuses unless `APP_ENVIRONMENT` is `staging`, the database
+host is the `skynet-staging` RDS instance, the account id has the
+`account.py` staging shape, and the account has a user row. Amounts are
+dollars with at most 2 decimals. A retry with the same `--idempotency-key`
+credits nothing more. Use a new key for each approved grant, for example
+`<account-id>-1`. The key has at most 54 characters. `--reason` has at most
+243 characters.
 
 Run it on staging as a one-off ECS task. It uses the migrate task
 definition, which has the staging database URL and `APP_ENVIRONMENT`.
@@ -221,9 +224,11 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
   nothing. Report a refusal; do not work around it.
 - Exit code `1` prints `Grant failed: <error class>` and writes nothing. The
   command hides the error text, because it can hold the email. Report it.
+- Exit code `2` with usage text and no `Grant refused:` means a missing or
+  bad argument. Fix the command line; nothing was written.
 - Record the grant (account id, dollars, key) in the PR test scope.
-- A preview already gives new accounts `PREVIEW_GRANT_CENTS`. This section
-  documents no preview invocation. If a preview check needs more, ask the
+- A preview already gives new accounts `PREVIEW_GRANT_CENTS`. The grant
+  command refuses previews. If a preview check needs more, ask the
   orchestrator.
 
 ### Authentication changes
