@@ -58,6 +58,7 @@ from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox import runner
+from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     CONSTRAINTS_FILE,
@@ -427,7 +428,8 @@ def stage_repository(
         "secret_names": sorted(secrets),
         "constrained": environment.constraints is not None,
         "proposer_hosts": list(hosts),
-        "hidden_paths": list(hidden),
+        # Hashes only: the guest's tool guard needs them, and the agent must never read a hidden name (E61).
+        "hidden_hashes": hidden_hashes(hidden),
     }
     return result, StagedRepository(
         snapshot=snapshot,

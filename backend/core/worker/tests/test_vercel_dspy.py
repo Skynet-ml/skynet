@@ -15,6 +15,7 @@ import pytest
 from core.billing.vercel_usage import proposer_hosts
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.service_gateway.optimization.blackbox import remote_sandbox
+from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from core.service_gateway.optimization.blackbox.tests.test_sandbox_broker import IMAGE, FakeRuntime
@@ -408,7 +409,13 @@ def test_repository_tree_is_uploaded_as_chunks_and_never_as_a_parent_path(
             "image": "backend@sha256:" + "a" * 64,
             "lifetime_seconds": 600,
         },
-        "_repo_snapshot": {"archive": str(archive), "commit": "c" * 40, "readonly_paths": [], "secret_names": ["K"]},
+        "_repo_snapshot": {
+            "archive": str(archive),
+            "commit": "c" * 40,
+            "readonly_paths": [],
+            "secret_names": ["K"],
+            "hidden_hashes": hidden_hashes(["eval/zq_scorer.py"]),
+        },
     }
 
     vercel_dspy.run_vercel_dspy(payload, "job-repo", queue.Queue(), "spawn")
@@ -420,6 +427,9 @@ def test_repository_tree_is_uploaded_as_chunks_and_never_as_a_parent_path(
     assert len(snapshot["chunks"]) == 3
     assert b"".join(base64.b64decode(session.files[path]) for path in snapshot["chunks"]) == b"0123456789"
     assert str(archive) not in session.files[request_path]
+    # The guest's proposer guard gets the hidden paths as hashes; no guest file names one (E61, SKY-395).
+    assert snapshot["hidden_hashes"] == hidden_hashes(["eval/zq_scorer.py"])
+    assert not any("zq_scorer" in content for content in session.files.values())
 
 
 @pytest.mark.parametrize(

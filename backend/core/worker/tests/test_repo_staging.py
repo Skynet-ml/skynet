@@ -35,6 +35,7 @@ from core.exceptions import ServiceError
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.sandbox.services import ComposeService
 from core.service_gateway.optimization.blackbox import runner
+from core.service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
@@ -1753,8 +1754,12 @@ def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: py
         assert _names(agent) == {"src/app.py", "eval/data.csv"}
         assert {"optimize.toml", "eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
         assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits")
-        # The proposer's tool guard refuses the same paths (E62, SKY-395).
-        assert staged_payload["_repo_snapshot"]["hidden_paths"] == list(staged.hidden_paths)
+        # The proposer's tool guard refuses the same paths (E62, SKY-395), from hashes only:
+        # the snapshot reaches the Vercel DSPy guest, so it must name no hidden path (E61).
+        snapshot = staged_payload["_repo_snapshot"]
+        assert snapshot["hidden_hashes"] == hidden_hashes(staged.hidden_paths)
+        assert "hidden_paths" not in snapshot
+        assert not any(path in json.dumps(snapshot) for path in staged.hidden_paths)
     finally:
         staged.cleanup()
 

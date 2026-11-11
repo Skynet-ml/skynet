@@ -697,7 +697,7 @@ def test_refusal_logger_writes_a_proposer_refusal_run_event(capsys: pytest.Captu
 
 
 def test_agent_editor_guards_sessions_and_logs_their_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pass the bundle's hidden list to each session and send its refusals to the run log; the edit still lands.
+    """Pass the bundle's hidden hashes to each session and send its refusals to the run log; the edit still lands.
 
     Args:
         tmp_path: Run folder.
@@ -706,7 +706,11 @@ def test_agent_editor_guards_sessions_and_logs_their_refusals(tmp_path: Path, mo
     chunks, _ = _repo(tmp_path)
     refusals: list[dict[str, str]] = []
     bundle = shinka_bundle.RepoBundle.prepare(
-        {"chunks": chunks, "editable_paths": ["src"], "hidden_paths": ["optimize.toml", "eval/metric.py"]},
+        {
+            "chunks": chunks,
+            "editable_paths": ["src"],
+            "hidden_hashes": shinka_runner.harness_bridge.hidden_hashes(["optimize.toml", "eval/metric.py"]),
+        },
         "",
         tmp_path / "guarded-checkout",
         on_refusal=refusals.append,
@@ -734,7 +738,9 @@ def test_agent_editor_guards_sessions_and_logs_their_refusals(tmp_path: Path, mo
 
     patch, _, success = asyncio.run(runner._run_patch_async(parent, [], [], 1))
 
-    assert calls[0]["proposer"]["hidden_paths"] == ["optimize.toml", "eval/metric.py"]
+    assert calls[0]["proposer"]["hidden_hashes"] == shinka_runner.harness_bridge.hidden_hashes(
+        ["optimize.toml", "eval/metric.py"]
+    )
     assert refusals == [{"tool": "read", "kind": "config"}]
     assert success is True
     assert patch is not None
@@ -758,7 +764,7 @@ def test_agent_editor_adds_no_guard_without_a_hidden_list(tmp_path: Path, monkey
 
     asyncio.run(runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1))
 
-    assert "hidden_paths" not in calls[0]["proposer"]
+    assert "hidden_hashes" not in calls[0]["proposer"]
 
 
 def test_config_turns_the_patch_mix_into_full_rewrites_for_the_agent_editor(tmp_path: Path) -> None:

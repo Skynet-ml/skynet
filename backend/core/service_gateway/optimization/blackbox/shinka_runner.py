@@ -949,7 +949,7 @@ class AgentEditor:
             deadline: ``time.monotonic()`` value no session may run past.
             part_names: The starting version's part names, or ``None`` for a text version.
             bundle: ``shinka_bundle.RepoBundle`` for a repository target. Its
-                ``hidden_paths`` guard each session, and its ``on_refusal``
+                ``hidden_hashes`` guard each session, and its ``on_refusal``
                 receives the session's refusals.
         """
         self.launches = {str(launch["key_env"]): dict(launch) for launch in config.get("launches") or ()}
@@ -1070,14 +1070,14 @@ class AgentEditor:
         workspace = self.workdir / "agent-edits" / scratch
         session_dir = self.workdir / "agent-sessions" / scratch
         self._prepare(parent_code, workspace)
-        hidden = list(self.bundle.hidden_paths) if self.bundle is not None else []
+        hidden = dict(self.bundle.hidden_hashes) if self.bundle is not None else {}
         try:
             outcome = harness_bridge.run_session(
                 {
                     **launch,
                     "instructions_file": None,
                     "max_tool_calls": self.max_tool_calls,
-                    **({"hidden_paths": hidden} if hidden else {}),
+                    **({"hidden_hashes": hidden} if hidden else {}),
                 },
                 workspace=workspace,
                 prompt=prompt,

@@ -16,7 +16,7 @@ import tarfile
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1090,7 +1090,12 @@ def test_lost_failure_write_keeps_the_budget(worker: BackgroundWorker, store: Fa
 
 
 def _run_repository_job(
-    worker: BackgroundWorker, store: FakeJobStore, snapshot: dict, *, bind_host: MagicMock | None = None
+    worker: BackgroundWorker,
+    store: FakeJobStore,
+    snapshot: dict,
+    *,
+    host: tuple[str, str] | None = None,
+    patched: dict[str, Any] | None = None,
 ) -> tuple[MagicMock, MagicMock, MagicMock]:
     """Run one stored repository job with staging that leaves ``snapshot`` on the payload.
 
@@ -1098,8 +1103,10 @@ def _run_repository_job(
         worker: The worker under test.
         store: Its job store.
         snapshot: What staging records under the repository snapshot key.
-        bind_host: Stands in for ``bind_host_agent``; when set, the run's
-            proposer is a host CLI.
+        host: The run's host proposer ``(cli, permission)``, or ``None``
+            for a proposer in the sandbox.
+        patched: Engine names mapped to the stand-ins that replace them,
+            applied after the defaults.
 
     Returns:
         The budget gateway, the publish step and the staged repository.
@@ -1147,15 +1154,7 @@ def _run_repository_job(
         stack.enter_context(
             patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload)
         )
-        stack.enter_context(
-            patch(
-                "core.worker.engine.host_proposer",
-                return_value=None if bind_host is None else ("claude", "workspace_only"),
-            )
-        )
-        if bind_host is not None:
-            stack.enter_context(patch("core.worker.engine.bind_host_agent", bind_host))
-            stack.enter_context(patch("core.worker.engine.attach_host_agent_token"))
+        stack.enter_context(patch("core.worker.engine.host_proposer", return_value=host))
         stack.enter_context(patch("core.worker.engine.stage_repository", side_effect=stage))
         stack.enter_context(patch("core.worker.engine.check_repository", return_value=[]))
         stack.enter_context(patch("core.worker.engine.infer_repo_setup", return_value=None))
@@ -1166,6 +1165,8 @@ def _run_repository_job(
         stack.enter_context(patch.object(worker, "_record_repo_commit"))
         stack.enter_context(patch.object(worker, "_record_repo_environment", return_value=None))
         stack.enter_context(patch.object(worker, "_close_budget_gateway", return_value=(None, None)))
+        for name, replacement in (patched or {}).items():
+            stack.enter_context(patch(f"core.worker.engine.{name}", replacement))
         worker._process_job("repo-hardened", 0)
     return gateway, publish, staged
 
@@ -1301,13 +1302,76 @@ def test_repository_run_grants_the_staged_proposer_hosts(
     gateway.allow_guest_hosts.assert_called_once_with(granted)
 
 
+def _host_patches(bind: MagicMock, **extra: Any) -> dict[str, Any]:
+    """Stand in for the host-agent binding of a run with a host CLI proposer.
+
+    Args:
+        bind: Stands in for ``bind_host_agent``.
+        **extra: More engine names mapped to their stand-ins.
+
+    Returns:
+        The patches for ``_run_repository_job``.
+    """
+    return {"check_host_agent": MagicMock(), "bind_host_agent": bind, "attach_host_agent_token": MagicMock(), **extra}
+
+
 def test_a_host_proposer_gets_the_staged_hidden_paths(worker: BackgroundWorker, store: FakeJobStore) -> None:
     """The host CLI refuses the hidden paths staging worked out, so it binds only after staging (E62, SKY-395)."""
     bind = MagicMock(return_value="host-token")
-    _gateway, _publish, staged = _run_repository_job(worker, store, {}, bind_host=bind)
+    _gateway, _publish, staged = _run_repository_job(
+        worker, store, {}, host=("claude", "workspace_only"), patched=_host_patches(bind)
+    )
 
     bind.assert_called_once()
     assert bind.call_args.kwargs["hidden_paths"] is staged.hidden_paths
+
+
+def test_a_gate_refused_run_binds_no_host_agent_token(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """A run the repository gate refuses never gets a host-agent token (SKY-395)."""
+    bind = MagicMock(return_value="host-token")
+    failure = repo_gate.GateFailure(
+        key="secrets.K",
+        place=repo_gate.sandbox_place(False),
+        reason="The secret is not available.",
+        code=I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE,
+    )
+    setup = MagicMock(return_value=None)
+    _run_repository_job(
+        worker,
+        store,
+        {},
+        host=("claude", "workspace_only"),
+        patched=_host_patches(bind, check_repository=MagicMock(return_value=[failure]), infer_repo_setup=setup),
+    )
+
+    bind.assert_not_called()
+    setup.assert_not_called()
+    assert store._jobs["repo-hardened"]["status"] == "failed"
+
+
+def test_a_refused_host_proposer_fails_before_staging_and_paid_setup(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """The real host check refuses an unknown CLI before staging, the setup model and the scorer box (SKY-395)."""
+    stage, setup, scorer, bind = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+    _run_repository_job(
+        worker,
+        store,
+        {},
+        host=("not-a-cli", "workspace_only"),
+        patched={
+            "stage_repository": stage,
+            "infer_repo_setup": setup,
+            "bind_repo_scorer": scorer,
+            "bind_host_agent": bind,
+        },
+    )
+
+    stage.assert_not_called()
+    setup.assert_not_called()
+    scorer.assert_not_called()
+    bind.assert_not_called()
+    assert store._jobs["repo-hardened"]["status"] == "failed"
 
 
 def test_unified_byok_injection_domain_error_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
