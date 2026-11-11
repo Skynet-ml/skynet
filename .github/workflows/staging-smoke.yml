@@ -1,9 +1,11 @@
 # Gate 5 of the merge policy in AGENTS.md: after a push to staging is live,
-# smoke-test staging. If the smoke test fails and the commit is the squash
-# merge of a PR labeled `backend` (an auto-merged PR), revert that one commit
-# on staging, comment on the PR, and reopen its Linear issue with the
-# failure. UI PRs were approved by the user, so they are reported, never
-# reverted automatically. This workflow never touches main.
+# smoke-test staging. Every PR (backend, UI and other) merges on the gates
+# with no human approval, so any PR can break staging. If the smoke test
+# fails and the tested commit is the merge of exactly one PR, open a revert
+# PR for that one commit against staging, comment on the PR, and reopen its
+# Linear issue with the failure. The revert PR goes through the batch CI flow
+# like any other PR. A batch merge holds many PRs, so it is only reported.
+# This workflow never pushes to staging or main and never force-pushes.
 #
 # It runs after "staging deploy" succeeds, which already waits until staging
 # serves the pushed commit. When that deploy check fails, nothing is
@@ -51,7 +53,7 @@ jobs:
           # Each check gets three tries so one slow request is not a revert.
           check() {
             local name=$1 url=$2 filter=$3 body
-            for attempt in 1 2 3; do
+            for _ in 1 2 3; do
               if body=$(curl -sS -f -L --max-time 20 "$url" 2>/dev/null) \
                 && { [ -z "$filter" ] || jq -e "$filter" <<<"$body" >/dev/null 2>&1; }; then
                 echo "ok   $name"
@@ -80,13 +82,14 @@ jobs:
 
   revert:
     needs: smoke
-    if: needs.smoke.outputs.failed == 'true'
+    # A manual run has no known tested commit, so it only fails and reports.
+    if: needs.smoke.outputs.failed == 'true' && github.event_name == 'workflow_run'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
       REPORT: ${{ needs.smoke.outputs.report }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       LINEAR_TEAM_KEY: ${{ vars.LINEAR_TEAM_KEY }}
@@ -96,7 +99,7 @@ jobs:
         with:
           ref: staging
           fetch-depth: 50
-          # The staging ruleset lets only this deploy key push past its gates.
+          # Pushes the revert branch; the revert reaches staging only through its PR.
           ssh-key: ${{ secrets.STAGING_PUSH_KEY }}
 
       - name: Find the PR behind the failing commit
@@ -106,41 +109,60 @@ jobs:
             --jq '[.[] | select(.merged_at != null and .base.ref == "staging")][0]')
           if [ -z "$pr" ] || [ "$pr" = "null" ]; then pr='{}'; fi
           number=$(jq -r '.number // empty' <<<"$pr")
-          backend=$(jq -r '[.labels[]?.name] | index("backend") != null' <<<"$pr")
-          parents=$(git rev-list --parents -n 1 "$SHA" | wc -w)
+          branch=$(jq -r '.head.ref // empty' <<<"$pr")
+          merged=$(jq -r '.merge_commit_sha // empty' <<<"$pr")
+          # rev-list prints the commit and its parents: 2 words for a squash, 3 for a merge.
+          words=$(git rev-list --parents -n 1 "$SHA" | wc -w)
           {
             echo "number=$number"
             echo "title=$(jq -r '.title // empty' <<<"$pr")"
-            echo "branch=$(jq -r '.head.ref // empty' <<<"$pr")"
-            # A squash merge has exactly one parent; anything else is not one PR's commit.
-            if [ -n "$number" ] && [ "$backend" = "true" ] && [ "$parents" -eq 2 ]; then
+            echo "branch=$branch"
+            # Revert only the one PR whose merge is the tested commit. A batch
+            # merge holds many PRs and the failing one is unknown.
+            if [ -n "$number" ] && [ "$merged" = "$SHA" ] && [[ "$branch" != batch/* ]] \
+              && { [ "$words" -eq 2 ] || [ "$words" -eq 3 ]; }; then
               echo "revert=true"
+              if [ "$words" -eq 3 ]; then echo "mainline=-m 1"; else echo "mainline="; fi
             else
               echo "revert=false"
             fi
           } >> "$GITHUB_OUTPUT"
 
-      - name: Revert the squash commit on staging
+      - name: Open a revert PR against staging
         id: revert
         if: steps.pr.outputs.revert == 'true'
+        env:
+          NUMBER: ${{ steps.pr.outputs.number }}
+          MAINLINE: ${{ steps.pr.outputs.mainline }}
         run: |
+          title="revert: #$NUMBER failed the staging smoke test"
+          body="Reverts $SHA (the merge of #$NUMBER) automatically. $REPORT. Run: $RUN_URL"
+          revert_branch="revert/pr-$NUMBER-${SHA:0:7}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git revert --no-edit "$SHA"
-          git commit --amend -m "revert: #${{ steps.pr.outputs.number }} failed the staging smoke test" \
-            -m "Reverts $SHA automatically. $REPORT. $RUN_URL"
-          git push origin HEAD:staging
+          git switch -c "$revert_branch"
+          # MAINLINE is empty for a squash commit and "-m 1" for a merge commit.
+          # shellcheck disable=SC2086
+          git revert --no-edit $MAINLINE "$SHA"
+          git commit --amend -m "$title" -m "$body"
+          git push origin "$revert_branch"
+          # The revert has no Linear issue of its own; `no-issue` lets the files scope check pass.
+          gh label create no-issue --repo "$REPO" --color ededed --description "PR without a Linear issue" --force >/dev/null
+          url=$(gh pr create --repo "$REPO" --base staging --head "$revert_branch" \
+            --title "$title" --body "$body" --label no-issue)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Comment on the PR
         if: always() && steps.pr.outputs.number != ''
         env:
           REVERTED: ${{ steps.revert.outcome == 'success' }}
           NUMBER: ${{ steps.pr.outputs.number }}
+          REVERT_URL: ${{ steps.revert.outputs.url }}
         run: |
           if [ "$REVERTED" = "true" ]; then
-            action="It was reverted on staging automatically. Fix it on a new branch and open a new PR."
+            action="A revert PR is open against staging: $REVERT_URL. The orchestrator merges it through the batch CI flow. Fix the problem on a new branch and open a new PR."
           else
-            action="It was not reverted automatically (not an auto-merged backend PR, or the revert conflicted); a person needs to look."
+            action="No revert PR was opened (the tested commit is not the merge of this one PR, or the revert failed). A person must look."
           fi
           gh pr comment "$NUMBER" --repo "$REPO" \
             --body "**$REPORT** after this PR landed on staging ($SHA). $action Run: $RUN_URL"
@@ -150,6 +172,7 @@ jobs:
         env:
           PR_TITLE: ${{ steps.pr.outputs.title }}
           PR_BRANCH: ${{ steps.pr.outputs.branch }}
+          REVERT_URL: ${{ steps.revert.outputs.url }}
         run: |
           python3 - <<'PY'
           import json
@@ -188,7 +211,7 @@ jobs:
                   {"id": issue["id"], "s": todo["id"]})
           gql("mutation($id: String!, $b: String!) { commentCreate(input: {issueId: $id, body: $b}) { success } }",
               {"id": issue["id"],
-               "b": f"{os.environ['REPORT']} after the merge; the commit was reverted on staging. "
+               "b": f"{os.environ['REPORT']} after the merge. Revert PR: {os.environ['REVERT_URL']}. "
                     f"Run: {os.environ['RUN_URL']}"})
           print(f"Reopened {key}.")
           PY

@@ -3,8 +3,6 @@
 # `ui` when any changed file is under frontend/ (mixed PRs count as UI);
 # `backend` only when every changed file is under backend/ or is Markdown
 # under docs/, and at least one is under backend/; otherwise no area label.
-# staging-smoke.yml reverts a PR labeled `backend` automatically when the
-# staging smoke test fails after its merge.
 # The label is recomputed on every push, so a PR that later touches
 # frontend/ flips to `ui`.
 name: pr kind label
@@ -44,7 +42,7 @@ jobs:
           fi
 
           gh label create ui --repo "$REPO" --color 1d76db --description "Touches frontend/" --force >/dev/null
-          gh label create backend --repo "$REPO" --color 0e8a16 --description "Backend only; auto-revert on staging smoke failure" --force >/dev/null
+          gh label create backend --repo "$REPO" --color 0e8a16 --description "Backend only" --force >/dev/null
 
           case "$kind" in
             ui) gh pr edit "$PR" --repo "$REPO" --add-label ui --remove-label backend ;;
