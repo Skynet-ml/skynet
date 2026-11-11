@@ -386,6 +386,25 @@ def test_runner_sums_usage_once_per_message_without_an_end_event(tmp_path: Path)
     assert parse_pi_output(completed.stdout)[1] == {"input_tokens": 22, "output_tokens": 5}
 
 
+def test_runner_fails_on_deerflow_provider_error_fallback(tmp_path: Path) -> None:
+    """Exit non-zero with no ``message_end`` when DeerFlow replaces the reply with its error fallback.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    fallback = {
+        "type": "ai",
+        "id": "m1",
+        "content": "The model provider is unavailable.",
+        "additional_kwargs": {"deerflow_error_fallback": True, "error_detail": "upstream 503"},
+    }
+    events = [["messages-tuple", fallback], ["end", {"usage": {"input_tokens": 4, "output_tokens": 0}}]]
+    completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
+    assert completed.returncode != 0
+    assert "message_end" not in completed.stdout
+    assert "upstream 503" in completed.stderr
+
+
 def test_run_command_keeps_deerflow_state_out_of_the_version_patch(tmp_path: Path) -> None:
     """Write DeerFlow's config and state outside the checkout, so a run adds no patch line.
 

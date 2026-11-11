@@ -174,6 +174,7 @@ def _run():
     # answer is the joined text of the last AI message, as upstream chat() does.
     texts = {{}}
     last_text = None
+    llm_error = None
     try:
         for event in client.stream(STEERING.format(workdir=workdir, task=task), recursion_limit={recursion_limit}):
             data = event.data if isinstance(event.data, dict) else {{}}
@@ -183,6 +184,11 @@ def _run():
                 # Chunks of one message repeat its id, and id-less chunks share
                 # one key, so usage counts once per message and deltas join.
                 message_id = data.get("id") or ""
+                extra = data.get("additional_kwargs")
+                # DeerFlow's LLMErrorHandlingMiddleware replaces a failed provider call
+                # with this flagged message; Harbor's runner treats it as a failed run.
+                if isinstance(extra, dict) and extra.get("deerflow_error_fallback"):
+                    llm_error = str(extra.get("error_detail") or _text(data.get("content")) or "LLM provider failed")
                 if isinstance(data.get("usage_metadata"), dict):
                     message_usage[message_id] = data["usage_metadata"]
                 piece = _text(data.get("content"))
@@ -191,6 +197,8 @@ def _run():
                     texts[last_text] = texts.get(last_text, "") + piece
     except errors.GraphRecursionError as exc:
         print(f"deerflow: recursion limit reached: {{exc}}", file=sys.stderr)
+    if llm_error is not None:
+        sys.exit(f"deerflow: model provider error: {{llm_error[:500]}}")
     answer = texts.get(last_text, "")
     usages = [end_usage] if end_usage is not None else list(message_usage.values())
     event = {{
