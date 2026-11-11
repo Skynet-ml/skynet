@@ -137,6 +137,7 @@ MAX_RUN_STDOUT_BYTES = 1024 * 1024
 ELAPSED_PARAM = "elapsed_s"
 _STOP_ROUNDS = 100
 _PR_SET_CHILD_SUBREAPER = 36
+_PR_SET_DUMPABLE = 4
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
     " again: run its tests through the [run] entry, and read their report in the metric (its output"
@@ -1302,8 +1303,10 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The process exit code: 0 whenever the output was written.
     """
-    _keep_user_site()
     args = list(sys.argv[1:] if argv is None else argv)
+    # The supervisor needs only the standard library (SKY-642).
+    if not (len(args) == 2 and args[0] == CANDIDATE_FLAG):
+        _keep_user_site()
     if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
         return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
     if len(args) >= 3 and args[0] == STAGE_COMMAND_FLAG:
@@ -1345,6 +1348,9 @@ def _write_output(call_dir: Path, text: str) -> None:
         text: The output document.
     """
     partial = call_dir / (OUTPUT_FILE + ".part")
+    # A link or folder that the version's code left here must not take the
+    # write; a folder makes the unlink fail, so the call fails (SKY-642).
+    partial.unlink(missing_ok=True)
     partial.write_text(text, encoding="utf-8")
     partial.replace(call_dir / OUTPUT_FILE)
 
@@ -1399,6 +1405,7 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     entry, token = payload["entry"], str(payload["token"])
     timeout = float(payload["timeout"])
     _become_subreaper()
+    _block_tracing()
     env = dict(os.environ)
     stages = payload.get("stages")
     if isinstance(stages, dict):
@@ -1535,6 +1542,18 @@ def _become_subreaper() -> None:
         return
     with _quiet():
         ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+
+
+def _block_tracing() -> None:
+    """Stop same-user ptrace and ``/proc/<pid>/mem`` access to this process on Linux (SKY-642).
+
+    Without Yama, any process of the same user could otherwise change the
+    supervisor's clock or its output. A failure leaves the process as it was.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    with _quiet():
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)
 
 
 def stop_candidates(token: str, leader: int | None = None) -> bool:

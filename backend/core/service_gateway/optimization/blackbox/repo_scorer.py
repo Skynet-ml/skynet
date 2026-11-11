@@ -527,11 +527,12 @@ class RepoScorer:
             secrets: Values to keep out of anything that leaves the box.
 
         Returns:
-            ``{"output", "error"}`` from the supervisor.
+            ``{"output", "error", "stopped", "elapsed_s"}`` from the supervisor.
 
         Raises:
-            RepoScoreError: When the version changed a protected file, or not
-                every process it started could be shown to have stopped.
+            RepoScoreError: When the version changed a protected file, the
+                supervisor did not exit cleanly, or not every process the
+                version started could be shown to have stopped.
             BudgetReached: When the run's budget stopped a service or MCP call.
             BudgetError: When a service or MCP call had insufficient budget coverage.
             UsagePendingError: When a service or MCP call needs reconciliation.
@@ -553,10 +554,12 @@ class RepoScorer:
             if unstamped:
                 raise RepoScoreError(unstamped)
             calls = shlex.quote(CALLS_DIR)
+            done = f"{root}/{supervisor}/{runner.OUTPUT_FILE}"
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
                     f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {_ISOLATED} {_NO_SITE}"
+                    f" -exec rm -rf {{}} +; rm -rf {shlex.quote(done)} {shlex.quote(done + '.part')}"
+                    f"; cd {shlex.quote(path)} && python3 {_ISOLATED} {_NO_SITE}"
                     f" {shlex.quote(f'{root}/{RUNNER_PATH}')} {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
@@ -568,7 +571,9 @@ class RepoScorer:
             ran = json.loads(text) if text is not None else None
         except ValueError:
             ran = None
-        if not isinstance(ran, dict) or ran.get("stopped") is not True:
+        # The entry can write this file and then kill the supervisor, so the
+        # file counts only when the supervisor itself exited cleanly (SKY-642).
+        if not result.ok or not isinstance(ran, dict) or ran.get("stopped") is not True:
             logger.warning(
                 "The [run] supervisor did not stop every process (exit %s): %s",
                 result.exit_code,

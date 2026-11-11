@@ -152,7 +152,10 @@ def score(repo_path, case, output=None, elapsed_s=None):
     ...
 ```
 
-A keyword-only `*, elapsed_s=None` also works. `elapsed_s` is
+A keyword-only `*, elapsed_s=None` after `output` also works. The
+parameter must come after `output`: `score(repo_path, case, *,
+elapsed_s=None)` has no `output` parameter, so it does not get the time.
+`elapsed_s` is
 a float in seconds. When no `[run] entry` ran, the parameter keeps its
 default. A metric with
 `score(repo_path)`, `score(repo_path, case)` or
@@ -170,9 +173,21 @@ trusted. Use `elapsed_s`.
 
 The supervisor starts without site-packages (`python3 -I -S`), and Skynet
 writes the runner again before each case. So version code from an earlier
-case cannot change the supervisor. Residual risk: code that gets root in the
-box (for example through `sudo`) could still trace or change the supervisor
-process.
+case cannot change the supervisor. Skynet trusts the supervisor's result
+only when the supervisor exits cleanly, so an entry that writes a false
+result and then kills the supervisor gets no score. On Linux the supervisor
+sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
+`ptrace` and `/proc/<pid>/mem` access to it, also when Yama is off.
+
+Residual risk:
+
+- Code that gets root in the box (for example through `sudo`) could still
+  trace or change the supervisor process.
+- A version's metric step or `[run]` entry can plant a `.pth` file in the
+  shared site-packages. That file runs in the entry's Python for later
+  versions, so it can slow their timed entries and make their times longer.
+  The supervisor's clock stays correct, but the entry is slower. SKY-398
+  (in progress) covers the root fix.
 
 A timeout or other `[run]` failure scores 0, and the metric does not run.
 

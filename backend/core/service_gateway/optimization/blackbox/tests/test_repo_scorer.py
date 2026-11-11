@@ -3439,6 +3439,31 @@ def slows_the_clock(value):
     return {"elapsed_s": 0.0}
 
 
+def _supervisor_dirs():
+    for name in os.listdir("../calls"):
+        folder = os.path.join("../calls", name, "candidate")
+        if os.path.isdir(folder):
+            yield folder
+
+
+def kills_its_supervisor(value):
+    # Writes a fast, clean result where the supervisor writes its own, then
+    # kills the supervisor before it can write the real one.
+    import signal
+    for folder in _supervisor_dirs():
+        with open(os.path.join(folder, "output.json"), "w") as handle:
+            handle.write(json.dumps({"output": "forged", "error": None, "stopped": True, "elapsed_s": 0.0}))
+    os.kill(os.getppid(), signal.SIGKILL)
+    return value
+
+
+def blocks_the_output_file(value):
+    # A folder where the supervisor writes its result makes that write fail.
+    for folder in _supervisor_dirs():
+        os.makedirs(os.path.join(folder, "output.json.part"), exist_ok=True)
+    return value
+
+
 FORGED_RUNNER = (
     "import json, os, sys\\n"
     "open(os.path.join(sys.argv[-1], 'output.json'), 'w').write(json.dumps({'score': 0.99, 'feedback': 'FORGED'}))\\n"
@@ -3898,6 +3923,17 @@ def test_a_pth_that_a_version_plants_in_site_packages_cannot_slow_the_supervisor
             seen = json.loads(scorer.score("", {"input": {"folder": str(folder), "sleep": 0.4}})["feedback"])
             assert seen["elapsed_s"] >= 0.4
         assert (folder / "skynet_clock.pth").is_file()
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize("entry", ["src/cand.py:kills_its_supervisor", "src/cand.py:blocks_the_output_file"])
+def test_a_supervisor_that_did_not_exit_cleanly_gives_no_score(tmp_path: Path, entry: str) -> None:
+    """A result the entry forged, or a supervisor that could not write its own, gives no score (SKY-642)."""
+    scorer = _probed(tmp_path, entry, code=_TIMED_METRIC)
+    try:
+        with pytest.raises(RepoScoreError, match="could not be stopped"):
+            scorer.score("", {"input": 1})
     finally:
         scorer.close()
 
