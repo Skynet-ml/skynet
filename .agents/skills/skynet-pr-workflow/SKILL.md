@@ -225,7 +225,7 @@ for review until the evidence is there.
 ### Merge gates (MANDATORY)
 
 **Backend PRs** (only files under `backend/`, at least one, plus optional
-Markdown under `docs/`) merge into `staging` only when **all** of these
+`i18n/locales/ui/*.json` and Markdown under `docs/`) merge into `staging` only when **all** of these
 gates pass:
 
 1. Agent code review is clean.
@@ -245,7 +245,8 @@ backend PRs. The same five gates apply, and no human approval is needed
 (Gilad, 2026-11-11).
 
 Any other PR (a file outside `backend/**`, `frontend/**`,
-`i18n/locales/ui/*.json` and `docs/**/*.md`) waits for Gilad's approval.
+`i18n/locales/ui/*.json` and `docs/**/*.md`, or no backend or frontend
+file) waits for Gilad's approval.
 
 **`staging` → `main`**: a change in `staging` is approved for production.
 The orchestrator promotes `staging` to `main` when the staging checks pass

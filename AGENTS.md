@@ -112,8 +112,8 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 - **Among agents, only the orchestrator merges**, in the daily window (03:00
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
-- Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
-  gates pass. UI PRs (`frontend/**`, optional `backend/**`,
+- Backend PRs (`backend/**`, optional `i18n/locales/ui/*.json` and
+  `docs/**/*.md`) merge when all gates pass. UI PRs (`frontend/**`, optional `backend/**`,
   `i18n/locales/ui/*.json` and `docs/**/*.md`) merge the same way, when all
   gates pass. Other PRs wait for Gilad's approval.
   A change in `staging` is approved for production. The orchestrator promotes
