@@ -158,7 +158,9 @@ def _temp_root(var: str, name: str) -> str:
 
     The folder lives in the box's temp directory, outside the workspace. An
     EXIT trap removes it when the run's shell exits, and the next run's sweep
-    removes it when a SIGKILL skipped the trap.
+    removes it when a SIGKILL skipped the trap. The box image does not pin
+    python3, so a box without it gets a plain ``mktemp`` folder with the
+    same prefix and trap, and no lock or sweep, as before SKY-594.
 
     Args:
         var: Environment variable that gets the folder's path.
@@ -167,9 +169,11 @@ def _temp_root(var: str, name: str) -> str:
     Returns:
         The shell command. Chain the run after it with ``&&``.
     """
+    trap = f"trap 'rm -rf \"${var}\"' EXIT"
     return (
-        f'{var}="$(python3 -I -c {shlex.quote(_TEMP_ROOT_SWEEP)} app-{name}-)" && export {var} && '
-        f"trap 'rm -rf \"${var}\"' EXIT && "
+        "if command -v python3 >/dev/null 2>&1; then "
+        f'{var}="$(python3 -I -c {shlex.quote(_TEMP_ROOT_SWEEP)} app-{name}-)" && export {var} && {trap} && '
         f'exec 9>"${var}/owner.tmp" && '
-        f'python3 -I -c {shlex.quote(_TEMP_ROOT_LOCK)} "${var}"'
+        f'python3 -I -c {shlex.quote(_TEMP_ROOT_LOCK)} "${var}"; '
+        f'else {var}="$(mktemp -d "${{TMPDIR:-/tmp}}/app-{name}-XXXXXXXX")" && export {var} && {trap}; fi'
     )

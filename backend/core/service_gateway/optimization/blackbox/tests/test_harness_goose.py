@@ -375,7 +375,7 @@ def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_pa
     assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "plain"
 
 
-def _spawn_goose(tmp_path: Path, tag: str, *, sleep: int = 0) -> tuple[subprocess.Popen[str], Path]:
+def _spawn_goose(tmp_path: Path, tag: str, *, sleep: int = 0, path: str = _PATH) -> tuple[subprocess.Popen[str], Path]:
     """Start the built goose command against a fake goose in its own process group.
 
     Every run shares one fake binary and one temp directory, as runs in one box do.
@@ -384,6 +384,7 @@ def _spawn_goose(tmp_path: Path, tag: str, *, sleep: int = 0) -> tuple[subproces
         tmp_path: Scratch directory for the workspaces, the fake binary and the temp directory.
         tag: Name of this run's workspace and call log.
         sleep: Seconds the fake goose waits before it answers.
+        path: ``PATH`` after the fake binary's folder.
 
     Returns:
         The running shell and its call log.
@@ -404,7 +405,7 @@ def _spawn_goose(tmp_path: Path, tag: str, *, sleep: int = 0) -> tuple[subproces
     log = tmp_path / f"calls-{tag}.log"
     env = {
         **launch.env,
-        "PATH": f"{bin_dir}{os.pathsep}{_PATH}",
+        "PATH": f"{bin_dir}{os.pathsep}{path}",
         "HOME": str(tmp_path / "home"),
         "TMPDIR": str(tmp_path / "tmp"),
         "FAKE_LOG": str(log),
@@ -493,3 +494,27 @@ def test_sweep_removes_an_old_lockless_root_and_keeps_a_new_one(tmp_path: Path) 
     assert not old.exists()
     assert new.is_dir()
     assert other.is_dir()
+
+
+def test_a_box_without_python3_still_runs_and_removes_its_root(tmp_path: Path) -> None:
+    """Fall back to a plain ``mktemp`` root without the sweep when the box has no python3 (SKY-594)."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("cat", "mktemp", "rm", "sleep"):
+        found = shutil.which(name)
+        assert found is not None
+        (tools / name).symlink_to(found)
+    old = tmp_path / "tmp" / "app-goose-old"
+    old.mkdir(parents=True)
+    hour_ago = time.time() - 3600
+    os.utime(old, (hour_ago, hour_ago))
+
+    run, log = _spawn_goose(tmp_path, "nopython", path=str(tools))
+    assert run.wait(timeout=10) == 0
+
+    assert "ROOT_DIR=yes" in log.read_text()
+    root = _goose_root(log)
+    assert root.parent == tmp_path / "tmp"
+    assert root.name.startswith("app-goose-")
+    assert not root.exists()
+    assert old.is_dir()
