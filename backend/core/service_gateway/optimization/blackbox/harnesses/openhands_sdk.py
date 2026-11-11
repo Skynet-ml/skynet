@@ -45,8 +45,9 @@ _PROBE = f"uv run --quiet --offline {_SDK_ENV}"
 _WARM = f"uv run --quiet {_SDK_ENV}"
 ENV_REASONING_EFFORT = "OPENHANDS_SDK_REASONING_EFFORT"
 INSTRUCTIONS_FILE = "AGENTS.md"
-# The SDK hands the effort to LiteLLM, which knows these provider-neutral values.
-_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+# The provider-neutral values that ``LLM.reasoning_effort`` documents in
+# openhands-sdk 1.61.0; the SDK hands them to LiteLLM unchanged.
+EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 # Empty values override any key the host shell leaks into the box, so LiteLLM
 # cannot fall back to a direct provider route. The runner sets its own
 # ``LLM_API_KEY`` and ``LLM_BASE_URL`` from the gateway inside the process.
@@ -316,13 +317,20 @@ def _openhands_sdk_launch(model: str, gateway: GatewayConfig, *, reasoning_effor
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When ``reasoning_effort`` is not a level the SDK supports.
     """
+    if reasoning_effort and reasoning_effort not in EFFORTS:
+        raise ServiceError(
+            f"The OpenHands SDK harness does not support the effort level {reasoning_effort!r}. "
+            f"Supported levels: {', '.join(sorted(EFFORTS))}."
+        )
     env = _base_env(model, gateway)
     env.update(_NO_DIRECT_KEYS)
     env.update(_QUIET_ENV)
-    effort = (reasoning_effort or "").lower()
-    if effort in _EFFORTS:
-        env[ENV_REASONING_EFFORT] = effort
+    if reasoning_effort:
+        env[ENV_REASONING_EFFORT] = reasoning_effort
     return HarnessLaunch(
         instructions_file=INSTRUCTIONS_FILE,
         install_command=_openhands_sdk_install(),

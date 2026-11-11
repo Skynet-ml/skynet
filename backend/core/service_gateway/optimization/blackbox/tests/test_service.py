@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +28,11 @@ from core.constants import (
     TQDM_TOTAL_KEY,
 )
 from core.exceptions import ServiceError
+from core.models import blackbox as blackbox_models
 from core.models.blackbox import (
     BLACKBOX_ENGINE_BEST_OF_N,
     BLACKBOX_ENGINE_GEPA,
+    BLACKBOX_HARNESSES,
     BlackboxRunRequest,
 )
 from core.models.results import ModelTokenUsage
@@ -44,6 +47,7 @@ from .. import shinka_evolve as shinka_evolve_mod
 from ..agent_runs import PHASE_BASELINE, PHASE_FINAL
 from ..auto import LaneOutcome
 from ..harness import GatewayConfig
+from ..harnesses import REGISTRY
 from ..native_runtime import NativeOptions
 from ..protocol import (
     METRIC_ERROR,
@@ -937,6 +941,52 @@ def test_native_model_controls_are_rejected_without_restricting_direct_engines(
             validate_blackbox_payload(payload)
     else:
         validate_blackbox_payload(payload)
+
+
+@pytest.mark.parametrize("strategy", [{"mode": "auto"}, {"mode": "single", "engine": "meta_harness"}])
+@pytest.mark.parametrize(
+    ("declared", "effort", "accepted"),
+    [
+        (("low", "high"), "max", False),
+        (("low", "high"), "high", True),
+        (("low", "high"), None, True),
+        (None, "max", True),
+    ],
+    ids=["unsupported", "supported", "default", "undeclared"],
+)
+def test_submit_checks_the_effort_against_the_proposer_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: dict[str, str],
+    declared: tuple[str, ...] | None,
+    effort: str | None,
+    accepted: bool,
+) -> None:
+    """Refuse at submit an effort level the proposer harness does not declare, before any paid work.
+
+    Args:
+        monkeypatch: Pytest fixture that swaps the registry entry and runtime capabilities.
+        strategy: Auto or a single native engine; both run the proposer harness.
+        declared: The harness's supported levels; ``None`` declares no list.
+        effort: The chosen effort level; ``None`` keeps the harness default.
+        accepted: Whether the submission passes validation.
+    """
+    monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
+    monkeypatch.setitem(REGISTRY, "fake", replace(REGISTRY["codex"], id="fake", supported_efforts=declared))
+    monkeypatch.setattr(blackbox_models, "BLACKBOX_HARNESSES", (*BLACKBOX_HARNESSES, "fake"))
+    extra = {"reasoning_effort": effort} if effort else {}
+    payload = _payload(
+        strategy=strategy,
+        max_cost_cents=100,
+        scorer={"kind": "remote", "url": "https://scorer.example"},
+        reflection_model_config={"name": "fake/model", "extra": extra},
+        proposer={"harness": "fake"},
+    )
+
+    if accepted:
+        validate_blackbox_payload(payload)
+    else:
+        with pytest.raises(ServiceError, match="fake proposer does not support the 'max' effort level"):
+            validate_blackbox_payload(payload)
 
 
 def test_scorer_llm_usage_is_billed_with_the_run(

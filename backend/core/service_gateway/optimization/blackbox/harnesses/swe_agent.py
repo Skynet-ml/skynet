@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import shlex
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_SWE_AGENT
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
@@ -37,6 +38,10 @@ SWE_AGENT_PYTHON = "3.12"
 # LiteLLM; SWE-ReX is the release current at the tag's resolution date.
 SWE_AGENT_LITELLM_VERSION = "1.103.1"
 SWE_AGENT_SWEREX_VERSION = "1.4.0"
+# The levels LiteLLM 1.103.1 accepts as ``reasoning_effort``
+# (``types.llms.openai.REASONING_EFFORT``). Each passes unchanged; submit and
+# the launch refuse any other level (SKY-585).
+SWE_AGENT_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # uv resolves every other dependency as of this date, so a later release of
 # one of them never reaches a run. It is after the LiteLLM pin's release.
 SWE_AGENT_EXCLUDE_NEWER = "2026-10-01T00:00:00Z"
@@ -160,9 +165,17 @@ def _effort_flags(reasoning_effort: str | None) -> str:
 
     Returns:
         The flags with a leading space, or an empty string.
+
+    Raises:
+        ServiceError: When the level is not in :data:`SWE_AGENT_EFFORTS`.
     """
     if not reasoning_effort:
         return ""
+    if reasoning_effort not in SWE_AGENT_EFFORTS:
+        raise ServiceError(
+            f"The SWE-agent harness does not support the effort level '{reasoning_effort}'. "
+            f"Supported levels: {', '.join(SWE_AGENT_EFFORTS)}."
+        )
     kwargs = shlex.quote(json.dumps({"reasoning_effort": reasoning_effort}))
     flags = f" --agent.model.completion_kwargs={kwargs}"
     if reasoning_effort != "none":
@@ -187,6 +200,9 @@ def _swe_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When the effort level is not in :data:`SWE_AGENT_EFFORTS`.
     """
     run_command = (
         f"{SWE_AGENT_ROOT_GUARD}; "
@@ -236,5 +252,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=54,
+        supported_efforts=SWE_AGENT_EFFORTS,
     )
 )

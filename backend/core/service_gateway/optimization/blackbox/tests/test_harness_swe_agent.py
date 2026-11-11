@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_SWE_AGENT, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
@@ -24,6 +25,7 @@ from ..harnesses.swe_agent import (
     _SNAPSHOT_WORKSPACE,
     SWE_AGENT_BASE_URL_FILE,
     SWE_AGENT_COMMIT,
+    SWE_AGENT_EFFORTS,
     SWE_AGENT_ROOT_GUARD,
     SWE_AGENT_VERSION,
 )
@@ -561,6 +563,27 @@ def test_reasoning_effort_passes_unchanged(tmp_path: Path, effort: str) -> None:
     args = _args(calls)
     assert f'--agent.model.completion_kwargs={{"reasoning_effort": "{effort}"}}' in args
     assert ("--agent.model.temperature=1" in args) is (effort != "none")
+
+
+def test_registry_declares_the_litellm_effort_levels() -> None:
+    """Declare the LiteLLM levels, so submit refuses any other level before paid work."""
+    assert REGISTRY[BLACKBOX_HARNESS_SWE_AGENT].supported_efforts == SWE_AGENT_EFFORTS == _EFFORTS
+
+
+@pytest.mark.parametrize("effort", ["default", "ultra", "HIGH"])
+def test_unsupported_reasoning_effort_is_refused_at_launch_build(effort: str) -> None:
+    """Refuse a level LiteLLM does not accept, instead of dropping it or changing it."""
+    with pytest.raises(ServiceError, match=f"does not support the effort level '{effort}'"):
+        build_launch(_target(), _GATEWAY, protected=False, reasoning_effort=effort)
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_reasoning_effort_keeps_the_model_default(effort: str | None) -> None:
+    """Send no effort and no temperature flag when the user picks no level."""
+    run_command = build_launch(_target(), _GATEWAY, protected=False, reasoning_effort=effort).run_command
+
+    assert "completion_kwargs" not in run_command
+    assert "--agent.model.temperature" not in run_command
 
 
 @pytest.mark.parametrize("fake_exit", [0, 3])
