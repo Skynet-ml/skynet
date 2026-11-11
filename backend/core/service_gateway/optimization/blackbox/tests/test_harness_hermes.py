@@ -62,7 +62,8 @@ _EXTRA_MODEL_KEYS = {
     "AUXILIARY_APPROVAL_API_KEY",
 }
 # Keys that 0.19.0 can take from the models.dev catalog, the Azure Anthropic
-# key, and the keys of paid web, image, speech and memory tools.
+# key, the custom provider's fallback key and the Hugging Face trace-upload
+# tokens.
 _CATALOG_AND_TOOL_KEYS = {
     "ACTUAL_API_KEY",
     "NEBIUS_API_KEY",
@@ -70,18 +71,47 @@ _CATALOG_AND_TOOL_KEYS = {
     "TOKENPLAN_API_KEY",
     "AZURE_ANTHROPIC_KEY",
     "ALIBABA_CODING_PLAN_API_KEY",
-    "FIRECRAWL_API_KEY",
-    "TAVILY_API_KEY",
-    "EXA_API_KEY",
-    "FAL_KEY",
-    "ELEVENLABS_API_KEY",
-    "HONCHO_API_KEY",
+    "CUSTOM_API_KEY",
+    "HUGGINGFACE_HUB_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "HUGGINGFACE_TOKEN",
 }
+# Every secret ``tool`` key in Hermes 0.19.0's ``OPTIONAL_ENV_VARS``: paid web,
+# browser, image, speech, memory and tracing services.
+_PAID_TOOL_KEYS = {
+    "EXA_API_KEY",
+    "PARALLEL_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "TOOL_GATEWAY_USER_TOKEN",
+    "TAVILY_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
+    "BROWSERBASE_API_KEY",
+    "BROWSER_USE_API_KEY",
+    "CAMOFOX_API_KEY",
+    "FAL_KEY",
+    "KREA_API_KEY",
+    "VOICE_TOOLS_OPENAI_KEY",
+    "ELEVENLABS_API_KEY",
+    "MISTRAL_API_KEY",
+    "GITHUB_TOKEN",
+    "HONCHO_API_KEY",
+    "HINDSIGHT_API_KEY",
+    "SUPERMEMORY_API_KEY",
+    "MEM0_API_KEY",
+    "RETAINDB_API_KEY",
+    "BRV_API_KEY",
+    "OPENVIKING_API_KEY",
+    "HERMES_LANGFUSE_SECRET_KEY",
+}
+# Hermes reads these only for Bedrock, which the config never selects, and an
+# empty ``AWS_PROFILE`` breaks boto3, so they stay inherited.
+_INHERITED_AWS_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"}
 _PROMPT = "Fix `solution.py` and say $(echo done)."
 # Stand-in for the hermes binary: it records its call and prints a fixed answer.
+# Python writes the argv as one JSON line, so any prompt text round-trips.
 _FAKE_HERMES = """#!/bin/sh
 {
-  printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
+  printf 'ARGS='; "$FAKE_PYTHON" -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@"
   printf 'OPENAI_BASE_URL=%s\\n' "$OPENAI_BASE_URL"
   printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
   printf 'ANTHROPIC_API_KEY=%s\\n' "$ANTHROPIC_API_KEY"
@@ -286,6 +316,7 @@ def _run_with_fake_hermes(
         "FAKE_ANSWER": _RECORDED_STDOUT,
         "FAKE_STDERR": _RECORDED_STDERR,
         "FAKE_EXIT": str(fake_exit),
+        "FAKE_PYTHON": sys.executable,
     }
     if protected:
         env[relay_env] = _RELAY_URL
@@ -517,6 +548,8 @@ def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Pat
     assert blanked >= _EXTRA_MODEL_KEYS
     assert blanked >= _DIRECT_PROVIDER_KEYS
     assert blanked >= _CATALOG_AND_TOOL_KEYS
+    assert blanked >= _PAID_TOOL_KEYS
+    assert not _INHERITED_AWS_KEYS & set(_PROTECTED_ENV)
     assert {"CLAUDE_CODE_OAUTH_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} <= set(_PROTECTED_ENV)
     for name, content in launch.files.items():
         path = tmp_path / name
@@ -548,10 +581,16 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
     result, calls, workspace = _run_with_fake_hermes(tmp_path, protected=True, relay_env=relay_env)
 
     assert result.returncode == 0
-    (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
-    assert (
-        run == f"ARGS [--yolo] [chat] [--query={_PROMPT}] [-Q] [--model] [target-model] [--provider] [custom:runtime]"
-    )
+    assert json.loads(_logged(calls, "ARGS")) == [
+        "--yolo",
+        "chat",
+        f"--query={_PROMPT}",
+        "-Q",
+        "--model",
+        "target-model",
+        "--provider",
+        "custom:runtime",
+    ]
     assert _logged(calls, "OPENAI_BASE_URL") == _RELAY_URL
     assert _logged(calls, "OPENAI_API_KEY") == _GATEWAY.api_key
     assert _logged(calls, "ANTHROPIC_API_KEY") == ""
@@ -570,13 +609,12 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
 
 
 def test_prompt_that_starts_with_an_option_stays_the_query_value(tmp_path: Path) -> None:
-    """A prompt that looks like a Hermes option reaches argparse as the ``--query`` value, never as an option."""
-    prompt = "--model=other-model -Q --provider=openrouter"
+    """A prompt that looks like Hermes options, with brackets and a newline, stays the one ``--query`` value."""
+    prompt = "--model=other-model -Q ] [--provider=openrouter]\n[x] [y]"
     result, calls, _ = _run_with_fake_hermes(tmp_path, protected=False, prompt=prompt)
 
     assert result.returncode == 0
-    (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
-    argv = re.findall(r"\[(.*?)\](?= \[|$)", run)
+    argv = json.loads(_logged(calls, "ARGS"))
     # The options of Hermes 0.19.0's ``chat`` parser that this run uses.
     parser = argparse.ArgumentParser(prog="hermes chat")
     parser.add_argument("-q", "--query")

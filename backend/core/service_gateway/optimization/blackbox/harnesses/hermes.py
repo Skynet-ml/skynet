@@ -124,13 +124,27 @@ _PROTECTED_ENV = {
     "TOKENPLAN_API_KEY": "",
     # The Azure Anthropic route takes its own key.
     "AZURE_ANTHROPIC_KEY": "",
-    # Web, image, speech and memory tools call paid services with their own keys.
+    # Web, browser, image, speech and memory tools call paid services with
+    # their own keys: every secret ``tool`` key in 0.19.0's OPTIONAL_ENV_VARS.
     "FIRECRAWL_API_KEY": "",
     "TAVILY_API_KEY": "",
     "EXA_API_KEY": "",
+    "PARALLEL_API_KEY": "",
+    "BRAVE_SEARCH_API_KEY": "",
+    "BROWSERBASE_API_KEY": "",
+    "BROWSER_USE_API_KEY": "",
+    "CAMOFOX_API_KEY": "",
+    "TOOL_GATEWAY_USER_TOKEN": "",
     "FAL_KEY": "",
+    "KREA_API_KEY": "",
     "ELEVENLABS_API_KEY": "",
     "HONCHO_API_KEY": "",
+    "HINDSIGHT_API_KEY": "",
+    "SUPERMEMORY_API_KEY": "",
+    "MEM0_API_KEY": "",
+    "RETAINDB_API_KEY": "",
+    "BRV_API_KEY": "",
+    "OPENVIKING_API_KEY": "",
     # Speech tools call Groq and OpenAI audio with their own keys.
     "GROQ_API_KEY": "",
     "VOICE_TOOLS_OPENAI_KEY": "",
@@ -142,6 +156,15 @@ _PROTECTED_ENV = {
     "COPILOT_GITHUB_TOKEN": "",
     "GH_TOKEN": "",
     "GITHUB_TOKEN": "",
+    # The custom provider's model listing tries this key before OPENAI_API_KEY.
+    "CUSTOM_API_KEY": "",
+    # Trace upload to Hugging Face reads these after HF_TOKEN.
+    "HUGGINGFACE_HUB_TOKEN": "",
+    "HUGGING_FACE_HUB_TOKEN": "",
+    "HUGGINGFACE_TOKEN": "",
+    # AWS credentials stay inherited. Hermes reads them only for Bedrock, which
+    # this config never selects, and passes them on to the terminal tool on
+    # purpose. An empty AWS_PROFILE makes boto3 fail with ProfileNotFound.
     "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "",
     "LANGFUSE_BASE_URL": "",
