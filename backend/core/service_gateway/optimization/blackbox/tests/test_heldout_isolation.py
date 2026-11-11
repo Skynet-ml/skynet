@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from core.constants import PROGRESS_EVALUATION_STARTED
+from core.constants import PROGRESS_EVALUATION_STARTED, PROGRESS_LANE_COMPLETED
 from core.models.blackbox import BlackboxRunRequest
 from core.models.common import SplitFractions
 
@@ -278,6 +278,8 @@ class _BoxRuntime:
         self.agent_bin = agent_bin
         self.sessions: list[_BoxSession] = []
         self.specs: list[SandboxSpec] = []
+        # Auto opens its explore lanes' boxes on parallel threads.
+        self._lock = threading.Lock()
 
     def open(self, spec: SandboxSpec) -> _BoxSession:
         """Open a new box.
@@ -288,10 +290,11 @@ class _BoxRuntime:
         Returns:
             The recording box.
         """
-        self.specs.append(spec)
-        session = _BoxSession(self.root / f"box-{len(self.sessions)}", real=self.real, agent_bin=self.agent_bin)
-        self.sessions.append(session)
-        return session
+        with self._lock:
+            self.specs.append(spec)
+            session = _BoxSession(self.root / f"box-{len(self.sessions)}", real=self.real, agent_bin=self.agent_bin)
+            self.sessions.append(session)
+            return session
 
 
 def _repo_snapshot(tmp_path: Path) -> dict[str, Any]:
@@ -369,7 +372,12 @@ def _run(
     search_records: list[logging.LogRecord] = []
 
     def progress(event: str, metrics: dict[str, Any]) -> None:
-        """Record each event and mark where the search ends."""
+        """Record each event and mark where the search ends.
+
+        Args:
+            event: The progress event name.
+            metrics: The event's payload.
+        """
         if event == PROGRESS_EVALUATION_STARTED and not scorer.search_done.is_set():
             search_records.extend(caplog.records)
             scorer.search_done.set()
@@ -458,6 +466,11 @@ def test_heldout_cases_never_enter_any_engine_box(
     response, scorer, events, search_records = _run(_request(strategy), runtime, tmp_path, monkeypatch, caplog)
 
     _assert_search_is_clean(runtime, scorer, events, search_records)
+    if strategy["mode"] == "auto":
+        # A failed lane runs no box work, so the scan above would not cover it.
+        lanes = [metrics for event, metrics in events if event == PROGRESS_LANE_COMPLETED]
+        assert lanes
+        assert all(lane["status"] == "completed" for lane in lanes), lanes
     assert response.split_counts.test == 2
     assert response.case_count == 2
 
@@ -475,7 +488,15 @@ def test_the_check_fails_when_a_heldout_case_enters_the_box(
     real_payload = native_runtime.native_task_payload
 
     def leaky_payload(engine_id: str, task: Any) -> dict[str, Any]:
-        """Add the first held-out case to the box's train set, as a leak would."""
+        """Add the first held-out case to the box's train set, as a leak would.
+
+        Args:
+            engine_id: The native engine the box runs.
+            task: The task the service sends to the box.
+
+        Returns:
+            The task document with one held-out case added.
+        """
         document = real_payload(engine_id, task)
         document["train_set"] = [*document["train_set"], {"id": 0, "input": _cases()[-2]["input"]}]
         return document
