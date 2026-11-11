@@ -238,18 +238,36 @@ export function adoptedSetupChatId(
   serverId: string,
   isActive: boolean,
 ): string | null {
-  return current?.startsWith("setup-") && isActive ? serverId : null;
+  return current !== null && !isSavedSetupChat(current) && isActive ? serverId : null;
 }
 
 /**
- * How a reopened setup gets its chat back. A saved chat loads from the
- * server, whose copy wins. A browser id with messages is an older build's
- * chat the server never saved, so it stays in the browser; with no messages,
- * no turn ran yet and the chat starts new.
+ * Whether a setup chat id names a server conversation. A ``setup-`` id is the
+ * browser's own: no turn saved the chat yet, its server copy failed to load,
+ * or an older build kept the chat only in the tab. Its next turn saves it.
  */
-export function setupChatReopen(chat: SetupChat): "server" | "unsaved" | "new" {
-  if (!chat.id.startsWith("setup-")) return "server";
-  return chat.messages.length ? "unsaved" : "new";
+export function isSavedSetupChat(id: string): boolean {
+  return !id.startsWith("setup-");
+}
+
+/**
+ * Whether the server's copy of a reopened setup chat may replace the tab's
+ * copy on view: the chat is still the setup's, and no turn changed it.
+ *
+ * Args:
+ *   setupId: The setup chat's id now.
+ *   live: The chat on view.
+ *   opened: The setup chat's id and the messages it opened with.
+ *
+ * Returns:
+ *   True when the loaded copy may take over.
+ */
+export function setupChatUnchanged(
+  setupId: string | null,
+  live: { id: string | null; messages: readonly AgentMessage[] },
+  opened: { id: string; messages: readonly AgentMessage[] },
+): boolean {
+  return setupId === opened.id && live.id === opened.id && live.messages === opened.messages;
 }
 
 /**

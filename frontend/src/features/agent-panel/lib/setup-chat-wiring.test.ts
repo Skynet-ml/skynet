@@ -30,7 +30,10 @@ const {
   opensWithKickoff,
   setupChatLedger,
   adoptedSetupChatId,
-  setupChatReopen,
+  isSavedSetupChat,
+  setupChatUnchanged,
+  newSetupChatId,
+  hideKickoffs,
 } = await import("./screen-agent.ts");
 
 const hook = "src/features/agent-panel/hooks/use-generalist-agent.ts";
@@ -59,18 +62,17 @@ function expression(file: string, name: string, context: Record<string, unknown>
   return new Function(...Object.keys(context), `return ${code}`)(...Object.values(context));
 }
 
-test("an unsaved session's turns go out with persist false and no conversation id", () => {
+test("every turn is saved: a chat with no server id sends none, and the server makes one", () => {
   const text = source(hook);
-  assert.match(text, /const unsaved = sessionsRef\.current\.get\(key\)\?\.unsaved === true;/);
-  assert.match(text, /const savedId = unsaved \? null : \(sessionsRef\.current\.get\(key\)\?\.conversationId \?\? null\);/);
+  assert.match(text, /const savedId = sessionsRef\.current\.get\(key\)\?\.conversationId \?\? null;/);
   assert.match(text, /conversation_id: saved\?\.id \?\? null,/);
-  assert.match(text, /persist: unsaved \? false : undefined,/);
+  assert.ok(!text.includes("persist:"));
 });
 
-test("pruning keeps an idle unsaved session, which the server cannot reload", () => {
+test("pruning keeps an idle chat with messages and no server id, which the server cannot reload", () => {
   const blankSession = expression(hook, "blankSession", {});
   const sessions = new Map<string, any>([
-    ["setup", { ...blankSession("setup"), conversationId: "setup-1", unsaved: true, messages: [{ role: "user", content: "hi" }] }],
+    ["setup", { ...blankSession("setup"), messages: [{ role: "user", content: "hi" }] }],
     ["saved", { ...blankSession("saved"), conversationId: "saved-1", messages: [{ role: "user", content: "hi" }] }],
   ]);
   const prune = expression(hook, "pruneInactive", {
@@ -81,22 +83,23 @@ test("pruning keeps an idle unsaved session, which the server cannot reload", ()
   assert.deepEqual([...sessions.keys()], ["setup"]);
 });
 
-test("openConversation stores the unsaved flag only when asked", () => {
+test("openConversation with no id shows the messages with no server id", () => {
   const draft = new Map<string, any>();
   let key = 0;
   const open = expression(hook, "openConversation", {
     nextKey: () => `k${key++}`, commit: (mutate: (d: Map<string, any>) => void) => mutate(draft),
     blankSession: expression(hook, "blankSession", {}), pruneInactive: () => {}, setActive: () => {},
   });
-  open("setup-1", [], { unsaved: true });
-  open("saved-1", []);
-  assert.equal(draft.get("k0")?.unsaved, true);
-  assert.equal(draft.get("k1")?.unsaved, undefined);
+  const messages = [{ role: "user", content: "q" }];
+  open(null, messages);
+  open("c1", []);
+  assert.equal(draft.get("k0")?.conversationId, null);
+  assert.equal(draft.get("k0")?.messages, messages);
+  assert.equal(draft.get("k1")?.conversationId, "c1");
 });
 
-test("a new setup chat starts as a normal chat, so its first turn saves it on the server", () => {
+test("a new setup chat starts with no server id, so its first turn saves it", () => {
   const text = source(panel);
-  assert.ok(!text.includes("openConversation(id, [], { unsaved: true })"));
   assert.ok(text.includes("keepSetupChat(newSetupChatId());\n      newSession();"));
 });
 
@@ -117,20 +120,65 @@ test("the setup chat takes the server's id from its first saved turn", () => {
   assert.deepEqual(seen, ["c1"]);
 });
 
-test("a reopened setup chat loads the server copy; only an older tab-only copy stays unsaved", () => {
-  const msgs = [{ role: "user", content: "q" }];
-  assert.equal(setupChatReopen({ id: "c1", kicked: [], messages: msgs }), "server");
-  assert.equal(setupChatReopen({ id: "hosted:c1", kicked: [], messages: [] }), "server");
-  assert.equal(setupChatReopen({ id: "setup-1", kicked: [], messages: msgs }), "unsaved");
-  assert.equal(setupChatReopen({ id: "setup-1", kicked: ["brief"], messages: [] }), "new");
-  const text = source(panel);
-  assert.match(text, /void getConversation\(id\)\.then\(\(detail\) => \{\n\s+if \(setupChatRef\.current !== id\) return;/);
-  assert.ok(text.includes("openConversation(id, detail ? hideKickoffs(detail.messages) : saved.messages);"));
+test("only a setup chat with a server id counts as saved", () => {
+  assert.equal(isSavedSetupChat("c1"), true);
+  assert.equal(isSavedSetupChat("hosted:c1"), true);
+  assert.equal(isSavedSetupChat("setup-1"), false);
 });
 
-test("the setup chat shows the Share button", () => {
-  const text = source(panel);
-  assert.match(text, /const canShareChat =\n\s+canShare && !webChat && !!agent\.conversationId && agent\.messages\.length > 0;/);
+function settleWith(live: { id: string | null; messages: unknown[] }, setupId: string | null = "c1") {
+  const opened: any[] = [];
+  const kept: (string | null)[] = [];
+  const settle = expression(panel, "settleSetupLoad", {
+    setupChatUnchanged, hideKickoffs, newSetupChatId,
+    setupChatRef: { current: setupId }, liveChatRef: { current: live },
+    openConversation: (id: string | null, messages: unknown[]) => opened.push({ id, messages }),
+    keepSetupChat: (id: string | null) => kept.push(id),
+  });
+  return { settle, opened, kept };
+}
+
+test("the server copy of a reopened setup chat replaces the tab copy while nothing changed", () => {
+  const messages = [{ role: "user", content: "tab" }];
+  const { settle, opened, kept } = settleWith({ id: "c1", messages });
+  settle({ id: "c1", messages }, { messages: [{ role: "user", content: "server" }] });
+  assert.deepEqual(opened, [{ id: "c1", messages: [{ role: "user", content: "server" }] }]);
+  assert.deepEqual(kept, []);
+});
+
+test("a failed server load moves the tab copy to a new browser id, so the next turn makes a new chat", () => {
+  const messages = [{ role: "user", content: "tab" }];
+  const { settle, opened, kept } = settleWith({ id: "c1", messages });
+  settle({ id: "c1", messages }, null);
+  assert.equal(kept.length, 1);
+  assert.match(String(kept[0]), /^setup-/);
+  assert.deepEqual(opened, [{ id: null, messages }]);
+  // The next saved turn gives the chat its new server id.
+  assert.equal(adoptedSetupChatId(kept[0], "c9", true), "c9");
+});
+
+test("a turn sent while the server copy loads keeps the chat on view", () => {
+  const messages = [{ role: "user", content: "tab" }];
+  const sent = [...messages, { role: "user", content: "new" }];
+  for (const load of [{ messages: [] }, null]) {
+    const { settle, opened, kept } = settleWith({ id: "c1", messages: sent });
+    settle({ id: "c1", messages }, load);
+    assert.deepEqual(opened, []);
+    assert.deepEqual(kept, []);
+  }
+  const closed = settleWith({ id: "c1", messages }, null);
+  closed.settle({ id: "c1", messages }, null);
+  assert.deepEqual(closed.opened, []);
+});
+
+test("the setup chat shows Share only once the server saved it", () => {
+  const share = (conversationId: string | null) =>
+    expression(panel, "canShareChat", {
+      canShare: true, webChat: false, agent: { conversationId, messages: [{ role: "user", content: "q" }] },
+    });
+  assert.equal(share("c1"), true);
+  // An older build's tab-only chat, or one whose server copy failed to load, opens with no id.
+  assert.equal(share(null), false);
 });
 
 function keepWith(

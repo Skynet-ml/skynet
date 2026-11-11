@@ -101,6 +101,7 @@ import {
   decodeSetupChat,
   encodeSetupChat,
   hideKickoffs,
+  isSavedSetupChat,
   legacySetupChatId,
   newSetupChatId,
   newSetupChatStart,
@@ -108,8 +109,8 @@ import {
   parseScreenNav,
   registerSetupChatFlush,
   setupChatLedger,
-  setupChatReopen,
   setupChatSnapshot,
+  setupChatUnchanged,
   storedKickedScreens,
   trackAutoTurn,
   trackKickoffTurn,
@@ -264,8 +265,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // The setup has one agent and one chat, which lives as long as the draft:
   // a reload or a return to a left setup brings it back, and submitting or
   // starting a new setup drops it from the setup. The server saves it like
-  // any other chat, so it can be shared; the tab's copy finds it again. Each screen the wizard reaches gives the agent a
-  // turn of its own; an agent's Back leaves the earlier screen its request.
+  // any other chat, so it can be shared, and the tab's copy finds it again.
+  // Each screen the wizard reaches gives the agent a turn of its own; an
+  // agent's Back leaves the earlier screen its request.
   const shownScreen = wizardCtx?.wizardScreen ?? null;
   const inSetup = shownScreen !== null;
   const setupChatRef = React.useRef<string | null>(null);
@@ -437,6 +439,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onToolEnd: handleToolEnd,
     onConversationMeta: handleConversationMeta,
   });
+  // Declared before the screen effect: a setup chat's server load reads it.
+  const liveChatRef = React.useRef({ id: agent.conversationId, messages: agent.messages });
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
   // Each conversation on view gets fresh turn components, so one chat's
@@ -541,6 +545,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   } = agent;
   const setActiveConversation = store.setActiveId;
   const removeConversation = store.remove;
+  // The server's copy of a reopened setup chat replaces the tab's copy only
+  // while no turn changed it. A failed load (a deleted chat, or no network)
+  // moves the tab's copy to a new browser id, so the next turn saves a new
+  // conversation and does not fail on the old one.
+  const settleSetupLoad = React.useCallback(
+    (opened: { id: string; messages: AgentMessage[] }, detail: { messages: AgentMessage[] } | null) => {
+      if (!setupChatUnchanged(setupChatRef.current, liveChatRef.current, opened)) return;
+      if (detail) {
+        openConversation(opened.id, hideKickoffs(detail.messages));
+        return;
+      }
+      keepSetupChat(newSetupChatId());
+      openConversation(null, opened.messages);
+    },
+    [keepSetupChat, openConversation],
+  );
   React.useEffect(() => {
     const from = shownScreenRef.current;
     shownScreenRef.current = shownScreen;
@@ -575,8 +595,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     try {
       const raw = window.sessionStorage.getItem(SETUP_CHAT_KEY);
       saved = decodeSetupChat(raw);
-      // An older build saved the setup chat on the server; nothing else
-      // would ever take it out of the history list.
+      // A much older build kept only the id of a setup chat it saved on the
+      // server, and that chat goes. Setup chats this build saves stay in the
+      // chat history, like other chats.
       const legacy = legacySetupChatId(raw);
       if (legacy) void removeConversation(legacy);
     } catch {
@@ -606,20 +627,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     keepSetupChat(id);
     // A reload in the middle of this screen's kickoff left it out of the copy.
     const kickoff = !saved.kicked.includes(shownScreen) && opensWithKickoff(shownScreen);
-    const reopen = setupChatReopen(saved);
-    if (reopen === "new") newSession();
-    else if (activateConversation(id)) {
-      // The chat is still in memory: the wizard came back without a reload.
-    } else if (reopen === "unsaved") openConversation(id, saved.messages, { unsaved: true });
-    else {
-      // The server's copy wins; the tab's copy covers a failed load. The
-      // kickoff waits for the chat, so it does not go to the blank one shown meanwhile.
-      newSession();
+    if (!isSavedSetupChat(id)) openConversation(null, saved.messages);
+    else if (!activateConversation(id)) {
+      // The tab's copy shows at once, so a turn sent meanwhile goes to this
+      // chat. The kickoff waits for the server's copy, which may replace it.
+      openConversation(id, saved.messages);
+      const opened = { id, messages: saved.messages };
       const screen = shownScreen;
       void getConversation(id).then((detail) => {
-        if (setupChatRef.current !== id) return;
-        openConversation(id, detail ? hideKickoffs(detail.messages) : saved.messages);
-        if (kickoff) setKickoffScreen(screen);
+        settleSetupLoad(opened, detail);
+        if (kickoff && setupChatRef.current !== null) setKickoffScreen(screen);
       });
       return;
     }
@@ -635,6 +652,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     removeConversation,
     keepSetupChat,
     restoreWriteBefore,
+    settleSetupLoad,
   ]);
 
   // The tab's copy of the setup chat follows each settled turn; a turn still
@@ -648,7 +666,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const webChat =
     agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
   const localMenu = useLocalAgentMenuModels(agent.model, webChat);
-  const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
   React.useEffect(() => {
     liveChatRef.current = { id: agentConversationId, messages: agentMessages };
     kickoffTurnRef.current = trackKickoffTurn(kickoffTurnRef.current, activeBusy);
