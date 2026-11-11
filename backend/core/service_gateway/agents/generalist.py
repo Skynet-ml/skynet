@@ -2059,6 +2059,14 @@ How a turn works:
   result means they refused that action: do not call that tool again this
   turn. Carry on with what does not depend on it and say in the final
   message that it was not done.
+* Starting tagging: when the user asks to tag or label a dataset, call
+  ``open_page`` with ``path`` ``/tagger?dataset=<id>``, with the id from
+  ``list_datasets_for_agent``. When no saved dataset fits, use
+  ``/tagger?new=1``, where the user uploads a file. The tagger opens with
+  this same chat beside it, on its setup with the dataset loaded. End the
+  turn with one short line that tells the user to pick the task there.
+  When ``wizard_screen`` is present, the setup leaves the screen but stays
+  saved as a draft: say so in that line too.
 
 Reply language — hard rule:
 * The final message, and every user-facing string you hand a tool (a
@@ -2090,12 +2098,6 @@ The wizard screen on view:
   it, and its first screen gives you a turn of its own, so write no
   wizard field in this turn. End the turn with one short line that the
   setup is open.
-* Starting tagging: when the user asks to tag or label a dataset, call
-  ``open_page`` with ``path`` ``/tagger?dataset=<id>``, with the id from
-  ``list_datasets_for_agent``. When no saved dataset fits, use
-  ``/tagger?new=1``, where the user uploads a file. The tagger opens with
-  this same chat beside it, on its setup with the dataset loaded. End the
-  turn with one short line that tells the user to pick the task there.
 * Say only what a tool result confirms. A refused write changed
   nothing, and the screen moves only when a navigation tool returns
   ``screen_nav``; never tell the user a field is set or that you moved

@@ -10,7 +10,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/
 import { Check, PencilSimple } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 import { useTagger } from "../hooks/use-tagger";
-import { opensTaggerSetup } from "../lib/deep-link";
+import { opensTaggerSetup, startingNewAfterLink } from "../lib/deep-link";
 import { TaggerResultsTable } from "./TaggerResultsTable";
 import { TaggerBackLink } from "./TaggerBackLink";
 import { TaggerSetup } from "./TaggerSetup";
@@ -58,14 +58,17 @@ export function TaggerView({ initialSession }: { initialSession?: TaggerSessionD
 
   // "Tag this dataset" deep links (/tagger?dataset=…) and the chat's tagging
   // requests (?dataset=… or ?new=1) skip the session chooser straight into
-  // setup, which loads the referenced dataset itself. Applied in an effect (not
-  // the state initializer) so SSR and first client paint agree. The chat may
-  // open the link while /tagger is already on view, so it follows the URL, and
-  // a new dataset id remounts the setup so it loads that dataset.
+  // setup, which loads the referenced dataset itself. The link arrives from the
+  // reader's effect (never during SSR), so SSR and first client paint agree. The
+  // chat may open the link while /tagger is already on view, so the view follows
+  // the URL; browser Back to a bare /tagger shows the chooser again, and a new
+  // dataset id remounts the setup so it loads that dataset.
   const [deepLink, setDeepLink] = useState<string | null>(null);
-  useEffect(() => {
-    if (deepLink !== null) setStartingNew(true);
-  }, [deepLink]);
+  const [seenLink, setSeenLink] = useState<string | null>(null);
+  if (deepLink !== seenLink) {
+    setSeenLink(deepLink);
+    setStartingNew((current) => startingNewAfterLink(current, seenLink, deepLink));
+  }
   // Only this leaf reads the URL, so the chooser still prerenders around it.
   const deepLinkReader = initialSession ? null : (
     <Suspense fallback={null}>

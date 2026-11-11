@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { opensTaggerSetup } from "./deep-link.ts";
+import { linkedDatasetName, opensTaggerSetup, startingNewAfterLink } from "./deep-link.ts";
 
 test("a dataset or new deep link opens the tagger setup; a bare /tagger shows the chooser", () => {
   assert.equal(opensTaggerSetup(new URLSearchParams("dataset=abc-123")), true);
@@ -11,16 +10,28 @@ test("a dataset or new deep link opens the tagger setup; a bare /tagger shows th
   assert.equal(opensTaggerSetup(new URLSearchParams("tab=sessions")), false);
 });
 
-// The chat opens /tagger?dataset=<id> while the user may already be on /tagger.
-// The page does not remount then, so the check must follow the URL, not run once.
-test("the tagger view follows the URL's search params, not only its first mount", () => {
-  const view = readFileSync(new URL("../components/TaggerView.tsx", import.meta.url), "utf8");
-  assert.doesNotMatch(view, /window\.location\.search/);
-  assert.match(view, /const link = opensTaggerSetup\(params\) \? \(params\.get\("dataset"\) \?\? ""\) : null;/);
-  assert.match(view, /useEffect\(\(\) => onChange\(link\), \[link, onChange\]\);/);
-  assert.match(view, /if \(deepLink !== null\) setStartingNew\(true\);\n {2}\}, \[deepLink\]\);/);
-  // The URL reader sits in its own Suspense, so the chooser still prerenders.
-  assert.match(view, /<Suspense fallback=\{null\}>\n\s*<TaggerDeepLink onChange=\{setDeepLink\} \/>/);
-  // A second dataset link while the setup is on view loads that dataset.
-  assert.match(view, /\{deepLinkReader\}\n\s*\{backBar\}\n\s*<TaggerSetup key=\{deepLink \?\? ""\}/);
+test("the setup follows the deep link as the URL changes", () => {
+  // The chat opens /tagger?dataset=X while the chooser is on view.
+  assert.equal(startingNewAfterLink(false, null, "X"), true);
+  // ?new=1 opens the setup too.
+  assert.equal(startingNewAfterLink(false, null, ""), true);
+  // A second dataset link while the setup is on view keeps the setup.
+  assert.equal(startingNewAfterLink(true, "X", "Y"), true);
+  // Browser Back from /tagger?dataset=X to /tagger shows the chooser again.
+  assert.equal(startingNewAfterLink(true, "X", null), false);
+  assert.equal(startingNewAfterLink(true, "", null), false);
+  // "Start new" on the chooser, with no link before or after, stays.
+  assert.equal(startingNewAfterLink(true, null, null), true);
+  assert.equal(startingNewAfterLink(false, null, null), false);
+});
+
+test("a linked dataset without a name in the link takes its name from the dataset list", () => {
+  const datasets = [
+    { id: "a", name: "Support tickets" },
+    { id: "b", name: "Reviews: Q3 / EU" },
+  ];
+  assert.equal(linkedDatasetName("b", null, datasets), "Reviews: Q3 / EU");
+  assert.equal(linkedDatasetName("a", "From the editor", datasets), "From the editor");
+  assert.equal(linkedDatasetName("missing", null, datasets), null);
+  assert.equal(linkedDatasetName("a", "", datasets), "Support tickets");
 });

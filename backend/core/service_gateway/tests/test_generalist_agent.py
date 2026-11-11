@@ -305,6 +305,10 @@ def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
     assert "call ``open_page`` with ``path`` ``/tagger?dataset=<id>``" in prompt
     assert "``/tagger?new=1``" in prompt
     assert "The tagger opens with this same chat beside it" in prompt
+    assert "stays saved as a draft" in prompt
+    # The rule holds whether or not a wizard screen is on view, so it sits
+    # before that section of the prompt, not inside it.
+    assert prompt.index("Starting tagging:") < prompt.index("The wizard screen on view:")
     assert {"open_page", "list_datasets_for_agent"} <= set(tools_for({}))
 
 

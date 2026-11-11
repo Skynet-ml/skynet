@@ -45,6 +45,16 @@ test("a route keeps a narrow query string and rejects open-redirect shapes", () 
   }
 });
 
+test("a route path is at most 200 characters in total, as on the backend", () => {
+  const at200 = `/tagger?dataset=${"a".repeat(200 - "/tagger?dataset=".length)}`;
+  assert.equal(at200.length, 200);
+  assert.deepEqual(parseAgentNavigation({ navigate: { kind: "route", path: at200 } }), {
+    kind: "route",
+    path: at200,
+  });
+  assert.equal(parseAgentNavigation({ navigate: { kind: "route", path: `${at200}a` } }), null);
+});
+
 test("appearance patches keep only string theme and locale", () => {
   assert.deepEqual(parseAppearancePatch({ ok: true, client_patch: { theme: "dark", locale: "he" } }), {
     theme: "dark",
