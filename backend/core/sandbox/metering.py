@@ -183,43 +183,46 @@ class PoolLease:
         """
         runtime = self.runtime
         deadline = time.monotonic() + runtime.wait_timeout
-        while True:
-            runtime.stop.check()
-            try:
-                return runtime.service.reserve_lease(
-                    runtime.budget_id,
-                    runtime.username,
-                    lease_key=generation_operation_key(lease_key, runtime.generation),
-                    slices=boxes,
-                    generation=runtime.generation,
-                    phase=runtime.phase,
-                    cost_kind="sandbox",
-                    request_fingerprint=self.quote.request_fingerprint,
-                    price_snapshot=self.quote.price_snapshot,
-                    max_cents=self.quote.maximum.total,
-                    max_wallet_cents=self.quote.maximum.wallet,
-                    role="runtime",
-                )
-            except BudgetUnreconciledError as error:
-                raise UsagePendingError(
-                    "Previous work is awaiting confirmed usage; its coverage is retained."
-                ) from error
-            except BudgetInFlightError as error:
-                # A setup check's own open sandboxes never make room, so the
-                # lease gives up early exactly like a single reservation.
-                refusal = runtime._wait_cannot_help(error)
-                if refusal is not None:
-                    raise refusal from error
-                if time.monotonic() >= deadline:
-                    raise UsagePendingError("Covered work has not settled; the lease was not admitted.") from error
-                # The lease cannot see the runtime's private condition, so it
-                # polls; each try is one short locked transaction.
-                time.sleep(min(_WAIT_STEP_SECONDS, max(0.0, deadline - time.monotonic())))
-            except BudgetInsufficientError as error:
-                if runtime.phase == "setup":
-                    raise
-                runtime.service.stop_admission(runtime.budget_id, runtime.username, reason="budget_reached")
-                raise runtime.stop.trip(str(error)) from error
+        try:
+            while True:
+                runtime.stop.check()
+                try:
+                    return runtime.service.reserve_lease(
+                        runtime.budget_id,
+                        runtime.username,
+                        lease_key=generation_operation_key(lease_key, runtime.generation),
+                        slices=boxes,
+                        generation=runtime.generation,
+                        phase=runtime.phase,
+                        cost_kind="sandbox",
+                        request_fingerprint=self.quote.request_fingerprint,
+                        price_snapshot=self.quote.price_snapshot,
+                        max_cents=self.quote.maximum.total,
+                        max_wallet_cents=self.quote.maximum.wallet,
+                        role="runtime",
+                    )
+                except BudgetUnreconciledError as error:
+                    raise UsagePendingError(
+                        "Previous work is awaiting confirmed usage; its coverage is retained."
+                    ) from error
+                except BudgetInFlightError as error:
+                    # The lease gives up early under the same rule as a single
+                    # reservation: only the runtime's own waiting boxes hold the room.
+                    refusal = runtime._wait_cannot_help(error)
+                    if refusal is not None:
+                        raise refusal from error
+                    if time.monotonic() >= deadline:
+                        raise UsagePendingError("Covered work has not settled; the lease was not admitted.") from error
+                    # The lease cannot see the runtime's private condition, so it
+                    # polls; each try is one short locked transaction.
+                    time.sleep(min(_WAIT_STEP_SECONDS, max(0.0, deadline - time.monotonic())))
+                except BudgetInsufficientError as error:
+                    if runtime.phase == "setup":
+                        raise
+                    runtime.service.stop_admission(runtime.budget_id, runtime.username, reason="budget_reached")
+                    raise runtime.stop.trip(str(error)) from error
+        finally:
+            runtime.end_wait()
 
     @property
     def slices(self) -> tuple[OperationSnapshot, ...]:

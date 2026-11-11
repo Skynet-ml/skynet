@@ -872,6 +872,53 @@ def test_run_stops_at_once_when_only_its_own_boxes_hold_the_room(engine: Engine)
     assert service.get(budget.id, "alice").reserved_cents == 47
 
 
+def test_run_lane_waits_while_another_lane_box_can_still_close(engine: Engine) -> None:
+    """A lane waits while another lane's box runs, and is admitted once that box closes."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-two-lanes")
+    service.attach_to_job(budget.id, "alice", "two-lanes-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=5)
+    box_a = runtime.reserve(_quote(20), operation_key="box-a", cost_kind="sandbox", role="runtime")
+    runtime.pin(box_a.id, cent_units(box_a.max_cents))
+    box_b = runtime.reserve(_quote(21), operation_key="box-b", cost_kind="sandbox", role="runtime")
+    runtime.pin(box_b.id, cent_units(box_b.max_cents))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        lane_a = pool.submit(runtime.reserve, _quote(15), operation_key="call", cost_kind="model")
+        time.sleep(0.5)
+        assert not lane_a.done()
+        service.mark_dispatched(box_b.id, "alice")
+        service.settle(box_b.id, "alice", evidence_key="box-b-usage", actual_cents=1, evidence={"usage": "box-b"})
+        runtime.unpin(box_b.id)
+        call = lane_a.result(timeout=5)
+
+    assert call.max_cents == 15
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_run_stops_at_once_when_every_box_waits(engine: Engine) -> None:
+    """Two lanes that both wait while their boxes hold the room stop the run instead of stalling."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-all-wait")
+    service.attach_to_job(budget.id, "alice", "all-wait-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=30)
+    for key in ("box-a", "box-b"):
+        box = runtime.reserve(_quote(20), operation_key=key, cost_kind="sandbox", role="runtime")
+        runtime.pin(box.id, cent_units(box.max_cents))
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        lane_a = pool.submit(runtime.reserve, _quote(15), operation_key="call-a", cost_kind="model")
+        time.sleep(0.5)
+        assert not lane_a.done()
+        with pytest.raises(BudgetReached):
+            runtime.reserve(_quote(15), operation_key="call-b", cost_kind="model")
+        with pytest.raises(BudgetReached):
+            lane_a.result(timeout=5)
+    assert time.monotonic() - started < 10
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+
+
 def test_run_waits_for_room_held_by_unpinned_work(engine: Engine) -> None:
     """In-flight work that is not an open box settles soon, so the run still waits for it."""
     service = BudgetService(engine=engine)

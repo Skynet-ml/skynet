@@ -117,6 +117,7 @@ class BudgetRuntime:
         self.wait_timeout = wait_timeout
         self._changed = threading.Condition()
         self._pinned: dict[str, int] = {}
+        self._waiters: set[int] = set()
 
     def pin(self, operation_id: str, units: int) -> None:
         """Record sandbox coverage that stays held until the work that opened it ends.
@@ -139,14 +140,19 @@ class BudgetRuntime:
             self._changed.notify_all()
 
     def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
-        """Refuse an operation that only this runtime's own open sandboxes keep out.
+        """Refuse an operation that only this runtime's own blocked sandboxes keep out.
 
-        The sandboxes stay open while their work waits: a setup check runs its
-        samples inside boxes it opened itself, and a run's scorer and agent
-        boxes host the very work that asks for the next operation. Their
-        coverage cannot make room, so waiting would only stall until the
-        timeout (SKY-647). Unpinned in-flight work still settles, so the
-        operation waits whenever it would fit once that work is done.
+        The calling thread counts as waiting from now until it calls
+        :meth:`end_wait`. A setup check runs its samples one at a time inside
+        boxes it opened itself, so its pinned coverage never makes room. A
+        run's lanes share this runtime, and a lane's box closes and frees its
+        coverage when that lane's work ends. A run therefore refuses early
+        only when at least as many calls wait as boxes are pinned: then the
+        work of every box is itself waiting, and waiting only stalls until
+        the timeout (SKY-647). The runtime cannot tell which box a call serves,
+        so parallel waiting calls inside one box count like calls in two
+        boxes. Unpinned in-flight work still settles, so the operation waits
+        whenever it would fit once that work is done.
 
         Args:
             error: The admission refusal, with its limit arithmetic when it has one.
@@ -156,11 +162,15 @@ class BudgetRuntime:
             In the run phase it is the stop latch's ``BudgetReached``, after
             the budget stopped admitting work, like any other run refusal.
         """
+        with self._changed:
+            self._waiters.add(threading.get_ident())
+            pinned = sum(self._pinned.values())
+            every_box_waits = len(self._waiters) >= len(self._pinned)
         if error.scope_units is None or error.room_units is None:
             return None
-        with self._changed:
-            pinned = sum(self._pinned.values())
         if error.scope_units <= error.room_units - pinned:
+            return None
+        if self.phase != "setup" and not every_box_waits:
             return None
         owner = "check's" if self.phase == "setup" else "run's"
         message = (
@@ -172,6 +182,11 @@ class BudgetRuntime:
             return BudgetInsufficientError(message)
         self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
         return self.stop.trip(message)
+
+    def end_wait(self) -> None:
+        """Stop counting the calling thread as a waiter once its admission loop ends."""
+        with self._changed:
+            self._waiters.discard(threading.get_ident())
 
     def check_admission(self) -> None:
         """Fence unpaid control calls against the same cancellation and recovery authority.
@@ -217,42 +232,45 @@ class BudgetRuntime:
             BudgetReached: When no covered work can release sufficient allowance.
         """
         deadline = time.monotonic() + self.wait_timeout
-        while True:
-            self.stop.check()
-            try:
-                return self.service.reserve(
-                    self.budget_id,
-                    self.username,
-                    operation_key=generation_operation_key(operation_key, self.generation),
-                    generation=self.generation,
-                    phase=self.phase,
-                    cost_kind=cost_kind,
-                    request_fingerprint=quote.request_fingerprint,
-                    price_snapshot=quote.price_snapshot,
-                    max_cents=quote.maximum.total,
-                    max_wallet_cents=quote.maximum.wallet,
-                    attempt=attempt,
-                    role=role,
-                )
-            except BudgetUnreconciledError as error:
-                raise UsagePendingError(
-                    "Previous work is awaiting confirmed usage; its coverage is retained."
-                ) from error
-            except BudgetInFlightError as error:
-                refusal = self._wait_cannot_help(error)
-                if refusal is not None:
-                    raise refusal from error
-                if time.monotonic() >= deadline:
+        try:
+            while True:
+                self.stop.check()
+                try:
+                    return self.service.reserve(
+                        self.budget_id,
+                        self.username,
+                        operation_key=generation_operation_key(operation_key, self.generation),
+                        generation=self.generation,
+                        phase=self.phase,
+                        cost_kind=cost_kind,
+                        request_fingerprint=quote.request_fingerprint,
+                        price_snapshot=quote.price_snapshot,
+                        max_cents=quote.maximum.total,
+                        max_wallet_cents=quote.maximum.wallet,
+                        attempt=attempt,
+                        role=role,
+                    )
+                except BudgetUnreconciledError as error:
                     raise UsagePendingError(
-                        "Covered work has not settled; no overlapping work was admitted."
+                        "Previous work is awaiting confirmed usage; its coverage is retained."
                     ) from error
-                with self._changed:
-                    self._changed.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
-            except BudgetInsufficientError as error:
-                if self.phase == "setup":
-                    raise
-                self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
-                raise self.stop.trip(str(error)) from error
+                except BudgetInFlightError as error:
+                    refusal = self._wait_cannot_help(error)
+                    if refusal is not None:
+                        raise refusal from error
+                    if time.monotonic() >= deadline:
+                        raise UsagePendingError(
+                            "Covered work has not settled; no overlapping work was admitted."
+                        ) from error
+                    with self._changed:
+                        self._changed.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+                except BudgetInsufficientError as error:
+                    if self.phase == "setup":
+                        raise
+                    self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
+                    raise self.stop.trip(str(error)) from error
+        finally:
+            self.end_wait()
 
     def extend(
         self,
@@ -279,30 +297,35 @@ class BudgetRuntime:
             UsagePendingError: When covered work did not settle before ``deadline``.
             BudgetReached: When the budget cannot pay for the extension.
         """
-        while True:
-            self.stop.check()
-            try:
-                return self.service.extend_coverage(
-                    operation_id,
-                    self.username,
-                    evidence_key=evidence_key,
-                    max_cents=quote.maximum.total,
-                    max_wallet_cents=quote.maximum.wallet,
-                    evidence=evidence,
-                )
-            except BudgetInFlightError as error:
-                refusal = self._wait_cannot_help(error)
-                if refusal is not None:
-                    raise refusal from error
-                if time.monotonic() >= deadline:
-                    raise UsagePendingError("Covered work has not settled; the sandbox was not extended.") from error
-                with self._changed:
-                    self._changed.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
-            except BudgetInsufficientError as error:
-                if self.phase == "setup":
-                    raise
-                self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
-                raise self.stop.trip(str(error)) from error
+        try:
+            while True:
+                self.stop.check()
+                try:
+                    return self.service.extend_coverage(
+                        operation_id,
+                        self.username,
+                        evidence_key=evidence_key,
+                        max_cents=quote.maximum.total,
+                        max_wallet_cents=quote.maximum.wallet,
+                        evidence=evidence,
+                    )
+                except BudgetInFlightError as error:
+                    refusal = self._wait_cannot_help(error)
+                    if refusal is not None:
+                        raise refusal from error
+                    if time.monotonic() >= deadline:
+                        raise UsagePendingError(
+                            "Covered work has not settled; the sandbox was not extended."
+                        ) from error
+                    with self._changed:
+                        self._changed.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+                except BudgetInsufficientError as error:
+                    if self.phase == "setup":
+                        raise
+                    self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
+                    raise self.stop.trip(str(error)) from error
+        finally:
+            self.end_wait()
 
     def execute(
         self,
