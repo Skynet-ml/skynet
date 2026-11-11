@@ -20,6 +20,7 @@ from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBro
 from core.service_gateway.optimization.blackbox.tests.test_sandbox_broker import IMAGE, FakeRuntime
 from core.worker import vercel_dspy
 from core.worker.isolated_runner import SANDBOX_PROTOCOL
+from core.worker.tests.mocks import SESSION_STOPPED, stopped_box_event
 
 
 class FakeSession:
@@ -503,3 +504,36 @@ def test_a_real_broker_opens_the_setup_check_box_offline_and_the_run_box_with_it
     assert spec.network_disabled is (not expected)
     messages = [str(item) for item in events.queue]
     assert not any("cannot open network access" in message for message in messages)
+
+
+def test_a_guest_box_that_stops_at_its_deadline_is_an_infrastructure_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session stop at the end of the guest box lifetime is the run deadline (SKY-586)."""
+    event = stopped_box_event(monkeypatch, lifetime=180, elapsed=181)
+
+    assert event["type"] == "error"
+    assert event["failure_kind"] == INFRASTRUCTURE_INTERRUPTION
+    assert event["error_type"] == "InfrastructureInterruptionError"
+    assert event["error"] == vercel_dspy.DEADLINE_MESSAGE.format(lifetime=180)
+
+
+def test_a_guest_box_that_stops_exactly_at_its_deadline_is_an_infrastructure_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session stop when the elapsed time equals the guest box lifetime is the run deadline."""
+    event = stopped_box_event(monkeypatch, lifetime=180, elapsed=180)
+
+    assert event["type"] == "error"
+    assert event["failure_kind"] == INFRASTRUCTURE_INTERRUPTION
+    assert event["error_type"] == "InfrastructureInterruptionError"
+    assert event["error"] == vercel_dspy.DEADLINE_MESSAGE.format(lifetime=180)
+
+
+def test_a_guest_box_that_stops_before_its_deadline_keeps_the_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session stop before the guest box lifetime ends is not the deadline and stays a failure."""
+    event = stopped_box_event(monkeypatch, lifetime=180, elapsed=120)
+
+    assert event["type"] == "error"
+    assert event["failure_kind"] == DETERMINISTIC_FAILURE
+    assert event["error"] == SESSION_STOPPED

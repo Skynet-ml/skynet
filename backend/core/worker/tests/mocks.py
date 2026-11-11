@@ -17,8 +17,18 @@ import json
 import queue
 from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
+
+from core.billing.model_gateway import _sandbox_failure_kind
+from core.sandbox.errors import SandboxInfraError
+from core.service_gateway.optimization.blackbox import remote_sandbox
+from core.service_gateway.optimization.blackbox.sandbox import CommandResult
+from core.worker import vercel_dspy
+from core.worker.isolated_runner import SANDBOX_PROTOCOL
 
 _FIXTURES_ROOT = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
 
@@ -226,3 +236,96 @@ def make_mp_context(exitcode: int = 0, result_events: list | None = None) -> tup
     ctx.Process.return_value = proc
     ctx.get_start_method.return_value = "spawn"
     return ctx, proc
+
+
+SESSION_STOPPED = "The Vercel sandbox session stopped: SandboxApiError"
+
+
+class StoppedSession:
+    """Pass the protocol probe, then lose the box under the optimizer command after ``elapsed`` seconds."""
+
+    def __init__(self, clock: list[float], elapsed: float) -> None:
+        """Keep the shared fake clock and the time the box stops.
+
+        Args:
+            clock: One-item list that holds the fake monotonic time.
+            elapsed: Seconds after the box opened at which the session stops.
+        """
+        self.files: dict[str, str] = {}
+        self.closed = False
+        self.clock = clock
+        self.elapsed = elapsed
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Answer the probe, then raise the error frame the parent sends for a stopped session.
+
+        Args:
+            command: The probe or the optimizer command.
+            **kwargs: The run options, which this fake ignores.
+
+        Returns:
+            The probe answer. The optimizer command never returns.
+
+        Raises:
+            ServiceError: The guest-side error for the stopped session.
+        """
+        if command == vercel_dspy.PROTOCOL_PROBE:
+            return CommandResult(0, stdout=f"{SANDBOX_PROTOCOL}\n")
+        self.clock[0] += self.elapsed
+        stopped = SandboxInfraError(SESSION_STOPPED)
+        remote_sandbox._raise_remote_error(
+            {
+                "type": "error",
+                "error_type": type(stopped).__name__,
+                "failure_kind": _sandbox_failure_kind(stopped),
+                "message": str(stopped),
+            }
+        )
+        raise AssertionError("unreachable")
+
+    def write_files(self, files: dict[str, str]) -> None:
+        """Record the staged request.
+
+        Args:
+            files: Box paths and their text.
+        """
+        self.files.update(files)
+
+    def close(self) -> None:
+        """Record that the worker closed the box."""
+        self.closed = True
+
+
+def stopped_box_event(monkeypatch: pytest.MonkeyPatch, *, lifetime: float, elapsed: float) -> dict[str, Any]:
+    """Run the guest box until its session stops and return the error event the worker gets.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        lifetime: The guest box lifetime in the descriptor (the run deadline).
+        elapsed: Seconds after the box opened at which the session stops.
+
+    Returns:
+        The single error event on the worker queue.
+    """
+    clock = [1000.0]
+    session = StoppedSession(clock, elapsed)
+    monkeypatch.setattr(vercel_dspy, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+    vercel_dspy.run_vercel_dspy(
+        {
+            "_budget_gateway_descriptor": {
+                "url": "http://127.0.0.1:9876",
+                "control_token": "control",
+                "image": "backend@sha256:" + "a" * 64,
+                "lifetime_seconds": lifetime,
+            },
+        },
+        "job-deadline",
+        events,
+        "spawn",
+    )
+    assert session.closed
+    event = events.get_nowait()
+    assert events.empty()
+    return event

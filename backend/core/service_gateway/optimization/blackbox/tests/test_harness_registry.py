@@ -45,10 +45,11 @@ _BUILT_INS = (
     *_PRE_REGISTRY,
     "aider",
     "mini_swe_agent",
+    "openhands",
     "openhands_sdk",
     "antigravity_sdk",
-    "fx",
     "goose",
+    "eve",
     "deerflow",
     "cline",
     "code_puppy",
@@ -280,6 +281,7 @@ def test_registry_keeps_the_catalog_order() -> None:
             """print(m.version("mini-swe-agent") if l == "1.103.1" else "litellm " + l)'""",
             "2.4.6",
         ),
+        "openhands": ("openhands", "1.6.0"),
         "openhands_sdk": (
             "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with openhands-sdk==1.61.0"
             " --with openhands-tools==1.61.0 --with fastapi==0.136.3 python -c"
@@ -292,8 +294,8 @@ def test_registry_keeps_the_catalog_order() -> None:
             """ 'import importlib.metadata as m; print(m.version("google-antigravity"))'""",
             "0.1.20",
         ),
-        "fx": ("fx", "0.0.16"),
         "goose": ("goose", "1.57.0"),
+        "eve": ("eve", "1.0.0-rc.6"),
         "deerflow": (DEERFLOW_SPEC.binary, DEERFLOW_REF),
         "cline": ("cline", "3.0.74"),
         "code_puppy": ("code-puppy", "0.0.967"),
