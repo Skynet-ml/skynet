@@ -7,9 +7,10 @@ and list what to cut.
 ## 1. Summary
 
 - A Claude Code session in this repo loads about **119k tokens before the
-  first action**. About 54k of it is the desktop app's own tool schemas.
-  About 6k of these go with one documented app switch. About 15k more
-  can go with deny rules that I did not test in the desktop app (§6).
+  first action**. About 54k of it is the loaded tool schemas (desktop app
+  and CLI built-ins). One documented app switch removes about 6k of these.
+  Deny rules can remove about 15k more, but I did not test them in the
+  desktop app (§6).
 - The user controls about **24–28k tokens** of the rest. Unused MCP servers
   and connectors cost about 14–18k. Global and repo instruction trims save
   about 7.3k. Unused plugin skills cost about 2k, and MCP server instructions
@@ -18,6 +19,10 @@ and list what to cut.
   tokens). One of them can defer to the other (about 5.5k saved per PR task).
 - The repo files are small (about 13 KB loaded). This PR trims them only a
   little, because the large costs are outside the repo.
+- Gilad applied one change on 2026-11-10: the RTK and AXI tool hints and
+  their hooks are removed from the global config. Claude now uses plain
+  `gh`. The tradeoff: the RTK hook no longer compresses Bash output, so
+  long command output uses more context.
 - Droid starts much smaller: 5 MCP servers, about 22 KB of instructions, no
   desktop-app tool schemas, and rolling compaction.
 
@@ -34,8 +39,8 @@ and list what to cut.
   Factory docs and from the local Droid configuration files. I mark each Droid
   fact DOCUMENTED, INFERRED, UNCONFIRMED or UNKNOWN.
 - **Gap:** I did not test the deny rules for the desktop app's tools
-  (§6). The docs describe them for the CLI only. The one tested-by-docs
-  switch is the app's Browser tools setting.
+  (§6). The docs describe them for the CLI only. The one documented
+  switch is the app's Browser tools setting. I did not test it either.
 - **Gap:** Two measures of the loaded tool schemas differ. The first turn
   shows 195 KB. A later API request record shows 146 KB for 57 loaded
   tools. I did not find the cause. §6 uses the request record for the size
@@ -52,27 +57,28 @@ says otherwise.
 | Layer | Before | After | Purpose | Action | Reason | Est. saving |
 | --- | --- | --- | --- | --- | --- | --- |
 | System prompt (harness) | 35 KB | 35 KB | Claude Code rules | Keep | Not user-controlled | 0 |
-| Loaded tool schemas (desktop built-ins) | 195 KB | up to about 76 KB less | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
+| Loaded tool schemas (desktop built-ins) | 195 KB | about 119 KB at best (76 KB less, request-record sizes; see §2) | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
 | Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 14–18k |
 | Global user instruction file | 17.6 KB | 1.1 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.4 KB workflow table; Skynet-only rules | 4.6k, every repo |
 | Shared conventions file (also read by Codex) | 21.7 KB | 16.5 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.4k, every repo |
-| CLI design rules file | 2.1 KB | 0 (on demand) | CLI design rules | Move | Needed only when you design a CLI | 0.6k, every repo |
-| Tool hint files | 1.8 KB | 1.8 KB | Tool hints | Keep | Small and used | 0 |
+| CLI design rules file | 2.1 KB | 0 (on demand) | CLI design rules | Removed from start (applied) | Needed only when you design a CLI | 0.6k, every repo |
+| Tool hint files | 1.8 KB | 0 KB | RTK and AXI tool hints | Removed (applied) | Claude uses plain `gh` and the built-in browser | about 0.5k, every repo |
 | Machine-local rules file (gitignored) | 3.5 KB | 1.4 KB | Machine rules | Trim | A stale rule; a third copy of the memory rules | 0.6k, Skynet only |
 | Repo `CLAUDE.md` | 0.6 KB | 0.4 KB | Imports AGENTS.md | Trim (this PR) | Repeats the local-rules note in AGENTS.md | 0.05k, Skynet only |
 | Repo `AGENTS.md` | 12.8 KB | 12.8 KB | Always-on repo rules | Keep | Devin and Codex read it; it is already lean | 0 |
 | `frontend/AGENTS.md` | 0.7 KB | 0.7 KB | Frontend rules | Keep | Loads only for frontend files | 0 |
-| `docs/agents/*.md` | 18.7 KB | 30.9 KB | Reference files | Keep (this PR adds this report) | Load on demand only | 0 |
+| `docs/agents/*.md` | 18.7 KB | about 34 KB | Reference files | Keep (this PR adds this report) | Load on demand only | 0 |
 | Skill listing | 19 KB, 428 skills | about 12 KB | Names and descriptions | Trim | Sales, finance, marketing, media and similar plugin skills are unused here | about 2k |
 | Repo skill descriptions | 1.0 KB | 0.6 KB | Two repo skills in the listing | Trim (this PR) | Long content lists; the trigger sentence is enough | 0.1k, Skynet only |
 | MCP server instructions | 14.5 KB | about 10.5 KB | Server usage notes | Trim | Long notes from servers that Skynet does not use (deepwiki stays) | 1.1k |
-| SessionStart hook output | 7 KB | 7 KB | GitHub dashboard, index warmup, notify | Keep | Useful state | 0 |
+| SessionStart hook output | 7 KB | smaller (not measured) | Index warmup, notify | Trim (applied) | The gh-axi GitHub dashboard hook is removed | not measured |
 | Memory tool start output | about 24 KB | smaller | Memory tree | Trim (out of scope) | Compress old nodes | not estimated |
 | **Per PR task:** per-PR policy file + `skynet-pr-workflow` skill | 41 KB read | about 21 KB | PR policy | Trim | The two files repeat the same sections | 5.5k per PR task |
 
 Total for instructions (global and repo files that load at start): about
 60 KB before, about 34 KB after. That is about 6.6k tokens saved in every
-repo, plus about 0.65k in Skynet only (about 7.3k in Skynet).
+repo, plus about 0.65k in Skynet only (about 7.3k in Skynet). The applied
+removal of the tool hint files saves about 0.5k more.
 
 ## 4. What Droid puts in context
 
@@ -173,6 +179,7 @@ defer them. Sizes come from one API request record (bytes in the request).
 | visualize (2 tools) | 4.2 KB | about 1.2k | Rarely | Deny rule `"mcp__visualize__*"` | As for Artifact |
 | Session, plan, PR and terminal tools of the app | about 17 KB | about 4.7k | Yes | Keep | — |
 | Other CLI built-ins (Bash, Read, Edit, Agent and others) | about 38 KB | about 10.6k | Yes | Keep | — |
+| Unattributed | about 15 KB | about 4k | — | — | — |
 
 - The docs say a bare tool name in `permissions.deny` removes the tool
   from context. A scoped rule only blocks calls. The desktop app reads
