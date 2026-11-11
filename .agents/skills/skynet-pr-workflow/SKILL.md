@@ -305,6 +305,25 @@ A manual hold on a change or on a promotion still stops it.
   and the latest Linear decision. This approval never covers production or
   other repositories.
 
+### PR tests and batch CI (Gilad, 2026-11-10)
+
+- The `ci` workflow does not run on pull requests. Each PR runs the tests
+  for the code that it changes, locally. Put the exact commands and their
+  results in the PR body.
+- The small PR workflows (gitleaks, i18n, pr files scope, pr kind label,
+  preview) still run on every PR.
+- The full CI runs once for each batch:
+  1. Create `batch/<date>` from current `staging`.
+  2. Merge every approved PR branch into it with merge commits. Resolve the
+     conflicts in the batch branch. Never force-push.
+  3. Run `gh workflow run ci.yml --ref batch/<date>`. Wait for the run to
+     pass. If it fails, fix the cause or remove that PR, then run it again.
+  4. Open one PR from `batch/<date>` to `staging` with the `no-issue` label.
+     List the included PRs and link the CI run.
+  5. Merge it with a merge commit (`gh pr merge <n> --merge`). GitHub then
+     marks each included PR as merged.
+- The push to `staging` runs the full CI again.
+
 ### Daily merge window (2026-10-20)
 
 - Merges into `staging` happen only in the daily window at 03:00
