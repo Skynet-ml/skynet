@@ -96,6 +96,9 @@ DEFAULT_SSH_CONNECT_TIMEOUT_SEC = 300.0
 NO_RETRY = {"total_max_attempts": 1, "mode": "standard"}
 _RUNNING_WAITER_DELAY_SEC = 5
 _SWEEP_STATES = ["pending", "running", "stopping", "stopped"]
+# Each launch tags its instance, so stop can find an instance whose id the
+# launch never saw.
+_LAUNCH_TAG = "skynet-launch-id"
 _GONE_CODES = frozenset({"InvalidInstanceID.NotFound", "InvalidInstanceID.Malformed"})
 _AUTH_CODES = frozenset(
     {
@@ -149,6 +152,7 @@ _LATE_TERMINATES: set[asyncio.Future[None]] = set()
 class _LaunchState:
     """Hold the state of one launch, so a late launch never touches a newer start."""
 
+    launch_id: str = dataclasses.field(default_factory=lambda: uuid.uuid4().hex)
     instance_id: str | None = None
     cancelled: bool = False
     known_hosts: str | None = None
@@ -233,6 +237,7 @@ class EC2Environment(SandboxEnvironment):
         self._strict_host_key_checking = strict_host_key_checking
         self._known_hosts_path = ssh_known_hosts_path
         self._temp_known_hosts: str | None = None
+        self._lost_launches: set[str] = set()
         self._connect_timeout = (
             timeouts.seconds(Phase.START) if timeouts is not None else DEFAULT_SSH_CONNECT_TIMEOUT_SEC
         )
@@ -312,12 +317,16 @@ class EC2Environment(SandboxEnvironment):
 
         The sandbox keeps the instance until the terminate succeeds, so a
         second stop tries again after a failed or unfinished terminate.
-        With no instance, stop only removes a temporary known hosts file.
+        Stop also terminates the instances of launches that ended inside
+        ``run_instances``, found by their launch tag. With no instance and
+        no such launch, stop only removes a temporary known hosts file.
 
         Raises:
             SandboxError: The terminate failed for a reason other than a gone instance.
             asyncio.CancelledError: The task was cancelled during the terminate.
         """
+        if self._lost_launches:
+            await self._terminate_lost_launches()
         instance_id = self._instance_id
         if instance_id is None:
             self._remove_known_hosts()
@@ -489,7 +498,7 @@ class EC2Environment(SandboxEnvironment):
             try:
                 with _translated("client setup"):
                     client = client or ec2_client(profile, region)
-                ids = await _aws("describe_instances", _tagged_instances, client, job_id)
+                ids = await _aws("describe_instances", _tagged_instances, client, JOB_TAG, [job_id])
                 if ids:
                     await _aws("terminate_instances", client.terminate_instances, InstanceIds=ids)
             except Exception as error:
@@ -523,10 +532,14 @@ class EC2Environment(SandboxEnvironment):
             StartTimeoutError: SSH did not answer in time.
             asyncio.CancelledError: The start was cancelled during the launch.
         """
-        kwargs = await _aws("describe_images", self._run_kwargs)
+        kwargs = await _aws("describe_images", self._run_kwargs, state.launch_id)
         # A cancel during the image lookup must not start a paid instance.
         _raise_if_cancelled(state)
+        # A cancel or an error here, also from a loop shutdown, can leave an
+        # instance with no known id. Stop finds it by the launch tag.
+        self._lost_launches.add(state.launch_id)
         response = await _aws("run_instances", client.run_instances, **kwargs)
+        self._lost_launches.discard(state.launch_id)
         instance_id = response["Instances"][0]["InstanceId"]
         state.instance_id = instance_id
         loop = asyncio.get_running_loop()
@@ -555,15 +568,18 @@ class EC2Environment(SandboxEnvironment):
             raise
         return instance_id, host
 
-    def _run_kwargs(self) -> dict[str, Any]:
+    def _run_kwargs(self, launch_id: str) -> dict[str, Any]:
         """Build the ``run_instances`` arguments from the spec and the settings.
+
+        Args:
+            launch_id: The value of the launch tag.
 
         Returns:
             The keyword arguments.
         """
         spec = self.spec
         name = instance_name(spec.name or f"skynet-{uuid.uuid4().hex[:8]}")
-        tags = aws_tags({"Name": name, **spec.tags})
+        tags = aws_tags({"Name": name, **spec.tags, _LAUNCH_TAG: launch_id})
         kwargs: dict[str, Any] = {
             "ImageId": self._ami_id,
             "InstanceType": self._instance_type,
@@ -622,6 +638,18 @@ class EC2Environment(SandboxEnvironment):
             return self._root_device_name
         images = self._client.describe_images(ImageIds=[self._ami_id]).get("Images") or []
         return (images[0].get("RootDeviceName") if images else None) or DEFAULT_ROOT_DEVICE
+
+    async def _terminate_lost_launches(self) -> None:
+        """Terminate the instances of launches that ended before ``run_instances`` returned.
+
+        Raises:
+            SandboxError: The lookup or the terminate failed; the launches stay for a retry.
+        """
+        launches = sorted(self._lost_launches)
+        ids = await _aws("describe_instances", _tagged_instances, self._client, _LAUNCH_TAG, launches)
+        if ids:
+            await _aws("terminate_instances", self._client.terminate_instances, InstanceIds=ids)
+        self._lost_launches.difference_update(launches)
 
     async def _wait_for_ssh(self, host: str, state: _LaunchState, deadline: float) -> None:
         """Probe SSH with ``true`` until it answers or the start deadline passes.
@@ -863,18 +891,19 @@ async def _run_process(argv: list[str], stdin: bytes | None, limit_sec: float | 
     return process.returncode or 0, out, err
 
 
-def _tagged_instances(client: Any, job_id: str) -> list[str]:
-    """List the live instances that carry the job tag.
+def _tagged_instances(client: Any, key: str, values: list[str]) -> list[str]:
+    """List the live instances that carry one of the tag values.
 
     Args:
         client: The EC2 client.
-        job_id: The value of the ``JOB_TAG`` tag.
+        key: The tag key.
+        values: The tag values.
 
     Returns:
         The instance ids.
     """
     filters = [
-        {"Name": f"tag:{JOB_TAG}", "Values": [job_id]},
+        {"Name": f"tag:{key}", "Values": values},
         {"Name": "instance-state-name", "Values": _SWEEP_STATES},
     ]
     ids: list[str] = []

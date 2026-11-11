@@ -515,6 +515,8 @@ async def test_run_instances_carries_the_spec(fake_ec2: FakeEC2) -> None:
     assert kwargs["ClientToken"] != client_token(spec.operation_key)
     assert len(kwargs["ClientToken"]) <= 64
     tags = {tag["Key"]: tag["Value"] for tag in kwargs["TagSpecifications"][0]["Tags"]}
+    launch_id = tags.pop("skynet-launch-id")
+    assert len(launch_id) == 32
     assert tags == {"Name": "trial-one", JOB_TAG: "job-1"}
     assert [item["ResourceType"] for item in kwargs["TagSpecifications"]] == ["instance", "volume"]
     assert kwargs["UserData"] == "#!/bin/sh\nshutdown -P +11\n"
@@ -876,6 +878,52 @@ async def test_transfers_have_the_run_time_limit_and_keepalive(
     argv = _ssh_calls(fake_ec2)[-1]
     assert "ServerAliveInterval=15" in argv
     assert "ServerAliveCountMax=4" in argv
+
+
+async def test_stop_terminates_an_instance_whose_launch_lost_the_id(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Find and terminate by the launch tag when the launch itself is cancelled inside run_instances."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_ec2.run_gate = threading.Event()
+    env = EC2Environment(_spec())
+    env._client = fake_ec2
+    # A loop shutdown cancels the launch task itself, so no start code sees the id.
+    launch = asyncio.create_task(env._launch(fake_ec2, ec2_provider._LaunchState()))
+    await _until(lambda: "run_instances" in fake_ec2.ops())
+    launch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+    fake_ec2.run_gate.set()
+    await _until(lambda: fake_ec2.live() != [])
+    assert env._instance_id is None
+    await env.stop()
+    assert fake_ec2.live() == []
+    assert env._lost_launches == set()
+    calls = len(fake_ec2.calls)
+    await env.stop()
+    assert len(fake_ec2.calls) == calls
+
+
+async def test_the_lost_launch_sweep_touches_only_its_own_instance(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the instances of other sandboxes, and keep the launch for a retry when the lookup fails."""
+    other = EC2Environment(_spec())
+    await other.start()
+    fake_ec2.errors["run_instances"] = _client_error("Weird", None)
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    assert len(env._lost_launches) == 1
+    fake_ec2.errors["describe_instances"] = _client_error("InternalError", 500)
+    with pytest.raises(SandboxTransientError):
+        await env.stop()
+    assert len(env._lost_launches) == 1
+    await env.stop()
+    assert env._lost_launches == set()
+    assert fake_ec2.live() == [other._instance_id]
+    await other.stop()
 
 
 async def test_a_late_launch_never_touches_a_newer_start(fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch) -> None:
