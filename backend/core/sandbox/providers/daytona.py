@@ -31,7 +31,6 @@ from typing import Any, ClassVar
 from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxError,
     SandboxFatalError,
     SandboxInfraError,
@@ -85,12 +84,14 @@ DAYTONA_CAPABILITIES = EnvironmentCapabilities(
     dynamic_network_policy=True,
 )
 
-DEFAULT_IMAGE = "python:3.12-slim"
+DEFAULT_IMAGE = "python:3.12.15-slim"
 CREATE_TIMEOUT_SEC = 300.0
 DELETE_TIMEOUT_SEC = 60.0
 
 _TRANSIENT_MARKERS = ("limit exceeded", "too many requests", "capacity", "rate limit")
 _BUILD_MARKERS = ("build_failed", "failed to build")
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 
 
 def _client() -> Any:
@@ -224,11 +225,12 @@ class DaytonaEnvironment(SandboxEnvironment):
             sudo: Not supported.
 
         Returns:
-            The exit code and the output of the command.
+            The exit code and the output of the command. When the command runs
+            past its time limit, the result has exit code 124 and ``timed_out``
+            set.
 
         Raises:
             SandboxRejectedError: ``sudo`` is set.
-            RunTimeoutError: The command ran past its time limit.
             SandboxError: Daytona failed the call.
         """
         if sudo:
@@ -251,7 +253,7 @@ class DaytonaEnvironment(SandboxEnvironment):
                     )
         except TimeoutError:
             if deadline.expired():
-                raise RunTimeoutError(limit) from None
+                return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
             raise
         result = ExecResult(
             exit_code=int(response.exit_code if response.exit_code is not None else -1),

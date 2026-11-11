@@ -688,6 +688,26 @@ def create_connectors_router(*, job_store) -> APIRouter:
         """Load the caller's credential for a generic provider; see :func:`connector_secret`."""
         return connector_secret(vault, username, provider)
 
+    def _optional_github_token(username: str) -> str | None:
+        """Load the caller's GitHub token, or ``None`` to read a public repository anonymously.
+
+        Args:
+            username: The caller.
+
+        Returns:
+            The bearer token, or ``None`` when GitHub is not linked.
+
+        Raises:
+            DomainError: 409 ``connectors.expired`` when the link expired.
+        """
+        try:
+            return _secret(username, github.PROVIDER).access_token
+        except DomainError as error:
+            # An expired link still asks for a reconnect: an anonymous read would hide the user's private repositories.
+            if error.code != "connectors.not_connected":
+                raise
+            return None
+
     @router.get(
         "/connectors/github/repos",
         response_model=GithubRepositoriesResponse,
@@ -794,7 +814,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
         Returns:
             The default branch and up to 300 branch names.
         """
-        return GithubBranchesResponse(**github.list_branches(_secret(user.username, github.PROVIDER), repo))
+        return GithubBranchesResponse(**github.list_branches(_optional_github_token(user.username), repo))
 
     @router.get(
         "/connectors/github/commits",
@@ -816,8 +836,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
         Returns:
             Up to 20 commits, newest first.
         """
-        secret = _secret(user.username, github.PROVIDER)
-        commits = github_repo.list_commits(secret.access_token, repo, branch)
+        commits = github_repo.list_commits(_optional_github_token(user.username), repo, branch)
         return RepoCommitsResponse(commits=[RepoCommit(**c) for c in commits])
 
     @router.get(
@@ -840,7 +859,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
         Returns:
             Every file and folder path, and whether GitHub truncated the tree.
         """
-        return GithubTreeResponse(**github.repository_tree(_secret(user.username, github.PROVIDER), repo, branch))
+        return GithubTreeResponse(**github.tree_entries(_optional_github_token(user.username), repo, branch))
 
     @router.get(
         "/connectors/github/file",
@@ -868,8 +887,8 @@ def create_connectors_router(*, job_store) -> APIRouter:
             DomainError: 400 ``connectors.invalid_ref`` for a path that is
                 absolute, walks out with ``..`` or points into ``.git``.
         """
-        secret = _secret(user.username, github.PROVIDER)
-        return GithubFileResponse(**github.read_repo_file(secret.access_token, repo, ref, path, GITHUB_FILE_MAX_BYTES))
+        token = _optional_github_token(user.username)
+        return GithubFileResponse(**github.read_repo_file(token, repo, ref, path, GITHUB_FILE_MAX_BYTES))
 
     # Declared after the GitHub routes, so ``/connectors/github/...`` keeps its own handlers.
     @router.get(

@@ -39,7 +39,6 @@ from typing import Any
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -94,6 +93,8 @@ _UNBOUNDED_POLLS = 10**9
 _MAX_KEEP_ALIVE_SECONDS = 172_800
 _MAX_MEMORY_GB = 64
 _ENDED_STATUSES = frozenset({"failure", "shutdown"})
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Runloop custom sizes: 1 or an even number of vCPUs up to 16, even GiB of
@@ -207,7 +208,7 @@ def _policy_name(hosts: list[str]) -> str:
     """Name the shared Runloop network policy for one set of hosts.
 
     Args:
-        hosts: The sorted allowed hosts; empty means no network.
+        hosts: The sorted, lower-case allowed hosts; empty means no network.
 
     Returns:
         A stable name, so boxes with the same egress share one policy.
@@ -228,8 +229,9 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
     Returns:
         True when the policy allows these hosts and nothing else.
     """
-    # Hostnames are case-insensitive, and Runloop may return them in another order.
-    wanted = sorted(host.lower() for host in hosts)
+    # Hostnames are case-insensitive, and Runloop may return them in another
+    # order or more than once.
+    wanted = {host.lower() for host in hosts}
     egress = getattr(policy, "egress", None)
     if egress is None:
         return False
@@ -240,7 +242,7 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
         and getattr(egress, "allow_mcp_gateway", False) is False
         and getattr(egress, "allow_runloop_mirrors", False) is False
         and not list(getattr(egress, "allowed_cidrs", None) or [])
-        and sorted(str(host).lower() for host in getattr(egress, "allowed_hostnames", None) or []) == wanted
+        and {str(host).lower() for host in getattr(egress, "allowed_hostnames", None) or []} == wanted
     )
 
 
@@ -389,7 +391,9 @@ class RunloopEnvironment(SandboxEnvironment):
         mode = network_mode(disabled=self.spec.network_disabled, allowed_hosts=tuple(self.spec.allowed_hosts))
         if mode is NetworkMode.OPEN:
             return None
-        hosts = [] if mode is NetworkMode.DENY_ALL else sorted(dict.fromkeys(self.spec.allowed_hosts))
+        # Hostnames are case-insensitive, so "A.example" and "a.example" share
+        # one policy name and one policy.
+        hosts = [] if mode is NetworkMode.DENY_ALL else sorted({host.lower() for host in self.spec.allowed_hosts})
         name = _policy_name(hosts)
         with _mapped("set up the network policy"):
             found = await self._find_policy(client, name, hosts)
@@ -460,13 +464,14 @@ class RunloopEnvironment(SandboxEnvironment):
             sudo: Has no effect: the devbox already runs commands as root.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, it is killed first, and the result has exit code
+            124 and ``timed_out`` set.
 
         Raises:
             SandboxInfraError: The devbox is not running, or Runloop gave no
                 exit code.
             SandboxRejectedError: An environment variable name is not valid.
-            RunTimeoutError: The command ran past the time limit. It is killed first.
         """
         devbox, client = self._devbox, self._client
         if devbox is None or client is None:
@@ -482,6 +487,7 @@ class RunloopEnvironment(SandboxEnvironment):
             execution = await devbox.cmd.exec_async(wrapped, **callbacks)
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
         finished = False
+        timed_out = False
         try:
             async with asyncio.timeout(limit) as deadline:
                 with _mapped("wait for the command"):
@@ -495,11 +501,13 @@ class RunloopEnvironment(SandboxEnvironment):
         except TimeoutError:
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit) from None
+            timed_out = True
         finally:
             if not finished:
                 # A timeout, a cancel or a lost wait must not leave the command running.
                 await asyncio.shield(_kill(execution))
+        if timed_out:
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
         if result.exit_code is None:
             raise SandboxInfraError("Runloop gave no exit code for the command.")
         return ExecResult(exit_code=result.exit_code, stdout=stdout, stderr=stderr)

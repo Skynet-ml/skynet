@@ -229,7 +229,6 @@
   "core/service_gateway/optimization/blackbox/tests/test_sandbox_local.py": 0.5561421599704772,
   "core/service_gateway/optimization/blackbox/tests/test_sandbox_log.py": 0.02607458207057789,
   "core/service_gateway/optimization/blackbox/tests/test_sandbox_scorer.py": 2.221724724804517,
-  "core/service_gateway/optimization/blackbox/tests/test_sandbox_sweep.py": 0.0007160460227169096,
   "core/service_gateway/optimization/blackbox/tests/test_scorer.py": 0.6475338959135115,
   "core/service_gateway/optimization/blackbox/tests/test_service.py": 121.59436094295233,
   "core/service_gateway/optimization/blackbox/tests/test_shinka_bundle.py": 0.571133290999569,

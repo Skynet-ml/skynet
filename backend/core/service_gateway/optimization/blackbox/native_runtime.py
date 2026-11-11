@@ -1160,16 +1160,16 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
     session = runtime.open(spec)
     final_result: Result | None = None
     opened = time.monotonic()
-    mailbox = _EvaluatorMailbox(
-        session,
-        server,
-        nonce,
-        getattr(ctx, "progress_callback", None),
-        getattr(ctx, "check_budget", None),
-        str_mode=task.str_mode,
-        cases=task.cases,
-    )
     try:
+        mailbox = _EvaluatorMailbox(
+            session,
+            server,
+            nonce,
+            getattr(ctx, "progress_callback", None),
+            getattr(ctx, "check_budget", None),
+            str_mode=task.str_mode,
+            cases=task.cases,
+        )
         payload = {
             "nonce": nonce,
             "source": upstream_revision,

@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,7 +53,7 @@ from ..billing.host_agent import (
     host_reasoning_effort,
 )
 from ..billing.metering import debit_at_fallback_price
-from ..billing.model_gateway import ModelGateway
+from ..billing.model_gateway import ModelGateway, SandboxControl
 from ..billing.pricing import ModelUsage
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
@@ -90,14 +90,10 @@ from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
 from ..registry import ServiceRegistry
+from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
 from ..service_gateway import DspyService
 from ..service_gateway.embedding_pipeline import embed_finished_job
-from ..service_gateway.optimization.blackbox.docker_sandbox import (
-    docker_runtime_from_settings,
-    remove_idle_sandbox_networks,
-)
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from ..service_gateway.optimization.blackbox.sandbox import sandbox_runtime_from_settings
 from ..service_gateway.optimization.blackbox.service import validate_blackbox_payload
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
 from ..service_gateway.optimization.unified.contract import validate_unified_payload
@@ -416,6 +412,8 @@ class BackgroundWorker:
         self._last_activity: dict[int, float] = {}
         self._activity_lock = threading.Lock()
         self._sweep_stop = threading.Event()
+        # Background box stops that still run after their jobs ended.
+        self._sandbox_stops: set[threading.Thread] = set()
         # Per-thread current job for lease heartbeats.
         self._thread_current_job: dict[int, str] = {}
         # Rate-limits the memory-pressure deferral warning across all threads.
@@ -774,6 +772,7 @@ class BackgroundWorker:
         overview: dict[str, Any] = {}  # pre-init so BaseException handler has a defined value even if early error
         execution_generation: int | None = None
         execution_budget_snapshot: dict[str, Any] | None = None
+        run_gateway: ModelGateway | None = None
         # Legacy (unprotected) runs are billed from the worker, not a budget
         # gateway; the exception handler reads these to bill a leg that ended
         # without a successful completion.
@@ -903,6 +902,9 @@ class BackgroundWorker:
             run_phase = "sandbox"
 
             budget_gateway: ModelGateway | None = None
+            # The closed gateway and its detached broker: the worker stops the
+            # boxes after the terminal write, so the run does not wait for them.
+            detached_sandbox: tuple[ModelGateway, SandboxControl] | None = None
             run_process: mp.process.BaseProcess | None = None
             staged_repository: StagedRepository | None = None
             event_queue: Any | None = None
@@ -1008,6 +1010,7 @@ class BackgroundWorker:
                             phase="run",
                         )
                     )
+                    run_gateway = budget_gateway
                     sandbox_workflow = "anything" if optimization_type == OPTIMIZATION_TYPE_BLACKBOX else "dspy"
                     current_image = protected_image(settings, sandbox_workflow)
                     sandbox_image = (
@@ -1021,6 +1024,7 @@ class BackgroundWorker:
                         workflow=sandbox_workflow,
                         owner_id=optimization_id,
                         image=sandbox_image,
+                        guest_lifetime_seconds=payload_dict.get("deadline_seconds"),
                         parent_hosts=(
                             PACKAGE_REGISTRY_HOSTS
                             if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and is_repo_payload(payload_dict)
@@ -1219,6 +1223,9 @@ class BackgroundWorker:
 
                 if budget_gateway is not None:
                     closing_gateway, budget_gateway = budget_gateway, None
+                    broker = closing_gateway.detach_sandbox()
+                    if broker is not None:
+                        detached_sandbox = (closing_gateway, broker)
                     with self._renewing_lease(worker_id):
                         execution_budget_snapshot, settlement_error = self._close_budget_gateway(
                             optimization_id, closing_gateway, execution_generation
@@ -1392,8 +1399,12 @@ class BackgroundWorker:
                         self._stop_blackbox_sandboxes(optimization_id)
                 raise
             finally:
-                # The scoring box is closed through the gateway, so it goes first.
-                if staged_repository is not None:
+                if budget_gateway is not None:
+                    broker = budget_gateway.detach_sandbox()
+                    if broker is not None:
+                        detached_sandbox = (budget_gateway, broker)
+                if detached_sandbox is None and staged_repository is not None:
+                    # The scoring box is closed through the gateway, so it goes first.
                     staged_repository.close_scorers()
                 if budget_gateway is not None:
                     # Closing waits for in-flight usage and can outlast the lease.
@@ -1408,6 +1419,17 @@ class BackgroundWorker:
                         logger.error(
                             "Optimization %s runtime cleanup needs attention: %s", optimization_id, settlement_error
                         )
+                if detached_sandbox is not None:
+                    # This runs after the success write and after the gateway's own
+                    # snapshot. On failure, _close_failed_budget also publishes, and
+                    # this stop can publish an older copy after it. Only the job's
+                    # fallback copy goes stale: the API serves the live budget row.
+                    self._stop_sandbox_in_background(
+                        optimization_id,
+                        *detached_sandbox,
+                        execution_generation,
+                        staged_repository.close_scorers if staged_repository is not None else None,
+                    )
                 if staged_repository is not None:
                     staged_repository.cleanup()
                 # The DB holds the checkpoint bytes for a resumable failure; the
@@ -1486,6 +1508,8 @@ class BackgroundWorker:
                         self._job_store.update_job(optimization_id, **fields)
                 except Exception:  # isolation boundary: a DB hiccup must not prevent the notification below
                     logger.exception("Optimization %s: failed to update status to %s", optimization_id, final_status)
+                if run_gateway is not None:
+                    self._close_failed_budget(optimization_id, run_gateway, execution_generation)
                 if self._job_store.claim_completion_notification(optimization_id):
                     notify_job_completed(
                         optimization_id=optimization_id,
@@ -1546,6 +1570,29 @@ class BackgroundWorker:
             return
         logger.info("Optimization %s released for recovery after a worker shutdown", optimization_id)
 
+    def _close_failed_budget(self, optimization_id: str, gateway: ModelGateway, generation: int | None) -> None:
+        """Close a failed run's budget so unstarted work stops holding wallet money.
+
+        The gateway close already settled the metered usage. Dispatched and
+        pending work, such as a sandbox the background stop still settles,
+        keeps its coverage until its usage is known.
+
+        Args:
+            optimization_id: Failed job owning the budget.
+            gateway: The run's closed gateway, still holding its budget authority.
+            generation: Worker epoch allowed to publish the closed snapshot.
+        """
+        runtime = gateway.runtime
+        try:
+            runtime.service.close_for_failed_job(
+                runtime.budget_id, runtime.username, expected_generation=runtime.generation
+            )
+        except Exception:  # isolation boundary: the failure notification must still go out
+            logger.exception("Optimization %s: could not close its run budget", optimization_id)
+            return
+        # The terminal evidence froze the budget before this close.
+        self._publish_budget_snapshot(optimization_id, gateway, generation)
+
     def _close_budget_gateway(
         self, optimization_id: str, gateway: ModelGateway, generation: int | None
     ) -> tuple[dict[str, Any] | None, BaseException | None]:
@@ -1560,13 +1607,94 @@ class BackgroundWorker:
             Authoritative snapshot and a genuine cleanup error, if one occurred.
         """
         error: BaseException | None = None
-        snapshot: dict[str, Any] | None = None
         try:
             gateway.close()
         except UsagePendingError:
             logger.info("Optimization %s finished with usage awaiting reconciliation", optimization_id)
         except BaseException as exc:
             error = exc
+        return self._publish_budget_snapshot(optimization_id, gateway, generation), error
+
+    def _stop_sandbox_in_background(
+        self,
+        optimization_id: str,
+        gateway: ModelGateway,
+        broker: SandboxControl,
+        generation: int | None,
+        close_scorers: Callable[[], None] | None,
+    ) -> None:
+        """Stop the run's boxes and settle their usage on a worker-owned thread.
+
+        The thread is not a daemon, so the process keeps it until the stop
+        ends, and ``stop`` waits for it. If the process dies first, the sandbox
+        sweep stops the boxes of the terminal job and the usage reconciler
+        settles the open operations.
+
+        Args:
+            optimization_id: Stable job owning the boxes.
+            gateway: The closed gateway, still holding the run budget.
+            broker: The broker taken out of ``gateway``.
+            generation: Worker epoch allowed to publish the settled snapshot.
+            close_scorers: Closes the parent's scoring boxes first, when the run has them.
+        """
+        thread = threading.Thread(
+            target=self._finish_sandbox_stop,
+            args=(optimization_id, gateway, broker, generation, close_scorers),
+            name=f"sandbox-stop-{optimization_id}",
+        )
+        with self._queue_lock:
+            self._sandbox_stops.add(thread)
+        thread.start()
+
+    def _finish_sandbox_stop(
+        self,
+        optimization_id: str,
+        gateway: ModelGateway,
+        broker: SandboxControl,
+        generation: int | None,
+        close_scorers: Callable[[], None] | None,
+    ) -> None:
+        """Stop the boxes, settle their usage and publish the settled budget.
+
+        A failed stop leaves the budget operations open, so the budget stays
+        Pending until the usage reconciler settles them.
+
+        Args:
+            optimization_id: Stable job owning the boxes.
+            gateway: The closed gateway, still holding the run budget.
+            broker: The broker taken out of ``gateway``.
+            generation: Worker epoch allowed to publish the settled snapshot.
+            close_scorers: Closes the parent's scoring boxes first, when the run has them.
+        """
+        try:
+            if close_scorers is not None:
+                close_scorers()
+            broker.close()
+        except UsagePendingError:
+            logger.info("Optimization %s finished with usage awaiting reconciliation", optimization_id)
+        except Exception:  # isolation boundary: the sweep and the reconciler finish a failed stop
+            logger.exception("Optimization %s could not stop its sandbox boxes", optimization_id)
+        finally:
+            try:
+                self._publish_budget_snapshot(optimization_id, gateway, generation)
+            finally:
+                with self._queue_lock:
+                    self._sandbox_stops.discard(threading.current_thread())
+
+    def _publish_budget_snapshot(
+        self, optimization_id: str, gateway: ModelGateway, generation: int | None
+    ) -> dict[str, Any] | None:
+        """Store the run budget's current state in the job's terminal evidence.
+
+        Args:
+            optimization_id: Stable job owning all covered work.
+            gateway: Trusted parent transport and its cumulative budget.
+            generation: Worker epoch allowed to publish the snapshot.
+
+        Returns:
+            The published snapshot, or ``None`` when the budget could not be read.
+        """
+        snapshot: dict[str, Any] | None = None
         try:
             raw = asdict(gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username))
             raw.pop("username", None)
@@ -1587,7 +1715,7 @@ class BackgroundWorker:
                 self._job_store.update_job(optimization_id, terminal_evidence=evidence)
         except Exception:
             logger.exception("Optimization %s could not publish its budget snapshot", optimization_id)
-        return snapshot, error
+        return snapshot
 
     def _process_tagging_job(
         self,
@@ -1704,6 +1832,14 @@ class BackgroundWorker:
         # slow child early — while still bounding total shutdown to ``timeout``.
         deadline = time.monotonic() + timeout
         for thread in self._threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+        # The worker threads start these stops, so they are joined last.
+        with self._queue_lock:
+            sandbox_stops = list(self._sandbox_stops)
+        for thread in sandbox_stops:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -2283,19 +2419,14 @@ class BackgroundWorker:
         Args:
             optimization_id: The job whose boxes to stop.
         """
-        # The local availability probe also checks the image; leftover boxes
-        # are removed by label, which needs only the Docker CLI.
-        runtime = (
-            docker_runtime_from_settings(settings) if settings.local_mode else sandbox_runtime_from_settings(settings)
-        )
-        if runtime is None:
-            return
         try:
-            stopped = runtime.stop_job_sandboxes(optimization_id)
+            stopped = stop_job_sandboxes(
+                optimization_id, local_mode=settings.local_mode, docker_bin=settings.docker_bin
+            )
         except Exception as exc:  # isolation boundary: a failed sweep must not mask the job's outcome
             logger.warning("Optimization %s: sandbox sweep failed: %s", optimization_id, exc)
             return
-        if stopped == 0:
+        if not stopped:
             return
         logger.info("Optimization %s: stopped %d sandbox(es) the job left running", optimization_id, stopped)
         with contextlib.suppress(Exception):

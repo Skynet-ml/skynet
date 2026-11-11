@@ -17,18 +17,24 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
   a trial box can start from it. A box that holds env values or injected
   headers is refused, and the snapshot storage is metered as sandbox cost.
 - Compose services (see ``..services``) run as processes in the box. The
-  box grows by their size, so the reservation prices them. They start after
-  the create or the snapshot restore, and stop before a snapshot.
-- Harbor's directory transfer and log streaming features are left out.
+  box grows by their size, so the reservation prices them. They start only
+  when the caller calls ``start_services``, once the repository is in the
+  box, and stop before a snapshot.
+- ``exec`` streams new command output to the output sink while the command
+  runs, so a model mailbox frame reaches the parent before the exit.
+- Harbor's directory transfer feature is left out.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import codecs
 import contextlib
 import dataclasses
 import logging
 import math
+import posixpath
 import shlex
 import subprocess
 import time
@@ -39,9 +45,16 @@ from typing import Any
 
 import httpx
 
+from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import json_fingerprint
+from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
-from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelSnapshotReservation, VercelUsageReservation
+from core.billing.vercel_usage import (
+    SANDBOX_NETWORK_BYTES_CAP,
+    SessionNotStoppedError,
+    VercelSnapshotReservation,
+    VercelUsageReservation,
+)
 from core.config import settings
 
 from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources, validate_spec
@@ -115,6 +128,21 @@ EXIT_PREFIX = "/tmp/.app-exit-"
 OUTPUT_PREFIX = "/tmp/.app-output-"
 TIMEOUT_CODES = frozenset({124, 137})
 SHELL_FLAGS = ("--noprofile", "--norc", "-c")
+OUTPUT_POLL = 0.5
+OUTPUT_POLL_WARN_AFTER = 3
+# The SDK streams a run with no read timeout, so a stalled tail read would stop
+# every later poll and starve a model mailbox until the guest proxy gives up.
+OUTPUT_POLL_TIMEOUT = 10.0
+# One poll reads at most this many bytes of each file. Without a cap, a large
+# backlog can outlast OUTPUT_POLL_TIMEOUT on every poll, and the poller never
+# catches up. With it, the offset moves forward in bounded steps.
+OUTPUT_POLL_MAX_BYTES = 1 << 20
+# Prints the bytes after each 1-based offset as one base64 line per file. The
+# SDK has no ranged read, and a full re-read on every poll is O(n^2).
+TAIL_SCRIPT = (
+    'while [ $# -gt 0 ]; do tail -c +"$1" "$2" 2>/dev/null'
+    f' | head -c {OUTPUT_POLL_MAX_BYTES} | base64 | tr -d "\\n"; echo; shift 2; done'
+)
 _LIVE_STATUSES = frozenset({"pending", "running"})
 
 ResponseCapture = Callable[[httpx.Response], Awaitable[None]]
@@ -187,6 +215,24 @@ def _is_not_found(error: BaseException) -> bool:
     return SandboxApiError is not None and isinstance(error, SandboxApiError) and error.status_code == 404
 
 
+def _settle_failure(error: Exception) -> Exception:
+    """Return the usage error that a failed settle raises from ``stop()``.
+
+    Args:
+        error: The settle failure.
+
+    Returns:
+        A usage error unchanged. Any other failure becomes a
+        ``UsagePendingError``, because the reservation stays pending and its
+        own text can hold database details.
+    """
+    if isinstance(error, UsagePendingError | BudgetError):
+        return error
+    pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+    pending.__cause__ = error
+    return pending
+
+
 async def _close_client(client: Any) -> None:
     """Close a snapshot SDK client, bounded so a hung close cannot hold the caller.
 
@@ -245,6 +291,35 @@ def policy_confirmed(policy: NetworkPolicy, readback: Any | None) -> bool:
     return readback.mode == "allow-all" or (readback.mode == "custom" and "*" in domains)
 
 
+@dataclasses.dataclass
+class _OutputTail:
+    """The read state of one command output file."""
+
+    stream: str
+    path: str
+    offset: int = 0
+    emitted: int = 0
+    decoder: codecs.IncrementalDecoder = dataclasses.field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
+    )
+
+
+async def _stop_poller(poller: asyncio.Future[None] | None) -> BaseException | None:
+    """Cancel the output poller and wait until it ends.
+
+    Args:
+        poller: The poller task, or ``None`` when no sink exists.
+
+    Returns:
+        The sink error that ended the poller, or ``None``.
+    """
+    if poller is None:
+        return None
+    poller.cancel()
+    await asyncio.wait({poller})
+    return None if poller.cancelled() else poller.exception()
+
+
 class VercelEnvironment(SandboxEnvironment):
     """Run commands in one Vercel sandbox.
 
@@ -282,7 +357,7 @@ class VercelEnvironment(SandboxEnvironment):
             snapshot_id: Start the box from this run snapshot instead of the image.
             snapshot_usage_factory: Makes the storage reservation of a snapshot.
             services: The compose services in start order. The box grows by
-                their size.
+                their size; ``start_services`` starts them.
 
         Raises:
             SandboxSpecError: The spec is invalid, a protected box has no
@@ -319,6 +394,7 @@ class VercelEnvironment(SandboxEnvironment):
         self._billing_call: asyncio.Future[Any] | None = None
         self._starting: asyncio.Future[None] | None = None
         self._stop_task: asyncio.Future[None] | None = None
+        self._settle_error: Exception | None = None
         self._halted = False
         self._funded_until: float | None = None
         self.snapshot_id = snapshot_id
@@ -532,9 +608,27 @@ class VercelEnvironment(SandboxEnvironment):
                 bucket=self._pacing.creates if self._pacing else None,
                 clock=self._clock,
             )
-        if self._services:
-            with self.timings.phase("services"):
-                await start_services(self, self._services, self._services_up)
+
+    async def start_services(self, base_dir: str) -> None:
+        """Start the compose services in the running box, in start order.
+
+        Args:
+            base_dir: The absolute folder of the repository in the box. A
+                relative service ``working_dir``, and a missing one, resolve in it.
+
+        Raises:
+            SandboxInfraError: A service did not start.
+            HealthcheckError: A service did not become healthy.
+        """
+        services = [
+            dataclasses.replace(
+                service,
+                working_dir=posixpath.join(base_dir, service.working_dir) if service.working_dir else base_dir,
+            )
+            for service in self._services
+        ]
+        with self.timings.phase("services"):
+            await start_services(self, services, self._services_up)
 
     async def _create(self, usage: Any | None) -> None:
         """Send the create call and confirm the session.
@@ -644,10 +738,21 @@ class VercelEnvironment(SandboxEnvironment):
         return await asyncio.shield(self._billing_call)
 
     async def stop(self) -> None:
-        """Stop the box once and settle its reservation. Safe to call again."""
+        """Stop the box once and settle its reservation. Safe to call again.
+
+        Raises:
+            UsagePendingError: The settle failed, so the reservation stays pending.
+            BudgetError: Trusted usage violates the reserved bounds.
+        """
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._timed_teardown())
         await asyncio.shield(self._stop_task)
+        # Like the legacy close, only one stop caller gets a settle failure,
+        # so a second close returns quietly. A stop that timed out before this
+        # line leaves the error for the close retry.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
 
     async def _timed_teardown(self) -> None:
         """Run the teardown inside the stop phase."""
@@ -698,8 +803,20 @@ class VercelEnvironment(SandboxEnvironment):
                     await asyncio.to_thread(usage.settle)
                 else:
                     await asyncio.to_thread(usage.fail, error or SandboxInfraError("The sandbox was never created."))
+            except SessionNotStoppedError as billing_error:
+                # The snapshot call stops the builder's session, but Vercel's
+                # receipt can still show it running for a short time after the
+                # stop. The reconciler settles the hold when the receipt is final.
+                if not (self._snapshotted and box is not None):
+                    logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
+                    if box is not None:
+                        self._settle_error = billing_error
+                else:
+                    logger.info("Snapshot builder %s usage settles after its receipt is final.", self.name)
             except Exception as billing_error:
                 logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
+                if box is not None:
+                    self._settle_error = _settle_failure(billing_error)
         if self._client is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._client.aclose(), STOP_TIMEOUT)
@@ -774,14 +891,16 @@ class VercelEnvironment(SandboxEnvironment):
         on_output: OutputSink | None = None,
         sudo: bool = False,
     ) -> ExecResult:
-        """Run one shell command and wait for its exit code without polling.
+        """Run one shell command and wait for its exit code without polling its status.
 
         Args:
             command: The shell command.
             cwd: The working directory, or the box default.
             env: Extra environment variables for this command.
             timeout_sec: The time limit; ``None`` means no limit.
-            on_output: Receives ``(stream, text)`` after the command ends.
+            on_output: Receives each new ``(stream, text)`` chunk while the
+                command runs, and the rest after it ends. The chunks of one
+                stream join to its full text.
             sudo: Run the command as root.
 
         Returns:
@@ -790,6 +909,7 @@ class VercelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The exit code could not be read, or the
                 command outlived its kill deadline.
+            Exception: The output sink failed; this error wins over the deadline.
         """
         session = self._require_session()
         if env:
@@ -806,27 +926,40 @@ class VercelEnvironment(SandboxEnvironment):
                 kill_after = min(timeout_sec + KILL_GRACE, KILL_AFTER_MAX)
             script = f"{inner} > {out_path} 2> {err_path}; echo $? > {sentinel}"
             process = await self._create_process(session, script, cwd=cwd, env=env, sudo=sudo, kill_after=kill_after)
-            try:
-                if kill_after is None:
-                    code = await self._wait(session, process, sentinel)
-                else:
-                    async with asyncio.timeout(kill_after + POLL_SLACK):
-                        code = await self._wait(session, process, sentinel)
-            except TimeoutError as error:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(process.kill(), CANCEL_GRACE)
-                raise SandboxInfraError("The sandbox command outlived its kill deadline.") from error
-            except asyncio.CancelledError:
-                await asyncio.shield(asyncio.ensure_future(self._abort(process)))
-                raise
-            stdout = await self._read_optional(session, out_path) or ""
-            stderr = await self._read_optional(session, err_path) or ""
             sink = on_output or current_output_sink()
+            tails = (_OutputTail("stdout", out_path), _OutputTail("stderr", err_path))
+            # A model mailbox answers frames only while the command runs, so
+            # output that arrives after the exit would hang the guest (SKY-529).
+            poller = asyncio.ensure_future(self._stream_output(session, tails, sink)) if sink is not None else None
+            try:
+                try:
+                    if kill_after is None:
+                        code = await self._wait_unless_sink_fails(session, process, sentinel, poller)
+                    else:
+                        async with asyncio.timeout(kill_after + POLL_SLACK):
+                            code = await self._wait_unless_sink_fails(session, process, sentinel, poller)
+                except TimeoutError as error:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(process.kill(), CANCEL_GRACE)
+                    # A sink error can start an abort that outlives the deadline;
+                    # the sink error is the cause, so the caller must see it.
+                    if poller is not None and poller.done() and not poller.cancelled() and poller.exception():
+                        raise poller.exception() from error
+                    raise SandboxInfraError("The sandbox command outlived its kill deadline.") from error
+                except asyncio.CancelledError:
+                    await asyncio.shield(asyncio.ensure_future(self._abort(process)))
+                    raise
+            finally:
+                sink_error = await _stop_poller(poller)
+            if sink_error is not None:
+                raise sink_error
+            # Decode like the streaming decoder, so ``tail.emitted`` counts the same text.
+            stdout = await self._read_optional(session, out_path, errors="replace") or ""
+            stderr = await self._read_optional(session, err_path, errors="replace") or ""
             if sink is not None:
-                if stdout:
-                    sink("stdout", stdout)
-                if stderr:
-                    sink("stderr", stderr)
+                for tail, text in zip(tails, (stdout, stderr), strict=True):
+                    if text[tail.emitted :]:
+                        sink(tail.stream, text[tail.emitted :])
             timed_out = timeout_sec is not None and code in TIMEOUT_CODES
             return ExecResult(exit_code=code, stdout=stdout, stderr=stderr, timed_out=timed_out)
 
@@ -878,6 +1011,82 @@ class VercelEnvironment(SandboxEnvironment):
                     raise self._session_stopped(error) from error
                 raise
         raise AssertionError("unreachable")
+
+    async def _stream_output(self, session: Any, tails: Sequence[_OutputTail], sink: OutputSink) -> None:
+        """Send new command output to the sink until the caller cancels this task.
+
+        Args:
+            session: The SDK runtime session.
+            tails: The read state of each output file.
+            sink: Receives each new ``(stream, text)`` chunk.
+        """
+        failures = 0
+        while True:
+            await self._clock.sleep(OUTPUT_POLL)
+            if self._pacing is not None:
+                await self._pacing.reads.acquire()
+            pairs = [value for tail in tails for value in (str(tail.offset + 1), tail.path)]
+            try:
+                # Not ``wait_for``: on 3.11 it swallows a cancel that lands as the
+                # read ends, and then ``_stop_poller`` waits forever.
+                async with asyncio.timeout(OUTPUT_POLL_TIMEOUT):
+                    completed = await session.run_process(
+                        "bash",
+                        [*SHELL_FLAGS, TAIL_SCRIPT, "tail", *pairs],
+                        capture_output=True,
+                        kill_after=OUTPUT_POLL_TIMEOUT,
+                    )
+                if completed.returncode != 0:
+                    raise RuntimeError(f"The tail script exited with {completed.returncode}: {completed.stderr}")
+                chunks = [base64.b64decode(line) for line in completed.stdout.split("\n")[: len(tails)]]
+            except Exception:
+                failures += 1
+                # A missed poll only delays output: the next poll or the final read sends it.
+                # A poll that keeps failing starves a model mailbox, so it must be visible.
+                level = logging.WARNING if failures == OUTPUT_POLL_WARN_AFTER else logging.DEBUG
+                logger.log(level, "A sandbox output poll failed (%d in a row).", failures, exc_info=True)
+                continue
+            failures = 0
+            for tail, chunk in zip(tails, chunks, strict=False):
+                # A stale, shorter read gives no bytes, so the offset never moves back.
+                tail.offset += len(chunk)
+                text = tail.decoder.decode(chunk)
+                if text:
+                    tail.emitted += len(text)
+                    sink(tail.stream, text)
+
+    async def _wait_unless_sink_fails(
+        self, session: Any, process: Any, sentinel: str, poller: asyncio.Future[None] | None
+    ) -> int:
+        """Wait for the command, but abort it as soon as the output sink fails.
+
+        Args:
+            session: The SDK runtime session.
+            process: The SDK process handle.
+            sentinel: The path of the exit code file.
+            poller: The output poller task, or ``None`` when no sink exists.
+
+        Returns:
+            The exit code.
+
+        Raises:
+            Exception: The sink error that ended the poller. A command whose
+                output nobody reads would only burn paid sandbox time.
+        """
+        if poller is None:
+            return await self._wait(session, process, sentinel)
+        waiter = asyncio.ensure_future(self._wait(session, process, sentinel))
+        try:
+            await asyncio.wait({waiter, poller}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            waiter.cancel()
+            raise
+        if waiter.done():
+            return waiter.result()
+        waiter.cancel()
+        await asyncio.wait({waiter})
+        await asyncio.shield(asyncio.ensure_future(self._abort(process)))
+        raise poller.exception()
 
     async def _wait(self, session: Any, process: Any, sentinel: str) -> int:
         """Wait on the long poll; fall back to the sentinel file after many cuts.
@@ -951,12 +1160,13 @@ class VercelEnvironment(SandboxEnvironment):
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.kill(), CANCEL_GRACE)
 
-    async def _read_optional(self, session: Any, path: str) -> str | None:
+    async def _read_optional(self, session: Any, path: str, *, errors: str = "strict") -> str | None:
         """Read one text file when it exists.
 
         Args:
             session: The SDK runtime session.
             path: The sandbox path.
+            errors: The UTF-8 decoding error policy.
 
         Returns:
             The content, or ``None`` when the file does not exist.
@@ -968,7 +1178,7 @@ class VercelEnvironment(SandboxEnvironment):
         with self._stop_guard():
             if not await session.fs.exists(path, cwd=cwd):
                 return None
-            return await session.fs.read_text(path, cwd=cwd)
+            return await session.fs.read_text(path, cwd=cwd, errors=errors)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write text files into the box.
@@ -1132,6 +1342,11 @@ class VercelEnvironment(SandboxEnvironment):
                 handle = await asyncio.wait_for(client.get_snapshot(snapshot_id=built.snapshot_id), STOP_TIMEOUT)
                 if handle.status != "deleted":
                     await asyncio.wait_for(handle.delete(), STOP_TIMEOUT)
+                # Vercel keeps ``updated_at`` at the creation time on a delete,
+                # so the storage ends at our own delete time. A retry after an
+                # earlier delete that reached Vercel uses this call's time too;
+                # the expiry caps the stored time.
+                deleted_at = int(time.time() * 1000)
             except BaseException:
                 if built.reservation is not None:
                     with contextlib.suppress(Exception):
@@ -1142,6 +1357,7 @@ class VercelEnvironment(SandboxEnvironment):
                     name: getattr(handle, name, None)
                     for name in ("id", "status", "size_bytes", "created_at", "updated_at", "expires_at")
                 }
+                state["deleted_at"] = deleted_at
                 await asyncio.to_thread(built.reservation.settle, state)
             try:
                 box = await asyncio.wait_for(client.get_sandbox(name=built.builder_name), STOP_TIMEOUT)

@@ -344,6 +344,20 @@ class FakeJobStore:
         del self._staged_datasets[staged_dataset_id]
         return True
 
+    def list_run_calls(
+        self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return no relay calls; this fake has no run-record write path."""
+        return []
+
+    def get_run_candidate(self, optimization_id: str, candidate_id: str) -> dict[str, Any] | None:
+        """Return no candidate; this fake has no run-record write path."""
+        return None
+
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        """Return no candidates; this fake has no run-record write path."""
+        return []
+
 
 @pytest.fixture
 def store() -> FakeJobStore:
