@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,7 +14,7 @@ import pytest
 from core.billing.budgets import BudgetService
 from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.protected_execution import run_call_recorder
-from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment
+from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment, ServiceSpec
 from core.service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
 from core.service_gateway.optimization.blackbox.repo_services import box_mcp_config
 from core.storage.run_call_store import PostgresRunCallStore, strip_secrets
@@ -381,6 +382,50 @@ def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) 
         dispatch(_ROUTE["token"], "/v1/service/echo/", b"", {})
 
     assert client.timeouts == []
+
+
+_QUERY_SECRET = "query-secret-value-6161"
+
+
+def test_a_proposer_service_gets_its_query_secret_and_the_box_never_sees_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The relay adds the filled ``?key=``, drops the guest's own ``key``, and masks it in the answer and record (SKY-638).
+
+    Args:
+        monkeypatch: Sends the pinned request to an in-memory upstream.
+    """
+    seen: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        """Echo the query the upstream got, in a header and the body."""
+        query = request.url.query.decode("ascii")
+        seen.append(query)
+        return httpx.Response(200, headers={"X-Query": query}, content=query.encode())
+
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    monkeypatch.setattr(scoped_relay, "_PinnedTransport", lambda url, pinned: httpx.MockTransport(upstream))
+    relay = scoped_relay.McpRelay(
+        "[proposer]",
+        RoleEnvironment(services=("geo",)),
+        secrets={"MAPS_KEY": _QUERY_SECRET},
+        secret_hosts={"MAPS_KEY": "maps.example.com"},
+        allowed_hosts={"MAPS_KEY": ("maps.example.com",)},
+        services={
+            "geo": ServiceSpec(secrets=("MAPS_KEY",), url="https://maps.example.com/v1", query={"key": "${MAPS_KEY}"})
+        },
+    )
+    sink = _Sink()
+
+    answer = relay.service(
+        "geo", "lookup?q=1&KEY=guest", "GET", b"", {}, scoped_relay.CallRecorder(sink, "job-1", "", "")
+    )
+
+    assert seen == [f"q=1&key={_QUERY_SECRET}"]
+    assert answer.status == 200
+    assert _QUERY_SECRET not in answer.body.decode() + str(answer.headers)
+    assert "[REDACTED]" in answer.body.decode()
+    [(_, call, secrets)] = sink.calls
+    assert _QUERY_SECRET in secrets
+    assert _QUERY_SECRET not in strip_secrets(json.dumps(call, default=str), secrets)
 
 
 def test_box_mcp_urls_name_each_server_and_hold_no_secret() -> None:

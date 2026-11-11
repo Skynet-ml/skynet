@@ -39,11 +39,13 @@ from ..service_gateway.optimization.blackbox.repo_scorer import (
     _HOP_HEADERS,
     _HTTP_METHOD,
     _MCP_STREAMS,
+    _QUERY_MARK,
     _SERVICE_BODY_BYTES,
     _SERVICE_TIMEOUT_SECONDS,
     SETUP_ALLOWANCE_SECONDS,
     _AnswerTooLargeError,
     _json_object,
+    _SecretQueryTransport,
     _streamed,
     _under,
     _UnreachableError,
@@ -417,7 +419,9 @@ class McpRelay:
             or not _under(target, base)
         ):
             return self._refused(recorder, name, 400, f"{label} got a malformed request or a path outside its url.")
-        return self._request(url, declared, label, name, method, body, headers, recorder, kind="host")
+        return self._request(
+            url, declared, label, name, method, body, headers, recorder, kind="host", query=self._services[name].query
+        )
 
     @staticmethod
     def _refused(recorder: CallRecorder | None, name: str, status: int, message: str) -> ModelHTTPResult:
@@ -453,6 +457,7 @@ class McpRelay:
         recorder: CallRecorder | None,
         *,
         kind: str = "mcp",
+        query: Mapping[str, str] | None = None,
     ) -> ModelHTTPResult:
         """Send the request through :func:`relay_request` to the declared url, pinned and with no redirect.
 
@@ -468,6 +473,8 @@ class McpRelay:
             kind: ``mcp`` for an MCP server, ``host`` for a service. A service
                 gets the guest's own headers, never streams, and answers with
                 its own headers.
+            query: A service's declared query parameters, with ``${SECRET}``
+                placeholders; the relay fills them and adds them to the url.
 
         Returns:
             The masked answer.
@@ -490,7 +497,8 @@ class McpRelay:
 
             Args:
                 address: The declared url.
-                filled: The declared headers with their secrets filled in.
+                filled: The declared headers with their secrets filled in, and
+                    the filled query parameters under ``_QUERY_MARK``.
                 content: The guest's body.
 
             Returns:
@@ -507,7 +515,11 @@ class McpRelay:
             except ValueError as error:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
-            transport = _PinnedTransport(url, pinned)
+            secret_query = {key[1:]: value for key, value in filled.items() if key.startswith(_QUERY_MARK)}
+            filled = {key: value for key, value in filled.items() if not key.startswith(_QUERY_MARK)}
+            transport: httpx.BaseTransport = _PinnedTransport(url, pinned)
+            if secret_query:
+                transport = _SecretQueryTransport(transport, secret_query)
             with contextlib.ExitStack() as stack:
                 stack.callback(transport.close)
                 client = stack.enter_context(
@@ -543,7 +555,8 @@ class McpRelay:
         try:
             answer = relay_request(
                 url=url,
-                headers=declared,
+                # relay_request fills and masks headers only, so the query rides as marked headers (SKY-638).
+                headers={**declared, **{_QUERY_MARK + key: value for key, value in (query or {}).items()}},
                 body=body,
                 user_secrets=self._secrets,
                 bindings=self._bindings,
