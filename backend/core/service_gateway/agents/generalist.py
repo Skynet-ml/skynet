@@ -949,6 +949,8 @@ class WizardState(TypedDict, total=False):
     spending_floor_cents: int | None
     run_code: str
     metric_code: str
+    # The repository's optimize.toml in the setup draft; only the coding agent writes it (SKY-184).
+    optimize_toml: str
     # The wizard screen on view (see ``_SCREEN_FIELDS``). Absent when the
     # wizard is not on screen, which leaves the agent unscoped.
     wizard_screen: str
@@ -1897,9 +1899,11 @@ def coding_agent_tools(
             name=CODING_AGENT_TOOL,
             desc=(
                 "Hand the screen's code to the workspace coding agent. It gets the run's setup and, for a "
-                "repository run with GitHub linked, reads the repository. It writes the code into the editor "
-                "and returns its summary, the files it read and its open questions. Do not write the same "
-                "code again with update_wizard_state."
+                "repository run with GitHub linked, reads the repository. It writes the code into the editor, "
+                "returns optimize.toml for a repository run in its wizard_state, and returns its summary, the "
+                "files it read, its open questions and the parser's optimize_toml_error when that file is not "
+                "valid. When it returns optimize_toml, show the user the returned optimize_toml in full. "
+                "Do not write the same code again with update_wizard_state."
             ),
             arg_desc={
                 "request": (
