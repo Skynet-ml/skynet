@@ -49,12 +49,18 @@ A repository with a ``[run]`` entry runs the candidate first, before the
 metric files are in the tree (E38). ``python3 app_runner.py --candidate
 <call_dir>`` reads ``{"entry", "input", "timeout", "token", "stages"}``,
 starts the entry in its own session with only the case's input (E42),
-stops every process it left, and writes ``{"output", "error", "stopped"}``.
+stops every process it left, and writes ``{"output", "error", "stopped",
+"elapsed_s"}``.
 A function entry (``path/file.py:function``) runs as ``--run <dir>
 <entry>`` and its output is its JSON return value; a command entry
 (``["pytest", "-q"]``) gets the input as JSON on stdin and its output is
 ``{"exit_code", "stdout"}`` (E41). The metric call then gets that output as
 ``score(repo_path, case, output)``, and may start no process of its own (E40).
+A metric that also names an ``elapsed_s`` parameter after ``output`` gets
+the entry's run time in seconds as ``elapsed_s=...`` (SKY-642). The
+supervisor measures it in its own process, from just before the entry
+starts until every process it started is gone, so the candidate's code
+cannot patch the clock it reads.
 """
 
 from __future__ import annotations
@@ -67,6 +73,7 @@ import inspect
 import io
 import json
 import os
+import shutil
 import signal
 import site
 import ssl
@@ -127,8 +134,11 @@ RUN_FLAG = "--run"
 CANDIDATE_TOKEN_ENV = "APP_CANDIDATE_TOKEN"
 RUN_DIR = "run"
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
+# The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
+ELAPSED_PARAM = "elapsed_s"
 _STOP_ROUNDS = 100
 _PR_SET_CHILD_SUBREAPER = 36
+_PR_SET_DUMPABLE = 4
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
     " again: run its tests through the [run] entry, and read their report in the metric (its output"
@@ -942,6 +952,30 @@ def accepts_output(fn: Callable[..., Any], ran: bool) -> bool:
     return len(named) >= 3 or (ran and any(p.kind == p.VAR_POSITIONAL for p in params))
 
 
+def accepts_elapsed(fn: Callable[..., Any]) -> bool:
+    """Return True when ``fn`` names an ``elapsed_s`` parameter after its first three.
+
+    Args:
+        fn: The scorer callable.
+
+    Returns:
+        True for ``fn(repo_path, case, output, elapsed_s=None)`` and
+        ``fn(repo_path, case, output, *, elapsed_s=None)`` shapes. A
+        ``*args`` or ``**kwargs`` scorer never gets it, so older metrics
+        see the same call as before (SKY-642).
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    for index, param in enumerate(params):
+        if param.name == ELAPSED_PARAM:
+            if param.kind == param.KEYWORD_ONLY:
+                return True
+            return param.kind == param.POSITIONAL_OR_KEYWORD and index >= 3
+    return False
+
+
 def _ssl_context() -> ssl.SSLContext:
     """Build the TLS context for gateway calls, trusting the sandbox's egress proxy when present.
 
@@ -1226,7 +1260,9 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             candidate, case = payload.get("candidate"), payload.get("case")
             if accepts_output(fn, "output" in payload):
-                raw = fn(candidate, case, payload.get("output"))
+                timed = ELAPSED_PARAM in payload and accepts_elapsed(fn)
+                extra = {ELAPSED_PARAM: payload[ELAPSED_PARAM]} if timed else {}
+                raw = fn(candidate, case, payload.get("output"), **extra)
             else:
                 raw = fn(candidate, case) if accepts_case(fn) else fn(candidate)
             score, side_info = normalize_score(raw)
@@ -1268,8 +1304,10 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The process exit code: 0 whenever the output was written.
     """
-    _keep_user_site()
     args = list(sys.argv[1:] if argv is None else argv)
+    # The supervisor needs only the standard library (SKY-642).
+    if not (len(args) == 2 and args[0] == CANDIDATE_FLAG):
+        _keep_user_site()
     if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
         return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
     if len(args) >= 3 and args[0] == STAGE_COMMAND_FLAG:
@@ -1311,6 +1349,9 @@ def _write_output(call_dir: Path, text: str) -> None:
         text: The output document.
     """
     partial = call_dir / (OUTPUT_FILE + ".part")
+    # A link or folder that the version's code left here must not take the
+    # write; a folder makes the unlink fail, so the call fails (SKY-642).
+    partial.unlink(missing_ok=True)
     partial.write_text(text, encoding="utf-8")
     partial.replace(call_dir / OUTPUT_FILE)
 
@@ -1358,12 +1399,14 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
         call_dir: The candidate call's folder.
 
     Returns:
-        ``{"output", "error", "stopped"}``: the entry's output, why the run
-        failed, and whether every candidate process is gone.
+        ``{"output", "error", "stopped", "elapsed_s"}``: the entry's output,
+        why the run failed, whether every candidate process is gone, and the
+        entry's run time in seconds, measured here, outside its processes.
     """
     entry, token = payload["entry"], str(payload["token"])
     timeout = float(payload["timeout"])
     _become_subreaper()
+    _block_tracing()
     env = dict(os.environ)
     stages = payload.get("stages")
     if isinstance(stages, dict):
@@ -1374,10 +1417,16 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     body = json.dumps(payload.get("input"))
     captured: list[bytes] = []
     readers: list[threading.Thread] = []
+    # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
+    started = time.monotonic()
     try:
         if isinstance(entry, str):
             (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
-            argv = [sys.executable, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
+            # The supervisor runs on the base interpreter without site-packages;
+            # the entry is candidate code and needs the box's python3 from PATH,
+            # where [setup] installed its packages (SKY-642).
+            python = shutil.which("python3", path=env.get("PATH")) or sys.executable
+            argv = [python, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
             # Its prints go to stderr: the parent reads relay frames on stdout.
             child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True)
         else:
@@ -1407,7 +1456,10 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     stopped = stop_candidates(token, child.pid)
     for reader in readers:
         reader.join(timeout=5)
-    result: dict[str, Any] = {"output": None, "error": None, "stopped": stopped}
+    # The time ends once every candidate process is gone, so a process the
+    # entry left cannot finish its work after the clock stops (SKY-642).
+    elapsed = time.monotonic() - started
+    result: dict[str, Any] = {"output": None, "error": None, "stopped": stopped, ELAPSED_PARAM: round(elapsed, 6)}
     if code is None:
         result["error"] = f"timeout after {timeout:g} s"
     elif code < 0:
@@ -1495,6 +1547,18 @@ def _become_subreaper() -> None:
         return
     with _quiet():
         ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+
+
+def _block_tracing() -> None:
+    """Stop same-user ptrace and ``/proc/<pid>/mem`` access to this process on Linux (SKY-642).
+
+    Without Yama, any process of the same user could otherwise change the
+    supervisor's clock or its output. A failure leaves the process as it was.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    with _quiet():
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)
 
 
 def stop_candidates(token: str, leader: int | None = None) -> bool:

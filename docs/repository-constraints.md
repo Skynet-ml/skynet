@@ -142,6 +142,80 @@ with package-registry network only. Then the box goes offline, a probe
 confirms it, and only then does version code run. A box that stays online
 stops the run.
 
+## Run time for the metric
+
+Skynet measures how long the `[run] entry` takes on each case. A metric
+gets this time when it names an `elapsed_s` parameter after `output`:
+
+```python
+def score(repo_path, case, output=None, elapsed_s=None):
+    ...
+```
+
+A keyword-only `*, elapsed_s=None` after `output` also works. The
+parameter must come after `output`: `score(repo_path, case, *,
+elapsed_s=None)` has no `output` parameter, so it does not get the time.
+`elapsed_s` is
+a float in seconds. When no `[run] entry` ran, the parameter keeps its
+default. A metric with
+`score(repo_path)`, `score(repo_path, case)` or
+`score(repo_path, case, output)` gets the same call as before. A `*args` or
+`**kwargs` metric does not get `elapsed_s`.
+
+The `[run]` supervisor measures the time in its own process, with a
+monotonic clock. The time starts just before the entry starts. It stops when
+the entry exits and the supervisor stopped every process that the entry
+left, so work in a left process also counts. It includes the Python start
+for a function entry. It does not include setup or the metric. The
+entry's code runs in other processes, so it cannot patch this clock. A time
+that the candidate puts in its `output` is not trusted. Use `elapsed_s`.
+
+`elapsed_s` is only as trusted as the metric's score. Until SKY-398 (run
+candidate code and the metric in separate sandboxes), candidate code from an
+earlier case can change both; see the residual risk below.
+
+The supervisor starts with the image's root-owned base interpreter
+(`/usr/local/bin/python3`), not with `python3` from `PATH`. The box user can
+write to `/app/.venv/bin`, so a `python3` there is not trusted. The
+supervisor also starts without site-packages (`-I -S`), and Skynet writes the
+runner again before each case. The supervisor starts a function entry with
+`python3` from `PATH`, so the entry gets the packages that `[setup]`
+installed. The entry is candidate code, so its interpreter does not need
+trust; the clock stays in the supervisor. The shell that starts the
+supervisor replaces itself with it (`exec`), so no shell of Skynet's waits
+for its exit code. These steps make the supervisor harder to change. They
+do not isolate the cases; see the residual risk below. Skynet trusts the
+supervisor's result
+only when the supervisor exits cleanly, so an entry that writes a false
+result and then kills the supervisor gets no score. On Linux the supervisor
+sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
+`ptrace` and `/proc/<pid>/mem` access to it, also when Yama is off.
+
+Residual risk:
+
+- Code that gets root in the box (for example through `sudo`) could still
+  trace or change the supervisor process.
+- A version's metric step or `[run]` entry can plant a `.pth` file in the
+  shared site-packages (`/app/.venv/lib/python3.12/site-packages`, which the
+  box user can write). That file runs in every later Python that loads
+  site-packages: the entry and the metric of later cases. In the metric it
+  can change `elapsed_s` and the score. It can also start a process that
+  rewrites the supervisor's result after the supervisor exits. SKY-398 (run
+  candidate code and the metric in separate sandboxes, in progress) covers
+  the root fix.
+- The box's command wrapper (`timeout` and the outer shell that records the
+  exit code) runs as the same user as the version's code. Where the box
+  allows same-user `ptrace` of that wrapper, version code could change the
+  exit code that Skynet reads. All cases of a version share one box user, so
+  only SKY-398 (in progress) gives each case full isolation.
+- Cached state that one case leaves in `$HOME` or `/tmp` (for example a
+  download, a model file or a warm cache) can make later cases faster. So
+  the measured times of later cases can be shorter than a cold run.
+- Where the image has no `/usr/local/bin/python3` (for example a local test
+  host), the supervisor falls back to `python3` from `PATH`.
+
+A timeout or other `[run]` failure scores 0, and the metric does not run.
+
 ## What is enforced
 
 | Setting | Enforcement |
