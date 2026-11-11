@@ -66,12 +66,15 @@ _PROBE = f"{_VENV_PYTHON} -I -c " + shlex.quote(
     'else "litellm %s swe-rex %s" % d)'
 )
 # The preexisting-repo reset runs ``git clean -fdq``, which deletes untracked
-# files. A workspace that is not a repo becomes one with a snapshot commit; in a
-# repo, staged files are not untracked, so ``git add -A`` keeps them.
+# files, so every run starts from a snapshot commit of the workspace. A resumed
+# run's workspace is already a repo with the earlier run's edits; committing
+# them keeps the submitted patch to this run's edits only. ``git add -A`` is
+# bounded as in the Aider harness, so a huge workspace cannot stall the start.
 _SNAPSHOT_WORKSPACE = (
-    "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git add -A; "
-    "else git init -q && git add -A && git -c user.name=Agent -c user.email=agent@localhost "
-    "commit -q --no-verify --allow-empty -m 'Task files before agent run'; fi"
+    "_swe_bound=; command -v timeout >/dev/null 2>&1 && _swe_bound='timeout 120'; "
+    "{ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init -q; } && "
+    "$_swe_bound git add -A && git -c user.name=Agent -c user.email=agent@localhost "
+    "commit -q --no-verify --allow-empty -m 'Task files before agent run'"
 )
 # Telemetry stays off in every run. LiteLLM loads a ``.env`` from the workspace
 # in its default DEV mode.

@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from ..harnesses import REGISTRY
 from ..harnesses.swe_agent import (
     _PROBE,
     _PROTECTED_ENV,
+    _SNAPSHOT_WORKSPACE,
     SWE_AGENT_BASE_URL_FILE,
     SWE_AGENT_COMMIT,
     SWE_AGENT_ROOT_GUARD,
@@ -296,14 +298,6 @@ def test_install_with_a_wrong_commit_or_failed_install_removes_the_folder_and_fa
     assert not install_dir.exists()
 
 
-def test_probe_rejects_a_venv_with_another_litellm_or_swe_rex() -> None:
-    """Print the dependency versions instead of the release when they drift from the pins."""
-    assert "1.103.1" in _PROBE
-    assert "1.4.0" in _PROBE
-    assert '"litellm %s swe-rex %s" % d' in _PROBE
-    assert "--version" not in _PROBE
-
-
 def test_launch_removes_patch_and_state_left_by_an_earlier_run() -> None:
     """Remove SWE-agent's fixed patch and state files before ``sweagent run`` starts."""
     command = build_launch(_target(), _GATEWAY).run_command
@@ -392,6 +386,60 @@ def test_run_snapshots_a_plain_workspace_so_the_repo_reset_keeps_its_files(tmp_p
     assert {"a.txt", "AGENTS.md", SWE_AGENT_BASE_URL_FILE} <= set(tracked)
     diff = subprocess.run(["git", "diff"], cwd=workspace, env=env, capture_output=True, text=True, check=True).stdout
     assert "+fixed" in diff
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_snapshot_commits_an_earlier_runs_edits_so_the_patch_holds_only_this_run(tmp_path: Path) -> None:
+    """Commit a resumed workspace's earlier edits, so ``git diff`` starts empty."""
+    env = _host_env(str(tmp_path))
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@localhost"]
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=env, check=True)
+    (tmp_path / "a.txt").write_text("old\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, env=env, check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], cwd=tmp_path, env=env, check=True)
+    (tmp_path / "a.txt").write_text("run one\n")
+    (tmp_path / "new.txt").write_text("run one\n")
+
+    subprocess.run(
+        [shutil.which("bash") or "/bin/sh", "-c", _SNAPSHOT_WORKSPACE], cwd=tmp_path, env=env, check=True, timeout=30
+    )
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, env=env, capture_output=True, text=True, check=True
+    )
+    assert status.stdout == ""
+
+
+def test_probe_prints_the_release_only_for_the_pinned_litellm_and_swe_rex(tmp_path: Path) -> None:
+    """Run the probe in a venv with fake package metadata for the pinned and drifted versions."""
+    venv = tmp_path / _INSTALL_DIR / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, timeout=60)
+    site = next(venv.glob("lib/python*/site-packages"))
+
+    def install(name: str, version: str) -> None:
+        dist = site / f"{name.replace('-', '_')}-{version}.dist-info"
+        dist.mkdir(exist_ok=True)
+        (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+
+    def probe() -> str:
+        result = subprocess.run(
+            [shutil.which("bash") or "/bin/sh", "-c", _PROBE],
+            env={"PATH": os.defpath, "HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    install("sweagent", SWE_AGENT_VERSION)
+    install("swe-rex", "1.4.0")
+    install("litellm", "1.103.1")
+    assert probe() == SWE_AGENT_VERSION
+    for dist in site.glob("litellm-*.dist-info"):
+        shutil.rmtree(dist)
+    install("litellm", "1.0.0")
+    assert probe() == "litellm 1.0.0 swe-rex 1.4.0"
 
 
 @pytest.mark.parametrize("effort", _EFFORTS)
