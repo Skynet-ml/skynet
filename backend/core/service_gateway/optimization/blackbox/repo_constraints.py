@@ -35,8 +35,9 @@ servers in its own mcp file (E49, E55). Every secret goes to one host, and
 the file names it only as ``${NAME}``; a raw secret value fails (E49, E52).
 The worker's preflight gate (``core.worker.repo_gate``) fails a run that
 sets a key its sandbox cannot enforce, before any sandbox time (SKY-352).
-That includes every ``[run]`` key and the ``[metric]`` mcp, services and
-illegal keys, until SKY-385 gives that box its environment.
+``ENFORCED`` there lists the keys that pass; ``[run] entry`` and ``timeout``
+pass because the scorer's supervisor enforces them (SKY-635), and ``[run]
+illegal`` still fails because no judge reads those rules yet.
 """
 
 from __future__ import annotations

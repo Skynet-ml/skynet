@@ -123,9 +123,6 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
             "[target.planner] network",
         ),
         (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
-        (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
-        (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
-        (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
         (b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
         (b'[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
     ],
@@ -142,6 +139,9 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
     ("raw", "key"),
     [
         (b'[services.cache]\nurl = "https://api.example.com"\n', "[services.cache]"),
+        (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
+        (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
+        (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
         (
             b'[services.maps]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
             "[run] services",
@@ -157,7 +157,7 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str, place: str) -> None:
-    """The relays enforce the stage and proposer service lists and MCP files, so the gate passes them (SKY-612)."""
+    """The relays enforce the service lists and MCP files, and the run's supervisor its entry and timeout (SKY-635)."""
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert key not in [failure.key for failure in failures]
@@ -169,6 +169,28 @@ def test_a_proposer_mcp_file_and_proposer_services_pass(tmp_path: Path, place: s
     raw = b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
+
+    assert failures == []
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_run_entry_that_calls_its_services_through_the_relay_passes(tmp_path: Path, place: str) -> None:
+    """A ``[run]`` entry with a timeout and services, each secret on its own host, starts the run (SKY-635)."""
+    raw = (
+        b'[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\n'
+        b'headers = { X-Goog-Api-Key = "${GOOGLE_MAPS_API_KEY}" }\n'
+        b'[services.llm]\nurl = "https://api.cerebras.ai/v1"\n'
+        b'headers = { Authorization = "Bearer ${CEREBRAS_API_KEY}" }\n'
+        b'[run]\nentry = "geocoding/run.py:geocode"\ntimeout = 120\nservices = ["geocode", "llm"]\n'
+    )
+    allowed_hosts = {"GOOGLE_MAPS_API_KEY": ("maps.googleapis.com",), "CEREBRAS_API_KEY": ("api.cerebras.ai",)}
+
+    failures = check_repository(
+        _archive(tmp_path, {CONSTRAINTS_FILE: raw}),
+        {"GOOGLE_MAPS_API_KEY", "CEREBRAS_API_KEY"},
+        place=place,  # type: ignore[arg-type]
+        allowed_hosts=allowed_hosts,
+    )
 
     assert failures == []
 
@@ -219,15 +241,15 @@ def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
 
 def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> None:
     """The worker's error lists every reason and keeps the first one's code for a client that shows one message."""
-    raw = b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n'
-    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
+    raw = b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n[metric]\nreference = "eval/reference.json"\n'
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place="local")
 
     error = RepoGateError(failures)
 
     assert error.failures == failures
     assert error.code == I18nKey.REPO_GATE_UNENFORCED_LOCAL
-    assert error.params == {"key": "[run] entry"}
-    assert "[run] entry" in str(error)
+    assert error.params == {"key": "[run] illegal"}
+    assert "[run] illegal" in str(error)
     assert "[metric] reference" in str(error)
 
 
