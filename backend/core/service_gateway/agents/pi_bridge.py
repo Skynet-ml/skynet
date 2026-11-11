@@ -1012,14 +1012,17 @@ class PiSandbox:
         # earlier turn left behind.
         return session, f"{_BOX_DIR}/{secrets.token_hex(8)}"
 
-    def _release(self, session: Any, *, failed: bool) -> None:
+    def _release(self, session: Any, *, failed: bool) -> Any:
         """End a turn and start the idle timer, or drop a box that failed.
 
         Args:
             session: The box the turn used.
             failed: Whether a sandbox call of the turn failed, or a budget
-                stop ended it. The box is then closed, and the next turn opens
+                stop ended it. The box is then dropped, and the next turn opens
                 a new one.
+
+        Returns:
+            The dropped box, which the caller must close, or ``None``.
         """
         with self._lock:
             self._busy = False
@@ -1030,8 +1033,7 @@ class PiSandbox:
                 self._idle = threading.Timer(self.idle_seconds, self._close_idle, args=(self._session,))
                 self._idle.daemon = True
                 self._idle.start()
-        if dead:
-            _close_quietly(session)
+        return session if dead else None
 
     def _close_idle(self, session: Any) -> None:
         """Close the box when no turn came within the idle time.
@@ -1286,11 +1288,14 @@ async def _run_in_sandbox(
                 try:
                     await _drive(pi, app, translator, prompt)
                 finally:
-                    await pi.stop()
-                    if not pi.stopped():
-                        # Pi ignored the end of its input. Closing the box ends
-                        # it, so the next turn never meets a second Pi.
-                        failed = True
+                    try:
+                        await pi.stop()
+                    finally:
+                        # Pi ignored the end of its input, or a cancel cut the
+                        # wait short. Closing the box ends it, so the next turn
+                        # never meets a second Pi.
+                        if not pi.stopped():
+                            failed = True
             except BaseException as error:
                 if pi.box_error is not None:
                     failed = True
@@ -1313,7 +1318,9 @@ async def _run_in_sandbox(
             failed = True
             raise
     finally:
-        sandbox._release(session, failed=failed or isinstance(app.failure, BudgetReached))
+        dead = sandbox._release(session, failed=failed or isinstance(app.failure, BudgetReached))
+        if dead is not None:
+            await asyncio.shield(asyncio.to_thread(_close_quietly, dead))
 
 
 async def run_pi_turn(

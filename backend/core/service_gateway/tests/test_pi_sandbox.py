@@ -807,6 +807,36 @@ async def test_a_pi_that_ignores_the_end_of_its_input_loses_its_box(
     sandbox.close()
 
 
+async def test_a_cancel_during_the_stop_wait_drops_the_box(
+    tmp_path: Path, sandbox_for: Callable[..., PiSandbox], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel while the turn waits for Pi to exit closes the box, so no running Pi is kept."""
+    monkeypatch.setattr(pi_bridge, "_SANDBOX_STOP_SECONDS", 30.0)
+    stopping = asyncio.Event()
+    stop = pi_bridge._SandboxPi.stop
+
+    async def tracked_stop(self: Any) -> None:
+        """Signal the test, then wait for Pi as usual.
+
+        Args:
+            self: The turn's Pi.
+        """
+        stopping.set()
+        await stop(self)
+
+    monkeypatch.setattr(pi_bridge._SandboxPi, "stop", tracked_stop)
+    runtime = _Runtime(tmp_path, hang=True)
+    sandbox = sandbox_for(runtime)
+    turn = asyncio.ensure_future(_turn(sandbox))
+    await asyncio.wait_for(stopping.wait(), 5)
+    await asyncio.sleep(0.05)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert sandbox._session is None
+    assert runtime.sessions[0].closed
+
+
 async def test_a_handler_budget_stop_ends_the_turn_as_itself_and_drops_the_box(
     tmp_path: Path, sandbox_for: Callable[..., PiSandbox]
 ) -> None:
