@@ -220,6 +220,7 @@
   "submit.v2.optimizer.sandbox.label": "بيئة التشغيل المعزولة",
   "submit.v2.optimizer.sandbox.hint": "مكان تشغيل كود التشغيل. إذا لم تختر، يختار الخادم.",
   "submit.v2.optimizer.sandbox.load_failed": "تعذّر تحميل بيئات التشغيل المعزولة. يستخدم التشغيل الإعداد الافتراضي للخادم.",
+  "submit.v2.optimizer.sandbox.server_default": "الإعداد الافتراضي للخادم",
   "submit.v2.optimizer.proposer.title": "إعدادات وكيل البرمجة",
   "submit.v2.optimizer.proposer.title.guided": "إعدادات الوكيل (اختياري)",
   "submit.v2.optimizer.sandbox_unavailable": "بيئة الكود المعزولة غير متاحة، لذا لا يمكن بدء التشغيلات الآن.",

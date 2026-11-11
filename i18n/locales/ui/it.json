@@ -220,6 +220,7 @@
   "submit.v2.optimizer.sandbox.label": "Sandbox",
   "submit.v2.optimizer.sandbox.hint": "Dove viene eseguito il codice dell’esecuzione. Se non scegli, sceglie il server.",
   "submit.v2.optimizer.sandbox.load_failed": "Impossibile caricare le sandbox. L’esecuzione usa il valore predefinito del server.",
+  "submit.v2.optimizer.sandbox.server_default": "Predefinito del server",
   "submit.v2.optimizer.proposer.title": "Impostazioni dell'agente di programmazione",
   "submit.v2.optimizer.proposer.title.guided": "Impostazioni dell'agente (facoltative)",
   "submit.v2.optimizer.sandbox_unavailable": "La sandbox del codice non è disponibile, quindi al momento non è possibile avviare esecuzioni.",

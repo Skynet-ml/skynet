@@ -220,6 +220,7 @@
   "submit.v2.optimizer.sandbox.label": "सैंडबॉक्स",
   "submit.v2.optimizer.sandbox.hint": "रन का कोड जहाँ चलता है। आप न चुनें तो सर्वर चुनता है।",
   "submit.v2.optimizer.sandbox.load_failed": "सैंडबॉक्स लोड नहीं हो सके। रन सर्वर का डिफ़ॉल्ट उपयोग करता है।",
+  "submit.v2.optimizer.sandbox.server_default": "सर्वर का डिफ़ॉल्ट",
   "submit.v2.optimizer.proposer.title": "कोडिंग एजेंट सेटिंग्स",
   "submit.v2.optimizer.proposer.title.guided": "एजेंट सेटिंग्स (वैकल्पिक)",
   "submit.v2.optimizer.sandbox_unavailable": "कोड सैंडबॉक्स उपलब्ध नहीं है, इसलिए अभी रन शुरू नहीं हो सकते।",

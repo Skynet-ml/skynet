@@ -220,6 +220,7 @@
   "submit.v2.optimizer.sandbox.label": "Песочница",
   "submit.v2.optimizer.sandbox.hint": "Где выполняется код запуска. Если не выбрать, выбирает сервер.",
   "submit.v2.optimizer.sandbox.load_failed": "Не удалось загрузить песочницы. Запуск использует значение сервера по умолчанию.",
+  "submit.v2.optimizer.sandbox.server_default": "Значение сервера по умолчанию",
   "submit.v2.optimizer.proposer.title": "Настройки агента-программиста",
   "submit.v2.optimizer.proposer.title.guided": "Настройки агента (необязательно)",
   "submit.v2.optimizer.sandbox_unavailable": "Песочница для кода недоступна, поэтому запуски сейчас не могут начаться.",

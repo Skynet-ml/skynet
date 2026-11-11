@@ -220,6 +220,7 @@
   "submit.v2.optimizer.sandbox.label": "沙盒",
   "submit.v2.optimizer.sandbox.hint": "執行程式碼運行嘅地方。唔揀嘅話，由伺服器揀。",
   "submit.v2.optimizer.sandbox.load_failed": "載入唔到沙盒列表。今次運行用伺服器預設。",
+  "submit.v2.optimizer.sandbox.server_default": "伺服器預設",
   "submit.v2.optimizer.proposer.title": "編程代理設定",
   "submit.v2.optimizer.proposer.title.guided": "代理設定（選填）",
   "submit.v2.optimizer.sandbox_unavailable": "程式碼沙盒用唔到，所以而家開始唔到運行。",

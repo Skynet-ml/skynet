@@ -4207,6 +4207,7 @@
   "submit.v2.optimizer.sandbox.label": "ארגז חול",
   "submit.v2.optimizer.sandbox.hint": "איפה הקוד של ההרצה רץ. אם לא בוחרים, השרת בוחר.",
   "submit.v2.optimizer.sandbox.load_failed": "לא הצלחנו לטעון את ארגזי החול. ההרצה תשתמש בברירת המחדל של השרת.",
+  "submit.v2.optimizer.sandbox.server_default": "ברירת המחדל של השרת",
   "submit.v2.optimizer.proposer.candidates": "מועמדים לכל איטרציה",
   "submit.v2.optimizer.shinka.title": "הגדרות ShinkaEvolve",
   "submit.v2.optimizer.shinka.title.guided": "הגדרות האבולוציה (אופציונלי)",

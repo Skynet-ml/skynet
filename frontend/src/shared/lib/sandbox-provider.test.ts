@@ -60,11 +60,21 @@ const mac = {
 const loading = { status: "loading" as const, catalog: null };
 const failed = { status: "failed" as const, catalog: null };
 
-test("a Mac/Web switch drops a pick the new server does not offer from the request", () => {
+test("a Mac/Web switch replaces a pick the new server does not offer with what the picker shows", () => {
   assert.equal(requestSandboxProvider("vercel", web), "vercel");
-  assert.equal(requestSandboxProvider("vercel", mac), null);
+  assert.equal(requestSandboxProvider("vercel", mac), "docker");
   assert.equal(requestSandboxProvider("docker", mac), "docker");
-  assert.equal(requestSandboxProvider(null, web), null);
+  assert.equal(requestSandboxProvider(null, web), "vercel");
+});
+
+test("with no pick and no offered default, the request names the provider the picker shows", () => {
+  const noDefault = { status: "ready" as const, catalog: { providers, default_provider: "modal" } };
+  assert.equal(requestSandboxProvider(null, noDefault), shownSandboxProvider(null, noDefault.catalog));
+  assert.equal(requestSandboxProvider(null, noDefault), "vercel");
+  assert.equal(
+    requestSandboxProvider(null, { status: "ready", catalog: { providers: [], default_provider: "vercel" } }),
+    null,
+  );
 });
 
 test("the request names no provider while the list loads or after it fails", () => {

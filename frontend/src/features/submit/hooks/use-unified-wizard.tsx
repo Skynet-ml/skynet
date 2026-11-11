@@ -666,9 +666,10 @@ export function WizardV2Provider({
   // Submit sends this exact request, and the Web check judges it.
   const repoRequest = useMemo(() => {
     const proposer = withSupportedHostCli(state.optimizer.proposer);
-    // The pick stays in the setup, but the request names it only while the
-    // run's server offers it: a Mac/Web switch on any step, a draft from the
-    // other server, or a list that is loading or failed sends no provider.
+    // The pick stays in the setup, but the request names the provider the
+    // picker shows on the run's server: a pick that server does not offer
+    // (a Mac/Web switch, a draft from the other server) sends what it shows
+    // instead, and a list that is loading or failed sends no provider.
     const sandboxProvider = requestSandboxProvider(
       state.optimizer.sandboxProvider,
       sandboxProviders,

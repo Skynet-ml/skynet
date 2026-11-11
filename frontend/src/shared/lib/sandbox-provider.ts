@@ -48,14 +48,15 @@ export function offeredSandboxProvider(
 }
 
 /**
- * The provider the run request names: an offered pick only, never a pick from
- * another server or from a list that is still loading or failed.
+ * The provider the run request names: the provider the picker shows, so the
+ * run uses what the user saw. A list that is still loading or failed names
+ * none, and the server default applies.
  */
 export function requestSandboxProvider(
   chosen: string | null | undefined,
   sandboxes: SandboxProviders,
 ): string | null {
-  return offeredSandboxProvider(chosen, sandboxes.catalog?.providers ?? []);
+  return sandboxes.catalog ? (shownSandboxProvider(chosen, sandboxes.catalog) ?? null) : null;
 }
 
 /**
