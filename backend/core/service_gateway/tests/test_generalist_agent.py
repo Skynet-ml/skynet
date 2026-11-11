@@ -20,9 +20,9 @@ from sqlalchemy.pool import StaticPool
 
 from core.api.routers.folders import create_folders_router
 from core.config import settings
-from core.service_gateway.agents import docs_tools, web_tools
+from core.service_gateway.agents import docs_tools, pi_react, web_tools
 from core.service_gateway.agents import generalist as generalist_module
-from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload, _SubmitArgExtractor
+from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload
 from core.service_gateway.agents.docs_retrieval import DocsCorpus
 from core.service_gateway.agents.generalist import (
     AUTOMATIC_TURN_PREFIX,
@@ -55,6 +55,21 @@ from core.service_gateway.agents.generalist import (
     validate_wizard_screen,
 )
 from core.storage.models import Base
+
+from .test_pi_react import _simulated_pi
+
+
+@pytest.fixture(autouse=True)
+def _simulated_pi_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run these turns on the in-process Pi stand-in, so no ``pi`` binary is needed.
+
+    The real-Pi check lives in ``test_pi_bridge.py``.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
+
 
 _SUBMIT = "submit_unified_run_optimize_post"
 _READY: dict[str, Any] = {
@@ -1028,55 +1043,6 @@ def test_registry_resolve_unknown_returns_false() -> None:
     """Resolving an unknown call id returns ``False``."""
     registry = ApprovalRegistry()
     assert registry.resolve("does-not-exist", True) is False
-
-
-def test_submit_arg_extractor_streams_value_incrementally() -> None:
-    """Incremental chunks of a submit tool_calls payload yield growing deltas."""
-    ext = _SubmitArgExtractor("assistant_message")
-    deltas: list[str] = []
-    for chunk in (
-        '{"tool_calls": [',
-        '{"name": "submit", "args": ',
-        '{"assistant_message": "',
-        "Shal",
-        "om, ",
-        "Gilad",
-        '!"}}]}',
-    ):
-        delta = ext.feed(chunk)
-        if delta:
-            deltas.append(delta)
-    assert "".join(deltas) == "Shalom, Gilad!"
-
-
-def test_submit_arg_extractor_ignores_non_submit_calls() -> None:
-    """A non-submit tool call produces no delta, and reset clears the buffer."""
-    ext = _SubmitArgExtractor("assistant_message")
-    assert ext.feed('{"tool_calls": [{"name": "list_models", "args": {}}]}') is None
-    ext.reset()
-    delta = ext.feed('{"tool_calls": [{"name": "submit", "args": {"assistant_message": "Done!"}}]}')
-    assert delta == "Done!"
-
-
-def test_submit_arg_extractor_handles_malformed_json() -> None:
-    """A partial / malformed chunk returns ``None`` without raising."""
-    ext = _SubmitArgExtractor("reply")
-    assert ext.feed('{"tool_calls": [{"name": "submit') is None
-
-
-def test_submit_arg_extractor_picks_submit_among_parallel_calls() -> None:
-    """Parallel tool calls including submit still resolve to the submit arg."""
-    ext = _SubmitArgExtractor("reply")
-    parallel = '{"tool_calls": [{"name": "foo", "args": {}}, {"name": "submit", "args": {"reply": "yo"}}]}'
-    assert ext.feed(parallel) == "yo"
-
-
-def test_submit_arg_extractor_is_idempotent_on_repeat_feed() -> None:
-    """Re-feeding the same buffer or an empty chunk yields no new delta."""
-    ext = _SubmitArgExtractor("reply")
-    full = '{"tool_calls": [{"name": "submit", "args": {"reply": "hi"}}]}'
-    assert ext.feed(full) == "hi"
-    assert ext.feed("") is None
 
 
 @pytest.mark.asyncio

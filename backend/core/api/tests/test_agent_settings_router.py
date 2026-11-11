@@ -8,9 +8,6 @@ with no database. The approval tests drive the generalist's gate directly.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
-from types import SimpleNamespace
 from typing import Any
 
 import dspy
@@ -21,7 +18,6 @@ from fastapi.testclient import TestClient
 from mcp.types import Tool as McpTool
 from mcp.types import ToolAnnotations
 
-from ...service_gateway.agents import react_serve
 from ...service_gateway.agents.generalist import (
     _ALWAYS_CONFIRM_TOOLS,
     _ALWAYS_TOOLS,
@@ -445,46 +441,3 @@ def test_training_ground_live_roster_drops_protected_tool(monkeypatch: pytest.Mo
     monkeypatch.setattr(run_react, "_list_live_tool_specs", listing)
     tools = run_react._list_live_tools("http://mcp.local/mcp", None)
     assert [tool.name for tool in tools] == ["list_settings"]
-
-
-class _RosterSeenError(Exception):
-    """Stop the react-serve driver once it built its roster."""
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["ask", "auto_safe", "yolo"])
-async def test_react_serve_roster_drops_protected_tool(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    """A served react chat can rename tools or run in YOLO, so it never gets the protected tool."""
-    seen: list[str] = []
-
-    @contextlib.asynccontextmanager
-    async def session(_url: str, auth_header: str | None = None) -> AsyncIterator[Any]:
-        """Yield a fake MCP session whose listing holds the protected tool."""
-
-        async def list_tools() -> Any:
-            """Return the fake listing."""
-            return SimpleNamespace(tools=_mcp_specs())
-
-        yield SimpleNamespace(list_tools=list_tools)
-
-    def capture(_hashes: Any, tools: list[dspy.Tool], strict: bool) -> None:
-        """Record the roster the driver built, then stop the turn."""
-        seen.extend(tool.name for tool in tools)
-        raise _RosterSeenError
-
-    monkeypatch.setattr(react_serve, "_mcp_session", session)
-    monkeypatch.setattr(react_serve, "_assert_tool_set_matches", capture)
-    with pytest.raises(_RosterSeenError):
-        await react_serve._drive_react_chat(
-            signature_cls=object,
-            program_state_json="{}",
-            react_overlay=SimpleNamespace(tool_source={}, tool_schema_hashes={}),
-            user_message="hi",
-            trust_mode=mode,
-            registry=ApprovalRegistry(),
-            emit=lambda _event: None,
-            lm=object(),
-            mcp_url="http://mcp.local/mcp",
-            auth_header=None,
-        )
-    assert seen == ["list_settings"]

@@ -520,37 +520,6 @@ def claim_delivery(inbox: SteerInbox, taken: list[tuple[str, str]]) -> bool:
     return True
 
 
-def attach_steering(react: dspy.Module, inbox: SteerInbox | None) -> None:
-    """Let a ReActV2 loop read steer messages between its steps.
-
-    Args:
-        react: The loop; its step predictor gets the inbox.
-        inbox: The turn's inbox, or ``None`` for a turn that cannot be steered.
-    """
-    if inbox is None:
-        return
-    react.react.steer_inbox = inbox
-    # Read through the class so DSPy does not flag a direct ``forward`` access.
-    run = type(react).forward.__get__(react)
-
-    def forward(**input_args: Any) -> Any:
-        """Run the loop, then record a steer the final step consumed.
-
-        Args:
-            **input_args: The loop's inputs.
-
-        Returns:
-            The loop's prediction.
-        """
-        prediction = run(**input_args)
-        history = getattr(prediction, "history", None)
-        if isinstance(history, dspy.History):
-            _record_unrecorded(inbox, history)
-        return prediction
-
-    react.forward = forward
-
-
 def _record_unrecorded(inbox: SteerInbox, history: dspy.History) -> None:
     """Write the last steered text into the history event of the step that read it.
 

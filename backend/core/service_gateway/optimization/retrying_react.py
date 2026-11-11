@@ -15,8 +15,8 @@ original error is re-raised, so the stock forced-submit fallback still runs
 exactly as before — the retry only ever adds attempts, never changes terminal
 behavior.
 
-Both the optimization rollout (``gepa_adapter``) and the three serve builders
-(``react_serve``, ``_helpers``, ``tool_overlay``) drive the program through the
+Both the optimization rollout (``gepa_adapter``) and the two serve builders
+(``_helpers``, ``tool_overlay``) drive the program through the
 synchronous ``Predict.forward`` — serve via ``dspy.streamify``'s asyncify path,
 which runs the sync loop in a worker thread — so overriding ``forward`` covers
 every site.

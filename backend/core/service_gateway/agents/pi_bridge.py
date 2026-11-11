@@ -647,11 +647,14 @@ async def run_pi_turn(
         skills: Allow-listed skills to load.
 
     Raises:
-        PiBridgeError: When Pi fails to start, rejects the prompt, or ends
-            the run with an error that no handler raised.
+        PiBridgeError: When the ``pi`` executable is missing, Pi fails to
+            start, rejects the prompt, or ends the run with an error that no
+            handler raised.
         Exception: The first exception a handler raised, as itself, so the
             caller's budget and gateway error handling still applies.
     """
+    if not pi_available(binary):
+        raise PiBridgeError(f"The Pi agent harness executable {binary!r} was not found; install Pi 0.87.1")
     argv = pi_command(binary, extensions=extensions, skills=skills)
     token = secrets.token_urlsafe(32)
     app = _BridgeApp(handlers, token)

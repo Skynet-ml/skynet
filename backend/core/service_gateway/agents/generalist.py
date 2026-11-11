@@ -1,6 +1,6 @@
 """Generalist agent that drives the Skynet wizard via MCP tools.
 
-A :class:`.conversation_react.ConversationReAct` loop on top of the MCP
+An :class:`.agent_program.AgentProgram` run on the Pi harness on top of the MCP
 surface exposed by ``backend/core/api/mcp_mount.py``. The agent observes the
 current wizard state, chooses from a phased tool list, and streams reasoning
 + sub-tool progress over the same SSE envelope used by :mod:`code_agent`.
@@ -46,7 +46,6 @@ from typing import Any, Literal, TypedDict, cast
 
 import dspy
 import dspy.clients.lm as dspy_lm
-from dspy.streaming import StatusMessageProvider
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from sqlalchemy import delete
@@ -70,14 +69,13 @@ from ..language_models import (
     served_model_from,
 )
 from ..optimization.training_ground.registry import hash_tool_schema
+from .agent_program import AgentProgram, history_from_turns
 from .answer_options import normalize_options
-from .code import ReactReplyStream, _agent_error_payload, _format_agent_error, _reply_language, _require_answer
+from .code import _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
-from .constants import REASONING_FIELD
-from .conversation_react import AppendOnlyChatAdapter, ConversationReAct, history_from_turns
 from .docs_tools import build_docs_tools
-from .steering import STEER_APPLIED_EVENT, SteerInbox, attach_steering, get_steer_store
-from .tool_pending import TOOL_PENDING_CLEAR_EVENT, TOOL_PENDING_EVENT, ToolCallSpotter
+from .pi_react import run_react_turn_on_pi
+from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
 from .workspace_coder import CODING_AGENT_TOOL, run_coding_agent
 from .workspace_coder import CONTEXT_FIELDS as CODER_CONTEXT_FIELDS
@@ -622,7 +620,7 @@ class _ApprovalGatedTool:
         request loop). Dispatching via ``run_coroutine_threadsafe`` keeps
         all asyncio work on the loop that owns the session and blocks
         the worker thread until the future resolves. ``Future.result()``
-        propagates exceptions naturally so DSPy's ReAct loop sees real
+        propagates exceptions naturally so the agent loop sees real
         errors instead of timing out on a hung coroutine.
         """
         future = asyncio.run_coroutine_threadsafe(self._async_body(*args, **kwargs), self._outer_loop)
@@ -1629,7 +1627,7 @@ def screen_turn_guard(
         emit: Sends one stream event.
 
     Returns:
-        The guard for :class:`ConversationReAct`, or ``None`` for a turn
+        The guard for :class:`AgentProgram`, or ``None`` for a turn
         that may end on a statement: no wizard, a cloned run, the Check or
         Overview screen, or the wizard's automatic check-failure message.
     """
@@ -2529,58 +2527,6 @@ def screen_signature(screen: str, reply_language: str = "English", cloned: bool 
     return GeneralistSig.with_instructions(with_conduct(prompt))
 
 
-class GeneralistStatusProvider(StatusMessageProvider):
-    """Send no status lines around tool calls.
-
-    The panel words its own status from ``tool_start`` / ``tool_end`` in the
-    viewer's language, while :func:`~core.i18n.t` only speaks Hebrew; DSPy's
-    default provider would send English ones instead of none.
-    """
-
-    def __init__(self, step_lm: dspy.LM | None = None) -> None:
-        """Bind the provider to the loop's LM.
-
-        Args:
-            step_lm: The LM each loop step calls; its call starts are marked
-                with :data:`STEP_START_STATUS`. ``None`` marks none.
-        """
-        self._step_lm = step_lm
-
-    def lm_start_status_message(self, instance: Any, inputs: dict[str, Any]) -> str | None:
-        """Mark the start of a loop step's model call.
-
-        A tool's own LM calls run under the same stream, so only the loop's
-        LM counts.
-
-        Args:
-            instance: The LM about to be called.
-            inputs: The call's inputs.
-
-        Returns:
-            :data:`STEP_START_STATUS` for the loop's LM, else ``None``.
-        """
-        return STEP_START_STATUS if self._step_lm is not None and instance is self._step_lm else None
-
-    def tool_start_status_message(self, instance: Any, inputs: dict[str, Any]) -> None:
-        """Send no line before a tool call.
-
-        Args:
-            instance: The tool instance about to run.
-            inputs: Keyword arguments the tool will be invoked with.
-        """
-
-    def tool_end_status_message(self, outputs: Any) -> None:
-        """Send no line after a tool call.
-
-        Args:
-            outputs: The value returned by the completed tool call.
-        """
-
-
-# A status line no provider writes; the loop turns it into an event, never text.
-STEP_START_STATUS = "\x00step_start"
-
-
 def _history_from_chat(chat_history: list[dict]) -> dspy.History:
     """Replay the bounded chat history as the loop's native history.
 
@@ -2657,6 +2603,8 @@ def _emit_to_queue_threadsafe(loop: asyncio.AbstractEventLoop, out_queue: asynci
 
 
 SHARE_PLAN_TOOL = "share_plan"
+# Tools that get no pending row: the reply's ``submit`` and the plan.
+_PENDING_SKIP = frozenset({"submit", "finish", SHARE_PLAN_TOOL})
 _MAX_PLAN_CHARS = 300
 # Shorter reasoning reads fine as its own summary; a model call would cost
 # more than it says.
@@ -3398,10 +3346,10 @@ async def _drive_generalist_agent(
     steer_key: str | None = None,
     github_token: Callable[[], str | None] | None = None,
 ) -> str:
-    """Open the MCP session, run the ReAct loop, and return the final assistant message.
+    """Open the MCP session, run the turn on Pi, and return the final assistant message.
 
     Streams reasoning / assistant / status chunks through ``emit`` as they
-    arrive from DSPy's async streamer. The final assistant reply is
+    arrive from the Pi harness. The final assistant reply is
     returned so the outer coroutine can emit a terminal ``done`` event.
 
     Args:
@@ -3439,9 +3387,9 @@ async def _drive_generalist_agent(
         listing = await session.list_tools()
         allowed_names = screen_tools(tools_for(wizard_state), wizard_state)
         staged_id = wizard_state.get("staged_dataset_id") or None
-        # The MCP session is bound to THIS loop. ``streamify`` dispatches
-        # tool calls from a worker thread (asyncify), so the wrapper has
-        # to marshal each call back here via run_coroutine_threadsafe.
+        # The MCP session is bound to THIS loop. The Pi relay runs tool
+        # calls in a worker thread, so the wrapper has to marshal each call
+        # back here via run_coroutine_threadsafe.
         outer_loop = asyncio.get_running_loop()
         # One per turn, shared across every wrapper, so a later call sees the
         # wizard fields an earlier call wrote this turn.
@@ -3514,73 +3462,41 @@ async def _drive_generalist_agent(
             if screen is None
             else screen_signature(screen or "", reply_language, cloned=bool(wizard_state.get("cloned_run")))
         )
-        react = ConversationReAct(
+        react = AgentProgram(
             signature,
             tools=dspy_tools,
             max_iters=12,
             submit_guard=screen_turn_guard(wizard_state, authoring_flag, user_message, emit),
         )
-        if steer_key and approval_owner:
-            attach_steering(
-                react,
-                SteerInbox(
-                    owner=approval_owner,
-                    steer_key=steer_key,
-                    input_field="user_message",
-                    emit=emit,
-                    store=get_steer_store(),
-                ),
+        inbox = (
+            SteerInbox(
+                owner=approval_owner,
+                steer_key=steer_key,
+                input_field="user_message",
+                emit=emit,
+                store=get_steer_store(),
             )
-        # ``ReactReplyStream`` picks its listener from the adapter active while
-        # it is built, and the loop only installs its native-tool-call adapter
-        # inside ``forward``; without this it would decode the text protocol.
-        with dspy.context(adapter=AppendOnlyChatAdapter()):
-            reply_stream = ReactReplyStream(react, "assistant_message", lm)
-        spotter = ToolCallSpotter(native=reply_stream.native, skip=frozenset({"submit", "finish", SHARE_PLAN_TOOL}))
-        # ``is_async_program`` stays False so ``streamify`` wraps the sync
-        # ``forward`` via ``asyncify``; ReActV2 defines no ``aforward``.
-        program = dspy.streamify(
-            react,
-            stream_listeners=reply_stream.listeners(tool_args=True),
-            status_message_provider=GeneralistStatusProvider(lm),
-            async_streaming=True,
+            if steer_key and approval_owner
+            else None
         )
-
         inputs = {
             "wizard_state": json.dumps(screen_snapshot(wizard_state), ensure_ascii=False),
             "reply_language": reply_language,
             "user_message": user_message,
             "history": _history_from_chat(chat_history),
         }
-        reply_text = ""
-        prediction: dspy.Prediction | None = None
-        with dspy.context(lm=lm):
-            async for chunk in program(**inputs):
-                if isinstance(chunk, dspy.streaming.StatusMessage):
-                    if chunk.message == STEP_START_STATUS:
-                        spotter.reset()
-                        emit({"event": TOOL_PENDING_CLEAR_EVENT, "data": {}})
-                    else:
-                        emit({"event": "status_patch", "data": {"chunk": chunk.message}})
-                elif isinstance(chunk, dspy.streaming.StreamResponse):
-                    if chunk.signature_field_name == REASONING_FIELD:
-                        emit({"event": "reasoning_patch", "data": {"chunk": chunk.chunk}})
-                    else:
-                        for index, tool in spotter.feed(chunk):
-                            emit({"event": TOOL_PENDING_EVENT, "data": {"index": index, "tool": tool}})
-                        delta = reply_stream.reply_delta(chunk)
-                        if reply_stream.take_retraction():
-                            reply_text = ""
-                            emit({"event": "message_reset", "data": {}})
-                        if delta:
-                            reply_text += delta
-                            emit({"event": "message_patch", "data": {"chunk": delta}})
-                elif isinstance(chunk, dspy.Prediction):
-                    prediction = chunk
-                    final = getattr(chunk, "assistant_message", "") or ""
-                    if final and final != reply_text:
-                        reply_text = final
-        _require_answer(prediction, reply_text, next_step="Send your message again or pick a different model.")
+        reply_text = await run_react_turn_on_pi(
+            react,
+            inputs,
+            lm,
+            emit=emit,
+            output_field="assistant_message",
+            input_field="user_message",
+            binary=settings.pi_binary,
+            pending_skip=_PENDING_SKIP,
+            steer_inbox=inbox,
+        )
+        _require_answer(None, reply_text, next_step="Send your message again or pick a different model.")
         return reply_text
 
 

@@ -1,6 +1,6 @@
 """DSPy ReAct harness: the agent loops built on DSPy.
 
-Four variants share this module:
+Three variants share this module:
 
 * ``dspy-reactv2``  the project's ``RetryingReActV2`` (``dspy.ReActV2`` with
   parse-failure resampling and serial tool calls), exactly the class the
@@ -9,9 +9,6 @@ Four variants share this module:
 * ``dspy-reactv2-stable``  ``dspy-reactv2`` under the project's
   ``StableRosterChatAdapter``: the same text tool protocol, with the tool roster
   pinned to the first user message so a provider can cache it.
-* ``dspy-reactv2-fixed``  the project's ``ConversationReAct``: the same loop with
-  native tool calling, an append-only prompt the provider can cache, earlier
-  turns replayed as real history, and the reply language pinned.
 
 The loop runs in a child process so a hang can be killed and so the backend's
 import footprint never stays resident in the benchmark runner.
@@ -30,7 +27,6 @@ from bench.harnesses.base import Attempt
 
 BACKEND = Path(__file__).resolve().parents[4] / "backend"
 MAX_ITERS = 15
-FIXED = "dspy-reactv2-fixed"
 STABLE = "dspy-reactv2-stable"
 
 
@@ -47,15 +43,14 @@ def run_dspy(
     """Run one DSPy ReAct attempt in a child process.
 
     Args:
-        variant: ``"dspy-reactv2"``, ``"dspy-react"``, ``"dspy-reactv2-stable"`` or ``"dspy-reactv2-fixed"``.
+        variant: ``"dspy-reactv2"``, ``"dspy-react"`` or ``"dspy-reactv2-stable"``.
         message: The user message.
         brief: The shared system prompt.
         port: Port of the attempt's world server.
         workdir: Directory for this attempt's files.
         key: OpenRouter API key.
         timeout: Seconds before the child is killed.
-        conversation: An optional ``reply_language`` to pin and, for the fixed variant,
-            the earlier ``turns`` to replay as history.
+        conversation: An optional ``reply_language`` to pin.
 
     Returns:
         The parsed attempt.

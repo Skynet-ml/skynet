@@ -417,10 +417,19 @@ async def test_run_turn_reports_a_rejected_prompt_and_an_early_exit(tmp_path: Pa
 
 
 def test_pi_available_checks_the_path(tmp_path: Path) -> None:
-    """The fallback check finds an executable by path and reports a missing one."""
+    """The check finds an executable by path and reports a missing one."""
     binary, _ = _fake_pi(tmp_path)
     assert pi_bridge.pi_available(binary)
     assert not pi_bridge.pi_available(str(tmp_path / "missing-pi"))
+
+
+async def test_run_turn_without_pi_fails_with_a_clear_error(tmp_path: Path) -> None:
+    """A missing ``pi`` executable fails the turn before any model call; there is no other harness."""
+    handlers = _Handlers()
+    with pytest.raises(PiBridgeError, match=r"install Pi 0\.87\.1"):
+        await run_pi_turn(
+            binary=str(tmp_path / "missing-pi"), handlers=handlers, translator=_translator([]), prompt="q"
+        )
 
 
 _REAL_PI = os.environ.get("SKYNET_PI_BINARY") or shutil.which("pi")

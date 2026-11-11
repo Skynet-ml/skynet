@@ -19,8 +19,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from bench.harnesses.base import MODEL
-from bench.harnesses.dspy_react import FIXED, MAX_ITERS, STABLE
-from core.service_gateway.agents.conversation_react import ConversationReAct, history_from_turns
+from bench.harnesses.dspy_react import MAX_ITERS, STABLE
 from core.service_gateway.optimization.retrying_react import RetryingReActV2
 from core.service_gateway.stable_roster_adapter import StableRosterChatAdapter
 
@@ -70,12 +69,7 @@ async def _child(variant: str, port: int, workdir: Path) -> dict[str, Any]:
                 str,
             )
             inputs["reply_language"] = conversation["reply_language"]
-        if variant == FIXED:
-            program = ConversationReAct(signature, tools=tools, max_iters=MAX_ITERS)
-            inputs["history"] = history_from_turns(
-                [tuple(turn) for turn in conversation["turns"]], input_field="user_message", output_field="reply"
-            )
-        elif variant in ("dspy-reactv2", STABLE):
+        if variant in ("dspy-reactv2", STABLE):
             program = RetryingReActV2(signature, tools=tools, max_iters=MAX_ITERS, serial_tool_calls=True)
         else:
             program = dspy.ReAct(signature, tools=tools, max_iters=MAX_ITERS)
@@ -117,7 +111,7 @@ async def _child(variant: str, port: int, workdir: Path) -> dict[str, Any]:
 def main() -> None:
     """Child entry point: run one attempt and write ``dspy_result.json``."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("variant", choices=["dspy-reactv2", "dspy-react", FIXED, STABLE])
+    parser.add_argument("variant", choices=["dspy-reactv2", "dspy-react", STABLE])
     parser.add_argument("port", type=int)
     parser.add_argument("workdir", type=Path)
     args = parser.parse_args()
