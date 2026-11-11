@@ -170,7 +170,10 @@ def _run():
     )
     end_usage = None
     message_usage = {{}}
-    answer = ""
+    # DeerFlow streams AI text as deltas that share one message id, so the
+    # answer is the joined text of the last AI message, as upstream chat() does.
+    texts = {{}}
+    last_text = None
     try:
         for event in client.stream(STEERING.format(workdir=workdir, task=task), recursion_limit={recursion_limit}):
             data = event.data if isinstance(event.data, dict) else {{}}
@@ -179,9 +182,13 @@ def _run():
             elif event.type == "messages-tuple" and data.get("type") == "ai":
                 if isinstance(data.get("usage_metadata"), dict):
                     message_usage[data.get("id") or len(message_usage)] = data["usage_metadata"]
-                answer = _text(data.get("content")) or answer
+                piece = _text(data.get("content"))
+                if piece:
+                    last_text = data.get("id") or ("no-id", len(texts))
+                    texts[last_text] = texts.get(last_text, "") + piece
     except errors.GraphRecursionError as exc:
         print(f"deerflow: recursion limit reached: {{exc}}", file=sys.stderr)
+    answer = texts.get(last_text, "")
     usages = [end_usage] if end_usage is not None else list(message_usage.values())
     event = {{
         "type": "message_end",
@@ -216,10 +223,11 @@ def _gateway_url(gateway: GatewayConfig) -> str:
 
     Raises:
         ServiceError: When the URL is empty, not absolute http(s), embeds
-            credentials, or has characters that cannot sit in the config text.
+            credentials, or has non-ASCII or other characters that cannot
+            sit in the config text.
     """
     url = gateway.url
-    if not url or any(char.isspace() or char in _URL_FORBIDDEN for char in url):
+    if not url or not url.isascii() or any(char.isspace() or char in _URL_FORBIDDEN for char in url):
         raise ServiceError("The DeerFlow harness needs an absolute http(s) gateway URL.")
     parts = urlsplit(url)
     try:
@@ -354,7 +362,6 @@ SPEC = register(
         version=DEERFLOW_REF,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
-        # Built-ins sort by position; DeerFlow sorts after Prime (40) and before Cline (70).
         position=60,
     )
 )

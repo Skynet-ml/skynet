@@ -82,6 +82,10 @@ class DeerFlowClient:
             "roots": [os.environ["DEER_FLOW_PROJECT_ROOT"], os.environ.get("DEER_FLOW_HOME")],
         }
         Path(os.environ["FAKE_DEERFLOW_RECORD"]).write_text(json.dumps(record))
+        if os.environ.get("FAKE_DEERFLOW_EVENTS"):
+            for kind, data in json.loads(os.environ["FAKE_DEERFLOW_EVENTS"]):
+                yield SimpleNamespace(type=kind, data=data)
+            return
         yield SimpleNamespace(type="values", data={"title": "x"})
         yield SimpleNamespace(
             type="messages-tuple",
@@ -217,6 +221,7 @@ def test_protected_launch_uses_the_pin_relay_and_offline_env(tmp_path: Path) -> 
         "ftp://gw.example/v1",
         "https://user:pw@gw.example/v1",
         "https://gw.example/v1'x",
+        "https://gw.exämple/v1",
         "https://",
     ],
 )
@@ -238,11 +243,15 @@ def test_parser_reads_the_recorded_runner_output() -> None:
     )
 
 
-def test_runner_drives_the_client_and_prints_one_pi_event(tmp_path: Path) -> None:
-    """Run the shipped runner against a fake DeerFlow and parse what it prints.
+def _run_fake_runner(tmp_path: Path, **extra_env: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Run the shipped runner against a fake DeerFlow package.
 
     Args:
         tmp_path: Workspace and fake package root.
+        **extra_env: Extra environment for the runner, such as scripted events.
+
+    Returns:
+        The finished process, the workspace and the fake client's record file.
     """
     launch = build_launch(_target(), _GATEWAY, reasoning_effort="none")
     fakes = tmp_path / "fakes"
@@ -264,10 +273,21 @@ def test_runner_drives_the_client_and_prints_one_pi_event(tmp_path: Path) -> Non
         "OPENAI_API_KEY": "leaked-host-key",
         "DEER_FLOW_PROJECT_ROOT": str(workspace / ".app/deerflow/project"),
         "FAKE_DEERFLOW_RECORD": str(record),
+        **extra_env,
     }
     completed = subprocess.run(
         [sys.executable, RUNNER_FILE], cwd=workspace, env=env, capture_output=True, text=True, timeout=60, check=False
     )
+    return completed, workspace, record
+
+
+def test_runner_drives_the_client_and_prints_one_pi_event(tmp_path: Path) -> None:
+    """Run the shipped runner against a fake DeerFlow and parse what it prints.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    completed, workspace, record = _run_fake_runner(tmp_path)
     assert completed.returncode == 0, completed.stderr
     assert parse_pi_output(completed.stdout) == ("final answer", {"input_tokens": 40, "output_tokens": 9})
     seen = json.loads(record.read_text())
@@ -284,6 +304,51 @@ def test_runner_drives_the_client_and_prints_one_pi_event(tmp_path: Path) -> Non
     assert seen["config"]["models"][0]["base_url"] == _GATEWAY.url
     mount = {"host_path": str(workspace.resolve()), "container_path": str(workspace.resolve()), "read_only": False}
     assert seen["config"]["sandbox"]["mounts"] == [mount]
+
+
+def _ai(message_id: str, content: object) -> list[object]:
+    """Return one scripted ``messages-tuple`` event for an AI message piece.
+
+    Args:
+        message_id: Stable id that DeerFlow gives every piece of one message.
+        content: The piece's LangChain content value.
+
+    Returns:
+        The event as a ``[type, data]`` pair.
+    """
+    return ["messages-tuple", {"type": "ai", "id": message_id, "content": content}]
+
+
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    [
+        ([_ai("m1", "The answer "), _ai("m1", "is "), _ai("m1", "42.")], "The answer is 42."),
+        (
+            [
+                _ai("m1", "Let me "),
+                _ai("m1", "look."),
+                ["messages-tuple", {"type": "tool", "id": "t1", "content": "tool noise"}],
+                _ai("m2", [{"type": "text", "text": "Done: "}]),
+                _ai("m2", ""),
+                _ai("m2", "fixed."),
+            ],
+            "Done: fixed.",
+        ),
+    ],
+)
+def test_runner_joins_streamed_deltas_of_the_last_ai_message(
+    tmp_path: Path, events: list[list[object]], expected: str
+) -> None:
+    """Join the text deltas of each AI message id and answer with the last message.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+        events: Scripted DeerFlow stream events.
+        expected: The answer the runner must print.
+    """
+    completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
+    assert completed.returncode == 0, completed.stderr
+    assert parse_pi_output(completed.stdout)[0] == expected
 
 
 def test_run_command_keeps_deerflow_state_out_of_the_version_patch(tmp_path: Path) -> None:
