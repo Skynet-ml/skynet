@@ -31,6 +31,7 @@ from core.storage.models import Base, JobModel, ProgressEventModel, RunCallModel
 from core.storage.remote import RemoteDBJobStore
 from core.storage.run_call_store import (
     BODY_CAP_BYTES,
+    FAILURE_REASON_CAP_BYTES,
     PROGRAM_EVENT_KEY,
     SECRET_MASK,
     PostgresRunCallStore,
@@ -157,6 +158,17 @@ def test_record_call_strips_a_secret_that_spans_the_cut(store: PostgresRunCallSt
 
     assert secret[:5] not in record["request"][-10:]
     assert record["request_bytes"] == len(body) - len(secret) + len(SECRET_MASK)
+
+
+def test_record_call_cuts_a_long_failure_reason_after_masking(store: PostgresRunCallStore) -> None:
+    """A huge failure reason is stored cut to its cap, and a secret across the cut leaves no part of itself."""
+    secret = "s3cr3t-value-0123456789"
+    reason = "x" * (FAILURE_REASON_CAP_BYTES - 5) + secret + "y" * 20_000_000
+    store.record_call("job-1", _call(status="failed", failure_reason=reason), [secret])
+
+    [record] = store.list_calls("job-1", "cand-1")
+
+    assert record["failure_reason"] == "x" * (FAILURE_REASON_CAP_BYTES - 5) + SECRET_MASK[:5]
 
 
 def test_record_call_rejects_an_unknown_kind(store: PostgresRunCallStore) -> None:

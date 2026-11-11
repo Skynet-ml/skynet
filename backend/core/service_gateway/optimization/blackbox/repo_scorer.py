@@ -1165,6 +1165,8 @@ class _StageRelay:
         self._allowed = tuple(allowed)
         self._mcp = mcp or RoleEnvironment()
         self._secrets = dict(secrets or {})
+        # Values stage code can print or echo: the run's secrets and its box's model route key.
+        self._stage_secrets = [*self._secrets.values(), self._env.get(ENV_API_KEY, "")]
         self._bindings = dict(bindings or {})
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
@@ -1717,9 +1719,7 @@ class _StageRelay:
             request=json.dumps(value, default=str),
             response=json.dumps(response, default=str),
             failure_reason=None if status == "ok" else str(reason or "The stage gave no answer."),
-            # The stage's input and answer come from code that can read the run's
-            # secrets and its box's model route key, the same key the gateway masks.
-            secrets=[*self._secrets.values(), self._env.get(ENV_API_KEY, "")],
+            secrets=self._stage_secrets,
         )
 
     def _run(self, name: str, identity: str, value: Any) -> dict[str, Any]:
@@ -1768,7 +1768,8 @@ class _StageRelay:
         if result.timed_out:
             return {"error": f"Stage {name!r} passed its {stage.timeout:g}s timeout."}
         if not result.ok:
-            tail = (result.stderr or result.stdout).strip()[-_STAGE_ERROR_CHARS:]
+            # Masked before the cut, so a secret across the cut leaves no part of itself.
+            tail = redact((result.stderr or result.stdout).strip(), self._stage_secrets)[-_STAGE_ERROR_CHARS:]
             return {"error": f"Stage {name!r} failed (exit {result.exit_code}): {tail}"}
         text = box.read_file(f"{folder}/{runner.OUTPUT_FILE}")
         try:

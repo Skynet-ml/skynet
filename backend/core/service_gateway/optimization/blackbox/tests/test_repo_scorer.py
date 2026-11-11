@@ -22,6 +22,8 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import SecretStr
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from core.billing.budgets import BudgetError, BudgetInsufficientError
 from core.billing.model_gateway import ModelGateway
@@ -35,7 +37,8 @@ from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
-from core.storage.run_call_store import strip_secrets
+from core.storage.models import Base
+from core.storage.run_call_store import FAILURE_REASON_CAP_BYTES, SECRET_MASK, PostgresRunCallStore
 from core.worker.scoped_relay import CallRecorder
 
 from .. import repo_scorer, runner
@@ -1015,7 +1018,18 @@ def test_each_stage_call_is_recorded_with_its_status_and_no_secret(tmp_path: Pat
 _GATEWAY_KEY = 'gw-key\\"route-token'
 
 
-def _recording_stage_relay(sink: _CallSink, workspace: _Workspace) -> _StageRelay:
+def _run_call_store() -> PostgresRunCallStore:
+    """Return the real run call store over a fresh in-memory SQLite schema.
+
+    Returns:
+        The store.
+    """
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return PostgresRunCallStore(engine)
+
+
+def _recording_stage_relay(sink: _CallSink | PostgresRunCallStore, workspace: _Workspace) -> _StageRelay:
     """Build a relay with no stage boxes, the model route env of a stage box, and a recorder.
 
     Args:
@@ -1047,18 +1061,82 @@ def test_a_stage_that_echoes_the_model_route_key_leaks_it_into_no_record(
     monkeypatch: pytest.MonkeyPatch, answer: dict[str, Any]
 ) -> None:
     """The stage box's model route key is masked, raw and JSON-escaped, in the answer and the error (E28)."""
-    sink = _CallSink()
-    relay = _recording_stage_relay(sink, _Workspace())
+    store = _run_call_store()
+    relay = _recording_stage_relay(store, _Workspace())
     monkeypatch.setattr(relay, "_run", lambda name, identity, value: answer)
     relay._call("leak", "d" * 32, {"echo": _GATEWAY_KEY})
     relay.close()
 
-    [(_, call, secrets)] = sink.calls
+    [stored] = store.list_calls("opt-1", "cand-1")
     escaped = json.dumps(_GATEWAY_KEY)[1:-1]
     for field in ("request", "response", "failure_reason"):
-        stored = strip_secrets(call[field] or "", secrets)
-        assert _GATEWAY_KEY not in stored
-        assert escaped not in stored
+        assert _GATEWAY_KEY not in (stored[field] or "")
+        assert escaped not in (stored[field] or "")
+    assert SECRET_MASK in stored["request"]
+    assert SECRET_MASK in (stored["response"] if "output" in answer else stored["failure_reason"])
+
+
+def test_a_very_long_stage_error_is_stored_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage error of megabytes is stored cut to the failure reason cap, so polling pages stay small."""
+    store = _run_call_store()
+    relay = _recording_stage_relay(store, _Workspace())
+    monkeypatch.setattr(relay, "_run", lambda name, identity, value: {"error": "x" * 2_000_000})
+    relay._call("broken", "f" * 32, 1)
+    relay.close()
+
+    [stored] = store.list_calls("opt-1", "cand-1")
+    assert stored["status"] == "failed"
+    assert 0 < len(stored["failure_reason"].encode()) <= FAILURE_REASON_CAP_BYTES
+
+
+def test_a_very_long_unknown_stage_name_is_stored_cut() -> None:
+    """A raw frame with a huge unknown stage name stores a cut target and a cut failure reason."""
+    store = _run_call_store()
+    relay = _recording_stage_relay(store, _Workspace())
+    name = "n" * 2_000_000
+    relay.output("stdout", relay._prefix + json.dumps({"id": "a" * 32, "stage": name, "input": 1}) + "\n")
+    relay._refusals.shutdown(wait=True)
+    relay.close()
+
+    [stored] = store.list_calls("opt-1", "cand-1")
+    assert stored["status"] == "refused"
+    assert len(stored["target"]) <= 512
+    assert 0 < len(stored["failure_reason"].encode()) <= FAILURE_REASON_CAP_BYTES
+
+
+def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: Path) -> None:
+    """The stage's output is masked before its last characters are kept, so no partial secret is left."""
+    secret = "stage-secret-value-0123456789"
+    failing = TargetStage(
+        entry=("python3", "-c", f"import sys; sys.stderr.write({secret!r} + 'B' * 490); sys.exit(1)"), timeout=30
+    )
+    code = (
+        "from skynet import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return 0.0, str(error)\n"
+        "    return 1.0, 'no error'\n"
+    )
+    sink = _CallSink()
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"failing": failing},
+        secrets={"JUDGE_KEY": secret},
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    [(_, call, _)] = [entry for entry in sink.calls if entry[1]["kind"] == "stage"]
+    for text in (call["failure_reason"], call["response"], feedback):
+        assert "0123456789" not in text
+        assert "[secret]" in text
 
 
 def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
