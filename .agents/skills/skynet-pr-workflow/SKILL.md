@@ -15,8 +15,8 @@ full PR, review and merge procedure.
 - Branch, worktree and draft PR rules: `AGENTS.md`.
 - Run independent issues in parallel, each in its own worktree and branch.
   Check memory, CPU and active work before you add an agent. Do not start
-  duplicate workers. The ceilings are six implementation worktrees and
-  twelve reviewers; they do not guarantee free capacity.
+  duplicate workers. The ceilings are fourteen implementation worktrees and
+  fourteen reviewers; they do not guarantee free capacity.
 - Give issues that touch the same code to one agent, one after the other,
   each with its own branch and PR.
 - Reviewers use the implementation worktree only after implementation

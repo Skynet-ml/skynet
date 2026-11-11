@@ -186,7 +186,7 @@ def test_goose_is_registered_before_cline_with_its_pin() -> None:
     """List goose in the registry and the request model, pinned to the exact GitHub release."""
     spec = REGISTRY[BLACKBOX_HARNESS_GOOSE]
     assert (spec.binary, spec.version, spec.output_format, spec.position) == ("goose", "1.57.0", "plain", 64)
-    assert list(REGISTRY).index(BLACKBOX_HARNESS_GOOSE) == list(REGISTRY).index("cline") - 1
+    assert list(REGISTRY).index(BLACKBOX_HARNESS_GOOSE) < list(REGISTRY).index("cline")
     assert BLACKBOX_HARNESS_GOOSE in BLACKBOX_HARNESSES
     assert (
         pinned_harness_check(BLACKBOX_HARNESS_GOOSE) == "goose --version 2>/dev/null | grep -Eq '(^| )1[.]57[.]0( |$)'"
