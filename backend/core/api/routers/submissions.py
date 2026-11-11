@@ -88,6 +88,7 @@ from ...models.blackbox import (
 from ...models.common import ModelConfig, OptimizationType
 from ...models.submissions import _OptimizationRequestBase
 from ...models.unified import METRIC_SIGNATURE, RUN_ENTRY
+from ...sandbox.bridge import default_provider
 from ...service_gateway.optimization.blackbox.registry import ENGINES
 from ...service_gateway.optimization.blackbox.service import engine_catalog, validate_blackbox_payload
 from ...service_gateway.optimization.unified.split import task_fingerprint
@@ -931,6 +932,9 @@ def submit_repo_payload(
     optimization_id = str(uuid4())
     if payload.seed is None:
         payload.seed = stable_seed(optimization_id)
+    # Set after the setup evidence check, which fingerprints the request as sent,
+    # so the stored run names the provider it runs on (SKY-606).
+    payload.sandbox_provider = payload.sandbox_provider or default_provider(settings)
     optimizer_name = payload.strategy.engine or BLACKBOX_STRATEGY_AUTO
     reflection_model = payload.reflection_model_settings.normalized_identifier()
 

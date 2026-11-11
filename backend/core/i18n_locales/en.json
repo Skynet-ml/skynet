@@ -209,6 +209,7 @@
     "optimization.protected_interactive_sandbox_required": "This protected optimization cannot be evaluated or served in the API process. A separately metered {runtime} sandbox is required and is not available on this endpoint yet.",
     "sandbox.docker_unavailable": "Docker is not running on this computer. Start Docker Desktop or OrbStack and try again.",
     "sandbox.docker_image_missing": "The local sandbox image is not built yet. Restart the app to build it.",
+    "sandbox.provider_unavailable": "This sandbox provider is not available on this server. Choose a provider from the list.",
     "repo_gate.unenforced_local": "optimize.toml sets {key}. The local Docker sandbox cannot enforce this setting yet. Remove it to run.",
     "repo_gate.unenforced_cloud": "optimize.toml sets {key}. The cloud sandbox cannot enforce this setting yet. Remove it to run.",
     "repo_gate.missing_secret": "The service {service} in optimize.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",

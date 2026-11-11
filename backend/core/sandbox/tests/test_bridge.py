@@ -17,6 +17,10 @@ from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP
 from core.config import Settings
 from core.config import settings as global_settings
 from core.sandbox import bridge
+from core.sandbox.errors import SandboxFatalError
+from core.sandbox.factory import PROVIDERS, ProviderEntry
+from core.sandbox.metering import USAGE_ADAPTERS
+from core.sandbox.providers import vercel as vercel_provider
 from core.sandbox.providers.vercel import VercelEnvironment
 from core.sandbox.tests.test_provider_vercel import FakeClient, FakeClock, FakeUsage, readback
 from core.service_gateway.optimization.blackbox import sandbox_runtime
@@ -452,3 +456,80 @@ def test_async_unavailable_reason_trusts_a_bound_parent_runtime(monkeypatch: pyt
     monkeypatch.setattr(global_settings, "vercel_token", None)
     with sandbox_runtime.sandbox_runtime_context(object()):  # type: ignore[arg-type]
         assert bridge.protected_unavailable_reason(_hosted()) is None
+
+
+def _vercel_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the Vercel provider preflight fake credentials and SDK.
+
+    Args:
+        monkeypatch: Pytest fixture.
+    """
+    # The preflight checks only that the SDK imported; a dev venv may lack it.
+    monkeypatch.setattr(vercel_provider, "SandboxClient", object)
+    monkeypatch.setattr(global_settings, "vercel_token", SecretStr("token"))
+    monkeypatch.setattr(global_settings, "vercel_team_id", "team")
+    monkeypatch.setattr(global_settings, "vercel_project_id", "project")
+
+
+def _offered_ids(settings: Settings) -> list[str]:
+    """Return the ids of the providers a run may pick.
+
+    Args:
+        settings: The deployment settings.
+
+    Returns:
+        The offered provider ids, in order.
+    """
+    return [entry["id"] for entry in bridge.offered_providers(settings)]
+
+
+def test_hosted_deployment_offers_only_the_configured_metered_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hosted Skynet offers Vercel when it is configured, and nothing without its credentials (SKY-606)."""
+    _vercel_credentials(monkeypatch)
+    assert bridge.offered_providers(_hosted()) == [{"id": "vercel", "label": "Vercel Sandbox"}]
+    monkeypatch.setattr(global_settings, "vercel_token", None)
+    assert bridge.offered_providers(_hosted()) == []
+
+
+def test_local_mode_offers_only_docker() -> None:
+    """Local mode offers its Docker box and no hosted provider."""
+    assert _offered_ids(_settings(local_mode=True)) == ["docker"]
+
+
+@pytest.mark.parametrize(
+    ("production_allowed", "metered", "offered"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_a_provider_appears_once_it_is_metered_and_allowed_in_production(
+    monkeypatch: pytest.MonkeyPatch, production_allowed: bool, metered: bool, offered: bool
+) -> None:
+    """A registry entry joins the list only with a usage adapter and production_allowed, with no other change."""
+    _vercel_credentials(monkeypatch)
+    monkeypatch.setitem(
+        PROVIDERS,
+        "fake",
+        ProviderEntry("core.sandbox.tests.fake_provider", "InMemorySandbox", None, production_allowed),
+    )
+    if metered:
+        monkeypatch.setitem(USAGE_ADAPTERS, "fake", USAGE_ADAPTERS["vercel"])
+
+    assert ("fake" in _offered_ids(_hosted())) is offered
+    assert bridge.provider_offered(_hosted(), "fake") is offered
+
+
+def test_runtime_uses_the_chosen_offered_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that picks Vercel gets the funded Vercel runtime."""
+    _vercel_credentials(monkeypatch)
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET, provider="vercel")
+    assert isinstance(runtime, bridge.ProtectedBridgeRuntime)
+    assert runtime.provider == "vercel"
+
+
+@pytest.mark.parametrize("provider", ["docker", "daytona", "nope"])
+def test_runtime_refuses_a_provider_the_deployment_does_not_offer(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    """Hosted Skynet refuses local Docker, an unmetered provider and an unknown name."""
+    _vercel_credentials(monkeypatch)
+    with pytest.raises(SandboxFatalError, match="not offered"):
+        bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET, provider=provider)

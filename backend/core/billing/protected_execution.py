@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
-from ..sandbox.bridge import protected_runtime, protected_unavailable_reason
+from ..sandbox.bridge import protected_runtime, protected_unavailable_reason, provider_offered
 from ..sandbox.factory import load_provider
 from ..sandbox.snapshots import SnapshotCache
 from ..service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
@@ -153,6 +153,7 @@ def bind_protected_sandbox(
     guest_lifetime_seconds: int | None = None,
     parent_hosts: tuple[str, ...] = (),
     image: str | None = None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """Keep provider credentials, fixed resource profiles, and metering in the parent.
 
@@ -170,6 +171,8 @@ def bind_protected_sandbox(
             box may reach during setup; empty when the run opens no such box.
         image: The immutable image the run is pinned to; the deployment's
             current image when None.
+        provider: The sandbox provider the run chose; the deployment
+            default when None.
 
     Returns:
         Non-secret deployment identity usable in setup evidence; its
@@ -181,6 +184,9 @@ def bind_protected_sandbox(
     reason = protected_vercel_unavailable_reason(settings, workflow)
     if reason:
         raise UnpricedOperationError(reason)
+    # The deployment may drop a provider between the run's submission and its start.
+    if not provider_offered(settings, provider):
+        raise UnpricedOperationError(f"The sandbox provider {provider!r} is not offered on this deployment.")
     if image is None:
         image = protected_image(settings, workflow)
     elif not _immutable(settings, image):
@@ -193,7 +199,7 @@ def bind_protected_sandbox(
     guest_lifetime = min(guest_lifetime_seconds or lifetime, lifetime)
     recorder = run_call_recorder(gateway, owner_id)
     gateway.recorder = recorder
-    runtime = protected_runtime(settings, image=image, budget=gateway.runtime, recorder=recorder)
+    runtime = protected_runtime(settings, image=image, budget=gateway.runtime, recorder=recorder, provider=provider)
     mailbox = ModelMailbox(gateway.dispatch_guest)
     snapshots = None
     if getattr(runtime, "supports_snapshots", False):

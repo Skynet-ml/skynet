@@ -484,6 +484,15 @@ class BlackboxRunRequest(BaseModel):
     strategy: BlackboxStrategy = Field(default_factory=BlackboxStrategy)
     target: BlackboxTarget = Field(default_factory=BlackboxTarget)
     proposer_runtime: Literal["vercel", "docker"] = "vercel"
+    sandbox_provider: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "The sandbox provider this run uses, one id from GET /sandbox-providers. "
+            "Unset uses the deployment default. A provider this deployment does not offer is refused before any paid work."
+        ),
+    )
     proposer: BlackboxProposer = Field(default_factory=BlackboxProposer)
     task_model_settings: ModelConfig | None = Field(default=None, alias="task_model_config")
     reflection_model_settings: ModelConfig = Field(alias="reflection_model_config")

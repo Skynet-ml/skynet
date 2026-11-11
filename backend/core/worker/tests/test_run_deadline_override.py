@@ -1,4 +1,4 @@
-"""Tests for the per-run deadline override on a repository run (SKY-572)."""
+"""Tests for the per-run deadline override and sandbox provider on a repository run (SKY-572, SKY-606)."""
 
 from __future__ import annotations
 
@@ -59,14 +59,14 @@ def _request(**extra: Any) -> BlackboxRunRequest:
     )
 
 
-def _bound_lifetime(payload: dict[str, Any]) -> Any:
-    """Run one stored repository job and return the guest lifetime it binds its sandbox with.
+def _bind_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run one stored repository job and return the arguments it binds its sandbox with.
 
     Args:
         payload: The stored run request.
 
     Returns:
-        The ``guest_lifetime_seconds`` argument the engine passed to the sandbox bind.
+        The keyword arguments the engine passed to the sandbox bind.
     """
     store = FakeJobStore()
     store.engine = MagicMock()
@@ -124,7 +124,19 @@ def _bound_lifetime(payload: dict[str, Any]) -> Any:
         worker._process_job("repo-deadline", 0)
     bind.assert_called_once()
     assert "lifetime_seconds" not in bind.call_args.kwargs
-    return bind.call_args.kwargs["guest_lifetime_seconds"]
+    return bind.call_args.kwargs
+
+
+def _bound_lifetime(payload: dict[str, Any]) -> Any:
+    """Run one stored repository job and return the guest lifetime it binds its sandbox with.
+
+    Args:
+        payload: The stored run request.
+
+    Returns:
+        The ``guest_lifetime_seconds`` argument the engine passed to the sandbox bind.
+    """
+    return _bind_kwargs(payload)["guest_lifetime_seconds"]
 
 
 def test_stored_run_binds_its_deadline_override() -> None:
@@ -138,6 +150,18 @@ def test_stored_run_binds_its_deadline_override() -> None:
 def test_run_without_override_keeps_the_configured_deadline() -> None:
     """A run without the field passes no override, so the configured lifetime applies."""
     assert _bound_lifetime(_request().model_dump(mode="json", by_alias=True)) is None
+
+
+def test_stored_run_binds_its_chosen_sandbox_provider() -> None:
+    """A run that names a sandbox provider binds its boxes on that provider (SKY-606)."""
+    payload = _request(sandbox_provider="vercel").model_dump(mode="json", by_alias=True)
+
+    assert _bind_kwargs(payload)["provider"] == "vercel"
+
+
+def test_run_without_provider_binds_the_default_provider() -> None:
+    """A run without a provider passes none, so the deployment default applies."""
+    assert _bind_kwargs(_request().model_dump(mode="json", by_alias=True))["provider"] is None
 
 
 def test_override_below_one_minute_is_refused() -> None:

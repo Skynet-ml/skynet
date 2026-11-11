@@ -1,16 +1,31 @@
-"""Expose the deployment's managed optimization runtime capability."""
+"""Expose the deployment's managed optimization runtime capability and its sandbox providers."""
 
 from __future__ import annotations
 
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from ...billing.protected_execution import protected_vercel_unavailable_reason, runtime_cost_profile
 from ...config import settings
+from ...sandbox.bridge import default_provider, offered_providers
 from ..auth import AuthenticatedUser, get_authenticated_user
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+
+
+# One sandbox provider a run may choose. No class docstring: Pydantic would
+# publish it as the OpenAPI schema description.
+class SandboxProviderInfo(BaseModel):
+    id: str
+    label: str
+
+
+# The providers a run may choose on this deployment, and the one it uses when it names none.
+class SandboxProviderCatalogResponse(BaseModel):
+    providers: list[SandboxProviderInfo]
+    default_provider: str
 
 
 def execution_runtime_catalog(*, has_image_inputs: bool = False) -> dict[str, Any]:
@@ -45,7 +60,7 @@ def execution_runtime_catalog(*, has_image_inputs: bool = False) -> dict[str, An
 
 
 def create_execution_runtimes_router() -> APIRouter:
-    """Build the authenticated runtime capability endpoint."""
+    """Build the authenticated runtime capability and sandbox provider endpoints."""
     router = APIRouter()
 
     @router.get("/execution-runtimes")
@@ -60,5 +75,23 @@ def create_execution_runtimes_router() -> APIRouter:
             Managed sandbox capability and its unavailability reason, if any.
         """
         return execution_runtime_catalog(has_image_inputs=has_image_inputs)
+
+    @router.get("/sandbox-providers", response_model=SandboxProviderCatalogResponse)
+    def sandbox_providers(user: AuthenticatedUserDep) -> SandboxProviderCatalogResponse:
+        """List the sandbox providers a run may choose on this deployment.
+
+        Only providers that are configured here and that protected execution
+        reserves and meters are listed.
+
+        Args:
+            user: Authenticated user authorized to configure a run.
+
+        Returns:
+            The offered providers and the deployment default.
+        """
+        return SandboxProviderCatalogResponse(
+            providers=[SandboxProviderInfo(**entry) for entry in offered_providers(settings)],
+            default_provider=default_provider(settings),
+        )
 
     return router

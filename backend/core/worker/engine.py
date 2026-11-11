@@ -1025,6 +1025,7 @@ class BackgroundWorker:
                         owner_id=optimization_id,
                         image=sandbox_image,
                         guest_lifetime_seconds=payload_dict.get("deadline_seconds"),
+                        provider=payload_dict.get("sandbox_provider"),
                         parent_hosts=(
                             PACKAGE_REGISTRY_HOSTS
                             if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and is_repo_payload(payload_dict)

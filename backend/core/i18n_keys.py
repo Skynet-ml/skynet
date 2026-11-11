@@ -371,6 +371,7 @@ class I18nKey(StrEnum):
     REPO_GATE_UNKNOWN_CONNECTOR = 'repo_gate.unknown_connector'
     SANDBOX_DOCKER_IMAGE_MISSING = 'sandbox.docker_image_missing'
     SANDBOX_DOCKER_UNAVAILABLE = 'sandbox.docker_unavailable'
+    SANDBOX_PROVIDER_UNAVAILABLE = 'sandbox.provider_unavailable'
     SECRETS_INVALID_NAME = 'secrets.invalid_name'
     SECRETS_INVALID_VALUE = 'secrets.invalid_value'
     SECRETS_LIMIT_REACHED = 'secrets.limit_reached'
