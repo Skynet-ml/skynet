@@ -102,6 +102,7 @@ import {
   encodeSetupChat,
   hideKickoffs,
   isSavedSetupChat,
+  keepHiddenTurns,
   legacySetupChatId,
   newSetupChatId,
   newSetupChatStart,
@@ -115,6 +116,7 @@ import {
   storedKickedScreens,
   trackAutoTurn,
   trackKickoffTurn,
+  unansweredTurn,
   type AutoTurn,
   type KickoffTurn,
   type SetupChat,
@@ -276,6 +278,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const screenOpeningRef = React.useRef<string | null>(null);
   const shownScreenRef = React.useRef<string | null>(null);
   const kickedScreensRef = React.useRef(new Set<string>());
+  // Counts each setup chat opening, so a late server load can tell it is stale.
+  const setupRunRef = React.useRef(0);
   // A kickoff turn counts as done for the tab's copy only once it finished,
   // so a reload in the middle of it runs it again.
   const kickoffTurnRef = React.useRef<KickoffTurn | null>(null);
@@ -559,6 +563,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     },
     [keepSetupChat, openConversation],
   );
+  // The server refuses a turn as not_found before it does any work, so the
+  // new chat can send the refused turn again.
+  const retryInNewSetupChat = React.useCallback(
+    (messages: AgentMessage[]) => {
+      const { kept, turn } = unansweredTurn(messages);
+      restartSetupChat(kept);
+      if (turn) sendToAgent(turn.content, undefined, { hidden: turn.hidden ?? false });
+    },
+    [restartSetupChat, sendToAgent],
+  );
   // The server's copy of a reopened setup chat replaces the tab's copy only
   // while no turn changed it. A 404 restarts the chat on view, even after a
   // turn; a running turn on it fails with not_found and restarts it then.
@@ -571,7 +585,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const live = liveChatRef.current;
       if (load.detail) {
         if (setupChatUnchanged(setupChatRef.current, live, opened)) {
-          openConversation(opened.id, hideKickoffs(load.detail.messages));
+          openConversation(opened.id, keepHiddenTurns(hideKickoffs(load.detail.messages), opened.messages));
         }
       } else if (load.missing && setupChatRef.current === opened.id && live.id === opened.id && !live.busy) {
         restartSetupChat(live.messages);
@@ -584,6 +598,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // waits for the server's copy, which may replace it.
   const openSetupChat = React.useCallback(
     async (saved: { id: string; messages: AgentMessage[] } | null, kickoff: string | null) => {
+      const run = ++setupRunRef.current;
       if (!saved) {
         // The first turn saves the chat and gives it the server's id.
         keepSetupChat(newSetupChatId());
@@ -595,11 +610,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         setSetupLoad(saved.id);
         const load = await loadConversation(saved.id);
         setSetupLoad(null);
-        // A load for a setup that closed or moved on must not touch the new one.
-        if (setupChatRef.current !== saved.id) return;
+        // A load for a setup that closed or opened again must not touch the
+        // new one. A restart to a new id during the load keeps the setup.
+        if (run !== setupRunRef.current || setupChatRef.current === null) return;
         settleSetupLoad(saved, load);
       }
-      if (kickoff) setKickoffScreen(kickoff);
+      // A screen change during the load set that screen's own kickoff.
+      if (kickoff && shownScreenRef.current === kickoff) setKickoffScreen(kickoff);
     },
     [keepSetupChat, newSession, openConversation, activateConversation, settleSetupLoad],
   );
@@ -701,9 +718,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const agentErrorCode = agent.errorCode;
   React.useEffect(() => {
     if (setupChatGone(setupChatRef.current, agentConversationId, agentErrorCode)) {
-      restartSetupChat(liveChatRef.current.messages);
+      retryInNewSetupChat(liveChatRef.current.messages);
     }
-  }, [agentConversationId, agentErrorCode, restartSetupChat]);
+  }, [agentConversationId, agentErrorCode, retryInNewSetupChat]);
   React.useEffect(
     () =>
       registerSetupChatFlush(() => {

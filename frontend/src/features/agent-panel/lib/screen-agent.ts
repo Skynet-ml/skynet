@@ -51,6 +51,45 @@ export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
   );
 }
 
+/**
+ * Copy the tab copy's hidden marks onto the server copy. The server stores a
+ * hidden turn (such as the agent's Back request) as a plain user turn.
+ *
+ * Args:
+ *   server: The server's messages.
+ *   tab: The tab copy's messages.
+ *
+ * Returns:
+ *   The server's messages, each user turn hidden when its matching tab turn was.
+ */
+export function keepHiddenTurns(server: AgentMessage[], tab: readonly AgentMessage[]): AgentMessage[] {
+  const tabTurns = tab.filter((m) => m.role === "user");
+  let next = 0;
+  return server.map((m) => {
+    if (m.role !== "user") return m;
+    // The user turns keep their order, so each one matches the next tab turn with its text.
+    const at = tabTurns.findIndex((t, i) => i >= next && t.content === m.content);
+    if (at < 0) return m;
+    next = at + 1;
+    return tabTurns[at]?.hidden && !m.hidden ? { ...m, hidden: true } : m;
+  });
+}
+
+/**
+ * Split off a chat's last user turn when no reply follows it.
+ *
+ * Args:
+ *   messages: The chat's messages.
+ *
+ * Returns:
+ *   The messages before that turn, and the turn (null when the last message is no user turn).
+ */
+export function unansweredTurn(messages: AgentMessage[]): { kept: AgentMessage[]; turn: AgentMessage | null } {
+  const last = messages[messages.length - 1];
+  if (last?.role !== "user") return { kept: messages, turn: null };
+  return { kept: messages.slice(0, -1), turn: last };
+}
+
 /** A move the screen agent asked for, read from its tool result. */
 export type ScreenNav =
   /** ``to`` is a later screen to jump to, after a go-back edit: the user returns where they were. */
