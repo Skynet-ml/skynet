@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from ..harness import (
     PRIME_AGENT_VERSION,
     PROMPT_FILE,
     GatewayConfig,
+    _with_relay_config,
     build_launch,
     launch_payload,
     pi_editor_launch,
@@ -309,6 +311,33 @@ def test_protected_harness_uses_offline_dependencies_and_local_relay(tmp_path: P
         content = (tmp_path / name).read_text()
         assert _GATEWAY.url not in content
         assert "http://127.0.0.1:3210/v1" in content
+
+
+def test_relay_rewrite_reads_and_writes_the_config_as_utf8(tmp_path: Path) -> None:
+    """Rewrite a config with non-ASCII text as UTF-8, never in the box locale's encoding (SKY-595).
+
+    ``PYTHONWARNDEFAULTENCODING`` makes Python warn on every text read or write
+    with no ``encoding=``, and the warnings filter makes that warning fail the run.
+    """
+    gateway = GatewayConfig(url="https://gw.example/caf\u00e9/v1", api_key="secret-key")
+    relay = "http://127.0.0.1:3210/v1"
+    (tmp_path / "config.json").write_text(f'{{"name": "caf\u00e9", "url": "{gateway.url}"}}', encoding="utf-8")
+
+    subprocess.run(
+        _with_relay_config("true", {"config.json": ""}, gateway),
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
+            "APP_BUDGET_RELAY_URL": relay,
+            "PYTHONWARNDEFAULTENCODING": "1",
+            "PYTHONWARNINGS": "error::EncodingWarning",
+        },
+        timeout=10,
+        check=True,
+    )
+
+    assert (tmp_path / "config.json").read_text(encoding="utf-8") == f'{{"name": "caf\u00e9", "url": "{relay}"}}'
 
 
 def test_prime_agent_launch_reuses_the_pi_gateway_config_in_its_own_agent_dir() -> None:
