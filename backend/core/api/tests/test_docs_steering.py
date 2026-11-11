@@ -10,9 +10,17 @@ import pytest
 from ...service_gateway.agents.steering import SteerInbox, SteerStore
 from ..auth import AuthenticatedUser
 from ..routers import docs_agent
-from .test_docs_agent_router import _client, _events, _ScriptedLM, _tool_output, docs_root, redis_double
+from .test_docs_agent_router import (
+    _client,
+    _events,
+    _ScriptedLM,
+    _simulated_pi_harness,
+    _tool_output,
+    docs_root,
+    redis_double,
+)
 
-__all__ = ["docs_root", "redis_double"]
+__all__ = ["_simulated_pi_harness", "docs_root", "redis_double"]
 
 
 @pytest.mark.parametrize("text", ["Focus on run budgets", "x" * 8000], ids=["normal", "at-limit"])

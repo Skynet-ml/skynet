@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,9 +21,9 @@ from sqlalchemy.pool import StaticPool
 
 from core.api.routers.folders import create_folders_router
 from core.config import settings
-from core.service_gateway.agents import docs_tools, web_tools
+from core.service_gateway.agents import docs_tools, pi_bridge, pi_react, web_tools
 from core.service_gateway.agents import generalist as generalist_module
-from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload, _SubmitArgExtractor
+from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload
 from core.service_gateway.agents.docs_retrieval import DocsCorpus
 from core.service_gateway.agents.generalist import (
     AUTOMATIC_TURN_PREFIX,
@@ -55,6 +56,21 @@ from core.service_gateway.agents.generalist import (
     validate_wizard_screen,
 )
 from core.storage.models import Base
+
+from .test_pi_react import _simulated_pi
+
+
+@pytest.fixture(autouse=True)
+def _simulated_pi_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run these turns on the in-process Pi stand-in, so no ``pi`` binary is needed.
+
+    The real-Pi check lives in ``test_pi_bridge.py``.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
+
 
 _SUBMIT = "submit_unified_run_optimize_post"
 _READY: dict[str, Any] = {
@@ -846,6 +862,70 @@ def _make_fake_tool(name: str, return_value: str = "ok") -> dspy.Tool:
     return dspy.Tool(func=func, name=name, desc="test tool", args={}, arg_types={}, arg_desc={})
 
 
+async def test_a_stopped_pi_turn_ends_an_approval_wait_in_its_tool_thread() -> None:
+    """When the Pi turn stops, the tool thread cancels the call waiting for approval and gives up."""
+    events: list[dict] = []
+    registry = ApprovalRegistry()
+    tool = _wrap_tool_with_approval(
+        _make_fake_tool("rename_job_optimizations", return_value="renamed"),
+        trust_mode="ask",
+        registry=registry,
+        emit=events.append,
+        outer_loop=asyncio.get_running_loop(),
+        needs_approval=lambda _name, _mode: True,
+    )
+    stop = threading.Event()
+    token = pi_bridge._TURN_STOP.set((stop,))
+    try:
+        call = asyncio.ensure_future(asyncio.to_thread(tool.func))
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+    for _ in range(200):
+        if any(event["event"] == "pending_approval" for event in events):
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    with pytest.raises(RuntimeError, match="turn stopped"):
+        await asyncio.wait_for(call, timeout=5)
+    for _ in range(200):
+        if any(event["event"] == "tool_end" for event in events):
+            break
+        await asyncio.sleep(0.01)
+    end = next(event for event in events if event["event"] == "tool_end")
+    assert end["data"]["result"] == "cancelled"
+    assert not registry._pending
+
+
+async def test_a_tool_thread_hands_the_turn_stop_to_the_work_it_starts() -> None:
+    """A gated tool's body, and a thread it starts (a coding-agent hand-off), see the Pi turn's stop signal."""
+
+    async def hand_off(**_kwargs: Any) -> Any:
+        """Return the stop signals a worker thread sees.
+
+        Args:
+            **_kwargs: Ignored.
+
+        Returns:
+            The signals.
+        """
+        return await asyncio.to_thread(pi_bridge._TURN_STOP.get)
+
+    tool = _wrap_tool_with_approval(
+        dspy.Tool(func=hand_off, name="hand_off", desc="test tool", args={}, arg_types={}, arg_desc={}),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _event: None,
+        outer_loop=asyncio.get_running_loop(),
+    )
+    stop = threading.Event()
+    token = pi_bridge._TURN_STOP.set((stop,))
+    try:
+        seen = await asyncio.to_thread(tool.func)
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+    assert seen == (stop,)
+
+
 @pytest.mark.asyncio
 async def test_wrap_bypasses_when_no_approval_needed() -> None:
     """Wrapped tool runs straight through when no approval is needed."""
@@ -1028,55 +1108,6 @@ def test_registry_resolve_unknown_returns_false() -> None:
     """Resolving an unknown call id returns ``False``."""
     registry = ApprovalRegistry()
     assert registry.resolve("does-not-exist", True) is False
-
-
-def test_submit_arg_extractor_streams_value_incrementally() -> None:
-    """Incremental chunks of a submit tool_calls payload yield growing deltas."""
-    ext = _SubmitArgExtractor("assistant_message")
-    deltas: list[str] = []
-    for chunk in (
-        '{"tool_calls": [',
-        '{"name": "submit", "args": ',
-        '{"assistant_message": "',
-        "Shal",
-        "om, ",
-        "Gilad",
-        '!"}}]}',
-    ):
-        delta = ext.feed(chunk)
-        if delta:
-            deltas.append(delta)
-    assert "".join(deltas) == "Shalom, Gilad!"
-
-
-def test_submit_arg_extractor_ignores_non_submit_calls() -> None:
-    """A non-submit tool call produces no delta, and reset clears the buffer."""
-    ext = _SubmitArgExtractor("assistant_message")
-    assert ext.feed('{"tool_calls": [{"name": "list_models", "args": {}}]}') is None
-    ext.reset()
-    delta = ext.feed('{"tool_calls": [{"name": "submit", "args": {"assistant_message": "Done!"}}]}')
-    assert delta == "Done!"
-
-
-def test_submit_arg_extractor_handles_malformed_json() -> None:
-    """A partial / malformed chunk returns ``None`` without raising."""
-    ext = _SubmitArgExtractor("reply")
-    assert ext.feed('{"tool_calls": [{"name": "submit') is None
-
-
-def test_submit_arg_extractor_picks_submit_among_parallel_calls() -> None:
-    """Parallel tool calls including submit still resolve to the submit arg."""
-    ext = _SubmitArgExtractor("reply")
-    parallel = '{"tool_calls": [{"name": "foo", "args": {}}, {"name": "submit", "args": {"reply": "yo"}}]}'
-    assert ext.feed(parallel) == "yo"
-
-
-def test_submit_arg_extractor_is_idempotent_on_repeat_feed() -> None:
-    """Re-feeding the same buffer or an empty chunk yields no new delta."""
-    ext = _SubmitArgExtractor("reply")
-    full = '{"tool_calls": [{"name": "submit", "args": {"reply": "hi"}}]}'
-    assert ext.feed(full) == "hi"
-    assert ext.feed("") is None
 
 
 @pytest.mark.asyncio
@@ -2157,3 +2188,35 @@ def test_chat_replay_drops_turn_checks() -> None:
     )
     names = [call.name for event in history.messages for call in getattr(event.get("tool_calls"), "tool_calls", [])]
     assert names == ["submit"]
+
+
+@pytest.mark.asyncio
+async def test_hand_off_puts_the_coding_agents_optimize_toml_into_the_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hand-off sends the current optimize.toml and puts the returned file into the turn's patch (SKY-184)."""
+    seen: dict[str, Any] = {}
+
+    def fake_coder(context: dict[str, Any], request: str, **_kwargs: Any) -> dict[str, Any]:
+        """Record the context and return a new optimize.toml."""
+        seen.update(context)
+        return {"wizard_state": {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}, "summary": "", "open_questions": []}
+
+    monkeypatch.setattr(generalist_module, "run_coding_agent", fake_coder)
+    state = cast(WizardState, {"wizard_screen": "metric", "artifact_kind": "repo", "optimize_toml": "version = 1\n"})
+    turn = _TurnAuthoringFlag()
+    (tool,) = generalist_module.coding_agent_tools(state, turn, lm=None, emit=lambda _e: None, github_token=None)
+
+    await tool.func("Run the tests.")
+
+    assert seen["optimize_toml"] == "version = 1\n"
+    assert turn.wizard_patch == {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}
+
+
+def test_hand_off_desc_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
+    """The setup agent shows the returned optimize.toml in full, so the user sees the file (SKY-184)."""
+    state = cast(WizardState, {"wizard_screen": "metric", "artifact_kind": "repo"})
+    (tool,) = generalist_module.coding_agent_tools(
+        state, _TurnAuthoringFlag(), lm=None, emit=lambda _e: None, github_token=None
+    )
+
+    assert "show the user the returned optimize_toml in full" in tool.desc
+    assert "Do not write the same code again with update_wizard_state." in tool.desc

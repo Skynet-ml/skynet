@@ -12,7 +12,8 @@ import { StackedUsageBar } from "./StackedUsageBar";
 import { StorageSkeleton } from "./StorageSkeleton";
 import { CATEGORY_META, STORAGE_CATEGORY_ORDER } from "../lib/categories";
 import { cn } from "@/shared/lib/utils";
-import { ResourceModeSwitch, useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
 
 /**
  * Top-level /storage page: the account-wide cleanup surface. A usage gauge over
@@ -32,6 +33,7 @@ export function StorageView() {
   const source = resources.mode;
   // Deletes from this page act on this Mac's data only, so web rows stay read-only here.
   const remote = resources.switchable && source === "hosted";
+  const swapping = useSourceSwap(source);
 
   // The newest request wins, so a late answer for the other mode never
   // replaces the figures on screen.
@@ -78,24 +80,11 @@ export function StorageView() {
     })).sort((a, b) => b.bytes - a.bytes);
   }, [usage]);
 
-  const modeBar = resources.switchable ? (
-    <div className="mt-6 flex justify-end">
-      <ResourceModeSwitch {...resources} />
-    </div>
-  ) : null;
-
-  if (loading)
-    return (
-      <>
-        {modeBar}
-        <StorageSkeleton />
-      </>
-    );
+  if (loading || swapping) return <StorageSkeleton />;
 
   if (error || !usage) {
     return (
       <div className="pb-16">
-        {modeBar}
         <div className="mt-8">
           <EmptyState icon={HardDrive} title={msg("storage.page.error")} />
         </div>
@@ -109,8 +98,7 @@ export function StorageView() {
   const free = Math.max(0, quota - used);
 
   return (
-    <div className="pb-16">
-      {modeBar}
+    <div className="swap-in pb-16">
       <section className="mt-8">
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-foreground">

@@ -79,7 +79,7 @@ Auto هو الخيار الافتراضي لكل تشغيل. يعمل على م�
 
 | الإعداد                                    | الافتراضي | النطاق                                           |
 | ------------------------------------------ | --------- | ------------------------------------------------ |
-| وكيل البرمجة                               | Codex     | Pi, Codex, OpenCode, Prime Agent، أمر مخصّص       |
+| وكيل البرمجة                               | Codex     | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy، أمر مخصّص       |
 | المرشّحون في كل تكرار                       | 3         | من 1 إلى 8. |
 | الحد الأقصى لاستدعاءات الأدوات لكل مرشح     | 100       | من 1 إلى 1000                                    |
 

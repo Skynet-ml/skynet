@@ -338,7 +338,16 @@ async def test_allowlist_start_opens_the_proxy_first(fake_docker: _FakeDocker) -
     assert proxy_run[proxy_run.index("--user") + 1] == "65534:65534"
     assert proxy_run[-2:] == ["a.example.com", "b.example.com"]
     box_run = fake_docker.calls[-1]
+    for run in (proxy_run, box_run):
+        assert run[run.index("--pull") + 1] == "never"
     assert box_run[box_run.index("--network") + 1] == f"{env.container_name}-net"
+
+
+async def test_offline_box_never_pulls_its_image(fake_docker: _FakeDocker) -> None:
+    """Start the box only from a local image, so a pull cannot outlive the CLI timeout."""
+    await DockerEnvironment(_spec()).start()
+    (run,) = fake_docker.calls
+    assert run[run.index("--pull") + 1] == "never"
 
 
 async def test_failed_proxy_start_removes_the_network(fake_docker: _FakeDocker) -> None:

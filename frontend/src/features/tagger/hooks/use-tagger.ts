@@ -55,6 +55,7 @@ import {
   interviewRequestEffort,
   interviewRequestModel,
   labelsAgree,
+  rememberInterviewPick,
   sampleRowIds,
 } from "../lib/assist";
 import { prefillFreetextPredictions } from "../lib/freetext-prefill";
@@ -721,6 +722,7 @@ export function useTagger(initialSession?: TaggerSessionDetail | null) {
       const controller = new AbortController();
       interviewAbortRef.current = controller;
       try {
+        rememberInterviewPick(state);
         const sentModel = await interviewRequestModel(state);
         await streamInterviewTurn(
           sessionId,
