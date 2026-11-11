@@ -11,8 +11,18 @@ registerHooks({
   },
 });
 
-const { diffRows, fileStats, hunkStarts, isChanged, orderFiles, revertHunk, splitRows } =
-  await import("./draft-changes.ts");
+const {
+  diffRows,
+  draftDiff,
+  fileStats,
+  hunkStarts,
+  isChanged,
+  isLarge,
+  LARGE_DIFF_LINES,
+  orderFiles,
+  revertHunk,
+  splitRows,
+} = await import("./draft-changes.ts");
 
 const lines = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `line ${i + from}`);
 
@@ -122,4 +132,22 @@ test("a change of only the final newline is not a change", () => {
     (f) => f.path,
   );
   assert.deepEqual(order, ["z.py", "metric.py"]);
+});
+
+test("a file's line diff is computed once and reused while its texts stay the same", () => {
+  const before = lines(50).join("\n");
+  const after = before.replace("line 7", "line seven");
+  const first = draftDiff(before, after);
+  assert.equal(draftDiff(before, after), first);
+  assert.notEqual(draftDiff(before, `${after}\nmore`), first);
+  // Many new files share the empty old text; each keeps its own diff.
+  const news = Array.from({ length: 10 }, (_, i) => draftDiff("", `new ${i}`));
+  news.forEach((diff, i) => assert.equal(draftDiff("", `new ${i}`), diff));
+});
+
+test("only a change of more than the threshold counts as large", () => {
+  const big = { path: "big.py", before: "", after: lines(LARGE_DIFF_LINES + 1).join("\n") };
+  const edge = { path: "edge.py", before: "", after: lines(LARGE_DIFF_LINES).join("\n") };
+  assert.equal(isLarge(big), true);
+  assert.equal(isLarge(edge), false);
 });

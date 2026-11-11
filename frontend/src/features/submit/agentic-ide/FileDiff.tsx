@@ -201,6 +201,7 @@ export function FileDiff({
   loading,
   split,
   collapsed,
+  onScreen,
   locked,
   markers,
   onToggleCollapse,
@@ -217,6 +218,8 @@ export function FileDiff({
   loading: boolean;
   split: boolean;
   collapsed: boolean;
+  /** The file is near the visible list; until then its diff rows are not built or drawn. */
+  onScreen: boolean;
   /** The agent is writing; reverts wait for its turn to end. */
   locked: boolean;
   markers: readonly LineMarker[];
@@ -232,9 +235,10 @@ export function FileDiff({
   onDeleteComment?: (comment: LineComment) => void;
 }) {
   // Diffs build only for the files on view, so a large draft loads per file.
+  const drawn = !collapsed && !loading && onScreen;
   const rows = React.useMemo(
-    () => (collapsed || loading ? [] : diffRows(file.before, file.after)),
-    [collapsed, loading, file.before, file.after],
+    () => (drawn ? diffRows(file.before, file.after) : []),
+    [drawn, file.before, file.after],
   );
   const stats = React.useMemo(() => fileStats(file), [file]);
   const markerAt = React.useMemo(() => new Map(markers.map((m) => [m.line, m.message])), [markers]);
@@ -343,6 +347,15 @@ export function FileDiff({
           <p className="px-3 py-3 text-xs text-muted-foreground">
             {msg("submit.agentic_ide.no_file_changes")}
           </p>
+        ) : !onScreen ? (
+          // Holds about the diff's height, so the scroll bar stays near its final size.
+          <div
+            aria-hidden
+            className="text-[0.75rem]/[1.65]"
+            style={{
+              height: `${((split ? Math.max(stats.added, stats.removed) : stats.added + stats.removed) + 6) * 1.65}em`,
+            }}
+          />
         ) : (
           <div
             dir="ltr"
