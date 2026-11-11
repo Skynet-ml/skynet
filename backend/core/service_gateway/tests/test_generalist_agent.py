@@ -299,7 +299,7 @@ def test_chat_outside_the_wizard_opens_the_setup_in_the_same_chat() -> None:
     assert "or from the chat in which the user asked for this setup" in screen_prompt
 
 
-def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
+def test_tagging_request_opens_the_tagger_and_names_the_chat_by_wizard_screen() -> None:
     """A tagging request opens the tagger setup, with this chat only outside a setup (SKY-631)."""
     prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
     assert "call ``open_page`` with ``path`` ``/tagger?dataset=<id>``" in prompt
@@ -311,7 +311,6 @@ def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
     assert "When ``wizard_screen`` is absent, the tagger opens with this same chat beside it" in prompt
     assert "never say that a new chat starts" in prompt
     assert "When ``wizard_screen`` is present, the tagger opens with a new chat" in prompt
-    assert "the tagger opens with a new chat" in prompt
     assert "this setup chat stays in the history as a draft" in prompt
     assert "The tagger opens with this same chat" not in prompt
     # The rule holds whether or not a wizard screen is on view, so it sits

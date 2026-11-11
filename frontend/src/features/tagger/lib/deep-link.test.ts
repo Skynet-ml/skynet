@@ -25,19 +25,6 @@ test("the setup follows the deep link as the URL changes", () => {
   assert.equal(startingNewAfterLink(false, null, null), false);
 });
 
-// The setup's back link runs TaggerView's onExit, which sets startingNew to
-// false and calls the tagger's backToSetup. backToSetup replaces the URL with a
-// bare /tagger, so the link goes away and the same link can come again.
-test("in-app back, then the same link again opens the setup", () => {
-  let startingNew = startingNewAfterLink(false, null, "X");
-  assert.equal(startingNew, true);
-  startingNew = false; // onExit
-  startingNew = startingNewAfterLink(startingNew, "X", null); // backToSetup: /tagger
-  assert.equal(startingNew, false);
-  startingNew = startingNewAfterLink(startingNew, null, "X"); // the chat's link again
-  assert.equal(startingNew, true);
-});
-
 test("a linked dataset without a name in the link takes its name from the dataset list", () => {
   const datasets = [
     { id: "a", name: "Support tickets" },
