@@ -54,7 +54,13 @@ import {
   type SetupQuestion,
   type SetupSettingDetail,
 } from "../lib/setup-tour";
-import { playsEntrance, readSplashState, setupCoversPath, subscribeSplash } from "../lib/entrance";
+import {
+  fadesInEntrance,
+  playsEntrance,
+  readSplashState,
+  setupCoversPath,
+  subscribeSplash,
+} from "../lib/entrance";
 import { useExperienceOptional } from "../providers/experience-provider";
 import { LEVEL_KEYS } from "./level-keys";
 import { SetupTour } from "./SetupTour";
@@ -108,14 +114,13 @@ const TRUST_OPTIONS: ReadonlyArray<{
  * The setup moves like the splash that plays when an optimization is sent
  * (`SubmitSplashOverlay`). On a first login the app-load splash hands over
  * on its last frame, and the title rises under its wordmark (`entrance.ts`).
- * When the splash is already gone, the app shows as normal for a
- * moment, so the user sees what they are setting up; then the setup's warm
- * panel slides down over it with the wordmark scaling in, and the title
- * settles under the wordmark long enough to read before the language
- * question takes its place. The panel then slides back up and the rest of
+ * After a password sign-in the splash already faded on `/login`, so the
+ * first-run setup fades in on that same frame instead. When Settings reruns
+ * the setup, the setup's warm panel slides down over the app with the
+ * wordmark scaling in, and the title settles under the wordmark long enough
+ * to read before the language question takes its place. The panel then slides back up and the rest of
  * the setup walks the app itself; the finale is that splash.
  */
-const APP_GLANCE_MS = 2000;
 const SPLASH_EASE: Transition["ease"] = [0.16, 1, 0.3, 1];
 // A token, so the panel follows the light/dark theme.
 const SPLASH_GROUND = "var(--splash-ground)";
@@ -136,7 +141,7 @@ const REDUCED_S = 0.2;
  */
 const ANSWER_HOLD_MS = 700;
 
-type Stage = "glance" | "title" | "language" | "tour";
+type Stage = "title" | "language" | "tour";
 
 /** Where the finale is: not yet, the splash over the app, or sliding off it. */
 type Finale = "none" | "splash" | "out";
@@ -217,25 +222,26 @@ function IntakeSurface() {
       ? resumeAfterLanguageSwitch(stored, resume, locale)
       : (stored ?? emptyDraft());
     // While the app-load splash still plays, the setup's entrance is the splash itself.
-    const entrance = playsEntrance({
+    const entranceState = {
       languageAnswered: draft.answered.includes("language"),
       rerunning: experience.rerunning,
       splash: readSplashState(),
-    });
+    };
+    const entrance = playsEntrance(entranceState);
+    // No splash above it (after a password sign-in): the same frame fades in.
+    const fadeIn = fadesInEntrance(entranceState);
     // A setup already under way picks up where it was, without the entrance again.
     // Back from a language switch, the panel shows once more so it can slide up off the tour.
     const stage: Stage = draft.answered.includes("language")
       ? resume
         ? "language"
         : "tour"
-      : experience.rerunning || entrance
-        ? "title"
-        : "glance";
+      : "title";
     // Back from a sign-in that left the page (Slack, a connector): the same stop.
     const stopIndex = draft.answered.includes("language")
       ? resumeStopIndex(setupStops(draft.answers.billing), draft.stop)
       : 0;
-    return { draft, stage, stopIndex, resumed: !!resume, entrance };
+    return { draft, stage, stopIndex, resumed: !!resume, entrance, sameFrame: entrance || fadeIn };
   });
   const splashState = React.useSyncExternalStore(
     subscribeSplash,
@@ -266,17 +272,16 @@ function IntakeSurface() {
   }, [draft, stop.id]);
 
   React.useEffect(() => {
-    if (stage !== "glance" && stage !== "title") return;
+    if (stage !== "title") return;
     if (!revealed) return;
     const titleIn = reduceMotion
       ? REDUCED_S * 1000
-      : initial.entrance
+      : initial.sameFrame
         ? WORDMARK_S * 1000
         : TITLE_IN_MS;
-    const delay = stage === "glance" ? APP_GLANCE_MS : titleIn + TITLE_HOLD_MS;
-    const timer = setTimeout(() => setStage(stage === "glance" ? "title" : "language"), delay);
+    const timer = setTimeout(() => setStage("language"), titleIn + TITLE_HOLD_MS);
     return () => clearTimeout(timer);
-  }, [stage, reduceMotion, revealed, initial.entrance]);
+  }, [stage, reduceMotion, revealed, initial.sameFrame]);
 
   // A stop about a setting Settings holds opens it there, framed behind the
   // card; moving on, going back, skipping or finishing closes it again.
@@ -548,8 +553,6 @@ function IntakeSurface() {
     <SubmitSplashOverlay show={finale === "splash"} slideOut onExited={closeAfterSlide} />
   );
 
-  if (stage === "glance") return null;
-
   const fade: Transition = { duration: REDUCED_S, ease: "easeOut" };
   const splash = (delay = 0, duration = WORDMARK_S): Transition =>
     reduceMotion ? fade : { duration, delay, ease: SPLASH_EASE };
@@ -606,30 +609,35 @@ function IntakeSurface() {
                   style={{
                     zIndex: 50,
                     // The entrance continues the splash, so it keeps the splash's ground.
-                    backgroundColor: initial.entrance ? "var(--background)" : SPLASH_GROUND,
+                    backgroundColor: initial.sameFrame ? "var(--background)" : SPLASH_GROUND,
                     fontFamily: ENGLISH_FONT,
-                    ["--evolution-ground" as string]: initial.entrance
+                    ["--evolution-ground" as string]: initial.sameFrame
                       ? "var(--background)"
                       : SPLASH_GROUND,
                   }}
-                  // Only the splash handoff mount (stage "title") stays still; Back from the tour slides in.
+                  // Only the splash handoff mount (stage "title") stays still, and the
+                  // post-sign-in mount fades in; Back from the tour slides in.
                   initial={
                     initial.entrance && stage === "title"
                       ? false
-                      : reduceMotion
+                      : reduceMotion || (initial.sameFrame && stage === "title")
                         ? { opacity: 0 }
                         : { y: "-100%" }
                   }
-                  animate={reduceMotion ? { opacity: 1 } : { y: 0 }}
+                  animate={{ opacity: 1, y: 0 }}
                   exit={reduceMotion ? { opacity: 0 } : { y: "-100%" }}
-                  transition={reduceMotion ? fade : { duration: PANEL_S, ease: SPLASH_EASE }}
+                  transition={
+                    reduceMotion || (initial.sameFrame && stage === "title")
+                      ? fade
+                      : { duration: PANEL_S, ease: SPLASH_EASE }
+                  }
                 >
                   <DialogPrimitive.Title className="sr-only">
                     {en("experience.intake.entrance.title")}
                   </DialogPrimitive.Title>
 
                   <AnimatePresence mode="wait" initial={false}>
-                    {stage === "title" && initial.entrance ? (
+                    {stage === "title" && initial.sameFrame ? (
                       <motion.div
                         key="title"
                         // The splash's exact layout, so the handover frame does not move.
