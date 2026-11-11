@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.server
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -128,6 +132,298 @@ def test_run_session_reports_timeouts_and_budget_overruns(tmp_path: Path) -> Non
     assert outcome.usage == {"input_tokens": 1000, "output_tokens": 0}
     assert outcome.cost_usd == pytest.approx(10.0)
     assert outcome.duration_seconds < 4
+
+
+def _record_signals(
+    monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[int, int, int]]
+) -> list[tuple[str, int, int]]:
+    """Fake the process table and record each signal ``_stop_group`` sends.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        table: ``(parent, group, start)`` for each fake pid.
+
+    Returns:
+        The list that collects ``("group", pgid, signum)`` and ``("pid", pid, signum)`` entries.
+    """
+    sent: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(harness_bridge.os, "killpg", lambda pid, signum: sent.append(("group", pid, signum)))
+    monkeypatch.setattr(harness_bridge.os, "kill", lambda pid, signum: sent.append(("pid", pid, signum)))
+    monkeypatch.setattr(harness_bridge, "_proc_stats", lambda: dict(table))
+    return sent
+
+
+def test_stop_group_signals_the_group_once_and_each_detached_descendant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signal the shell's group once, then only the descendants that left it, never a group member twice."""
+    sent = _record_signals(
+        monkeypatch,
+        {
+            100: (1, 100, 7),  # the harness shell
+            101: (100, 100, 8),  # a group member, reached by killpg
+            102: (101, 102, 9),  # a detached tool command
+            103: (100, 103, 9),  # an orphaned background job the shell adopted
+            104: (102, 102, 9),  # a child in the tool command's group
+            200: (1, 200, 3),  # an unrelated process
+        },
+    )
+
+    harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGTERM, 7)  # type: ignore[arg-type]
+
+    assert sent[0] == ("group", 100, signal.SIGTERM)
+    assert sorted(sent[1:]) == [("pid", pid, signal.SIGTERM) for pid in (102, 103, 104)]
+
+
+def test_stop_group_leaves_a_process_that_reused_the_shell_pid_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send nothing when the reaped shell's pid now belongs to a process with another start time."""
+    sent = _record_signals(monkeypatch, {100: (1, 100, 50), 101: (100, 101, 51)})
+
+    harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
+
+    assert sent == []
+
+
+def test_stop_group_signals_the_group_when_the_reaped_pid_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signal only the group when the shell is gone and nothing took its pid, as members can still hold the pipe."""
+    sent = _record_signals(monkeypatch, {101: (1, 100, 8)})
+
+    harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
+
+    assert sent == [("group", 100, signal.SIGKILL)]
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the descendant sweep reads /proc")
+def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> None:
+    """Kill a grandchild that left the harness group and session, the way eve's sandbox starts a tool command."""
+    pid_file = tmp_path / "job.pid"
+    detached = f"import os, time; os.setsid(); open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    process = subprocess.Popen(
+        ["bash", "-c", f"{shlex.quote(sys.executable)} -c {shlex.quote(detached)} & wait"],
+        start_new_session=True,
+        text=True,
+    )
+    root_start = harness_bridge._start_time(process.pid)
+    deadline = time.monotonic() + 10
+    while not (pid_file.exists() and pid_file.read_text().strip()):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    job = int(pid_file.read_text())
+    try:
+        assert os.getsid(job) != process.pid
+
+        harness_bridge._stop_group(process, signal.SIGKILL, root_start)
+        process.wait(timeout=10)
+
+        deadline = time.monotonic() + 10
+        # The killed job's parent is gone, so init reaps it; until then it is a zombie.
+        while _alive(job):
+            assert time.monotonic() < deadline, "the detached job outlived the harness"
+            time.sleep(0.05)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(job, signal.SIGKILL)
+
+
+# PR_SET_CHILD_SUBREAPER is a Linux prctl, so macOS has no way to keep an
+# orphan in the harness tree; the bridge starts the shell plainly there.
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
+def test_timeout_kills_a_background_job_that_a_finished_tool_command_left(tmp_path: Path) -> None:
+    """Kill an orphaned ``sleep`` whose detached parent already exited, the way ``sleep 300 &`` in an eve tool does."""
+    pid_file = tmp_path / "job.pid"
+    tool = (
+        "import os, subprocess; os.setsid(); "
+        "job = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"open({str(pid_file)!r}, 'w').write(str(job.pid))"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(tool)}; sleep 60"
+    job = None
+    try:
+        outcome = run_session(
+            {"run_command": command, "output_format": "plain"},
+            workspace=tmp_path / "work",
+            prompt="x",
+            model="m",
+            session_dir=tmp_path / "session",
+            timeout_seconds=2,
+        )
+        assert outcome.timed_out
+        job = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while _alive(job):
+            assert time.monotonic() < deadline, "the orphaned background job outlived the harness"
+            time.sleep(0.05)
+    finally:
+        if job is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(job, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
+def test_normal_end_kills_a_background_job_that_a_detached_tool_command_left(tmp_path: Path) -> None:
+    """Kill an orphaned ``sleep`` from a detached tool when the harness ends on its own, with no stop."""
+    pid_file = tmp_path / "job.pid"
+    tool = (
+        "import os, subprocess; os.setsid(); "
+        "job = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"open({str(pid_file)!r}, 'w').write(str(job.pid))"
+    )
+    job = None
+    try:
+        outcome = run_session(
+            {"run_command": f"{shlex.quote(sys.executable)} -c {shlex.quote(tool)}", "output_format": "plain"},
+            workspace=tmp_path / "work",
+            prompt="x",
+            model="m",
+            session_dir=tmp_path / "session",
+            timeout_seconds=30,
+        )
+        assert outcome.returncode == 0
+        assert not outcome.timed_out
+        job = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while _alive(job):
+            assert time.monotonic() < deadline, "the orphaned background job outlived the session"
+            time.sleep(0.05)
+    finally:
+        if job is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(job, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the normal-end group kill needs /proc")
+def test_normal_end_kills_a_background_job_left_in_the_harness_group(tmp_path: Path) -> None:
+    """Kill a ``sleep &`` that the harness shell left in its own group when the shell ends on its own."""
+    pid_file = tmp_path / "job.pid"
+    outcome = run_session(
+        {
+            "run_command": f"sleep 300 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}",
+            "output_format": "plain",
+        },
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=30,
+    )
+    job = int(pid_file.read_text())
+    try:
+        assert outcome.returncode == 0
+        deadline = time.monotonic() + 10
+        while _running(job):
+            assert time.monotonic() < deadline, "the background job outlived the session"
+            time.sleep(0.05)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(job, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
+def test_harness_pipelines_end_when_the_reader_closes_the_pipe(tmp_path: Path) -> None:
+    """Keep SIGPIPE at its default in the harness shell, so ``producer | head -1`` ends at once."""
+    outcome = run_session(
+        {
+            "run_command": "while true; do echo x; done | head -1; yes | head -1; echo status=$?",
+            "output_format": "plain",
+        },
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=20,
+    )
+
+    assert not outcome.timed_out
+    assert outcome.returncode == 0
+    assert outcome.stdout.splitlines() == ["x", "y", "status=0"]
+    assert "Broken pipe" not in outcome.stderr
+    assert outcome.duration_seconds < 10
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
+def test_cap_stop_lets_the_harness_exit_trap_remove_its_temp_folder(tmp_path: Path) -> None:
+    """Let the shell's EXIT trap finish after a tool-call cap stop, so a large temp folder is gone."""
+    scratch = tmp_path / "scratch"
+    for index in range(20):
+        part = scratch / str(index)
+        part.mkdir(parents=True)
+        for name in range(1000):
+            (part / str(name)).touch()
+    command = f"trap 'rm -rf {shlex.quote(str(scratch))}' EXIT; {_tool_events_command(3)}"
+    outcome = run_session(
+        {**_PLAIN, "output_format": "pi", "run_command": command, "max_tool_calls": 1},
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=30,
+    )
+
+    assert outcome.tool_cap_reached is True
+    assert not scratch.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
+def test_cap_stop_kills_a_shell_that_ignores_sigterm_without_a_timeout(tmp_path: Path) -> None:
+    """End a cap stop after the reaper's grace when the shell ignores SIGTERM and the session has no timeout."""
+    events = _tool_events_command(3).replace("sleep 5", "sleep 120")
+    outcome = run_session(
+        {**_PLAIN, "output_format": "pi", "run_command": f"trap '' TERM; {events}", "max_tool_calls": 1},
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=None,
+    )
+
+    assert outcome.tool_cap_reached is True
+    assert outcome.duration_seconds < 60
+    assert not (tmp_path / "work" / "late.txt").exists()
+
+
+def test_normal_end_sends_no_group_kill_when_the_reaped_pid_cannot_be_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skip the normal-end group kill without a start time, as the reaped shell pid can belong to a new process."""
+    stops: list[int] = []
+    monkeypatch.setattr(harness_bridge, "_start_time", lambda pid: None)
+    monkeypatch.setattr(harness_bridge, "_stop_group", lambda process, signum, root_start: stops.append(signum))
+
+    outcome = run_session(
+        _PLAIN, workspace=tmp_path / "work", prompt="x", model="m", session_dir=tmp_path / "session", timeout_seconds=30
+    )
+
+    assert outcome.returncode == 0
+    assert stops == []
+
+
+def _running(pid: int) -> bool:
+    """Tell whether a process runs and is not a zombie, on Linux and macOS.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        ``True`` while ``/proc`` or ``ps`` shows the process in a state other than zombie.
+    """
+    if Path("/proc/self/stat").exists():
+        # Slim Linux images can lack ``ps``.
+        return _alive(pid)
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    return bool(state.stdout.strip()) and not state.stdout.strip().startswith("Z")
+
+
+def _alive(pid: int) -> bool:
+    """Tell whether a process runs and is not a zombie.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        ``True`` while ``/proc`` shows the process in a state other than zombie.
+    """
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
 
 
 def test_result_document_and_transcript_match_what_upstream_reads(tmp_path: Path) -> None:
@@ -601,6 +897,7 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
     assert "guard hook" in hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert Path(env["APP_GUARD_PI"]).exists()
     assert (Path(env["OPENCODE_CONFIG_DIR"]) / "plugin" / "app-guard.js").exists()
+    assert Path(env["APP_GUARD_EVE"]).name == "eve-guard.mjs"
 
 
 def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
@@ -838,7 +1135,7 @@ _NODE = shutil.which("node")
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) -> None:
-    """Block a hidden read in the Pi extension and throw in the OpenCode plugin; let others run."""
+    """Block a hidden read in the Pi extension, the OpenCode plugin and the eve module; let others run."""
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
     pi_module = tmp_path / "pi-guard.mjs"
@@ -847,6 +1144,9 @@ def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) ->
     plugin_module = tmp_path / "app-guard.mjs"
     plugin_module.write_text(plugin.read_text())
     script = f"""
+const {{ appGuardReason }} = await import({json.dumps(Path(env["APP_GUARD_EVE"]).as_uri())});
+const eveRefused = appGuardReason("read_file", {{ path: "data/cases.jsonl" }});
+const eveAllowed = appGuardReason("read_file", {{ path: "src/app.py" }});
 const pi = (await import({json.dumps(pi_module.as_uri())})).default;
 let handler;
 pi({{ on: (name, fn) => {{ handler = fn; }} }});
@@ -858,13 +1158,15 @@ let thrown = null;
 try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "optimize.toml" }} }}); }}
 catch (error) {{ thrown = error.message; }}
 await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "src/app.py" }} }});
-console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown }}));
+console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown, eveRefused, eveAllowed }}));
 """
     completed = subprocess.run([_NODE, "--input-type=module", "-e", script], capture_output=True, text=True, check=True)
     result = json.loads(completed.stdout)
     assert result["blocked"] == {"block": True, "reason": harness_bridge.GUARD_REFUSAL}
     assert result["allowed"] is None
     assert result["thrown"] == harness_bridge.GUARD_REFUSAL
+    assert result["eveRefused"] == harness_bridge.GUARD_REFUSAL
+    assert result["eveAllowed"] is None
 
 
 @pytest.mark.parametrize("mode", ["hook", "check"])
