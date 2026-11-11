@@ -419,6 +419,13 @@ def test_launch_refuses_a_gateway_url_that_cannot_sit_in_the_config(url: str) ->
         build_launch(_target(), GatewayConfig(url=url, api_key="gateway-token"))
 
 
+@pytest.mark.parametrize("char", ["\x01", "\x1f", "\x7f"])
+def test_launch_refuses_a_gateway_url_with_a_control_character(char: str) -> None:
+    """Stop the launch for a control character, which TOML refuses raw or the relay rewrite misses escaped."""
+    with pytest.raises(ServiceError):
+        build_launch(_target(), GatewayConfig(url=f"https://gw.example/v1{char}", api_key="gateway-token"))
+
+
 def test_protected_run_points_grok_at_the_relay_and_returns_its_answer(tmp_path: Path) -> None:
     """Run the protected command against a fake Grok: relay URL, blank keys, literal prompt, answer and usage."""
     result, calls, config, workspace = _run_with_fake_grok(tmp_path, protected=True)

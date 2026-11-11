@@ -160,10 +160,11 @@ def _gateway_url(gateway: GatewayConfig) -> str:
 
     Raises:
         ServiceError: When the URL is not absolute http(s), embeds credentials,
-            or has characters that cannot sit raw in a TOML string.
+            or has characters that cannot sit raw in a TOML string (quotes,
+            backslashes, whitespace and control characters).
     """
     url = gateway.url
-    if not url or any(char.isspace() or char in _URL_FORBIDDEN for char in url):
+    if not url or any(char.isspace() or char in _URL_FORBIDDEN or ord(char) < 0x20 or char == "\x7f" for char in url):
         raise ServiceError("The Grok Build harness needs an absolute http(s) gateway URL.")
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname or parts.fragment:
