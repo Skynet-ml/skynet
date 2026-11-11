@@ -1,0 +1,253 @@
+# Context audit: Claude Code compared with Factory Droid
+
+Status: measured on 2026-11-10 in one Claude Code desktop session in this repo.
+Purpose: find why Claude Code sessions compact more often than Droid sessions,
+and list what to cut.
+
+## 1. Summary
+
+- A Claude Code session in this repo loads about **119k tokens by the end
+  of its first tool call**. The memory start output from that call adds
+  about 7k of it. About 54k of it is the loaded tool schemas (desktop app
+  and CLI built-ins). One documented app switch removes about 6k of these.
+  Deny rules can remove about 15k more, but I did not test them in the
+  desktop app (§6).
+- The user controls about **24–28k tokens** of the rest. Unused MCP servers
+  and connectors cost about 14–18k. Global and repo instruction trims save
+  about 6.7k more. Unused plugin skills cost about 2k, and MCP server
+  instructions about 1.1k.
+- Each PR task also reads two overlapping 21 KB policy files (about 11.7k
+  tokens). In Skynet, the agent can read only the repo skill (about 5.9k
+  saved per PR task).
+- The repo files are small (about 14 KB loaded). This PR trims them only a
+  little, because the large costs are outside the repo.
+- On 2026-11-10 Gilad removed the RTK and AXI tool hints, the CLI design
+  rules import and the RTK and gh-axi hooks from the global config. These
+  three files no longer load at start. This saves about 1.1k. Nobody
+  measured the hook saving. Claude now uses plain `gh`. The tradeoff: the
+  RTK hook no longer compresses Bash output, so long command output uses
+  more context.
+- Droid starts much smaller: 5 MCP servers, about 22 KB of instructions, no
+  desktop-app tool schemas, and rolling compaction.
+
+## 2. Method and coverage gaps
+
+- Most sizes come from the first turn of this session. That turn holds the
+  system prompt, tool schemas, deferred tool names, `instructions`, skill
+  listing, MCP instructions and hook output. File sizes come from `wc -c`.
+- Token estimates use about bytes ÷ 3.6 for English text and bytes ÷ 3 for
+  tool names. These are estimates, not tokenizer counts.
+- **Gap:** I did not count compactions across past sessions. Some
+  transcripts are about 400 MB and the scan did not finish in time.
+- **Gap:** I did not run a Droid session. The Droid side comes from the public
+  Factory docs and from the local Droid configuration files. I mark each Droid
+  fact DOCUMENTED, INFERRED, UNCONFIRMED or UNKNOWN.
+- **Gap:** I did not test the deny rules for the desktop app's tools
+  (§6). The docs describe them for the CLI only. The one documented
+  switch is the app's Browser tools setting. I did not test it either.
+- **Gap:** Two measures of the loaded tool schemas differ. The first turn
+  shows 195 KB. A later API request record shows 146 KB for 57 loaded
+  tools. I did not find the cause. §6 uses the request record for the size
+  of each tool group.
+- This report copies no transcript content and no private file content. It
+  reports only sizes and general descriptions.
+
+## 3. Layers, sizes and actions
+
+"Before" is the measured size. "After" is the size after you apply all
+actions in this report. Savings are tokens on every session start, unless
+the row says otherwise.
+
+| Layer | Before | After | Purpose | Action | Reason | Est. saving |
+| --- | --- | --- | --- | --- | --- | --- |
+| System prompt (harness) | 35 KB | 35 KB | Claude Code rules | Keep | Not user-controlled | 0 |
+| Loaded tool schemas (desktop built-ins) | 195 KB | about 70 KB (of the 146 KB request record, §2; §6 lists the 76 KB to turn off) | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
+| Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 14–18k |
+| Global user instruction file | 17.9 KB | 1.3 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.1 KB workflow table; Skynet-only rules | 4.6k, every repo |
+| Shared conventions file (also read by Codex) | 21.7 KB | 16.9 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.3k, every repo |
+| CLI design rules file | 2.1 KB | 0 (on demand) | CLI design rules | Removed from start (applied) | Needed only when you design a CLI | 0.6k, every repo (applied) |
+| Tool hint files | 1.8 KB | 0 KB | RTK and AXI tool hints | Removed (applied) | Claude uses plain `gh` | about 0.5k, every repo (applied) |
+| Machine-local rules file (gitignored) | 3.5 KB | 0.9 KB | Machine rules | Trim | A stale rule; a third copy of the memory rules | 0.7k, Skynet only |
+| Repo `CLAUDE.md` | 0.6 KB | 0.4 KB | Imports AGENTS.md | Trim (this PR) | Repeats the local-rules note in AGENTS.md | 0.05k, Skynet only |
+| Repo `AGENTS.md` | 13.7 KB | 13.7 KB | Always-on repo rules | Keep | Devin and Codex read it; it is already lean | 0 |
+| `frontend/AGENTS.md` | 0.7 KB | 0.7 KB | Frontend rules | Keep | Loads only for frontend files | 0 |
+| `docs/agents/*.md` | 18.7 KB | about 35 KB | Reference files | Keep (this PR adds this report) | Load on demand only | 0 |
+| Skill listing | 19 KB, 428 skills | about 12 KB | Names and descriptions | Trim | Sales, finance, marketing, media and similar plugin skills are unused here | about 2k |
+| Repo skill descriptions | 1.0 KB | 0.6 KB | Two repo skills in the listing | Trim (this PR) | Long content lists; the trigger sentence is enough | 0.1k, Skynet only |
+| MCP server instructions | 14.5 KB | about 10.5 KB | Server usage notes | Trim | Long notes from servers that Skynet does not use (deepwiki stays) | 1.1k |
+| SessionStart hook output | 7 KB | smaller (not measured) | Index warmup, notify | Trim (applied) | Gilad removed the gh-axi GitHub dashboard hook | not measured |
+| Memory tool start output | about 24 KB | smaller | Memory tree | Trim (out of scope) | Compress old nodes | not estimated |
+| **Per PR task:** per-PR policy file + `skynet-pr-workflow` skill | 42 KB read | about 21 KB | PR policy | Trim | The two files repeat the same sections | 5.9k per PR task |
+
+Total for instructions (global and repo files that load at start): about
+61 KB before, about 33 KB after. Gilad already applied about 1.1k of this
+(the CLI design rules file and the tool hint files). The proposed trims
+save about 5.9k more in every repo, plus about 0.8k in Skynet only (about
+6.7k in Skynet).
+
+## 4. What Droid puts in context
+
+| Fact | Source |
+| --- | --- |
+| Droid loads `AGENTS.md` from the working directory up to the git root, and from the user's Factory, `.agents` and `.agent` folders. | DOCUMENTED (docs.factory.com, AGENTS.md page) |
+| Nested `AGENTS.md` files load lazily, when Droid works in that folder. | DOCUMENTED |
+| Limits: 80k characters at start, 40k characters for each discovery. | DOCUMENTED |
+| Droid also reads `CLAUDE.md` for compatibility. | DOCUMENTED |
+| `@import` lines in `CLAUDE.md` expand in Droid. | UNCONFIRMED |
+| All tools of an MCP server load unless `disabledTools` or `enabledTools` removes them. Removed tools cost 0 tokens. | DOCUMENTED (MCP page) |
+| Some deferred tool loading exists (`ToolSearch`, `ConnectorSearch`). | INFERRED |
+| Droid has about 27 built-in tools. | INFERRED |
+| Skills load only name and description at start. | DOCUMENTED (skills page) |
+| Only SessionStart, UserPromptSubmit and PostToolUse hooks add context. | DOCUMENTED (hooks reference) |
+| Compaction is rolling and anchored to a message. It starts at a fill line and keeps a retained part. The default limit is model-dependent. | DOCUMENTED (settings page; factory.com/news/compressing-context) |
+| Context window sizes per model. | UNKNOWN |
+
+Local Droid setup:
+
+- The user-level Droid `AGENTS.md` is 8.3 KB. With the repo `AGENTS.md` and
+  `CLAUDE.md`, Droid starts with about 22 KB of instructions.
+- The Droid MCP configuration has 5 servers. Claude Code has about 40 servers
+  and connectors in this session.
+- All Droid hooks run a notify script that adds no context.
+- The Droid settings set no `compactionTokenLimit`. The repo has no
+  `.factory/` folder.
+
+Conclusion: Droid starts with about one third of the instruction text, far
+fewer tool names and no desktop-app tool schemas. Rolling compaction also
+keeps more recent context after each compaction.
+
+## 5. Ranked wins
+
+1. **Turn off unused desktop tool groups.** About 6k tokens for the
+   built-in browser (documented switch). Up to about 15k more with deny
+   rules that need a test first. See §6.
+2. **Turn off unused MCP servers and connectors in Skynet sessions.**
+   About 14k tokens (about 18k with Vercel). See §6.
+3. **Apply the global instruction trims.** About 5.9k tokens on every session
+   in every repo, plus about 0.8k in Skynet. See §7.
+4. **In Skynet, read the repo PR skill instead of the per-PR policy file.**
+   About 5.9k tokens per PR task (21.2 KB). See §7.
+5. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
+6. **Remove MCP servers with long instructions that Skynet does not use.**
+   About 1.1k tokens. This adds to the win 2 saving when those servers go.
+7. **Compress the memory tree** on old nodes. Not estimated.
+8. **Repo trims in this PR.** About 0.16k tokens (repo `CLAUDE.md` and the two
+   skill descriptions). Small on purpose.
+
+## 6. What to turn off for Skynet
+
+Deferred tool names by source (unique names, bytes in context):
+
+| Source | Names | Size | Used in Skynet? | Action |
+| --- | --- | --- | --- | --- |
+| 6 personal-app connectors (email, calendar, office, tasks, file storage, voice media) | 365 | 23.8 KB | No | Off |
+| Vercel plugin | 250 | 12.0 KB | Sandbox operations only | Off by default; on for sandbox ops work |
+| 4 user-scope MCP servers for other work | 357 | 11.3 KB | Rarely or no | Off; on for tasks that need them |
+| Linear connector (duplicate of the `linear` MCP server) | 70 | 4.1 KB | Duplicate | Off (keep `linear`) |
+| chrome-devtools plugin | 32 | 2.0 KB | Rarely | Off |
+| semgrep plugin | 11 | 0.5 KB | Rarely | Off |
+| linear, codedb, digup, context7, aws-mcp, playwright, claude-in-chrome, deepwiki | — | — | Yes | Keep |
+
+How to turn them off:
+
+- **Connectors (claude.ai):** the desktop app can turn a connector off for
+  one session (`set_session_connector_enabled`). I found no default for each
+  project in the docs. Turn them off in the app's Connectors settings if you
+  never use them in Code sessions.
+- **Plugins from the user settings file:** merge these keys into
+  `.claude/settings.local.json` in the Skynet checkout (gitignored; create
+  it if it does not exist). Do not replace the file. Project settings
+  override user settings for `enabledPlugins`. Set each unused plugin to
+  false, for example `"<plugin>@<marketplace>": false`. Candidates: the
+  vercel, chrome-devtools-mcp and semgrep plugins, and the media-generation
+  plugins.
+- **Desktop-app plugins** (sales, finance, marketing, productivity,
+  product-management, engineering, data, design and others) do not appear in
+  the user settings file. Most of their MCP servers need sign-in or fail to
+  connect, so they add no tool names. They still add about 220 entries to
+  the skill listing. Turn them off in the app's plugin settings. I did not
+  confirm the exact switch.
+- **User-scope MCP servers:** run `/mcp` in a terminal `claude` session in
+  the Skynet folder. Disable them there for this project. You can also move
+  them from user scope to the projects that use them.
+
+### Desktop-app tool schemas
+
+These tools load in full at every session start. Tool search does not
+defer them. Sizes come from one API request record (bytes in the request).
+
+| Tool group | Size | Est. tokens | Used in Skynet? | Switch | Status |
+| --- | --- | --- | --- | --- | --- |
+| Built-in browser (19 tools) | 22.4 KB | about 6.2k | No; UI checks use Chrome or a headless browser | Settings > Code > Browser tools: off | DOCUMENTED |
+| Artifact | 37.1 KB | about 10.3k | No; UI evidence goes to Linear | Deny rule `"Artifact"` | DOCUMENTED for the CLI; not tested in the desktop app |
+| iOS Simulator | 6.9 KB | about 1.9k | No | Deny rule `"mcp__Claude_Code_iOS_Simulator__*"`, or an app setting for mobile simulators | Deny rule as above; app setting UNCONFIRMED |
+| Workflow | 5.5 KB | about 1.5k | Rarely; only when Gilad asks | Deny rule `"Workflow"` | As for Artifact |
+| visualize (2 tools) | 4.2 KB | about 1.2k | Rarely | Deny rule `"mcp__visualize__*"` | As for Artifact |
+| Session, plan, PR and terminal tools of the app | about 17 KB | about 4.7k | Yes | Keep | — |
+| Other CLI built-ins (Bash, Read, Edit, Agent and others) | about 38 KB | about 10.6k | Yes | Keep | — |
+| Unattributed | about 15 KB | about 4k | — | — | — |
+
+- The docs say a bare tool name in `permissions.deny` removes the tool
+  from context. A scoped rule only blocks calls. The desktop app reads
+  `permissions` from the settings files.
+- Put the deny rules in `.claude/settings.local.json` in the Skynet
+  checkout. Merge them into the existing file; do not replace it.
+- Test first: add the rules, start a new session, and check that the tools
+  are gone. One public user report says a browser deny rule did not work
+  in the desktop app.
+- The Browser tools switch also turns off dev-server previews in the app.
+- The app turns tool search on, but its own tools still load in full. I
+  found no user switch that defers them.
+
+## 7. Global file changes (wait for Gilad's decision)
+
+Do not apply these without Gilad's approval. The full diffs and proposed
+files are not in this repo. They are in this task's session notes, which only
+Gilad can get. They stay out of this public repo because they quote private
+files.
+
+- **Global user instruction file (17.9 KB → 1.3 KB).** Most of its text
+  repeats the shared conventions file word for word. A 6.1 KB workflow table
+  repeats the skill listing. The Skynet-only rules already exist in the repo
+  `AGENTS.md` and skills. Its generic PR review rules move to the shared
+  conventions file. An install script writes some blocks, so change the
+  script too, or the blocks come back. Keep the rule about asking Gilad
+  with interactive questions, because no other file has it.
+- **Shared conventions file (21.7 KB → 16.9 KB).** Replace the Skynet-only
+  sections with one pointer to the repo `AGENTS.md` and skills. Remove a
+  stale section for another project. Move the Skynet-only parallel-agent
+  lines to the machine-local file. Add a short `Pull requests, reviews and
+  UI proof (every repo)` section. It takes the generic rules from the global
+  file's `Pull request review requirements` and RevEngine sections. Keep the
+  generic parallel-agent and UI-evidence rules, because other repos use
+  them. Codex reads this file too. The repo `AGENTS.md` covers Codex in
+  Skynet, so Codex loses no Skynet rule.
+- **Machine-local rules file (3.5 KB → 0.9 KB).** Remove a stale rule.
+  Replace the third copy of the memory rules with one `MEMORY_DIR` line.
+  Keep the local port notes. Add a `## Parallel agents` section with the
+  Skynet-only lines from the shared conventions file (governor, worktree and
+  reviewer ceilings, AWS staging). Keep the check of a process `cwd` before
+  you stop a process on a port.
+- **Per-PR policy file (21.2 KB, read per PR task).** Many sections repeat
+  the `skynet-pr-workflow` skill. A pointer at the top of this file saves
+  nothing, because the Read tool loads the whole file. The saving comes from
+  the read instruction in the shared conventions file. The proposed shared
+  conventions file in the notes folder changes this read instruction. In a
+  repo with its own PR skill (Skynet: `skynet-pr-workflow`), the agent reads
+  that skill instead of the per-PR policy file. In other repos, it reads the
+  per-PR policy file as before. Then a Skynet PR task skips about 21.2 KB
+  (about 5.9k tokens). The policy file allows a staging test-credit grant
+  after Gilad approves it in chat. The repo has its own copy of this rule
+  (SKY-573) in `AGENTS.md` and both repo skills, so Skynet tasks keep it.
+  This report gives no diff for the policy file itself, because other repos
+  still use it.
+
+## 8. Changes in this PR
+
+- `CLAUDE.md`: remove the last paragraph. `AGENTS.md`, which `CLAUDE.md`
+  imports, has the same rule about `CLAUDE.local.md` and `AGENTS.local.md`.
+- `.agents/skills/skynet-pr-workflow/SKILL.md` and
+  `.agents/skills/skynet-test-accounts/SKILL.md`: shorten the `description`
+  line. The trigger sentence stays the same. The list of contents is shorter.
+  The skill bodies do not change.
+- This report.
