@@ -478,23 +478,25 @@ def test_runner_answers_after_a_tool_call_turn_that_ends_with_an_end_event(tmp_p
     Args:
         tmp_path: Workspace and fake package root.
     """
+    # Shaped like DeerFlow 7a6c4a99 stream(): the tool-call event and the text
+    # deltas carry no usage, so usage reaches the runner only in the snapshots.
     call = {"name": "bash", "args": {"command": "ls"}, "id": "c1"}
+    m1 = {"type": "ai", "id": "m1", "content": "", "tool_calls": [call]}
+    m1_usage = {**m1, "usage_metadata": {"input_tokens": 10, "output_tokens": 4}}
+    m2_usage = {
+        "type": "ai",
+        "id": "m2",
+        "content": "Done.",
+        "usage_metadata": {"input_tokens": 20, "output_tokens": 3},
+    }
     events = [
-        [
-            "messages-tuple",
-            {
-                "type": "ai",
-                "id": "m1",
-                "content": "",
-                "tool_calls": [call],
-                "usage_metadata": {"input_tokens": 10, "output_tokens": 4},
-            },
-        ],
-        ["messages-tuple", {"type": "tool", "id": "t1", "tool_call_id": "c1", "content": "README.md"}],
-        [
-            "messages-tuple",
-            {"type": "ai", "id": "m2", "content": "Done.", "usage_metadata": {"input_tokens": 20, "output_tokens": 3}},
-        ],
+        ["messages-tuple", m1],
+        ["values", {"title": None, "messages": [m1_usage]}],
+        ["messages-tuple", {"type": "tool", "id": "t1", "name": "bash", "tool_call_id": "c1", "content": "README.md"}],
+        ["values", {"title": None, "messages": [m1_usage]}],
+        ["messages-tuple", {"type": "ai", "id": "m2", "content": "Do"}],
+        ["messages-tuple", {"type": "ai", "id": "m2", "content": "ne."}],
+        ["values", {"title": None, "messages": [m1_usage, m2_usage]}],
         ["end", {"usage": {"input_tokens": 99, "output_tokens": 99}}],
     ]
     completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
