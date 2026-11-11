@@ -107,9 +107,13 @@ def provider_offered(settings: Settings, provider: object) -> bool:
 
     Returns:
         True when the run names no provider, the default or an offered one.
+        False for any other value, including a non-string one.
     """
     if provider is None or provider == default_provider(settings):
         return True
+    # The setup check passes the raw payload, so an unhashable value must refuse, not raise.
+    if not isinstance(provider, str):
+        return False
     return provider in {entry["id"] for entry in offered_providers(settings)}
 
 

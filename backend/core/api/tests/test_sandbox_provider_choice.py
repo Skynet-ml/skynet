@@ -59,12 +59,12 @@ def test_catalog_lists_the_offered_providers_and_the_default() -> None:
 
 
 @pytest.mark.usefixtures("hosted_vercel")
-@pytest.mark.parametrize("provider", ["nope", "docker", "daytona"])
-def test_gate_refuses_a_provider_the_deployment_does_not_offer(provider: str) -> None:
-    """Both setup gates refuse an unknown, local-only or unmetered provider with 422.
+@pytest.mark.parametrize("provider", ["nope", "docker", "daytona", [], {}, ["vercel"], 1])
+def test_gate_refuses_a_provider_the_deployment_does_not_offer(provider: object) -> None:
+    """Both setup gates refuse an unknown, local-only, unmetered or non-string provider with 422.
 
     Args:
-        provider: The requested provider id.
+        provider: The requested provider value, as a raw payload may send it.
     """
     for check in (
         lambda: enforce_local_mode_sources(SimpleNamespace(sandbox_provider=provider), "byok", []),
