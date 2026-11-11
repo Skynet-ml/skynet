@@ -199,7 +199,8 @@ def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> 
     """Return the Grok ``config.toml`` that routes every model role to the gateway.
 
     JSON string literals are valid TOML basic strings, so ``json.dumps``
-    quotes the model id both as a table key and as a value.
+    quotes the model id both as a table key and as a value. The URL keeps its
+    raw non-ASCII characters, so the relay rewrite finds it byte for byte.
 
     Args:
         model: Target model id as the gateway knows it.
@@ -210,6 +211,7 @@ def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> 
         The TOML text.
     """
     slug = json.dumps(model)
+    url = json.dumps(gateway_url, ensure_ascii=False)
     return (
         # Web search is an xAI server-side tool that does not go through the gateway.
         "disable_web_search = true\n\n"
@@ -218,13 +220,13 @@ def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> 
         "[harness]\ndisable_codebase_upload = true\n\n"
         # Grok fetches its model list from this base at start, outside the
         # model entry; pointing it at the gateway keeps that call off api.x.ai.
-        f"[endpoints]\nxai_api_base_url = {json.dumps(gateway_url)}\n\n"
+        f"[endpoints]\nxai_api_base_url = {url}\n\n"
         # Auxiliary roles default to xAI's hosted models; pinning them to the
         # same entry keeps every call on the gateway.
         f"[models]\ndefault = {slug}\nsession_summary = {slug}\n"
         f"image_description = {slug}\nweb_search = {slug}\n\n"
         f"[model.{slug}]\nname = {slug}\nmodel = {slug}\n"
-        f"base_url = {json.dumps(gateway_url)}\nenv_key = {json.dumps(ENV_API_KEY)}\n"
+        f"base_url = {url}\nenv_key = {json.dumps(ENV_API_KEY)}\n"
         'api_backend = "chat_completions"\n'
         # Grok 1.0.77 drops ``--reasoning-effort`` with only a warning for a
         # custom model whose menu lacks the level, and the gateway's model list

@@ -126,6 +126,7 @@ def _run_with_fake_grok(
     stream: str = _RECORDED_STREAM,
     fake_exit: int = 0,
     prompt: str = _PROMPT,
+    gateway: GatewayConfig = _GATEWAY,
 ) -> tuple[subprocess.CompletedProcess[str], str, dict, Path]:
     """Run the built Grok command in a scratch workspace against a fake ``grok`` binary.
 
@@ -135,16 +136,17 @@ def _run_with_fake_grok(
         stream: The NDJSON the fake binary prints.
         fake_exit: Exit status the fake binary returns.
         prompt: The task prompt the run reads from its prompt file.
+        gateway: Gateway URL and key the launch writes into the config.
 
     Returns:
         The finished command, the fake binary's call log, the config Grok saw, and the workspace.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected)
+    launch = build_launch(_target(), gateway, protected=protected)
     workspace = tmp_path / "work"
     for name, content in launch.files.items():
         path = workspace / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
+        path.write_text(content, encoding="utf-8")
     (workspace / "task").mkdir(parents=True)
     (workspace / "task" / "PROMPT.md").write_text(prompt)
     bin_dir = tmp_path / "bin"
@@ -179,7 +181,7 @@ def _run_with_fake_grok(
         timeout=10,
         check=False,
     )
-    return result, log.read_text(), tomllib.loads(config_copy.read_text()), workspace
+    return result, log.read_text(), tomllib.loads(config_copy.read_text(encoding="utf-8")), workspace
 
 
 def _run_install(
@@ -442,6 +444,19 @@ def test_protected_run_points_grok_at_the_relay_and_returns_its_answer(tmp_path:
         "I fixed the off-by-one error.\n\n42.",
         {"input_tokens": 125, "output_tokens": 40},
     )
+
+
+def test_the_relay_rewrite_reaches_a_non_ascii_gateway_url(tmp_path: Path) -> None:
+    """Write a non-ASCII gateway URL raw into the config, so the protected relay rewrite still replaces it."""
+    gateway = GatewayConfig(url="https://gw.exämple/v1/ü", api_key="gateway-token")
+    assert gateway.url in build_launch(_target(), gateway).files[GROK_CONFIG_FILE]
+
+    result, calls, config, _ = _run_with_fake_grok(tmp_path, protected=True, gateway=gateway)
+
+    assert result.returncode == 0, result.stderr
+    assert config["model"][_MODEL]["base_url"] == _RELAY
+    assert config["endpoints"]["xai_api_base_url"] == _RELAY
+    assert gateway.url not in calls
 
 
 def test_a_prompt_that_starts_with_a_dash_stays_the_prompt_value(tmp_path: Path) -> None:
