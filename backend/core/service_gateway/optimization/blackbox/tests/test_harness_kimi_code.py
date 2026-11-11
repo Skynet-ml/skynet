@@ -26,6 +26,7 @@ from ..harnesses.kimi_code import (
     KIMI_CODE_EFFORTS,
     KIMI_CODE_ID,
     KIMI_CODE_SHA256,
+    KIMI_CODE_TO_PI,
     KIMI_CODE_VERSION,
 )
 
@@ -101,6 +102,7 @@ def _run_with_fake_kimi(
     reasoning_effort: str | None = None,
     status: int = 0,
     workspace: Path | None = None,
+    parser_fails: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Kimi Code command in a scratch workspace against a fake ``kimi`` binary.
 
@@ -110,6 +112,7 @@ def _run_with_fake_kimi(
         reasoning_effort: The user's effort for the model.
         status: Exit status of the fake.
         workspace: An existing checkout to run in; a fresh folder when ``None``.
+        parser_fails: Put a ``python3`` on PATH that fails, so the usage parse step fails.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -130,6 +133,10 @@ def _run_with_fake_kimi(
     fake = bin_dir / "kimi"
     fake.write_text(_FAKE_KIMI)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    if parser_fails:
+        broken = bin_dir / "python3"
+        broken.write_text("#!/bin/sh\nexit 2\n")
+        broken.chmod(broken.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "calls.log"
     log.touch()
     env = {
@@ -250,6 +257,42 @@ def test_run_keeps_the_kimi_code_exit_status(tmp_path: Path) -> None:
 
     assert result.returncode == 3
     assert parse_pi_output(result.stdout)[1] == _USAGE
+
+
+@pytest.mark.parametrize(("status", "expected"), [(3, 3), (0, 1)])
+def test_failed_parse_keeps_a_kimi_code_failure_and_fails_a_success(tmp_path: Path, status: int, expected: int) -> None:
+    """Keep Kimi Code's nonzero status when the parse step fails, and exit 1 when Kimi Code succeeded."""
+    result, _, _ = _run_with_fake_kimi(tmp_path, protected=False, status=status, parser_fails=True)
+
+    assert result.returncode == expected
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("  The answer.  ", "The answer."),
+        (
+            [{"type": "text", "text": "One."}, {"type": "think", "think": "x"}, {"type": "text", "text": "Two."}],
+            "One.\nTwo.",
+        ),
+        ([{"type": "think", "think": "only thinking"}], "Earlier."),
+    ],
+)
+def test_answer_content_may_be_a_string_or_a_list_of_text_parts(tmp_path: Path, content: object, expected: str) -> None:
+    """Read the answer from string content and from joined text parts, and keep the last answer when a step has none."""
+    stream = tmp_path / "stream.jsonl"
+    lines = [{"role": "assistant", "content": "Earlier."}, {"role": "assistant", "content": content}]
+    stream.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    result = subprocess.run(
+        ["python3", "-I", "-c", KIMI_CODE_TO_PI, str(stream), str(tmp_path / "sessions")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    assert parse_pi_output(result.stdout)[0] == expected
 
 
 def _shipped_tree(tmp_path: Path) -> Path:

@@ -40,9 +40,12 @@ KIMI_CODE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # ``message_end`` line with the tokens summed from every ``usage.record`` in the
 # session journals (``wire.jsonl``, one for each agent), then one Pi
 # ``tool_execution_start`` line for each tool call id in the stream, so the
-# bridge's cost and tool-call stops read them. It runs inline
-# (``python3 -I -c '...'``) for the reasons :data:`.fx.FX_TO_PI` gives, so it
-# must hold no single quote.
+# bridge's cost and tool-call stops read them. An answer's content may be a
+# string or a list of text parts. The bridge's usage has only input and output
+# tokens, so cache reads and writes count as full input: the count can be high,
+# never low, and a token limit stops a run early rather than late. It runs
+# inline (``python3 -I -c '...'``) for the reasons :data:`.fx.FX_TO_PI` gives,
+# so it must hold no single quote.
 KIMI_CODE_TO_PI = """import json
 import os
 import sys
@@ -67,13 +70,19 @@ def count(value):
     return value if type(value) is int and value >= 0 else 0
 
 
+def answer(content):
+    if isinstance(content, list):
+        parts = [part.get("text") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+        content = "\\n".join(part for part in parts if isinstance(part, str) and part)
+    return content.strip() if isinstance(content, str) else ""
+
+
 text = ""
 calls = []
 for record in records(sys.argv[1]):
     if record.get("role") != "assistant":
         continue
-    if isinstance(record.get("content"), str) and record["content"].strip():
-        text = record["content"].strip()
+    text = answer(record.get("content")) or text
     for call in record.get("tool_calls") or []:
         call_id = call.get("id") if isinstance(call, dict) else None
         if isinstance(call_id, str) and call_id not in calls:
@@ -176,7 +185,8 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     Each run gets a fresh ``KIMI_CODE_HOME`` outside the workspace, so the
     session journals never land in the version patch, and an EXIT trap removes
     it. :data:`KIMI_CODE_TO_PI` turns the stream and the journals into Pi lines
-    for the bridge's Pi parser. The run keeps Kimi Code's exit status.
+    for the bridge's Pi parser. The run keeps Kimi Code's exit status. When
+    the parse step fails after Kimi Code succeeds, the run exits 1.
 
     Args:
         model: Target model id.
@@ -206,7 +216,8 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         f'kimi --prompt "$(cat "${ENV_PROMPT_FILE}")" --output-format stream-json '
         '< /dev/null > "$_kc_dir/stream.jsonl"; '
         "_kc_status=$?; "
-        f'python3 -I -c \'{KIMI_CODE_TO_PI}\' "$_kc_dir/stream.jsonl" "$KIMI_CODE_HOME/sessions" || exit 1; '
+        f'python3 -I -c \'{KIMI_CODE_TO_PI}\' "$_kc_dir/stream.jsonl" "$KIMI_CODE_HOME/sessions" '
+        '|| [ "$_kc_status" -ne 0 ] || _kc_status=1; '
         "exit $_kc_status"
     )
     return HarnessLaunch(
