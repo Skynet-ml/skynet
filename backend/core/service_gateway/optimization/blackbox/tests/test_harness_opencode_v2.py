@@ -69,6 +69,9 @@ _FAKE_OPENCODE2 = """#!/bin/sh
   printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
   printf 'OPENCODE_CONFIG=%s\\n' "${OPENCODE_CONFIG-unset}"
   printf 'OPENCODE_CONFIG_CONTENT=%s\\n' "${OPENCODE_CONFIG_CONTENT-unset}"
+  printf 'OPENCODE_CONFIG_DIR=%s\\n' "${OPENCODE_CONFIG_DIR-unset}"
+  printf 'OPENCODE_DISABLE_PROJECT_CONFIG=%s\\n' "${OPENCODE_DISABLE_PROJECT_CONFIG-unset}"
+  printf 'OPENCODE_CONFIG_PROJECT_DISABLE=%s\\n' "${OPENCODE_CONFIG_PROJECT_DISABLE-unset}"
   printf 'STDIN=%s\\n' "$(cat)"
 } >> "$FAKE_LOG"
 printf '%s' "$FAKE_ANSWER"
@@ -102,9 +105,9 @@ def _run_with_fake_opencode2(
 ) -> tuple[str, str, Path]:
     """Run the built command in a scratch workspace against a fake ``opencode2`` binary.
 
-    The env also carries an inherited ``OPENCODE_CONFIG`` and
-    ``OPENCODE_CONFIG_CONTENT``, which a protected run must replace so they
-    cannot add a provider.
+    The env also carries inherited OpenCode config variables. A protected
+    run must replace them, so they cannot add a provider, move the global
+    config dir, or skip the workspace config.
 
     Args:
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
@@ -132,6 +135,9 @@ def _run_with_fake_opencode2(
     env = {
         "OPENCODE_CONFIG": "/elsewhere/opencode.json",
         "OPENCODE_CONFIG_CONTENT": '{"providers": {"openai": {}}}',
+        "OPENCODE_CONFIG_DIR": "/elsewhere",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
+        "OPENCODE_CONFIG_PROJECT_DISABLE": "1",
         **launch.env,
         "PATH": os.defpath,
         "HOME": str(tmp_path / "home"),
@@ -349,6 +355,8 @@ def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() ->
     assert launch.env["OPENCODE_DISABLE_MODELS_FETCH"] == "true"
     assert launch.env["OPENCODE_CONFIG"] == ""
     assert launch.env["OPENCODE_CONFIG_CONTENT"] == "{}"
+    for name in ("OPENCODE_CONFIG_DIR", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_PROJECT_DISABLE"):
+        assert launch.env[name] == ""
     assert launch.env["OPENCODE_DISABLE_FREE_MODELS"] == "true"
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
 
@@ -369,6 +377,8 @@ def test_protected_run_points_opencode2_at_the_relay_and_returns_its_answer(tmp_
     assert _logged(calls, "OPENAI_API_KEY") == ""
     assert _logged(calls, "OPENCODE_CONFIG") == ""
     assert _logged(calls, "OPENCODE_CONFIG_CONTENT") == "{}"
+    for name in ("OPENCODE_CONFIG_DIR", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_PROJECT_DISABLE"):
+        assert _logged(calls, name) == ""
     assert _logged(calls, "STDIN") == ""
     assert parse_output("opencode", stdout) == (
         "I fixed solution.py.\n\nThe answer is 42.",

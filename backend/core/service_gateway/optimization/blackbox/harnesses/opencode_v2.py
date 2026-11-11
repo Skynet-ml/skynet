@@ -69,9 +69,15 @@ _ENV = {
 # V2 merges ``OPENCODE_CONFIG`` and ``OPENCODE_CONFIG_CONTENT`` into the
 # workspace config, so an inherited one could add a provider. An empty
 # object, not an empty string, because V2 parses any set content as JSON.
+# An inherited ``OPENCODE_CONFIG_DIR`` would move the global config dir, and
+# an inherited true project-disable flag would skip the workspace config. V2
+# treats an empty value as unset for all three (cli/src/server-process.ts).
 _PROTECTED_ENV = {
     "OPENCODE_CONFIG": "",
     "OPENCODE_CONFIG_CONTENT": "{}",
+    "OPENCODE_CONFIG_DIR": "",
+    "OPENCODE_DISABLE_PROJECT_CONFIG": "",
+    "OPENCODE_CONFIG_PROJECT_DISABLE": "",
     "OPENCODE_API_KEY": "",
     "OPENAI_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
