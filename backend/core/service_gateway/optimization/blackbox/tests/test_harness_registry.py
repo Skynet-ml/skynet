@@ -53,6 +53,7 @@ _BUILT_INS = (
     "openhands_sdk",
     "qwen_code",
     "antigravity_sdk",
+    "fabric",
     "goose",
     "hermes",
     "eve",
@@ -309,6 +310,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "eve": ("eve", "1.0.0-rc.6"),
         "deerflow": (DEERFLOW_SPEC.binary, DEERFLOW_REF),
         "cline": ("cline", "3.0.74"),
+        "fabric": ("fabric", "0.5.0"),
         "code_puppy": ("code-puppy", "0.0.967"),
     }
 
