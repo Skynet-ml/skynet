@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import base64
-import configparser
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -31,8 +31,10 @@ _ANSWER = "I read solution.py and fixed the off-by-one error.\n\nThe answer is 4
 # prompt echo and a tool trace on stdout like the real CLI, writes a session,
 # a cache and the autosave under its XDG dirs (the last response holds the
 # answer in two text parts), makes one code change when the workspace has
-# ``main.py``, and writes the usage file unless FAKE_FAIL is set (like a
-# swallowed model error).
+# ``main.py``, copies its whole temporary folder to FAKE_SNAPSHOT when set,
+# and writes the usage file unless FAKE_FAIL is set (like a swallowed model
+# error). It resolves the model's ``$NAME`` api_key from the environment, as
+# Code Puppy does.
 _FAKE_CODE_PUPPY = """#!/bin/sh
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
@@ -42,7 +44,9 @@ _FAKE_CODE_PUPPY = """#!/bin/sh
   printf 'GEMINI_API_KEY=%s\\n' "$GEMINI_API_KEY"
   printf 'NO_VERSION_UPDATE=%s\\n' "$NO_VERSION_UPDATE"
   printf 'CFG=%s\\n' "$XDG_CONFIG_HOME/code_puppy/puppy.cfg"
-  printf 'CFG_MODE=%s\\n' "$(ls -l "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" | cut -c1-10)"
+  _ref="$(sed -n 's/.*"api_key": "[$]\\([A-Za-z0-9_]*\\)".*/\\1/p' "$XDG_DATA_HOME/code_puppy/extra_models.json")"
+  printf 'KEY_REF=%s\\n' "$_ref"
+  eval "printf 'RESOLVED_KEY=%s\\n' \\"\\${$_ref}\\""
   printf 'MODELS=%s\\n' "$XDG_DATA_HOME/code_puppy/extra_models.json"
   printf 'MODEL_URL=%s\\n' "$(grep -o '"url": "[^"]*"' "$XDG_DATA_HOME/code_puppy/extra_models.json")"
   printf 'CFG_BEGIN\\n'; cat "$XDG_CONFIG_HOME/code_puppy/puppy.cfg"; printf 'CFG_END\\n'
@@ -68,6 +72,7 @@ printf '%s' '{"format": 2, "encoding": "pydantic-ai-messages", "messages": [
   {"part_kind": "text", "content": "I read solution.py and fixed the off-by-one error."},
   {"part_kind": "text", "content": "The answer is 42."}]}
 ]}' > "$_auto/auto_session_1.json"
+if [ -n "$FAKE_SNAPSHOT" ]; then cp -R "$(dirname "$XDG_CONFIG_HOME")" "$FAKE_SNAPSHOT"; fi
 if [ -z "$FAKE_FAIL" ]; then
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--usage-file" ]; then
@@ -99,6 +104,7 @@ def _run_with_fake_code_puppy(
     workspace: Path | None = None,
     gateway: GatewayConfig = _GATEWAY,
     repo_env: str | None = None,
+    snapshot: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Code Puppy command in a scratch workspace against a fake ``code-puppy`` binary.
 
@@ -111,6 +117,7 @@ def _run_with_fake_code_puppy(
         workspace: An existing checkout to run in; a fresh folder when ``None``.
         gateway: Gateway URL and token for the launch.
         repo_env: Text of a ``.env`` file the candidate repo ships, or ``None`` for no file.
+        snapshot: Where the fake copies the run's temporary folder, or ``None`` for no copy.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -142,6 +149,8 @@ def _run_with_fake_code_puppy(
     }
     if fail:
         env["FAKE_FAIL"] = "1"
+    if snapshot is not None:
+        env["FAKE_SNAPSHOT"] = str(snapshot)
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
     result = subprocess.run(
@@ -197,7 +206,8 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     ("effort", "line"),
     [
         (None, None),
-        ("none", None),
+        ("auto", None),
+        ("none", "model_settings_app_reasoning_effort = none"),
         ("high", "model_settings_app_reasoning_effort = high"),
         ("max", "model_settings_app_reasoning_effort = max"),
         ("minimal", "model_settings_app_reasoning_effort = minimal"),
@@ -246,7 +256,7 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
         f"ARGS [--disable-ask-user-question] [--usage-file] [{usage_arg}] [--model] [app] "
         "[--prompt] [Fix `solution.py` and say $(echo done).]"
     )
-    assert "code_puppy_api_key = gateway-token\n" in calls
+    assert "RESOLVED_KEY=gateway-token\n" in calls
     for name in _PROVIDER_KEYS:
         assert f"{name}=\n" in calls
     assert "NO_VERSION_UPDATE=1" in calls
@@ -259,30 +269,53 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
 
 
 @pytest.mark.parametrize("protected", [False, True])
-def test_gateway_token_is_read_from_the_config_so_a_repo_env_file_cannot_replace_it(
+def test_gateway_token_comes_from_a_random_env_name_so_a_repo_env_file_cannot_replace_it(
     tmp_path: Path, protected: bool
 ) -> None:
-    """Put the gateway token in puppy.cfg, which Code Puppy reads before the environment, and keep ``%`` intact.
+    """Export the gateway token under a random name per run and point the XDG model file at that name.
 
-    Code Puppy 0.0.967 copies ``CODE_PUPPY_API_KEY`` from the workspace ``.env``
-    into its environment at startup, so the token must not come from the environment.
+    Code Puppy 0.0.967 copies a model's ``$NAME`` api_key from the workspace
+    ``.env`` into its environment at startup, so the name must be one that a
+    repo cannot know in advance.
     """
     token = "tok%en-100%"
     repo_env = "CODE_PUPPY_API_KEY=repo-key\nOPENAI_API_KEY=repo-key\n"
+    gateway = GatewayConfig(url=_GATEWAY.url, api_key=token)
 
     result, calls, workspace = _run_with_fake_code_puppy(
-        tmp_path, protected=protected, gateway=GatewayConfig(url=_GATEWAY.url, api_key=token), repo_env=repo_env
+        tmp_path, protected=protected, gateway=gateway, repo_env=repo_env
     )
+    (tmp_path / "second").mkdir()
+    _, second_calls, _ = _run_with_fake_code_puppy(tmp_path / "second", protected=protected, gateway=gateway)
 
     assert result.returncode == 0, result.stderr
+    assert f"RESOLVED_KEY={token}\n" in calls
+    (name,) = [line[len("KEY_REF=") :] for line in calls.splitlines() if line.startswith("KEY_REF=")]
+    (second_name,) = [line[len("KEY_REF=") :] for line in second_calls.splitlines() if line.startswith("KEY_REF=")]
+    assert re.fullmatch(r"CP_KEY_[0-9a-f]{16}", name)
+    assert name != second_name
     assert "CODE_PUPPY_API_KEY=\n" in calls
-    cfg = configparser.ConfigParser()
-    cfg.read_string(calls.split("CFG_BEGIN\n", 1)[1].split("CFG_END\n", 1)[0])
-    assert cfg.get("puppy", "code_puppy_api_key") == token
+    assert json.loads((workspace / CODE_PUPPY_MODELS_FILE).read_text())["app"]["custom_endpoint"]["api_key"] == (
+        "$CODE_PUPPY_API_KEY"
+    )
     assert (workspace / ".env").read_text() == repo_env
     for path in workspace.rglob("*"):
         if path.is_file():
             assert token not in path.read_text()
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_no_file_in_the_run_temp_folder_holds_the_token(tmp_path: Path, protected: bool) -> None:
+    """Keep the gateway token out of every file Code Puppy's temporary folder holds while it runs."""
+    snapshot = tmp_path / "snapshot"
+
+    result, _, _ = _run_with_fake_code_puppy(tmp_path, protected=protected, snapshot=snapshot)
+
+    assert result.returncode == 0, result.stderr
+    files = [path for path in snapshot.rglob("*") if path.is_file()]
+    assert {path.name for path in files} >= {"puppy.cfg", "extra_models.json"}
+    for path in files:
+        assert _GATEWAY.api_key.encode() not in path.read_bytes(), path
 
 
 def test_open_run_keeps_the_gateway_url(tmp_path: Path) -> None:
@@ -323,14 +356,6 @@ def test_stdout_holds_only_the_final_answer_and_usage(tmp_path: Path, protected:
     assert events[0]["type"] == "message_end"
     assert [call for event in events for call in tool_call_ids("pi", event)] == ["code-puppy-0", "code-puppy-1"]
     assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "pi"
-
-
-def test_config_with_the_token_is_owner_only(tmp_path: Path) -> None:
-    """Write puppy.cfg, which holds the gateway token, readable by its owner only."""
-    result, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=True)
-
-    assert result.returncode == 0, result.stderr
-    assert "CFG_MODE=-rw-------\n" in calls
 
 
 def _shipped_tree(tmp_path: Path) -> Path:

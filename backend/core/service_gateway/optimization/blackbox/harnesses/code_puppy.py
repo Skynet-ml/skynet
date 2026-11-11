@@ -6,8 +6,9 @@ first-run prompts, the ``extra_models.json`` custom OpenAI endpoint that reads
 its key from ``CODE_PUPPY_API_KEY``, the ``--prompt`` headless run, the guard
 for a prompt that starts with ``!`` or ``/``, and the usage-file check that
 turns a swallowed model error into a failed run. Skynet pins the release and
-always routes the custom endpoint to the model gateway, and writes the gateway
-token to ``puppy.cfg`` instead of the environment (see :data:`_KEY_CFG_LINE`).
+always routes the custom endpoint to the model gateway, and reads the gateway
+token from an environment name that each run picks at random (see
+:data:`_CUSTOM_API_KEY_ENV`).
 Harbor passes ``--yolo true``, but the pinned CLI has no such argument and
 exits on it, so ``puppy.cfg`` sets ``yolo_mode = true`` instead.
 """
@@ -100,16 +101,20 @@ calls = min(count(used.get("tool_calls")), 10000)
 lines += [json.dumps({"type": "tool_execution_start", "toolCallId": f"code-puppy-{index}"}) for index in range(calls)]
 sys.stdout.write("\\n".join(lines) + "\\n")
 """
-# Code Puppy resolves a ``$NAME`` api_key of a custom endpoint from this variable.
+# Code Puppy resolves a ``$NAME`` api_key of a custom endpoint from the
+# environment. At startup 0.0.967 copies every model's ``$NAME`` api_key from
+# ``./.env`` into the environment over the inherited value, so a candidate
+# repo's ``.env`` could replace a fixed name. The workspace model file holds
+# this placeholder; each run exports the token under a random name and rewrites
+# the placeholder to it in the XDG copy. The token never goes into a file, and
+# a repo ``.env`` cannot know the name.
 _CUSTOM_API_KEY_ENV = "CODE_PUPPY_API_KEY"
-# At startup Code Puppy 0.0.967 copies every model's ``$NAME`` api_key from
-# ``./.env`` into the environment over the inherited value, so a candidate repo's
-# ``.env`` could replace the gateway token. Its key lookup reads ``puppy.cfg``
-# (the lowercase name) before the environment, and puppy.cfg lives outside the
-# workspace, so the token goes there. configparser interpolation reads ``%%`` as ``%``.
-_KEY_CFG_LINE = f"printf '{_CUSTOM_API_KEY_ENV.lower()} = %s\\n' \"$(printf '%s' \"${ENV_API_KEY}\" | sed 's/%/%%/g')\""
-# Code Puppy's effort names, written to puppy.cfg; anything else gets no setting.
-_CODE_PUPPY_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+_RANDOM_KEY_ENV = (
+    f'_cp_key="CP_KEY_$(od -An -N8 -tx1 /dev/urandom | tr -d \' \\n\')" && export "$_cp_key=${ENV_API_KEY}"'
+)
+# Code Puppy's effort names (model_utils._OPENAI_REASONING_EFFORT_ORDER in
+# 0.0.967), written to puppy.cfg; anything else gets no setting.
+_CODE_PUPPY_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 # ``uv tool install`` and the uv installer both put their binaries here.
 _CODE_PUPPY_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
 # Code Puppy reads these keys for its native providers. Every launch blanks
@@ -223,11 +228,10 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
         """trap 'rm -rf "$_cp_dir"' EXIT; """
         f"export {xdg_exports}; "
         'mkdir -p "$XDG_CONFIG_HOME/code_puppy" "$XDG_DATA_HOME/code_puppy" && '
-        f'cp {CODE_PUPPY_MODELS_FILE} "$XDG_DATA_HOME/code_puppy/extra_models.json" && '
-        # A SIGKILL at the session timeout skips the EXIT trap, so puppy.cfg,
-        # which holds the gateway token, is made owner-only in case it stays behind.
-        f"( umask 077 && printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" && "
-        f'{_KEY_CFG_LINE} >> "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" ) || exit 1; '
+        f"{_RANDOM_KEY_ENV} && "
+        f'sed "s/[$]{_CUSTOM_API_KEY_ENV}/\\$$_cp_key/" {CODE_PUPPY_MODELS_FILE} '
+        '> "$XDG_DATA_HOME/code_puppy/extra_models.json" && '
+        f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" || exit 1; "
         f"{_FRAMED_PROMPT}"
         "code-puppy --disable-ask-user-question "
         f'--usage-file {_USAGE_FILE} --model {PROVIDER} --prompt "$_cp_prompt" < /dev/null >&2; '
