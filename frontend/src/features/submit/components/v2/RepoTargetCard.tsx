@@ -43,6 +43,12 @@ const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 /** The commit picker's value for "latest on the branch"; Radix Select items cannot use "". */
 const LATEST = "__latest__";
 
+/**
+ * Monospace for a typed branch or SHA only. An empty field shows its translated
+ * placeholder, and Hebrew in the code font looks broken, so it keeps the UI font (SKY-633).
+ */
+const monoWhenSet = (value: string) => (value ? "font-mono" : "");
+
 /** What a new repository's first commit holds: the task, the scorer and the cases. */
 export interface RepoSeed {
   objective: string;
@@ -352,7 +358,7 @@ export function RepoTargetCard({
                   <SelectTrigger
                     id="v2-repo-branch"
                     dir="ltr"
-                    className={`${TOUCH_FIELD} w-full font-mono`}
+                    className={`${TOUCH_FIELD} w-full ${monoWhenSet(repo.branch)}`}
                   >
                     <SelectValue placeholder={msg("submit.blackbox.repo.branch_default")} />
                   </SelectTrigger>
@@ -373,7 +379,7 @@ export function RepoTargetCard({
                   autoComplete="off"
                   spellCheck={false}
                   dir="ltr"
-                  className={`${TOUCH_FIELD} font-mono`}
+                  className={`${TOUCH_FIELD} ${monoWhenSet(repo.branch)}`}
                 />
               )}
             </div>
@@ -410,7 +416,7 @@ export function RepoTargetCard({
                   autoComplete="off"
                   spellCheck={false}
                   dir="ltr"
-                  className={`${TOUCH_FIELD} font-mono`}
+                  className={`${TOUCH_FIELD} ${monoWhenSet(repo.commit)}`}
                 />
               )}
             </div>
