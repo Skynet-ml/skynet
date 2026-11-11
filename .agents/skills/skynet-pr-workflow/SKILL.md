@@ -1,6 +1,6 @@
 ---
 name: skynet-pr-workflow
-description: Use this skill whenever you create, update, describe, review, verify, capture UI evidence for, or merge a Skynet pull request, or move its Linear issue. It holds the fix-locally-then-push-once order, the merge gates and proof card, the PR description structure and test table, the Opus 5.5 RevEngine review gate, the staging and preview acceptance rules, the costly-workflow rule, the UI before-and-after image and video specs, the backend-only merge scope, the Linear approval flow and the daily merge window.
+description: Use this skill whenever you create, update, describe, review, verify, capture UI evidence for, or merge a Skynet pull request, or move its Linear issue. It holds the PR description, review, acceptance, UI evidence, Linear and merge rules.
 ---
 
 # Skynet PR workflow
