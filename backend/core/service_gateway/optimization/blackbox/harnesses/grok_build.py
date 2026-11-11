@@ -1,12 +1,16 @@
 """xAI Grok Build CLI harness (``grok``).
 
 Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/grok_build: the
-``install.sh`` release install into ``~/.grok/bin``, the generated
-``config.toml`` with telemetry, codebase upload and auto-update pinned off, a
-custom ``[model.<slug>]`` entry on the ``chat_completions`` backend, and the
-``--single ... --always-approve --output-format streaming-json`` one-shot run.
-Harbor reads Grok's session files for the answer; Skynet converts the stdout
-stream to one Pi ``message_end`` event, so the bridge's Pi parser reads it.
+release binary in ``~/.grok/bin``, the generated ``config.toml`` with
+telemetry, codebase upload and auto-update pinned off, a custom
+``[model.<slug>]`` entry on the ``chat_completions`` backend, the
+``--single ... --always-approve --output-format streaming-json`` one-shot run,
+the ``--reasoning-effort`` choices, and the answer read from the session's
+``chat_history.jsonl``. Harbor pipes ``x.ai/cli/install.sh`` into bash and
+gives Grok a direct provider key; Skynet downloads the pinned release binary
+itself and points the custom model entry at the model gateway instead. Harbor
+converts the session on the host; Skynet converts it in the sandbox to one Pi
+``message_end`` event, so the bridge's Pi parser reads it.
 """
 
 from __future__ import annotations
@@ -21,72 +25,109 @@ from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
 from .base import _PROMPT_ARG, ENV_API_KEY, ENV_MODEL, GatewayConfig, HarnessLaunch, _base_env, _version_check
 
-# The ``stable`` release that ``https://x.ai/cli/install.sh`` served on 2026-11-08.
+# The ``stable`` release that ``https://x.ai/cli/stable`` served on 2026-11-10.
 GROK_VERSION = "1.0.77"
 GROK_BINARY = "grok"
-_INSTALL_SCRIPT_URL = "https://x.ai/cli/install.sh"
-_PATH_EXPORT = 'export PATH="$HOME/.grok/bin:$PATH"'
+# The address ``install.sh`` downloads a pinned release from. xAI publishes no
+# checksum for it, so the install checks the version the binary reports.
+_RELEASE_URL = f"https://x.ai/cli/grok-{GROK_VERSION}-linux"
+_GROK_BIN = '"$HOME/.grok/bin"'
+_PATH_EXPORT = f'export PATH={_GROK_BIN}:"$PATH"'
+_DOWNLOADED = '"$d/grok"'
 # The gateway URL lives in this file rather than on the command line, so a
 # protected run's relay rewrite of generated files reaches it.
 GROK_CONFIG_FILE = ".app/grok/config.toml"
-# Grok accepts every effort level Skynet offers; anything else gets no flag.
-_GROK_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-# Grok falls back to these keys for its built-in xAI and other providers. Empty
-# values override a leaked host key, so no route around the gateway exists.
-_NO_DIRECT_KEYS = {"XAI_API_KEY": "", "OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": ""}
+# The ``--reasoning-effort`` choices of Grok Build (Harbor's
+# ``_GROK_REASONING_EFFORT_CHOICES``). Skynet passes the user's level as it is.
+GROK_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# Each run has a fresh Grok home, so a fixed id never collides. It lets the
+# converter read the main session and not a subagent's.
+_SESSION_ID = "6b1f3a52-58f4-4c1e-9d1e-5c0a6f2d7b41"
+# Grok falls back to these keys for its built-in xAI and other providers, and
+# the installer reads the deployment key. Empty values override a leaked host
+# key, so no route around the gateway exists.
+_NO_DIRECT_KEYS = {"XAI_API_KEY": "", "OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": "", "GROK_DEPLOYMENT_KEY": ""}
 _PROTECTED_ENV = {**_NO_DIRECT_KEYS, "GROK_DISABLE_AUTOUPDATER": "1", "DO_NOT_TRACK": "1"}
 # The relay rewrite replaces the raw URL text in the config, so the URL must
 # need no TOML escaping.
 _URL_FORBIDDEN = frozenset("\"'\\")
 
-# Grok's streaming-json reports ``reasoning_tokens`` as a part of
-# ``output_tokens`` and cache reads and writes beside ``input_tokens``, so the
-# prompt total adds the cache buckets and the completion total is the output.
-# The converter runs inline: every generated file must carry the gateway URL
-# for the relay rewrite, and this script has none.
-_CONVERTER_SCRIPT = '''"""Turn Grok Build streaming-json on stdin into one Pi ``message_end`` line."""
+# Grok's streaming-json ``end`` event carries the run total (Harbor's
+# ``GrokUsage``): ``reasoning_tokens`` is a part of ``output_tokens``, and cache
+# reads and writes sit beside ``input_tokens``. So the prompt total adds the
+# cache buckets and the completion total is the output. Without an ``end``
+# event, the per-call ``usage`` events add up. The converter runs inline: a
+# script in ``files`` would land in the workspace that Grok can edit.
+_CONVERTER_SCRIPT = '''"""Turn a Grok Build run into one Pi ``message_end`` line."""
 
+import glob
 import json
+import os
 import sys
+
+_PROMPT_BUCKETS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def json_lines(path):
+    """Return the JSON objects in the file at ``path``, one for each line."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return []
+    found = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            found.append(item)
+    return found
+
+
+def count(used, name):
+    """Return one token bucket, or 0 when it is missing or not a count."""
+    value = used.get(name)
+    return value if type(value) is int and value >= 0 else 0
+
+
+def text_of(content):
+    """Join Grok message content, a string or a list of text blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    return ""
 
 
 def main():
-    """Join Grok's text chunks and sum its usage, then print the Pi event."""
-    chunks, errors = [], []
-    prompt = completion = 0
-    for line in sys.stdin:
-        try:
-            event = json.loads(line)
-        except ValueError:
+    """Print the last assistant text of the session and the run usage as a Pi event."""
+    stream, home, session = sys.argv[1:4]
+    calls, total = [], None
+    for event in json_lines(stream):
+        used = event.get("usage")
+        if not isinstance(used, dict):
             continue
-        if not isinstance(event, dict):
-            continue
-        kind = event.get("type")
-        if kind == "text" and isinstance(event.get("data"), str):
-            chunks.append(event["data"])
-        elif kind == "end":
-            used = event.get("usage") or {}
-            prompt += sum(
-                int(used.get(name) or 0)
-                for name in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-            )
-            completion += int(used.get("output_tokens") or 0)
-        elif kind == "error":
-            errors.append(str(event.get("message") or "Grok Build reported an error."))
-    text = "".join(chunks).strip()
-    if errors and not text:
-        sys.stderr.write("\\n".join(errors) + "\\n")
-        return 1
-    message = {
-        "role": "assistant",
-        "content": [{"type": "text", "text": text}],
-        "usage": {"input": prompt, "output": completion},
-    }
+        if event.get("type") == "usage":
+            calls.append(used)
+        elif event.get("type") in ("end", "error"):
+            total = used
+    picked = calls if total is None else [total]
+    prompt = sum(count(used, name) for used in picked for name in _PROMPT_BUCKETS)
+    completion = sum(count(used, "output_tokens") for used in picked)
+    text = ""
+    pattern = os.path.join(home, ".grok", "sessions", "**", session, "chat_history.jsonl")
+    for path in sorted(glob.glob(pattern, recursive=True)):
+        for message in json_lines(path):
+            if message.get("type") == "assistant":
+                text = text_of(message.get("content")).strip() or text
+    content = [{"type": "text", "text": text}] if text else []
+    message = {"role": "assistant", "content": content, "usage": {"input": prompt, "output": completion}}
     print(json.dumps({"type": "message_end", "message": message}))
-    return 0
 
 
-sys.exit(main())
+main()
 '''
 
 
@@ -114,6 +155,28 @@ def _gateway_url(gateway: GatewayConfig) -> str:
     return url
 
 
+def _effort_flag(reasoning_effort: str | None) -> str:
+    """Return the ``--reasoning-effort`` argument for the user's level.
+
+    Args:
+        reasoning_effort: The user's effort for the model, or ``None`` for Grok's default.
+
+    Returns:
+        The argument with a leading space, or an empty string for no effort.
+
+    Raises:
+        ServiceError: When Grok Build does not know the level.
+    """
+    if reasoning_effort is None:
+        return ""
+    if reasoning_effort not in GROK_EFFORTS:
+        raise ServiceError(
+            f"Grok Build does not support the reasoning effort '{reasoning_effort}'. "
+            f"Use one of: {', '.join(GROK_EFFORTS)}."
+        )
+    return f" --reasoning-effort {reasoning_effort}"
+
+
 def _config_toml(model: str, gateway_url: str) -> str:
     """Return the Grok ``config.toml`` that routes every model role to the gateway.
 
@@ -129,6 +192,8 @@ def _config_toml(model: str, gateway_url: str) -> str:
     """
     slug = json.dumps(model)
     return (
+        # Web search is an xAI server-side tool that does not go through the gateway.
+        "disable_web_search = true\n\n"
         "[cli]\nauto_update = false\n\n"
         "[features]\ntelemetry = false\n\n"
         "[harness]\ndisable_codebase_upload = true\n\n"
@@ -146,11 +211,24 @@ def _grok_install() -> str:
     """Return the command that installs the pinned Grok release unless it is already on PATH.
 
     Returns:
-        The shell command.
+        The shell command. It downloads the release binary into a fresh
+        folder, checks the version it reports, and moves it into
+        ``$HOME/.grok/bin``. It removes the download folder on success and on
+        failure, and exits non-zero when a step fails.
     """
+    # The bootstrap runs this inside its own ``set -eu`` script, so the step
+    # records its status with ``|| r=$?`` (exempt from ``set -e``) and removes
+    # the download folder before it fails, rather than with an EXIT trap that
+    # would replace the caller's.
     return (
-        f"{_PATH_EXPORT}; {_version_check(GROK_BINARY, GROK_VERSION)} || "
-        f"curl -fsSL {_INSTALL_SCRIPT_URL} | bash -s {GROK_VERSION}"
+        f"{_PATH_EXPORT}; {_version_check(GROK_BINARY, GROK_VERSION)} || {{ "
+        'case "$(uname -m)" in x86_64|amd64) a=x86_64;; aarch64|arm64) a=aarch64;; '
+        '*) echo "grok: unsupported architecture" >&2; exit 1;; esac; '
+        'd="$(mktemp -d)"; r=0; '
+        f'curl -fsSL -o "$d/grok" "{_RELEASE_URL}-$a" && chmod 755 "$d/grok" && '
+        f"{_version_check(_DOWNLOADED, GROK_VERSION)} && "
+        f'mkdir -p {_GROK_BIN} && mv "$d/grok" {_GROK_BIN}/grok || r=$?; '
+        'rm -rf "$d"; [ "$r" -eq 0 ] || exit "$r"; }'
     )
 
 
@@ -158,7 +236,8 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
     """Build the launch for the xAI Grok Build CLI (``grok``, pinned to :data:`GROK_VERSION`).
 
     Each run gets a fresh Grok home outside the workspace, so Grok's session
-    and log files never land in the files the run hands back.
+    and log files never land in the files the run hands back. An EXIT trap
+    removes it. The run keeps Grok's exit status.
 
     Args:
         model: Target model id as the gateway knows it.
@@ -167,17 +246,20 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When the gateway URL is not usable or Grok does not know the effort.
     """
-    effort = (reasoning_effort or "").lower()
-    effort_flag = f" --reasoning-effort {effort}" if effort in _GROK_EFFORTS else ""
+    effort_flag = _effort_flag(reasoning_effort)
     run_command = (
         f"{_PATH_EXPORT} && "
-        'GROK_HOME_DIR="$(mktemp -d)" && mkdir -p "$GROK_HOME_DIR/.grok" && '
-        f'cp {GROK_CONFIG_FILE} "$GROK_HOME_DIR/.grok/config.toml" && '
-        'HOME="$GROK_HOME_DIR" GROK_LOG_FILE="$GROK_HOME_DIR/grok.log" '
+        'g="$(mktemp -d)" && trap \'rm -rf "$g"\' EXIT && mkdir -p "$g/.grok" && '
+        f'cp {GROK_CONFIG_FILE} "$g/.grok/config.toml" && {{ '
+        'HOME="$g" GROK_LOG_FILE="$g/grok.log" '
         f"{GROK_BINARY} --no-auto-update --single {_PROMPT_ARG} --always-approve "
-        f'--output-format streaming-json --model "${ENV_MODEL}"{effort_flag} < /dev/null '
-        f"| python3 -c {shlex.quote(_CONVERTER_SCRIPT)}"
+        f'--output-format streaming-json --session-id {_SESSION_ID} --model "${ENV_MODEL}"{effort_flag} '
+        '< /dev/null > "$g/stream.jsonl"; s=$?; '
+        f'python3 -I -c {shlex.quote(_CONVERTER_SCRIPT)} "$g/stream.jsonl" "$g" {_SESSION_ID} && exit "$s"; }}'
     )
     env = _base_env(model, gateway)
     env.update(_NO_DIRECT_KEYS)

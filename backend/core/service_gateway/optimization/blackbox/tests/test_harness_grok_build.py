@@ -1,10 +1,10 @@
-"""Tests for the Grok Build CLI harness: registry entry, gateway-only launch, protected env and output parsing."""
+"""Tests for the Grok Build CLI harness: registry entry, pinned install, gateway-only launch, effort and output parsing."""
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
+import shutil
 import stat
 import subprocess
 import tomllib
@@ -18,21 +18,21 @@ from core.models.blackbox import BLACKBOX_HARNESS_GROK_BUILD, BLACKBOX_HARNESSES
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_pi_output
 from ..harnesses import REGISTRY
-from ..harnesses.grok_build import _CONVERTER_SCRIPT, GROK_CONFIG_FILE, GROK_VERSION
+from ..harnesses.grok_build import _SESSION_ID, GROK_CONFIG_FILE, GROK_EFFORTS, GROK_VERSION
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
 _MODEL = "acme/grok-4"
-_DIRECT_KEYS = ("XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
-# Synthetic ``grok --output-format streaming-json`` transcript: text chunks, a
-# tool call, and the ``end`` event with cache and reasoning buckets.
-_RECORDED_STDOUT = "\n".join(
+_DIRECT_KEYS = ("XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROK_DEPLOYMENT_KEY")
+_PROMPT = "Fix `solution.py` and say $(echo done)."
+# Synthetic ``grok --output-format streaming-json`` stdout: per-call usage, then
+# the ``end`` event with the run total, cache and reasoning buckets.
+_RECORDED_STREAM = "\n".join(
     json.dumps(event)
     for event in (
-        {"type": "thought", "data": "Check solution.py first."},
-        {"type": "text", "data": "I fixed the off-by-one "},
-        {"type": "tool_call", "name": "bash", "input": {"command": "pytest"}},
-        {"type": "text", "data": "error.\n\nThe answer is 42.\n"},
+        {"type": "text", "data": "Working on it."},
+        {"type": "usage", "usage": {"input_tokens": 60, "output_tokens": 10}},
+        {"type": "usage", "usage": {"input_tokens": 40, "output_tokens": 30}},
         {
             "type": "end",
             "usage": {
@@ -45,18 +45,55 @@ _RECORDED_STDOUT = "\n".join(
         },
     )
 )
-# Stand-in for the Grok binary: it records its call and config, then prints a fixed stream.
+# Synthetic ``chat_history.jsonl`` in the message shapes Harbor's Grok models read.
+_RECORDED_HISTORY = "\n".join(
+    json.dumps(message)
+    for message in (
+        {"type": "system", "content": "You are Grok."},
+        {"type": "user", "content": _PROMPT},
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Check solution.py."}]},
+        {
+            "type": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "bash", "arguments": '{"command": "pytest"}'}],
+        },
+        {"type": "tool_result", "tool_call_id": "c1", "content": "1 passed"},
+        {
+            "type": "assistant",
+            "content": [{"type": "text", "text": "I fixed the off-by-one error.\n\n"}, {"type": "text", "text": "42."}],
+        },
+    )
+)
+# Stand-in for the Grok binary: it records its call and config, writes the
+# session history under its home, prints a fixed stream and exits as told.
 _FAKE_GROK = """#!/bin/sh
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
   printf 'HOME=%s\\n' "$HOME"
-  printf 'XAI_API_KEY=%s\\n' "$XAI_API_KEY"
-  printf 'APP_API_KEY=%s\\n' "$APP_API_KEY"
-  printf 'GROK_LOG_FILE=%s\\n' "$GROK_LOG_FILE"
+  for k in XAI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GROK_DEPLOYMENT_KEY APP_API_KEY GROK_LOG_FILE; do
+    eval "printf '%s=%s\\n' $k \\"\\$$k\\""
+  done
 } >> "$FAKE_LOG"
 cp "$HOME/.grok/config.toml" "$FAKE_CONFIG_COPY"
+s="$HOME/.grok/sessions/workspace/$FAKE_SESSION"
+mkdir -p "$s" "$HOME/.grok/sessions/workspace/sub-agent"
+printf '%s\\n' "$FAKE_HISTORY" > "$s/chat_history.jsonl"
+printf '%s\\n' '{"type": "assistant", "content": "subagent text"}' > "$HOME/.grok/sessions/workspace/sub-agent/chat_history.jsonl"
 printf '%s\\n' "$FAKE_STREAM"
+exit "${FAKE_EXIT:-0}"
 """
+# Stand-ins for the install step's tools. ``curl`` logs the file it writes and
+# writes a fake ``grok`` that reports ``FAKE_VERSION``. macOS ``mktemp -d``
+# ignores ``TMPDIR``, so a fake one keeps the folder in scratch.
+_FAKE_INSTALL_TOOLS = {
+    "uname": "#!/bin/sh\necho x86_64\n",
+    "mktemp": '#!/bin/sh\nd="$TMPDIR/download.$$"\nmkdir "$d" && echo "$d"\n',
+    "curl": (
+        '#!/bin/sh\nprintf \'%s %s\\n\' "$3" "$4" >> "$FAKE_LOG"\n'
+        '[ "${FAKE_CURL_EXIT:-0}" -eq 0 ] || exit "$FAKE_CURL_EXIT"\n'
+        'printf \'#!/bin/sh\\necho "grok %s (39d0c6872354) [stable]"\\n\' "$FAKE_VERSION" > "$3"\n'
+    ),
+}
 
 
 def _target() -> BlackboxTarget:
@@ -69,17 +106,18 @@ def _target() -> BlackboxTarget:
 
 
 def _run_with_fake_grok(
-    tmp_path: Path, *, protected: bool, stream: str = _RECORDED_STDOUT
-) -> tuple[str, str, dict, Path]:
+    tmp_path: Path, *, protected: bool, stream: str = _RECORDED_STREAM, fake_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], str, dict, Path]:
     """Run the built Grok command in a scratch workspace against a fake ``grok`` binary.
 
     Args:
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
         protected: Build the protected launch, with the sandbox-local relay set.
         stream: The NDJSON the fake binary prints.
+        fake_exit: Exit status the fake binary returns.
 
     Returns:
-        The command's stdout, the fake binary's call log, the config Grok saw, and the workspace.
+        The finished command, the fake binary's call log, the config Grok saw, and the workspace.
     """
     launch = build_launch(_target(), _GATEWAY, protected=protected)
     workspace = tmp_path / "work"
@@ -88,7 +126,7 @@ def _run_with_fake_grok(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     (workspace / "task").mkdir(parents=True)
-    (workspace / "task" / "PROMPT.md").write_text("Fix `solution.py` and say $(echo done).")
+    (workspace / "task" / "PROMPT.md").write_text(_PROMPT)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "grok"
@@ -100,16 +138,71 @@ def _run_with_fake_grok(
         **launch.env,
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
+        "XAI_API_KEY": "leaked-host-key",
         "FAKE_LOG": str(log),
         "FAKE_CONFIG_COPY": str(config_copy),
+        "FAKE_SESSION": _SESSION_ID,
+        "FAKE_HISTORY": _RECORDED_HISTORY,
         "FAKE_STREAM": stream,
+        "FAKE_EXIT": str(fake_exit),
     }
+    env.update(launch.env)
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
+    shell = shutil.which("bash") or "/bin/sh"
     result = subprocess.run(
-        launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=True
+        [shell, "-c", launch.run_command],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
-    return result.stdout, log.read_text(), tomllib.loads(config_copy.read_text()), workspace
+    return result, log.read_text(), tomllib.loads(config_copy.read_text()), workspace
+
+
+def _run_install(tmp_path: Path, *, curl_exit: int = 0, version: str = GROK_VERSION) -> tuple[int, str, Path, str]:
+    """Run the open install command under ``set -eu`` with fake download tools.
+
+    Args:
+        tmp_path: Scratch directory for the fake tools, ``HOME`` and ``TMPDIR``.
+        curl_exit: Exit status the fake ``curl`` returns.
+        version: Version the downloaded fake ``grok`` reports.
+
+    Returns:
+        The exit status, the stdout, the ``TMPDIR`` folder, and the fake ``curl`` log.
+    """
+    install = build_launch(_target(), _GATEWAY).install_command
+    assert install is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, script in _FAKE_INSTALL_TOOLS.items():
+        tool = bin_dir / name
+        tool.write_text(script)
+        tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    log = tmp_path / "curl.log"
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(scratch),
+        "FAKE_LOG": str(log),
+        "FAKE_CURL_EXIT": str(curl_exit),
+        "FAKE_VERSION": version,
+    }
+    shell = shutil.which("bash") or "/bin/sh"
+    result = subprocess.run(
+        [shell, "-c", f"set -eu; {install}; echo after-install"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return result.returncode, result.stdout, scratch, log.read_text()
 
 
 def test_grok_build_is_registered_before_cline_with_its_pin() -> None:
@@ -117,7 +210,7 @@ def test_grok_build_is_registered_before_cline_with_its_pin() -> None:
     spec = REGISTRY[BLACKBOX_HARNESS_GROK_BUILD]
     assert (spec.binary, spec.version, spec.output_format, spec.position) == ("grok", "1.0.77", "pi", 67)
     ids = list(REGISTRY)
-    assert ids.index("antigravity_sdk") < ids.index(BLACKBOX_HARNESS_GROK_BUILD) < ids.index("cline")
+    assert ids.index("goose") < ids.index(BLACKBOX_HARNESS_GROK_BUILD) < ids.index("cline")
     assert BLACKBOX_HARNESS_GROK_BUILD in BLACKBOX_HARNESSES
     assert (
         pinned_harness_check(BLACKBOX_HARNESS_GROK_BUILD)
@@ -125,22 +218,18 @@ def test_grok_build_is_registered_before_cline_with_its_pin() -> None:
     )
 
 
-def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway() -> None:
-    """Install the pinned release, route every model role to the gateway in the config, and blank direct keys."""
+def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
+    """Route every model role to the gateway in the config, keep keys out of files and argv, and blank direct keys."""
     launch = build_launch(_target(), _GATEWAY)
 
     assert launch.instructions_file == "AGENTS.md"
-    assert launch.install_command == (
-        'export PATH="$HOME/.grok/bin:$PATH"; '
-        "grok --version 2>/dev/null | grep -Eq '(^| )1[.]0[.]77( |$)' || "
-        f"curl -fsSL https://x.ai/cli/install.sh | bash -s {GROK_VERSION}"
-    )
     assert set(launch.files) == {GROK_CONFIG_FILE}
     config = tomllib.loads(launch.files[GROK_CONFIG_FILE])
+    assert config["disable_web_search"] is True
     assert config["cli"] == {"auto_update": False}
     assert config["features"] == {"telemetry": False}
     assert config["harness"] == {"disable_codebase_upload": True}
-    assert set(config["models"].values()) == {_MODEL}
+    assert config["models"] == dict.fromkeys(("default", "session_summary", "image_description", "web_search"), _MODEL)
     assert config["model"] == {
         _MODEL: {
             "name": _MODEL,
@@ -155,29 +244,80 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     assert _GATEWAY.api_key not in launch.run_command
     assert (
         'grok --no-auto-update --single "$(cat "$APP_PROMPT_FILE")" --always-approve '
-        f'--output-format streaming-json --model "$APP_MODEL" < /dev/null | python3 -c {shlex.quote(_CONVERTER_SCRIPT)}'
+        f'--output-format streaming-json --session-id {_SESSION_ID} --model "$APP_MODEL" < /dev/null'
     ) in launch.run_command
-    assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
-    assert launch.env["GROK_DISABLE_AUTOUPDATER"] == "1"
     assert all(launch.env[name] == "" for name in _DIRECT_KEYS)
+    assert launch.env["GROK_DISABLE_AUTOUPDATER"] == "1"
     assert launch.parse_output is parse_pi_output
 
 
-@pytest.mark.parametrize(
-    ("effort", "flag"),
-    [(None, None), ("none", "none"), ("minimal", "minimal"), ("high", "high"), ("max", "max"), ("turbo", None)],
-)
-def test_reasoning_effort_maps_to_the_effort_flag(effort: str | None, flag: str | None) -> None:
-    """Pass a known effort as Grok's ``--reasoning-effort``, and no flag for anything else."""
+def test_launch_env_carries_the_app_and_skynet_names() -> None:
+    """Give the gateway key, model and prompt file under both the ``APP_*`` and the legacy ``SKYNET_*`` names."""
+    env = build_launch(_target(), _GATEWAY).env
+
+    for name, value in (("API_KEY", _GATEWAY.api_key), ("MODEL", _MODEL), ("GATEWAY_URL", _GATEWAY.url)):
+        assert env[f"APP_{name}"] == env[f"SKYNET_{name}"] == value
+
+
+def test_open_install_downloads_the_pinned_binary_without_a_remote_script() -> None:
+    """Fetch the pinned release binary and never pipe xAI's install script into a shell."""
+    install = build_launch(_target(), _GATEWAY).install_command
+
+    assert install is not None
+    assert install.startswith(f'export PATH="$HOME/.grok/bin":"$PATH"; {pinned_harness_check("grok_build")} || {{ ')
+    assert f'"https://x.ai/cli/grok-{GROK_VERSION}-linux-$a"' in install
+    assert "install.sh" not in install
+    assert "| bash" not in install
+    assert "| sh" not in install
+    assert "sudo" not in install
+
+
+def test_install_puts_the_pinned_binary_on_path_and_removes_the_download_folder(tmp_path: Path) -> None:
+    """Install the binary, remove the download folder, and let the caller's script continue."""
+    code, stdout, scratch, curl_log = _run_install(tmp_path)
+
+    assert code == 0
+    assert stdout.strip() == "after-install"
+    assert (tmp_path / "home" / ".grok" / "bin" / "grok").is_file()
+    assert curl_log.split()[1] == f"https://x.ai/cli/grok-{GROK_VERSION}-linux-x86_64"
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize(("curl_exit", "version", "code"), [(22, GROK_VERSION, 22), (0, "1.0.78", 1)])
+def test_failed_download_or_wrong_version_removes_the_download_folder_and_fails(
+    tmp_path: Path, curl_exit: int, version: str, code: int
+) -> None:
+    """Remove the download folder when the download fails or the binary is another release, and exit non-zero."""
+    exit_code, stdout, scratch, _ = _run_install(tmp_path, curl_exit=curl_exit, version=version)
+
+    assert exit_code == code
+    assert "after-install" not in stdout
+    assert not (tmp_path / "home" / ".grok" / "bin" / "grok").exists()
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("effort", GROK_EFFORTS)
+def test_every_grok_effort_passes_unchanged(effort: str) -> None:
+    """Pass each level Grok Build knows as ``--reasoning-effort`` with the same spelling."""
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
-    if flag is None:
-        assert "--reasoning-effort" not in launch.run_command
-    else:
-        assert f'--model "$APP_MODEL" --reasoning-effort {flag} < /dev/null' in launch.run_command
+
+    assert f'--model "$APP_MODEL" --reasoning-effort {effort} < /dev/null' in launch.run_command
+
+
+def test_no_effort_sends_no_flag() -> None:
+    """Leave the effort to Grok's default when the user sets none."""
+    assert "--reasoning-effort" not in build_launch(_target(), _GATEWAY).run_command
+
+
+@pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH", ""])
+def test_an_unsupported_effort_stops_the_launch(effort: str) -> None:
+    """Refuse a level Grok Build does not know, rather than drop or remap it."""
+    with pytest.raises(ServiceError, match="reasoning effort"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
-    """Use the offline version probe, blank every direct provider key, and keep the gateway key."""
+    """Use the offline version probe, blank every direct provider key, keep telemetry off and keep the gateway key."""
     launch = build_launch(_target(), _GATEWAY, protected=True)
 
     assert launch.install_command == pinned_harness_check(BLACKBOX_HARNESS_GROK_BUILD)
@@ -195,24 +335,27 @@ def test_launch_refuses_a_gateway_url_that_cannot_sit_in_the_config(url: str) ->
 
 
 def test_protected_run_points_grok_at_the_relay_and_returns_its_answer(tmp_path: Path) -> None:
-    """Run the protected command against a fake Grok: the relay URL, gateway token and answer come through."""
-    stdout, calls, config, workspace = _run_with_fake_grok(tmp_path, protected=True)
+    """Run the protected command against a fake Grok: relay URL, blank keys, literal prompt, answer and usage."""
+    result, calls, config, workspace = _run_with_fake_grok(tmp_path, protected=True)
 
+    assert result.returncode == 0, result.stderr
     run = next(line for line in calls.splitlines() if line.startswith("ARGS"))
     assert run == (
-        "ARGS [--no-auto-update] [--single] [Fix `solution.py` and say $(echo done).] [--always-approve] "
-        f"[--output-format] [streaming-json] [--model] [{_MODEL}]"
+        f"ARGS [--no-auto-update] [--single] [{_PROMPT}] [--always-approve] "
+        f"[--output-format] [streaming-json] [--session-id] [{_SESSION_ID}] [--model] [{_MODEL}]"
     )
     assert config["model"][_MODEL]["base_url"] == _RELAY
     assert _GATEWAY.url not in calls
-    assert "APP_API_KEY=gateway-token" in calls
-    assert "XAI_API_KEY=\n" in calls
+    assert "APP_API_KEY=gateway-token" in calls.splitlines()
+    for name in _DIRECT_KEYS:
+        assert f"{name}=" in calls.splitlines()
     grok_home = Path(next(line for line in calls.splitlines() if line.startswith("HOME=")).split("=", 1)[1])
     assert not grok_home.is_relative_to(workspace.resolve())
     assert not grok_home.is_relative_to(workspace)
-    assert f"GROK_LOG_FILE={grok_home}/grok.log" in calls
-    assert parse_output("pi", stdout) == (
-        "I fixed the off-by-one error.\n\nThe answer is 42.",
+    assert f"GROK_LOG_FILE={grok_home}/grok.log" in calls.splitlines()
+    assert not grok_home.exists()
+    assert parse_output("pi", result.stdout) == (
+        "I fixed the off-by-one error.\n\n42.",
         {"input_tokens": 125, "output_tokens": 40},
     )
 
@@ -224,12 +367,22 @@ def test_open_run_reads_the_gateway_url_from_the_generated_config(tmp_path: Path
     assert config["model"][_MODEL]["base_url"] == _GATEWAY.url
 
 
-def test_an_error_stream_without_text_fails_the_run(tmp_path: Path) -> None:
-    """Fail the command and surface Grok's message when the stream has an error and no answer."""
-    with pytest.raises(subprocess.CalledProcessError) as failure:
-        _run_with_fake_grok(tmp_path, protected=False, stream=json.dumps({"type": "error", "message": "bad route"}))
+def test_without_an_end_event_the_per_call_usage_adds_up(tmp_path: Path) -> None:
+    """Sum the ``usage`` events when Grok stops before its ``end`` event."""
+    stream = "\n".join(_RECORDED_STREAM.splitlines()[:3])
+    result, _, _, _ = _run_with_fake_grok(tmp_path, protected=False, stream=stream)
 
-    assert "bad route" in failure.value.stderr
+    assert parse_output("pi", result.stdout)[1] == {"input_tokens": 100, "output_tokens": 40}
+
+
+def test_a_failed_grok_run_keeps_its_exit_status_and_usage(tmp_path: Path) -> None:
+    """Return Grok's own exit status, and still report the tokens it used, and remove its home."""
+    result, calls, _, _ = _run_with_fake_grok(tmp_path, protected=False, fake_exit=3)
+
+    assert result.returncode == 3
+    assert parse_output("pi", result.stdout)[1] == {"input_tokens": 125, "output_tokens": 40}
+    grok_home = Path(next(line for line in calls.splitlines() if line.startswith("HOME=")).split("=", 1)[1])
+    assert not grok_home.exists()
 
 
 def test_the_payload_names_the_pi_parser() -> None:
