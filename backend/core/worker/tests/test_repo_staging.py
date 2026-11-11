@@ -989,7 +989,7 @@ def test_binding_hands_the_proposer_route_its_own_mcp_relay(tmp_path: Path) -> N
 
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
 
-    assert route[MCP_RELAY_ROUTE_KEY] == {"token": "mcp-token", "servers": ["web"]}
+    assert route[MCP_RELAY_ROUTE_KEY] == {"token": "mcp-token", "servers": ["web"], "services": []}
     [relay] = relays
     assert relay._label == "[proposer]"
     assert relay._role is proposer
@@ -997,6 +997,49 @@ def test_binding_hands_the_proposer_route_its_own_mcp_relay(tmp_path: Path) -> N
     assert relay._secret_hosts == {"API_KEY": "web.example.com"}
     assert "secret-value" not in repr(payload)
     assert "web.example.com" not in repr(payload)
+    staged.close_scorers()
+
+
+def test_binding_hands_the_proposer_route_a_relay_for_its_services(tmp_path: Path) -> None:
+    """A proposer that lists services gets a relay token and the names; the relay holds the urls (SKY-612)."""
+    payload, bare = _binding(tmp_path, None)
+    route = {"url": "http://127.0.0.1:1/v1", "token": "proposer-token"}
+    payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
+    services = {"maps": ServiceSpec(secrets=("API_KEY",), url="https://maps.example.com/v1")}
+    staged = dataclasses.replace(
+        bare,
+        proposer_role=RoleEnvironment(services=("maps",)),
+        services=services,
+        secret_hosts={"API_KEY": "maps.example.com"},
+    )
+    gateway = _Gateway()
+    relays: list[McpRelay] = []
+
+    def bind_mcp_relay(relay: McpRelay) -> dict[str, str]:
+        """Keep the relay and hand back a fake route."""
+        relays.append(relay)
+        return {"url": "http://127.0.0.1:1/v1", "token": "mcp-token"}
+
+    gateway.bind_mcp_relay = bind_mcp_relay  # type: ignore[attr-defined]
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert route[MCP_RELAY_ROUTE_KEY] == {"token": "mcp-token", "servers": [], "services": ["maps"]}
+    [relay] = relays
+    assert relay._services == services
+    assert relay._secrets == {"API_KEY": "secret-value"}
+    assert "secret-value" not in repr(payload)
+    assert "maps.example.com" not in repr(payload)
+    staged.close_scorers()
+
+
+def test_binding_refuses_proposer_services_without_a_model_route(tmp_path: Path) -> None:
+    """Services with no proposer model route have no box to reach them, so the run stops before it starts."""
+    payload, bare = _binding(tmp_path, None)
+    staged = dataclasses.replace(bare, proposer_role=RoleEnvironment(services=("maps",)))
+
+    with pytest.raises(ServiceError, match="need the proposer's model route"):
+        repo_staging.bind_repo_scorer(payload, staged, _Gateway(), owner_id="job-1")
     staged.close_scorers()
 
 

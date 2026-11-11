@@ -325,7 +325,6 @@
     "repo_gate.secret_host_unlisted": "Il segreto {secret} non ha host consentiti, ma il repository lo invia a {host}. Aggiungi {host} agli host consentiti di {secret} nell’esecuzione.",
     "repo_gate.managed_secret_unavailable": "Il segreto {secret} è collegato a una chiave {term.appName}, ma {term.appName} non ha una chiave per {host}. Collega il segreto a user, o usa uno di questi host, che hanno una chiave {term.appName}: {known}.",
     "repo_gate.unknown_connector": "Il servizio {service} in optimize.toml non è un connettore. Usa uno di questi nomi: {known}.",
-    "repo_gate.proposer_hosts_unsupported": "optimize.toml imposta [proposer] network su {hosts}. Gli host consentiti per il proponente non sono ancora supportati. Rimuovi l’elenco per avviare l’esecuzione.",
     "optimization.retry_no_payload": "L'ottimizzazione di origine non ha alcun payload salvato da riprovare.",
     "optimization.retry_wrong_status": "Possono essere riprovate solo le ottimizzazioni nello stato 'failed' o 'cancelled': questa è nello stato '{status}'. Clonala invece.",
     "quota.reached": "Hai raggiunto il limite di {quota, plural, one {1 ottimizzazione} other {# ottimizzazioni}}. Elimina le vecchie ottimizzazioni per crearne di nuove.",

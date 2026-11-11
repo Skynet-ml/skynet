@@ -311,7 +311,6 @@
     "repo_gate.secret_host_unlisted": "密鑰 {secret} 冇任何允許主機，但係儲存庫將佢傳去 {host}。請喺運行度將 {host} 加入 {secret} 嘅允許主機。",
     "repo_gate.managed_secret_unavailable": "密鑰 {secret} 綁定咗 {term.appName} 嘅密鑰，但係 {term.appName} 冇 {host} 嘅密鑰。請將密鑰綁定去 user，或者用以下有 {term.appName} 密鑰嘅主機之一：{known}。",
     "repo_gate.unknown_connector": "optimize.toml 入面嘅服務 {service} 唔係連接器。請用以下其中一個名：{known}。",
-    "repo_gate.proposer_hosts_unsupported": "optimize.toml 將 [proposer] network 設定咗做 {hosts}。暫時未支援提案者嘅允許主機。請刪走呢個清單再運行。",
     "optimization.retry_no_payload": "來源優化冇已儲存嘅 payload 可以重試。",
     "optimization.retry_wrong_status": "只有處於「failed」或「cancelled」狀態嘅優化先可以重試——目前處於「{status}」。請改為複製佢。",
     "quota.concurrent_reached": "你已經有 {limit, plural, other {# 個執行}} 進行緊。請等其中一個完成咗先好開始下一個。",

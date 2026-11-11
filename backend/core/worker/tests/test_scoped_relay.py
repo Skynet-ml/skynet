@@ -287,8 +287,37 @@ def test_the_mcp_route_refuses_a_path_that_leaves_one_server_name(client: type[_
     assert client.timeouts == []
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/service/",
+        "/v1/service//x",
+        "/v1/service/../_sandbox",
+        "/v1/service/%2e%2e/x",
+        "/v1/service/echo/../other/",
+        "/v1/service/echo/a/%2E%2E/b",
+        "/v1/service/echo/./a",
+        "/v1/service/echo?x/",
+        "/v1/service/echo#x/",
+    ],
+)
+def test_the_service_route_refuses_a_path_that_leaves_one_service(client: type[_Client], path: str) -> None:
+    """A service relay path must name one service and stay under it; anything else never leaves the parent.
+
+    Args:
+        client: The fake HTTP client.
+        path: The path the box asks for.
+    """
+    dispatch = scoped_relay.model_forwarder({MCP_RELAY_ROUTE_KEY: _MCP_ROUTE})
+
+    with pytest.raises(ValueError, match="outside the service relay"):
+        dispatch(_MCP_ROUTE["token"], path, b"", {})
+
+    assert client.timeouts == []
+
+
 def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) -> None:
-    """The MCP token opens no model route, and a model token opens no MCP server.
+    """The MCP token opens no model route, and a model token opens no MCP server or service.
 
     Args:
         client: The fake HTTP client.
@@ -299,6 +328,8 @@ def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) 
         dispatch(_MCP_ROUTE["token"], "/v1/chat/completions", {"model": "fixture/text"}, {})
     with pytest.raises(ValueError, match="unknown metered model capability"):
         dispatch(_ROUTE["token"], "/v1/mcp/search", b"{}", {})
+    with pytest.raises(ValueError, match="unknown metered model capability"):
+        dispatch(_ROUTE["token"], "/v1/service/echo/", b"", {})
 
     assert client.timeouts == []
 

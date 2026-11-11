@@ -325,7 +325,6 @@
     "repo_gate.secret_host_unlisted": "시크릿 {secret}에 허용 호스트가 없지만, 저장소가 {host}(으)로 보냅니다. 실행에서 {secret}의 허용 호스트에 {host}을(를) 추가하세요.",
     "repo_gate.managed_secret_unavailable": "시크릿 {secret}이(가) {term.appName} 키에 연결되어 있지만, {term.appName}에는 {host}용 키가 없습니다. 시크릿을 user에 연결하거나, {term.appName} 키가 있는 다음 호스트 중 하나를 사용하세요: {known}.",
     "repo_gate.unknown_connector": "optimize.toml의 서비스 {service}은(는) 커넥터가 아닙니다. 다음 이름 중 하나를 사용하세요: {known}.",
-    "repo_gate.proposer_hosts_unsupported": "optimize.toml에서 [proposer] network를 {hosts}(으)로 설정합니다. 제안자의 허용 호스트는 아직 지원되지 않습니다. 실행하려면 목록을 제거하세요.",
     "optimization.retry_no_payload": "원본 최적화에 다시 시도할 저장된 페이로드가 없습니다.",
     "optimization.retry_wrong_status": "'failed' 또는 'cancelled' 상태의 최적화만 다시 시도할 수 있습니다. 이 최적화는 '{status}' 상태입니다. 대신 복제하세요.",
     "quota.reached": "사용자당 최적화 한도({quota}개)에 도달했습니다. 새로 만들려면 기존 최적화를 삭제하세요.",

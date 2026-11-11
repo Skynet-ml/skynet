@@ -325,7 +325,6 @@
     "repo_gate.secret_host_unlisted": "Секрет {secret} не має дозволених хостів, але репозиторій надсилає його на {host}. Додайте {host} до дозволених хостів {secret} у запуску.",
     "repo_gate.managed_secret_unavailable": "Секрет {secret} прив’язаний до ключа {term.appName}, але {term.appName} не має ключа для {host}. Прив’яжіть секрет до user або використайте один із цих хостів із ключем {term.appName}: {known}.",
     "repo_gate.unknown_connector": "Сервіс {service} в optimize.toml не є конектором. Використайте одну з цих назв: {known}.",
-    "repo_gate.proposer_hosts_unsupported": "У optimize.toml для [proposer] network задано {hosts}. Дозволені хости для агента-пропонувача поки не підтримуються. Видаліть список, щоб запустити.",
     "optimization.retry_no_payload": "Вихідна оптимізація не має збережених даних для повторної спроби.",
     "optimization.retry_wrong_status": "Повторити можна лише оптимізації у стані 'failed' або 'cancelled' — ця перебуває у стані '{status}'. Клонуйте її натомість.",
     "quota.reached": "Ви досягли свого ліміту — {quota, plural, one {1 оптимізація} few {# оптимізації} many {# оптимізацій} other {# оптимізації}}. Видаліть старі оптимізації, щоб створити нові.",

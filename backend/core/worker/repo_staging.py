@@ -146,8 +146,9 @@ class StagedRepository:
     # stage: the relay checks each MCP request against the calling role only
     # (E49, E55, SKY-611).
     mcp_roles: Mapping[str, RoleEnvironment] = field(default_factory=dict)
-    # The proposer, whose box reaches the servers of its own MCP file only
-    # through the parent's relay, behind its own token (SKY-610).
+    # The proposer, whose box reaches the servers of its own MCP file and the
+    # services it lists only through the parent's relay, behind its own token
+    # (SKY-610, SKY-612).
     proposer_role: RoleEnvironment | None = None
     # The [run] entry, which runs before the metric with the metric files out of the tree (E38).
     run_entry: str | tuple[str, ...] | None = None
@@ -777,8 +778,9 @@ def bind_repo_scorer(
     or a way to open a box with package-registry access. When the target has
     a setup command the box opens reaching only package registries, runs
     setup once, and goes offline before any version is laid out. When the
-    proposer's MCP file lists servers, the proposer's route also gets the
-    token and server names of a relay that reaches only those servers.
+    proposer's MCP file lists servers or ``[proposer] services`` lists
+    services, the proposer's route also gets the token, server names and
+    service names of a relay that reaches only those.
 
     Args:
         payload: Protected payload, updated in place with the evaluator route.
@@ -791,7 +793,7 @@ def bind_repo_scorer(
     Raises:
         ConstraintsError: When the run turned the watch hook on but it cannot run.
         ServiceError: When the scorer has a model but no scoped route from the trusted
-            parent, or the proposer has MCP servers but no model route.
+            parent, or the proposer has MCP servers or services but no model route.
     """
     model_gateway = _repo_model_gateway(payload["scorer"])
     rule_judge = _rule_judge(payload, staged, gateway, owner_id=owner_id, managed_key=managed_key)
@@ -852,10 +854,10 @@ def bind_repo_scorer(
     scorer.prepare()
     payload["_skynet_evaluator_route"] = gateway.bind_evaluator(scorer)
     proposer = staged.proposer_role
-    if proposer is not None and proposer.mcp_servers:
+    if proposer is not None and (proposer.mcp_servers or proposer.services):
         proposer_route = _proposer_model_extra(payload).get(ROUTE_KEY)
         if not isinstance(proposer_route, dict):
-            raise ServiceError("The [proposer] mcp servers need the proposer's model route.")
+            raise ServiceError("The [proposer] mcp servers and services need the proposer's model route.")
         relay = McpRelay(
             "[proposer]",
             proposer,
@@ -864,12 +866,14 @@ def bind_repo_scorer(
             secret_hosts=staged.secret_hosts,
             allowed_hosts=staged.secret_allowed_hosts,
             budget=getattr(gateway, "runtime", None),
+            services=staged.services,
         )
         # Beside the proposer's model route, as the host proposer's token is:
         # the guest's harness launch reads only that route.
         proposer_route[MCP_RELAY_ROUTE_KEY] = {
             "token": gateway.bind_mcp_relay(relay)["token"],
             "servers": [server.name for server in proposer.mcp_servers],
+            "services": list(proposer.services),
         }
 
 

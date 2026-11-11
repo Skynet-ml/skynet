@@ -22,7 +22,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from .... import run_log
-from ....billing.guest_model_proxy import MCP_TOKEN_ENV
+from ....billing.guest_model_proxy import MCP_TOKEN_ENV, SERVICES_ENV
 from ....billing.host_agent import HOST_AGENT_TOKEN_KEY
 from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY, raise_gateway_stop
 from ....billing.pricing import model_token_costs
@@ -1134,6 +1134,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
     editor = _shinka_editor(options, relay) if shinka and (options.shinka or {}).get("editor") == "agent" else None
     if mcp_route.get("servers") and not relay:
         raise ServiceError("The [proposer] mcp servers require the box's mailbox relay.")
+    if mcp_route.get("services") and not relay:
+        raise ServiceError("The [proposer] services require the box's mailbox relay.")
     launch = build_launch(
         BlackboxTarget(
             kind="agent",
@@ -1279,6 +1281,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             **(with_legacy_env({"APP_BUDGET_RELAY_URL": relay}) if relay else {}),
             # The box's proxy adds this token to each [proposer] MCP request (SKY-610).
             **({MCP_TOKEN_ENV: mcp_route["token"]} if mcp_route.get("token") else {}),
+            # The box's proxy turns these names into SKYNET_SERVICE_<NAME>_URL on its own port (SKY-612).
+            **({SERVICES_ENV: json.dumps(mcp_route["services"])} if mcp_route.get("services") else {}),
         }
         if shinka:
             env.update(

@@ -74,26 +74,6 @@ def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []
 
 
-def test_an_unenforceable_proposer_services_key_fails_on_local_docker(tmp_path: Path) -> None:
-    """No proposer box reaches [services] yet, so the run stops instead of ignoring the key."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b"[proposer]\nservices = []\n", **_NAMED_FILES})
-
-    failures = check_repository(archive, (), place="local")
-
-    assert failures == [
-        GateFailure(
-            key="[proposer] services",
-            place="local",
-            reason=(
-                "optimize.toml sets [proposer] services. The local Docker sandbox cannot enforce "
-                "this setting yet. Remove it to run."
-            ),
-            code=I18nKey.REPO_GATE_UNENFORCED_LOCAL,
-            params={"key": "[proposer] services"},
-        )
-    ]
-
-
 def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
     """The message says which sandbox cannot enforce the key."""
     archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[metric]\nreference = "eval/reference.json"\n'})
@@ -133,7 +113,6 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("raw", "key"),
     [
-        (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
         (
             b'[services.maps]\nurl = "https://api.example.com"\n'
             b'[target.planner]\nentry = "agents/planner.py:plan"\nservices = ["maps"]\n',
@@ -143,7 +122,6 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
             b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n',
             "[target.planner] network",
         ),
-        (b"[proposer]\nservices = []\n", "[proposer] services"),
         (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
         (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
         (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
@@ -173,24 +151,26 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
         (b"[metric]\nservices = []\n", "[metric] services"),
         (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
         (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
+        (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
+        (b"[proposer]\nservices = []\n", "[proposer] services"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str, place: str) -> None:
-    """The stage relay enforces the run and metric service lists and MCP files, so the gate stops refusing them (SKY-385)."""
+    """The relays enforce the stage and proposer service lists and MCP files, so the gate passes them (SKY-612)."""
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert key not in [failure.key for failure in failures]
 
 
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_a_proposer_mcp_file_passes_and_proposer_services_still_fail(tmp_path: Path, place: str) -> None:
-    """The proposer's box reaches its MCP servers through the relay, so only ``[proposer] services`` fails (SKY-610)."""
+def test_a_proposer_mcp_file_and_proposer_services_pass(tmp_path: Path, place: str) -> None:
+    """The proposer's box reaches its MCP servers and services through the relay (SKY-610, SKY-612)."""
     raw = b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
-    assert [failure.key for failure in failures] == ["[proposer] services"]
+    assert failures == []
 
 
 @pytest.mark.parametrize(
@@ -239,15 +219,15 @@ def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
 
 def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> None:
     """The worker's error lists every reason and keeps the first one's code for a client that shows one message."""
-    raw = b'[proposer]\nservices = []\n[metric]\nreference = "eval/reference.json"\n'
+    raw = b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     error = RepoGateError(failures)
 
     assert error.failures == failures
     assert error.code == I18nKey.REPO_GATE_UNENFORCED_LOCAL
-    assert error.params == {"key": "[proposer] services"}
-    assert "[proposer] services" in str(error)
+    assert error.params == {"key": "[run] entry"}
+    assert "[run] entry" in str(error)
     assert "[metric] reference" in str(error)
 
 
@@ -377,7 +357,6 @@ def test_a_stdio_mcp_server_fails_the_setup_check(tmp_path: Path) -> None:
 
 def test_the_new_messages_exist_in_hebrew() -> None:
     """Each new code renders in the Hebrew base catalog with its placeholders filled."""
-    hosts = t_locale("he", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED, hosts="pypi.org")
     mcp = t_locale(
         "he", I18nKey.REPO_GATE_MISSING_MCP_SECRET, server="grader", path="eval/.mcp.json", secret="GRADER_KEY"
     )
@@ -385,7 +364,6 @@ def test_the_new_messages_exist_in_hebrew() -> None:
         "he", I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE, secret="MAPS_KEY", host="maps.example.com", known="maps"
     )
 
-    assert "pypi.org" in hosts
     assert all(value in mcp for value in ("grader", "eval/.mcp.json", "GRADER_KEY"))
     assert all(value in managed for value in ("MAPS_KEY", "maps.example.com", "maps"))
     assert "{" not in mcp + managed

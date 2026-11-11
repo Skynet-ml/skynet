@@ -11,6 +11,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 RELAY_URL_ENV = "APP_BUDGET_RELAY_URL"
@@ -27,9 +28,29 @@ _FORWARDED_HEADERS = frozenset({"authorization", "x-api-key", "anthropic-version
 MCP_PATH = "/v1/mcp/"
 # The mailbox passes one JSON document per request, so an MCP request's HTTP method travels as this header.
 METHOD_HEADER = "x-app-relay-method"
-# The relay token of the role's MCP servers. The box's MCP file holds no header, so the proxy adds it.
+# The relay token of the role's MCP servers and services. The box holds no header for them, so the proxy adds it.
 MCP_TOKEN_ENV = "APP_MCP_RELAY_TOKEN"
 _MCP_HEADERS = frozenset({"accept", "content-type", "last-event-id", "mcp-protocol-version", "mcp-session-id"})
+# Each [proposer] service is at <relay url>/service/<name>/ on this proxy, behind the same relay token (SKY-612).
+SERVICE_PATH = "/v1/service/"
+# A JSON list of the role's service names; the proxy gives the command one SKYNET_SERVICE_<NAME>_URL for each.
+SERVICES_ENV = "APP_RELAY_SERVICES"
+# A service takes any header but these: they belong to this connection or carry the box's own credential.
+_SERVICE_DROPPED_HEADERS = frozenset(
+    {
+        "authorization",
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-authorization",
+        "te",
+        "transfer-encoding",
+        "upgrade",
+        METHOD_HEADER,
+    }
+)
+_RAW_PATHS = (MCP_PATH, SERVICE_PATH)
 
 
 def main() -> int:
@@ -59,8 +80,23 @@ def main() -> int:
             self._relay()
 
         def do_DELETE(self) -> None:
-            """Relay the end of an MCP session; no other path takes DELETE."""
-            if not self.path.startswith(MCP_PATH):
+            """Relay the end of an MCP session or a service DELETE; no other path takes DELETE."""
+            if not self.path.startswith(_RAW_PATHS):
+                self.send_error(405)
+                return
+            self._relay()
+
+        def do_PUT(self) -> None:
+            """Relay a service PUT; no other path takes PUT."""
+            self._service_only()
+
+        def do_PATCH(self) -> None:
+            """Relay a service PATCH; no other path takes PATCH."""
+            self._service_only()
+
+        def _service_only(self) -> None:
+            """Relay a request whose method only a service path takes."""
+            if not self.path.startswith(SERVICE_PATH):
                 self.send_error(405)
                 return
             self._relay()
@@ -68,14 +104,21 @@ def main() -> int:
         def _relay(self) -> None:
             """Wait for the supervisor's response without contacting the internet."""
             mcp = self.path.startswith(MCP_PATH)
+            service = self.path.startswith(SERVICE_PATH)
+            raw = mcp or service
             length = int(self.headers.get("Content-Length", "0"))
-            if (self.command == "POST" and length <= 0) or not 0 <= length <= 32 * 1024 * 1024:
+            if (self.command == "POST" and length <= 0 and not service) or not 0 <= length <= 32 * 1024 * 1024:
                 self.send_error(413)
                 return
             identity = uuid4().hex
-            forwarded = _FORWARDED_HEADERS | _MCP_HEADERS if mcp else _FORWARDED_HEADERS
-            headers = {key: value for key, value in self.headers.items() if key.lower() in forwarded}
-            if mcp:
+            if service:
+                headers = {
+                    key: value for key, value in self.headers.items() if key.lower() not in _SERVICE_DROPPED_HEADERS
+                }
+            else:
+                forwarded = _FORWARDED_HEADERS | _MCP_HEADERS if mcp else _FORWARDED_HEADERS
+                headers = {key: value for key, value in self.headers.items() if key.lower() in forwarded}
+            if raw:
                 headers = {key: value for key, value in headers.items() if key.lower() != METHOD_HEADER}
                 headers[METHOD_HEADER] = self.command
                 if os.environ.get(MCP_TOKEN_ENV):
@@ -84,7 +127,7 @@ def main() -> int:
             request = {
                 "id": identity,
                 "path": self.path,
-                "body": base64.b64encode(self.rfile.read(length) if length else b"" if mcp else b"{}").decode(),
+                "body": base64.b64encode(self.rfile.read(length) if length else b"" if raw else b"{}").decode(),
                 "headers": headers,
             }
             with _PRINT_LOCK:
@@ -135,6 +178,10 @@ def main() -> int:
         "OPENAI_BASE_URL": f"{endpoint}/v1",
         GATEWAY_URL_ENV: f"{endpoint}/v1",
         _LEGACY_GATEWAY_URL_ENV: f"{endpoint}/v1",
+        **{
+            service_env_name(name): f"{endpoint}{SERVICE_PATH}{quote(name, safe='')}/"
+            for name in json.loads(os.environ.get(SERVICES_ENV) or "[]")
+        },
     }
     try:
         return subprocess.run(sys.argv[2:], env=environment, check=False).returncode
@@ -142,6 +189,21 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def service_env_name(name: str) -> str:
+    """Return the variable that holds one service's loopback address in the box.
+
+    It mirrors ``runner.service_env_name``: this file runs in the box without
+    the backend's code, and a role's code reads the same name in every box.
+
+    Args:
+        name: The ``[services.<name>]`` name.
+
+    Returns:
+        ``SKYNET_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+    """
+    return "SKYNET_SERVICE_" + "".join(char if char.isalnum() else "_" for char in name.upper()) + "_URL"
 
 
 def _wait(path: Path, timeout: float) -> dict | None:
