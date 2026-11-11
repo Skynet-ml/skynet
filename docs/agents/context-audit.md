@@ -22,8 +22,8 @@ and list what to cut.
 - The repo files are small (about 13 KB loaded). This PR trims them only a
   little, because the large costs are outside the repo.
 - On 2026-11-10 Gilad removed the RTK and AXI tool hints, the CLI design
-  rules import and the RTK and gh-axi hooks from the global config. The three
-  removed files save about 1.1k. Nobody measured the hook saving. Claude now
+  rules import and the RTK and gh-axi hooks from the global config. These
+  three files no longer load at start. This saves about 1.1k. Nobody measured the hook saving. Claude now
   uses plain `gh`. The tradeoff: the RTK hook no longer compresses Bash
   output, so long command output uses more context.
 - Droid starts much smaller: 5 MCP servers, about 22 KB of instructions, no
@@ -60,13 +60,13 @@ says otherwise.
 | Layer | Before | After | Purpose | Action | Reason | Est. saving |
 | --- | --- | --- | --- | --- | --- | --- |
 | System prompt (harness) | 35 KB | 35 KB | Claude Code rules | Keep | Not user-controlled | 0 |
-| Loaded tool schemas (desktop built-ins) | 195 KB | about 119 KB at best (76 KB less, request-record sizes; see §2) | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
+| Loaded tool schemas (desktop built-ins) | 195 KB | about 76 KB less (request-record sizes, §6); about 70 KB of the 146 KB request record, see §2 | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
 | Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 14–18k |
 | Global user instruction file | 17.9 KB | 1.3 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.1 KB workflow table; Skynet-only rules | 4.6k, every repo |
-| Shared conventions file (also read by Codex) | 21.7 KB | 16.6 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.4k, every repo |
+| Shared conventions file (also read by Codex) | 21.7 KB | 16.9 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.3k, every repo |
 | CLI design rules file | 2.1 KB | 0 (on demand) | CLI design rules | Removed from start (applied) | Needed only when you design a CLI | 0.6k, every repo (applied) |
 | Tool hint files | 1.8 KB | 0 KB | RTK and AXI tool hints | Removed (applied) | Claude uses plain `gh` | about 0.5k, every repo (applied) |
-| Machine-local rules file (gitignored) | 3.5 KB | 1.4 KB | Machine rules | Trim | A stale rule; a third copy of the memory rules | 0.6k, Skynet only |
+| Machine-local rules file (gitignored) | 3.5 KB | 0.9 KB | Machine rules | Trim | A stale rule; a third copy of the memory rules | 0.7k, Skynet only |
 | Repo `CLAUDE.md` | 0.6 KB | 0.4 KB | Imports AGENTS.md | Trim (this PR) | Repeats the local-rules note in AGENTS.md | 0.05k, Skynet only |
 | Repo `AGENTS.md` | 12.8 KB | 12.8 KB | Always-on repo rules | Keep | Devin and Codex read it; it is already lean | 0 |
 | `frontend/AGENTS.md` | 0.7 KB | 0.7 KB | Frontend rules | Keep | Loads only for frontend files | 0 |
@@ -81,7 +81,7 @@ says otherwise.
 Total for instructions (global and repo files that load at start): about
 60 KB before, about 32 KB after. Gilad already applied about 1.1k of this
 (the CLI design rules file and the tool hint files). The proposed trims
-save about 6.0k more in every repo, plus about 0.65k in Skynet only (about
+save about 5.9k more in every repo, plus about 0.75k in Skynet only (about
 6.7k in Skynet).
 
 ## 4. What Droid puts in context
@@ -121,8 +121,8 @@ keeps more recent context after each compaction.
    rules that need a test first. See §6.
 2. **Turn off unused MCP servers and connectors in Skynet sessions.**
    About 14k tokens (about 18k with Vercel). See §6.
-3. **Apply the global instruction trims.** About 6.0k tokens on every session
-   in every repo, plus about 0.6k in Skynet. See §7.
+3. **Apply the global instruction trims.** About 5.9k tokens on every session
+   in every repo, plus about 0.7k in Skynet. See §7.
 4. **In Skynet, read the repo PR skill instead of the per-PR policy file.**
    About 5.9k tokens per PR task (21.2 KB). See §7.
 5. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
@@ -207,30 +207,37 @@ files.
 - **Global user instruction file (17.9 KB → 1.3 KB).** Most of its text
   repeats the shared conventions file word for word. A 6.1 KB workflow table
   repeats the skill listing. The Skynet-only rules already exist in the repo
-  `AGENTS.md` and skills. An install script writes some blocks, so change the
+  `AGENTS.md` and skills. Its generic PR review rules move to the shared
+  conventions file. An install script writes some blocks, so change the
   script too, or the blocks come back. Keep the rule about asking Gilad
   with interactive questions, because no other file has it.
-- **Shared conventions file (21.7 KB → 16.6 KB).** Replace the Skynet-only
+- **Shared conventions file (21.7 KB → 16.9 KB).** Replace the Skynet-only
   sections with one pointer to the repo `AGENTS.md` and skills. Remove a
   stale section for another project. Move the Skynet-only parallel-agent
-  lines to the machine-local file. Keep the generic PR review,
-  parallel-agent and UI-evidence rules, because other repos use them. Codex
+  lines to the machine-local file. Add a short `Pull requests, reviews and
+  UI proof (every repo)` section. It takes the generic rules from the global
+  file's `Pull request review requirements` and RevEngine sections. Keep the
+  generic parallel-agent and UI-evidence rules, because other repos use
+  them. Codex
   reads this file too. The repo `AGENTS.md` covers Codex in Skynet, so Codex
   loses no Skynet rule.
-- **Machine-local rules file (3.5 KB → 1.4 KB).** Remove a stale rule.
+- **Machine-local rules file (3.5 KB → 0.9 KB).** Remove a stale rule.
   Replace the third copy of the memory rules with one `MEMORY_DIR` line.
   Keep the local port notes. Add a `## Parallel agents` section with the
   Skynet-only lines from the shared conventions file (governor, worktree and
-  reviewer ceilings, AWS staging).
+  reviewer ceilings, AWS staging). Keep the check of a process `cwd` before
+  you stop a process on a port.
 - **Per-PR policy file (21.2 KB, read per PR task).** Many sections repeat
   the `skynet-pr-workflow` skill. A pointer at the top of this file saves
   nothing, because the Read tool loads the whole file. The saving comes from
-  the read instruction in the shared conventions file. The proposed file in
-  the notes folder changes it to read the repo's own PR skill (Skynet:
-  `skynet-pr-workflow`) instead of the per-PR policy file. Otherwise the
-  agent reads the per-PR policy file and applies it before it creates,
-  updates or reviews a PR. Then a Skynet PR task skips about 21.2 KB (about
-  5.9k tokens). This report gives no diff for the policy file itself,
+  the read instruction in the shared conventions file. The proposed shared
+  conventions file in the notes folder changes this read instruction. In a
+  repo with its own PR skill (Skynet: `skynet-pr-workflow`), the agent reads
+  that skill instead of the per-PR policy file. In other repos, it reads the
+  per-PR policy file as before. Then a Skynet PR task skips about 21.2 KB
+  (about 5.9k tokens). One policy-file rule has no copy in the repo: a
+  staging test-credit grant after Gilad approves it in chat. The repo rules
+  forbid all grants, so Skynet tasks lose this option. This report gives no diff for the policy file itself,
   because other repos still use it.
 
 ## 8. Changes in this PR
