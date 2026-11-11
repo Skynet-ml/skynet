@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_HERMES
@@ -53,6 +54,15 @@ HERMES_BASE_URL_FILE = ".app/hermes/base_url"
 HERMES_PROVIDER = "custom:runtime"
 # ``uv tool install`` puts its binaries here.
 _HERMES_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
+# A protected run checks only the preinstalled version, so a Hermes without the
+# ``mcp`` extra would pass and then skip every MCP server with no error. The
+# run imports ``mcp`` with the interpreter on Hermes's shebang line, left
+# unquoted so an ``/usr/bin/env python3`` line splits into its words. ``-I``
+# keeps an ``mcp`` folder in the workspace from passing the check (SKY-620).
+_MCP_CHECK = (
+    "$(sed -n '1s/^#!//p' \"$(command -v hermes)\") -I -c 'import mcp' || "
+    "{ echo 'hermes has no mcp extra: install hermes-agent[mcp] to load the [proposer] MCP servers' >&2; exit 1; }; "
+)
 # Downloads one file and keeps it only when its sha256 matches; ``-I`` keeps
 # the interpreter from importing anything from the working directory.
 _WHEEL_FETCH = (
@@ -195,17 +205,21 @@ def _hermes_install() -> str:
     # The bootstrap runs this inside its own ``set -eu`` script, so the step
     # records its status with ``|| r=$?`` (exempt from ``set -e``) and removes
     # the download folder before it fails, rather than with an EXIT trap that
-    # would replace the caller's.
+    # would replace the caller's. The ``mcp`` extra brings the MCP SDK: without
+    # it Hermes skips every ``mcp_servers`` entry with no error (SKY-620).
     return (
         f"{_HERMES_PATH}; {_version_check('hermes', HERMES_VERSION_TOKEN)} || {{ "
         'd="$(mktemp -d)"; r=0; '
         f"{uv} && {fetch} && "
-        f'"$u" tool install --force --python {HERMES_PYTHON} "$d/{HERMES_WHEEL}" >/dev/null || r=$?; '
+        f'"$u" tool install --force --python {HERMES_PYTHON} "{HERMES_PACKAGE}[mcp] @ file://$d/{HERMES_WHEEL}" '
+        ">/dev/null || r=$?; "
         'rm -rf "$d"; [ "$r" -eq 0 ] || exit "$r"; } && hermes --version'
     )
 
 
-def _hermes_config(model: str, gateway: GatewayConfig, reasoning_effort: str | None) -> str:
+def _hermes_config(
+    model: str, gateway: GatewayConfig, reasoning_effort: str | None, mcp_servers: tuple[str, ...] = ()
+) -> str:
     """Build Hermes's ``config.yaml`` for a one-shot run against the gateway.
 
     The profile names the key's environment variable, so the token never lands
@@ -215,6 +229,8 @@ def _hermes_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Hermes's default.
+        mcp_servers: The ``[proposer]`` MCP server names, each a Streamable
+            HTTP entry at the gateway's ``/mcp/<name>`` url.
 
     Returns:
         The config text. JSON is valid YAML.
@@ -250,10 +266,22 @@ def _hermes_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
         "checkpoints": {"enabled": False},
         **({"agent": agent} if agent else {}),
     }
+    if mcp_servers:
+        config["mcp_servers"] = {name: {"url": f"{gateway.url}/mcp/{quote(name, safe='')}"} for name in mcp_servers}
+        # Hermes waits only 1.5 s (0.19.0 default) for MCP discovery before it
+        # takes the first tool list, and it has no option that fails the run
+        # when a server does not connect.
+        config["mcp_discovery_timeout"] = 60
     return json.dumps(config, indent=2) + "\n"
 
 
-def _hermes_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _hermes_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for Hermes Agent (:data:`HERMES_PACKAGE`, pinned to :data:`HERMES_VERSION`).
 
     Each run gets a fresh ``HERMES_HOME`` outside the workspace, so Hermes's
@@ -265,11 +293,17 @@ def _hermes_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
     value and never as an option. ``OPENAI_BASE_URL``
     also names the gateway, so a side task that Hermes routes to its OpenAI
     provider still reaches the gateway. ``-Q`` prints only the final answer.
+    Hermes reads MCP servers only from ``$HERMES_HOME/config.yaml``, so the
+    workspace cannot add one; project plugins load only when the
+    ``HERMES_ENABLE_PROJECT_PLUGINS`` env is set (SKY-620).
 
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Hermes's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url in the config file, which the box's proxy relays
+            with its own token, so Hermes never holds the real url or a secret (SKY-620).
 
     Returns:
         The launch.
@@ -278,7 +312,8 @@ def _hermes_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
         ServiceError: When the effort is not one of :data:`HERMES_EFFORTS`.
     """
     run_command = (
-        f'{_HERMES_PATH}; export HERMES_HOME="$(mktemp -d)" && '
+        f"{_HERMES_PATH}; {_MCP_CHECK if mcp_servers else ''}"
+        'export HERMES_HOME="$(mktemp -d)" && '
         "trap 'rm -rf \"$HERMES_HOME\"' EXIT && "
         f'cp {HERMES_CONFIG_FILE} "$HERMES_HOME/config.yaml" && '
         f'printf {shlex.quote(_UPDATE_CHECK_CACHE)} "$(date +%s)" > "$HERMES_HOME/.update_check" && '
@@ -289,7 +324,7 @@ def _hermes_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
         instructions_file="AGENTS.md",
         install_command=_hermes_install(),
         files={
-            HERMES_CONFIG_FILE: _hermes_config(model, gateway, reasoning_effort),
+            HERMES_CONFIG_FILE: _hermes_config(model, gateway, reasoning_effort, mcp_servers),
             HERMES_BASE_URL_FILE: gateway.url,
         },
         run_command=run_command,
