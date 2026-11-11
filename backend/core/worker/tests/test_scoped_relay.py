@@ -296,6 +296,7 @@ def test_the_mcp_route_refuses_a_path_that_leaves_one_server_name(client: type[_
         "/v1/service/%2e%2e/x",
         "/v1/service/echo/../other/",
         "/v1/service/echo/a/%2E%2E/b",
+        "/v1/service/echo/%252e%252e/x",
         "/v1/service/echo/./a",
         "/v1/service/echo?x/",
         "/v1/service/echo#x/",
@@ -314,6 +315,29 @@ def test_the_service_route_refuses_a_path_that_leaves_one_service(client: type[_
         dispatch(_MCP_ROUTE["token"], path, b"", {})
 
     assert client.timeouts == []
+
+
+@pytest.mark.parametrize(
+    ("base", "target", "under"),
+    [
+        ("http://h/api", "http://h/api", True),
+        ("http://h/api", "http://h/api/x?q=1", True),
+        ("http://h/api/", "http://h/api/x", True),
+        ("http://h", "http://h/anything", True),
+        ("http://h/api", "http://h/apix", False),
+        ("http://h/api", "http://h/ap%69x", False),
+        ("http://h/api", "http://h/", False),
+    ],
+)
+def test_a_service_url_stays_under_its_declared_path_as_a_directory(base: str, target: str, under: bool) -> None:
+    """Base ``/api`` allows ``/api`` and ``/api/x``, never a sibling such as ``/apix``.
+
+    Args:
+        base: The service's declared url.
+        target: The url the relay would call.
+        under: Whether the relay may call it.
+    """
+    assert scoped_relay._under(httpx.URL(target), httpx.URL(base)) is under
 
 
 def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) -> None:

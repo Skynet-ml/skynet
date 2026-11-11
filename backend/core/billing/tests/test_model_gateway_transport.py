@@ -2963,6 +2963,62 @@ def test_the_forwarder_passes_a_service_method_and_body_to_the_gateway(
     assert echo_service.requests == [("PUT", "/api/item")]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/service/echo/../x",
+        "/v1/service/echo/a/%2e%2e/x",
+        "/v1/service/echo/%2E%2E",
+        "/v1/service/echo/%252e%252e/x",
+        "/v1/service/echo/./x",
+    ],
+)
+def test_the_mailbox_path_refuses_a_service_path_that_leaves_the_service(
+    gateway: ModelGateway, echo_service: _EchoService, path: str
+) -> None:
+    """A dot segment, raw or percent-encoded, gets a 400 and a refused record, and never reaches the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+        path: The path the box asks for.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+
+    answer = gateway.dispatch_guest(route["token"], path, b"", {METHOD_HEADER: "GET"})
+
+    assert answer.status == 400
+    assert b"a path outside its url" in answer.body
+    assert echo_service.requests == []
+    [call] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (call["kind"], call["role"], call["target"], call["status"]) == ("host", "proposer", "echo", "refused")
+
+
+def test_the_mailbox_path_reaches_a_sub_path_and_drops_encoding_and_range(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """A deeper path under the service passes; the guest's accept-encoding and range never reach the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    headers = {METHOD_HEADER: "GET", "Accept-Encoding": "x-guest-encoding", "Range": "bytes=0-3", "X-Custom": "yes"}
+
+    answer = gateway.dispatch_guest(route["token"], "/v1/service/echo/v2/a..b/item.json", b"", headers)
+
+    echoed = json.loads(answer.body)
+    sent = {key.lower(): value for key, value in echoed["headers"].items()}
+    assert answer.status == 200
+    assert echoed["path"] == "/api/v2/a..b/item.json"
+    assert "range" not in sent
+    assert "x-guest-encoding" not in sent.get("accept-encoding", "")
+    assert sent["x-custom"] == "yes"
+    assert _SERVICE_KEY.encode() not in answer.body
+
+
 def test_the_box_service_variable_matches_the_runner() -> None:
     """The box proxy names each service variable as the runner does, so a role's code reads one name everywhere."""
     for name in ("echo", "geo-coder", "maps.v2"):

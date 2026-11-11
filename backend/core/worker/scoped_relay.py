@@ -60,7 +60,18 @@ _MCP_REQUEST_HEADERS = frozenset({"accept", "content-type", "last-event-id", "mc
 _MCP_ANSWER_HEADERS = frozenset({"mcp-session-id", "mcp-protocol-version"})
 _MCP_METHODS = frozenset({"GET", "POST", "DELETE"})
 # A service gets the guest's own headers, but never the relay token or the parent's bookkeeping headers.
-_SERVICE_DROPPED_HEADERS = _HOP_HEADERS | USAGE_TAGS_HEADERS | {"authorization", METHOD_HEADER, MODEL_ATTEMPT_HEADER}
+# The answer must come back decoded and whole, or the masker cannot find a filled secret in it.
+_SERVICE_DROPPED_HEADERS = (
+    _HOP_HEADERS
+    | USAGE_TAGS_HEADERS
+    | {
+        "authorization",
+        "accept-encoding",
+        "range",
+        METHOD_HEADER,
+        MODEL_ATTEMPT_HEADER,
+    }
+)
 # The answer's content type travels on its own, and each server on the way back sets its own date and name.
 _SERVICE_ANSWER_DROPPED = frozenset({"content-type", "date", "server"})
 
@@ -397,9 +408,11 @@ class McpRelay:
             base = target = None
         if (
             not _HTTP_METHOD.fullmatch(method)
+            or _has_dot_segment(path)
             or base is None
             or target is None
             or (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
+            or not _under(target, base)
         ):
             return self._refused(recorder, name, 400, f"{label} got a malformed request or a path outside its url.")
         return self._request(url, declared, label, name, method, body, headers, recorder, kind="host")
@@ -678,8 +691,41 @@ def _service_path_safe(path: str) -> bool:
         dot segment anywhere, raw or percent-encoded; True otherwise.
     """
     name, _, rest = path[len(SERVICE_PATH) :].partition("/")
-    segments = [name, *unquote(rest.partition("?")[0]).split("/")]
-    return bool(name) and not any(mark in name for mark in "?#") and not {".", ".."} & {unquote(name), *segments}
+    return bool(name) and not any(mark in name for mark in "?#") and not _has_dot_segment(f"{name}/{rest}")
+
+
+def _has_dot_segment(path: str) -> bool:
+    """Check a relative service path for a ``.`` or ``..`` segment, in any percent-encoded form.
+
+    It decodes until nothing changes, because a server may decode
+    ``%252e`` to ``%2e`` and then to ``.``.
+
+    Args:
+        path: The path after the service name, with its query.
+
+    Returns:
+        True when a segment is ``.`` or ``..`` after decoding.
+    """
+    path = path.partition("?")[0]
+    while (decoded := unquote(path)) != path:
+        path = decoded
+    return bool({".", ".."} & set(path.split("/")))
+
+
+def _under(target: httpx.URL, base: httpx.URL) -> bool:
+    """Check that a request url stays under the service's declared path, as a directory.
+
+    Args:
+        target: The url the relay is about to call.
+        base: The service's declared url.
+
+    Returns:
+        True when the target path is the base path or below it: base
+        ``/api`` allows ``/api`` and ``/api/x``, not ``/apix``.
+    """
+    root = unquote(base.raw_path.decode("ascii").partition("?")[0]).rstrip("/")
+    path = unquote(target.raw_path.decode("ascii").partition("?")[0])
+    return path == root or path.startswith(root + "/")
 
 
 def model_forwarder(payload: dict[str, Any]) -> Any:
