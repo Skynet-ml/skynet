@@ -5,7 +5,7 @@ import * as React from "react";
 import { toast } from "react-toastify";
 import { useCompletionNotification } from "@/shared/hooks/use-completion-notification";
 import { createPortal } from "react-dom";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
@@ -101,12 +101,14 @@ import {
   backRequest,
   decodeSetupChat,
   encodeSetupChat,
+  handedOverSetupChat,
   hideKickoffs,
   isSavedSetupChat,
   keepHiddenTurns,
   legacySetupChatId,
   newSetupChatId,
   newSetupChatStart,
+  opensSetup,
   opensWithKickoff,
   parseScreenNav,
   registerSetupChatFlush,
@@ -275,6 +277,14 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const shownScreen = wizardCtx?.wizardScreen ?? null;
   const inSetup = shownScreen !== null;
   const setupChatRef = React.useRef<string | null>(null);
+  // The chat whose agent opened the setup: the wizard keeps it as the setup chat (SKY-631).
+  const setupHandoffRef = React.useRef<{ id: string | null } | null>(null);
+  const pathname = usePathname();
+  // A user who leaves /submit before the wizard mounts (the draft dialog) drops
+  // the mark, so a setup opened by hand later starts its own chat.
+  React.useEffect(() => {
+    if (!opensSetup(pathname ?? "")) setupHandoffRef.current = null;
+  }, [pathname]);
   const setupMessagesRef = React.useRef<AgentMessage[]>([]);
   const screenOpeningRef = React.useRef<string | null>(null);
   const shownScreenRef = React.useRef<string | null>(null);
@@ -398,7 +408,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         const nav = parseAgentNavigation(ev.result);
         if (nav?.kind === "settings" && Object.hasOwn(SETTINGS_TABS, nav.tab))
           openSettingsTo(nav.tab);
-        else if (nav?.kind === "route") router.push(nav.path);
+        else if (nav?.kind === "route") {
+          if (!wizardCtx?.wizardScreen && opensSetup(nav.path)) {
+            setupHandoffRef.current = { id: ctx.conversationId };
+          }
+          router.push(nav.path);
+        }
       }
       if (ev.status === "ok" && SUBMIT_TOOLS.has(ev.tool)) {
         const optimizationId = extractOptimizationId(ev.result);
@@ -685,17 +700,31 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     } catch {
       // Blocked storage: the setup starts a new chat.
     }
-    setActiveConversation(null);
+    const handoff = setupHandoffRef.current;
+    setupHandoffRef.current = null;
     if (!saved || !restoredSetupRef.current) {
       // A kept chat this setup does not reopen lost its draft (a cloned run
       // reloads from its source run, not the tab's draft), so it goes too.
-      if (saved) discardConversation(saved.id);
+      const handed = handedOverSetupChat(handoff, liveChatRef.current);
+      if (saved && saved.id !== handed?.id) discardConversation(saved.id);
       const start = newSetupChatStart(shownScreen, reopenedScreenRef.current);
       kickedScreensRef.current = new Set(start.kicked);
+      if (handed) {
+        // The chat that asked for the setup goes on in it, with its turn
+        // still running; the screen's kickoff waits for that turn to end.
+        setupRunRef.current++;
+        setSetupLoad(null);
+        setupMessagesRef.current = handed.messages;
+        keepSetupChat(handed.id);
+        if (start.kickoff) setKickoffScreen(shownScreen);
+        return;
+      }
+      setActiveConversation(null);
       setupMessagesRef.current = [];
       void openSetupChat(null, start.kickoff ? shownScreen : null);
       return;
     }
+    setActiveConversation(null);
     const id = saved.id;
     kickedScreensRef.current = new Set(saved.kicked);
     setupMessagesRef.current = saved.messages;

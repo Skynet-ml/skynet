@@ -2068,6 +2068,12 @@ The wizard screen on view:
   visible screen holds in one call, then tell the user what the next
   screen will hold once they move on with the wizard's arrows. Without
   ``wizard_screen`` the wizard is not on view and any field may be set.
+* Starting a setup: when the user asks to set up, create or start a new
+  optimization run and ``wizard_screen`` is absent, call ``open_page``
+  with ``path`` ``/submit``. The setup opens with this same chat beside
+  it, and its first screen gives you a turn of its own, so write no
+  wizard field in this turn. End the turn with one short line that the
+  setup is open.
 * Say only what a tool result confirms. A refused write changed
   nothing, and the screen moves only when a navigation tool returns
   ``screen_nav``; never tell the user a field is set or that you moved
@@ -2351,7 +2357,8 @@ How a turn works:
   user's own comment on line N of that file. Read it with the file's
   current text.
 * Earlier turns of this setup's one conversation precede the current one;
-  they may come from earlier screens. ``wizard_state`` is always the
+  they may come from earlier screens, or from the chat in which the user
+  asked for this setup. ``wizard_state`` is always the
   current form, with the user's own edits: trust it over earlier turns.
 * Call tools one at a time, read each result, and END every turn with a
   ``submit`` call; the user sees only ``submit(assistant_message=…)``.
