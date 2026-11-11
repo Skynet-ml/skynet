@@ -218,7 +218,7 @@
   "submit.v2.optimizer.proposer.candidates": "Candidatos por iteração",
   "submit.v2.optimizer.proposer.harness": "Agente de programação",
   "submit.v2.optimizer.sandbox.label": "Sandbox",
-  "submit.v2.optimizer.sandbox.hint": "Onde o código da execução roda. Se você não escolher, o servidor escolhe.",
+  "submit.v2.optimizer.sandbox.hint": "Onde o código da execução roda.",
   "submit.v2.optimizer.sandbox.load_failed": "Não foi possível carregar os sandboxes. A execução usa o padrão do servidor.",
   "submit.v2.optimizer.sandbox.server_default": "Padrão do servidor",
   "submit.v2.optimizer.proposer.title": "Definições do agente de programação",

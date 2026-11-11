@@ -218,7 +218,7 @@
   "submit.v2.optimizer.proposer.candidates": "Kandidaten pro Iteration",
   "submit.v2.optimizer.proposer.harness": "Coding-Agent",
   "submit.v2.optimizer.sandbox.label": "Sandbox",
-  "submit.v2.optimizer.sandbox.hint": "Wo der Code des Laufs ausgeführt wird. Ohne Auswahl wählt der Server.",
+  "submit.v2.optimizer.sandbox.hint": "Wo der Code des Laufs ausgeführt wird.",
   "submit.v2.optimizer.sandbox.load_failed": "Die Sandboxes konnten nicht geladen werden. Der Lauf nutzt die Standardeinstellung des Servers.",
   "submit.v2.optimizer.sandbox.server_default": "Standard des Servers",
   "submit.v2.optimizer.proposer.title": "Einstellungen des Coding-Agenten",

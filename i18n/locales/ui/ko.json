@@ -218,7 +218,7 @@
   "submit.v2.optimizer.proposer.candidates": "반복당 후보 수",
   "submit.v2.optimizer.proposer.harness": "코딩 에이전트",
   "submit.v2.optimizer.sandbox.label": "샌드박스",
-  "submit.v2.optimizer.sandbox.hint": "실행 코드가 동작하는 곳입니다. 선택하지 않으면 서버가 선택합니다.",
+  "submit.v2.optimizer.sandbox.hint": "실행 코드가 동작하는 곳입니다.",
   "submit.v2.optimizer.sandbox.load_failed": "샌드박스를 불러오지 못했습니다. 실행은 서버 기본값을 사용합니다.",
   "submit.v2.optimizer.sandbox.server_default": "서버 기본값",
   "submit.v2.optimizer.proposer.title": "코딩 에이전트 설정",

@@ -218,7 +218,7 @@
   "submit.v2.optimizer.proposer.candidates": "نامزدها در هر تکرار",
   "submit.v2.optimizer.proposer.harness": "عامل برنامه‌نویس",
   "submit.v2.optimizer.sandbox.label": "محیط ایزوله",
-  "submit.v2.optimizer.sandbox.hint": "جایی که کد اجرا در آن اجرا می‌شود. اگر انتخاب نکنید، سرور انتخاب می‌کند.",
+  "submit.v2.optimizer.sandbox.hint": "جایی که کد اجرا در آن اجرا می‌شود.",
   "submit.v2.optimizer.sandbox.load_failed": "بارگیری محیط‌های ایزوله ممکن نشد. اجرا از پیش‌فرض سرور استفاده می‌کند.",
   "submit.v2.optimizer.sandbox.server_default": "پیش‌فرض سرور",
   "submit.v2.optimizer.proposer.title": "تنظیمات عامل برنامه‌نویس",

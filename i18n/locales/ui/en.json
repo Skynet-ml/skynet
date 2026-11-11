@@ -4205,7 +4205,7 @@
   "submit.v2.optimizer.proposer.title.guided": "Agent settings (optional)",
   "submit.v2.optimizer.proposer.harness": "Coding agent",
   "submit.v2.optimizer.sandbox.label": "Sandbox",
-  "submit.v2.optimizer.sandbox.hint": "Where the run's code runs. The server picks one when you choose none.",
+  "submit.v2.optimizer.sandbox.hint": "Where the run's code runs.",
   "submit.v2.optimizer.sandbox.load_failed": "Couldn't load the sandboxes. The run uses the server default.",
   "submit.v2.optimizer.sandbox.server_default": "Server default",
   "submit.v2.optimizer.proposer.candidates": "Candidates per iteration",

@@ -4205,7 +4205,7 @@
   "submit.v2.optimizer.proposer.title.guided": "הגדרות הסוכן (אופציונלי)",
   "submit.v2.optimizer.proposer.harness": "סוכן קוד",
   "submit.v2.optimizer.sandbox.label": "ארגז חול",
-  "submit.v2.optimizer.sandbox.hint": "איפה הקוד של ההרצה רץ. אם לא בוחרים, השרת בוחר.",
+  "submit.v2.optimizer.sandbox.hint": "איפה הקוד של ההרצה רץ.",
   "submit.v2.optimizer.sandbox.load_failed": "לא הצלחנו לטעון את ארגזי החול. ההרצה תשתמש בברירת המחדל של השרת.",
   "submit.v2.optimizer.sandbox.server_default": "ברירת המחדל של השרת",
   "submit.v2.optimizer.proposer.candidates": "מועמדים לכל איטרציה",

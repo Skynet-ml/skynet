@@ -218,7 +218,7 @@
   "submit.v2.optimizer.proposer.candidates": "每次迭代的候选数",
   "submit.v2.optimizer.proposer.harness": "编程智能体",
   "submit.v2.optimizer.sandbox.label": "沙箱",
-  "submit.v2.optimizer.sandbox.hint": "运行代码的执行位置。不选择时由服务器选择。",
+  "submit.v2.optimizer.sandbox.hint": "运行代码的执行位置。",
   "submit.v2.optimizer.sandbox.load_failed": "无法加载沙盒列表。本次运行使用服务器默认值。",
   "submit.v2.optimizer.sandbox.server_default": "服务器默认值",
   "submit.v2.optimizer.proposer.title": "编程智能体设置",
