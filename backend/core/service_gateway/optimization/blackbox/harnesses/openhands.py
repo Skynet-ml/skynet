@@ -66,8 +66,15 @@ _WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
 # ``temperature=0``. ``None`` overrides them, and LiteLLM drops a ``None``
 # parameter, so the gateway gets neither. LiteLLM drops ``reasoning_effort``
 # for a model name it does not know, so ``allowed_openai_params`` forces it
-# through.
-_SAMPLING_DEFAULTS_OFF = {"temperature": None, "top_p": None}
+# through. OpenHands also adds ``thinking`` for a model name that contains
+# ``gemini-2.5-pro`` (a 128-token budget, with ``allowed_openai_params``
+# set to ``["thinking"]``) or ``claude-opus-4-1`` (disabled), because the
+# harness never sets ``LLM_REASONING_EFFORT``. With ``LLM_DROP_PARAMS=false``,
+# LiteLLM 1.80.10 refuses that ``thinking`` on the ``openai/`` route, so
+# every such run fails. ``None`` removes it. ``allowed_openai_params=None``
+# also removes the OpenHands ``["thinking"]``: with no effort, LiteLLM would
+# otherwise pass ``thinking=None`` to the OpenAI client, which rejects it.
+_DEFAULTS_OFF = {"temperature": None, "top_p": None, "thinking": None, "allowed_openai_params": None}
 # LiteLLM reads these keys for its other providers. A protected run blanks
 # them, so an inherited key never gives OpenHands a route around the gateway.
 _PROTECTED_ENV = {
@@ -125,9 +132,10 @@ def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]
     """Return the ``LLM_COMPLETION_KWARGS`` setting for every run.
 
     OpenHands parses the value with ``ast.literal_eval``. It always unsets
-    ``temperature`` and ``top_p``. It adds the user's effort unchanged, as the
-    Codex, OpenCode and Aider harnesses do, so the gateway gets the same
-    ``reasoning_effort`` from every harness. ``LLM_DROP_PARAMS=false`` makes a level that
+    ``temperature``, ``top_p``, ``thinking`` and ``allowed_openai_params``.
+    It adds the user's effort unchanged, as the Codex, OpenCode and Aider
+    harnesses do, so the gateway gets the same ``reasoning_effort`` from
+    every harness. ``LLM_DROP_PARAMS=false`` makes a level that
     LiteLLM refuses fail the call rather than vanish.
 
     Args:
@@ -136,7 +144,7 @@ def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]
     Returns:
         The env entry.
     """
-    kwargs: dict[str, object] = dict(_SAMPLING_DEFAULTS_OFF)
+    kwargs: dict[str, object] = dict(_DEFAULTS_OFF)
     if reasoning_effort:
         kwargs["reasoning_effort"] = reasoning_effort
         kwargs["allowed_openai_params"] = ["reasoning_effort"]

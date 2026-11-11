@@ -287,7 +287,12 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.env["LOG_ALL_EVENTS"] == "true"
     assert launch.env["LLM_DROP_PARAMS"] == "false"
     assert "LLM_REASONING_EFFORT" not in launch.env
-    assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == {"temperature": None, "top_p": None}
+    assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == {
+        "temperature": None,
+        "top_p": None,
+        "thinking": None,
+        "allowed_openai_params": None,
+    }
     assert not set(_PROVIDER_KEYS) & set(launch.env)
     assert launch.parse_output is parse_plain_output
 
@@ -307,11 +312,38 @@ def test_completion_kwargs_unset_sampling_and_pass_the_effort_unchanged(effort: 
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
     assert "LLM_REASONING_EFFORT" not in launch.env
     assert launch.env["LLM_DROP_PARAMS"] == "false"
-    expected: dict[str, object] = {"temperature": None, "top_p": None}
+    expected: dict[str, object] = {"temperature": None, "top_p": None, "thinking": None, "allowed_openai_params": None}
     if effort:
         expected["reasoning_effort"] = effort
         expected["allowed_openai_params"] = ["reasoning_effort"]
     assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == expected
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gemini-2.5-pro", "google/gemini-2.5-pro-preview", "claude-opus-4-1", "anthropic/claude-opus-4-1-20250805"],
+)
+@pytest.mark.parametrize("effort", [None, "none", "low", "medium", "high"])
+def test_completion_kwargs_remove_the_thinking_openhands_adds(model: str, effort: str | None) -> None:
+    """Remove the ``thinking`` that OpenHands 1.6.0 adds for Gemini 2.5 Pro and Opus 4.1, and keep the effort.
+
+    The harness never sets ``LLM_REASONING_EFFORT``, so OpenHands always adds
+    ``thinking`` for these names. With ``LLM_DROP_PARAMS=false``, LiteLLM
+    1.80.10 refuses it on the ``openai/`` route and every run fails; with no
+    effort, the Gemini 128-token budget would replace the model default. The
+    completion kwargs override the OpenHands kwargs, as ``LLM.__init__`` does.
+    """
+    openhands_kwargs: dict[str, object] = {"temperature": 0.0, "max_completion_tokens": None, "top_p": 1.0}
+    if "gemini-2.5-pro" in model:
+        openhands_kwargs = {"max_completion_tokens": None, "thinking": {"budget_tokens": 128}}
+        openhands_kwargs["allowed_openai_params"] = ["thinking"]
+    if "claude-opus-4-1" in model:
+        openhands_kwargs["thinking"] = {"type": "disabled"}
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
+    openhands_kwargs.update(ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]))
+
+    sent = {key: value for key, value in openhands_kwargs.items() if value is not None}
+    assert sent == ({"reasoning_effort": effort, "allowed_openai_params": ["reasoning_effort"]} if effort else {})
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
