@@ -19,13 +19,14 @@ and list what to cut.
 - Each PR task also reads two overlapping 20 KB policy files (about 11.5k
   tokens). In Skynet, the agent can read only the repo skill (about 5.9k
   saved per PR task).
-- The repo files are small (about 13 KB loaded). This PR trims them only a
+- The repo files are small (about 14 KB loaded). This PR trims them only a
   little, because the large costs are outside the repo.
 - On 2026-11-10 Gilad removed the RTK and AXI tool hints, the CLI design
   rules import and the RTK and gh-axi hooks from the global config. These
-  three files no longer load at start. This saves about 1.1k. Nobody measured the hook saving. Claude now
-  uses plain `gh`. The tradeoff: the RTK hook no longer compresses Bash
-  output, so long command output uses more context.
+  three files no longer load at start. This saves about 1.1k. Nobody
+  measured the hook saving. Claude now uses plain `gh`. The tradeoff: the
+  RTK hook no longer compresses Bash output, so long command output uses
+  more context.
 - Droid starts much smaller: 5 MCP servers, about 22 KB of instructions, no
   desktop-app tool schemas, and rolling compaction.
 
@@ -68,20 +69,20 @@ says otherwise.
 | Tool hint files | 1.8 KB | 0 KB | RTK and AXI tool hints | Removed (applied) | Claude uses plain `gh` | about 0.5k, every repo (applied) |
 | Machine-local rules file (gitignored) | 3.5 KB | 0.9 KB | Machine rules | Trim | A stale rule; a third copy of the memory rules | 0.7k, Skynet only |
 | Repo `CLAUDE.md` | 0.6 KB | 0.4 KB | Imports AGENTS.md | Trim (this PR) | Repeats the local-rules note in AGENTS.md | 0.05k, Skynet only |
-| Repo `AGENTS.md` | 12.8 KB | 12.8 KB | Always-on repo rules | Keep | Devin and Codex read it; it is already lean | 0 |
+| Repo `AGENTS.md` | 13.7 KB | 13.7 KB | Always-on repo rules | Keep | Devin and Codex read it; it is already lean | 0 |
 | `frontend/AGENTS.md` | 0.7 KB | 0.7 KB | Frontend rules | Keep | Loads only for frontend files | 0 |
-| `docs/agents/*.md` | 18.7 KB | about 34 KB | Reference files | Keep (this PR adds this report) | Load on demand only | 0 |
+| `docs/agents/*.md` | 18.7 KB | about 35 KB | Reference files | Keep (this PR adds this report) | Load on demand only | 0 |
 | Skill listing | 19 KB, 428 skills | about 12 KB | Names and descriptions | Trim | Sales, finance, marketing, media and similar plugin skills are unused here | about 2k |
 | Repo skill descriptions | 1.0 KB | 0.6 KB | Two repo skills in the listing | Trim (this PR) | Long content lists; the trigger sentence is enough | 0.1k, Skynet only |
 | MCP server instructions | 14.5 KB | about 10.5 KB | Server usage notes | Trim | Long notes from servers that Skynet does not use (deepwiki stays) | 1.1k |
 | SessionStart hook output | 7 KB | smaller (not measured) | Index warmup, notify | Trim (applied) | Gilad removed the gh-axi GitHub dashboard hook | not measured |
 | Memory tool start output | about 24 KB | smaller | Memory tree | Trim (out of scope) | Compress old nodes | not estimated |
-| **Per PR task:** per-PR policy file + `skynet-pr-workflow` skill | 41 KB read | about 20 KB | PR policy | Trim | The two files repeat the same sections | 5.9k per PR task |
+| **Per PR task:** per-PR policy file + `skynet-pr-workflow` skill | 42 KB read | about 21 KB | PR policy | Trim | The two files repeat the same sections | 5.9k per PR task |
 
 Total for instructions (global and repo files that load at start): about
-60 KB before, about 32 KB after. Gilad already applied about 1.1k of this
+61 KB before, about 33 KB after. Gilad already applied about 1.1k of this
 (the CLI design rules file and the tool hint files). The proposed trims
-save about 5.9k more in every repo, plus about 0.75k in Skynet only (about
+save about 5.9k more in every repo, plus about 0.8k in Skynet only (about
 6.7k in Skynet).
 
 ## 4. What Droid puts in context
@@ -122,7 +123,7 @@ keeps more recent context after each compaction.
 2. **Turn off unused MCP servers and connectors in Skynet sessions.**
    About 14k tokens (about 18k with Vercel). See §6.
 3. **Apply the global instruction trims.** About 5.9k tokens on every session
-   in every repo, plus about 0.7k in Skynet. See §7.
+   in every repo, plus about 0.8k in Skynet. See §7.
 4. **In Skynet, read the repo PR skill instead of the per-PR policy file.**
    About 5.9k tokens per PR task (21.2 KB). See §7.
 5. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
@@ -235,10 +236,11 @@ files.
   repo with its own PR skill (Skynet: `skynet-pr-workflow`), the agent reads
   that skill instead of the per-PR policy file. In other repos, it reads the
   per-PR policy file as before. Then a Skynet PR task skips about 21.2 KB
-  (about 5.9k tokens). One policy-file rule has no copy in the repo: a
-  staging test-credit grant after Gilad approves it in chat. The repo rules
-  forbid all grants, so Skynet tasks lose this option. This report gives no diff for the policy file itself,
-  because other repos still use it.
+  (about 5.9k tokens). The policy file allows a staging test-credit grant
+  after Gilad approves it in chat. The repo has its own copy of this rule
+  (SKY-573) in `AGENTS.md` and both repo skills, so Skynet tasks keep it.
+  This report gives no diff for the policy file itself, because other repos
+  still use it.
 
 ## 8. Changes in this PR
 
