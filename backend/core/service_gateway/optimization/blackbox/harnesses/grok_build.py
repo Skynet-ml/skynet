@@ -256,7 +256,9 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
         'g="$(mktemp -d)" && trap \'rm -rf "$g"\' EXIT && mkdir -p "$g/.grok" && '
         f'cp {GROK_CONFIG_FILE} "$g/.grok/config.toml" && {{ '
         'HOME="$g" GROK_LOG_FILE="$g/grok.log" '
-        f"{GROK_BINARY} --no-auto-update --single {_PROMPT_ARG} --always-approve "
+        # ``--single=`` keeps a prompt that starts with "-" a value; clap reads a
+        # separate argument that starts with "-" as a flag.
+        f"{GROK_BINARY} --no-auto-update --single={_PROMPT_ARG} --always-approve "
         f'--output-format streaming-json --session-id {_SESSION_ID} --model "${ENV_MODEL}"{effort_flag} '
         '< /dev/null > "$g/stream.jsonl"; s=$?; '
         f'python3 -I -c {shlex.quote(_CONVERTER_SCRIPT)} "$g/stream.jsonl" "$g" {_SESSION_ID} && exit "$s"; }}'

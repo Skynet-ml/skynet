@@ -106,7 +106,12 @@ def _target() -> BlackboxTarget:
 
 
 def _run_with_fake_grok(
-    tmp_path: Path, *, protected: bool, stream: str = _RECORDED_STREAM, fake_exit: int = 0
+    tmp_path: Path,
+    *,
+    protected: bool,
+    stream: str = _RECORDED_STREAM,
+    fake_exit: int = 0,
+    prompt: str = _PROMPT,
 ) -> tuple[subprocess.CompletedProcess[str], str, dict, Path]:
     """Run the built Grok command in a scratch workspace against a fake ``grok`` binary.
 
@@ -115,6 +120,7 @@ def _run_with_fake_grok(
         protected: Build the protected launch, with the sandbox-local relay set.
         stream: The NDJSON the fake binary prints.
         fake_exit: Exit status the fake binary returns.
+        prompt: The task prompt the run reads from its prompt file.
 
     Returns:
         The finished command, the fake binary's call log, the config Grok saw, and the workspace.
@@ -126,7 +132,7 @@ def _run_with_fake_grok(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     (workspace / "task").mkdir(parents=True)
-    (workspace / "task" / "PROMPT.md").write_text(_PROMPT)
+    (workspace / "task" / "PROMPT.md").write_text(prompt)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "grok"
@@ -243,7 +249,7 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
     assert (
-        'grok --no-auto-update --single "$(cat "$APP_PROMPT_FILE")" --always-approve '
+        'grok --no-auto-update --single="$(cat "$APP_PROMPT_FILE")" --always-approve '
         f'--output-format streaming-json --session-id {_SESSION_ID} --model "$APP_MODEL" < /dev/null'
     ) in launch.run_command
     assert all(launch.env[name] == "" for name in _DIRECT_KEYS)
@@ -341,7 +347,7 @@ def test_protected_run_points_grok_at_the_relay_and_returns_its_answer(tmp_path:
     assert result.returncode == 0, result.stderr
     run = next(line for line in calls.splitlines() if line.startswith("ARGS"))
     assert run == (
-        f"ARGS [--no-auto-update] [--single] [{_PROMPT}] [--always-approve] "
+        f"ARGS [--no-auto-update] [--single={_PROMPT}] [--always-approve] "
         f"[--output-format] [streaming-json] [--session-id] [{_SESSION_ID}] [--model] [{_MODEL}]"
     )
     assert config["model"][_MODEL]["base_url"] == _RELAY
@@ -358,6 +364,15 @@ def test_protected_run_points_grok_at_the_relay_and_returns_its_answer(tmp_path:
         "I fixed the off-by-one error.\n\n42.",
         {"input_tokens": 125, "output_tokens": 40},
     )
+
+
+def test_a_prompt_that_starts_with_a_dash_stays_the_prompt_value(tmp_path: Path) -> None:
+    """Keep a prompt such as ``- Fix X`` the value of ``--single``, so Grok does not read it as a flag."""
+    result, calls, _, _ = _run_with_fake_grok(tmp_path, protected=False, prompt="- Fix X")
+
+    assert result.returncode == 0, result.stderr
+    run = next(line for line in calls.splitlines() if line.startswith("ARGS"))
+    assert run.startswith("ARGS [--no-auto-update] [--single=- Fix X] [--always-approve] ")
 
 
 def test_open_run_reads_the_gateway_url_from_the_generated_config(tmp_path: Path) -> None:
