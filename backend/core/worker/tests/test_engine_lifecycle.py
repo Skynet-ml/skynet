@@ -700,17 +700,22 @@ def test_renewing_lease_touches_activity_while_a_blocking_step_runs(
     worker: BackgroundWorker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A step that outlasts the lease window keeps renewing the lease until it exits."""
-    touches: list[int] = []
+    touches: list[tuple[int, str]] = []
     monkeypatch.setattr(worker, "_lease_seconds", 0.06)
-    monkeypatch.setattr(worker, "_touch_activity", touches.append)
+    monkeypatch.setattr(
+        worker, "_touch_activity", lambda worker_id: touches.append((worker_id, threading.current_thread().name))
+    )
 
     with worker._renewing_lease(1):
         threading.Event().wait(0.2)
-        renewed_during_step = len(touches)
 
-    assert renewed_during_step >= 3
-    assert len(touches) == renewed_during_step + 1
-    assert set(touches) == {1}
+    # The renewer can tick between any read inside the block and ``done.set()``,
+    # so count its touches by thread name instead of by a snapshot.
+    job_thread = threading.current_thread().name
+    assert [name for _, name in touches if name != "lease-renew-1"] == [job_thread, job_thread]
+    assert touches[-1][1] == job_thread
+    assert sum(name == "lease-renew-1" for _, name in touches) >= 3
+    assert {worker_id for worker_id, _ in touches} == {1}
 
 
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]
