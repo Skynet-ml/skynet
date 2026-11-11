@@ -198,10 +198,10 @@ for review until the evidence is there.
 - A UI PR is ready for review when three conditions are true. The Opus 5.5
   review gate (section 3) approves the current head. CI passes. The
   acceptance checks pass, or a section 4 exemption applies. Then the
-  orchestrator marks the PR ready (not draft). It does not merge it. Gilad
-  reviews the finished UI PRs. He approves them (in chat, on GitHub or with
-  `Approved for merge` on the Linear issue), or tells the orchestrator to
-  merge them.
+  orchestrator marks the PR ready for review (not draft). It does not merge
+  it. Gilad reviews the finished UI PRs. He approves them (in chat, on GitHub
+  or with `Approved for merge` on the Linear issue), or tells the orchestrator
+  to merge them.
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -238,9 +238,10 @@ gates pass:
    PR's merge right away and reopen its issue with the failure.
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) follow
-section 5. A UI PR is ready when the section 5 conditions are true. The PR
-stays unmerged. Attach a proof card. It names the decision, the Linear issue,
-the acceptance check results, the review verdict and the diff size.
+section 5. A UI PR is ready for review when the section 5 conditions are
+true. The PR stays unmerged. Attach a proof card. It names the decision, the
+Linear issue, the acceptance check results, the review verdict and the diff
+size.
 Merge only after one of two events:
 
 - Gilad approves that specific PR in chat, on GitHub or with `Approved for
