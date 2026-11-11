@@ -51,7 +51,6 @@ export function setupCoversPath(pathname: string): boolean {
     pathname === "/mcp/authorize" ||
     pathname === "/terms" ||
     pathname === "/privacy" ||
-    pathname === "/download" ||
     pathname === "/docs" ||
     pathname.startsWith("/docs/") ||
     pathname.startsWith("/share/")

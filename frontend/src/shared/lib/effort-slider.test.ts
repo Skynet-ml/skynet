@@ -49,13 +49,13 @@ test("the track fill follows the level", () => {
   assert.equal(effortFill(["low", "high"], "max"), 0);
 });
 
-test("fast mode goes only with a local CLI model", () => {
+test("fast mode reaches CLI, OpenRouter, and the server default", () => {
   assert.equal(sentFastMode(true, "subscription/claude/anthropic/claude-opus-5.5"), true);
   assert.equal(sentFastMode(true, "subscription/codex/openai/gpt-6.1-sol"), true);
   assert.equal(sentFastMode(false, "subscription/claude/anthropic/claude-opus-5.5"), false);
-  assert.equal(sentFastMode(true, "openrouter/anthropic/claude-opus-5.5"), false);
+  assert.equal(sentFastMode(true, "openrouter/anthropic/claude-opus-5.5"), true);
   assert.equal(sentFastMode(true, "anthropic/claude-opus-5.5"), false);
-  assert.equal(sentFastMode(true, null), false);
+  assert.equal(sentFastMode(true, null), true);
 });
 
 test("a saved retired level reads as max", () => {
@@ -63,6 +63,7 @@ test("a saved retired level reads as max", () => {
   assert.equal(liveEffort("ultracode"), "max");
   assert.equal(liveEffort("xhigh"), "xhigh");
   assert.equal(liveEffort(null), null);
+  assert.equal(liveEffort("none"), null);
 });
 
 test("a CLI model runs Max and a retired level at its top level, as the backend does", () => {

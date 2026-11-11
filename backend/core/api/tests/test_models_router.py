@@ -352,8 +352,8 @@ def test_agent_models_in_local_mode_are_the_signed_in_subscriptions(
 def test_agent_models_in_local_mode_filter_by_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Apply the name filter to the subscription ids."""
     client = _local_agent_client(tmp_path, monkeypatch)
-    body = client.get("/models/for-agent", params={"query": "HAIKU-4.5"}).json()
-    assert [row["name"] for row in body["models"]] == ["subscription/claude/anthropic/claude-haiku-4.5"]
+    body = client.get("/models/for-agent", params={"query": "HAIKU-5.5"}).json()
+    assert [row["name"] for row in body["models"]] == ["subscription/claude/anthropic/claude-haiku-5.5"]
 
 
 def test_agent_models_in_hosted_mode_are_the_catalog(models_client: TestClient) -> None:

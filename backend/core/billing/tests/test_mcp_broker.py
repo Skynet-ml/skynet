@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -112,8 +113,7 @@ def test_mcp_response_cannot_echo_parent_authorization_to_guest(remote: list[htt
 
 
 def test_declined_tool_call_never_reaches_remote_endpoint(remote: list[httpx.Request]) -> None:
-    """Return a tool error and lifecycle events without dispatch after caller denial."""
-    events: list[dict[str, Any]] = []
+    """Return a tool error without dispatch after caller denial."""
     approvals: list[tuple[str, str, dict[str, Any]]] = []
 
     def deny(call_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
@@ -126,7 +126,6 @@ def test_declined_tool_call_never_reaches_remote_endpoint(remote: list[httpx.Req
         check_admission=lambda: None,
         tool_filter=["echo"],
         authorize_tool=deny,
-        on_tool_event=events.append,
     )
     result = json.loads(
         broker.dispatch(_rpc("tools/call", {"name": "echo", "arguments": {"value": "blocked"}})).body
@@ -137,9 +136,6 @@ def test_declined_tool_call_never_reaches_remote_endpoint(remote: list[httpx.Req
     assert result["result"]["isError"] is True
     assert result["result"]["content"][0]["text"] == "User declined"
     assert approvals[0][1:] == ("echo", {"value": "blocked"})
-    assert [event["event"] for event in events] == ["tool_start", "tool_end"]
-    assert events[0]["data"]["id"] == events[1]["data"]["id"]
-    assert events[1]["data"]["status"] == "error"
 
 
 @pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fd00:ec2::254"])
@@ -196,7 +192,7 @@ def test_worker_tool_token_cannot_dispatch_models() -> None:
 def test_parent_headers_reach_remote_and_are_redacted_from_tool_output(remote: list[httpx.Request]) -> None:
     """Send a connector's key header to the remote and keep it out of the guest's result."""
 
-    def respond_with_header(tool: str, arguments: dict[str, Any], call: Any) -> dict[str, Any]:
+    def respond_with_header(tool: str, arguments: Mapping[str, Any], call: Any) -> dict[str, Any]:
         """Run the call unchanged; the meter only wraps it."""
         return call()
 
@@ -218,7 +214,7 @@ def test_meter_wraps_each_tool_call_but_not_listing(remote: list[httpx.Request])
     """Meter tools/call once per call and leave tools/list free."""
     metered: list[tuple[str, dict[str, Any]]] = []
 
-    def meter(tool: str, arguments: dict[str, Any], call: Any) -> dict[str, Any]:
+    def meter(tool: str, arguments: Mapping[str, Any], call: Any) -> dict[str, Any]:
         """Record the metered call, then run it."""
         metered.append((tool, dict(arguments)))
         return call()
@@ -239,7 +235,7 @@ def test_meter_wraps_each_tool_call_but_not_listing(remote: list[httpx.Request])
 def test_meter_refusal_keeps_call_away_from_remote(remote: list[httpx.Request]) -> None:
     """Refuse a call the budget cannot cover before the remote sees tools/call."""
 
-    def refuse(tool: str, arguments: dict[str, Any], call: Any) -> dict[str, Any]:
+    def refuse(tool: str, arguments: Mapping[str, Any], call: Any) -> dict[str, Any]:
         """Refuse like a budget that has no room left."""
         raise BudgetReached("budget")
 

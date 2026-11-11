@@ -12,6 +12,7 @@ from core.local.cli_catalog import (
     cli_efforts,
     cli_fast,
     cli_model_arg,
+    current_cli_slug,
     parse_subscription_model_id,
 )
 
@@ -57,8 +58,8 @@ def test_parse_subscription_model_id_rejects_other_ids(model_id: str) -> None:
 
 def test_cli_model_arg_maps_slug_to_cli_name() -> None:
     """Each CLI gets its own ``--model`` name for a catalog slug."""
-    assert cli_model_arg("claude", "anthropic/claude-sonnet-4.5") == "claude-sonnet-4-5-20250929"
-    assert cli_model_arg("claude", "anthropic/claude-haiku-4.5") == "claude-haiku-4-5"
+    assert cli_model_arg("claude", "anthropic/claude-sonnet-4.6") == "claude-sonnet-4-6"
+    assert cli_model_arg("claude", "anthropic/claude-haiku-5.5") == "claude-haiku-5-5"
     assert cli_model_arg("codex", "openai/gpt-6-sol") == "gpt-6-sol"
 
 
@@ -84,6 +85,7 @@ def test_every_cli_model_has_an_effort_row() -> None:
     for cli, models in CLI_MODELS.items():
         assert set(CLI_EFFORTS[cli]) == set(models)
         for levels in CLI_EFFORTS[cli].values():
+            assert levels
             assert list(levels) == [level for level in ladder if level in levels]
 
 
@@ -151,3 +153,14 @@ def test_every_fast_model_is_a_cli_model() -> None:
     """The fast table names only slugs the CLI runs."""
     for cli, slugs in CLI_FAST.items():
         assert slugs <= set(CLI_MODELS[cli])
+
+
+@pytest.mark.parametrize("slug", ["anthropic/claude-sonnet-4.5", "anthropic/claude-haiku-4.5"])
+def test_a_removed_cli_model_runs_the_default(slug: str) -> None:
+    """A stored pick of a removed Claude slug runs the CLI's default model."""
+    default = next(iter(CLI_MODELS["claude"]))
+    assert current_cli_slug("claude", slug) == default
+    assert cli_model_arg("claude", slug) == CLI_MODELS["claude"][default]
+    assert current_cli_slug("claude", "anthropic/claude-unknown-1") is None
+    with pytest.raises(ValueError):
+        cli_model_arg("claude", "anthropic/claude-unknown-1")

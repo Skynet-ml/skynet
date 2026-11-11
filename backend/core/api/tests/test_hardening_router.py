@@ -78,7 +78,7 @@ def _catalog(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch: Pytest monkeypatch fixture.
     """
     models = [
-        CatalogModel(value=value, label=value, provider="openai", available=True)
+        CatalogModel(value=value, label=value, provider="openai", available=True, supports_thinking=True)
         for value in (_BODY["attacker_model"], _BODY["judge_model"])
     ]
     monkeypatch.setattr(model_catalog, "get_catalog_cached", lambda: ModelCatalogResponse(providers=[], models=models))

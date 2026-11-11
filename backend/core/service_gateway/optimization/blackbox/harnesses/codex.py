@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CODEX
 from ..harness_bridge import parse_codex_output
 from . import HarnessSpec, register
@@ -19,6 +20,11 @@ from .base import (
 )
 
 CODEX_VERSION = "0.153.0"
+# The named ``ReasoningEffort`` levels that Codex 0.153.0 sends unchanged
+# (codex-rs/protocol/src/openai_models.rs). ``ultra`` and ``persistent`` are
+# left out: ``reasoning_effort_for_request`` in codex-rs/core/src/client.rs
+# swaps them for another level or for ``disabled``.
+CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
@@ -31,7 +37,15 @@ def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When ``reasoning_effort`` is not in :data:`CODEX_EFFORTS`.
     """
+    if reasoning_effort and reasoning_effort not in CODEX_EFFORTS:
+        raise ServiceError(
+            f"The Codex harness does not support the effort level {reasoning_effort!r}. "
+            f"Supported levels: {', '.join(CODEX_EFFORTS)}."
+        )
     # The gateway prices only function and custom tools; without these settings
     # Codex also sends tool_search and web_search tools, and the gateway rejects them.
     config_toml = (
@@ -80,5 +94,6 @@ SPEC = register(
         version=CODEX_VERSION,
         output_format="codex",
         position=20,
+        supported_efforts=CODEX_EFFORTS,
     )
 )

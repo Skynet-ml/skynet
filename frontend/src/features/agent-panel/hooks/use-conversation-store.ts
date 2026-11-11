@@ -18,6 +18,8 @@
 // conversation seen on pick + on every conversation_meta for the active row.
 
 import * as React from "react";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useIsCurrentSide, useSourceSwap } from "@/shared/hooks/use-source-swap";
 
 import {
   deleteConversation,
@@ -63,6 +65,8 @@ function writeLastSeen(map: LastSeenMap): void {
 export interface ConversationStoreState {
   conversations: ConversationSummary[];
   loading: boolean;
+  /** A Local/Web switch is in progress: the listed chats belong to the other side. */
+  swapping: boolean;
   activeId: string | null;
   unreadIds: ReadonlySet<string>;
   setActiveId: (id: string | null) => void;
@@ -84,16 +88,22 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
   const [loading, setLoading] = React.useState(false);
   const [activeId, setActiveId] = React.useState<string | null>(null);
   const [lastSeen, setLastSeen] = React.useState<LastSeenMap>(() => readLastSeen());
+  const { web } = useResourceMode();
+  const [rowsSide, setRowsSide] = React.useState(web);
+  const swapping = useSourceSwap(web) || rowsSide !== web;
+  const isCurrentSide = useIsCurrentSide(web);
 
   const refresh = React.useCallback(
     async (params?: ListConversationsParams) => {
       if (!enabled) return;
       setLoading(true);
       const rows = await listConversations(params);
+      if (!isCurrentSide(web)) return;
       setLoading(false);
       if (rows !== null) setConversations(rows);
+      setRowsSide(web);
     },
-    [enabled],
+    [enabled, web, isCurrentSide],
   );
 
   React.useEffect(() => {
@@ -194,6 +204,7 @@ export function useConversationStore(args: UseConversationStoreArgs): Conversati
   return {
     conversations,
     loading,
+    swapping,
     activeId,
     unreadIds,
     setActiveId,

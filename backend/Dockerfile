@@ -171,6 +171,22 @@ RUN umask 0002; \
         && RUNNER_JS=$("$PY" -c 'import os, dspy.primitives.python_interpreter as m; print(os.path.join(os.path.dirname(m.__file__), "runner.js"))') \
         && deno cache "$RUNNER_JS"
 
+# The setup agent's read-only GitHub repository tools (SKY-327). The version
+# and checksums match GITHUB_MCP_VERSION in core/service_gateway/agents/github_mcp.py.
+ARG GITHUB_MCP_VERSION=2.1.0
+RUN case "$(dpkg --print-architecture)" in \
+            amd64) GH_MCP_ARCH=x86_64; GH_MCP_SHA256=a442f9db287cea01008bcb55fe6bc0292270301046c3edbd1a8b22d6e4157b2b ;; \
+            arm64) GH_MCP_ARCH=arm64; GH_MCP_SHA256=34d5a268f65cd1e9b7107fa976f3571ccd575f9df00cec489fec79a039923a22 ;; \
+            *) echo "unsupported arch for github-mcp-server: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSL --retry 10 --retry-all-errors --retry-delay 2 \
+            "https://github.com/github/github-mcp-server/releases/download/v$GITHUB_MCP_VERSION/github-mcp-server_Linux_$GH_MCP_ARCH.tar.gz" \
+            -o /tmp/github-mcp-server.tar.gz \
+        && echo "$GH_MCP_SHA256  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
+        && tar -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server \
+        && rm /tmp/github-mcp-server.tar.gz \
+        && chmod 0755 /usr/local/bin/github-mcp-server
+
 COPY --chown=1001:0 . .
 
 # Install the project itself. pip does an editable --no-deps install (every
@@ -183,6 +199,41 @@ RUN if [ "$PKG_MANAGER" = "pip" ]; then \
         umask 0002; \
         UV_PYTHON_DOWNLOADS=never uv sync --frozen; \
     fi
+
+# SWE-agent 1.1.0's default edit tool runs `pip install tree-sitter==0.21.3
+# tree-sitter-languages` at the start of each run, and its editor imports
+# tree_sitter_languages with the python3 on PATH. Harness commands run with the
+# runtime interpreter first on PATH, so the exact wheels go into it here: pip
+# then finds them installed and does not go to the network (SKY-578). This
+# step comes after the last uv sync because an exact sync removes packages
+# that uv.lock does not list. Hashes: the cp312 manylinux wheels for amd64 and arm64.
+RUN umask 0002; \
+        if [ "$PKG_MANAGER" = "uv" ]; then PY=/app/.venv/bin/python; else PY=python; fi \
+        && printf '%s\n' \
+            'tree-sitter==0.21.3 --hash=sha256:af992dfe08b4fefcfcdb40548d0d26d5d2e0a0f2d833487372f3728cd0772b48 --hash=sha256:6a3e06ae2a517cf6f1abb682974f76fa760298e6d5a3ecf2cf140c70f898adf0' \
+            'tree-sitter-languages==1.10.2 --hash=sha256:6d2f1cd1d1bdd65332f9c2b67d49dcf148cf1ded752851d159ac3e5ee4f4d260 --hash=sha256:15db3c8510bc39a80147ee7421bf4782c15c09581c1dc2237ea89cefbd95b846' \
+            > /tmp/swe-agent-tree-sitter.txt \
+        && "$PY" -m pip install --no-cache-dir --no-deps --require-hashes --only-binary :all: \
+            -r /tmp/swe-agent-tree-sitter.txt \
+        && rm /tmp/swe-agent-tree-sitter.txt \
+        && "$PY" -c "from tree_sitter_languages import get_parser; get_parser('python')"
+
+# SWE-agent 1.1.0 hard-codes /root for its tools (/root/tools), its state
+# (/root/state.json, /root/.swe-agent-env) and its patch copy (/root/model.patch),
+# and no setting moves them. /root stays root-owned, so UID 1001 cannot plant
+# dotfiles that a root command reads. Root-owned links send only those four
+# paths to /opt/swe-agent-root, which UID 1001 and GID 0 own. Mode 0711 lets
+# UID 1001 follow the links and read the stock /root/.bashrc that SWE-agent
+# sources, but not list or create entries in /root. The build leaves
+# group-writable caches in /root (umask 0002), so each top-level entry except
+# the stock dotfiles closes to root. A recursive chmod would copy the 722 MB uv
+# cache into this layer and pass the registry layer limit.
+RUN install -d -o 1001 -g 0 -m 0770 /opt/swe-agent-root /opt/swe-agent-root/tools \
+    && find /root -mindepth 1 -maxdepth 1 ! -name .bashrc ! -name .profile -exec chmod go-rwx {} + \
+    && chmod 0711 /root \
+    && for P in tools state.json model.patch .swe-agent-env; do \
+        ln -s "/opt/swe-agent-root/$P" "/root/$P" || exit 1; \
+    done
 
 ARG GIT_SHA=unknown
 

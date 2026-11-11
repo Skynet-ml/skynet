@@ -59,7 +59,8 @@ function expression(file: string, name: string, context: Record<string, unknown>
 test("an unsaved session's turns go out with persist false and no conversation id", () => {
   const text = source(hook);
   assert.match(text, /const unsaved = sessionsRef\.current\.get\(key\)\?\.unsaved === true;/);
-  assert.match(text, /conversation_id: unsaved \? null : \(sessionsRef\.current\.get\(key\)\?\.conversationId \?\? null\)/);
+  assert.match(text, /const savedId = unsaved \? null : \(sessionsRef\.current\.get\(key\)\?\.conversationId \?\? null\);/);
+  assert.match(text, /conversation_id: saved\?\.id \?\? null,/);
   assert.match(text, /persist: unsaved \? false : undefined,/);
 });
 

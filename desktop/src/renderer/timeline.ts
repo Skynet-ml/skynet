@@ -37,21 +37,6 @@ export function totalElapsed(timeline: Timeline, now: number): number {
   }, 0);
 }
 
-/**
- * Time left, from the last launch's step times: the rest of the running step's
- * estimate plus every pending step's estimate. Null when a step has no estimate.
- */
-export function remaining(timeline: Timeline, now: number): number | null {
-  let left = 0;
-  for (const step of timeline.steps) {
-    const phase = stepPhase(step);
-    if (phase === "done") continue;
-    if (step.estimateMs === undefined) return null;
-    left += phase === "active" ? Math.max(0, step.estimateMs - (now - (step.startedAt as number))) : step.estimateMs;
-  }
-  return left;
-}
-
 /** Seconds with one decimal for a step under 10s ("0.8"), so short steps do not all read 0:00. Null when it would round to "10.0". */
 export function shortSeconds(ms: number): string | null {
   const tenths = Math.round(Math.max(0, ms) / 100);

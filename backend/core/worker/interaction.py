@@ -80,10 +80,9 @@ def _run_program(
         else:
             for item in stream(**inputs):
                 if isinstance(item, StreamResponse):
-                    event = "message_patch" if descriptor["kind"] == "react_chat" else "token"
                     emit(
                         {
-                            "event": event,
+                            "event": "token",
                             "data": {"field": item.signature_field_name, "chunk": item.chunk},
                         }
                     )
@@ -92,12 +91,6 @@ def _run_program(
             if prediction is None:
                 raise RuntimeError("The isolated stream did not return a final prediction.")
     outputs = _response_outputs(prediction, output_fields, inputs)
-    if descriptor["kind"] == "react_chat":
-        values = [value for value in outputs.values() if value is not None]
-        return {
-            "assistant_message": "\n\n".join(str(value) for value in values),
-            "model": model.normalized_identifier(),
-        }
     return {
         "optimization_id": descriptor["optimization_id"],
         "outputs": outputs,
@@ -203,7 +196,7 @@ def run_interaction(
     Raises:
         ValueError: When the requested interaction kind is unsupported.
     """
-    if descriptor.get("kind") in {"serve", "react_chat"}:
+    if descriptor.get("kind") == "serve":
         return _run_program(payload, descriptor, emit)
     if descriptor.get("kind") == "evaluate":
         return _run_evaluation(payload, descriptor)

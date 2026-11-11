@@ -1,6 +1,6 @@
 import en from "./locales/en.json";
 import he from "./locales/he.json";
-import { formatClock, remaining, runningView, stepPhase, stepTime as formatStepTime, totalElapsed, type Timeline } from "./timeline";
+import { formatClock, runningView, stepPhase, stepTime as formatStepTime, totalElapsed, type Timeline } from "./timeline";
 
 type Kind =
   | "checking"
@@ -150,10 +150,9 @@ setInterval(() => tick?.(), 250);
 
 function timelinePanel(timeline: Timeline): HTMLElement {
   const elapsedNode = el("span", { className: "tl-elapsed", dir: "ltr" });
-  const leftNode = el("span", { className: "tl-left" });
   const head = el("div", { className: "tl-head" }, [
     el("span", { className: "tl-title", text: t("starting.title") }),
-    el("span", { className: "tl-totals" }, [leftNode, elapsedNode]),
+    el("span", { className: "tl-totals" }, [elapsedNode]),
   ]);
   const updates: ((now: number) => void)[] = [];
 
@@ -181,10 +180,8 @@ function timelinePanel(timeline: Timeline): HTMLElement {
         fill.style.animationDelay = `-${Math.min(Date.now() - startedAt, estimate)}ms`;
         bar.prepend(fill);
       }
-      // Without a fill, the bar and note stay hidden until the step passes its estimate.
-      row.append(
-        el("div", { className: hasFill ? "tl-extra" : "tl-extra tl-late" }, [bar, el("div", { className: "tl-note", text: t("timeline.over") })]),
-      );
+      // Without a fill, the bar stays hidden until the step passes its estimate.
+      row.append(el("div", { className: hasFill ? "tl-extra" : "tl-extra tl-late" }, [bar]));
     }
     updates.push((now) => {
       const view = runningView(now - startedAt, estimate, seconds);
@@ -196,8 +193,6 @@ function timelinePanel(timeline: Timeline): HTMLElement {
 
   updates.push((now) => {
     elapsedNode.textContent = formatClock(totalElapsed(timeline, now));
-    const left = remaining(timeline, now);
-    leftNode.textContent = left !== null && left >= 1000 ? t("timeline.left", { time: formatClock(left) }) : "";
   });
   tick = () => {
     const now = Date.now();
@@ -208,7 +203,6 @@ function timelinePanel(timeline: Timeline): HTMLElement {
   const card = el("div", { className: "timeline" }, [head]);
   // The clock changes every second; screen readers hear the checklist, not every tick.
   card.setAttribute("aria-live", "off");
-  if (timeline.firstLaunch) card.append(el("p", { className: "tl-first", text: t("timeline.first") }));
   card.append(el("ol", { className: "tl-steps" }, rows));
   return card;
 }

@@ -22,10 +22,6 @@ export function ToastContainer() {
       pauseOnHover
       theme="light"
       toastClassName="text-sm !py-3 !px-4"
-      // Sit above the bottom action bars (the wizard's Continue/Submit): at the
-      // default offset a toast covered that button, so the next click on it
-      // only dismissed the toast.
-      style={{ bottom: "max(5.5rem, env(safe-area-inset-bottom))" }}
     />
   );
 }

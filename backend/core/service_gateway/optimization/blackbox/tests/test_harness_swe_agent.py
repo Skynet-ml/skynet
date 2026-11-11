@@ -248,14 +248,14 @@ def _run_install(tmp_path: Path, *, sha: str = SWE_AGENT_COMMIT, uv_exit: int = 
     return result.returncode, result.stdout, log.read_text(), home / _INSTALL_DIR
 
 
-def test_swe_agent_is_registered_after_aider_with_its_pin() -> None:
+def test_swe_agent_is_registered_after_mini_swe_agent_with_its_pin() -> None:
     """List swe_agent in the registry and the request model, pinned to the probe and release."""
     spec = REGISTRY[BLACKBOX_HARNESS_SWE_AGENT]
 
     assert BLACKBOX_HARNESS_SWE_AGENT == "swe_agent"
     assert BLACKBOX_HARNESS_SWE_AGENT in BLACKBOX_HARNESSES
     ids = list(REGISTRY)
-    assert ids.index("aider") + 1 == ids.index("swe_agent")
+    assert ids.index("mini_swe_agent") + 1 == ids.index("swe_agent")
     assert (spec.binary, spec.version, spec.output_format) == (_PROBE, "1.1.0", "plain")
     assert SWE_AGENT_COMMIT == "0f3acafacabc0def8cc76b4e48acb4b6cf302cb9"
 
