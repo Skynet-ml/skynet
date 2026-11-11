@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -49,8 +50,11 @@ _RECORDED_FAILURE = {
 }
 # Stand-in for ``nemo_fabric.integrations.harbor.runner``: it records the spec,
 # its argv and the key env it saw, then writes the result the test chose.
+# With FAKE_KILL_PARENT set, it kills the run script first, as a turn timeout
+# that reaches only the outer process does, and records whether its state
+# folder's lock is still held.
 _FAKE_RUNNER = """\
-import argparse, json, os, sys
+import argparse, fcntl, json, os, signal, sys, time
 parser = argparse.ArgumentParser()
 parser.add_argument("--spec")
 parser.add_argument("--result")
@@ -62,6 +66,20 @@ seen = {
     "env": {name: os.environ.get(name) for name in names},
 }
 json.dump(seen, open(os.environ["FAKE_RUNNER_LOG"], "w"))
+if os.environ.get("FAKE_KILL_PARENT"):
+    parent = os.getppid()
+    os.kill(parent, signal.SIGKILL)
+    deadline = time.time() + 10
+    while os.getppid() == parent and time.time() < deadline:
+        time.sleep(0.01)
+    probe = os.open(os.path.join(seen["spec"]["config_base_dir"], "owner.lock"), os.O_RDONLY)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held = False
+    except OSError:
+        held = True
+    os.close(probe)
+    json.dump({"parent_gone": os.getppid() != parent, "lock_held": held}, open(os.environ["FAKE_KILL_PARENT"], "w"))
 print("runner progress line")
 result = json.loads(os.environ["FAKE_RESULT"])
 open(args.result, "w").write(json.dumps(result))
@@ -144,7 +162,9 @@ def _install(tmp_path: Path, launch_install: str) -> tuple[dict[str, str], Path]
     return env, uv_log
 
 
-def _run(tmp_path: Path, *, protected: bool, result: dict) -> tuple[subprocess.CompletedProcess[str], dict, Path]:
+def _run(
+    tmp_path: Path, *, protected: bool, result: dict, extra_env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], dict, Path]:
     """Install the stand-in Fabric, then run the built command in a scratch workspace.
 
     Args:
@@ -152,6 +172,7 @@ def _run(tmp_path: Path, *, protected: bool, result: dict) -> tuple[subprocess.C
             the run's ``TMPDIR`` (``tmp_path / "tmp"``).
         protected: Build the protected launch, with the sandbox-local relay set.
         result: The result file the fake runner writes.
+        extra_env: More environment for the run command.
 
     Returns:
         The finished run command, what the fake runner saw, and the workspace.
@@ -175,6 +196,7 @@ def _run(tmp_path: Path, *, protected: bool, result: dict) -> tuple[subprocess.C
         "FAKE_RUNNER_LOG": str(runner_log),
         "FAKE_RESULT": json.dumps(result),
         "TMPDIR": str(tmp_dir),
+        **(extra_env or {}),
     }
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
@@ -477,6 +499,17 @@ def test_string_error_fails_the_run_with_that_string(tmp_path: Path) -> None:
     assert "fabric: model route refused" in finished.stderr
 
 
+def test_error_object_without_a_message_fails_the_run_with_the_whole_object(tmp_path: Path) -> None:
+    """Print the whole error object when it has no ``message``, never ``fabric: None``."""
+    result = {"runner_error": {"stage": "run", "code": "harness_failed", "retryable": False}}
+    finished, _, _ = _run(tmp_path, protected=False, result=result)
+
+    assert finished.returncode == 1
+    assert finished.stdout == ""
+    assert "fabric: None" not in finished.stderr
+    assert 'fabric: {"stage": "run", "code": "harness_failed", "retryable": false}' in finished.stderr
+
+
 @pytest.mark.parametrize("result", [_RECORDED_RESULT, _RECORDED_FAILURE], ids=["succeeded", "runner_error"])
 def test_run_removes_its_state_directory(tmp_path: Path, result: dict) -> None:
     """Leave no ``app-fabric-*`` folder behind, so repeated proposer turns do not fill the box."""
@@ -488,14 +521,20 @@ def test_run_removes_its_state_directory(tmp_path: Path, result: dict) -> None:
 
 
 def test_run_removes_state_folders_of_dead_runs_and_keeps_live_ones(tmp_path: Path) -> None:
-    """Remove a killed run's folder, and keep a live run's folder and folders without a lock."""
+    """Remove a killed run's folder and an old folder without a lock; keep a live run's folder and a new one."""
     tmp_dir = tmp_path / "tmp"
-    folders = {name: tmp_dir / name for name in ("app-fabric-dead", "app-fabric-live", "app-fabric-nolock", "other")}
+    names = ("app-fabric-dead", "app-fabric-live", "app-fabric-nolock", "app-fabric-oldnolock", "other")
+    folders = {name: tmp_dir / name for name in names}
     for folder in folders.values():
         folder.mkdir(parents=True)
         (folder / "spec.json").write_text('{"request": {"input": "old prompt"}}')
     for name in ("app-fabric-dead", "app-fabric-live", "other"):
         (folders[name] / "owner.lock").write_text("")
+    # A run killed between ``mkdtemp`` and the lock rename leaves no lock file.
+    # Only a folder older than the sweep's stale age (600 s) goes; a newer one
+    # may be a run that is about to lock it.
+    old = time.time() - 86400
+    os.utime(folders["app-fabric-oldnolock"], (old, old))
     # A killed run leaves an unlocked lock file. A live run holds the flock,
     # here through this test's own open file.
     with (folders["app-fabric-live"] / "owner.lock").open() as live_lock:
@@ -504,6 +543,27 @@ def test_run_removes_state_folders_of_dead_runs_and_keeps_live_ones(tmp_path: Pa
 
     assert finished.returncode == 0, finished.stderr
     assert sorted(path.name for path in tmp_dir.iterdir()) == ["app-fabric-live", "app-fabric-nolock", "other"]
+
+
+def test_runner_that_outlives_a_killed_run_keeps_its_folder_locked(tmp_path: Path) -> None:
+    """Keep the lock while the runner lives, so a later sweep never deletes a running runner's folder."""
+    probe_log = tmp_path / "probe.json"
+
+    finished, seen, _ = _run(
+        tmp_path, protected=False, result=_RECORDED_RESULT, extra_env={"FAKE_KILL_PARENT": str(probe_log)}
+    )
+
+    assert finished.returncode != 0
+    assert json.loads(probe_log.read_text()) == {"parent_gone": True, "lock_held": True}
+    state = Path(seen["spec"]["config_base_dir"])
+    assert (state / "owner.lock").exists()
+    (tmp_path / "next").mkdir()
+    # The runner has exited now, so the kernel dropped the lock and the next sweep removes the folder.
+    finished, _, _ = _run(
+        tmp_path / "next", protected=False, result=_RECORDED_RESULT, extra_env={"TMPDIR": str(state.parent)}
+    )
+    assert finished.returncode == 0, finished.stderr
+    assert not state.exists()
 
 
 @pytest.mark.parametrize("adapter_version", ["0.4.0", None], ids=["mismatched", "missing"])

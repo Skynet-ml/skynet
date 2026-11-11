@@ -98,7 +98,11 @@ _PROTECTED_ENV = {
 # each run first removes the folders of dead runs. A live run holds an flock on
 # its ``owner.lock``, and the kernel drops the lock when the run dies, so a
 # concurrent run's folder stays. The lock file gets its final name only after
-# it is locked, so a sweep never sees an unlocked lock of a live run.
+# it is locked, so a sweep never sees an unlocked lock of a live run. The runner
+# inherits the locked descriptor, so a runner that outlives a killed script
+# still holds the lock and keeps its folder. A run killed between ``mkdtemp``
+# and the rename leaves a folder with no lock; the sweep removes such a folder
+# once it is older than ``STALE_SECONDS``, far longer than that short window.
 _FABRIC_RUN_SCRIPT = """\
 import fcntl
 import json
@@ -107,7 +111,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+STALE_SECONDS = 600
 
 
 def sweep(root):
@@ -116,6 +123,14 @@ def sweep(root):
             continue
         try:
             fd = os.open(old / "owner.lock", os.O_RDONLY)
+        except FileNotFoundError:
+            try:
+                stale = time.time() - old.stat().st_mtime > STALE_SECONDS
+            except OSError:
+                continue
+            if stale and old.is_dir():
+                shutil.rmtree(old, ignore_errors=True)
+            continue
         except OSError:
             continue
         try:
@@ -153,7 +168,7 @@ def main():
             sys.executable, "-I", "-m", "nemo_fabric.integrations.harbor.runner",
             "--spec", str(spec_path), "--result", str(result_path),
         ]
-        code = subprocess.run(command, stdout=sys.stderr).returncode
+        code = subprocess.run(command, stdout=sys.stderr, pass_fds=(lock,)).returncode
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -161,7 +176,10 @@ def main():
             return code or 1
         failure = result.get("runner_error") or result.get("error")
         if failure or result.get("status") != "succeeded":
-            message = failure.get("message") if isinstance(failure, dict) else failure or result.get("status")
+            if isinstance(failure, dict):
+                message = failure.get("message") or json.dumps(failure)
+            else:
+                message = failure or result.get("status")
             print(f"fabric: {message}", file=sys.stderr)
             return code or 1
         output = result.get("output")
