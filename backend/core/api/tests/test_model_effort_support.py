@@ -8,8 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from ...billing.cli_dispatch import THINKING_LABEL_ROLE, CliDispatcher
-from ...billing.operation_pricing import UnpricedOperationError
-from ...local.cli_catalog import CLI_MODELS
+from ...local.cli_catalog import CLI_MODELS, cli_model_arg
 from .. import interview_model, model_catalog, model_router
 from ..errors import DomainError
 from ..model_catalog import CatalogModel, ModelCatalogResponse
@@ -86,23 +85,26 @@ def test_filtered_defaults_and_raw_metadata(monkeypatch: pytest.MonkeyPatch) -> 
     assert model_catalog.with_platform_reasoning([twin])[0].reasoning_efforts == []
 
 
-def test_stale_managed_pick_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject a saved selection even if an unfiltered catalog still contains it.
+def test_stale_managed_pick_runs_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the default for a saved selection the filtered menus no longer offer.
 
     Args:
-        monkeypatch: Supply provider metadata without a usable effort ladder.
+        monkeypatch: Supply a raw catalog with a model without a usable effort ladder.
     """
     old = _model(reasoning_efforts=[])
-    monkeypatch.setattr(model_catalog, "get_catalog_cached", lambda: ModelCatalogResponse(providers=[], models=[old]))
+    kept = _model("openrouter/acme/current", is_default=True)
+    shown = ModelCatalogResponse(providers=[], models=[kept])
+    monkeypatch.setattr(model_catalog, "_cached_response", ModelCatalogResponse(providers=[], models=[old, kept]))
+    monkeypatch.setattr(model_catalog, "get_catalog_cached", lambda: shown)
+    monkeypatch.setattr(model_router, "get_catalog_cached", lambda: shown)
     monkeypatch.setattr(model_catalog, "_hidden_model_values", frozenset())
     monkeypatch.setattr(model_router.settings, "local_mode", False)
-    with pytest.raises(DomainError, match=r"models\.unknown_model"):
-        model_router.route_menu_model(old.value)
+    assert model_router.route_menu_model(old.value) == kept.value
 
 
 @pytest.mark.parametrize("slug", ["anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-4.5"])
-def test_removed_cli_model_cannot_run_user_turn(slug: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject removed CLI selections at both routing and dispatch boundaries.
+def test_removed_cli_model_runs_the_cli_default(slug: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route a stored removed CLI selection to the CLI default, at routing and at dispatch.
 
     Args:
         slug: Removed Claude model.
@@ -110,10 +112,10 @@ def test_removed_cli_model_cannot_run_user_turn(slug: str, monkeypatch: pytest.M
     """
     monkeypatch.setattr(model_router.settings, "local_mode", True)
     assert slug not in CLI_MODELS["claude"]
-    with pytest.raises(DomainError):
-        model_router.route_menu_model(f"subscription/claude/{slug}")
-    with pytest.raises(UnpricedOperationError):
-        CliDispatcher(None, "claude", slug, "agent", SimpleNamespace(local_mode=True))
+    default = next(iter(CLI_MODELS["claude"]))
+    assert model_router.route_menu_model(f"subscription/claude/{slug}") == f"subscription/claude/{default}"
+    assert CliDispatcher(None, "claude", slug, "agent", SimpleNamespace(local_mode=True)).model == slug
+    assert cli_model_arg("claude", slug) == CLI_MODELS["claude"][default]
 
 
 def test_internal_label_keeps_fixed_haiku() -> None:
