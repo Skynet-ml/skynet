@@ -13,12 +13,20 @@ from pathlib import Path
 
 import pytest
 
-from core.models.blackbox import BLACKBOX_HARNESS_GOOSE, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
+from core.exceptions import ServiceError
+from core.models.blackbox import (
+    BLACKBOX_HARNESS_GOOSE,
+    BLACKBOX_HARNESSES,
+    BLACKBOX_TARGET_AGENT,
+    BlackboxProposer,
+    BlackboxTarget,
+)
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
 from ..harnesses.goose import _PROTECTED_ENV, GOOSE_BASE_URL_FILE, GOOSE_SHA256, GOOSE_VERSION
+from ..service import _check_proposer_effort
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -268,20 +276,41 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.parse_output is parse_plain_output
 
 
-@pytest.mark.parametrize(
-    ("effort", "level"),
-    [(None, None), ("none", "none"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max"), ("minimal", "low")],
-)
-def test_reasoning_effort_maps_to_the_thinking_env(effort: str | None, level: str | None) -> None:
-    """Pass the user's effort as goose's ``GOOSE_THINKING_EFFORT``, or nothing for goose's default."""
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "max"])
+def test_supported_reasoning_effort_passes_unchanged(effort: str) -> None:
+    """Pass each effort goose supports as ``GOOSE_THINKING_EFFORT`` with no change."""
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
-    assert launch.env.get("GOOSE_THINKING_EFFORT") == level
+    assert launch.env["GOOSE_THINKING_EFFORT"] == effort
 
 
-def test_unknown_reasoning_effort_sets_no_thinking_env() -> None:
-    """Give goose no thinking setting for an effort name it does not know."""
-    launch = build_launch(_target(), _GATEWAY, reasoning_effort="turbo")
+def test_goose_declares_its_effort_levels_for_the_submit_check() -> None:
+    """Declare goose's levels on its registry entry, so submit refuses the rest before paid work."""
+    assert REGISTRY[BLACKBOX_HARNESS_GOOSE].supported_efforts == ("none", "low", "medium", "high", "max")
+
+
+@pytest.mark.parametrize(("effort", "accepted"), [("high", True), (None, True), ("xhigh", False), ("minimal", False)])
+def test_submit_check_uses_the_goose_levels(effort: str | None, accepted: bool) -> None:
+    """Refuse at submit an effort goose has no level for, and accept a supported one or none."""
+    proposer = BlackboxProposer(harness=BLACKBOX_HARNESS_GOOSE)
+    if accepted:
+        _check_proposer_effort(proposer, effort)
+    else:
+        with pytest.raises(ServiceError, match=f"goose proposer does not support the '{effort}' effort level"):
+            _check_proposer_effort(proposer, effort)
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_reasoning_effort_keeps_the_goose_default(effort: str | None) -> None:
+    """Give goose no thinking setting when the user picks no effort."""
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
     assert "GOOSE_THINKING_EFFORT" not in launch.env
+
+
+@pytest.mark.parametrize("effort", ["minimal", "xhigh", "turbo"])
+def test_unsupported_reasoning_effort_raises(effort: str) -> None:
+    """Refuse an effort goose has no level for, instead of a remap or a silent drop."""
+    with pytest.raises(ServiceError, match="Goose does not support effort"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers_and_telemetry() -> None:
