@@ -42,6 +42,7 @@ _RECORDED_STREAM = "\n".join(
         {"type": "usage", "usage": {"input_tokens": 40, "output_tokens": 30}},
         {
             "type": "end",
+            "stopReason": "end_turn",
             "usage": {
                 "input_tokens": 100,
                 "output_tokens": 40,
@@ -261,6 +262,7 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert config["cli"] == {"auto_update": False}
     assert config["features"] == {"telemetry": False}
     assert config["harness"] == {"disable_codebase_upload": True}
+    assert config["endpoints"] == {"xai_api_base_url": _GATEWAY.url}
     assert config["models"] == dict.fromkeys(("default", "session_summary", "image_description", "web_search"), _MODEL)
     assert config["model"] == {
         _MODEL: {
@@ -424,6 +426,7 @@ def test_protected_run_points_grok_at_the_relay_and_returns_its_answer(tmp_path:
         f"[--output-format] [streaming-json] [--session-id] [{_SESSION_ID}] [--model] [{_MODEL}]"
     )
     assert config["model"][_MODEL]["base_url"] == _RELAY
+    assert config["endpoints"]["xai_api_base_url"] == _RELAY
     assert _GATEWAY.url not in calls
     assert "APP_API_KEY=gateway-token" in calls.splitlines()
     for name in _DIRECT_KEYS:
@@ -453,6 +456,7 @@ def test_open_run_reads_the_gateway_url_from_the_generated_config(tmp_path: Path
     _, _, config, _ = _run_with_fake_grok(tmp_path, protected=False)
 
     assert config["model"][_MODEL]["base_url"] == _GATEWAY.url
+    assert config["endpoints"]["xai_api_base_url"] == _GATEWAY.url
 
 
 def test_without_an_end_event_the_per_call_usage_adds_up(tmp_path: Path) -> None:
@@ -471,6 +475,21 @@ def test_a_failed_grok_run_keeps_its_exit_status_and_usage(tmp_path: Path) -> No
     assert parse_output("pi", result.stdout)[1] == {"input_tokens": 125, "output_tokens": 40}
     grok_home = Path(next(line for line in calls.splitlines() if line.startswith("HOME=")).split("=", 1)[1])
     assert not grok_home.exists()
+
+
+@pytest.mark.parametrize("stop_reason", ["cancelled", "max_tokens", "refusal", None])
+def test_a_run_that_does_not_end_its_turn_fails_without_an_answer(tmp_path: Path, stop_reason: str | None) -> None:
+    """Fail a run whose ``end`` event has no ``end_turn`` stop, even when Grok exits 0, and drop earlier text."""
+    events = [json.loads(line) for line in _RECORDED_STREAM.splitlines()]
+    if stop_reason is None:
+        del events[-1]["stopReason"]
+    else:
+        events[-1]["stopReason"] = stop_reason
+    stream = "\n".join(json.dumps(event) for event in events)
+    result, _, _, _ = _run_with_fake_grok(tmp_path, protected=False, stream=stream)
+
+    assert result.returncode == 1
+    assert parse_output("pi", result.stdout) == (None, {"input_tokens": 125, "output_tokens": 40})
 
 
 def test_the_payload_names_the_pi_parser() -> None:

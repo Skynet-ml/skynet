@@ -63,8 +63,11 @@ _URL_FORBIDDEN = frozenset("\"'\\")
 # ``GrokUsage``): ``reasoning_tokens`` is a part of ``output_tokens``, and cache
 # reads and writes sit beside ``input_tokens``. So the prompt total adds the
 # cache buckets and the completion total is the output. Without an ``end``
-# event, the per-call ``usage`` events add up. The converter runs inline: a
-# script in ``files`` would land in the workspace that Grok can edit.
+# event, the per-call ``usage`` events add up. Grok exits 0 on an ``end`` event
+# whose ``stopReason`` is ``cancelled`` (for example when the gateway drops
+# mid-run), so any stop reason other than ``end_turn`` fails the run and drops
+# the text of earlier turns. The converter runs inline: a script in ``files``
+# would land in the workspace that Grok can edit.
 _CONVERTER_SCRIPT = '''"""Turn a Grok Build run into one Pi ``message_end`` line."""
 
 import glob
@@ -111,8 +114,10 @@ def text_of(content):
 def main():
     """Print the last assistant text of the session and the run usage as a Pi event."""
     stream, home, session = sys.argv[1:4]
-    calls, total = [], None
+    calls, total, end = [], None, None
     for event in json_lines(stream):
+        if event.get("type") == "end":
+            end = event
         used = event.get("usage")
         if not isinstance(used, dict):
             continue
@@ -123,6 +128,10 @@ def main():
     picked = calls if total is None else [total]
     prompt = sum(count(used, name) for used in picked for name in _PROMPT_BUCKETS)
     completion = sum(count(used, "output_tokens") for used in picked)
+    usage = {"input": prompt, "output": completion}
+    if end is not None and end.get("stopReason") != "end_turn":
+        print(json.dumps({"type": "message_end", "message": {"role": "assistant", "content": [], "usage": usage}}))
+        sys.exit(1)
     text = ""
     pattern = os.path.join(home, ".grok", "sessions", "**", session, "chat_history.jsonl")
     for path in sorted(glob.glob(pattern, recursive=True)):
@@ -130,7 +139,7 @@ def main():
             if message.get("type") == "assistant":
                 text = text_of(message.get("content")).strip() or text
     content = [{"type": "text", "text": text}] if text else []
-    message = {"role": "assistant", "content": content, "usage": {"input": prompt, "output": completion}}
+    message = {"role": "assistant", "content": content, "usage": usage}
     print(json.dumps({"type": "message_end", "message": message}))
 
 
@@ -205,6 +214,9 @@ def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> 
         "[cli]\nauto_update = false\n\n"
         "[features]\ntelemetry = false\n\n"
         "[harness]\ndisable_codebase_upload = true\n\n"
+        # Grok fetches its model list from this base at start, outside the
+        # model entry; pointing it at the gateway keeps that call off api.x.ai.
+        f"[endpoints]\nxai_api_base_url = {json.dumps(gateway_url)}\n\n"
         # Auxiliary roles default to xAI's hosted models; pinning them to the
         # same entry keeps every call on the gateway.
         f"[models]\ndefault = {slug}\nsession_summary = {slug}\n"
