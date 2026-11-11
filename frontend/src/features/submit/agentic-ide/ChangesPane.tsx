@@ -149,22 +149,31 @@ export function ChangesPane({
   const split = listWidth >= SPLIT_MIN_PX;
   const showTree = paneWidth >= TREE_MIN_PX;
 
-  // Each file's first open state, pinned once its base loads, so a change that
-  // grows or shrinks later does not open or close it by itself.
-  const [firstOpen, setFirstOpen] = React.useState<ReadonlyMap<string, boolean>>(new Map());
-  const unpinned = shown.filter((file) => !loading.has(file.path) && !firstOpen.has(file.path));
+  // Each diff's first open state, pinned once its base loads, so a change that
+  // grows or shrinks later does not open or close it by itself. The pin holds
+  // only for the base it saw: a scope switch, a new turn or a late repository
+  // base is a new diff and gets a new first state.
+  const [firstOpen, setFirstOpen] = React.useState<
+    ReadonlyMap<string, { before: string; open: boolean }>
+  >(new Map());
+  const pinned = (file: DraftFile) => {
+    const pin = firstOpen.get(file.path);
+    return pin?.before === file.before ? pin.open : undefined;
+  };
+  const unpinned = shown.filter((file) => !loading.has(file.path) && pinned(file) === undefined);
   if (unpinned.length > 0) {
     setFirstOpen(
-      new Map([...firstOpen, ...unpinned.map((file) => [file.path, !isLarge(file)] as const)]),
+      new Map([
+        ...firstOpen,
+        ...unpinned.map(
+          (file) => [file.path, { before: file.before, open: !isLarge(file) }] as const,
+        ),
+      ]),
     );
   }
   // A loading file has no real counts yet; it stays open and shows that it loads.
   const isCollapsed = (file: DraftFile) =>
-    !(
-      open.get(file.path) ??
-      firstOpen.get(file.path) ??
-      (loading.has(file.path) || !isLarge(file))
-    );
+    !(open.get(file.path) ?? pinned(file) ?? (loading.has(file.path) || !isLarge(file)));
 
   const shownPaths = shown.map((file) => file.path).join("\n");
   React.useEffect(() => {

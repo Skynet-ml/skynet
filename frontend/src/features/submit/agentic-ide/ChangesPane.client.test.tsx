@@ -302,6 +302,37 @@ void test("a large file that still loads its base is open and says it loads", as
   await pane.unmount();
 });
 
+const expandedIn = (container: HTMLElement, path: string) =>
+  section(container, path).querySelector("button[aria-expanded]")?.getAttribute("aria-expanded");
+
+void test("a scope switch gives the other scope's diff its own first open state", async () => {
+  const text = lines(600, "a");
+  const after = [...text.slice(0, 599), "x"].join("\n");
+  // The last turn changed one line; the whole draft adds all 600 lines of a new file.
+  const lastTurn = { path: "a.py", before: text.join("\n"), after };
+  const whole = { path: "a.py", before: "", after };
+  const pane = await mount([lastTurn], { scope: "last" });
+  assert.equal(expandedIn(pane.container, "a.py"), "true");
+  await pane.render({ ...props([whole]), scope: "all" });
+  assert.equal(expandedIn(pane.container, "a.py"), "false");
+  await pane.render({ ...props([lastTurn]), scope: "last" });
+  assert.equal(expandedIn(pane.container, "a.py"), "true");
+  await pane.render({ ...props([whole]), scope: "all" });
+  assert.equal(expandedIn(pane.container, "a.py"), "false");
+  await pane.unmount();
+});
+
+void test("a new turn's diff of a file gets a new first open state", async () => {
+  const first = { path: "a.py", before: "x = 1", after: "x = 2" };
+  const pane = await mount([first], { scope: "last" });
+  assert.equal(expandedIn(pane.container, "a.py"), "true");
+  // Turn 2 rewrites the file with 2000 lines.
+  const second = { path: "a.py", before: first.after, after: lines(2000, "b").join("\n") };
+  await pane.render({ ...props([second]), scope: "last" });
+  assert.equal(expandedIn(pane.container, "a.py"), "false");
+  await pane.unmount();
+});
+
 void test("the filter narrows the file tree and leaves the diffs alone", async () => {
   const pane = await mount(bigDraft());
   const treeRows = () => pane.container.querySelectorAll("nav li").length;

@@ -51,7 +51,10 @@ export function isChanged(file: Pick<DraftFile, "before" | "after">): boolean {
 // The tree, the totals and each diff all read a file's line diff on every
 // render, so keep the recent ones. Keyed by the new text first: many new
 // files share the empty old text. SKY-628.
-const DIFF_CACHE_SIZE = 200;
+// Every render reads each shown file's diff, so the current versions stay
+// recent. Room for a large draft, but few old versions of a file that the
+// user types in.
+const DIFF_CACHE_SIZE = 100;
 const diffCache = new Map<string, Map<string, DiffLine[]>>();
 
 /**
