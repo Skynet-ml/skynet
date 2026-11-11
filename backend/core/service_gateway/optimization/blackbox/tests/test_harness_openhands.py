@@ -328,13 +328,15 @@ def test_completion_kwargs_remove_the_thinking_openhands_adds(model: str, effort
     """Remove the ``thinking`` that OpenHands 1.6.0 adds for Gemini 2.5 Pro and Opus 4.1, and keep the effort.
 
     The harness never sets ``LLM_REASONING_EFFORT``, so OpenHands always adds
-    ``thinking`` for these names. With ``LLM_DROP_PARAMS=false``, LiteLLM
+    ``thinking`` for these names. OpenHands matches the Gemini basename
+    exactly, so it adds nothing for ``gemini-2.5-pro-preview``, and the
+    launch still sends only the effort. With ``LLM_DROP_PARAMS=false``, LiteLLM
     1.80.10 refuses it on the ``openai/`` route and every run fails; with no
     effort, the Gemini 128-token budget would replace the model default. The
     completion kwargs override the OpenHands kwargs, as ``LLM.__init__`` does.
     """
     openhands_kwargs: dict[str, object] = {"temperature": 0.0, "max_completion_tokens": None, "top_p": 1.0}
-    if "gemini-2.5-pro" in model:
+    if model.rsplit("/", 1)[-1] == "gemini-2.5-pro":
         openhands_kwargs = {"max_completion_tokens": None, "thinking": {"budget_tokens": 128}}
         openhands_kwargs["allowed_openai_params"] = ["thinking"]
     if "claude-opus-4-1" in model:
