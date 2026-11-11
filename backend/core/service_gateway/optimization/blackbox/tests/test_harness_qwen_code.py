@@ -158,11 +158,11 @@ def _logged(calls: str, name: str) -> str:
     return next(line for line in calls.splitlines() if line.startswith(f"{name}=")).split("=", 1)[1]
 
 
-def test_qwen_code_is_registered_after_aider_with_its_pin() -> None:
+def test_qwen_code_is_registered_after_openhands_sdk_with_its_pin() -> None:
     """List qwen_code in the registry and the request model, pinned to the exact npm release."""
     spec = REGISTRY[BLACKBOX_HARNESS_QWEN_CODE]
     assert (spec.binary, spec.version, spec.output_format, spec.position) == ("qwen", "0.27.2", "plain", 58)
-    assert list(REGISTRY).index(BLACKBOX_HARNESS_QWEN_CODE) == list(REGISTRY).index("aider") + 1
+    assert list(REGISTRY).index(BLACKBOX_HARNESS_QWEN_CODE) == list(REGISTRY).index("openhands_sdk") + 1
     assert BLACKBOX_HARNESS_QWEN_CODE in BLACKBOX_HARNESSES
     assert (
         pinned_harness_check(BLACKBOX_HARNESS_QWEN_CODE)
