@@ -53,7 +53,8 @@ _VERSION_PROBE = (
 _VERSION_BINARY = f'"{_VENV_PYTHON}" -c {shlex.quote(_VERSION_PROBE)}'
 MODEL_NAME = "skynet-model"
 RECURSION_LIMIT = 1000
-ENV_THINKING = "DEERFLOW_THINKING_ENABLED"
+# DeerFlow loads no AGENTS.md itself, so the runner reads it and puts it in the turn message.
+INSTRUCTIONS_FILE = "AGENTS.md"
 # Empty values override any key the host shell leaks into the box. DeerFlow
 # then has no direct provider route and no search, tracing or telemetry key.
 _NO_DIRECT_KEYS = dict.fromkeys(
@@ -106,18 +107,20 @@ from pathlib import Path
 CONFIG_FILE = Path({config_file!r})
 GATEWAY_URL = {gateway_url!r}
 DIRECT_ROUTES = {direct_routes!r}
+INSTRUCTIONS_FILE = {instructions_file!r}
 STEERING = (
     "You are operating directly on a real Linux machine through the bash and file tools. "
     "Act on the actual filesystem at real absolute paths.\\n"
     "Your working directory is {{workdir}}. Create and modify the task's files under {{workdir}}. "
-    "Do NOT write deliverables into /mnt/user-data.\\n\\nTask:\\n{{task}}"
+    "Do NOT write deliverables into /mnt/user-data.\\n\\n{{instructions}}Task:\\n{{task}}"
 )
 
 
-def _flag(name, default):
-    \"\"\"Read a boolean toggle from the environment.\"\"\"
-    value = os.environ.get(name)
-    return default if value is None else value.strip().lower() in ("1", "true", "yes", "on")
+def _instructions(workdir):
+    \"\"\"Return the workdir's instructions file as a message section, or ``""`` when it is absent or empty.\"\"\"
+    path = Path(workdir) / INSTRUCTIONS_FILE
+    text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    return f"Follow these instructions from {{INSTRUCTIONS_FILE}}:\\n{{text}}\\n\\n" if text else ""
 
 
 def _count(usage, field):
@@ -133,6 +136,21 @@ def _text(content):
     if isinstance(content, list):
         return "".join(part.get("text", "") for part in content if isinstance(part, dict))
     return ""
+
+
+def _print_end(answer, usages, partial=False):
+    \"\"\"Print one Pi-shaped ``message_end`` event with the answer and summed usage.\"\"\"
+    message = {{
+        "role": "assistant",
+        "content": [{{"type": "text", "text": answer}}],
+        "usage": {{
+            "input": sum(_count(usage, "input_tokens") for usage in usages),
+            "output": sum(_count(usage, "output_tokens") for usage in usages),
+        }},
+    }}
+    if partial:
+        message["partial"] = True
+    print(json.dumps({{"type": "message_end", "message": message}}), flush=True)
 
 
 def _write_config(workdir):
@@ -165,9 +183,9 @@ def _run():
     client = client_module.DeerFlowClient(
         model_name={model_name!r},
         subagent_enabled=False,
-        # The model entry has no ``supports_thinking`` or thinking settings, so DeerFlow
-        # sends no thinking parameters either way. Off by default matches that config.
-        thinking_enabled=_flag({env_thinking!r}, False),
+        # The model entry has no thinking settings, so DeerFlow's factory sends no
+        # thinking parameters; the user's effort goes out as ``reasoning_effort``.
+        thinking_enabled=False,
         plan_mode=False,
     )
     end_usage = None
@@ -178,7 +196,9 @@ def _run():
     last_text = None
     llm_error = None
     try:
-        for event in client.stream(STEERING.format(workdir=workdir, task=task), recursion_limit={recursion_limit}):
+        for event in client.stream(
+            STEERING.format(workdir=workdir, instructions=_instructions(workdir), task=task),
+            recursion_limit={recursion_limit}):
             data = event.data if isinstance(event.data, dict) else {{}}
             if event.type == "end" and isinstance(data.get("usage"), dict):
                 end_usage = data["usage"]
@@ -199,24 +219,15 @@ def _run():
                     texts[last_text] = texts.get(last_text, "") + piece
     except errors.GraphRecursionError as exc:
         # The stream stops before its ``end`` event, and tool-call-only AI events
-        # carry no usage, so a result here would undercount tokens. Fail the run.
+        # carry no usage, so the per-message sum may undercount. Report it as
+        # partial usage with no answer, so the record shows the model did work,
+        # and fail the run.
+        _print_end("", list(message_usage.values()), partial=True)
         sys.exit(f"deerflow: recursion limit reached: {{exc}}")
     if llm_error is not None:
         sys.exit(f"deerflow: model provider error: {{llm_error[:500]}}")
     answer = texts.get(last_text, "")
-    usages = [end_usage] if end_usage is not None else list(message_usage.values())
-    event = {{
-        "type": "message_end",
-        "message": {{
-            "role": "assistant",
-            "content": [{{"type": "text", "text": answer}}],
-            "usage": {{
-                "input": sum(_count(usage, "input_tokens") for usage in usages),
-                "output": sum(_count(usage, "output_tokens") for usage in usages),
-            }},
-        }},
-    }}
-    print(json.dumps(event), flush=True)
+    _print_end(answer, [end_usage] if end_usage is not None else list(message_usage.values()))
 
 
 if __name__ == "__main__":
@@ -317,7 +328,7 @@ def _runner_script(gateway_url: str) -> str:
         direct_routes=tuple(_NO_DIRECT_KEYS),
         env_api_key=ENV_API_KEY,
         env_prompt_file=ENV_PROMPT_FILE,
-        env_thinking=ENV_THINKING,
+        instructions_file=INSTRUCTIONS_FILE,
         model_name=MODEL_NAME,
         recursion_limit=RECURSION_LIMIT,
     )
@@ -349,8 +360,8 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
     Args:
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; DeerFlow sends every model call there.
-        reasoning_effort: The user's effort for the model; ``none`` turns thinking off,
-            and any other value goes to the gateway as ``reasoning_effort``.
+        reasoning_effort: The user's effort for the model; any value but ``none`` goes
+            to the gateway as ``reasoning_effort``.
 
     Returns:
         The launch.
@@ -360,10 +371,8 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
     env.update(_NO_TRACING)
     env["UV_NO_PROGRESS"] = "1"
     gateway_url = _gateway_url(gateway)
-    if reasoning_effort:
-        env[ENV_THINKING] = "false" if reasoning_effort.lower() == "none" else "true"
     return HarnessLaunch(
-        instructions_file="AGENTS.md",
+        instructions_file=INSTRUCTIONS_FILE,
         install_command=_deerflow_install(),
         files={
             CONFIG_FILE: _deerflow_config(model, gateway_url, reasoning_effort),

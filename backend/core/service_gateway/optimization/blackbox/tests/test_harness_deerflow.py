@@ -17,6 +17,7 @@ from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from .. import repo_tree
+from ..agent_eval import candidate_files
 from ..harness import GatewayConfig, build_launch, pinned_harness_check
 from ..harness_bridge import parse_pi_output, workspace_files
 from ..harnesses import REGISTRY
@@ -26,8 +27,8 @@ from ..harnesses.deerflow import (
     DEERFLOW_PACKAGE,
     DEERFLOW_REF,
     DEERFLOW_REPO,
-    ENV_THINKING,
     HARNESS_ID,
+    INSTRUCTIONS_FILE,
     MODEL_NAME,
     RUNNER_FILE,
     SPEC,
@@ -163,7 +164,8 @@ def test_launch_runs_the_runner_on_the_gateway_only() -> None:
     assert env["LANGSMITH_TRACING"] == "false"
     assert env["LANGCHAIN_TRACING_V2"] == "false"
     assert env["DO_NOT_TRACK"] == "1"
-    assert ENV_THINKING not in env
+    assert not any(name.startswith("DEERFLOW_") for name in env)
+    assert launch.instructions_file == INSTRUCTIONS_FILE == "AGENTS.md"
 
 
 def test_install_clones_the_pinned_commit_into_a_venv() -> None:
@@ -175,17 +177,6 @@ def test_install_clones_the_pinned_commit_into_a_venv() -> None:
     assert "uv==0.9.13" in install
     assert f'printf "%s\\n" {DEERFLOW_REF} > "$HOME/.app/deerflow/venv/deerflow-ref"' in install
     assert "astral.sh" not in install
-
-
-@pytest.mark.parametrize(("effort", "expected"), [("none", "false"), ("NONE", "false"), ("high", "true")])
-def test_effort_switches_thinking(effort: str, expected: str) -> None:
-    """Turn DeerFlow thinking off only for the ``none`` effort.
-
-    Args:
-        effort: Reasoning effort the user picked.
-        expected: The thinking toggle the runner gets.
-    """
-    assert build_launch(_target(), _GATEWAY, reasoning_effort=effort).env[ENV_THINKING] == expected
 
 
 @pytest.mark.parametrize(
@@ -270,11 +261,14 @@ def test_parser_reads_the_recorded_runner_output() -> None:
     )
 
 
-def _run_fake_runner(tmp_path: Path, **extra_env: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+def _run_fake_runner(
+    tmp_path: Path, instructions: str | None = None, **extra_env: str
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     """Run the shipped runner against a fake DeerFlow package.
 
     Args:
         tmp_path: Workspace and fake package root.
+        instructions: Text for the workspace's instructions file, or ``None`` for no file.
         **extra_env: Extra environment for the runner, such as scripted events.
 
     Returns:
@@ -291,6 +285,8 @@ def _run_fake_runner(tmp_path: Path, **extra_env: str) -> tuple[subprocess.Compl
         (workspace / name).write_text(source)
     (workspace / "task").mkdir()
     (workspace / "task" / "PROMPT.md").write_text("Fix the pager.\n")
+    if instructions is not None:
+        (workspace / INSTRUCTIONS_FILE).write_text(instructions)
     record = tmp_path / "record.json"
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -326,11 +322,43 @@ def test_runner_drives_the_client_and_prints_one_pi_event(tmp_path: Path) -> Non
     }
     assert seen["recursion_limit"] == 1000
     assert seen["message"].endswith("Task:\nFix the pager.")
+    assert INSTRUCTIONS_FILE not in seen["message"]
     assert str(workspace.resolve()) in seen["message"]
     assert seen["keys"] == {"OPENAI_API_KEY": None, "EXA_API_KEY": None}
     assert seen["config"]["models"][0]["base_url"] == _GATEWAY.url
     mount = {"host_path": str(workspace.resolve()), "container_path": str(workspace.resolve()), "read_only": False}
     assert seen["config"]["sandbox"]["mounts"] == [mount]
+
+
+@pytest.mark.parametrize("candidate", ["Always run the tests first.\n", "Use {braces} and 100% care."])
+def test_runner_puts_the_candidate_instructions_in_the_turn_message(tmp_path: Path, candidate: str) -> None:
+    """Send the text version, written to the instructions file, to DeerFlow before the task.
+
+    DeerFlow loads no AGENTS.md itself, so without this the candidate never reaches the model.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+        candidate: The text version the optimizer writes to the instructions file.
+    """
+    files = candidate_files(candidate, build_launch(_target(), _GATEWAY).instructions_file)
+    completed, _, record = _run_fake_runner(tmp_path, instructions=files[INSTRUCTIONS_FILE])
+    assert completed.returncode == 0, completed.stderr
+    message = json.loads(record.read_text())["message"]
+    section = f"Follow these instructions from {INSTRUCTIONS_FILE}:\n{candidate.strip()}\n\nTask:\nFix the pager."
+    assert message.endswith(section)
+
+
+def test_runner_skips_an_empty_instructions_file(tmp_path: Path) -> None:
+    """Send only the task when the instructions file holds no text.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    completed, _, record = _run_fake_runner(tmp_path, instructions="  \n")
+    assert completed.returncode == 0, completed.stderr
+    message = json.loads(record.read_text())["message"]
+    assert INSTRUCTIONS_FILE not in message
+    assert message.endswith("/mnt/user-data.\n\nTask:\nFix the pager.")
 
 
 def _ai(message_id: str, content: object) -> list[object]:
@@ -433,15 +461,25 @@ def test_runner_fails_on_deerflow_provider_error_fallback(tmp_path: Path) -> Non
 
 
 def test_runner_fails_when_deerflow_hits_the_recursion_limit(tmp_path: Path) -> None:
-    """Exit non-zero with no ``message_end`` when the stream stops at the recursion limit.
+    """Exit non-zero at the recursion limit, reporting partial usage and no answer.
+
+    The usage shows the model did work, so a run that dies here is not taken
+    for a harness that never reached the model.
 
     Args:
         tmp_path: Workspace and fake package root.
     """
-    events = [_ai("m1", "partial")]
+    m1 = {"input_tokens": 10, "output_tokens": 2}
+    events = [
+        ["messages-tuple", {"type": "ai", "id": "m1", "content": "partial", "usage_metadata": m1}],
+        ["messages-tuple", {"type": "ai", "id": "m1", "content": " text", "usage_metadata": m1}],
+        ["messages-tuple", {"type": "ai", "id": "m2", "content": "", "usage_metadata": {"input_tokens": 5}}],
+    ]
     completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events), FAKE_DEERFLOW_RECURSION="1")
     assert completed.returncode == 1
-    assert "message_end" not in completed.stdout
+    assert parse_pi_output(completed.stdout) == (None, {"input_tokens": 15, "output_tokens": 2})
+    ends = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")]
+    assert [end["message"].get("partial") for end in ends] == [True]
     assert "recursion limit reached" in completed.stderr
 
 
