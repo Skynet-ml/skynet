@@ -209,9 +209,11 @@ RUN umask 0002; \
 # paths to /opt/swe-agent-root, which UID 1001 and GID 0 own. Mode 0711 lets
 # UID 1001 follow the links and read the stock /root/.bashrc that SWE-agent
 # sources, but not list or create entries in /root. The build leaves
-# group-writable caches in /root (umask 0002), so go-w closes them first.
+# group-writable caches in /root (umask 0002), so each top-level entry except
+# the stock dotfiles closes to root. A recursive chmod would copy the 722 MB uv
+# cache into this layer and pass the registry layer limit.
 RUN install -d -o 1001 -g 0 -m 0770 /opt/swe-agent-root /opt/swe-agent-root/tools \
-    && chmod -R go-w /root \
+    && find /root -mindepth 1 -maxdepth 1 ! -name .bashrc ! -name .profile -exec chmod go-rwx {} + \
     && chmod 0711 /root \
     && for P in tools state.json model.patch .swe-agent-env; do \
         ln -s "/opt/swe-agent-root/$P" "/root/$P" || exit 1; \
