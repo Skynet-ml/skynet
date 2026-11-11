@@ -195,7 +195,8 @@ def _run():
         thinking_enabled=False,
         plan_mode=False,
     )
-    end_usage = None
+    # DeerFlow's own end-event total counts id-less chunk usage and the snapshot
+    # copy of the same message, so the per-message sum is the only total used.
     message_usage = {{}}
     # DeerFlow streams AI text as deltas that share one message id, so the
     # answer is the joined text of the last AI message, as upstream chat() does.
@@ -207,9 +208,7 @@ def _run():
             STEERING.format(workdir=workdir, instructions=_instructions(workdir), task=task),
             recursion_limit={recursion_limit}):
             data = event.data if isinstance(event.data, dict) else {{}}
-            if event.type == "end" and isinstance(data.get("usage"), dict):
-                end_usage = data["usage"]
-            elif event.type == "messages-tuple" and data.get("type") == "ai":
+            if event.type == "messages-tuple" and data.get("type") == "ai":
                 # Chunks of one message repeat its id, so usage counts once per
                 # message. Id-less deltas share one key, so their text joins.
                 message_id = data.get("id") or ""
@@ -246,7 +245,7 @@ def _run():
     if llm_error is not None:
         sys.exit(f"deerflow: model provider error: {{llm_error[:500]}}")
     answer = texts.get(last_text, "")
-    _print_end(answer, [end_usage] if end_usage is not None else list(message_usage.values()))
+    _print_end(answer, list(message_usage.values()))
 
 
 if __name__ == "__main__":

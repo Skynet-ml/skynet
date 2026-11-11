@@ -99,7 +99,12 @@ class DeerFlowClient:
         )
         yield SimpleNamespace(
             type="messages-tuple",
-            data={"type": "ai", "id": "m2", "content": [{"type": "text", "text": "final answer"}]},
+            data={
+                "type": "ai",
+                "id": "m2",
+                "content": [{"type": "text", "text": "final answer"}],
+                "usage_metadata": {"input_tokens": 37, "output_tokens": 9},
+            },
         )
         yield SimpleNamespace(type="messages-tuple", data={"type": "tool", "id": "t1", "content": "tool noise"})
         yield SimpleNamespace(type="end", data={"usage": {"input_tokens": 40, "output_tokens": 9}})
@@ -439,11 +444,12 @@ def test_runner_joins_deltas_that_carry_no_message_id(tmp_path: Path) -> None:
     assert parse_pi_output(completed.stdout)[0] == "The answer is 42."
 
 
-def test_runner_sums_usage_once_per_message_without_an_end_event(tmp_path: Path) -> None:
-    """Without a final usage event, count each AI message's usage once, however many chunks repeat it.
+def test_runner_sums_usage_once_per_message_and_ignores_the_end_total(tmp_path: Path) -> None:
+    """Count each AI message's usage once, however many chunks repeat it.
 
     An id-less chunk's usage counts once, from the snapshot copy that DeerFlow
-    gives the finished message under a real id.
+    gives the finished message under a real id. DeerFlow's own end total counts
+    that message twice, so the runner does not use it.
 
     Args:
         tmp_path: Workspace and fake package root.
@@ -458,6 +464,7 @@ def test_runner_sums_usage_once_per_message_without_an_end_event(tmp_path: Path)
         ["messages-tuple", {"type": "ai", "id": None, "content": "e", "usage_metadata": no_id}],
         ["values", {"title": None, "messages": [{"type": "ai", "id": "m3", "content": "de", "usage_metadata": no_id}]}],
         ["messages-tuple", {"type": "ai", "id": "m3", "content": "de", "usage_metadata": no_id}],
+        ["end", {"usage": {"input_tokens": 36, "output_tokens": 11}}],
     ]
     completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
     assert completed.returncode == 0, completed.stderr
