@@ -1743,6 +1743,7 @@ def _service_relay(
     allowed_hosts: tuple[str, ...] | None = None,
     secret: str = "judge-secret-value",
     recorder: CallRecorder | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the given services.
 
@@ -1755,6 +1756,7 @@ def _service_relay(
         allowed_hosts: The run's allowed hosts for ``JUDGE_KEY``; ``None`` allows ``host``.
         secret: The value of ``JUDGE_KEY``.
         recorder: Writes each relayed call into the run record.
+        env: The box's environment, such as its model route; empty when ``None``.
 
     Returns:
         The relay.
@@ -1764,7 +1766,7 @@ def _service_relay(
         {},
         response_dir="calls/000001/stages",
         max_concurrency=2,
-        env={},
+        env=dict(env or {}),
         workspace=workspace,  # type: ignore[arg-type]
         services=services,
         role=role,
@@ -2356,6 +2358,7 @@ def _mcp_relay(
     secret: str = "judge-secret-value",
     recorder: CallRecorder | None = None,
     max_concurrency: int = 2,
+    env: Mapping[str, str] | None = None,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the role's MCP servers.
 
@@ -2367,6 +2370,7 @@ def _mcp_relay(
         secret: The value of ``JUDGE_KEY``.
         recorder: Writes each relayed call into the run record.
         max_concurrency: The size of the service and MCP call pool.
+        env: The box's environment, such as its model route; empty when ``None``.
 
     Returns:
         The relay.
@@ -2376,7 +2380,7 @@ def _mcp_relay(
         {},
         response_dir="calls/000001/stages",
         max_concurrency=max_concurrency,
-        env={},
+        env=dict(env or {}),
         workspace=workspace,  # type: ignore[arg-type]
         services=services,
         role=role,
@@ -2761,6 +2765,44 @@ def test_a_relayed_call_is_recorded_under_its_role_and_kind_with_the_key_marked_
     target = f"search@judge.example.test:{echo.port}/" if kind == "mcp" else "judge.example.test"
     assert (call["target"], call["status"]) == (target, "ok")
     assert "judge-secret-value" in secrets
+
+
+@pytest.mark.parametrize("kind", ["host", "mcp"])
+def test_a_relayed_call_that_echoes_the_model_route_key_leaks_it_into_no_record(echo: _Echo, kind: str) -> None:
+    """The box's model route key is masked, raw and JSON-escaped, in its service and MCP records (E28, SKY-637)."""
+    store = _run_call_store()
+    recorder = CallRecorder(store, "opt-1", "cand-1", "")
+    workspace = _Workspace()
+    route = {ENV_API_KEY: _GATEWAY_KEY, ENV_MODEL: "fixture/text"}
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"key": _GATEWAY_KEY}}).encode()
+    frame = {"id": "e" * 32, "method": "POST", "headers": [], "body": base64.b64encode(body).decode()}
+    if kind == "mcp":
+        relay = _mcp_relay(workspace, "run", _mcp_role(echo.port), recorder=recorder, env=route)
+        frame |= {"mcp": "search", "path": ""}
+    else:
+        spec = ServiceSpec(
+            secrets=("JUDGE_KEY",),
+            url=f"http://judge.example.test:{echo.port}/",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        )
+        relay = _service_relay(
+            workspace, role="metric", allowed=("judge",), services={"judge": spec}, recorder=recorder, env=route
+        )
+        frame |= {"service": "judge", "path": "echo"}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while not workspace.writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    relay.close()
+
+    assert json.loads(workspace.writes[0][1])["status"] == 200
+    [stored] = store.list_calls("opt-1", "cand-1")
+    assert (stored["kind"], stored["status"]) == (kind, "ok")
+    escaped = json.dumps(_GATEWAY_KEY)[1:-1]
+    for field in ("request", "response", "failure_reason"):
+        assert _GATEWAY_KEY not in (stored[field] or "")
+        assert escaped not in (stored[field] or "")
+    assert SECRET_MASK in stored["request"]
 
 
 def test_two_mcp_servers_on_one_host_each_get_their_own_record_target(echo: _Echo) -> None:

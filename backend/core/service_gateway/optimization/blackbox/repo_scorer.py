@@ -1678,6 +1678,8 @@ class _StageRelay:
                 recorder=self._recorder,
                 kind=kind,
                 target=record_target,
+                # Box code can put its model route key into a tool call or a request body (SKY-637).
+                record_secrets=self._stage_secrets,
             )
         except _AnswerTooLargeError:
             return {"status": 502, "error": f"{label} answered with more than 4 MiB."}

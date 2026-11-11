@@ -572,6 +572,7 @@ def relay_request(
     recorder: CallRecorder | None = None,
     kind: str = "host",
     target: str = "",
+    record_secrets: Collection[str] = (),
 ) -> bytes | Generator[bytes, None, None]:
     """Send one ``[services]`` or MCP http request with its secrets filled in (E49-E53).
 
@@ -602,6 +603,9 @@ def relay_request(
             for a role ``.mcp.json`` call.
         target: The record target, such as ``server@host/tool``; the url's
             host when empty.
+        record_secrets: More values the record must mask, such as the box's
+            model route key. The relay does not fill them or mask them in the
+            answer.
 
     Returns:
         The answer body without any filled secret value: whole, or, when
@@ -640,7 +644,7 @@ def relay_request(
                 request=body,
                 response=answer,
                 cost_usd=state.cost_usd,
-                secrets=state.secrets,
+                secrets=state.secrets | set(record_secrets),
             )
             return
         recorder.record(
@@ -653,7 +657,7 @@ def relay_request(
             failure_reason=f"{type(error).__name__}: {error}",
             # A tool that failed after the send still settles its price.
             cost_usd=state.cost_usd if state.sent else None,
-            secrets=state.secrets,
+            secrets=state.secrets | set(record_secrets),
         )
 
     try:

@@ -909,6 +909,49 @@ def test_relay_records_an_echoed_call_with_no_secret(
     _assert_no_secret([record], secret, other)
 
 
+@pytest.mark.parametrize("fails", [False, True], ids=["ok", "failed"])
+def test_relay_records_no_record_secret_the_box_puts_in_its_call(calls: PostgresRunCallStore, fails: bool) -> None:
+    """Mask a record secret, such as the box's model route key, in an ok and a failed record (SKY-637)."""
+    route_key = 'gw-key\\"route-token'
+    body = json.dumps({"method": "tools/call", "params": {"key": route_key}}).encode()
+
+    def send(_url: str, _headers: dict[str, str], sent: bytes) -> bytes:
+        """Echo the body back, or fail with it in the error.
+
+        Args:
+            _url: The filled url.
+            _headers: The filled headers.
+            sent: The request body.
+
+        Returns:
+            The body, as the answer.
+        """
+        if fails:
+            raise OSError(f"connection reset after sending {sent!r}")
+        return sent
+
+    try:
+        relay_request(
+            url="https://api.judge.example/v1",
+            headers={},
+            body=body,
+            user_secrets={},
+            bindings={},
+            secret_hosts={},
+            allowed_hosts={},
+            send=send,
+            recorder=_recorder(calls),
+            kind="mcp",
+            record_secrets=[route_key],
+        )
+    except OSError:
+        assert fails
+    [record] = _stored(calls)
+    assert (record["kind"], record["status"]) == ("mcp", "failed" if fails else "ok")
+    assert "tools/call" in record["request"]
+    _assert_no_secret([record], route_key)
+
+
 def test_relay_records_a_failed_send_with_its_reason(calls: PostgresRunCallStore) -> None:
     """Store a send failure as failed, with its reason and with the secret removed."""
     secret = "user-judge-key-789"
