@@ -25,17 +25,18 @@ QWEN_CODE_PACKAGE = "@qwen-code/qwen-code"
 # The gateway URL lives in this file rather than on the command line, so a
 # protected run's relay rewrite of generated files reaches it.
 QWEN_CODE_BASE_URL_FILE = ".app/qwen/base_url"
-# Qwen Code 0.27.2 takes the base URL of a ``modelProviders`` entry whose id
-# matches ``--model`` over OPENAI_BASE_URL, and loads that entry from the
-# workspace ``.qwen/settings.json``. Without a pin, a candidate repo could send
-# the gateway token in OPENAI_API_KEY to another host. The run copies this file
-# into its temp folder and loads the copy as the system scope, which merges
-# last, so its ``openai`` list and ``providerProtocol`` replace any workspace
-# value. It loads the same copy as the system defaults scope, which merges
-# first, so the ``openai`` key comes first and the provider lookup finds this
-# entry before an entry under any other workspace key. Qwen Code fills the
-# ``${...}`` values from the process env, so the base URL stays the one the run
-# reads from the base URL file.
+# Qwen Code 0.27.2 takes the base URL of the ``modelProviders`` entry it picks
+# for the model over OPENAI_BASE_URL, and loads entries from the workspace
+# ``.qwen/settings.json`` too. With ``--model`` it picks the first entry whose id
+# matches, in JS key order, so an integer-like workspace provider key such as
+# ``"1"`` comes before ``openai`` and could send the gateway token to another
+# host. The run copies this file into its temp folder and loads the copy as the
+# system scope, which merges last. Its ``model.name`` and ``model.baseUrl`` win
+# over any workspace value, and with no ``--model`` Qwen Code picks the entry
+# whose id and base URL both match them (``resolveCliGenerationConfig``). Only
+# an entry at the gateway URL can match, whatever its provider key. Qwen Code
+# fills the ``${...}`` values from the process env, so the base URL stays the
+# one the run reads from the base URL file.
 QWEN_CODE_SETTINGS_FILE = ".app/qwen/settings.json"
 # Qwen Code's own ``model.reasoningEffort`` values (``normalizeReasoningEffort``
 # plus ``none``); Skynet sends no effort for any other name.
@@ -51,17 +52,19 @@ def _qwen_code_settings(reasoning_effort: str | None) -> str:
     Returns:
         The settings JSON. It names the key's env variable and holds no key.
     """
+    model: dict[str, str] = {"name": f"${{{ENV_MODEL}}}", "baseUrl": "${OPENAI_BASE_URL}"}
+    if reasoning_effort in _QWEN_CODE_EFFORTS:
+        model["reasoningEffort"] = reasoning_effort
     # ``$version`` 4 is the current settings schema, so Qwen Code does not
     # write a migrated copy back to the file.
-    settings: dict[str, object] = {
+    settings = {
         "$version": 4,
         "modelProviders": {
             "openai": [{"id": f"${{{ENV_MODEL}}}", "baseUrl": "${OPENAI_BASE_URL}", "envKey": "OPENAI_API_KEY"}]
         },
         "providerProtocol": {"openai": "openai"},
+        "model": model,
     }
-    if reasoning_effort in _QWEN_CODE_EFFORTS:
-        settings["model"] = {"reasoningEffort": reasoning_effort}
     return json.dumps(settings, indent=2)
 
 
@@ -129,11 +132,10 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         "trap 'rm -rf \"$QWEN_HOME\"' EXIT && "
         f'cp {QWEN_CODE_SETTINGS_FILE} "$QWEN_HOME/system-settings.json" && '
         'QWEN_CODE_SYSTEM_SETTINGS_PATH="$QWEN_HOME/system-settings.json" '
-        'QWEN_CODE_SYSTEM_DEFAULTS_PATH="$QWEN_HOME/system-settings.json" '
         "NO_PROXY='*' no_proxy='*' "
         f'OPENAI_BASE_URL="$(cat {QWEN_CODE_BASE_URL_FILE})" '
         f'OPENAI_API_KEY="${ENV_API_KEY}" OPENAI_MODEL="${ENV_MODEL}" '
-        f'qwen --yolo --auth-type openai --model "${ENV_MODEL}" '
+        "qwen --yolo --auth-type openai "
         "--exclude-tools web_fetch,web_search "
         "--allowed-mcp-server-names skynet-no-mcp --disable-mcp-server '*' "
         f"--prompt {_PROMPT_ARG} < /dev/null"
