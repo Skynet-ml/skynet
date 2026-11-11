@@ -1117,6 +1117,7 @@ class VercelEnvironment(SandboxEnvironment):
                 next slice.
         """
         errors = 0
+        last_error: Exception | None = None
         while True:
             try:
                 return await process.wait()

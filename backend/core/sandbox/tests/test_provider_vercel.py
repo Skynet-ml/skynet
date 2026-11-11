@@ -1109,6 +1109,20 @@ async def test_box_that_stops_after_an_unfunded_slice_is_a_budget_stop(log: list
     await env.stop()
 
 
+async def test_budget_stop_with_no_message_keeps_the_default_stop_message(log: list[str]) -> None:
+    """Check that a budget refusal with no message still gives the run a clear stop message (SKY-587)."""
+    client = FakeClient(log)
+    env = make_env(client, log, lifetime=1500)
+    await env.start()
+    env.usage.extend_error = BudgetReached()
+    await asyncio.wait_for(env._renewer, 5)
+    client.boxes[env.name].outcomes = [_gone()]
+    with pytest.raises(BudgetReached) as caught:
+        await env.exec("python optimize.py")
+    assert str(caught.value) == "The remaining budget cannot cover the next operation."
+    await env.stop()
+
+
 async def test_sentinel_read_that_finds_a_budget_stopped_box_stays_a_budget_stop(log: list[str]) -> None:
     """Check that a 410 on the sentinel read after 20 wait errors and a budget refusal stays a budget stop (SKY-587)."""
     client = FakeClient(log)
