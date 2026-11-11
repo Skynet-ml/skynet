@@ -254,7 +254,7 @@ SPEC = register(
         version=SWE_AGENT_VERSION,
         output_format="plain",
         protected_env=_PROTECTED_ENV,
-        position=54,
+        position=53,
         supported_efforts=SWE_AGENT_EFFORTS,
     )
 )
