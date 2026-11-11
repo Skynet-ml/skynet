@@ -15,7 +15,7 @@ from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_EVE
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
-from .base import PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _npm_install
+from .base import PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _npm_install, _temp_root
 
 EVE_VERSION = "1.0.0-rc.6"
 # eve takes ``ai`` as a peer dependency, and the gateway provider needs zod as
@@ -506,13 +506,12 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
     """Build the launch for eve (npm ``eve``, pinned to :data:`EVE_VERSION`).
 
     The version under optimization becomes the agent's ``instructions.md``.
-    The run copies agent.ts and the instructions into a fresh ``mktemp -d``
+    The run copies agent.ts and the instructions into a fresh temp
     project outside the workspace, adds the workspace sandbox and the runner
     channel, then builds it there, since ``eve build`` compiles those
     instructions. So package.json, the runner, node_modules and the build
     output never reach the version patch, and an exit trap removes the project.
-    A SIGKILL skips that trap, so the project can stay in the box's temp
-    directory until the box ends; ``mktemp -d`` makes it mode 0700.
+    The next run removes it when a timeout's SIGKILL skipped the trap.
     The runner then sends the case prompt.
 
     Args:
@@ -533,7 +532,7 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
     # it in the workspace; the copy runs after that rewrite, so the build
     # directory gets the relay URL.
     setup = (
-        'export EVE_WORKSPACE="$PWD" && EVE_DIR="$(mktemp -d)" && trap \'rm -rf "$EVE_DIR"\' EXIT && '
+        f'export EVE_WORKSPACE="$PWD" && {_temp_root("EVE_DIR", "eve")} && '
         'mkdir -p "$EVE_DIR/agent/channels" "$EVE_DIR/agent/tools" && '
         f'cp {_AGENT_FILE} {EVE_INSTRUCTIONS_FILE} "$EVE_DIR/agent/" && '
         f"printf '%s' {shlex.quote(EVE_SANDBOX)} > \"$EVE_DIR/agent/sandbox.ts\" && "
