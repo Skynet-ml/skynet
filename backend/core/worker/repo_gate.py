@@ -40,12 +40,15 @@ Place = Literal["local", "cloud"]
 # file only through the stage relay, which checks the role and fills each
 # secret by host (SKY-385). The scorer opens each ``[target.<name>]`` stage in
 # its own offline box from its entry, timeout and vCPUs, and the judges read
-# its rules (SKY-599).
+# its rules (SKY-599). The proposer's box reaches the servers of its own MCP
+# file only through the parent's relay, and only the Codex harness loads them;
+# any other harness stops the launch (SKY-610).
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
 _PROPOSER_NETWORK = frozenset({"proposer.network"})
+_PROPOSER_MCP = frozenset({"proposer.mcp"})
 _STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
 _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "target.illegal"})
-_ENFORCED_EVERYWHERE = _METRIC_HIDING | _PROPOSER_NETWORK | _STAGE_SERVICES | _TARGET_STAGES
+_ENFORCED_EVERYWHERE = _METRIC_HIDING | _PROPOSER_NETWORK | _PROPOSER_MCP | _STAGE_SERVICES | _TARGET_STAGES
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
 _UNENFORCED_CODE: dict[Place, I18nKey] = {

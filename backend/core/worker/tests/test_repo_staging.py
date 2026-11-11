@@ -24,7 +24,7 @@ from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
 from core.billing.model_dispatch import ModelHTTPResult
-from core.billing.model_gateway import ROUTE_KEY
+from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
@@ -56,6 +56,7 @@ from core.service_gateway.optimization.blackbox.service import legacy_case_split
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.worker import repo_staging
 from core.worker.repo_gate import check_hidden
+from core.worker.scoped_relay import McpRelay
 
 
 def _payload(commit: str | None) -> dict[str, Any]:
@@ -873,6 +874,104 @@ def test_binding_gives_the_scorer_each_roles_mcp_servers(tmp_path: Path) -> None
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
 
     assert gateway.evaluator._mcp_roles == {"run": run, "metric": RoleEnvironment()}
+    staged.close_scorers()
+
+
+def test_the_proposer_tree_holds_only_its_relay_urls_and_no_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proposer's .mcp.json lists only the [proposer] servers at relay urls: no real url, header or key (SKY-610)."""
+    files = {
+        "optimize.toml": '[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
+        "agent.mcp.json": (
+            '{"mcpServers": {"web": {"url": "https://web.example.com/mcp",'
+            ' "headers": {"Authorization": "Bearer ${API_KEY}"}}}}'
+        ),
+        ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
+        "a.py": "def f(x):\n    return x\n",
+    }
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["web.example.com"]
+
+    staged_payload, staged = _stage_with(files, monkeypatch, payload)
+
+    assert staged.agent_archive is not None
+    assert staged_payload["_repo_snapshot"]["archive"] == str(staged.agent_archive)
+    with tarfile.open(staged.agent_archive) as packed:
+        texts = {
+            Path(member.name).as_posix(): packed.extractfile(member).read().decode()  # type: ignore[union-attr]
+            for member in packed
+            if member.isreg()
+        }
+    relay = f"http://127.0.0.1:{runner.RELAY_PORT}/mcp"
+    assert json.loads(texts["agent.mcp.json"]) == {"mcpServers": {"web": {"type": "http", "url": f"{relay}/web"}}}
+    assert "example.com" not in "".join(texts.values())
+    assert "secret-value" not in "".join(texts.values())
+    assert "API_KEY" not in texts["agent.mcp.json"]
+    assert [server.name for server in staged.proposer_role.mcp_servers] == ["web"]  # type: ignore[union-attr]
+    staged.cleanup()
+
+
+def test_the_proposer_and_scorer_trees_hold_the_same_protected_mcp_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both trees get the same rewrite, so the protected check passes and the rewrite never enters a patch."""
+    files = {
+        "optimize.toml": '[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = "tools/run.mcp.json"\n',
+        "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
+        "tools/run.mcp.json": '{"mcpServers": {"docs": {"url": "https://docs.example.com/mcp"}}}',
+        "a.py": "def f(x):\n    return x\n",
+    }
+
+    _, staged = _stage_with(files, monkeypatch)
+
+    assert staged.agent_archive is not None
+    assert staged.scorer_archive is not None
+    assert {"agent.mcp.json", "tools/run.mcp.json"} <= set(staged.protected_paths)
+    with tarfile.open(staged.agent_archive) as agent, tarfile.open(staged.scorer_archive) as scorer:
+        for name in ("agent.mcp.json", "tools/run.mcp.json"):
+            assert agent.extractfile(name).read() == scorer.extractfile(name).read()  # type: ignore[union-attr]
+    staged.cleanup()
+
+
+def test_binding_hands_the_proposer_route_its_own_mcp_relay(tmp_path: Path) -> None:
+    """The proposer's route gets a relay token and server names; the relay holds the secrets in the parent (SKY-610)."""
+    payload, bare = _binding(tmp_path, None)
+    route = {"url": "http://127.0.0.1:1/v1", "token": "proposer-token"}
+    payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
+    proposer = RoleEnvironment(
+        mcp="agent.mcp.json", mcp_servers=(McpServer(name="web", url="https://web.example.com/mcp"),)
+    )
+    staged = dataclasses.replace(bare, proposer_role=proposer, secret_hosts={"API_KEY": "web.example.com"})
+    gateway = _Gateway()
+    relays: list[McpRelay] = []
+
+    def bind_mcp_relay(relay: McpRelay) -> dict[str, str]:
+        """Keep the relay and hand back a fake route."""
+        relays.append(relay)
+        return {"url": "http://127.0.0.1:1/v1", "token": "mcp-token"}
+
+    gateway.bind_mcp_relay = bind_mcp_relay  # type: ignore[attr-defined]
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert route[MCP_RELAY_ROUTE_KEY] == {"token": "mcp-token", "servers": ["web"]}
+    [relay] = relays
+    assert relay._label == "[proposer]"
+    assert relay._role is proposer
+    assert relay._secrets == {"API_KEY": "secret-value"}
+    assert relay._secret_hosts == {"API_KEY": "web.example.com"}
+    assert "secret-value" not in repr(payload)
+    assert "web.example.com" not in repr(payload)
+    staged.close_scorers()
+
+
+def test_binding_without_proposer_mcp_servers_adds_no_relay(tmp_path: Path) -> None:
+    """A proposer with no MCP servers gets no relay token."""
+    payload, bare = _binding(tmp_path, None)
+    route = {"url": "http://127.0.0.1:1/v1", "token": "proposer-token"}
+    payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
+    staged = dataclasses.replace(bare, proposer_role=RoleEnvironment())
+
+    repo_staging.bind_repo_scorer(payload, staged, _Gateway(), owner_id="job-1")
+
+    assert MCP_RELAY_ROUTE_KEY not in route
     staged.close_scorers()
 
 

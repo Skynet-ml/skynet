@@ -22,8 +22,9 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from .... import run_log
+from ....billing.guest_model_proxy import MCP_TOKEN_ENV
 from ....billing.host_agent import HOST_AGENT_TOKEN_KEY
-from ....billing.model_gateway import raise_gateway_stop
+from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY, raise_gateway_stop
 from ....billing.pricing import model_token_costs
 from ....billing.runtime import UsagePendingError
 from ....billing.usage_tags import CALLER_PROPOSER, KIND_MUTATION, USAGE_TAGS_HEADER, encode_tags, usage_scope
@@ -1094,6 +1095,14 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         raise ServiceError("This agent proposer needs a repository checkout.")
     if shinka and not options.shinka_models:
         raise ServiceError("ShinkaEvolve needs at least one optimization model route.")
+    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
+    # The ShinkaEvolve runner never reads the proposer launch, so it would run
+    # without the tools the [proposer] mcp file lists; an Auto run loses only this lane (SKY-610).
+    if shinka and mcp_route.get("servers"):
+        raise ServiceError(
+            "ShinkaEvolve cannot load the [proposer] mcp servers yet. "
+            "Choose another engine, or remove [proposer] mcp from optimize.toml."
+        )
     if own_venv and options.repo is None and task.seed_candidate is None:
         # A blank run patches an empty starting text rather than refusing.
         task = replace(task, seed_candidate="")
@@ -1123,6 +1132,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
     relay = app_env("APP_BUDGET_RELAY_URL")
     proposer = options.proposer
     editor = _shinka_editor(options, relay) if shinka and (options.shinka or {}).get("editor") == "agent" else None
+    if mcp_route.get("servers") and not relay:
+        raise ServiceError("The [proposer] mcp servers require the box's mailbox relay.")
     launch = build_launch(
         BlackboxTarget(
             kind="agent",
@@ -1136,6 +1147,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         host_cli=proposer.host_cli,
         host_agent_token=(options.budget_route or {}).get(HOST_AGENT_TOKEN_KEY),
         reasoning_effort=options.reasoning_effort,
+        mcp_servers=tuple(mcp_route.get("servers") or ()),
     )
     input_price, output_price = model_token_costs(options.model)
     # Runs carry no wall-clock cap of their own: the budget and evaluation
@@ -1265,6 +1277,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             "CI": "1",
             "NO_COLOR": "1",
             **(with_legacy_env({"APP_BUDGET_RELAY_URL": relay}) if relay else {}),
+            # The box's proxy adds this token to each [proposer] MCP request (SKY-610).
+            **({MCP_TOKEN_ENV: mcp_route["token"]} if mcp_route.get("token") else {}),
         }
         if shinka:
             env.update(

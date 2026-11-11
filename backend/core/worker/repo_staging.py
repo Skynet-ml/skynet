@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session
 
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
 from ..api.routers.package_registry import package_registry_for
-from ..billing.model_gateway import ROUTE_KEY
+from ..billing.host_agent import _proposer_model_extra
+from ..billing.model_gateway import MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from ..billing.operation_pricing import ChargePolicy
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
@@ -96,6 +97,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
 from .repo_gate import RepoGateError, check_hidden, sandbox_place
+from .scoped_relay import McpRelay
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +145,9 @@ class StagedRepository:
     # Each role with the servers of its own MCP file: the relay checks each
     # MCP request against the calling role only (E49, E55).
     mcp_roles: Mapping[str, RoleEnvironment] = field(default_factory=dict)
+    # The proposer, whose box reaches the servers of its own MCP file only
+    # through the parent's relay, behind its own token (SKY-610).
+    proposer_role: RoleEnvironment | None = None
     # The [run] entry, which runs before the metric with the metric files out of the tree (E38).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = 60.0
@@ -386,7 +391,13 @@ def stage_repository(
                 f"{CONSTRAINTS_FILE}: the hidden scoring path '{linked[0]}' is, holds or lies inside a link."
                 " Make the [metric] and [data] cases paths real files and folders, with no symlinks or hard links."
             )
-        agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
+        agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-stripped.tgz")
+        if environment.constraints is not None:
+            # Every role's MCP file gets the same relay urls as in the scorer's
+            # tree, so the protected files match and never enter a patch (SKY-610).
+            agent_archive = relay_mcp_archive(
+                agent_archive, tuple(environment.constraints.mcp_roles.values()), workdir / "agent-tree.tgz"
+            )
         # Nothing checks that [metric] reference names a file, so a missing one is not a leak.
         leaks = check_hidden(
             snapshot.archive,
@@ -451,6 +462,7 @@ def stage_repository(
         mcp_roles={"metric": environment.constraints.metric_role, "run": environment.constraints.run_role}
         if environment.constraints is not None
         else {},
+        proposer_role=environment.constraints.proposer if environment.constraints is not None else None,
         run_entry=environment.constraints.run_entry if environment.constraints is not None else None,
         run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
         agent_archive=agent_archive,
@@ -472,8 +484,10 @@ def relay_mcp_archive(archive: Path, roles: tuple[RoleEnvironment, ...], destina
 
     Args:
         archive: Packed full tree.
-        roles: Every role that may name an MCP file; [run] and [metric] call
-            through the relay, and the other files get loopback urls too.
+        roles: Every role that may name an MCP file; [run], [metric] and
+            [proposer] call through the relay, and the other files get
+            loopback urls too. Both the scorer's tree and the proposer's
+            tree get this rewrite (SKY-610).
         destination: Where to write the copy.
 
     Returns:
@@ -757,7 +771,9 @@ def bind_repo_scorer(
     the guest's boxes while the guest never holds its secrets, its filesystem
     or a way to open a box with package-registry access. When the target has
     a setup command the box opens reaching only package registries, runs
-    setup once, and goes offline before any version is laid out.
+    setup once, and goes offline before any version is laid out. When the
+    proposer's MCP file lists servers, the proposer's route also gets the
+    token and server names of a relay that reaches only those servers.
 
     Args:
         payload: Protected payload, updated in place with the evaluator route.
@@ -769,7 +785,8 @@ def bind_repo_scorer(
 
     Raises:
         ConstraintsError: When the run turned the watch hook on but it cannot run.
-        ServiceError: When the scorer has a model but no scoped route from the trusted parent.
+        ServiceError: When the scorer has a model but no scoped route from the trusted
+            parent, or the proposer has MCP servers but no model route.
     """
     model_gateway = _repo_model_gateway(payload["scorer"])
     rule_judge = _rule_judge(payload, staged, gateway, owner_id=owner_id, managed_key=managed_key)
@@ -829,6 +846,26 @@ def bind_repo_scorer(
     # guest that writes versions exists; either failing fails the run.
     scorer.prepare()
     payload["_skynet_evaluator_route"] = gateway.bind_evaluator(scorer)
+    proposer = staged.proposer_role
+    if proposer is not None and proposer.mcp_servers:
+        proposer_route = _proposer_model_extra(payload).get(ROUTE_KEY)
+        if not isinstance(proposer_route, dict):
+            raise ServiceError("The [proposer] mcp servers need the proposer's model route.")
+        relay = McpRelay(
+            "[proposer]",
+            proposer,
+            secrets=staged.secrets,
+            bindings=staged.secret_bindings,
+            secret_hosts=staged.secret_hosts,
+            allowed_hosts=staged.secret_allowed_hosts,
+            budget=getattr(gateway, "runtime", None),
+        )
+        # Beside the proposer's model route, as the host proposer's token is:
+        # the guest's harness launch reads only that route.
+        proposer_route[MCP_RELAY_ROUTE_KEY] = {
+            "token": gateway.bind_mcp_relay(relay)["token"],
+            "servers": [server.name for server in proposer.mcp_servers],
+        }
 
 
 def _repo_model_gateway(scorer_spec: dict[str, Any]) -> ScorerGateway | None:
