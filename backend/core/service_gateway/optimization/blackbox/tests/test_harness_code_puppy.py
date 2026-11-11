@@ -383,6 +383,24 @@ def test_run_fails_when_code_puppy_writes_no_usage_file(tmp_path: Path) -> None:
     assert "its usage file was not written" in result.stderr
 
 
+@pytest.mark.parametrize(("fail", "code"), [(False, 0), (True, 1)])
+def test_run_removes_its_temp_folder_and_keeps_the_exit_status(tmp_path: Path, fail: bool, code: int) -> None:
+    """Remove Code Puppy's temporary folder when the run's shell exits, after a pass and after a failure.
+
+    Args:
+        tmp_path: Scratch directory for the run.
+        fail: Make the fake skip the usage file, so the run fails.
+        code: The exit status the run must keep.
+    """
+    result, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=False, fail=fail)
+
+    assert result.returncode == code, result.stderr
+    cfg = next(line.removeprefix("CFG=") for line in calls.splitlines() if line.startswith("CFG="))
+    temp_dir = Path(cfg).parents[2]
+    assert temp_dir.name
+    assert not temp_dir.exists()
+
+
 @pytest.mark.parametrize("protected", [False, True])
 def test_stdout_holds_only_the_final_answer_and_usage(tmp_path: Path, protected: bool) -> None:
     """Keep the prompt echo and tool traces out of the scored answer, and give the bridge tokens and tool calls."""
