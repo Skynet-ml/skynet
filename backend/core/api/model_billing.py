@@ -12,6 +12,7 @@ from ..models import BlackboxRunRequest, RunRequest, UnifiedRunRequest
 from ..models.common import ModelConfig
 from ..models.submissions import _OptimizationRequestBase
 from ..models.unified import UnifiedModels
+from ..sandbox.bridge import provider_offered
 from ..service_gateway.optimization.unified.metric_model import resolve_metric_model
 from .errors import DomainError
 
@@ -140,6 +141,8 @@ def enforce_local_mode_sources(
     A subscription model or a host-CLI proposer runs on the user's own Mac, so
     a hosted deployment has no way to serve it. The Mac app has no managed
     model routing, so a managed model there could never run.
+    Every setup check and run passes here before paid work, so this is also
+    where a sandbox provider the deployment does not offer is refused.
 
     Args:
         payload: The submission or setup check, read for its proposer's ``host_cli``.
@@ -148,11 +151,15 @@ def enforce_local_mode_sources(
         model_configs: Executable configs with normalized per-model sources.
 
     Raises:
-        DomainError: 422 ``models.subscription_local_only`` outside local mode;
+        DomainError: 422 ``sandbox.provider_unavailable`` for a sandbox
+            provider this deployment does not offer;
+            422 ``models.subscription_local_only`` outside local mode;
             422 ``local.not_available`` for a Docker execution or proposer
             runtime outside local mode;
             422 ``models.managed_unavailable_local`` in local mode.
     """
+    if not provider_offered(settings, getattr(payload, "sandbox_provider", None)):
+        raise DomainError("sandbox.provider_unavailable", status=422)
     sources = {config.token_source for config in model_configs}
     optimizer = getattr(payload, "optimizer", None)
     proposer = getattr(payload, "proposer", None) or getattr(optimizer, "proposer", None)
@@ -178,11 +185,15 @@ def enforce_raw_local_mode_sources(payload: dict[str, Any]) -> None:
         payload: Raw run or setup payload.
 
     Raises:
-        DomainError: 422 ``models.subscription_local_only`` outside local mode
+        DomainError: 422 ``sandbox.provider_unavailable`` for a sandbox
+            provider this deployment does not offer;
+            422 ``models.subscription_local_only`` outside local mode
             when a model uses a subscription or the proposer names a host CLI;
             422 ``local.not_available`` for a Docker execution or proposer
             runtime.
     """
+    if not provider_offered(settings, payload.get("sandbox_provider")):
+        raise DomainError("sandbox.provider_unavailable", status=422)
     if settings.local_mode:
         return
     requested = str(payload.get("token_source") or TOKEN_SOURCE_MANAGED)

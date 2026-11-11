@@ -680,6 +680,7 @@ def _perform_preflight(
             parent_hosts=(
                 PACKAGE_REGISTRY_HOSTS if request.workflow == "anything" and is_repo_payload(payload) else ()
             ),
+            provider=payload.get("sandbox_provider"),
         )
         if request.workflow == "unified" and request.scope == "evaluation":
             # The contract check runs in the parent's own box, without a guest.

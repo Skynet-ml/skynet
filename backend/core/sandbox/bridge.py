@@ -1,8 +1,9 @@
 """Protected sandbox runtimes for the trusted parent.
 
 ``core.billing.protected_execution`` builds its sandbox here, so it imports no
-runtime itself. This module returns the async provider of the deployment
-(Docker in local mode, Vercel everywhere else) through the SBX-11 sync bridge.
+runtime itself. This module returns the run's chosen provider, or the
+deployment default (Docker in local mode, Vercel everywhere else), through the
+SBX-11 sync bridge. It also lists the providers a run may choose (SKY-606).
 The Vercel provider reserves and settles each usage slice against the run's
 budget.
 
@@ -19,7 +20,11 @@ from ..service_gateway.optimization.blackbox.sandbox import docker_sandbox_unava
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxRuntime
 from ..service_gateway.optimization.blackbox.sandbox_runtime import AsyncBridgeRuntime, current_sandbox_runtime
 from .errors import SandboxFatalError
-from .factory import preflight
+from .factory import PROVIDERS, preflight
+from .metering import USAGE_ADAPTERS
+
+# A fallback English label; the UI shows its own translated name when it has one.
+_LABELS = {"vercel": "Vercel Sandbox", "docker": "Local Docker"}
 
 
 class ProtectedBridgeRuntime(AsyncBridgeRuntime):
@@ -49,8 +54,8 @@ class ProtectedBridgeRuntime(AsyncBridgeRuntime):
             self._options["budget"] = budget
 
 
-def _provider(settings: Settings) -> str:
-    """Return the async provider of this deployment.
+def default_provider(settings: Settings) -> str:
+    """Return the async provider a run uses when it names none.
 
     Args:
         settings: Trusted deployment configuration.
@@ -59,6 +64,57 @@ def _provider(settings: Settings) -> str:
         ``"docker"`` in local mode, otherwise ``"vercel"``.
     """
     return "docker" if settings.local_mode else "vercel"
+
+
+def offered_providers(settings: Settings) -> list[dict[str, str]]:
+    """List the providers a user may pick for a run on this deployment.
+
+    Local mode offers only its Docker box. A hosted deployment offers every
+    provider that production allows, that protected execution meters through
+    a usage adapter, and whose own preflight passes here. A new provider
+    joins the list once it meets all three, with no other change.
+
+    Args:
+        settings: Trusted deployment configuration.
+
+    Returns:
+        One ``{"id", "label"}`` entry per offered provider, in registry order.
+    """
+    if settings.local_mode:
+        names = ["docker"]
+    else:
+        names = []
+        for name, entry in PROVIDERS.items():
+            if not entry.production_allowed or name not in USAGE_ADAPTERS:
+                continue
+            try:
+                preflight(name)
+            except SandboxFatalError:
+                continue
+            names.append(name)
+    return [{"id": name, "label": _LABELS.get(name, name)} for name in names]
+
+
+def provider_offered(settings: Settings, provider: object) -> bool:
+    """Check a run's requested provider against the offered list.
+
+    The default provider always passes: a stored run names it, and the
+    deployment's own availability check reports a missing default instead.
+
+    Args:
+        settings: Trusted deployment configuration.
+        provider: The requested provider id, or ``None`` for the default.
+
+    Returns:
+        True when the run names no provider, the default or an offered one.
+        False for any other value, including a non-string one.
+    """
+    if provider is None or provider == default_provider(settings):
+        return True
+    # The setup check passes the raw payload, so an unhashable value must refuse, not raise.
+    if not isinstance(provider, str):
+        return False
+    return provider in {entry["id"] for entry in offered_providers(settings)}
 
 
 def protected_unavailable_reason(settings: Settings) -> str | None:
@@ -73,7 +129,7 @@ def protected_unavailable_reason(settings: Settings) -> str | None:
     if current_sandbox_runtime() is not None:
         return None
     try:
-        preflight(_provider(settings))
+        preflight(default_provider(settings))
     except SandboxFatalError as error:
         return str(error)
     # The async Docker provider has no preflight; the same probe checks the
@@ -81,7 +137,9 @@ def protected_unavailable_reason(settings: Settings) -> str | None:
     return docker_sandbox_unavailable_reason(settings) if settings.local_mode else None
 
 
-def protected_runtime(settings: Settings, *, image: str, budget: Any, recorder: Any = None) -> SandboxRuntime:
+def protected_runtime(
+    settings: Settings, *, image: str, budget: Any, recorder: Any = None, provider: str | None = None
+) -> SandboxRuntime:
     """Build the protected runtime of this deployment.
 
     Args:
@@ -90,13 +148,17 @@ def protected_runtime(settings: Settings, *, image: str, budget: Any, recorder: 
         budget: The run's budget runtime.
         recorder: Unused. The async providers record no egress proxy
             requests; callers still pass the run's call recorder.
+        provider: The run's chosen provider; the deployment default when None.
 
     Returns:
-        The async provider of this deployment through the sync bridge.
+        The chosen async provider through the sync bridge.
 
     Raises:
-        SandboxFatalError: The provider cannot load.
+        SandboxFatalError: The provider is not offered here, or cannot load.
     """
-    if settings.local_mode:
+    if not provider_offered(settings, provider):
+        raise SandboxFatalError(f"Sandbox provider {provider!r} is not offered on this deployment.")
+    name = provider or default_provider(settings)
+    if name == "docker":
         return ProtectedBridgeRuntime("docker", budget=budget, image=image, docker_bin=settings.docker_bin)
-    return ProtectedBridgeRuntime("vercel", budget=budget)
+    return ProtectedBridgeRuntime(name, budget=budget)
