@@ -47,10 +47,12 @@ locally, check them again, and then push them together in one push.
 A PR that adds a harness to `BLACKBOX_HARNESSES` in
 `backend/core/models/blackbox.py` must also update the frontend in the same
 PR: `frontend/src/shared/lib/blackbox-harness.ts`, the `BlackboxHarness` type
-in `frontend/src/shared/types/api.ts`, and the harness label in every locale
-catalog. `HARNESS_EFFORTS` must match the new module's `supported_efforts`.
-Then run `python3 scripts/generate_i18n.py`. The harness parity test then
-stays green (SKY-625, SKY-626).
+in `frontend/src/shared/types/api.ts`, and the harness label in `he.json`,
+`en.json` and every other locale catalog that has harness labels.
+`HARNESS_EFFORTS` must match the new module's `supported_efforts`. Then run
+`python3 scripts/generate_i18n.py`. The harness parity test
+(`frontend/src/shared/lib/__tests__/blackbox-harness.test.ts`) then stays
+green (SKY-625, SKY-626).
 
 ## 2. Required for every PR
 
@@ -135,8 +137,9 @@ for review until the evidence is there.
   the `staging deploy` run (`staging-deploy.yml`). For a staging smoke
   failure, gate 5 applies. The reviewer or implementation agent that sees a
   red run names the failing check and the commit where it started, in its
-  report. The orchestrator opens an Urgent Linear issue and delegates the
-  fix. The fix PR merges in the next batch, before any other PR (SKY-625,
+  report. When a PR in the current batch causes the failure, section 7
+  applies. Otherwise the orchestrator opens an Urgent Linear issue and
+  delegates the fix. The fix PR is the first PR in the next batch (SKY-625,
   SKY-626).
 
 ## 4. Acceptance on staging or the PR preview
