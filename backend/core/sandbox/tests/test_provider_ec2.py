@@ -1196,3 +1196,148 @@ def test_helpers_follow_the_harbor_rules() -> None:
     assert wrap_script("ls", env={"A": "x y"}, cwd="/w", sudo=True) == (
         "sudo -n bash -lc 'export A='\"'\"'x y'\"'\"'; cd /w && ls'"
     )
+
+
+def _flaky_terminate(fake: FakeEC2, monkeypatch: pytest.MonkeyPatch, failures: int) -> None:
+    """Make the next terminate calls fail with a throttle error.
+
+    Args:
+        fake: The fake EC2 client.
+        monkeypatch: Replaces the fake's terminate method.
+        failures: The number of calls that fail.
+    """
+    real = fake.terminate_instances
+    left = [failures]
+
+    def flaky(**kwargs: Any) -> dict[str, Any]:
+        """Fail while failures are left, then terminate.
+
+        Args:
+            **kwargs: The ``terminate_instances`` arguments.
+
+        Returns:
+            The state changes.
+
+        Raises:
+            ClientError: A failure is left.
+        """
+        if left[0]:
+            left[0] -= 1
+            fake.calls.append(("terminate_instances", kwargs))
+            raise _client_error("RequestLimitExceeded", 503)
+        return real(**kwargs)
+
+    monkeypatch.setattr(fake, "terminate_instances", flaky)
+
+
+async def test_a_failed_start_whose_terminate_fails_leaves_the_instance_for_stop(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the launch with its instance id when the terminate of a failed start fails, so stop ends it."""
+    fake_ec2.no_address = True
+    _flaky_terminate(fake_ec2, monkeypatch, 1)
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxInfraError, match="no IP address"):
+        await env.start()
+    assert len(fake_ec2.live()) == 1
+    await env.stop()
+    assert fake_ec2.live() == []
+    assert env._lost_launches == {}
+
+
+async def test_a_cancelled_start_whose_two_terminates_fail_leaves_the_instance_for_stop(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the launch when the start and the launch both fail to terminate the known instance."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_ec2.wait_gate = threading.Event()
+    _flaky_terminate(fake_ec2, monkeypatch, 2)
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "wait" in fake_ec2.ops())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    fake_ec2.wait_gate.set()
+    await _until(lambda: fake_ec2.ops().count("terminate_instances") == 2 and not ec2_provider._LATE_TERMINATES)
+    await asyncio.sleep(0.05)
+    assert len(fake_ec2.live()) == 1
+    await env.stop()
+    assert fake_ec2.live() == []
+    assert env._lost_launches == {}
+
+
+async def test_a_failed_start_waits_seconds_for_a_slow_terminate(fake_ec2: FakeEC2) -> None:
+    """Wait for a terminate that takes longer than the cancel grace time when the start was not cancelled."""
+    fake_ec2.no_address = True
+    fake_ec2.terminate_gate = threading.Event()
+    threading.Timer(1.0, fake_ec2.terminate_gate.set).start()
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxInfraError, match="no IP address"):
+        await env.start()
+    assert fake_ec2.live() == []
+    assert not ec2_provider._LATE_TERMINATES
+    assert env._lost_launches == {}
+
+
+async def test_a_failed_start_passes_on_after_the_failure_grace_time(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the start error after the failure grace time when the terminate hangs, and let stop end the instance."""
+    monkeypatch.setattr(ec2_provider, "_FAILED_START_GRACE_SEC", 0.1)
+    fake_ec2.no_address = True
+    fake_ec2.terminate_gate = threading.Event()
+    env = EC2Environment(_spec())
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(SandboxInfraError, match="no IP address"):
+        await env.start()
+    assert loop.time() - began < 1.0
+    assert len(env._lost_launches) == 1
+    fake_ec2.terminate_gate.set()
+    await _until(lambda: not ec2_provider._LATE_TERMINATES)
+    await env.stop()
+    assert fake_ec2.live() == []
+    assert env._lost_launches == {}
+
+
+async def test_an_unknown_launch_that_stop_keeps_or_drops_is_logged(
+    fake_ec2: FakeEC2, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a warning when stop keeps an unknown launch, and when it drops one after the lifetime."""
+    fake_ec2.errors["run_instances"] = _client_error("Weird", None)
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    with caplog.at_level(logging.WARNING, logger=ec2_provider.__name__):
+        await env.stop()
+        assert "stays tracked" in caplog.text
+        next(iter(env._lost_launches.values())).call_ended -= env.spec.lifetime_seconds
+        await env.stop()
+    assert "no longer tracked" in caplog.text
+    assert env._lost_launches == {}
+
+
+async def test_ssh_keys_each_host_key_by_its_instance_id(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Key a shared known hosts file by the instance id, so a reused address with a new host key still connects."""
+    known = str(tmp_path / "known_hosts")
+    ids = []
+    for _ in range(2):
+        env = EC2Environment(_spec(), ssh_known_hosts_path=known)
+        await env.start()
+        await env.exec("true")
+        ids.append(env._instance_id)
+        await env.stop()
+    calls = _ssh_calls(fake_ec2)
+    aliases = [arg.split("=", 1)[1] for argv in calls for arg in argv if arg.startswith("HostKeyAlias=")]
+    assert len(aliases) == len(calls)
+    assert set(aliases) == set(ids)
+    assert ids[0] != ids[1]
+    assert all("CheckHostIP=no" in argv for argv in calls)
+
+
+async def test_strict_host_key_checking_yes_keeps_the_address_as_the_key(fake_ec2: FakeEC2) -> None:
+    """Send no host key alias when the known hosts file must already hold the key."""
+    async with EC2Environment(_spec(), strict_host_key_checking="yes") as env:
+        await env.exec("true")
+    assert not any(arg.startswith("HostKeyAlias=") for argv in _ssh_calls(fake_ec2) for arg in argv)

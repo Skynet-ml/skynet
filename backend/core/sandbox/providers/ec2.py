@@ -153,6 +153,9 @@ _REMOTE_KILL_AFTER_SEC = 5
 _SSH_FAILED = 255
 # How long a cancelled start or stop waits for an open AWS call before the cancel passes on.
 _CANCEL_GRACE_SEC = 0.5
+# How long a start that failed without a cancel waits for the terminate of its
+# instance. A normal terminate_instances call can take longer than the cancel grace.
+_FAILED_START_GRACE_SEC = 5.0
 # The remote shell reads the whole script from stdin and runs it, so the
 # command then sees an empty stdin.
 _READ_STDIN_SCRIPT = 'eval "$(cat)"'
@@ -232,7 +235,9 @@ class EC2Environment(SandboxEnvironment):
             iam_instance_profile: An instance profile name or ARN.
             strict_host_key_checking: The SSH ``StrictHostKeyChecking`` value.
             ssh_known_hosts_path: The SSH known hosts file; ``None`` uses a
-                temporary file for the life of the instance.
+                temporary file for the life of the instance. Unless
+                ``strict_host_key_checking`` is ``"yes"``, the file keys each
+                host key by the instance id, not the address.
             timeouts: The phase timeouts. The start phase bounds the SSH
                 readiness wait; the run phase is the default ``exec`` limit.
 
@@ -293,6 +298,10 @@ class EC2Environment(SandboxEnvironment):
         terminates its own instance. A failed start removes its temporary
         known hosts file.
 
+        The launch stays in the lost launches until its instance runs for
+        this start or a terminate succeeds, so stop tries again when the
+        terminate of a failed or cancelled start fails.
+
         Raises:
             SandboxError: An AWS call failed, or the instance has no address.
             StartTimeoutError: SSH did not answer in time.
@@ -320,14 +329,18 @@ class EC2Environment(SandboxEnvironment):
                     await _wait_through_cancels(launch, _CANCEL_GRACE_SEC)
                 if not launch.done():
                     launch.add_done_callback(lambda done: _terminate_late_launch(client, done))
-                if state.instance_id is not None:
-                    await _terminate_bounded(client, state.instance_id)
+                if state.instance_id is not None and await _terminate_bounded(
+                    client, state.instance_id, _CANCEL_GRACE_SEC
+                ):
+                    self._lost_launches.pop(state.launch_id, None)
             finally:
                 self._remove_known_hosts()
             raise
         except BaseException:
             self._remove_known_hosts()
             raise
+        # No await between these lines, so the instance always has an owner.
+        self._lost_launches.pop(state.launch_id, None)
         self._instance_id = instance_id
         self._host = host
         _LIVE.add(self)
@@ -342,7 +355,8 @@ class EC2Environment(SandboxEnvironment):
         The sandbox keeps the instance until the terminate succeeds, so a
         second stop tries again after a failed or unfinished terminate.
         Stop also terminates the instances of launches that ended inside
-        ``run_instances``. It always tries both terminates, then raises the
+        ``run_instances``, and of failed or cancelled starts whose own
+        terminate failed. It always tries both terminates, then raises the
         first error. With no instance and no such launch, stop only removes
         a temporary known hosts file.
 
@@ -587,9 +601,9 @@ class EC2Environment(SandboxEnvironment):
             if state.nothing_launched:
                 self._lost_launches.pop(state.launch_id, None)
             raise
-        self._lost_launches.pop(state.launch_id, None)
         instance_id = response["Instances"][0]["InstanceId"]
         if state.terminated:
+            self._lost_launches.pop(state.launch_id, None)
             raise asyncio.CancelledError
         loop = asyncio.get_running_loop()
         # The start phase time limit bounds the running wait and the SSH wait together.
@@ -605,15 +619,19 @@ class EC2Environment(SandboxEnvironment):
             host = instance_host(described["Reservations"][0]["Instances"][0], use_public_ip=self._use_public_ip)
             if host is None:
                 raise SandboxInfraError(f"The ec2 instance {instance_id} has no IP address.")
-            await self._wait_for_ssh(host, state, deadline)
+            await self._wait_for_ssh(host, instance_id, state, deadline)
             _raise_if_cancelled(state)
-        except BaseException:
-            if state.cancelled and state.known_hosts not in (None, self._temp_known_hosts):
+        except BaseException as error:
+            cancelled = state.cancelled or isinstance(error, asyncio.CancelledError)
+            if cancelled and state.known_hosts not in (None, self._temp_known_hosts):
                 # The start removed this file already, and a late probe with
                 # accept-new could write it again.
                 _remove_file(state.known_hosts)
-            # A failed launch must not leave a paid instance behind.
-            await _terminate_bounded(client, instance_id)
+            # A failed launch must not leave a paid instance behind. When the
+            # terminate fails, the launch stays, so stop terminates by the id.
+            grace = _CANCEL_GRACE_SEC if cancelled else _FAILED_START_GRACE_SEC
+            if await _terminate_bounded(client, instance_id, grace):
+                self._lost_launches.pop(state.launch_id, None)
             raise
         return instance_id, host
 
@@ -689,14 +707,18 @@ class EC2Environment(SandboxEnvironment):
         return (images[0].get("RootDeviceName") if images else None) or DEFAULT_ROOT_DEVICE
 
     async def _terminate_lost_launches(self) -> None:
-        """Terminate the instances of launches that ended before ``run_instances`` returned to them.
+        """Terminate the instances of launches that no start owns.
 
-        A launch whose call is still open stays: its worker thread
-        terminates the instance when the call returns. A launch with a known
-        instance id ends by that id. Only a launch with an unknown outcome
-        needs the lookup by its launch tag. EC2 lookups are eventually
-        consistent, so a launch that the lookup does not find stays until
-        the spec lifetime passes. The instance shuts itself down then.
+        Each launch is marked as cancelled, so a launch that still runs
+        stops at its next step. A launch whose call is still open stays: its
+        worker thread terminates the instance when the call returns. A
+        launch with a known instance id ends by that id. Only a launch with
+        an unknown outcome needs the lookup by its launch tag. EC2 lookups
+        are eventually consistent, so a launch that the lookup does not find
+        stays until the spec lifetime passes. The instance shuts itself down
+        then. Both cases only log a warning: the instance ends itself at the
+        lifetime, and a stop error from a context exit would fail a run that
+        worked.
 
         Raises:
             SandboxError: The lookup or the terminate failed; the launches stay for a retry.
@@ -704,8 +726,8 @@ class EC2Environment(SandboxEnvironment):
         unknown: list[tuple[str, _LaunchState]] = []
         for launch_id, state in list(self._lost_launches.items()):
             with state.lock:
+                state.cancelled = True
                 if not state.call_done:
-                    state.cancelled = True
                     continue
             if state.terminated or state.nothing_launched:
                 self._lost_launches.pop(launch_id, None)
@@ -719,16 +741,26 @@ class EC2Environment(SandboxEnvironment):
             if ids:
                 await _aws("terminate_instances", self._client.terminate_instances, InstanceIds=ids)
             ended = state.call_ended if state.call_ended is not None else time.monotonic()
-            if ids or time.monotonic() - ended >= self.spec.lifetime_seconds:
+            if ids:
                 self._lost_launches.pop(launch_id, None)
+            elif time.monotonic() - ended >= self.spec.lifetime_seconds:
+                self._lost_launches.pop(launch_id, None)
+                logger.warning(
+                    "An ec2 launch %s with an unknown outcome is no longer tracked: its lifetime passed.", launch_id
+                )
+            else:
+                logger.warning(
+                    "The lookup did not find the ec2 launch %s with an unknown outcome; it stays tracked.", launch_id
+                )
 
-    async def _wait_for_ssh(self, host: str, state: _LaunchState, deadline: float) -> None:
+    async def _wait_for_ssh(self, host: str, instance_id: str, state: _LaunchState, deadline: float) -> None:
         """Probe SSH with ``true`` until it answers or the start deadline passes.
 
         This is a readiness wait for a new host, not a retry of an AWS call.
 
         Args:
             host: The SSH host of the new instance.
+            instance_id: The id of the new instance, which keys its host key.
             state: The state of the launch; a cancelled launch stops probing.
             deadline: The event loop time when the start phase ends.
 
@@ -737,7 +769,8 @@ class EC2Environment(SandboxEnvironment):
             asyncio.CancelledError: The start was cancelled during the wait.
         """
         loop = asyncio.get_running_loop()
-        argv = self._ssh_argv(wrap_script("true", env={}, cwd=None, sudo=False), stdin=False, limit=None, host=host)
+        script = wrap_script("true", env={}, cwd=None, sudo=False)
+        argv = self._ssh_argv(script, stdin=False, limit=None, host=host, instance_id=instance_id)
         state.known_hosts = self._temp_known_hosts
         last = b""
         while True:
@@ -756,7 +789,15 @@ class EC2Environment(SandboxEnvironment):
         logger.warning("SSH to an ec2 instance did not answer: %s", last.decode("utf-8", errors="replace")[:500])
         raise StartTimeoutError(self._connect_timeout)
 
-    def _ssh_argv(self, script: str, *, stdin: bool, limit: float | None, host: str | None = None) -> list[str]:
+    def _ssh_argv(
+        self,
+        script: str,
+        *,
+        stdin: bool,
+        limit: float | None,
+        host: str | None = None,
+        instance_id: str | None = None,
+    ) -> list[str]:
         """Build the ssh command line that runs a script on the instance.
 
         Args:
@@ -764,6 +805,7 @@ class EC2Environment(SandboxEnvironment):
             stdin: Send stdin to the remote command; otherwise pass ``-n``.
             limit: The command time limit, which caps the connect timeout.
             host: The SSH host; ``None`` uses the host of the running instance.
+            instance_id: The instance id; ``None`` uses the running instance.
 
         Returns:
             The argv list.
@@ -786,6 +828,12 @@ class EC2Environment(SandboxEnvironment):
             "-o",
             f"ServerAliveCountMax={_SSH_ALIVE_COUNT}",
         ]
+        if self._strict_host_key_checking != "yes":
+            # EC2 reuses private addresses, and a new instance has a new host
+            # key. Keyed by the instance id, a shared known hosts file never
+            # holds a stale key for a new instance. With "yes" the file must
+            # already hold the key, so the address stays the key.
+            argv += ["-o", f"HostKeyAlias={instance_id or self._instance_id}", "-o", "CheckHostIP=no"]
         if not stdin:
             argv.append("-n")
         if self._ssh_key_path:
@@ -1054,9 +1102,8 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
         that does not come from boto3 or botocore.
     """
     if ClientError is not None and isinstance(error, ClientError):
+        code = _error_code(error) or "Unknown"
         response = error.response if isinstance(error.response, Mapping) else {}
-        raw = str((response.get("Error") or {}).get("Code") or "Unknown")
-        code = _CODE_CHARS.sub("", raw)[:64] or "Unknown"
         status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
         message = f"EC2 {action} failed with {code}."
         if code in _AUTH_CODES or status in (401, 403):
@@ -1067,7 +1114,6 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
             mapped = SandboxRejectedError(message)
         else:
             mapped = SandboxInfraError(message)
-        mapped.aws_code = code
         return mapped
     if WaiterError is not None and isinstance(error, WaiterError):
         return SandboxInfraError(f"EC2 {action} ended before the instance ran.")
@@ -1075,6 +1121,23 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
         message = f"EC2 {action} failed: {type(error).__name__}."
         return SandboxFatalError(message) if isinstance(error, _FATAL_BOTO_ERRORS) else SandboxTransientError(message)
     return None
+
+
+def _error_code(error: Exception) -> str | None:
+    """Return the safe AWS error code of a botocore client error.
+
+    Args:
+        error: The error that the AWS call raised.
+
+    Returns:
+        The code with only letters, digits and dots, or ``None`` for an
+        error that is not a botocore client error.
+    """
+    if ClientError is None or not isinstance(error, ClientError):
+        return None
+    response = error.response if isinstance(error.response, Mapping) else {}
+    raw = str((response.get("Error") or {}).get("Code") or "Unknown")
+    return _CODE_CHARS.sub("", raw)[:64] or "Unknown"
 
 
 def _run_instances(client: Any, state: _LaunchState, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -1115,9 +1178,8 @@ def _run_instances(client: Any, state: _LaunchState, kwargs: dict[str, Any]) -> 
     try:
         client.terminate_instances(InstanceIds=[instance_id])
     except Exception as error:
-        mapped = _aws_error(error, "terminate_instances")
-        if getattr(mapped, "aws_code", None) not in _GONE_CODES:
-            failure = mapped or error
+        if _error_code(error) not in _GONE_CODES:
+            failure = _aws_error(error, "terminate_instances") or error
     if failure is not None:
         # The log keeps no AWS response text. Stop or the launch tries again by the instance id.
         logger.error("Could not terminate an ec2 instance after an ended launch: %s", _safe_text(failure))
@@ -1222,30 +1284,40 @@ async def _terminate(client: Any, instance_id: str) -> None:
     Raises:
         SandboxError: The terminate failed for another reason.
     """
-    try:
-        await _aws("terminate_instances", client.terminate_instances, InstanceIds=[instance_id])
-    except SandboxError as error:
-        if getattr(error, "aws_code", None) not in _GONE_CODES:
-            raise
+    with _translated("terminate_instances"):
+        try:
+            await asyncio.to_thread(client.terminate_instances, InstanceIds=[instance_id])
+        except Exception as error:
+            if _error_code(error) not in _GONE_CODES:
+                raise
 
 
-async def _terminate_bounded(client: Any, instance_id: str) -> None:
-    """Terminate an instance of a failed or cancelled launch, and wait at most ``_CANCEL_GRACE_SEC``.
+async def _terminate_bounded(client: Any, instance_id: str, grace_sec: float) -> bool:
+    """Terminate an instance of a failed or cancelled launch, and wait at most the grace time.
 
     Args:
         client: The EC2 client.
         instance_id: The instance id.
+        grace_sec: The longest wait in seconds.
+
+    Returns:
+        True when the terminate ended in time and succeeded, or found the instance gone.
     """
     terminate = asyncio.ensure_future(_terminate(client, instance_id))
-    await _wait_through_cancels(terminate, _CANCEL_GRACE_SEC)
+    await _wait_through_cancels(terminate, grace_sec)
     if not terminate.done():
         _keep_late_terminate(terminate)
-    elif not terminate.cancelled() and terminate.exception() is not None:
+        return False
+    if terminate.cancelled():
+        return False
+    if terminate.exception() is not None:
         # The first error must still reach the caller, so this one goes to the log.
         logger.error(
             "Could not terminate an ec2 instance after a failed or cancelled start: %s",
             _safe_text(terminate.exception()),
         )
+        return False
+    return True
 
 
 async def _wait_through_cancels(task: asyncio.Future[Any], grace_sec: float) -> None:
