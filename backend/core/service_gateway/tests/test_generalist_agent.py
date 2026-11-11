@@ -478,6 +478,19 @@ def test_screen_prompts_forbid_unconfirmed_claims() -> None:
     assert "the only kind new runs take" not in SCREEN_FOCUS["artifact"]
 
 
+def test_screen_snapshot_names_the_failed_setup_check() -> None:
+    """The snapshot carries the failed setup check's errors, stripped, under a named key."""
+    errors = "Fix these errors:\n- optimize.toml:3 [run] command: required"
+    for extra in ({}, {"cloned_run": True}):
+        state = cast(WizardState, {"wizard_screen": "brief", "setup_check": f"  {errors}\n", **extra})
+        snapshot = screen_snapshot(state)
+        assert snapshot["setup_check_failed"] == errors
+        assert "setup_check" not in snapshot
+    assert "setup_check_failed" not in screen_snapshot(
+        cast(WizardState, {"wizard_screen": "brief", "setup_check": " "})
+    )
+
+
 def test_screen_snapshot_of_a_clone_names_notes_and_what_blocks_continue() -> None:
     """A cloned run keeps its whole setup and still gets the named notes and blocker."""
     state = cast(

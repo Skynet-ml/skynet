@@ -7,6 +7,7 @@ import {
   type DataMode,
   type OptimizerTarget,
 } from "@/shared/types/unified-run";
+import type { LineComment } from "@/shared/ui/agent/line-comments";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
 import { nextReturnScreen, reachedReturnScreen, runScreenNav } from "../lib/screen-agent";
@@ -87,6 +88,8 @@ interface WizardStateContextValue {
   /** What each wizard write's fields held on the form when it landed, by tool call id. */
   writeBefore: Readonly<Record<string, Record<string, unknown>>>;
   noteWriteBefore: (callId: string, before: Record<string, unknown>) => void;
+  /** Bring back the before-states a reopened chat kept, so its edits show again. */
+  restoreWriteBefore: (ledger: Readonly<Record<string, Record<string, unknown>>>) => void;
   /** The files the newest turn that edited any changed, for the Changes pane's "Last turn". */
   lastTurnEdits: readonly FileEdit[];
   setLastTurnEdits: (edits: readonly FileEdit[]) => void;
@@ -99,6 +102,22 @@ interface WizardStateContextValue {
   /** A failed setup check the composer offers to send to the agent; null when there is none. */
   setupCheckIssue: SetupCheckIssue | null;
   setSetupCheckIssue: (issue: SetupCheckIssue | null) => void;
+  /** The draft's files as the Changes pane holds them; null while no pane is mounted. */
+  draftFiles: DraftFiles | null;
+  setDraftFiles: (files: DraftFiles | null) => void;
+  /** Comments on diff lines that wait for the next message. */
+  lineComments: readonly LineComment[];
+  addLineComment: (comment: LineComment) => void;
+  removeLineComment: (comment: LineComment) => void;
+  clearLineComments: () => void;
+}
+
+/** Read the draft's files, or write a turn's edits back to one side, as Undo and Reapply do. */
+export interface DraftFiles {
+  /** A file's text now. */
+  text: (path: string) => string;
+  /** Write each edit's text before or after its turn; false while the agent is on a turn. */
+  write: (edits: readonly FileEdit[], side: "before" | "after") => boolean;
 }
 
 /** A failed setup check: how many errors it found, and the message that asks the agent to fix them. */
@@ -151,6 +170,12 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const noteWriteBefore = React.useCallback((callId: string, before: Record<string, unknown>) => {
     setWriteBefore((prev) => ({ ...prev, [callId]: before }));
   }, []);
+  const restoreWriteBefore = React.useCallback(
+    (ledger: Readonly<Record<string, Record<string, unknown>>>) => {
+      setWriteBefore((prev) => ({ ...ledger, ...prev }));
+    },
+    [],
+  );
   const [lastTurnEdits, setLastTurnEditsState] = React.useState<readonly FileEdit[]>([]);
   // The panel recomputes the list on each streamed token; only a new list is a change.
   const setLastTurnEdits = React.useCallback((edits: readonly FileEdit[]) => {
@@ -168,6 +193,15 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       prev?.count === issue?.count && prev?.feedback === issue?.feedback ? prev : issue,
     );
   }, []);
+  const [draftFiles, setDraftFiles] = React.useState<DraftFiles | null>(null);
+  const [lineComments, setLineComments] = React.useState<readonly LineComment[]>([]);
+  const addLineComment = React.useCallback((comment: LineComment) => {
+    setLineComments((prev) => [...prev, comment]);
+  }, []);
+  const removeLineComment = React.useCallback((comment: LineComment) => {
+    setLineComments((prev) => prev.filter((c) => c !== comment));
+  }, []);
+  const clearLineComments = React.useCallback(() => setLineComments([]), []);
   // A ref, not state: the frame re-registers on every render that changes its
   // handlers, and the agent reads it only when a move arrives.
   const navigatorRef = React.useRef<ScreenNavigator | null>(null);
@@ -285,6 +319,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     setWriteBefore({});
     setLastTurnEdits([]);
     setSetupCheckIssue(null);
+    setLineComments([]);
     setReturnScreen(null);
   }, [setLastTurnEdits, setSetupCheckIssue]);
 
@@ -321,6 +356,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setFinishedAutoFeedback,
       writeBefore,
       noteWriteBefore,
+      restoreWriteBefore,
       lastTurnEdits,
       setLastTurnEdits,
       viewChanges,
@@ -329,6 +365,12 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setRepoBase,
       setupCheckIssue,
       setSetupCheckIssue,
+      draftFiles,
+      setDraftFiles,
+      lineComments,
+      addLineComment,
+      removeLineComment,
+      clearLineComments,
     }),
     [
       state,
@@ -354,6 +396,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       finishedAutoFeedback,
       writeBefore,
       noteWriteBefore,
+      restoreWriteBefore,
       lastTurnEdits,
       setLastTurnEdits,
       viewChanges,
@@ -362,6 +405,11 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setRepoBase,
       setupCheckIssue,
       setSetupCheckIssue,
+      draftFiles,
+      lineComments,
+      addLineComment,
+      removeLineComment,
+      clearLineComments,
     ],
   );
 

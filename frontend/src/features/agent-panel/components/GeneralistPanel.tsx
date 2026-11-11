@@ -10,6 +10,7 @@ import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Brain,
+  ChatText,
   ClockCounterClockwise,
   Copy,
   Cpu,
@@ -20,6 +21,7 @@ import {
   Plus,
   MagicWand,
   ShareNetwork,
+  X,
 } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
@@ -31,6 +33,8 @@ import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
+import { joinLineComments, withLineComments, type LineComment } from "@/shared/ui/agent/line-comments";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
@@ -102,6 +106,7 @@ import {
   opensWithKickoff,
   parseScreenNav,
   registerSetupChatFlush,
+  setupChatLedger,
   setupChatSnapshot,
   storedKickedScreens,
   trackAutoTurn,
@@ -110,7 +115,7 @@ import {
   type KickoffTurn,
   type SetupChat,
 } from "../lib/screen-agent";
-import { latestTurnEdits, messageEdits } from "../lib/turn-edits";
+import { latestTurnEdits, messageEdits, turnState, type FileEdit } from "../lib/turn-edits";
 import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
@@ -153,6 +158,7 @@ const RICH_CARD_TOOLS = new Set<string>([
 // Submit tools whose success should mirror the manual wizard submit button:
 // play the splash banner, then route to the new optimization's details.
 const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_post"]);
+const NO_COMMENTS: readonly LineComment[] = [];
 
 /** Whether a file opens the dataset column-mapping card instead of being read as text. */
 function isDatasetFile(file: File): boolean {
@@ -244,11 +250,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (screen == null) return merged;
     const issue = wizardCtx?.screenIssue;
     const back = wizardCtx?.returnScreen;
+    const check = wizardCtx?.setupCheckIssue?.feedback;
     return {
       ...merged,
       wizard_screen: screen,
       ...(issue ? { screen_issue: issue } : {}),
       ...(back ? { return_screen: back } : {}),
+      ...(check ? { setup_check: check } : {}),
     };
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
@@ -267,21 +275,32 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // so a reload in the middle of it runs it again.
   const kickoffTurnRef = React.useRef<KickoffTurn | null>(null);
   const [kickoffScreen, setKickoffScreen] = React.useState<string | null>(null);
+  // The copy keeps each write's before-state, so a reload still shows what each turn edited.
+  const writeBeforeRef = React.useRef(wizardCtx?.writeBefore ?? {});
+  React.useEffect(() => {
+    writeBeforeRef.current = wizardCtx?.writeBefore ?? {};
+  }, [wizardCtx?.writeBefore]);
+  const restoreWriteBefore = wizardCtx?.restoreWriteBefore;
   const keepSetupChat = React.useCallback((id: string | null) => {
     setupChatRef.current = id;
     try {
       if (id) {
+        const messages = setupMessagesRef.current;
         const chat = {
           id,
           kicked: storedKickedScreens(kickedScreensRef.current, kickoffTurnRef.current),
-          messages: setupMessagesRef.current,
+          messages,
+          ledger: setupChatLedger(messages, writeBeforeRef.current),
         };
         try {
           window.sessionStorage.setItem(SETUP_CHAT_KEY, encodeSetupChat(chat));
         } catch {
           // Storage full: the screens already started still count after a
           // reload, even though the messages do not fit.
-          window.sessionStorage.setItem(SETUP_CHAT_KEY, encodeSetupChat({ ...chat, messages: [] }));
+          window.sessionStorage.setItem(
+            SETUP_CHAT_KEY,
+            encodeSetupChat({ id, kicked: chat.kicked, messages: [] }),
+          );
         }
       } else window.sessionStorage.removeItem(SETUP_CHAT_KEY);
     } catch {
@@ -576,6 +595,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const id = saved.id;
     kickedScreensRef.current = new Set(saved.kicked);
     setupMessagesRef.current = saved.messages;
+    if (saved.ledger) {
+      writeBeforeRef.current = { ...saved.ledger, ...writeBeforeRef.current };
+      restoreWriteBefore?.(saved.ledger);
+    }
     keepSetupChat(id);
     if (!activateConversation(id)) openConversation(id, saved.messages, { unsaved: true });
     // A reload in the middle of this screen's kickoff left it out of the copy.
@@ -592,6 +615,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     setActiveConversation,
     removeConversation,
     keepSetupChat,
+    restoreWriteBefore,
   ]);
 
   // The tab's copy of the setup chat follows each settled turn; a turn still
@@ -709,15 +733,46 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (!inSetup || !setLastTurnEdits || !writeBefore) return;
     setLastTurnEdits(latestTurnEdits(agent.messages, writeBefore, repoBase));
   }, [inSetup, agent.messages, writeBefore, repoBase, setLastTurnEdits]);
+  // Undo and Reapply act on the newest turn that edited files, through the Changes pane.
+  const draftFiles = wizardCtx?.draftFiles ?? null;
+  const ideBusy = wizardCtx?.agentBusy ?? false;
+  const newestEdited = React.useMemo(() => {
+    if (!inSetup || !writeBefore) return null;
+    for (let i = agent.messages.length - 1; i >= 0; i--) {
+      const message = agent.messages[i]!;
+      if (messageEdits(message, writeBefore, repoBase).length > 0) return message;
+    }
+    return null;
+  }, [inSetup, agent.messages, writeBefore, repoBase]);
   const renderEditedFiles = React.useCallback(
     (message: AgentMessage) => {
       if (!writeBefore) return null;
       const edits = messageEdits(message, writeBefore, repoBase);
-      return edits.length > 0 ? (
-        <EditedFilesCard edits={edits} onView={wizardCtx?.viewChanges ?? null} />
-      ) : null;
+      if (edits.length === 0) return null;
+      const writeTurn = (turn: readonly FileEdit[], side: "before" | "after") => {
+        if (!draftFiles?.write(turn, side)) return;
+        toast(
+          msg(side === "before" ? "agent.edited_files.reverted" : "agent.edited_files.reapplied"),
+        );
+      };
+      return (
+        <EditedFilesCard
+          edits={edits}
+          onView={wizardCtx?.viewChanges ?? null}
+          undo={
+            draftFiles && message === newestEdited
+              ? {
+                  state: turnState(edits, draftFiles.text),
+                  disabled: ideBusy,
+                  onUndo: () => writeTurn(edits, "before"),
+                  onReapply: () => writeTurn(edits, "after"),
+                }
+              : null
+          }
+        />
+      );
     },
-    [writeBefore, repoBase, wizardCtx?.viewChanges],
+    [writeBefore, repoBase, wizardCtx?.viewChanges, draftFiles, newestEdited, ideBusy],
   );
   const setupCheckIssue = inSetup ? (wizardCtx?.setupCheckIssue ?? null) : null;
   // Deleting the conversation you're currently viewing must drop you back to a
@@ -860,12 +915,19 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [agent, wizardCtx, webChat],
   );
 
+  const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
+  const clearLineComments = wizardCtx?.clearLineComments;
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
-    if (!trimmed) return;
-    agent.send(trimmed);
+    if (!trimmed && lineComments.length === 0) return;
+    agent.send(joinLineComments(trimmed, lineComments));
     setDraft("");
-  }, [agent, draft]);
+    clearLineComments?.();
+  }, [agent, draft, lineComments, clearLineComments]);
+  const midTurn = React.useMemo(
+    () => withLineComments(agent.midTurn, lineComments, clearLineComments),
+    [agent.midTurn, lineComments, clearLineComments],
+  );
 
   // Prompts other features queue (the first-login setup) open the panel and
   // go out as if typed; one queued before the lazy panel mounted drains here.
@@ -1381,54 +1443,56 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         ]}
       >
         <ChatSourceContext.Provider value={webChat ? "hosted" : "local"}>
-          <ChatTranscript
-            key={chatView.key}
-            messages={agent.messages}
-            streaming={streaming}
-            editAndResend={agent.editAndResend}
-            renderToolCall={renderToolCall}
-            isStepCall={isStepCall}
-            isPinnedCall={isPinnedCall}
-            stepKind={stepKind}
-            onRunCode={handleRunCode}
-            renderAfterContent={inSetup ? renderEditedFiles : undefined}
-            animatePairs
-            trailing={({ isEditingAny }) => (
-              <>
-                {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
-                  <QuestionChoices
-                    options={choices}
-                    onSelect={(label) => agent.send(label)}
-                    hint={msg("agent.choices.hint")}
-                    ariaLabel={msg("agent.choices.label")}
-                  />
-                )}
-                {agent.pendingApproval && (
-                  <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
-                )}
-                {agent.error && (
-                  <ChatErrorBanner
-                    message={agent.error}
-                    retryLabel={msg(
-                      "auto.features.agent.panel.components.generalistpanel.error_retry",
-                    )}
-                    onRetry={
-                      agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
-                        ? undefined
-                        : agent.retry
-                    }
-                    action={
-                      agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                        <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
-                          {msg("billing.action.add_funds")}
-                        </Button>
-                      ) : undefined
-                    }
-                  />
-                )}
-              </>
-            )}
-          />
+          <LineCommentLinkContext.Provider value={wizardCtx?.viewChanges ?? null}>
+            <ChatTranscript
+              key={chatView.key}
+              messages={agent.messages}
+              streaming={streaming}
+              editAndResend={agent.editAndResend}
+              renderToolCall={renderToolCall}
+              isStepCall={isStepCall}
+              isPinnedCall={isPinnedCall}
+              stepKind={stepKind}
+              onRunCode={handleRunCode}
+              renderAfterContent={inSetup ? renderEditedFiles : undefined}
+              animatePairs
+              trailing={({ isEditingAny }) => (
+                <>
+                  {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
+                    <QuestionChoices
+                      options={choices}
+                      onSelect={(label) => agent.send(label)}
+                      hint={msg("agent.choices.hint")}
+                      ariaLabel={msg("agent.choices.label")}
+                    />
+                  )}
+                  {agent.pendingApproval && (
+                    <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
+                  )}
+                  {agent.error && (
+                    <ChatErrorBanner
+                      message={agent.error}
+                      retryLabel={msg(
+                        "auto.features.agent.panel.components.generalistpanel.error_retry",
+                      )}
+                      onRetry={
+                        agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
+                          ? undefined
+                          : agent.retry
+                      }
+                      action={
+                        agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
+                          <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
+                            {msg("billing.action.add_funds")}
+                          </Button>
+                        ) : undefined
+                      }
+                    />
+                  )}
+                </>
+              )}
+            />
+          </LineCommentLinkContext.Provider>
         </ChatSourceContext.Provider>
       </AgentThread>
 
@@ -1452,14 +1516,35 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onChange={setDraft}
         onSubmit={handleSubmit}
         onStop={agent.stop}
-        placeholder={msg(
-          // Hidden wizard kickoff turns run before the user types, so they do not count.
-          !agent.messages.some((m) => m.role === "user" && !m.hidden)
-            ? "agent.generalist.first_placeholder"
-            : "auto.features.agent.panel.components.generalistpanel.literal.5",
-        )}
+        placeholder={
+          lineComments.length > 0
+            ? formatMsg("agent.line_comments.send_with", { count: lineComments.length })
+            : msg(
+                // Hidden wizard kickoff turns run before the user types, so they do not count.
+                !agent.messages.some((m) => m.role === "user" && !m.hidden)
+                  ? "agent.generalist.first_placeholder"
+                  : "auto.features.agent.panel.components.generalistpanel.literal.5",
+              )
+        }
+        sendsEmpty={lineComments.length > 0}
+        chips={
+          lineComments.length > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 py-0.5 ps-2 pe-1 text-xs text-foreground">
+              <ChatText className="size-3.5 text-muted-foreground" aria-hidden />
+              {formatMsg("shared.agent.line_comments.count", { count: lineComments.length })}
+              <button
+                type="button"
+                onClick={clearLineComments}
+                aria-label={msg("shared.agent.line_comments.remove")}
+                className="flex size-4 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-3" aria-hidden />
+              </button>
+            </span>
+          )
+        }
         streaming={activeBusy}
-        midTurn={agent.midTurn}
+        midTurn={midTurn}
         slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={

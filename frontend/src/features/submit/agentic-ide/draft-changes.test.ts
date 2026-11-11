@@ -11,9 +11,8 @@ registerHooks({
   },
 });
 
-const { diffRows, fileStats, hunkStarts, orderFiles, revertHunk, splitRows } = await import(
-  "./draft-changes.ts"
-);
+const { diffRows, fileStats, hunkStarts, isChanged, orderFiles, revertHunk, splitRows } =
+  await import("./draft-changes.ts");
 
 const lines = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `line ${i + from}`);
 
@@ -111,4 +110,16 @@ test("reverting a hunk keeps the new text's final newline", () => {
   assert.equal(revertHunk("a\nb\nc\n", "a\nB\nc\n", 0), "a\nb\nc\n");
   assert.equal(revertHunk("a\n", "a\nb\n", 0), "a\n");
   assert.equal(revertHunk("", "x\ny\n", 0), "");
+});
+
+test("a change of only the final newline is not a change", () => {
+  const file = { path: "metric.py", before: "x = 1", after: "x = 1\n" };
+  assert.equal(isChanged(file), false);
+  assert.deepEqual(fileStats(file), { added: 0, removed: 0 });
+  assert.equal(isChanged({ path: "metric.py", before: "x = 1\n", after: "x = 2\n" }), true);
+  assert.equal(isChanged({ path: "metric.py", before: "x", after: "x\n\n" }), true);
+  const order = orderFiles([file, { path: "z.py", before: "a", after: "b" }], "").map(
+    (f) => f.path,
+  );
+  assert.deepEqual(order, ["z.py", "metric.py"]);
 });

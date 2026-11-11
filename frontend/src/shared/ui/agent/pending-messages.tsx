@@ -10,7 +10,8 @@ import {
   Trash,
   TreeView,
 } from "@/shared/ui/icons";
-import { msg } from "@/shared/lib/messages";
+import { formatMsg, msg } from "@/shared/lib/messages";
+import { splitLineComments } from "./line-comments";
 import { splitPastes } from "./pasted-text";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import {
@@ -247,12 +248,16 @@ export function PendingMessages({
   );
 }
 
-/** A queued message's one-line preview, with files and pastes named instead of dumped. */
+/** A queued message's one-line preview, with files, pastes and line comments named instead of dumped. */
 function previewText(text: string): string {
-  const { text: typed, pastes, files } = splitPastes(text);
+  const { rest, comments } = splitLineComments(text);
+  const { text: typed, pastes, files } = splitPastes(rest);
   const label = [
     ...files.map((file) => `[${file.name}]`),
     ...pastes.map(() => `[${msg("shared.agent.pasted_text")}]`),
+    ...(comments.length
+      ? [`[${formatMsg("shared.agent.line_comments.count", { count: comments.length })}]`]
+      : []),
   ].join(" ");
   return [label, typed].filter(Boolean).join(" ");
 }

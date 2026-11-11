@@ -69,7 +69,7 @@ export function messageEdits(
     }
   }
   return [...byPath]
-    .filter(([, { before, after }]) => before !== after)
+    .filter(([, { before, after }]) => body(before) !== body(after))
     .map(([path, { before, after }]) => ({
       path,
       before,
@@ -115,4 +115,26 @@ export function editTotals(edits: readonly FileEdit[]): { added: number; removed
     (sum, edit) => ({ added: sum.added + edit.added, removed: sum.removed + edit.removed }),
     { added: 0, removed: 0 },
   );
+}
+
+/**
+ * Tell where a turn's files stand now, so Undo and Reapply never overwrite
+ * an edit made after the turn.
+ *
+ * Args:
+ *   edits: The turn's edits.
+ *   text: A file's text now, by path.
+ *
+ * Returns:
+ *   "applied" when every file holds the turn's after-state, "undone" when
+ *   every file holds its before-state again, else "changed".
+ */
+export function turnState(
+  edits: readonly FileEdit[],
+  text: (path: string) => string,
+): "applied" | "undone" | "changed" {
+  if (edits.length === 0) return "changed";
+  if (edits.every((edit) => body(text(edit.path)) === body(edit.after))) return "applied";
+  if (edits.every((edit) => body(text(edit.path)) === body(edit.before))) return "undone";
+  return "changed";
 }

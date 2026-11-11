@@ -28,6 +28,7 @@ const {
   storedKickedScreens,
   newSetupChatStart,
   opensWithKickoff,
+  setupChatLedger,
 } = await import("./screen-agent.ts");
 
 const hook = "src/features/agent-panel/hooks/use-generalist-agent.ts";
@@ -100,13 +101,19 @@ test("the panel opens every setup chat as unsaved", () => {
   assert.ok(!meta.includes("keepSetupChat"));
 });
 
-function keepWith(setItem: (k: string, v: string) => void, events: string[] = []) {
+function keepWith(
+  setItem: (k: string, v: string) => void,
+  events: string[] = [],
+  messages: unknown[] = [{ role: "user", content: "q" }],
+  writeBefore: Record<string, Record<string, unknown>> = {},
+) {
   const stored = new Map<string, string>();
   const keep = expression(panel, "keepSetupChat", {
     setupChatRef: { current: null }, kickedScreensRef: { current: new Set(["brief", "source"]) },
     kickoffTurnRef: { current: { screen: "source", from: 2, started: true } },
-    setupMessagesRef: { current: [{ role: "user", content: "q" }] }, SETUP_CHAT_KEY, encodeSetupChat,
-    storedKickedScreens, SETUP_CHAT_KEPT_EVENT: "chat-kept",
+    setupMessagesRef: { current: messages }, SETUP_CHAT_KEY, encodeSetupChat,
+    storedKickedScreens, SETUP_CHAT_KEPT_EVENT: "chat-kept", setupChatLedger,
+    writeBeforeRef: { current: writeBefore },
     window: {
       sessionStorage: {
         setItem: (k: string, v: string) => { setItem(k, v); stored.set(k, v); },
@@ -140,6 +147,19 @@ test("a copy too large for storage keeps its id and started screens without mess
   assert.deepEqual(kept, { id: "setup-1", kicked: ["brief"], messages: [] });
 });
 
+test("the tab's copy keeps each turn's before-state, and a copy too large for storage drops it", () => {
+  const messages = [{ role: "assistant", content: "", toolCalls: [{ id: "t1", name: "edit" }] }];
+  const writeBefore = { t1: { run_code: "old" }, gone: { run_code: "x" } };
+  assert.deepEqual(keepWith(() => {}, [], messages, writeBefore)?.ledger, {
+    t1: { run_code: "old" },
+  });
+  let calls = 0;
+  const full = () => {
+    if (calls++ === 0) throw new Error("QuotaExceededError");
+  };
+  assert.equal(keepWith(full, [], messages, writeBefore)?.ledger, undefined);
+});
+
 test("a copy that cannot be stored at all leaves no older copy", () => {
   assert.equal(keepWith(() => { throw new Error("QuotaExceededError"); }), null);
 });
@@ -151,7 +171,8 @@ test("a restored setup with no chat copy sends no kickoff on its screen, now or 
   const keep = expression(panel, "keepSetupChat", {
     setupChatRef: { current: null }, kickedScreensRef: { current: new Set(start.kicked) },
     kickoffTurnRef: { current: null }, setupMessagesRef: { current: [] }, SETUP_CHAT_KEY, encodeSetupChat,
-    storedKickedScreens, SETUP_CHAT_KEPT_EVENT: "chat-kept",
+    storedKickedScreens, SETUP_CHAT_KEPT_EVENT: "chat-kept", setupChatLedger,
+    writeBeforeRef: { current: {} },
     window: {
       sessionStorage: { setItem: (k: string, v: string) => stored.set(k, v), removeItem: () => {} },
       dispatchEvent: () => true,

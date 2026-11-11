@@ -34,6 +34,20 @@ function body(text: string): string {
   return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
+/**
+ * Tell whether a file's text changed. A change of only the final newline
+ * is not a change: the diff shows no line for it.
+ *
+ * Args:
+ *   file: The text before and after.
+ *
+ * Returns:
+ *   True when a line of the text changed.
+ */
+export function isChanged(file: Pick<DraftFile, "before" | "after">): boolean {
+  return body(file.before) !== body(file.after);
+}
+
 function numbered(lines: readonly DiffLine[]): DiffRow[] {
   const rows: DiffRow[] = [];
   let oldNo = 0;
@@ -188,7 +202,7 @@ export function hunkStarts(rows: ReadonlyArray<DiffRow | SplitRow>): Map<number,
  *   The added and removed line counts.
  */
 export function fileStats(file: DraftFile): { added: number; removed: number } {
-  return file.before === file.after
+  return !isChanged(file)
     ? { added: 0, removed: 0 }
     : diffStats(lineDiff(body(file.before), body(file.after)));
 }
@@ -209,7 +223,7 @@ export function orderFiles(files: readonly DraftFile[], filter: string): DraftFi
   return files
     .filter((file) => !needle || file.path.toLowerCase().includes(needle))
     .sort((a, b) => {
-      const changed = Number(b.before !== b.after) - Number(a.before !== a.after);
+      const changed = Number(isChanged(b)) - Number(isChanged(a));
       return changed || a.path.localeCompare(b.path);
     });
 }

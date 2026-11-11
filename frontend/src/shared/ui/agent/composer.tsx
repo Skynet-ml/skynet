@@ -94,6 +94,10 @@ interface ComposerProps {
     commands: readonly SlashCommand[];
     run: (command: SlashCommand, arg: string) => void;
   };
+  /** Items that go with the next message, such as line comments, shown above the draft. */
+  chips?: React.ReactNode;
+  /** The next message has content besides the draft, so an empty draft can still be sent. */
+  sendsEmpty?: boolean;
 }
 
 /** One slash menu row, with the composer model menu's row metrics and highlight. */
@@ -174,6 +178,8 @@ export function Composer({
   attachments = true,
   dictation: showMic = true,
   slash,
+  chips,
+  sendsEmpty = false,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -203,6 +209,7 @@ export function Composer({
   // Without a mid-turn handler a streaming turn locks the input as before.
   const locked = Boolean(streaming && !midTurn);
   const hasDraft = value.trim().length > 0;
+  const canSend = hasDraft || sendsEmpty;
   const { suggestion, dismiss: dismissSuggestion } = useNextPrompt({
     messages: suggest?.messages,
     model: suggest?.model,
@@ -353,7 +360,7 @@ export function Composer({
       sendMidTurn(midTurn?.canSteer ? "steer" : "queue");
       return;
     }
-    if (disabled || dictating || attaching > 0 || !hasDraft) return;
+    if (disabled || dictating || attaching > 0 || !canSend) return;
     onSubmit();
     resetHeight();
   };
@@ -564,6 +571,7 @@ export function Composer({
                 })}
           </div>
         )}
+        {chips && !inline && <div className="flex flex-wrap gap-2 px-3 pt-3">{chips}</div>}
         {draft.pastes.length + draft.files.length > 0 && !inline && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {draft.files.map((file, i) => (
@@ -764,7 +772,7 @@ export function Composer({
                 size="icon"
                 autoTooltip={false}
                 className="shrink-0 rounded-full"
-                disabled={disabled || dictating || attaching > 0 || !hasDraft}
+                disabled={disabled || dictating || attaching > 0 || !canSend}
                 aria-label={sendAriaLabel}
               >
                 <svg viewBox="0 0 24 24" fill="none" className="size-4">

@@ -33,6 +33,7 @@ const {
   registerSetupChatFlush,
   runScreenNav,
   SETUP_CHAT_MAX_CHARS,
+  setupChatLedger,
   setupChatSnapshot,
   storedKickedScreens,
   trackAutoTurn,
@@ -277,4 +278,25 @@ test("the Check screen opens with no kickoff turn; other screens do", () => {
   for (const screen of ["brief", "inputs", "optimizer", "metric", "overview"]) {
     assert.equal(opensWithKickoff(screen), true);
   }
+});
+
+test("the setup chat keeps the before-state of its own writes, and drops it when too long", () => {
+  const call = (id: string) => ({ id, tool: "set", reason: "", status: "done" as const });
+  const messages = [{ role: "assistant" as const, content: "done", toolCalls: [call("a")] }];
+  const ledger = setupChatLedger(messages, {
+    a: { metric_code: "x = 0" },
+    gone: { run_code: "y" },
+  });
+  assert.deepEqual(ledger, { a: { metric_code: "x = 0" } });
+  const raw = encodeSetupChat({ id: "c1", kicked: [], messages, ledger });
+  assert.deepEqual(decodeSetupChat(raw)?.ledger, ledger);
+  assert.equal(
+    decodeSetupChat('{"id":"c1","kicked":[],"messages":[],"ledger":{"a":"x","b":{"run_code":""}}}')
+      ?.ledger?.a,
+    undefined,
+  );
+  const huge = { a: { metric_code: "x".repeat(400_000) } };
+  const cut = decodeSetupChat(encodeSetupChat({ id: "c1", kicked: [], messages, ledger: huge }));
+  assert.equal(cut?.ledger, undefined);
+  assert.equal(cut?.messages.length, 1);
 });
