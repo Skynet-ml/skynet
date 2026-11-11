@@ -37,7 +37,7 @@ bugs before you push. Follow this order for every PR:
    example, two subagents). Verify each finding with a failing test, then
    fix it. Repeat until a review finds nothing new.
 3. Push once. Let CI, the preview build and the automated review gate run.
-4. Run the acceptance checks on the PR preview. A visual-only change can use
+4. Run the acceptance checks on the PR preview. A visual-only change may use
    the section 4 exemption.
 
 If the review gate or the acceptance checks find a bug, fix all findings
@@ -73,9 +73,9 @@ Use the repository template when there is one. Include, in this order:
 
 1. Problem and resulting behavior (one concrete before-and-after example when
    useful).
-2. Review evidence: the acceptance checks for the changed behavior. Say if
-   the change is visible in the UI. UI PRs need no Before and After images
-   or videos (section 5).
+2. Review evidence: the acceptance checks for the changed behavior, or the
+   section 4 exemption that applies. Say if the change is visible in the UI.
+   UI PRs need no Before and After images or videos (section 5).
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
 5. Automated review verdicts and the decision requested from Gilad.
@@ -238,11 +238,9 @@ gates pass:
    PR's merge right away and reopen its issue with the failure.
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) follow
-section 5. A UI PR is ready for review when three conditions are true. The
-Opus 5.5 review gate (section 3) approves the current head. CI passes. The
-acceptance checks pass, or a section 4 exemption applies. The PR stays
-unmerged. Attach a proof card: one line naming the decision and the Linear
-issue, the acceptance check results, the review verdict, and the diff size.
+section 5. A UI PR is ready when the section 5 conditions are true. The PR
+stays unmerged. Attach a proof card. It names the decision, the Linear issue,
+the acceptance check results, the review verdict and the diff size.
 Merge only after one of two events:
 
 - Gilad approves that specific PR in chat, on GitHub or with `Approved for
@@ -254,7 +252,7 @@ A frontend PR with no meaningful visible change can use the backend path
 (the 2026-10-22 exception below).
 
 Any other PR (files outside `backend/` and `docs/**/*.md`, or no backend
-file) also waits for the user's approval.
+file) also waits for Gilad's approval.
 
 **`staging` → `main`**: a change in `staging` is approved for production.
 The orchestrator promotes `staging` to `main` when the staging checks pass.
