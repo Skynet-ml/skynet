@@ -72,9 +72,9 @@ Use the repository template when there is one. Include, in this order:
 
 1. Problem and resulting behavior (one concrete before-and-after example when
    useful).
-2. Review evidence: the acceptance checks for the changed behavior, or why
-   there is no visible UI change. UI PRs need no Before and After images or
-   videos (section 5).
+2. Review evidence: the acceptance checks for the changed behavior. Say if
+   the change is visible in the UI. UI PRs need no Before and After images
+   or videos (section 5).
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
 5. Automated review verdicts and the decision requested from Gilad.
@@ -194,10 +194,12 @@ for review until the evidence is there.
 - UI PRs use the same flow as backend PRs: build, fresh review, then verify
   and fix (sections 1a and 3). The acceptance checks in section 4 still
   apply.
-- When the review is clean, CI passes, and the acceptance checks pass (or a
-  section 4 exemption applies), the orchestrator marks the PR ready for
-  review (not draft). It does not merge it. Gilad reviews the finished
-  UI PRs. He merges them, or he tells the orchestrator to merge them.
+- When the Opus 5.5 review gate (section 3) approves the current head, CI
+  passes, and the acceptance checks pass (or a section 4 exemption applies),
+  the orchestrator marks the PR ready for review (not draft). It does not
+  merge it. Gilad reviews the finished UI PRs. He approves them (in chat, on
+  GitHub or with `Approved for merge` on the Linear issue), or tells the
+  orchestrator to merge them.
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -234,15 +236,15 @@ gates pass:
    PR's merge right away and reopen its issue with the failure.
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) follow
-section 5. After a clean review, passing CI and passing acceptance checks
-(or a section 4 exemption), the PR is ready for review but not merged.
-Attach a proof card: one line naming the decision and the Linear issue, the
-acceptance check results, the review verdict, and the diff size. Merge only
-after Gilad approves that specific PR in chat or on GitHub (or with
-`Approved for merge` on the Linear issue), or tells the orchestrator to merge
-it. Merge only in the daily window or when Gilad asks. A frontend PR with no
-meaningful visible change can use the backend path (the 2026-10-22 exception
-below).
+section 5. When the Opus 5.5 review gate (section 3) approves the current
+head, CI passes, and the acceptance checks pass (or a section 4 exemption
+applies), the PR is ready for review but not merged. Attach a proof card: one
+line naming the decision and the Linear issue, the acceptance check results,
+the review verdict, and the diff size. Merge only after Gilad approves that
+specific PR in chat or on GitHub (or with `Approved for merge` on the Linear
+issue), or tells the orchestrator to merge it. Merge only in the daily window
+or when Gilad asks. A frontend PR with no meaningful visible change can use
+the backend path (the 2026-10-22 exception below).
 
 Any other PR (files outside `backend/` and `docs/**/*.md`, or no backend
 file) also waits for the user's approval.
@@ -264,9 +266,8 @@ A manual hold on a change or on a promotion still stops it.
 - Exception (2026-10-22): a PR that touches frontend files may use this path
   when the review confirms no meaningful visible change in normal use (for
   example payload or data-cleanup fixes for stale states, internal refactors,
-  tests, i18n-only string moves). The PR body
-  must say why the change is not visible. If the reviewer is unsure, keep
-  the human approval.
+  tests, i18n-only string moves). The PR body must say why the change is
+  not visible. If the reviewer is unsure, keep the human approval.
 - Just before the merge, check the full changed-file list, the current
   revision, base, evidence and review policy. Use a merge command that
   requires the reviewed head commit. Never bypass branch protection or queue
