@@ -130,7 +130,8 @@ _REPO_ENGINE_REASON = "This engine does not optimize a repository."
 _PROGRESS_EVENTS = 100
 
 # No choice, or one of the catalog's ``ReasoningEffort`` levels (core/api/model_catalog.py). Pi and Prime Agent put
-# the effort into a shell command line, so a free-form value must never reach them.
+# the effort into a shell command line, so a free-form value must never reach them. An empty string is no choice:
+# the proposer launch turns it into ``None``, the harness default.
 _NATIVE_EFFORTS = (None, "", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
@@ -443,7 +444,7 @@ def _check_proposer_effort(proposer: BlackboxProposer, effort: str | None) -> No
 
     Args:
         proposer: The job's proposer.
-        effort: The chosen effort level; ``None`` or ``""`` keeps the harness default.
+        effort: The chosen effort level; ``None`` or an empty string keeps the harness default.
 
     Raises:
         ServiceError: When the harness declares its levels and ``effort`` is not one of them.
