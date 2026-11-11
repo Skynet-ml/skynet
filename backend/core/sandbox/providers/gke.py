@@ -151,6 +151,10 @@ class _DroppedSessionError(_ConnectTimeoutError):
     """A queued exec session was dropped before a pool thread took it, so no session opened."""
 
 
+class _DroppedCancelledError(asyncio.CancelledError):
+    """A cancel dropped a queued exec session before a pool thread took it, so no session opened."""
+
+
 class _TimedWebSocket(k8s_ws_client.WebSocket if k8s_ws_client is not None else object):
     """A websocket that takes the calling thread's ``_connect_scope`` limit as its socket timeout."""
 
@@ -711,6 +715,8 @@ class GKEEnvironment(SandboxEnvironment):
             SandboxInfraError: The session failed, or did not connect in time
                 (``_ConnectTimeoutError``; the command did not start).
                 ``_DroppedSessionError`` says that no pool thread took the session.
+            asyncio.CancelledError: The task was cancelled. ``_DroppedCancelledError``
+                says that no pool thread took the session.
         """
         loop = asyncio.get_running_loop()
         connected = asyncio.Event()
@@ -753,8 +759,9 @@ class GKEEnvironment(SandboxEnvironment):
                 )
             remaining = None if seconds is None else max(0.0, seconds - (loop.time() - started))
             done, _ = await asyncio.wait({worker}, timeout=remaining)
-        except asyncio.CancelledError:
-            await _abandon(job, worker, stop)
+        except asyncio.CancelledError as error:
+            if await _abandon(job, worker, stop):
+                raise _DroppedCancelledError(*error.args) from error
             raise
         finally:
             connecting.cancel()
@@ -898,7 +905,7 @@ class GKEEnvironment(SandboxEnvironment):
 
         try:
             exit_code = await self._session(name, argv, stdin=stream, on_chunk=take, seconds=deadline)
-        except _DroppedSessionError:
+        except (_DroppedSessionError, _DroppedCancelledError):
             # No session opened, so no command runs. A kill would only queue
             # behind the same full pool.
             raise

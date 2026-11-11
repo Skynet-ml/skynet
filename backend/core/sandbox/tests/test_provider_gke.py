@@ -893,7 +893,48 @@ async def test_an_exec_dropped_from_a_full_pool_sends_no_kill(
             started = time.monotonic()
             with pytest.raises(gke._DroppedSessionError, match="did not connect"):
                 await env.exec("true", timeout_sec=60)
-            assert time.monotonic() - started < 1.8
+            # A wait for the queued job would last until the 5s kill limit.
+            # The margin keeps a slow runner below it.
+            assert time.monotonic() - started < 4
+            assert kills == []
+        finally:
+            release.set()
+            blocker.result(5)
+            pool.shutdown()
+
+
+async def test_a_cancelled_exec_dropped_from_a_full_pool_sends_no_kill(
+    cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancel an exec that never left the pool queue at once, with no kill that queues again."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 30.0)
+    monkeypatch.setattr(gke, "_GROUP_KILL_SECONDS", 5.0)
+    release = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=1)
+    kills: list[str] = []
+
+    async def record_kill(name: str, state: str) -> None:
+        """Record a kill instead of sending it.
+
+        Args:
+            name: The pod name.
+            state: The command's state id.
+        """
+        kills.append(state)
+
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "_SESSION_POOL", pool)
+        monkeypatch.setattr(env, "_kill_group", record_kill)
+        blocker = pool.submit(release.wait, 10)
+        try:
+            task = asyncio.create_task(env.exec("true", timeout_sec=60))
+            await asyncio.sleep(0.2)
+            started = time.monotonic()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # A wait for the queued job would last until the 5s kill limit.
+            assert time.monotonic() - started < 3
             assert kills == []
         finally:
             release.set()
