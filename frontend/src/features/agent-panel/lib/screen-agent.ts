@@ -56,7 +56,7 @@ export function newSetupChatStart(
 /** A reopened chat stores the wizard's kickoff and Back turns as user turns; they stay unshown. */
 export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((m) =>
-    m.role === "user" && (m.content.trim() === SCREEN_KICKOFF || m.content.startsWith(SCREEN_BACK))
+    m.role === "user" && (m.content.trim() === SCREEN_KICKOFF || m.content.startsWith(SCREEN_BACK.trim()))
       ? { ...m, hidden: true }
       : m,
   );

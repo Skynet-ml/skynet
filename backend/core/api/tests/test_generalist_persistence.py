@@ -1051,6 +1051,18 @@ def test_title_skips_attached_file_and_pasted_text_blocks() -> None:
     assert agent_mod._derive_title("<pasted_text>\nlong paste\n</pasted_text>") == ""
 
 
+def test_title_skips_the_setup_wizard_hidden_turns() -> None:
+    """A setup chat is not titled from the wizard's hidden kickoff or from its Back marker."""
+    kickoff = (
+        "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in "
+        "and continue; otherwise ask me the one thing you need."
+    )
+    assert agent_mod._derive_title(kickoff) == ""
+    back = "[The wizard went back to this screen for your request; I typed nothing.] Change the metric to F1"
+    assert agent_mod._derive_title(back) == "Change the metric to F1"
+    assert agent_mod._derive_title("[The wizard went back to this screen for your request; I typed nothing.]") == ""
+
+
 def test_turn_forwards_tool_trace_and_owner(
     persistence_client: tuple[TestClient, Engine],
     monkeypatch: pytest.MonkeyPatch,

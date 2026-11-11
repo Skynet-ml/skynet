@@ -617,6 +617,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const openSetupChat = React.useCallback(
     async (saved: { id: string; messages: AgentMessage[] } | null, kickoff: string | null) => {
       const run = ++setupRunRef.current;
+      // An older run's load may still block Share; it no longer clears it.
+      setSetupLoad(null);
       if (!saved) {
         // The first turn saves the chat and gives it the server's id.
         keepSetupChat(newSetupChatId());

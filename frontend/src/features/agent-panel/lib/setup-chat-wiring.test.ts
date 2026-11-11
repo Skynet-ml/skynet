@@ -185,22 +185,23 @@ const server = [{ role: "user", content: "server" }];
 test("a new setup chat starts with no server id and its kickoff, so its first turn saves it", async () => {
   const chat = setupChat({ setupId: null });
   await chat.openSetupChat(null, "brief");
-  assert.equal(chat.log.length, 3);
-  assert.match(String(chat.log[0][1]), /^setup-/);
-  assert.deepEqual(chat.log.slice(1), [["new"], ["kickoff", "brief"]]);
+  assert.equal(chat.log.length, 4);
+  assert.deepEqual(chat.log[0], ["loading", null]);
+  assert.match(String(chat.log[1][1]), /^setup-/);
+  assert.deepEqual(chat.log.slice(2), [["new"], ["kickoff", "brief"]]);
 });
 
 test("a tab-only setup chat from an older build opens with no server id", async () => {
   const chat = setupChat({ setupId: "setup-1" });
   await chat.openSetupChat({ id: "setup-1", messages: tab }, "brief");
-  assert.deepEqual(chat.log, [["open", null, tab], ["kickoff", "brief"]]);
+  assert.deepEqual(chat.log, [["loading", null], ["open", null, tab], ["kickoff", "brief"]]);
 });
 
 test("a reopened setup chat shows the tab copy, loads the server copy, then sends its kickoff", async () => {
   const chat = setupChat({ live: { id: null, messages: [] }, load: async () => ({ detail: { messages: server }, missing: false }) });
   await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
   assert.deepEqual(chat.log, [
-    ["activate", "c1"], ["open", "c1", tab], ["loading", "c1"], ["load", "c1"],
+    ["loading", null], ["activate", "c1"], ["open", "c1", tab], ["loading", "c1"], ["load", "c1"],
     ["loading", null], ["open", "c1", server], ["kickoff", "brief"],
   ]);
 });
@@ -208,7 +209,7 @@ test("a reopened setup chat shows the tab copy, loads the server copy, then send
 test("a setup chat already open in the panel sends its kickoff at once", async () => {
   const chat = setupChat({ active: true });
   await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
-  assert.deepEqual(chat.log, [["activate", "c1"], ["kickoff", "brief"]]);
+  assert.deepEqual(chat.log, [["loading", null], ["activate", "c1"], ["kickoff", "brief"]]);
 });
 
 test("a load for a setup that closed changes nothing and sends no kickoff", async () => {
@@ -379,7 +380,24 @@ test("an old load that ends late leaves the newer load's Share block on", async 
   void chat.openSetupChat({ id: "c1", messages: tab }, "brief");
   first.load.finish({ detail: null, missing: false });
   await done;
-  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [["loading", "c1"], ["loading", "c1"]]);
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [
+    ["loading", null], ["loading", "c1"], ["loading", null], ["loading", "c1"],
+  ]);
+});
+
+test("a Back request of only spaces stays hidden after send trims it", () => {
+  const sent = backRequest("   ").trim();
+  assert.deepEqual(hideKickoffs([{ role: "user", content: sent }]).map((m) => m.hidden), [true]);
+});
+
+test("a new setup chat clears the Share block an old load left on", async () => {
+  const first = pendingLoad();
+  const chat = setupChat({ load: first.start });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  void chat.openSetupChat(null, null);
+  first.load.finish({ detail: null, missing: false });
+  await done;
+  assert.deepEqual(chat.log.filter((entry) => entry[0] === "loading"), [["loading", null], ["loading", "c1"], ["loading", null]]);
 });
 
 test("the server copy keeps the hidden mark of each turn the tab copy hid", () => {
