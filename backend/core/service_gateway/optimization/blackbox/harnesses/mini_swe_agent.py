@@ -19,7 +19,7 @@ import shlex
 from .....models.blackbox import BLACKBOX_HARNESS_MINI_SWE_AGENT
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
-from .base import ENV_API_KEY, ENV_MODEL, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import ENV_API_KEY, ENV_MODEL, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
 
 MINI_SWE_AGENT_PACKAGE = "mini-swe-agent"
 # PyPI release 2.4.6 (MIT), 2026-07-23.
@@ -84,7 +84,7 @@ def _read(path):
 
 
 def prepare(folder):
-    task = _read(os.environ["APP_PROMPT_FILE"])
+    task = _read(os.environ["__PROMPT_ENV__"])
     if os.path.isfile("AGENTS.md"):
         task = _read("AGENTS.md") + "\n\n" + task
     text = json.dumps({"run": {"task": task.rstrip("\n")}}, ensure_ascii=False)
@@ -123,7 +123,7 @@ def answer(path):
 
 if __name__ == "__main__":
     {"prepare": prepare, "answer": answer}[sys.argv[1]](sys.argv[2])
-'''
+'''.replace("__PROMPT_ENV__", ENV_PROMPT_FILE)
 # mini and LiteLLM read these keys for their other routes. A protected run
 # blanks them, so an inherited key never gives mini a route around the gateway.
 _PROTECTED_ENV = {
