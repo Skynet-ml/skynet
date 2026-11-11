@@ -1113,6 +1113,8 @@ class VercelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The session stopped, or every wait failed and
                 the sentinel has no code.
+            BudgetReached: The session stopped because the budget refused the
+                next slice.
         """
         errors = 0
         while True:
@@ -1124,17 +1126,21 @@ class VercelEnvironment(SandboxEnvironment):
                 if not _is_retryable_wait_error(error):
                     raise
                 errors += 1
-                if errors >= WAIT_ERROR_LIMIT:
-                    code = await self._read_exit(session, sentinel)
-                    if code is None:
-                        # The command may still run and use the funded lifetime.
-                        with contextlib.suppress(Exception):
-                            await asyncio.wait_for(process.kill(), CANCEL_GRACE)
-                        raise SandboxInfraError("The sandbox command exit code could not be read.") from error
-                    return code
-                if self._pacing is not None:
-                    await self._pacing.reads.acquire()
-                await self._clock.sleep(min(errors * WAIT_BACKOFF, WAIT_BACKOFF_MAX))
+                last_error = error
+            # Read the sentinel outside the except block: a budget stop on this
+            # read must not carry the wait error as its context, or the broker
+            # sees a transport error and requeues the run (SKY-587).
+            if errors >= WAIT_ERROR_LIMIT:
+                code = await self._read_exit(session, sentinel)
+                if code is None:
+                    # The command may still run and use the funded lifetime.
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(process.kill(), CANCEL_GRACE)
+                    raise SandboxInfraError("The sandbox command exit code could not be read.") from last_error
+                return code
+            if self._pacing is not None:
+                await self._pacing.reads.acquire()
+            await self._clock.sleep(min(errors * WAIT_BACKOFF, WAIT_BACKOFF_MAX))
 
     async def _read_exit(self, session: Any, sentinel: str) -> int | None:
         """Read the exit code that the wrapper wrote.

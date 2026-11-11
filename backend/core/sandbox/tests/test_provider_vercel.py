@@ -19,8 +19,10 @@ from vercel.sandbox import SandboxApiError
 from vercel.sandbox._internal.recovery import execute_with_sandbox_recovery
 
 from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.model_gateway import _sandbox_failure_kind
 from core.billing.model_mailbox import ModelMailbox
 from core.billing.signals import BudgetReached
+from core.exceptions import DETERMINISTIC_FAILURE
 from core.sandbox import sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
@@ -31,6 +33,7 @@ from core.sandbox.providers.vercel import VercelEnvironment, box_name, policy_co
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.services import ComposeService, ServicesTooLargeError
 from core.sandbox.telemetry import use_output_sink
+from core.service_gateway.optimization.blackbox import remote_sandbox
 
 _PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); echo \$\? > (\S+)$")
 
@@ -1103,6 +1106,47 @@ async def test_box_that_stops_after_an_unfunded_slice_is_a_budget_stop(log: list
     with pytest.raises(BudgetReached, match="budget gone"):
         await env.exec("python optimize.py")
     assert env._halted is True
+    await env.stop()
+
+
+async def test_sentinel_read_that_finds_a_budget_stopped_box_stays_a_budget_stop(log: list[str]) -> None:
+    """Check that a 410 on the sentinel read after 20 wait errors and a budget refusal stays a budget stop (SKY-587)."""
+    client = FakeClient(log)
+    env = make_env(client, log, lifetime=1500)
+    await env.start()
+    env.usage.extend_error = BudgetReached("budget gone")
+    await asyncio.wait_for(env._renewer, 5)
+    box = client.boxes[env.name]
+    box.outcomes = [httpx.RemoteProtocolError("cut")] * 20
+    original = box.create_process
+
+    async def create_then_stop(command: str, args: list[str], **kwargs: Any) -> FakeProcess:
+        """Start the process, then let Vercel end the box so every file read answers 410.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+        """
+        process = await original(command, args, **kwargs)
+        box.fs.stopped = True
+        return process
+
+    box.create_process = create_then_stop
+    with pytest.raises(BudgetReached, match="budget gone") as caught:
+        await env.exec("python optimize.py")
+    assert box.processes[0].waits == 20
+    assert env._halted is True
+    stop = caught.value
+    kind = _sandbox_failure_kind(stop)
+    assert kind == DETERMINISTIC_FAILURE
+    with pytest.raises(BudgetReached, match="budget gone"):
+        remote_sandbox._raise_remote_error(
+            {"type": "error", "error_type": type(stop).__name__, "failure_kind": kind, "message": str(stop)}
+        )
     await env.stop()
 
 

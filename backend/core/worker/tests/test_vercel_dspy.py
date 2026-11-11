@@ -10,7 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from vercel.sandbox import SandboxApiError
 
 from core.billing.model_gateway import _sandbox_failure_kind
 from core.billing.signals import BudgetReached
@@ -330,11 +332,18 @@ class BudgetStoppedSession(FakeSession):
             The probe answer. The optimizer command never returns.
 
         Raises:
-            BudgetReached: The guest-side error for the budget stop.
+            BudgetReached: The guest-side error for the budget stop. The parent
+                error chains to the 410 that reported the stopped session, as
+                the provider raises it.
         """
         if command == vercel_dspy.PROTOCOL_PROBE:
             return CommandResult(0, stdout=f"{SANDBOX_PROTOCOL}\n")
-        stop = BudgetReached("budget gone")
+        try:
+            raise BudgetReached("budget gone") from SandboxApiError(
+                httpx.Response(410), "gone", data={"error": {"code": "sandbox_stopped"}}
+            )
+        except BudgetReached as error:
+            stop = error
         remote_sandbox._raise_remote_error(
             {
                 "type": "error",
