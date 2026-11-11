@@ -56,6 +56,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "kata": ProviderEntry("core.sandbox.providers.kata", "KataEnvironment", None, False),
     "sail": ProviderEntry("core.sandbox.providers.sail", "SailEnvironment", "sail", False),
     "smol": ProviderEntry("core.sandbox.providers.smol", "SmolEnvironment", "smol", False),
+    "ec2": ProviderEntry("core.sandbox.providers.ec2", "EC2Environment", "ec2", False),
     "singularity": ProviderEntry("core.sandbox.providers.singularity", "SingularityEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
 }

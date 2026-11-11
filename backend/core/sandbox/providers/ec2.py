@@ -6,19 +6,28 @@ tags, network interface, root volume and instance profile, the root device
 lookup, the ``instance_running`` waiter, the host choice between the public
 and private address, the instance name and client token rules, the SSH
 command line, the ``bash -lc`` script wrapper with env, cwd and sudo, the
-SSH readiness probe and the terminate on stop come from it. Changes: the
-provider implements the SBX-6 async contract, the AWS calls never retry
-(SKY-406 D3, D10), the factory refuses the provider in production (SKY-406
-D1), the instance shuts itself down and terminates at the end of the spec
-lifetime, the job sweep terminates the instances by tag, and files move
-over SSH stdin one file at a time. Harbor's Docker Compose, Docker-in-Docker,
-Docker bootstrap, cloud-init, attach mode, trial paths and directory
-transfer are left out.
+SSH readiness probe and the terminate on stop come from it. Changes:
+
+- The provider implements the SBX-6 async contract. The factory refuses it
+  in production (SKY-406 D1).
+- The AWS calls never retry (SKY-406 D3, D10).
+- AWS errors keep only the operation and the error code, so no response
+  body or account identifier reaches an error or a log.
+- The exec script and its env go over SSH stdin, so no credential is in an
+  argv.
+- The instance shuts itself down and terminates at the end of the spec
+  lifetime.
+- The job sweep terminates the instances by tag.
+- Files move over SSH stdin one file at a time.
+
+Harbor's Docker Compose, Docker-in-Docker, Docker bootstrap, cloud-init,
+attach mode, trial paths and directory transfer are left out.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import math
@@ -28,13 +37,20 @@ import shlex
 import shutil
 import tempfile
 import uuid
-from collections.abc import Mapping
-from pathlib import PurePosixPath
+from collections.abc import Callable, Iterator, Mapping
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
 from ..capabilities import EnvironmentCapabilities, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
-from ..errors import RunTimeoutError, SandboxFatalError, SandboxInfraError
+from ..errors import (
+    SandboxError,
+    SandboxFatalError,
+    SandboxInfraError,
+    SandboxRejectedError,
+    SandboxTransientError,
+    StartTimeoutError,
+)
 from ..resources import ResourceMode, SandboxSpec
 from ..telemetry import current_output_sink
 from ..timeouts import Phase, PhaseTimeouts
@@ -42,11 +58,25 @@ from ..timeouts import Phase, PhaseTimeouts
 try:
     import boto3
     from botocore.config import Config as BotoConfig
-    from botocore.exceptions import ClientError
+    from botocore.exceptions import (
+        BotoCoreError,
+        ClientError,
+        NoCredentialsError,
+        NoRegionError,
+        PartialCredentialsError,
+        ProfileNotFound,
+        WaiterError,
+    )
 except ImportError:
     boto3 = None
     BotoConfig = None
+    BotoCoreError = None
     ClientError = None
+    NoCredentialsError = None
+    NoRegionError = None
+    PartialCredentialsError = None
+    ProfileNotFound = None
+    WaiterError = None
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +93,40 @@ NO_RETRY = {"total_max_attempts": 1, "mode": "standard"}
 _RUNNING_WAITER = {"Delay": 5, "MaxAttempts": 120}
 _SWEEP_STATES = ["pending", "running", "stopping", "stopped"]
 _GONE_CODES = frozenset({"InvalidInstanceID.NotFound", "InvalidInstanceID.Malformed"})
+_AUTH_CODES = frozenset(
+    {
+        "AuthFailure",
+        "Blocked",
+        "ExpiredToken",
+        "InvalidClientTokenId",
+        "OptInRequired",
+        "SignatureDoesNotMatch",
+        "UnauthorizedOperation",
+        "UnrecognizedClientException",
+    }
+)
+_TRANSIENT_CODES = frozenset(
+    {
+        "InsufficientInstanceCapacity",
+        "InternalError",
+        "RequestLimitExceeded",
+        "ServiceUnavailable",
+        "Throttling",
+        "ThrottlingException",
+        "Unavailable",
+    }
+)
+_CODE_CHARS = re.compile(r"[^A-Za-z0-9.]")
 _SSH_PROBE_TIMEOUT_SEC = 10.0
 _SSH_PROBE_INTERVAL_SEC = 5.0
+_TIMEOUT_EXIT_CODE = 124
 # ssh exits with 255 when it cannot reach the host.
 _SSH_FAILED = 255
 # How long a cancelled start or stop waits for an open AWS call before the cancel passes on.
 _CANCEL_GRACE_SEC = 0.5
+# The remote shell reads the whole script from stdin and runs it, so the
+# command then sees an empty stdin.
+_READ_STDIN_SCRIPT = 'eval "$(cat)"'
 
 # The instances of this process, so that the job sweep can clear their state
 # and find the regions that they run in.
@@ -185,13 +243,16 @@ class EC2Environment(SandboxEnvironment):
         instance when it ends, so no instance leaks.
 
         Raises:
+            SandboxError: An AWS call failed, or the instance has no address.
+            StartTimeoutError: SSH did not answer in time.
             asyncio.CancelledError: The task was cancelled during the launch.
         """
         if self._instance_id is not None:
             return
         _require_sdk()
         if self._client is None:
-            self._client = ec2_client(self._aws_profile, self._region)
+            with _translated("client setup"):
+                self._client = ec2_client(self._aws_profile, self._region)
         launch = asyncio.ensure_future(self._launch())
         try:
             instance_id, host = await asyncio.shield(launch)
@@ -220,6 +281,7 @@ class EC2Environment(SandboxEnvironment):
         cancel on with the terminate still running in the background.
 
         Raises:
+            SandboxError: The terminate failed for a reason other than a gone instance.
             asyncio.CancelledError: The task was cancelled during the terminate.
         """
         instance_id = self._instance_id
@@ -235,7 +297,8 @@ class EC2Environment(SandboxEnvironment):
                 _keep_late_terminate(terminate)
             elif not terminate.cancelled() and terminate.exception() is not None:
                 logger.warning(
-                    "Could not terminate an ec2 instance during a cancelled stop.", exc_info=terminate.exception()
+                    "Could not terminate an ec2 instance during a cancelled stop: %s",
+                    _safe_text(terminate.exception()),
                 )
             raise
 
@@ -252,32 +315,38 @@ class EC2Environment(SandboxEnvironment):
         """Run one shell command on the instance over SSH.
 
         The output arrives when the command ends, so the sink gets one
-        stdout chunk and one stderr chunk at the end.
+        stdout chunk and one stderr chunk at the end. The command reads an
+        empty stdin.
 
         Args:
             command: The shell command.
             cwd: The working directory, or the SSH user's home.
             env: Extra environment variables.
-            timeout_sec: The time limit; ``None`` uses the run phase timeout.
+            timeout_sec: After this long, kill the local ssh and return
+                ``timed_out=True``; ``None`` uses the run phase timeout.
             on_output: Receives ``(stream, text)`` chunks; ``None`` uses the
                 sink of the current task.
             sudo: Run the command as root instead of the SSH user.
 
         Returns:
-            The exit code and the captured output.
+            The exit code, the captured output and whether the timeout fired.
 
         Raises:
             RuntimeError: The instance is not running.
-            RunTimeoutError: The command ran past the time limit.
         """
         self._require_running()
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
         sink = on_output or current_output_sink()
-        script = wrap_script(command, env={**self.spec.env, **(env or {})}, cwd=cwd, sudo=sudo)
+        # The env can hold credentials, so the script goes over stdin and
+        # never into the argv of the local ssh or the remote shell.
+        script = wrap_script(command, env={**self.spec.env, **(env or {})}, cwd=cwd, sudo=False)
+        reader = wrap_script(_READ_STDIN_SCRIPT, env={}, cwd=None, sudo=sudo)
         try:
-            code, out, err = await _run_process(self._ssh_argv(script, stdin=False, limit=limit), None, limit)
+            code, out, err = await _run_process(
+                self._ssh_argv(reader, stdin=True, limit=limit), script.encode("utf-8"), limit
+            )
         except TimeoutError:
-            raise RunTimeoutError(limit) from None
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
         stdout, stderr = out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
         if sink is not None:
             if stdout:
@@ -304,7 +373,9 @@ class EC2Environment(SandboxEnvironment):
                 raise RuntimeError(f"The ec2 sandbox could not create the upload directories: {made.stderr}")
         for path, text in files.items():
             script = wrap_script(f"cat > {shlex.quote(path)}", env={}, cwd=None, sudo=True)
-            code, _, err = await _run_process(self._ssh_argv(script, stdin=True, limit=None), text.encode("utf-8"), None)
+            code, _, err = await _run_process(
+                self._ssh_argv(script, stdin=True, limit=None), text.encode("utf-8"), None
+            )
             if code != 0:
                 raise RuntimeError(f"The ec2 sandbox could not write {path}: {err.decode('utf-8', errors='replace')}")
 
@@ -325,7 +396,7 @@ class EC2Environment(SandboxEnvironment):
         # A lost connection must not read as a missing file, so the probe
         # tells the ssh failure code apart from a failed test.
         probe = await self.exec(f"test -f {shlex.quote(path)}", sudo=True)
-        if probe.exit_code == _SSH_FAILED:
+        if probe.timed_out or probe.exit_code == _SSH_FAILED:
             raise SandboxInfraError(f"The ec2 sandbox could not reach the instance: {probe.stderr}")
         if not probe.ok:
             return None
@@ -358,12 +429,18 @@ class EC2Environment(SandboxEnvironment):
         terminated: set[str] = set()
         for (profile, region), client in targets.items():
             try:
-                client = client or ec2_client(profile, region)
-                ids = await asyncio.to_thread(_tagged_instances, client, job_id)
+                with _translated("client setup"):
+                    client = client or ec2_client(profile, region)
+                ids = await _aws("describe_instances", _tagged_instances, client, job_id)
                 if ids:
-                    await asyncio.to_thread(client.terminate_instances, InstanceIds=ids)
-            except Exception:
-                logger.exception("Could not terminate the ec2 instances of job %s in region %s.", job_id, region)
+                    await _aws("terminate_instances", client.terminate_instances, InstanceIds=ids)
+            except Exception as error:
+                logger.warning(
+                    "Could not terminate the ec2 instances of job %s in region %s: %s",
+                    job_id,
+                    region,
+                    _safe_text(error),
+                )
                 continue
             terminated.update(ids)
         for env in [env for env in _LIVE if env._instance_id in terminated]:
@@ -377,17 +454,18 @@ class EC2Environment(SandboxEnvironment):
             The instance id and the SSH host.
 
         Raises:
-            SandboxInfraError: The instance has no address, or SSH did not answer.
+            SandboxError: An AWS call failed, or the instance has no address.
+            StartTimeoutError: SSH did not answer in time.
         """
         client = self._client
-        kwargs = await asyncio.to_thread(self._run_kwargs)
-        response = await asyncio.to_thread(client.run_instances, **kwargs)
+        kwargs = await _aws("describe_images", self._run_kwargs)
+        response = await _aws("run_instances", client.run_instances, **kwargs)
         instance_id = response["Instances"][0]["InstanceId"]
         self._pending_id = instance_id
         try:
             waiter = client.get_waiter("instance_running")
-            await asyncio.to_thread(waiter.wait, InstanceIds=[instance_id], WaiterConfig=_RUNNING_WAITER)
-            described = await asyncio.to_thread(client.describe_instances, InstanceIds=[instance_id])
+            await _aws("instance_running wait", waiter.wait, InstanceIds=[instance_id], WaiterConfig=_RUNNING_WAITER)
+            described = await _aws("describe_instances", client.describe_instances, InstanceIds=[instance_id])
             host = instance_host(described["Reservations"][0]["Instances"][0], use_public_ip=self._use_public_ip)
             if host is None:
                 raise SandboxInfraError(f"The ec2 instance {instance_id} has no IP address.")
@@ -470,25 +548,26 @@ class EC2Environment(SandboxEnvironment):
         This is a readiness wait for a new host, not a retry of an AWS call.
 
         Raises:
-            SandboxInfraError: SSH did not answer in time.
+            StartTimeoutError: SSH did not answer in time.
         """
-        attempts = max(1, int(self._connect_timeout // _SSH_PROBE_INTERVAL_SEC))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._connect_timeout
+        argv = self._ssh_argv(wrap_script("true", env={}, cwd=None, sudo=False), stdin=False, limit=None)
         last = b""
-        for attempt in range(attempts):
+        while True:
+            remaining = deadline - loop.time()
             try:
-                code, _, last = await _run_process(
-                    self._ssh_argv(wrap_script("true", env={}, cwd=None, sudo=False), stdin=False, limit=None),
-                    None,
-                    _SSH_PROBE_TIMEOUT_SEC,
-                )
+                code, _, last = await _run_process(argv, None, max(0.0, min(_SSH_PROBE_TIMEOUT_SEC, remaining)))
             except TimeoutError:
                 code = _SSH_FAILED
             if code == 0:
                 return
-            if attempt + 1 < attempts:
-                await asyncio.sleep(_SSH_PROBE_INTERVAL_SEC)
-        detail = last.decode("utf-8", errors="replace").strip()
-        raise SandboxInfraError(f"SSH to the ec2 instance did not answer in time: {detail}")
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_SSH_PROBE_INTERVAL_SEC, remaining))
+        logger.warning("SSH to an ec2 instance did not answer: %s", last.decode("utf-8", errors="replace")[:500])
+        raise StartTimeoutError(self._connect_timeout)
 
     def _ssh_argv(self, script: str, *, stdin: bool, limit: float | None) -> list[str]:
         """Build the ssh command line that runs a script on the instance.
@@ -541,10 +620,8 @@ class EC2Environment(SandboxEnvironment):
         self._host = None
         _LIVE.discard(self)
         if self._temp_known_hosts is not None:
-            try:
-                os.remove(self._temp_known_hosts)
-            except OSError:
-                pass
+            with contextlib.suppress(OSError):
+                Path(self._temp_known_hosts).unlink(missing_ok=True)
             self._temp_known_hosts = None
 
     def _require_running(self) -> None:
@@ -651,13 +728,13 @@ def client_token(value: str) -> str:
     return f"{safe[:51].rstrip('-_')}-{hashlib.sha256(value.encode()).hexdigest()[:12]}"
 
 
-async def _run_process(argv: list[str], stdin: bytes | None, timeout: float | None) -> tuple[int, bytes, bytes]:
+async def _run_process(argv: list[str], stdin: bytes | None, limit_sec: float | None) -> tuple[int, bytes, bytes]:
     """Run a local command and kill it when it runs past the time limit.
 
     Args:
         argv: The command.
         stdin: The bytes for stdin, or ``None`` for no stdin.
-        timeout: The time limit in seconds, or ``None``.
+        limit_sec: The time limit in seconds, or ``None``.
 
     Returns:
         The exit code, stdout and stderr.
@@ -672,7 +749,7 @@ async def _run_process(argv: list[str], stdin: bytes | None, timeout: float | No
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(limit_sec):
             out, err = await process.communicate(stdin)
     except BaseException:
         if process.returncode is None:
@@ -717,6 +794,100 @@ def _require_sdk() -> None:
         raise SandboxFatalError("The ec2 sandbox needs the boto3 package: install the `ec2` extra.")
 
 
+async def _aws(action: str, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run one blocking AWS call in a thread and translate its error.
+
+    Args:
+        action: The short name of the call, for the error message.
+        call: The blocking function.
+        *args: The positional arguments of the call.
+        **kwargs: The keyword arguments of the call.
+
+    Returns:
+        The result of the call.
+
+    Raises:
+        SandboxError: The AWS call failed, in the matching error group.
+    """
+    with _translated(action):
+        return await asyncio.to_thread(call, *args, **kwargs)
+
+
+@contextlib.contextmanager
+def _translated(action: str) -> Iterator[None]:
+    """Turn a boto3 or botocore error into a sandbox error group, without a retry.
+
+    The new error does not chain to the AWS error, because the AWS message
+    and response can name the account, the caller ARN or the request.
+
+    Args:
+        action: The short name of the call, for the error message.
+
+    Yields:
+        Nothing.
+
+    Raises:
+        SandboxError: The mapped error.
+    """
+    try:
+        yield
+    except Exception as error:
+        mapped = _aws_error(error, action)
+        if mapped is None:
+            raise
+        raise mapped from None
+
+
+def _aws_error(error: Exception, action: str) -> SandboxError | None:
+    """Return the sandbox error for one AWS error, with only the operation and the code.
+
+    Args:
+        error: The error that the AWS call raised.
+        action: The short name of the call.
+
+    Returns:
+        The sandbox error in the matching group, or ``None`` for an error
+        that does not come from boto3 or botocore.
+    """
+    if ClientError is not None and isinstance(error, ClientError):
+        response = error.response if isinstance(error.response, Mapping) else {}
+        raw = str((response.get("Error") or {}).get("Code") or "Unknown")
+        code = _CODE_CHARS.sub("", raw)[:64] or "Unknown"
+        status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+        message = f"EC2 {action} failed with {code}."
+        if code in _AUTH_CODES or status in (401, 403):
+            mapped: SandboxError = SandboxFatalError(message)
+        elif code in _TRANSIENT_CODES or (isinstance(status, int) and status >= 500):
+            mapped = SandboxTransientError(message)
+        elif status == 400:
+            mapped = SandboxRejectedError(message)
+        else:
+            mapped = SandboxInfraError(message)
+        mapped.aws_code = code
+        return mapped
+    if WaiterError is not None and isinstance(error, WaiterError):
+        return SandboxInfraError(f"EC2 {action} ended before the instance ran.")
+    if BotoCoreError is not None and isinstance(error, BotoCoreError):
+        fatal = (NoCredentialsError, PartialCredentialsError, NoRegionError, ProfileNotFound)
+        message = f"EC2 {action} failed: {type(error).__name__}."
+        return SandboxFatalError(message) if isinstance(error, fatal) else SandboxTransientError(message)
+    return None
+
+
+def _safe_text(error: BaseException | None) -> str:
+    """Describe an error for a log line without AWS response text.
+
+    Args:
+        error: The error, or ``None``.
+
+    Returns:
+        The message of a sandbox error, else the error type name.
+    """
+    if isinstance(error, SandboxError):
+        return str(error)
+    return type(error).__name__
+
+
 async def _terminate(client: Any, instance_id: str) -> None:
     """Terminate one instance, and ignore an instance that is already gone.
 
@@ -725,12 +896,12 @@ async def _terminate(client: Any, instance_id: str) -> None:
         instance_id: The instance id.
 
     Raises:
-        ClientError: The terminate failed for another reason.
+        SandboxError: The terminate failed for another reason.
     """
     try:
-        await asyncio.to_thread(client.terminate_instances, InstanceIds=[instance_id])
-    except ClientError as error:
-        if error.response.get("Error", {}).get("Code") not in _GONE_CODES:
+        await _aws("terminate_instances", client.terminate_instances, InstanceIds=[instance_id])
+    except SandboxError as error:
+        if getattr(error, "aws_code", None) not in _GONE_CODES:
             raise
 
 
@@ -748,7 +919,8 @@ async def _terminate_bounded(client: Any, instance_id: str) -> None:
     elif not terminate.cancelled() and terminate.exception() is not None:
         # The first error must still reach the caller, so this one goes to the log.
         logger.error(
-            "Could not terminate an ec2 instance after a failed or cancelled start.", exc_info=terminate.exception()
+            "Could not terminate an ec2 instance after a failed or cancelled start: %s",
+            _safe_text(terminate.exception()),
         )
 
 
@@ -788,8 +960,10 @@ def _terminate_late_launch(client: Any, launch: asyncio.Future[tuple[str, str]])
         if launch.cancelled() or launch.exception() is not None:
             return
         terminate = asyncio.ensure_future(_terminate(client, launch.result()[0]))
-    except Exception:
-        logger.exception("Could not terminate an ec2 instance that arrived after a cancelled start.")
+    except Exception as error:
+        logger.warning(
+            "Could not terminate an ec2 instance that arrived after a cancelled start: %s", _safe_text(error)
+        )
         return
     _keep_late_terminate(terminate)
 
@@ -814,5 +988,6 @@ def _finish_late_terminate(terminate: asyncio.Future[None]) -> None:
     _LATE_TERMINATES.discard(terminate)
     if not terminate.cancelled() and terminate.exception() is not None:
         logger.error(
-            "Could not terminate an ec2 instance after a cancelled start or stop.", exc_info=terminate.exception()
+            "Could not terminate an ec2 instance after a cancelled start or stop: %s",
+            _safe_text(terminate.exception()),
         )
