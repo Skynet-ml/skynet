@@ -47,8 +47,9 @@ locally, check them again, and then push them together in one push.
 ## 2. Required for every PR
 
 - State the problem, the resulting behavior and the linked Linear issue in
-  plain language. Put the decision for Gilad in plain language. He must not
-  need to read source code to understand the change or its evidence.
+  plain language. For a PR that waits for Gilad (section 7), put the
+  decision for him in plain language. He must not need to read source code
+  to understand the change or its evidence.
 - Name the tested head commit and the baseline commit. Refresh the evidence
   after changes that affect it.
 - Explain the test scope: which behaviors, failure cases and integration
@@ -80,7 +81,8 @@ Use the repository template when there is one. Include, in this order:
    UI PRs need no Before and After images or videos (section 5).
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
-5. Automated review verdicts and the decision requested from Gilad.
+5. Automated review verdicts. For a PR that waits for Gilad (section 7),
+   the decision requested from him.
 
 Also list the PR's `## Files` (the issue's Files list). For a PR without a
 visible UI change, say so, explain what each test group proves, and add
@@ -118,8 +120,8 @@ for review until the evidence is there.
   description or evidence needs a new evidence check.
 - Add a short review table: reviewer model, reviewed commit, verdict, report
   link.
-- Approval permits human review, or the backend-only merge below. It never
-  permits a production deploy.
+- Approval permits human review, or the backend or UI merge below (section
+  7). It never permits a production deploy.
 - For a PR the automation cannot control, record the failed gate. Do not
   call it ready for human review.
 
@@ -197,13 +199,8 @@ for review until the evidence is there.
 - UI PRs use the same flow as backend PRs: build, fresh review, then verify
   and fix (sections 1a and 3). The acceptance checks in section 4 still
   apply.
-- A UI PR is ready for review when three conditions are true. The Opus 5.5
-  review gate (section 3) approves the current head. The PR checks and local
-  tests pass. The acceptance checks pass, or a section 4 exemption applies.
-  Then the orchestrator marks the PR ready for review (not draft). It does
-  not merge it. Gilad reviews the finished UI PRs. He approves them (in
-  chat, on GitHub or with `Approved for merge` on the Linear issue), or tells
-  the orchestrator to merge them.
+- UI PRs merge like backend PRs, when all gates pass (Gilad, 2026-11-11).
+  They do not wait for Gilad's approval. The gates are in section 7.
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -228,8 +225,8 @@ for review until the evidence is there.
 ### Merge gates (MANDATORY)
 
 **Backend PRs** (only files under `backend/`, at least one, plus optional
-Markdown under `docs/`) merge into `staging` only when **all** of these
-gates pass:
+`i18n/locales/ui/*.json` and Markdown under `docs/`) merge into `staging`
+only when **all** of these gates pass:
 
 1. Agent code review is clean.
 2. Tests and the Linear issue's acceptance checks pass in the PR environment.
@@ -242,23 +239,14 @@ gates pass:
    commit>`) and reopen its issue with the failure. The revert goes in its
    own PR and through the batch CI flow below.
 
-**UI PRs** (anything touching `frontend/`, including mixed PRs) follow
-section 5. A UI PR is ready for review when the section 5 conditions are
-true. The PR stays unmerged until Gilad approves it or tells the orchestrator
-to merge it. Attach a proof card. It names the decision, the Linear issue, the
-acceptance check results, the review verdict and the diff size.
-Merge only after one of two events:
+**UI PRs** touch `frontend/**`. They can also touch `backend/**` and
+`i18n/locales/ui/*.json`, plus optional `docs/**/*.md`. UI PRs merge like
+backend PRs. The same five gates apply, and no human approval is needed
+(Gilad, 2026-11-11).
 
-- Gilad approves that specific PR in chat, on GitHub or with `Approved for
-  merge` on the Linear issue.
-- Gilad tells the orchestrator to merge it.
-
-Merge only in the daily window or when Gilad asks.
-A frontend PR with no meaningful visible change can use the backend path
-(the 2026-10-22 exception below).
-
-Any other PR (files outside `backend/` and `docs/**/*.md`, or no backend
-file) also waits for Gilad's approval.
+Any other PR (a file outside `backend/**`, `frontend/**`,
+`i18n/locales/ui/*.json` and `docs/**/*.md`, or no backend or frontend
+file) waits for Gilad's approval.
 
 **`staging` → `main`**: a change in `staging` is approved for production.
 The orchestrator promotes `staging` to `main` when the staging checks pass
@@ -266,21 +254,17 @@ and CI passes on the promotion PR (see "PR tests and batch CI").
 Do not send a promotion card or a video tour, and do not wait for "promote".
 A manual hold on a change or on a promotion still stops it.
 
-### Backend-only merges (2026-10-19)
+### Backend and UI merges (2026-10-19, UI 2026-11-11)
 
-- The orchestrator may put a backend-only PR into the batch (see "PR tests
+- The orchestrator may put a backend or UI PR into the batch (see "PR tests
   and batch CI") without another human approval. Gates: one current Opus
-  5.5 medium-effort approval of the current head and base, the PR's own
-  checks and its local test evidence pass, and the review confirms no
-  visible UI change. The full CI runs on the batch, not on the PR.
-- Automatic scope: `backend/**`, plus optional Markdown under `docs/**`. At
-  least one backend file. UI, mixed, unknown and other-repository changes
-  keep the human approval.
-- Exception (2026-10-22): a PR that touches frontend files may use this path
-  when the review confirms no meaningful visible change in normal use (for
-  example payload or data-cleanup fixes for stale states, internal refactors,
-  tests, i18n-only string moves). The PR body must say why the change is
-  not visible. If the reviewer is unsure, keep the human approval.
+  5.5 medium-effort approval of the current head and base, and the PR's own
+  checks and its local test evidence pass. The full CI runs on the batch,
+  not on the PR.
+- Automatic scope: `backend/**`, `frontend/**` and
+  `i18n/locales/ui/*.json`, plus optional `docs/**/*.md`. At least one
+  backend or frontend file. Unknown and other-repository changes keep the
+  human approval.
 - Just before a PR goes into the batch, check the full changed-file list,
   the current revision, base, evidence and review policy. Merge the reviewed
   head commit into the batch. Merge the batch PR with a command that requires
@@ -296,7 +280,7 @@ A manual hold on a change or on a promotion still stops it.
   5.5 approval, the orchestrator moves the issue there and notifies Gilad
   only for changes that need human review (PR, preview, checks, review
   evidence). Withdraw readiness quietly if commits, checks or evidence
-  change. A backend merge needs no notification.
+  change. A backend or UI merge needs no notification.
 - Gilad approves with a new comment that contains `Approved for merge`. It
   authorizes only the version in the latest completed review handoff, and
   only from Gilad's Linear account after that handoff. Delegated agent
@@ -352,8 +336,7 @@ A manual hold on a change or on a promotion still stops it.
     Close the old batch PR and delete its branch.
   - A merge conflict between PRs: the orchestrator may resolve it in the
     batch merge commit. Then the batch head needs a fresh Opus 5.5
-    medium-effort review before the merge. If the resolution changes a UI
-    PR's visible UI, stop and wait for Gilad.
+    medium-effort review before the merge.
 - **A red batch run or a red promotion run blocks the promotion.** Fix it in
   a new PR, which goes through the next batch. Do not promote `staging` to
   `main` while the latest batch run or the promotion run is red.
