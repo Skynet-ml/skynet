@@ -51,16 +51,40 @@ _BLANKED = (
     "KIMI_WEB_FETCH_API_KEY",
     "KIMI_WEB_FETCH_BASE_URL",
 )
+# Every ``KIMI_MODEL_*`` name that Kimi Code 2.5.3 reads.
+_MODEL_ENV = (
+    "KIMI_MODEL_ADAPTIVE_THINKING",
+    "KIMI_MODEL_API_KEY",
+    "KIMI_MODEL_BASE_URL",
+    "KIMI_MODEL_CAPABILITIES",
+    "KIMI_MODEL_DISPLAY_NAME",
+    "KIMI_MODEL_MAX_COMPLETION_TOKENS",
+    "KIMI_MODEL_MAX_CONTEXT_SIZE",
+    "KIMI_MODEL_MAX_OUTPUT_SIZE",
+    "KIMI_MODEL_MAX_TOKENS",
+    "KIMI_MODEL_NAME",
+    "KIMI_MODEL_OUTPUT_FORMAT",
+    "KIMI_MODEL_PROVIDER_TYPE",
+    "KIMI_MODEL_REASONING_KEY",
+    "KIMI_MODEL_TEMPERATURE",
+    "KIMI_MODEL_THINKING_EFFORT",
+    "KIMI_MODEL_THINKING_KEEP",
+    "KIMI_MODEL_TOP_P",
+)
 # Stand-in for Kimi Code 2.5.3: it records its call and env, prints the
 # stream-json lines on stdout (two assistant steps with tool calls, a tool
 # result, a meta line, then the final answer), writes one ``wire.jsonl`` for
-# the main agent and one for a subagent under ``KIMI_CODE_HOME``, makes one
+# the main agent and one for a subagent under ``KIMI_CODE_HOME``, prints a Stop
+# hook result line after the answer as Kimi Code does, makes one
 # code change when the workspace has ``main.py``, and exits with FAKE_STATUS.
-_FAKE_KIMI = """#!/bin/sh
+_FAKE_KIMI = (
+    """#!/bin/sh
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
-  for v in KIMI_MODEL_NAME KIMI_MODEL_API_KEY KIMI_MODEL_BASE_URL KIMI_MODEL_PROVIDER_TYPE \\
-    KIMI_MODEL_THINKING_EFFORT KIMI_CODE_HOME KIMI_DISABLE_TELEMETRY KIMI_CODE_NO_AUTO_UPDATE OPENAI_API_KEY; do
+  for v in """
+    + " ".join(_MODEL_ENV)
+    + """ \\
+    KIMI_CODE_HOME KIMI_DISABLE_TELEMETRY KIMI_CODE_NO_AUTO_UPDATE OPENAI_API_KEY; do
     eval "printf '%s=%s\\n' $v \\"\\${$v-<unset>}\\""
   done
 } >> "$FAKE_LOG"
@@ -79,9 +103,11 @@ printf '%s\\n' \\
   '{"role":"tool","tool_call_id":"call_1","content":"print(1)"}' \\
   '{"role":"assistant","tool_calls":[{"type":"function","id":"call_2","function":{"name":"Edit","arguments":"{}"}}]}' \\
   '{"role":"tool","tool_call_id":"call_2","content":"ok"}' \\
-  '{"role":"assistant","content":"I fixed main.py.\\n\\nThe answer is 42."}'
+  '{"role":"assistant","content":"I fixed main.py.\\n\\nThe answer is 42."}' \\
+  '{"role":"assistant","content":"Stop hook\\n\\nAll checks passed."}'
 exit "${FAKE_STATUS:-0}"
 """
+)
 _ANSWER = "I fixed main.py.\n\nThe answer is 42."
 _USAGE = {"input_tokens": 158, "output_tokens": 29}
 
@@ -103,6 +129,7 @@ def _run_with_fake_kimi(
     status: int = 0,
     workspace: Path | None = None,
     parser_fails: bool = False,
+    inherited: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Kimi Code command in a scratch workspace against a fake ``kimi`` binary.
 
@@ -113,6 +140,7 @@ def _run_with_fake_kimi(
         status: Exit status of the fake.
         workspace: An existing checkout to run in; a fresh folder when ``None``.
         parser_fails: Put a ``python3`` on PATH that fails, so the usage parse step fails.
+        inherited: Sandbox env that the launch env overrides, as the bridge applies it.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -140,6 +168,7 @@ def _run_with_fake_kimi(
     log = tmp_path / "calls.log"
     log.touch()
     env = {
+        **(inherited or {}),
         **launch.env,
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
@@ -184,11 +213,11 @@ def test_open_launch_installs_the_checked_tarball_and_sends_model_calls_only_to_
     assert launch.env["KIMI_MODEL_NAME"] == "target-model"
     assert launch.env["KIMI_MODEL_API_KEY"] == _GATEWAY.api_key
     assert launch.env["KIMI_MODEL_PROVIDER_TYPE"] == "openai"
-    assert "KIMI_MODEL_BASE_URL" not in launch.env
+    assert launch.env["KIMI_MODEL_BASE_URL"] == ""
     assert {name: launch.env[name] for name in _BLANKED} == dict.fromkeys(_BLANKED, "")
     assert launch.env["KIMI_DISABLE_TELEMETRY"] == "true"
     assert launch.env["KIMI_CODE_NO_AUTO_UPDATE"] == "true"
-    assert "KIMI_MODEL_THINKING_EFFORT" not in launch.env
+    assert launch.env["KIMI_MODEL_THINKING_EFFORT"] == ""
     assert launch.parse_output is parse_pi_output
     assert launch_payload(launch)["output_format"] == "pi"
 
@@ -212,12 +241,29 @@ def test_supported_effort_goes_to_kimi_code_unchanged(tmp_path: Path, effort: st
     assert f"KIMI_MODEL_THINKING_EFFORT={effort}\n" in calls
 
 
-def test_no_effort_keeps_the_kimi_code_default(tmp_path: Path) -> None:
-    """Leave ``KIMI_MODEL_THINKING_EFFORT`` unset when the user picks no effort."""
-    result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False)
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_keeps_the_kimi_code_default(tmp_path: Path, effort: str | None) -> None:
+    """Keep ``KIMI_MODEL_THINKING_EFFORT`` blank, which Kimi Code reads as unset, when the user picks no effort."""
+    result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, reasoning_effort=effort)
 
     assert result.returncode == 0, result.stderr
-    assert "KIMI_MODEL_THINKING_EFFORT=<unset>\n" in calls
+    assert "KIMI_MODEL_THINKING_EFFORT=\n" in calls
+
+
+def test_inherited_model_env_cannot_change_the_model(tmp_path: Path) -> None:
+    """Set every ``KIMI_MODEL_*`` name Kimi Code reads, so sandbox values for them never reach Kimi Code."""
+    assert set(_MODEL_ENV) <= set(build_launch(_target(), _GATEWAY).env)
+    inherited = dict.fromkeys(_MODEL_ENV, "inherited")
+    inherited["OPENAI_API_KEY"] = "inherited"
+
+    result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, reasoning_effort="high", inherited=inherited)
+
+    assert result.returncode == 0, result.stderr
+    assert "inherited" not in calls
+    assert "KIMI_MODEL_THINKING_EFFORT=high\n" in calls
+    assert "KIMI_MODEL_CAPABILITIES=\n" in calls
+    assert "KIMI_MODEL_MAX_CONTEXT_SIZE=\n" in calls
+    assert f"KIMI_MODEL_BASE_URL={_GATEWAY.url}\n" in calls
 
 
 @pytest.mark.parametrize("effort", ["none", "minimal", "off", "HIGH", "extreme"])
@@ -282,6 +328,33 @@ def test_answer_content_may_be_a_string_or_a_list_of_text_parts(tmp_path: Path, 
     """Read the answer from string content and from joined text parts, and keep the last answer when a step has none."""
     stream = tmp_path / "stream.jsonl"
     lines = [{"role": "assistant", "content": "Earlier."}, {"role": "assistant", "content": content}]
+    stream.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    result = subprocess.run(
+        ["python3", "-I", "-c", KIMI_CODE_TO_PI, str(stream), str(tmp_path / "sessions")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    assert parse_pi_output(result.stdout)[0] == expected
+
+
+@pytest.mark.parametrize(
+    ("last", "expected"),
+    [
+        ({"role": "assistant", "content": "Stop hook\n\nAll checks passed."}, "The answer."),
+        ({"role": "assistant", "content": "PostToolUse hook blocked\n\nNo."}, "The answer."),
+        ({"role": "assistant", "content": "Stop hook\n\nA Stop hook failed to execute."}, "The answer."),
+        ({"role": "assistant", "content": "Stop hook passed."}, "Stop hook passed."),
+        ({"role": "assistant", "content": "My hook\n\nDone."}, "My hook\n\nDone."),
+    ],
+)
+def test_hook_result_lines_never_replace_the_answer(tmp_path: Path, last: dict[str, str], expected: str) -> None:
+    """Skip Kimi Code's hook result lines (a hook event title and a blank line), and keep other answers."""
+    stream = tmp_path / "stream.jsonl"
+    lines = [{"role": "assistant", "content": "The answer."}, last]
     stream.write_text("".join(json.dumps(line) + "\n" for line in lines))
 
     result = subprocess.run(

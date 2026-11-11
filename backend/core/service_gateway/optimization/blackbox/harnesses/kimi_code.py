@@ -41,9 +41,14 @@ KIMI_CODE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # session journals (``wire.jsonl``, one for each agent), then one Pi
 # ``tool_execution_start`` line for each tool call id in the stream, so the
 # bridge's cost and tool-call stops read them. An answer's content may be a
-# string or a list of text parts. The bridge's usage has only input and output
-# tokens, so cache reads and writes count as full input: the count can be high,
-# never low, and a token limit stops a run early rather than late. It runs
+# string or a list of text parts. Kimi Code's PromptJsonWriter also prints each
+# hook result as a ``role: "assistant"`` line, and its only mark is the
+# ``"<hook event> hook[ blocked]"`` title and a blank line before the body, so
+# lines with one of the 2.5.3 HOOK_EVENT_TYPES titles and no ``tool_calls`` are
+# not answers. Without this, a Stop hook line after the answer replaces it.
+# The bridge's usage has only input and output tokens, so cache reads and
+# writes count as full input: the count can be high, never low, and a token
+# limit stops a run early rather than late. It runs
 # inline (``python3 -I -c '...'``) for the reasons :data:`.fx.FX_TO_PI` gives,
 # so it must hold no single quote.
 KIMI_CODE_TO_PI = """import json
@@ -66,6 +71,42 @@ def records(path):
             yield record
 
 
+HOOK_TITLES = {
+    event + suffix
+    for event in (
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PermissionRequest",
+        "PermissionResult",
+        "UserPromptSubmit",
+        "UserPromptQueued",
+        "TurnStarted",
+        "Stop",
+        "StopFailure",
+        "Interrupt",
+        "SessionStart",
+        "SessionEnd",
+        "SessionHeartbeat",
+        "SubagentStart",
+        "SubagentStop",
+        "TaskStarted",
+        "PreCompact",
+        "PostCompact",
+        "Notification",
+    )
+    for suffix in (" hook", " hook blocked")
+}
+
+
+def is_hook(record):
+    content = record.get("content")
+    if "tool_calls" in record or not isinstance(content, str):
+        return False
+    title, blank, _body = content.partition("\\n\\n")
+    return bool(blank) and title in HOOK_TITLES
+
+
 def count(value):
     return value if type(value) is int and value >= 0 else 0
 
@@ -80,7 +121,7 @@ def answer(content):
 text = ""
 calls = []
 for record in records(sys.argv[1]):
-    if record.get("role") != "assistant":
+    if record.get("role") != "assistant" or is_hook(record):
         continue
     text = answer(record.get("content")) or text
     for call in record.get("tool_calls") or []:
@@ -126,6 +167,34 @@ _BLANK_PROVIDER_ENV = dict.fromkeys(
     ),
     "",
 )
+# Every ``KIMI_MODEL_*`` name that Kimi Code 2.5.3 reads (its env model overlay,
+# the provider and thinking env bindings, and the prompt output format). Every
+# launch sets each one, blank when Skynet does not use it, so an inherited value
+# cannot change the model, its limits or its effort. Kimi Code treats a blank
+# value as unset. The run command sets ``KIMI_MODEL_BASE_URL`` from
+# :data:`KIMI_CODE_BASE_URL_FILE`.
+_BLANK_MODEL_ENV = dict.fromkeys(
+    (
+        "KIMI_MODEL_ADAPTIVE_THINKING",
+        "KIMI_MODEL_API_KEY",
+        "KIMI_MODEL_BASE_URL",
+        "KIMI_MODEL_CAPABILITIES",
+        "KIMI_MODEL_DISPLAY_NAME",
+        "KIMI_MODEL_MAX_COMPLETION_TOKENS",
+        "KIMI_MODEL_MAX_CONTEXT_SIZE",
+        "KIMI_MODEL_MAX_OUTPUT_SIZE",
+        "KIMI_MODEL_MAX_TOKENS",
+        "KIMI_MODEL_NAME",
+        "KIMI_MODEL_OUTPUT_FORMAT",
+        "KIMI_MODEL_PROVIDER_TYPE",
+        "KIMI_MODEL_REASONING_KEY",
+        "KIMI_MODEL_TEMPERATURE",
+        "KIMI_MODEL_THINKING_EFFORT",
+        "KIMI_MODEL_THINKING_KEEP",
+        "KIMI_MODEL_TOP_P",
+    ),
+    "",
+)
 _KIMI_RUN_ENV = {
     "KIMI_DISABLE_TELEMETRY": "true",
     "KIMI_CODE_NO_AUTO_UPDATE": "true",
@@ -158,7 +227,7 @@ def _kimi_code_install() -> str:
 
 
 def _effort_env(reasoning_effort: str | None) -> dict[str, str]:
-    """Return the ``KIMI_MODEL_THINKING_EFFORT`` setting, or nothing for Kimi Code's default.
+    """Return the ``KIMI_MODEL_THINKING_EFFORT`` setting, or nothing to keep it blank for Kimi Code's default.
 
     Args:
         reasoning_effort: The user's effort for the model, or ``None``.
@@ -202,12 +271,18 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     env = {
         **_base_env(model, gateway),
         **_BLANK_PROVIDER_ENV,
+        **_BLANK_MODEL_ENV,
         **_KIMI_RUN_ENV,
         "KIMI_MODEL_NAME": model,
         "KIMI_MODEL_PROVIDER_TYPE": "openai",
         "KIMI_MODEL_API_KEY": gateway.api_key,
         **_effort_env(reasoning_effort),
     }
+    # Kimi Code 2.5.3 takes the prompt only as the ``--prompt`` value: print
+    # mode has no prompt-file option, does not read stdin, and sends the value
+    # unchanged as the user message. So, unlike Pi's ``@file``, the prompt is
+    # one argv string, and Linux refuses a single argument over 128 KiB
+    # (MAX_ARG_STRLEN) with E2BIG before Kimi Code starts.
     run_command = (
         '_kc_dir="$(mktemp -d)" || exit 1; '
         """trap 'rm -rf "$_kc_dir"' EXIT; """
