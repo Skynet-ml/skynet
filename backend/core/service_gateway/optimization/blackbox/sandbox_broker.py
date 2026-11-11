@@ -276,6 +276,14 @@ class _ParentSandboxRuntime:
         return self._broker._open_parent(spec)
 
     @property
+    def max_lifetime_seconds(self) -> float:
+        """Return the longest lifetime a box opened here may ask for, the profile maximum.
+
+        A per-run deadline caps only guest boxes (SKY-572), so it does not lower this.
+        """
+        return self._broker._maximum
+
+    @property
     def supports_snapshots(self) -> bool:
         """Return whether the run has a snapshot cache before its deadline, so ``snapshot`` can save a box."""
         return self._broker._snapshots_live()
@@ -317,6 +325,7 @@ class SandboxBroker:
         *,
         image: str,
         max_lifetime_seconds: float,
+        guest_lifetime_seconds: float | None = None,
         vcpus: int = 2,
         tags: Mapping[str, str] | None = None,
         command_runner: SandboxCommandRunner | None = None,
@@ -329,6 +338,9 @@ class SandboxBroker:
             runtime: Metered Vercel runtime (or free local Docker runtime) held only in the trusted parent.
             image: Deployment-selected immutable prebuilt image digest.
             max_lifetime_seconds: Largest session the parent will authorize.
+            guest_lifetime_seconds: Largest session a guest-opened box gets, such
+                as a per-run deadline; ``max_lifetime_seconds`` when None. It
+                never exceeds ``max_lifetime_seconds``.
             vcpus: Fixed allocation selected by the parent.
             tags: Parent-owned job identity used by cleanup and reconciliation.
             command_runner: Optional model mailbox command wrapper.
@@ -342,6 +354,9 @@ class SandboxBroker:
         self._runtime = runtime
         self._image = image
         self._maximum = _duration(max_lifetime_seconds, VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS)
+        self._guest_maximum = (
+            self._maximum if guest_lifetime_seconds is None else _duration(guest_lifetime_seconds, self._maximum)
+        )
         # A local Docker box is free and its image is a bare local id, which
         # the Vercel price check would refuse.
         if getattr(runtime, "billable", True):
@@ -402,7 +417,7 @@ class SandboxBroker:
         spec = payload.get("spec")
         if not isinstance(request_id, str) or not request_id or len(request_id) > 100 or not isinstance(spec, dict):
             raise ServiceError("Sandbox creation requires a stable request identity and spec.")
-        lifetime = _duration(spec.get("lifetime_seconds"), self._maximum)
+        lifetime = _duration(spec.get("lifetime_seconds"), self._guest_maximum)
         if (spec.get("image") is not None and spec.get("image") != self._image) or spec.get(
             "vcpus", self._vcpus
         ) != self._vcpus:

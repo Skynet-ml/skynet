@@ -19,6 +19,7 @@ from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
 
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
+from ..repo_scorer import _STAGE_LAYOUT_SECONDS
 from ..sandbox import _CODEX_REQUIREMENTS_COMMAND, _CODEX_REQUIREMENTS_READBACK, CommandResult, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 
@@ -193,8 +194,38 @@ def test_the_parent_box_reaches_only_funded_registries_and_carries_no_credential
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("registry.npmjs.org",), operation_key="k"))
     with pytest.raises(ServiceError, match="credentials"):
         narrow.open(SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), env={"A": "b"}, operation_key="k"))
+    for bad in (0, -1, float("nan"), float("inf"), True, 600):
+        with pytest.raises(ServiceError, match="duration"):
+            narrow.open(SandboxSpec(lifetime_seconds=bad, allowed_hosts=("pypi.org",), operation_key="k"))
+
+
+def test_a_run_deadline_caps_only_the_guest_so_the_scorer_outlives_it() -> None:
+    """A 120 s deadline caps the guest box; the scorer and stage boxes keep the profile (SKY-572).
+
+    The scorer box opens during staging, 50 s before the guest. With the
+    deadline on every box it would expire first and end the run for the wrong
+    reason; here the guest box expires first, at its deadline.
+    """
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=3600, guest_lifetime_seconds=120)
+    parent = broker.parent_runtime(())
+    parent.open(SandboxSpec(lifetime_seconds=parent.max_lifetime_seconds, operation_key="repo-scorer:a"))
+    parent.open(SandboxSpec(lifetime_seconds=30.0 + _STAGE_LAYOUT_SECONDS, operation_key="stage:a"))
     with pytest.raises(ServiceError, match="duration"):
-        narrow.open(SandboxSpec(lifetime_seconds=600, allowed_hosts=("pypi.org",), operation_key="k"))
+        parent.open(SandboxSpec(lifetime_seconds=parent.max_lifetime_seconds + 1, operation_key="stage:b"))
+    broker.handle("open", _open_payload(lifetime_seconds=120))
+    with pytest.raises(ServiceError, match="duration"):
+        broker.handle("open", {"request_id": "two", "spec": {"lifetime_seconds": 121}})
+    scorer, stage, guest = (spec.lifetime_seconds for spec in runtime.specs)
+    assert (scorer, stage, guest) == (3600.0, 630.0, 120.0)
+    staging_seconds = 50
+    assert staging_seconds + guest < scorer
+
+
+def test_a_guest_lifetime_cannot_exceed_the_profile() -> None:
+    """A guest lifetime above the broker maximum is refused, so a deadline only shortens boxes."""
+    with pytest.raises(ServiceError, match="duration"):
+        SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=120, guest_lifetime_seconds=121)
 
 
 def test_a_parent_box_without_a_network_switch_fails_closed() -> None:
