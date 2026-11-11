@@ -107,6 +107,19 @@ _PROTECTED_ENV = {
     "TOKENHUB_API_KEY": "",
     "UPSTAGE_API_KEY": "",
     "XIAOMI_API_KEY": "",
+    "NOUS_API_KEY": "",
+    "DEEPINFRA_API_KEY": "",
+    "NOVITA_API_KEY": "",
+    "QWEN_API_KEY": "",
+    # Not read by 0.19.0; blanked so a later Hermes cannot pick it up.
+    "AI_GATEWAY_API_KEY": "",
+    # Speech tools call Groq and OpenAI audio with their own keys.
+    "GROQ_API_KEY": "",
+    "VOICE_TOOLS_OPENAI_KEY": "",
+    # Side tasks (vision, web extract, approval) can take their own endpoint key.
+    "AUXILIARY_VISION_API_KEY": "",
+    "AUXILIARY_WEB_EXTRACT_API_KEY": "",
+    "AUXILIARY_APPROVAL_API_KEY": "",
     # The Copilot provider takes a GitHub token as its model key.
     "COPILOT_GITHUB_TOKEN": "",
     "GH_TOKEN": "",

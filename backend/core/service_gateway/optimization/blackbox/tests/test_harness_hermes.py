@@ -46,6 +46,20 @@ _RELAY_URL = "http://127.0.0.1:3210/v1"
 _RECORDED_STDOUT = "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.\n"
 _RECORDED_STDERR = "\nsession_id: 20261108_120000_abcdef\n"
 _DIRECT_PROVIDER_KEYS = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "KIMI_API_KEY", "GLM_API_KEY"}
+# Keys Hermes 0.19 reads for other model routes, speech tools and side tasks.
+# ``AI_GATEWAY_API_KEY`` is not in 0.19.0; it is blanked for later releases.
+_EXTRA_MODEL_KEYS = {
+    "AI_GATEWAY_API_KEY",
+    "NOUS_API_KEY",
+    "GROQ_API_KEY",
+    "DEEPINFRA_API_KEY",
+    "NOVITA_API_KEY",
+    "QWEN_API_KEY",
+    "VOICE_TOOLS_OPENAI_KEY",
+    "AUXILIARY_VISION_API_KEY",
+    "AUXILIARY_WEB_EXTRACT_API_KEY",
+    "AUXILIARY_APPROVAL_API_KEY",
+}
 _PROMPT = "Fix `solution.py` and say $(echo done)."
 # Stand-in for the hermes binary: it records its call and prints a fixed answer.
 _FAKE_HERMES = """#!/bin/sh
@@ -54,6 +68,7 @@ _FAKE_HERMES = """#!/bin/sh
   printf 'OPENAI_BASE_URL=%s\\n' "$OPENAI_BASE_URL"
   printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
   printf 'ANTHROPIC_API_KEY=%s\\n' "$ANTHROPIC_API_KEY"
+  printf 'NOUS_API_KEY=%s\\n' "$NOUS_API_KEY"
   printf 'HERMES_HOME=%s\\n' "$HERMES_HOME"
   printf 'CONFIG=%s\\n' "$(tr -d '\\n' < "$HERMES_HOME/config.yaml")"
 } >> "$FAKE_LOG"
@@ -236,6 +251,7 @@ def _run_with_fake_hermes(
     env = {
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
         "ANTHROPIC_API_KEY": "inherited-key",
+        "NOUS_API_KEY": "inherited-key",
         **launch.env,
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
@@ -464,6 +480,7 @@ def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Pat
         assert launch.env[key] == value
     assert launch.env["DO_NOT_TRACK"] == "1"
     blanked = {name for name, value in _PROTECTED_ENV.items() if value == ""}
+    assert blanked >= _EXTRA_MODEL_KEYS
     assert blanked >= _DIRECT_PROVIDER_KEYS
     assert {"CLAUDE_CODE_OAUTH_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} <= set(_PROTECTED_ENV)
     for name, content in launch.files.items():
@@ -501,6 +518,7 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
     assert _logged(calls, "OPENAI_BASE_URL") == _RELAY_URL
     assert _logged(calls, "OPENAI_API_KEY") == _GATEWAY.api_key
     assert _logged(calls, "ANTHROPIC_API_KEY") == ""
+    assert _logged(calls, "NOUS_API_KEY") == ""
     assert _RELAY_URL in _logged(calls, "CONFIG")
     assert _GATEWAY.url not in calls
     home = Path(_logged(calls, "HERMES_HOME"))
