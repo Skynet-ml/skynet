@@ -6,6 +6,7 @@ import base64
 import http.client
 import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -837,6 +838,114 @@ def test_stage_mode_runs_the_entry_function(tmp_path: Path, source: str, answer:
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == answer
+
+
+def _stage_call(tmp_path: Path, port: int) -> tuple[Path, Path]:
+    """Lay out a stage tree and one call folder whose relay config names one MCP server.
+
+    Args:
+        tmp_path: The test's folder, which stands for the stage box.
+        port: The relay port the config asks for.
+
+    Returns:
+        The stage tree and the call folder.
+    """
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    (call_dir / runner.INPUT_FILE).write_text("3")
+    config = {
+        "prefix": "APP_STAGE_test:",
+        "response_dir": "../relay",
+        "names": [],
+        "services": [],
+        "mcp": ["search"],
+        "mcp_file": ".mcp.json",
+        "port": port,
+    }
+    (call_dir / runner.STAGE_RELAY_FILE).write_text(json.dumps(config))
+    return tree, call_dir
+
+
+def test_stage_mode_serves_the_stage_relay_and_names_the_stages_own_mcp_file(tmp_path: Path) -> None:
+    """``--stage`` with a relay config gives the entry its MCP variables and the stage's own MCP file."""
+    tree, call_dir = _stage_call(tmp_path, 0)
+    (tree / "stage.py").write_text(
+        "import os\n"
+        "def run(value):\n"
+        "    return {key: os.environ[key] for key in ('SKYNET_MCP_SEARCH_URL', 'SKYNET_MCP_CONFIG')}\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    env = json.loads((call_dir / runner.OUTPUT_FILE).read_text())["output"]
+    url = urllib.parse.urlsplit(env["SKYNET_MCP_SEARCH_URL"])
+    assert url.hostname == "127.0.0.1"
+    assert url.port
+    assert url.path == "/mcp/search"
+    assert env["SKYNET_MCP_CONFIG"] == str((tree / ".mcp.json").resolve())
+
+
+def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exit_code(tmp_path: Path) -> None:
+    """``--stage-command`` runs the command on ``input.json`` into ``output.json``, with the relay's variables."""
+    tree, call_dir = _stage_call(tmp_path, 0)
+    script = (
+        "import json, os, sys\n"
+        "print(json.dumps({'input': json.load(sys.stdin), 'url': os.environ['SKYNET_MCP_SEARCH_URL']}))\n"
+        "sys.exit(3)\n"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(runner.__file__)),
+            runner.STAGE_COMMAND_FLAG,
+            str(call_dir),
+            sys.executable,
+            "-c",
+            script,
+        ],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 3, completed.stderr
+    written = json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+    assert written["input"] == 3
+    assert written["url"].startswith("http://127.0.0.1:")
+    assert written["url"].endswith("/mcp/search")
+
+
+def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_path: Path) -> None:
+    """A call with no relay config runs the command with the box's own environment only."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("{}")
+    script = "import json, os\nprint(json.dumps(sorted(k for k in os.environ if k.startswith('SKYNET_MCP'))))\n"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(runner.__file__)),
+            runner.STAGE_COMMAND_FLAG,
+            str(call_dir),
+            sys.executable,
+            "-c",
+            script,
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={key: value for key, value in os.environ.items() if not key.startswith("SKYNET_MCP")},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == []
 
 
 def test_service_proxy_relays_each_request_through_the_parent() -> None:

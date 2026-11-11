@@ -134,7 +134,6 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
     ("raw", "key"),
     [
         (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
-        (b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n', "[target.planner] mcp"),
         (
             b'[services.maps]\nurl = "https://api.example.com"\n'
             b'[target.planner]\nentry = "agents/planner.py:plan"\nservices = ["maps"]\n',
@@ -205,6 +204,16 @@ def test_a_proposer_mcp_file_passes_and_proposer_services_still_fail(tmp_path: P
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_target_stages_pass_in_every_place(tmp_path: Path, raw: bytes, place: str) -> None:
     """The scorer opens each stage offline from its entry, timeout and vCPUs, and the judges read its rules (SKY-599)."""
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
+
+    assert failures == []
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_target_mcp_file_passes_in_every_place(tmp_path: Path, place: str) -> None:
+    """Each stage reaches the servers of its own MCP file through its stage box's relay (SKY-611)."""
+    raw = b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n'
+
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert failures == []

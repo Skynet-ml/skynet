@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import http.server
+import itertools
 import json
 import logging
 import os
@@ -848,6 +849,8 @@ def _stage_scorer(
     *,
     scorer_runtime: Any = None,
     protected_paths: tuple[str, ...] = (),
+    tree: Mapping[str, str] | None = None,
+    secrets: Mapping[str, str] | None = None,
     **kwargs: Any,
 ) -> tuple[RepoScorer, Path]:
     """Open a scorer whose run has target stages.
@@ -859,13 +862,16 @@ def _stage_scorer(
         stages: The run's stages.
         scorer_runtime: Opens the scorer's box; a plain local box when unset.
         protected_paths: Paths the version's code must not change while it runs.
+        tree: More files for the repository and the stage tree.
+        secrets: The run's secrets.
         **kwargs: More ``RepoScorer`` options.
 
     Returns:
         The scorer and the tree's archive.
     """
-    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.py": "hidden\n", "judge/labels.csv": "1\n"})
-    stage_archive = _archive(tmp_path / "stage", STAGE_TREE)
+    files = {**STAGE_TREE, **(tree or {})}
+    archive = _archive(tmp_path, {**files, "eval/metric.py": "hidden\n", "judge/labels.csv": "1\n"})
+    stage_archive = _archive(tmp_path / "stage", files)
     scorer = RepoScorer(
         RepoWorkspace(
             runtime=scorer_runtime or LocalSubprocessRuntime(),
@@ -874,7 +880,7 @@ def _stage_scorer(
             editable_paths=["src"],
             readonly_paths=[],
             setup_command=None,
-            secrets={},
+            secrets=dict(secrets or {}),
             protected_paths=list(protected_paths),
         ),
         code,
@@ -2598,6 +2604,199 @@ def test_the_scorer_gives_each_role_only_the_servers_of_its_own_mcp_file(tmp_pat
     )
     assert seen["metric"][1]["error"].endswith(
         "MCP server 'search' is not in eval/.mcp.json, the [metric] MCP file. Add it there."
+    )
+
+
+# A stage that calls its own ``search`` MCP server through the stage box's loopback relay (SKY-611).
+_LOOKUP_STAGE = """
+import os
+import time
+import urllib.error
+import urllib.request
+
+
+class _Keep(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def lookup(value):
+    started = time.time()
+    # Long enough that calls in parallel boxes would overlap.
+    time.sleep(0.3)
+    body = value["body"].encode() if value.get("body") else None
+    url = os.environ["SKYNET_MCP_SEARCH_URL"] + value.get("path", "")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Keep)
+    try:
+        with opener.open(urllib.request.Request(url, data=body, method="POST" if body else "GET")) as response:
+            status, text = response.status, response.read().decode()
+    except urllib.error.HTTPError as error:
+        status, text = error.code, ""
+    return {"status": status, "body": text, "key_in_env": "JUDGE_KEY" in os.environ, "span": [started, time.time()]}
+"""
+_LOOKUP_COMMAND = (
+    "python3",
+    "-c",
+    "import json, sys; sys.path.insert(0, 'src'); import lookup; print(json.dumps(lookup.lookup(json.load(sys.stdin))))",
+)
+_LOOKUP_SCORER = (
+    "import json\n"
+    "from concurrent.futures import ThreadPoolExecutor\n"
+    "from skynet import call\n"
+    "def score(repo_path, case=None):\n"
+    "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}, {'path': '/events'}]\n"
+    "    with ThreadPoolExecutor(3) as pool:\n"
+    "        answers = list(pool.map(lambda ask: call('lookup', ask), asks))\n"
+    "    return {'score': 1.0, 'feedback': json.dumps(answers)}\n"
+)
+
+
+@pytest.mark.parametrize("entry", ["src/lookup.py:lookup", _LOOKUP_COMMAND])
+def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
+    tmp_path: Path, echo: _Echo, entry: str | tuple[str, ...]
+) -> None:
+    """Stage calls with MCP run one at a time even at ``max_concurrency=3``, and each gets its own redacted answer.
+
+    A redirect stays unfollowed, and each call is recorded.
+    """
+    echo.release.set()
+    sink = _CallSink()
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        _LOOKUP_SCORER,
+        runtime,
+        {"lookup": TargetStage(entry=entry, timeout=30)},
+        tree={"src/lookup.py": _LOOKUP_STAGE},
+        secrets={"JUDGE_KEY": "judge-secret-value"},
+        mcp_roles={"target.lookup": _mcp_role(echo.port)},
+        secret_hosts={"JUDGE_KEY": "judge.example.test"},
+        secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+        max_concurrency=3,
+    )
+    try:
+        result = scorer.score("")
+    finally:
+        scorer.close()
+
+    posted, redirected, streamed = json.loads(result["feedback"])
+    spans = sorted(answer["span"] for answer in (posted, redirected, streamed))
+    assert all(earlier[1] <= later[0] for earlier, later in itertools.pairwise(spans))
+    assert (posted["status"], json.loads(posted["body"])) == (200, {"seen": "[REDACTED]"})
+    assert redirected["status"] == 302
+    assert streamed["status"] == 200
+    assert "[REDACTED]" in streamed["body"]
+    assert streamed["body"].endswith("data: last\n\n")
+    assert not any(answer["key_in_env"] for answer in (posted, redirected, streamed))
+    assert "judge-secret-value" not in result["feedback"]
+    assert sorted(echo.paths) == ["/echo", "/echo/events", "/echo/redirect"]
+    assert (
+        sorted((call["role"], call["kind"], call["candidate_id"]) for _, call, _ in sink.calls)
+        == [("target.lookup", "mcp", "cand-1")] * 3
+    )
+
+
+def test_a_budget_stop_in_a_stages_mcp_call_stops_the_evaluation(
+    tmp_path: Path, echo: _Echo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stage that swallows its MCP call's 503 still stops the evaluation with the budget stop (SKY-611)."""
+
+    def stop(**_: Any) -> bytes:
+        """Raise the budget stop as the metered relay does.
+
+        Raises:
+            BudgetReached: Always.
+        """
+        raise BudgetReached("spent")
+
+    monkeypatch.setattr(repo_scorer, "relay_request", stop)
+    code = (
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        return {'score': call('lookup', {'body': '{}'})['status'] / 1000, 'feedback': 'ran'}\n"
+        "    except Exception:\n"
+        "        return {'score': 0.5, 'feedback': 'swallowed'}\n"
+    )
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"lookup": TargetStage(entry="src/lookup.py:lookup", timeout=30)},
+        tree={"src/lookup.py": _LOOKUP_STAGE},
+        secrets={"JUDGE_KEY": "judge-secret-value"},
+        mcp_roles={"target.lookup": _mcp_role(echo.port)},
+        secret_hosts={"JUDGE_KEY": "judge.example.test"},
+        secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+    )
+    try:
+        with pytest.raises(BudgetReached, match="spent"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+
+def test_the_evaluation_reads_a_budget_stop_a_stage_relay_kept_after_its_call(tmp_path: Path) -> None:
+    """A stop that a stage's MCP stream hits after its call returned still reaches the evaluation's end (SKY-611)."""
+    stage = TargetStage(
+        entry="src/stages.py:double",
+        mcp=".mcp.json",
+        mcp_servers=(McpServer(name="search", url="https://search.example.test/mcp", headers={}),),
+    )
+    scorer, _ = _stage_scorer(
+        tmp_path, SCORER, RecordingRuntime(), {"lookup": stage}, mcp_roles={"target.lookup": stage}
+    )
+    box = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, network_disabled=True))
+    relay = scorer._relay({"lookup": box}, "calls/000001/stages")
+    try:
+        assert relay.first_control() is None
+        relay._stage_relays["lookup"].control = {"code": "budget_reached", "message": "spent"}
+        assert relay.control is None
+        assert relay.first_control() == {"code": "budget_reached", "message": "spent"}
+        relay.control = {"code": "usage_pending", "message": "pending"}
+        assert relay.first_control() == {"code": "usage_pending", "message": "pending"}
+    finally:
+        relay.close()
+        scorer.close()
+        box.close()
+
+
+def test_a_stage_relay_refuses_another_roles_server_and_names_the_stage_mcp_file(tmp_path: Path) -> None:
+    """A stage reaches only the servers of its own MCP file, and the refusal names that file (SKY-611)."""
+    stage = TargetStage(
+        entry="src/stages.py:double",
+        mcp="agents/.mcp.json",
+        mcp_servers=(McpServer(name="search", url="https://search.example.test/mcp", headers={}),),
+    )
+    metric = RoleEnvironment(
+        mcp="eval/.mcp.json",
+        mcp_servers=(McpServer(name="grader", url="https://grader.example.test/mcp", headers={}),),
+    )
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        SCORER,
+        RecordingRuntime(),
+        {"lookup": stage, "double": STAGES["double"]},
+        mcp_roles={"metric": metric, "target.lookup": stage},
+    )
+    box = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, network_disabled=True))
+    relay = scorer._relay({"lookup": box, "double": box}, "calls/000001/stages")
+    try:
+        assert list(relay._stage_relays) == ["lookup"]
+        stage_relay = relay._stage_relays["lookup"]
+        assert stage_relay.config("../..")["mcp"] == ["search"]
+        assert stage_relay.config("../..")["mcp_file"] == "agents/.mcp.json"
+        assert stage_relay.config("../..")["response_dir"] == "../../.app-stage/relay"
+        refusal = stage_relay._mcp_refusal("grader")
+        assert relay.config("/work")["mcp"] == ["grader"]
+    finally:
+        relay.close()
+        scorer.close()
+        box.close()
+    assert refusal["status"] == 403
+    assert refusal["error"].endswith(
+        "MCP server 'grader' is not in agents/.mcp.json, the [target.lookup] MCP file. Add it there."
     )
 
 
