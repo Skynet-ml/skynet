@@ -271,6 +271,93 @@ def localize_preflight(
     return response.model_copy(update=update)
 
 
+def checked_preflight(
+    request: WizardPreflightRequest, user: AuthenticatedUser, job_store: Any
+) -> tuple[WizardPreflightResponse, UnifiedRunRequest | None]:
+    """Run one setup check, with its messages still in the Hebrew base.
+
+    Args:
+        request: Current authored inputs and the user's shared budget revision.
+        user: Authenticated owner used for data, credentials, and spending.
+        job_store: Store that holds staged data, connectors, the budget and the evidence.
+
+    Returns:
+        The check result, and the canonical unified spec it ran (None for other workflows).
+    """
+    enforce_submission_rate(user.username)
+    spec: UnifiedRunRequest | None = None
+    payload = copy.deepcopy(request.payload)
+    payload["username"] = user.username
+    payload["execution_budget_id"] = request.execution_budget_id
+    payload["execution_budget_revision"] = request.execution_budget_revision
+    # A unified run is seeded from its task, not its budget, so the
+    # evidence fingerprint matches what POST /optimize later recomputes.
+    if payload.get("seed") is None and request.workflow != "unified":
+        payload["seed"] = setup_seed(request.execution_budget_id)
+    if request.scope == "execution" or request.workflow == "unified":
+        model: type[BaseModel] = BlackboxRunRequest if request.workflow == "anything" else UnifiedRunRequest
+        try:
+            typed = model.model_validate(payload)
+        except ValidationError as error:
+            raise RequestValidationError(error.errors()) from error
+        # The dump below writes host_cli, so fill it first, as the submit route does.
+        fill_proposer_host_cli(job_store, user.username, typed)
+        requested_source = typed.token_source
+        configs, _ = normalize_model_token_sources(typed)
+        enforce_local_mode_sources(typed, requested_source, configs)
+        if isinstance(typed, UnifiedRunRequest):
+            reflection = typed.models.reflection_model
+            novelty = bool(typed.optimizer.shinka and typed.optimizer.shinka.novelty)
+            _materialize_unified_cases(typed, job_store=job_store, username=user.username)
+            _default_unified_seed(typed)
+            spec = typed
+        else:
+            _materialize_repo_cases(typed, job_store=job_store, username=user.username)
+            reflection = typed.reflection_model_settings
+            novelty = bool(typed.shinka and typed.shinka.novelty)
+        _admit_byok_models(job_store, user.username, configs, reflection, novelty)
+        payload = typed.model_dump(mode="json", by_alias=True)
+    else:
+        # The evaluation check skips the full run request, but the sandbox
+        # still reads every scorer field, so it gets the run's defaults and limits.
+        try:
+            scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
+        except ValidationError as error:
+            raise RequestValidationError(
+                [{**detail, "loc": ("scorer", *detail["loc"])} for detail in error.errors()]
+            ) from error
+        enforce_raw_local_mode_sources(payload)
+        payload["scorer"] = scorer.model_dump(mode="json", by_alias=True)
+        # The scorer dry run reads the first case, so a staged dataset is
+        # inlined here exactly as the execution check inlines it.
+        staged_id = payload.pop("staged_dataset_id", None) if request.workflow == "anything" else None
+        if staged_id and not payload.get("cases"):
+            payload["cases"] = staged_repo_cases(
+                staged_id,
+                input_fields=payload.get("input_fields") or [],
+                expected_field=payload.get("expected_field"),
+                job_store=job_store,
+                username=user.username,
+            )
+        configs = []
+        reflection = None
+        for raw in _model_config_dicts(payload):
+            try:
+                config = ModelConfig.model_validate(raw)
+            except ValidationError as error:
+                raise RequestValidationError(error.errors()) from error
+            config.token_source = config.token_source or payload.get("token_source", "managed")
+            config.base_url = None
+            config.extra = safe_connection_params(config.extra)
+            configs.append(config)
+            if raw is payload.get("reflection_model_config"):
+                reflection = config
+        shinka = payload.get("shinka")
+        novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
+        _admit_byok_models(job_store, user.username, configs, reflection, novelty)
+    return run_preflight(request.model_copy(update={"payload": payload}), user, job_store), spec
+
+
 def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
     """Build paid Continue validation using the same ledger as the eventual run."""
     router = APIRouter()
@@ -291,97 +378,12 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
             worded in the caller's locale.
         """
         try:
-            response, spec = _checked_preflight(request, user)
+            response, spec = checked_preflight(request, user, job_store)
         except DomainError as error:
             if error.code.startswith(("submission.byok_", "billing.byok_")):
                 error.detail = t_locale(request_locale(request.locale, accept_language), error.code, **error.params)
             raise
         return localize_preflight(response, spec, request_locale(request.locale, accept_language))
-
-    def _checked_preflight(
-        request: WizardPreflightRequest, user: AuthenticatedUser
-    ) -> tuple[WizardPreflightResponse, UnifiedRunRequest | None]:
-        """Run one setup check, with its messages still in the Hebrew base.
-
-        Args:
-            request: Current authored inputs and the user's shared budget revision.
-            user: Authenticated owner used for data, credentials, and spending.
-
-        Returns:
-            The check result, and the canonical unified spec it ran (None for other workflows).
-        """
-        enforce_submission_rate(user.username)
-        spec: UnifiedRunRequest | None = None
-        payload = copy.deepcopy(request.payload)
-        payload["username"] = user.username
-        payload["execution_budget_id"] = request.execution_budget_id
-        payload["execution_budget_revision"] = request.execution_budget_revision
-        # A unified run is seeded from its task, not its budget, so the
-        # evidence fingerprint matches what POST /optimize later recomputes.
-        if payload.get("seed") is None and request.workflow != "unified":
-            payload["seed"] = setup_seed(request.execution_budget_id)
-        if request.scope == "execution" or request.workflow == "unified":
-            model: type[BaseModel] = BlackboxRunRequest if request.workflow == "anything" else UnifiedRunRequest
-            try:
-                typed = model.model_validate(payload)
-            except ValidationError as error:
-                raise RequestValidationError(error.errors()) from error
-            # The dump below writes host_cli, so fill it first, as the submit route does.
-            fill_proposer_host_cli(job_store, user.username, typed)
-            requested_source = typed.token_source
-            configs, _ = normalize_model_token_sources(typed)
-            enforce_local_mode_sources(typed, requested_source, configs)
-            if isinstance(typed, UnifiedRunRequest):
-                reflection = typed.models.reflection_model
-                novelty = bool(typed.optimizer.shinka and typed.optimizer.shinka.novelty)
-                _materialize_unified_cases(typed, job_store=job_store, username=user.username)
-                _default_unified_seed(typed)
-                spec = typed
-            else:
-                _materialize_repo_cases(typed, job_store=job_store, username=user.username)
-                reflection = typed.reflection_model_settings
-                novelty = bool(typed.shinka and typed.shinka.novelty)
-            _admit_byok_models(job_store, user.username, configs, reflection, novelty)
-            payload = typed.model_dump(mode="json", by_alias=True)
-        else:
-            # The evaluation check skips the full run request, but the sandbox
-            # still reads every scorer field, so it gets the run's defaults and limits.
-            try:
-                scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
-            except ValidationError as error:
-                raise RequestValidationError(
-                    [{**detail, "loc": ("scorer", *detail["loc"])} for detail in error.errors()]
-                ) from error
-            enforce_raw_local_mode_sources(payload)
-            payload["scorer"] = scorer.model_dump(mode="json", by_alias=True)
-            # The scorer dry run reads the first case, so a staged dataset is
-            # inlined here exactly as the execution check inlines it.
-            staged_id = payload.pop("staged_dataset_id", None) if request.workflow == "anything" else None
-            if staged_id and not payload.get("cases"):
-                payload["cases"] = staged_repo_cases(
-                    staged_id,
-                    input_fields=payload.get("input_fields") or [],
-                    expected_field=payload.get("expected_field"),
-                    job_store=job_store,
-                    username=user.username,
-                )
-            configs = []
-            reflection = None
-            for raw in _model_config_dicts(payload):
-                try:
-                    config = ModelConfig.model_validate(raw)
-                except ValidationError as error:
-                    raise RequestValidationError(error.errors()) from error
-                config.token_source = config.token_source or payload.get("token_source", "managed")
-                config.base_url = None
-                config.extra = safe_connection_params(config.extra)
-                configs.append(config)
-                if raw is payload.get("reflection_model_config"):
-                    reflection = config
-            shinka = payload.get("shinka")
-            novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
-            _admit_byok_models(job_store, user.username, configs, reflection, novelty)
-        return run_preflight(request.model_copy(update={"payload": payload}), user, job_store), spec
 
     @router.post("/wizard/preflight/stream", include_in_schema=False)
     def stream_preflight(
@@ -510,7 +512,7 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
             return static
         if spec.execution_budget_id is None or spec.execution_budget_revision is None:
             raise HTTPException(status_code=402, detail=t_locale(locale, "submit.preflight.contract_budget_missing"))
-        result, _ = _checked_preflight(
+        result, _ = checked_preflight(
             WizardPreflightRequest(
                 scope="evaluation",
                 workflow="unified",
@@ -520,6 +522,7 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
                 contract_sample_count=request.sample_count,
             ),
             user,
+            job_store,
         )
         contract = (result.workflow_result or {}).get("contract")
         if isinstance(contract, dict):

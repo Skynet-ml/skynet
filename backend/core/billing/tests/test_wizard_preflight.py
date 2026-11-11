@@ -154,6 +154,20 @@ def test_continue_reuses_matching_success_and_preserves_setup_spend(setup_client
     assert len(calls) == 1
 
 
+def test_checked_preflight_runs_the_route_check_for_other_callers(setup_client) -> None:
+    """Give the MCP preflight tool the route's own check and evidence, not a copy (SKY-600)."""
+    client, engine, calls = setup_client
+    budget = _budget(client)
+    first = client.post("/wizard/preflight", json=_request(budget)).json()
+    request = wizard_preflight.WizardPreflightRequest.model_validate(_request(budget))
+    response, spec = preflight_router.checked_preflight(
+        request, AuthenticatedUser("alice", "user", ()), SimpleNamespace(engine=engine)
+    )
+    assert (response.id, response.status, response.may_advance) == (first["id"], "succeeded", True)
+    assert spec is None
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     ("model", "base", "novelty", "expected"),
     [

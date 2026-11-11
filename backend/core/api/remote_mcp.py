@@ -34,6 +34,7 @@ from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ..config import settings
 from ..i18n import DEFAULT_LOCALE, request_locale, t_locale, term
 from .auth import AuthenticatedUser
 from .converters import job_owner
@@ -52,6 +53,7 @@ from .response_limits import AGENT_DEFAULT_LIST, AGENT_MAX_LIST, clamp_limit
 from .routers._helpers import _grant_role, build_summary, load_job_for_user
 from .routers.constants import VALID_STATUSES
 from .routers.optimizations._local import execution_budget_view
+from .routers.optimizations.detail import _delta_offset
 from .routers.optimizations.lifecycle import cancel_optimization
 from .sharing_access import ShareRole, role_rank
 
@@ -60,14 +62,17 @@ logger = logging.getLogger(__name__)
 _PRINCIPAL_STATE_KEY = "mcp_principal"
 _TERMINAL_STATUSES = frozenset({"success", "failed", "cancelled", "stopped"})
 _STORED_REASON_TERMS = ("cancellationReason", "pauseReason")
+_CANDIDATE_PAGE = 500
 
 _INSTRUCTIONS = (
     "Skynet optimizes repositories against a metric. "
     "To start a repository run, call repo_draft_start and follow each step's next_tool: "
     "every step saves part of the run and reports what to fix. "
-    "repo_draft_review prices the run; repo_draft_submit starts it after the user agrees to the price. "
+    "repo_draft_review prices the run; repo_draft_preflight checks it and repo_draft_submit starts it, "
+    "both after the user agrees to the price. "
     "check_run and start_run refuse DSPy program runs. "
-    "Use list_runs and get_run to follow the account's runs until the status is terminal. stop_run ends a run early. "
+    "Use list_runs and get_run to follow the account's runs until the status is terminal. "
+    "get_run_progress returns a running run's new progress events and best score. stop_run ends a run early. "
     "Tools named platform_* call the Skynet API directly."
 )
 
@@ -215,6 +220,47 @@ def get_run(
     }
 
 
+def get_run_progress(
+    optimization_id: str, since: int | None, user: AuthenticatedUser, *, job_store: Any
+) -> dict[str, Any]:
+    """Return a run's progress events after ``since``, its best score and its candidate count.
+
+    The cursor follows ``since_progress`` of ``GET /optimizations/{id}``:
+    after the retention cap evicts old events, or for a cursor past the end,
+    ``progress_offset`` is 0 and the events are the whole stream again.
+
+    Args:
+        optimization_id: The run.
+        since: Events the client already holds, from the last ``next_since``.
+        user: Account that asks; must have access to the run.
+        job_store: Store that holds the run.
+
+    Returns:
+        The status, the events from ``progress_offset``, ``next_since``, the
+        best score so far and the candidate count.
+    """
+    job_data = _run_access(job_store, optimization_id, user, ShareRole.viewer)
+    count = job_store.get_progress_count(optimization_id)
+    offset = _delta_offset(None if since is None else str(since), count, settings.progress_events_per_job_cap)
+    metrics = job_data.get("latest_metrics") or {}
+    candidates = 0
+    while page := job_store.list_run_candidates(optimization_id, limit=_CANDIDATE_PAGE, offset=candidates):
+        candidates += len(page)
+        if len(page) < _CANDIDATE_PAGE:
+            break
+    status = str(job_data.get("status") or "pending")
+    return {
+        "optimization_id": optimization_id,
+        "status": status,
+        "terminal": status in _TERMINAL_STATUSES,
+        "progress_offset": offset,
+        "next_since": count,
+        "progress_events": job_store.get_progress_events(optimization_id, since=offset),
+        "best_score": metrics.get("best_score"),
+        "candidate_count": candidates,
+    }
+
+
 def list_runs(
     limit: int,
     offset: int,
@@ -338,6 +384,21 @@ def build_remote_mcp(
         user = _user(SCOPE_READ)
         locale = _request_locale()
         return guarded(lambda: get_run(optimization_id, user, job_store=job_store, locale=locale))
+
+    @mcp.tool(name="get_run_progress", annotations=read_only)
+    def get_run_progress_tool(
+        optimization_id: Annotated[str, Field(max_length=64)],
+        since: Annotated[
+            int | None, Field(ge=0, description="next_since of the last call; omit the first time.")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Get a run's new progress events, its best score so far and its candidate count.
+
+        Send the last answer's next_since as since to get only the new events.
+        When progress_offset is 0, the events are the whole stream again.
+        """
+        user = _user(SCOPE_READ)
+        return guarded(lambda: get_run_progress(optimization_id, since, user, job_store=job_store))
 
     @mcp.tool(name="list_runs", annotations=read_only)
     def list_runs_tool(

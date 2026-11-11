@@ -244,13 +244,13 @@ def test_unconfigured_server_serves_nothing(harness: Any, monkeypatch: pytest.Mo
     assert client.get(MCP_URL).json() == {"served_by": "api"}
 
 
-def test_tools_list_names_the_five_tools(harness: Any) -> None:
-    """List check, start, get, list and stop, and no money tools."""
+def test_tools_list_names_the_run_tools(harness: Any) -> None:
+    """List check, start, get, progress, list and stop, and no money tools."""
     client, _store, _calls = harness
     resp = _rpc(client, "tools/list", {})
     assert resp.status_code == 200, resp.text
     names = {tool["name"] for tool in resp.json()["result"]["tools"]}
-    assert names == {"check_run", "start_run", "get_run", "list_runs", "stop_run"}
+    assert names == {"check_run", "start_run", "get_run", "get_run_progress", "list_runs", "stop_run"}
 
 
 @pytest.mark.parametrize(
@@ -613,6 +613,70 @@ def test_viewer_grant_can_read_but_not_stop(harness: Any, monkeypatch: pytest.Mo
     error = json.loads(_error_text(_call(client, "stop_run", {"optimization_id": "opt-bob"})))
     assert error["code"] == "optimization.insufficient_role"
     assert "cancel" not in calls
+
+
+def _progress_store(store: Any, monkeypatch: pytest.MonkeyPatch, events: int, candidates: int) -> None:
+    """Serve one of the caller's runs with ``events`` progress events and ``candidates`` candidates.
+
+    Args:
+        store: Harness store; gets the progress and candidate reads.
+        monkeypatch: Pytest monkeypatch fixture.
+        events: Number of stored progress events.
+        candidates: Number of stored candidates.
+    """
+    job = {
+        "optimization_id": "opt-1",
+        "status": "running",
+        "payload": {"username": USER},
+        "latest_metrics": {"best_score": 0.75},
+    }
+    monkeypatch.setattr(remote_mcp, "load_job_for_user", lambda store, oid, user: job)
+    rows = [{"event": "iteration", "index": index} for index in range(events)]
+    store.get_progress_count = lambda optimization_id: len(rows)
+    store.get_progress_events = lambda optimization_id, since=0: rows[since:]
+    store.list_run_candidates = lambda optimization_id, limit, offset: [{}] * max(0, min(limit, candidates - offset))
+
+
+def test_get_run_progress_returns_the_new_events_and_the_best_score(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return the events after since, the next cursor, the best score and every candidate (SKY-600)."""
+    client, store, _calls = harness
+    _progress_store(store, monkeypatch, events=5, candidates=1203)
+    monkeypatch.setattr(settings, "progress_events_per_job_cap", 100)
+    body = _payload(_call(client, "get_run_progress", {"optimization_id": "opt-1", "since": 3}, token=READ_TOKEN))
+    assert body["progress_offset"] == 3
+    assert [event["index"] for event in body["progress_events"]] == [3, 4]
+    assert body["next_since"] == 5
+    assert body["best_score"] == 0.75
+    assert body["candidate_count"] == 1203
+    assert (body["status"], body["terminal"]) == ("running", False)
+    first = _payload(_call(client, "get_run_progress", {"optimization_id": "opt-1"}, token=READ_TOKEN))
+    assert (first["progress_offset"], len(first["progress_events"])) == (0, 5)
+
+
+@pytest.mark.parametrize(("since", "cap"), [(9, 100), (3, 5)])
+def test_get_run_progress_resends_the_stream_after_a_reset(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, since: int, cap: int
+) -> None:
+    """Send the whole stream for a cursor past the end, or once the retention cap evicts events."""
+    client, store, _calls = harness
+    _progress_store(store, monkeypatch, events=5, candidates=0)
+    monkeypatch.setattr(settings, "progress_events_per_job_cap", cap)
+    arguments = {"optimization_id": "opt-1", "since": since}
+    body = _payload(_call(client, "get_run_progress", arguments, token=READ_TOKEN))
+    assert (body["progress_offset"], len(body["progress_events"]), body["next_since"]) == (0, 5, 5)
+    assert body["candidate_count"] == 0
+
+
+def test_get_run_progress_refuses_another_accounts_run(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer not_found for a run the account neither owns nor was granted."""
+    client, store, calls = harness
+    _other_users_run(store, monkeypatch, calls)
+    store.get_progress_count = lambda optimization_id: calls.setdefault("read", optimization_id) and 0
+    error = json.loads(_error_text(_call(client, "get_run_progress", {"optimization_id": "opt-bob"})))
+    assert (error["code"], error["status"]) == ("optimization.not_found", 404)
+    assert "read" not in calls
 
 
 LOCAL_URL = "http://127.0.0.1:8123/remote-mcp"

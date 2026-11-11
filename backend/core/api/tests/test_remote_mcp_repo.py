@@ -24,6 +24,7 @@ from sqlalchemy.pool import StaticPool
 
 from ...billing.budgets import BudgetConflictError
 from ...config import settings
+from ...models.hardening import HardeningJobModel
 from ...storage.models import Base, McpRunDraftModel, UserModel
 from .. import remote_mcp_repo
 from ..errors import DomainError
@@ -93,7 +94,9 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     def submit(request: Any, *, service: Any, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
         """Record the submission instead of starting a run."""
-        calls["submits"].append({"username": current_user.username, "key": idempotency_key})
+        calls["submits"].append(
+            {"username": current_user.username, "key": idempotency_key, "hardening_job_id": request.hardening_job_id}
+        )
         return SimpleNamespace(model_dump=lambda mode: {"optimization_id": f"opt-{len(calls['submits'])}"})
 
     monkeypatch.setattr(remote_mcp_repo, "submit_repo_payload", submit)
@@ -365,6 +368,178 @@ def test_submit_refuses_a_lower_limit_for_a_used_key(harness: Any, monkeypatch: 
         "optimization_id": "opt-1",
         "next_tool": "get_run",
     }
+
+
+def _hardening_job(engine: Any, username: str) -> str:
+    """Save one finished metric-hardening job of ``username`` and return its id."""
+    with Session(engine) as session:
+        row = HardeningJobModel(username=username, draft_id="setup-draft", status="completed", job={})
+        session.add(row)
+        session.commit()
+        return row.id
+
+
+def test_submit_sends_an_owned_hardening_job(harness: Any) -> None:
+    """Put the account's own hardening job on the run request (SKY-600)."""
+    client, engine, calls = harness
+    job_id = _hardening_job(engine, USER)
+    draft_id = _complete_draft(client)
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "hardening_job_id": job_id}
+    assert _payload(_call(client, "repo_draft_submit", arguments))["optimization_id"] == "opt-1"
+    _payload(_call(client, "repo_draft_submit", {**arguments, "hardening_job_id": None}))
+    assert [call["hardening_job_id"] for call in calls["submits"]] == [job_id, None]
+
+
+def test_submit_refuses_a_hardening_job_of_another_account(harness: Any) -> None:
+    """Answer hardening.job_not_found for another account's job or an unknown id, before any run."""
+    client, engine, calls = harness
+    draft_id = _complete_draft(client)
+    for job_id in (_hardening_job(engine, "bob@example.test"), "missing-job"):
+        arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "hardening_job_id": job_id}
+        assert json.loads(_error_text(_call(client, "repo_draft_submit", arguments)))["code"] == (
+            "hardening.job_not_found"
+        )
+    assert calls["submits"] == []
+
+
+@pytest.fixture
+def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Fake the budget ledger and the setup check, and record what the preflight tool sends them.
+
+    Args:
+        harness: The app fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        A ``(client, engine, record)`` tuple; ``record`` holds the budgets, checks and replay keys.
+    """
+    client, engine, _calls = harness
+    record: dict[str, Any] = {
+        "budgets": {},
+        "creates": [],
+        "checks": [],
+        "keys": [],
+        "balance": [],
+        "status": "succeeded",
+    }
+
+    class _Budgets:
+        """Stand in for the budget ledger, keyed by creation key."""
+
+        def __init__(self, *, engine: Any) -> None:
+            """Accept the engine."""
+
+        def find_by_creation_key(self, username: str, idempotency_key: str) -> Any:
+            """Return the budget the key made, if any."""
+            return record["budgets"].get(idempotency_key)
+
+        def create(self, username: str, total_cents: int, *, idempotency_key: str, uncapped: bool) -> Any:
+            """Make a budget for the key."""
+            record["creates"].append((username, total_cents, idempotency_key, uncapped))
+            budget = SimpleNamespace(id="budget-1", revision=3, total_cents=total_cents, job_id=None)
+            record["budgets"][idempotency_key] = budget
+            return budget
+
+    def keys(request: Any, *, username: str, workflow: str, supplied_key: str) -> Any:
+        """Derive the budget key from the submission key, as the real resolver does."""
+        record["keys"].append(supplied_key)
+        return SimpleNamespace(budget=f"api:{supplied_key}", job=supplied_key)
+
+    def check(request: Any, user: Any, job_store: Any) -> Any:
+        """Record the setup check and answer with the configured status."""
+        record["checks"].append((request, user.username))
+        status = record["status"]
+        return SimpleNamespace(status=status, may_advance=status == "succeeded"), None
+
+    monkeypatch.setattr(remote_mcp_repo, "BudgetService", _Budgets)
+    monkeypatch.setattr(remote_mcp_repo, "resolve_submission_replay_keys", keys)
+    monkeypatch.setattr(remote_mcp_repo, "_enforce_balance", lambda store, user, source: record["balance"].append(user))
+    monkeypatch.setattr(remote_mcp_repo, "checked_preflight", check)
+    monkeypatch.setattr(
+        remote_mcp_repo,
+        "localize_preflight",
+        lambda response, spec, locale: SimpleNamespace(model_dump=lambda **kwargs: {"status": response.status}),
+    )
+    monkeypatch.setattr(settings, "local_mode", False)
+    return client, engine, record
+
+
+def test_preflight_needs_confirmation_and_runs_write(preflight: Any) -> None:
+    """Refuse a preflight before the user agreed, or from a read-only token, without a check."""
+    client, _engine, record = preflight
+    draft_id = _complete_draft(client)
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": False}
+    assert "confirm=true" in _error_text(_call(client, "repo_draft_preflight", arguments))
+    arguments["confirm"] = True
+    assert "runs:write" in _error_text(_call(client, "repo_draft_preflight", arguments, token=READ_TOKEN))
+    assert record["checks"] == []
+    assert record["creates"] == []
+
+
+def test_preflight_refuses_an_incomplete_draft(preflight: Any) -> None:
+    """Answer draft.not_ready before any budget or check."""
+    client, _engine, record = preflight
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}
+    assert json.loads(_error_text(_call(client, "repo_draft_preflight", arguments)))["code"] == "draft.not_ready"
+    assert record["checks"] == []
+    assert record["creates"] == []
+
+
+def test_preflight_checks_under_the_budget_the_submit_reuses(preflight: Any) -> None:
+    """Run the execution check under the submit's budget key, and make the budget only once (SKY-600)."""
+    client, engine, record = preflight
+    job_id = _hardening_job(engine, USER)
+    draft_id = _complete_draft(client)
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "hardening_job_id": job_id}
+    body = _payload(_call(client, "repo_draft_preflight", arguments))
+    assert body["status"] == "succeeded"
+    assert body["next_tool"] == "repo_draft_submit"
+    request, username = record["checks"][0]
+    assert username == USER
+    assert (request.scope, request.workflow) == ("execution", "anything")
+    assert (request.execution_budget_id, request.execution_budget_revision) == ("budget-1", 3)
+    assert request.payload["max_cost_cents"] == 500
+    assert request.payload["hardening_job_id"] == job_id
+    key = record["keys"][0]
+    assert key.startswith(f"mcp-draft-{draft_id}-")
+    assert record["creates"] == [(USER, 500, f"api:{key}", False)]
+    assert record["balance"] == [USER]
+    _payload(_call(client, "repo_draft_preflight", arguments))
+    _payload(_call(client, "repo_draft_submit", arguments))
+    assert set(record["keys"]) == {key}
+    assert len(record["creates"]) == 1
+    assert len(record["checks"]) == 2
+
+
+def test_preflight_names_the_next_tool_for_each_status(preflight: Any) -> None:
+    """Point a pending check back at the preflight, and a failed check at the review."""
+    client, _engine, record = preflight
+    draft_id = _complete_draft(client)
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}
+    record["status"] = "pending"
+    body = _payload(_call(client, "repo_draft_preflight", arguments))
+    assert body["next_tool"] == "repo_draft_preflight"
+    assert body["retry_after_seconds"] == remote_mcp_repo._PENDING_RETRY_SECONDS
+    record["status"] = "failed"
+    assert _payload(_call(client, "repo_draft_preflight", arguments))["next_tool"] == "repo_draft_review"
+
+
+def test_preflight_refuses_a_hardening_job_of_another_account(preflight: Any) -> None:
+    """Answer hardening.job_not_found before any budget or check."""
+    client, engine, record = preflight
+    draft_id = _complete_draft(client)
+    arguments = {
+        "draft_id": draft_id,
+        "max_cost_cents": 500,
+        "confirm": True,
+        "hardening_job_id": _hardening_job(engine, "bob@example.test"),
+    }
+    assert json.loads(_error_text(_call(client, "repo_draft_preflight", arguments)))["code"] == (
+        "hardening.job_not_found"
+    )
+    assert record["checks"] == []
+    assert record["creates"] == []
 
 
 def test_start_purges_old_drafts_and_caps_the_count(harness: Any) -> None:

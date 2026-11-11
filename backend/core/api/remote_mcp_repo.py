@@ -5,13 +5,15 @@ at a time: repository, data, scorer, models, engine and budget. Each step
 saves its part of a server-side draft and answers with feedback: what it
 saved, the problems it found, and the next tool to call. ``repo_draft_review``
 checks the whole draft and prices its smallest spending limit.
-``repo_draft_submit`` starts the run only with ``confirm=true`` and a
-``max_cost_cents`` the user agreed to.
+``repo_draft_preflight`` runs the paid setup check of ``/wizard/preflight``
+under the run's own budget, so the submit reuses it. ``repo_draft_submit``
+starts the run. Both need ``confirm=true`` and a ``max_cost_cents`` the user
+agreed to (SKY-600).
 
 The submission goes through the same path as ``POST /blackbox/run``
 (:func:`core.api.routers.submissions.submit_repo_payload`), so the run gets
 the same admission, balance check, protected budget and replay protection.
-No step runs user code or spends money before the submit.
+No step runs user code or spends money before the preflight or the submit.
 """
 
 from __future__ import annotations
@@ -54,14 +56,19 @@ from ..storage.models import McpRunDraftModel
 from .auth import AuthenticatedUser
 from .errors import DomainError
 from .mcp_oauth import SCOPE_READ, SCOPE_WRITE
-from .remote_mcp import _domain_tool_error, _user
+from .preflight_execution import WizardPreflightRequest
+from .remote_mcp import _domain_tool_error, _request_locale, _user
 from .routers.connectors import connector_secret
+from .routers.execution_budgets import budget_http_error
+from .routers.hardening import _load as _load_hardening_job
 from .routers.models import box_hold_cents, call_hold_cents
 from .routers.submissions import (
     _BLACKBOX_WORKFLOW,
+    _enforce_balance,
     staged_repo_cases,
     submit_repo_payload,
 )
+from .routers.wizard_preflight import checked_preflight, localize_preflight
 from .submission_idempotency import resolve_submission_replay_keys
 
 STEPS = ("repository", "data", "scorer", "models", "engine", "budget")
@@ -658,6 +665,151 @@ def review_draft(
     return issues, notes, price
 
 
+def _ready_request(
+    spec: dict[str, Any],
+    draft_id: str,
+    max_cost_cents: int,
+    hardening_job_id: str | None,
+    idempotency_key: str | None,
+    user: AuthenticatedUser,
+    *,
+    job_store: Any,
+    http_client: Callable[[], httpx.Client],
+) -> tuple[BlackboxRunRequest, str, str | None]:
+    """Check a whole draft and its limit, and build the run request and its keys.
+
+    Without a key, the key is the draft id plus a fingerprint of the draft,
+    so the preflight and the submit of one draft share it.
+
+    Args:
+        spec: The whole draft.
+        draft_id: The draft.
+        max_cost_cents: Spending limit the user agreed to.
+        hardening_job_id: Optional metric-hardening job whose exploit suite the run ships.
+        idempotency_key: Optional key from the client.
+        user: Account that asks.
+        job_store: Store that holds the draft's data, the hardening jobs and the wallet.
+        http_client: Factory for the model catalog client.
+
+    Returns:
+        The run request, the submission key, and the budget creation key.
+
+    Raises:
+        ToolError: When the draft has issues, the limit is below its floor,
+            or the key already made a higher limit.
+        DomainError: 404 when the account has no such hardening job.
+    """
+    issues, _notes, price = review_draft(spec, user, job_store=job_store, http_client=http_client)
+    if issues:
+        raise ToolError(json.dumps({"code": "draft.not_ready", "issues": issues, "next_tool": "repo_draft_review"}))
+    floor = price["min_max_cost_cents"]
+    if max_cost_cents < floor:
+        raise ToolError(
+            json.dumps(
+                {
+                    "code": "budget.below_minimum",
+                    "detail": f"max_cost_cents {max_cost_cents} is below this run's minimum of {floor} cents.",
+                    "min_max_cost_cents": floor,
+                }
+            )
+        )
+    if hardening_job_id is not None:
+        with Session(job_store.engine) as session:
+            _load_hardening_job(session, user.username, hardening_job_id, lock=False)
+    request = build_request(spec)
+    request.max_cost_cents = max_cost_cents
+    request.hardening_job_id = hardening_job_id
+    key = idempotency_key or f"mcp-draft-{draft_id}-{json_fingerprint(spec)[:16]}"
+    replay_keys = resolve_submission_replay_keys(
+        request, username=user.username, workflow=_BLACKBOX_WORKFLOW, supplied_key=key
+    )
+    if replay_keys.budget is not None:
+        _refuse_lower_limit(job_store, user.username, replay_keys.budget, max_cost_cents)
+    return request, key, replay_keys.budget
+
+
+def preflight_draft(
+    spec: dict[str, Any],
+    draft_id: str,
+    max_cost_cents: int,
+    hardening_job_id: str | None,
+    idempotency_key: str | None,
+    user: AuthenticatedUser,
+    *,
+    job_store: Any,
+    http_client: Callable[[], httpx.Client],
+    locale: str,
+) -> dict[str, Any]:
+    """Run the draft's paid setup check under the budget its submit uses.
+
+    The budget comes from the same creation key as ``submit_draft``, and the
+    check is the one ``/wizard/preflight`` runs. A submit with the same
+    arguments finds that budget and the stored evidence, so it does not pay
+    for the check again.
+
+    Args:
+        spec: The whole draft.
+        draft_id: The draft.
+        max_cost_cents: Spending limit the user agreed to.
+        hardening_job_id: Optional metric-hardening job whose exploit suite the run ships.
+        idempotency_key: Optional key; send the same one to the submit.
+        user: Account that pays for the check.
+        job_store: Store that holds the budget and the evidence.
+        http_client: Factory for the model catalog client.
+        locale: Locale tag for the check messages.
+
+    Returns:
+        The setup check result and the next tool.
+    """
+    request, _key, budget_key = _ready_request(
+        spec,
+        draft_id,
+        max_cost_cents,
+        hardening_job_id,
+        idempotency_key,
+        user,
+        job_store=job_store,
+        http_client=http_client,
+    )
+    budgets = BudgetService(engine=job_store.engine)
+    try:
+        budget = budgets.find_by_creation_key(user.username, budget_key)
+        if budget is None:
+            # The same gate as the submit: a depleted account gets 402 before a budget exists.
+            if not settings.local_mode:
+                _enforce_balance(job_store, user.username, request.token_source)
+            budget = budgets.create(
+                user.username, max_cost_cents, idempotency_key=budget_key, uncapped=settings.local_mode
+            )
+    except BudgetError as error:
+        raise budget_http_error(error) from error
+    request.max_cost_cents = budget.total_cents
+    response, _spec = checked_preflight(
+        WizardPreflightRequest(
+            scope="execution",
+            workflow=_BLACKBOX_WORKFLOW,
+            payload=request.model_dump(mode="json", by_alias=True),
+            execution_budget_id=budget.id,
+            execution_budget_revision=budget.revision,
+        ),
+        user,
+        job_store,
+    )
+    answer = localize_preflight(response, None, locale).model_dump(mode="json", exclude_none=True)
+    if response.may_advance:
+        answer["next_tool"] = "repo_draft_submit"
+        answer["note"] = (
+            "Call repo_draft_submit with the same max_cost_cents, hardening_job_id and idempotency_key. "
+            "The run then reuses this check and its budget."
+        )
+    elif response.status == "pending":
+        answer["next_tool"] = "repo_draft_preflight"
+        answer["retry_after_seconds"] = _PENDING_RETRY_SECONDS
+    else:
+        answer["next_tool"] = "repo_draft_review"
+    return answer
+
+
 def submit_draft(
     spec: dict[str, Any],
     draft_id: str,
@@ -668,6 +820,7 @@ def submit_draft(
     service: Any,
     job_store: Any,
     http_client: Callable[[], httpx.Client],
+    hardening_job_id: str | None = None,
 ) -> dict[str, Any]:
     """Start the draft's run under a new execution budget of ``max_cost_cents``.
 
@@ -684,6 +837,7 @@ def submit_draft(
         service: Optimization service handed to the worker.
         job_store: Store that persists the run.
         http_client: Factory for the model catalog client.
+        hardening_job_id: Optional metric-hardening job whose exploit suite the run ships.
 
     Returns:
         The submission, or ``status: in_progress`` while other usage on the
@@ -691,29 +845,18 @@ def submit_draft(
 
     Raises:
         ToolError: When the draft has issues, or the limit is below its floor.
+        DomainError: 404 when the account has no such hardening job.
     """
-    issues, _notes, price = review_draft(spec, user, job_store=job_store, http_client=http_client)
-    if issues:
-        raise ToolError(json.dumps({"code": "draft.not_ready", "issues": issues, "next_tool": "repo_draft_review"}))
-    floor = price["min_max_cost_cents"]
-    if max_cost_cents < floor:
-        raise ToolError(
-            json.dumps(
-                {
-                    "code": "budget.below_minimum",
-                    "detail": f"max_cost_cents {max_cost_cents} is below this run's minimum of {floor} cents.",
-                    "min_max_cost_cents": floor,
-                }
-            )
-        )
-    request = build_request(spec)
-    request.max_cost_cents = max_cost_cents
-    key = idempotency_key or f"mcp-draft-{draft_id}-{json_fingerprint(spec)[:16]}"
-    replay_keys = resolve_submission_replay_keys(
-        request, username=user.username, workflow=_BLACKBOX_WORKFLOW, supplied_key=key
+    request, key, _budget_key = _ready_request(
+        spec,
+        draft_id,
+        max_cost_cents,
+        hardening_job_id,
+        idempotency_key,
+        user,
+        job_store=job_store,
+        http_client=http_client,
     )
-    if replay_keys.budget is not None:
-        _refuse_lower_limit(job_store, user.username, replay_keys.budget, max_cost_cents)
     try:
         result = submit_repo_payload(
             request, service=service, job_store=job_store, current_user=user, idempotency_key=key
@@ -1041,8 +1184,53 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         answer["draft"] = {key: value for key, value in spec.items() if key != "scorer"}
         if not issues:
             answer["next_tool"] = "repo_draft_submit"
+            answer["optional_tool"] = "repo_draft_preflight"
             answer["note"] = "A run stops when it reaches max_cost_cents. Unused budget is released when the run ends."
         return answer
+
+    @mcp.tool(
+        name="repo_draft_preflight",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    )
+    def repo_draft_preflight(
+        draft_id: Annotated[str, Field(max_length=64)],
+        max_cost_cents: Annotated[int, Field(ge=1, le=1_000_000, description="Spending limit of this run, in cents.")],
+        confirm: Annotated[bool, Field(description="True only after the user agreed to max_cost_cents.")],
+        hardening_job_id: Annotated[
+            str | None, Field(min_length=1, max_length=36, description="A metric-hardening job of this account.")
+        ] = None,
+        idempotency_key: Annotated[
+            str | None, Field(max_length=128, description="Send the same key to repo_draft_submit.")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Run the setup check of the run before submit. It spends from the run's max_cost_cents.
+
+        The check runs the repository, the scorer and the models once in the
+        sandbox. Call repo_draft_review first and show the user its price.
+        Send confirm=true only after the user agreed. A repo_draft_submit with
+        the same arguments reuses this check and does not pay for it again.
+        """
+        if not confirm:
+            raise ToolError(
+                "Show the user max_cost_cents and the balance from repo_draft_review. Send confirm=true after they agree."
+            )
+        user = _user(SCOPE_WRITE)
+        locale = _request_locale()
+        with Session(job_store.engine) as session:
+            spec = dict(_load_draft(session, draft_id, user.username).spec or {})
+        return guarded(
+            lambda: preflight_draft(
+                spec,
+                draft_id,
+                max_cost_cents,
+                hardening_job_id,
+                idempotency_key,
+                user,
+                job_store=job_store,
+                http_client=http_client,
+                locale=locale,
+            )
+        )
 
     @mcp.tool(
         name="repo_draft_submit",
@@ -1054,6 +1242,14 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         confirm: Annotated[bool, Field(description="True only after the user agreed to max_cost_cents.")],
         idempotency_key: Annotated[
             str | None, Field(max_length=128, description="Send the same key to retry without a second run.")
+        ] = None,
+        hardening_job_id: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=36,
+                description="A metric-hardening job of this account; the run's PR ships its exploit suite.",
+            ),
         ] = None,
     ) -> dict[str, Any]:
         """Start the repository run. It spends at most max_cost_cents from the account balance.
@@ -1079,5 +1275,6 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 service=service,
                 job_store=job_store,
                 http_client=http_client,
+                hardening_job_id=hardening_job_id,
             )
         )
