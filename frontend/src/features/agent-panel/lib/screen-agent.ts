@@ -270,6 +270,34 @@ export function newSetupChatId(): string {
   return `setup-${crypto.randomUUID()}`;
 }
 
+/** Whether an `open_page` route opens the setup wizard (SKY-631). */
+export function opensSetup(path: string): boolean {
+  return path.replace(/\/+$/, "") === "/submit";
+}
+
+/**
+ * The chat that becomes the setup chat when the wizard opens after the agent
+ * opened it from a chat (SKY-631). The same conversation continues in the
+ * setup, so the chat history keeps one entry.
+ *
+ * Args:
+ *   handoff: The chat whose agent opened the setup, or null.
+ *   live: The chat on view as the wizard opens.
+ *
+ * Returns:
+ *   The setup chat's id and messages, or null when the setup starts a new
+ *   chat: no handoff, or the user moved to another chat. A chat that the
+ *   server did not save gets a browser id; its next turn's server id
+ *   replaces it.
+ */
+export function handedOverSetupChat(
+  handoff: { id: string | null } | null,
+  live: { id: string | null; messages: AgentMessage[] },
+): { id: string; messages: AgentMessage[] } | null {
+  if (!handoff || handoff.id !== live.id || live.messages.length === 0) return null;
+  return { id: live.id ?? newSetupChatId(), messages: live.messages };
+}
+
 /**
  * The id the setup chat keeps when a turn's server conversation arrives. A
  * chat with no server copy yet takes the server's id, so the tab's copy and

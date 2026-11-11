@@ -290,6 +290,15 @@ def test_system_prompt_names_the_screen_rule() -> None:
     assert "``wizard_state.wizard_screen`` names the wizard screen" in prompt
 
 
+def test_chat_outside_the_wizard_opens_the_setup_in_the_same_chat() -> None:
+    """A setup request outside the wizard opens /submit, which keeps the chat (SKY-631)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+    assert "``wizard_screen`` is absent, call ``open_page`` with ``path`` ``/submit``" in prompt
+    assert "open_page" in tools_for({})
+    screen_prompt = " ".join((generalist_module.SCREEN_AGENT_PROMPT or "").split())
+    assert "or from the chat in which the user asked for this setup" in screen_prompt
+
+
 _FULL_SNAPSHOT: dict[str, Any] = {
     "job_name": "Tickets",
     "job_description": "d",

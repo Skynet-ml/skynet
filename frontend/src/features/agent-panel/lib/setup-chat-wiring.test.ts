@@ -39,6 +39,8 @@ const {
   unansweredTurn,
   keepHiddenTurns,
   backRequest,
+  opensSetup,
+  handedOverSetupChat,
 } = await import("./screen-agent.ts");
 const { SteerQueue } = await import("../../../shared/ui/agent/steer-queue.ts");
 
@@ -744,4 +746,131 @@ test("the root deletes the left setup the agent submits", () => {
   forget(new Event("setup-submitted"));
   assert.deepEqual(deleted, ["alice"]);
   assert.match(source(file), /window\.addEventListener\(SETUP_SUBMITTED_EVENT, forgetSubmittedSetup\);/);
+});
+
+// SKY-631: a chat whose agent opens the setup goes on as the setup chat.
+
+test("only an open_page route to the wizard opens the setup", () => {
+  assert.equal(opensSetup("/submit"), true);
+  assert.equal(opensSetup("/submit/"), true);
+  assert.equal(opensSetup("/submitted"), false);
+  assert.equal(opensSetup("/optimizations"), false);
+});
+
+test("the chat that opened the setup becomes the setup chat, unless the user moved to another chat", () => {
+  const messages = [{ role: "user", content: "set up a run" }];
+  assert.deepEqual(handedOverSetupChat({ id: "c1" }, { id: "c1", messages }), { id: "c1", messages });
+  assert.equal(handedOverSetupChat(null, { id: "c1", messages }), null);
+  assert.equal(handedOverSetupChat({ id: "c1" }, { id: "c2", messages }), null);
+  assert.equal(handedOverSetupChat({ id: null }, { id: null, messages: [] }), null);
+  const unsaved = handedOverSetupChat({ id: null }, { id: null, messages });
+  assert.match(String(unsaved?.id), /^setup-/);
+  assert.equal(isSavedSetupChat(String(unsaved?.id)), false);
+});
+
+function toolEnd(wizardScreen: string | null) {
+  const pushed: string[] = [];
+  const setupHandoffRef = { current: null as unknown };
+  const handle = expression(panel, "handleToolEnd", {
+    parseAgentNavigation: (result: any) => result.navigate, opensSetup, setupHandoffRef,
+    router: { push: (path: string) => pushed.push(path) },
+    SUBMIT_TOOLS: new Set(), wizardCtx: wizardScreen === null ? null : { wizardScreen },
+    extractWizardPatch: () => ({}), parseScreenNav: () => null,
+  });
+  return { handle, pushed, setupHandoffRef };
+}
+
+const openSubmit = { id: "t1", tool: "open_page", status: "ok", result: { navigate: { kind: "route", path: "/submit" } } };
+
+test("the agent's open_page to the wizard marks its chat for the setup", () => {
+  const run = toolEnd(null);
+  run.handle(openSubmit, { isActive: true, conversationId: "c1" });
+  assert.deepEqual(run.pushed, ["/submit"]);
+  assert.deepEqual(run.setupHandoffRef.current, { id: "c1" });
+});
+
+test("an open_page to another page, from a background chat or inside the setup marks no chat", () => {
+  const other = toolEnd(null);
+  other.handle({ ...openSubmit, result: { navigate: { kind: "route", path: "/datasets" } } }, { isActive: true, conversationId: "c1" });
+  assert.equal(other.setupHandoffRef.current, null);
+  const background = toolEnd(null);
+  background.handle(openSubmit, { isActive: false, conversationId: "c1" });
+  assert.deepEqual(background.pushed, []);
+  assert.equal(background.setupHandoffRef.current, null);
+  const inSetup = toolEnd("brief");
+  inSetup.handle(openSubmit, { isActive: true, conversationId: "c1" });
+  assert.equal(inSetup.setupHandoffRef.current, null);
+});
+
+// The panel's screen effect: it opens the setup's chat as the wizard mounts.
+function screenEffect(options: { handoff: { id: string | null } | null; live: { id: string | null; messages: unknown[] } }) {
+  const tree = ts.createSourceFile(panel, source(panel), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let found: ts.Node | undefined;
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) && node.expression.getText(tree) === "React.useEffect" &&
+      node.arguments[0]?.getText(tree).includes("handedOverSetupChat")
+    ) found = node.arguments[0];
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.ok(found, "screen effect");
+  const log: unknown[][] = [];
+  const context: Record<string, unknown> = {
+    shownScreenRef: { current: null }, shownScreen: "brief", screenOpeningRef: { current: null },
+    window: { sessionStorage: { getItem: () => null } }, SETUP_CHAT_KEY: "k",
+    decodeSetupChat: () => null, legacySetupChatId: () => null, removeConversation: () => {},
+    setupHandoffRef: { current: options.handoff }, restoredSetupRef: { current: false },
+    handedOverSetupChat, liveChatRef: { current: { ...options.live, busy: true } },
+    discardConversation: (id: string) => log.push(["discard", id]),
+    newSetupChatStart, reopenedScreenRef: { current: null },
+    kickedScreensRef: { current: new Set() }, setupRunRef: { current: 0 },
+    setSetupLoad: () => {}, setupMessagesRef: { current: [] },
+    keepSetupChat: (id: string | null) => log.push(["keep", id]),
+    setKickoffScreen: (screen: string) => log.push(["kickoff", screen]),
+    setActiveConversation: (id: string | null) => log.push(["active", id]),
+    openSetupChat: (saved: unknown, kickoff: string | null) => log.push(["openSetup", saved, kickoff]),
+  };
+  const code = ts.transpileModule(`(${found!.getText(tree)})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const effect = new Function(...Object.keys(context), `return ${code}`)(...Object.values(context));
+  effect();
+  return { log, context };
+}
+
+test("the wizard opened by the agent keeps the asking chat as the setup chat, with no new chat", () => {
+  const messages = [{ role: "user", content: "set up a run" }];
+  const run = screenEffect({ handoff: { id: "c1" }, live: { id: "c1", messages } });
+  assert.deepEqual(run.log, [["keep", "c1"], ["kickoff", "brief"]]);
+  assert.equal((run.context.setupMessagesRef as { current: unknown }).current, messages);
+  assert.equal((run.context.setupHandoffRef as { current: unknown }).current, null);
+});
+
+test("a wizard the user opened, or opened after a chat switch, starts its own setup chat as before", () => {
+  const messages = [{ role: "user", content: "hi" }];
+  for (const handoff of [null, { id: "c1" }]) {
+    const run = screenEffect({ handoff, live: { id: "c2", messages } });
+    assert.deepEqual(run.log, [["active", null], ["openSetup", null, "brief"]]);
+  }
+});
+
+test("leaving /submit before the wizard mounts drops the setup mark", () => {
+  const tree = ts.createSourceFile(panel, source(panel), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let found: ts.Node | undefined;
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) && node.expression.getText(tree) === "React.useEffect" &&
+      node.arguments[1]?.getText(tree) === "[pathname]"
+    ) found = node.arguments[0];
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.ok(found, "pathname effect");
+  const code = ts.transpileModule(`(${found!.getText(tree)})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const run = (pathname: string) => {
+    const setupHandoffRef = { current: { id: "c1" } as { id: string } | null };
+    new Function("pathname", "opensSetup", "setupHandoffRef", `return ${code}`)(pathname, opensSetup, setupHandoffRef)();
+    return setupHandoffRef.current;
+  };
+  assert.deepEqual(run("/submit"), { id: "c1" });
+  assert.equal(run("/runs"), null);
 });
