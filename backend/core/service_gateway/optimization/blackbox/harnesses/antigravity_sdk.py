@@ -6,7 +6,7 @@ Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/antigravity_sdk.
 from __future__ import annotations
 
 import shlex
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_ANTIGRAVITY_SDK
@@ -82,7 +82,7 @@ from pathlib import Path
 
 from google.antigravity import Agent, LocalAgentConfig
 from google.antigravity.hooks import policy
-from google.antigravity.models import GeminiAPIEndpoint, GeminiModelOptions, ModelTarget, ThinkingLevel
+from google.antigravity.models import GeminiAPIEndpoint, GeminiModelOptions, ModelTarget, ThinkingLevel{mcp_import}
 
 GATEWAY_URL = {gateway_url!r}
 STATE_DIR = Path({state_dir!r})
@@ -117,7 +117,7 @@ async def _run():
         workspaces=[str(workspace)],
         save_dir=str((STATE_DIR / "session").resolve()),
         app_data_dir=str((STATE_DIR / "app_data").resolve()),
-        mcp_servers=[],
+        mcp_servers=[{mcp_servers}],
         policies=[policy.allow_all()],
     )
     # Harbor clears the eval preset's own thinking level only when the user picked one.
@@ -181,14 +181,15 @@ def _gateway_url(gateway: GatewayConfig) -> str:
     return url
 
 
-def _runner_script(gateway_url: str) -> str:
+def _runner_script(gateway_url: str, mcp_servers: tuple[str, ...] = ()) -> str:
     """Return the pinned uv script that runs the SDK against ``gateway_url``.
 
-    The URL sits in the script text, not the env, so the protected relay
-    rewrite of generated files points it at the sandbox-local mailbox.
+    The URLs sit in the script text, not the env, so the protected relay
+    rewrite of generated files points them at the sandbox-local mailbox.
 
     Args:
         gateway_url: Validated gateway base URL.
+        mcp_servers: Proposer MCP server names the agent may use, served by the gateway.
 
     Returns:
         The script source.
@@ -202,6 +203,11 @@ def _runner_script(gateway_url: str) -> str:
         env_model=ENV_MODEL,
         env_prompt_file=ENV_PROMPT_FILE,
         env_thinking_level=ENV_THINKING_LEVEL,
+        mcp_import="\nfrom google.antigravity.types import McpStreamableHttpServer" if mcp_servers else "",
+        mcp_servers=", ".join(
+            f"McpStreamableHttpServer(name={name!r}, url={gateway_url + '/mcp/' + quote(name, safe='')!r})"
+            for name in mcp_servers
+        ),
     )
 
 
@@ -219,13 +225,20 @@ def _antigravity_install() -> str:
     )
 
 
-def _antigravity_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _antigravity_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for the Google Antigravity SDK (``google-antigravity``).
 
     Args:
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; the SDK sends every model call there.
         reasoning_effort: The user's effort for the model, or ``None`` for the SDK default.
+        mcp_servers: Proposer MCP server names the agent may use, served by the gateway (SKY-621).
 
     Returns:
         The launch.
@@ -247,7 +260,7 @@ def _antigravity_launch(model: str, gateway: GatewayConfig, *, reasoning_effort:
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_antigravity_install(),
-        files={RUNNER_FILE: _runner_script(_gateway_url(gateway))},
+        files={RUNNER_FILE: _runner_script(_gateway_url(gateway), mcp_servers)},
         run_command=f"{_UV_PATH} {_RUNNER}",
         env=env,
         parse_output=parse_pi_output,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import shlex
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_DEERFLOW
@@ -172,7 +172,7 @@ def _write_config(workdir):
     config["sandbox"]["mounts"] = [{{"host_path": workdir, "container_path": workdir, "read_only": False}}]
     root = Path(os.environ["DEER_FLOW_PROJECT_ROOT"])
     root.mkdir(parents=True, exist_ok=True)
-    (root / "config.yaml").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    (root / "config.yaml").write_text(json.dumps(config, indent=2), encoding="utf-8"){write_extensions}
 
 
 def _run():
@@ -331,14 +331,17 @@ def _deerflow_config(model: str, gateway_url: str, reasoning_effort: str | None 
     return json.dumps(config, indent=2)
 
 
-def _runner_script(gateway_url: str) -> str:
+def _runner_script(gateway_url: str, mcp_servers: tuple[str, ...] = ()) -> str:
     """Return the runner that drives ``DeerFlowClient`` and prints a Pi-shaped result.
 
     The runner holds the gateway URL too, so the protected relay rewrite moves
     it with the config and the runner refuses a config with any other route.
+    With proposer MCP servers, the runner also writes DeerFlow's
+    ``extensions_config.json`` into the project root, so their URLs move too.
 
     Args:
         gateway_url: Validated gateway base URL.
+        mcp_servers: Proposer MCP server names the agent may use, served by the gateway.
 
     Returns:
         The script source.
@@ -352,7 +355,28 @@ def _runner_script(gateway_url: str) -> str:
         instructions_file=INSTRUCTIONS_FILE,
         model_name=MODEL_NAME,
         recursion_limit=RECURSION_LIMIT,
+        write_extensions=_write_extensions(gateway_url, mcp_servers),
     )
+
+
+def _write_extensions(gateway_url: str, mcp_servers: tuple[str, ...]) -> str:
+    """Return the runner line that writes the proposer MCP servers, or ``""`` with none.
+
+    Args:
+        gateway_url: Validated gateway base URL.
+        mcp_servers: Proposer MCP server names.
+
+    Returns:
+        The indented source line, with its leading newline.
+    """
+    if not mcp_servers:
+        return ""
+    servers = {
+        name: {"enabled": True, "type": "http", "url": f"{gateway_url}/mcp/{quote(name, safe='')}"}
+        for name in mcp_servers
+    }
+    extensions = json.dumps({"mcpServers": servers}, indent=2)
+    return f'\n    (root / "extensions_config.json").write_text({extensions!r}, encoding="utf-8")'
 
 
 def _deerflow_install() -> str:
@@ -375,7 +399,13 @@ def _deerflow_install() -> str:
     )
 
 
-def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _deerflow_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for DeerFlow (``deerflow-harness``) at the pinned source commit.
 
     Args:
@@ -383,6 +413,7 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
         gateway: Gateway URL and key; DeerFlow sends every model call there.
         reasoning_effort: The user's effort for the model; any non-empty value,
             ``none`` included, goes to the gateway unchanged as ``reasoning_effort``.
+        mcp_servers: Proposer MCP server names the agent may use, served by the gateway (SKY-621).
 
     Returns:
         The launch.
@@ -397,7 +428,7 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
         install_command=_deerflow_install(),
         files={
             CONFIG_FILE: _deerflow_config(model, gateway_url, reasoning_effort),
-            RUNNER_FILE: _runner_script(gateway_url),
+            RUNNER_FILE: _runner_script(gateway_url, mcp_servers),
         },
         run_command=_RUN_COMMAND,
         env=env,

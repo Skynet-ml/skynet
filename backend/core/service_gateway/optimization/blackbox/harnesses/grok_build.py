@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import shlex
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_GROK_BUILD
@@ -205,7 +205,7 @@ def _effort_flag(reasoning_effort: str | None) -> str:
     return f" --reasoning-effort {reasoning_effort}"
 
 
-def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> str:
+def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None, mcp_servers: tuple[str, ...] = ()) -> str:
     """Return the Grok ``config.toml`` that routes every model role to the gateway.
 
     JSON string literals are valid TOML basic strings, so ``json.dumps``
@@ -216,6 +216,7 @@ def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> 
         model: Target model id as the gateway knows it.
         gateway_url: Validated gateway base URL.
         reasoning_effort: A level from :data:`GROK_EFFORTS`, or ``None`` or an empty string for Grok's default.
+        mcp_servers: Proposer MCP server names Grok may use, served by the gateway.
 
     Returns:
         The TOML text.
@@ -245,6 +246,11 @@ def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> 
             f"\n[[model.{slug}.reasoning_efforts]]\nvalue = {json.dumps(reasoning_effort)}\n"
             if reasoning_effort
             else ""
+        )
+        + "".join(
+            f"\n[mcp_servers.{json.dumps(name)}]\n"
+            f"url = {json.dumps(gateway_url + '/mcp/' + quote(name, safe=''), ensure_ascii=False)}\n"
+            for name in mcp_servers
         )
     )
 
@@ -283,7 +289,13 @@ def _grok_install() -> str:
     )
 
 
-def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _grok_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for the xAI Grok Build CLI (``grok``, pinned to :data:`GROK_VERSION`).
 
     Each run gets a fresh Grok home outside the workspace, so Grok's session
@@ -295,6 +307,7 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; Grok sends every model call there.
         reasoning_effort: The user's effort for the model, or ``None`` or an empty string for Grok's default.
+        mcp_servers: Proposer MCP server names Grok may use, served by the gateway (SKY-621).
 
     Returns:
         The launch.
@@ -322,7 +335,7 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_grok_install(),
-        files={GROK_CONFIG_FILE: _config_toml(model, _gateway_url(gateway), reasoning_effort)},
+        files={GROK_CONFIG_FILE: _config_toml(model, _gateway_url(gateway), reasoning_effort, mcp_servers)},
         run_command=run_command,
         env=env,
         parse_output=parse_pi_output,

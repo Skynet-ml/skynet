@@ -104,10 +104,11 @@ class AgentContext:
 
 
 class Agent:
-    def __init__(self, llm, tools, agent_context):
+    def __init__(self, llm, tools, agent_context, mcp_config=None):
         self.llm = llm
         self.tools = tools
         self.agent_context = agent_context
+        self.mcp_config = mcp_config
 
 
 class _State:
@@ -135,6 +136,7 @@ class Conversation:
             "env": {name: os.environ.get(name) for name in (
                 "LLM_API_KEY", "LLM_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")},
             "tools": [tool.name for tool in self.agent.tools],
+            "mcp_config": self.agent.mcp_config,
             "skills": self.agent.agent_context.skills,
             "system_message_suffix": self.agent.agent_context.system_message_suffix,
             "visualizer": self.visualizer,
@@ -477,6 +479,7 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
         "ANTHROPIC_API_KEY": None,
     }
     assert seen["tools"] == ["terminal", "file_editor", "task_tracker"]
+    assert seen["mcp_config"] is None
     assert seen["skills"] == []
     assert seen["system_message_suffix"] is None
     assert seen["visualizer"] is None
@@ -491,6 +494,50 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
     assert list((workspace / ".app/openhands_sdk").iterdir()) == [workspace / RUNNER_FILE]
     assert parse_pi_output(result.stdout) == ("answer to Fix the bug.", {"input_tokens": 11, "output_tokens": 7})
     assert result.stdout.strip().count("\n") == 0
+
+
+def test_protected_runner_gives_the_agent_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give each [proposer] server one streamable HTTP entry at the relay in ``Agent.mcp_config`` (SKY-621)."""
+    target = BlackboxTarget.model_construct(
+        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
+    )
+    launch = build_launch(target, _GATEWAY, protected=True, mcp_servers=("search", "my tools"))
+    ws = tmp_path / "ws"
+    for name, content in launch.files.items():
+        path = ws / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    rewrite = launch.run_command.split(" && ", 1)[0]
+    subprocess.run(rewrite, shell=True, cwd=ws, env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY}, check=True)
+    runner = (ws / RUNNER_FILE).read_text()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix the bug.\n")
+    record = tmp_path / "record.json"
+
+    result = _run_runner(
+        tmp_path,
+        {RUNNER_FILE: runner},
+        **{**launch.env, "APP_API_KEY": "k", "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(record.read_text())["mcp_config"] == {
+        "search": {"url": f"{_RELAY}/mcp/search", "transport": "http"},
+        "my tools": {"url": f"{_RELAY}/mcp/my%20tools", "transport": "http"},
+    }
+    assert _GATEWAY.url not in runner
+    assert _GATEWAY.api_key not in runner
+
+
+def test_launch_without_proposer_mcp_servers_keeps_the_runner() -> None:
+    """Keep the runner as before when the proposer's file lists no server."""
+    target = BlackboxTarget.model_construct(
+        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
+    )
+    launch = build_launch(target, _GATEWAY, protected=True)
+
+    assert "mcp_config" not in launch.files[RUNNER_FILE]
+    assert "agent = Agent(llm=llm, tools=tools, agent_context=" in launch.files[RUNNER_FILE]
 
 
 def test_runner_gives_the_candidate_instructions_to_the_agent(tmp_path: Path) -> None:

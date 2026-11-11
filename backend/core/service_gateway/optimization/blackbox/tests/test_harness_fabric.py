@@ -169,6 +169,7 @@ def _run(
     result: dict | list,
     extra_env: dict[str, str] | None = None,
     relay_env: str = "APP_BUDGET_RELAY_URL",
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], dict, Path]:
     """Install the stand-in Fabric, then run the built command in a scratch workspace.
 
@@ -179,12 +180,13 @@ def _run(
         result: The result file the fake runner writes.
         extra_env: More environment for the run command.
         relay_env: The variable that carries the relay URL in a protected run.
+        mcp_servers: Proposer MCP server names for the launch.
 
     Returns:
         The finished run command, what the fake runner saw, and the workspace.
     """
     env, _ = _install(tmp_path, build_launch(_target(), _GATEWAY).install_command or "")
-    launch = build_launch(_target(), _GATEWAY, protected=protected)
+    launch = build_launch(_target(), _GATEWAY, protected=protected, mcp_servers=mcp_servers)
     workspace = tmp_path / "work"
     for name, content in launch.files.items():
         path = workspace / name
@@ -505,6 +507,36 @@ def test_protected_run_points_codex_at_the_relay_and_returns_the_response(tmp_pa
     assert "runner progress line" in finished.stderr
     assert "runner progress line" not in finished.stdout
     assert parse_output("plain", finished.stdout) == (_ANSWER, {})
+
+
+def test_protected_run_gives_codex_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """With proposer MCP servers, Codex gets each one at the relay, marked required, with no token in the file."""
+    finished, seen, workspace = _run(
+        tmp_path, protected=True, result=_RECORDED_RESULT, mcp_servers=("search", "my tools")
+    )
+
+    assert finished.returncode == 0, finished.stderr
+    config = seen["spec"]["config"]
+    assert config["mcp"] == {
+        "servers": {
+            "search": {"transport": "streamable-http", "url": f"{_RELAY}/mcp/search"},
+            "my tools": {"transport": "streamable-http", "url": f"{_RELAY}/mcp/my%20tools"},
+        }
+    }
+    overrides = config["harness"]["settings"]["config_overrides"]
+    assert overrides["mcp_servers.search.required"] is True
+    assert overrides["mcp_servers.my tools.required"] is True
+    written = (workspace / FABRIC_CONFIG_FILE).read_text()
+    assert _GATEWAY.url not in written
+    assert _GATEWAY.api_key not in written
+
+
+def test_launch_without_proposer_mcp_servers_sets_no_mcp_config() -> None:
+    """No proposer MCP servers leaves the config with no MCP section and no required override."""
+    config = json.loads(build_launch(_target(), _GATEWAY, protected=True).files[FABRIC_CONFIG_FILE])
+
+    assert "mcp" not in config
+    assert not any(key.startswith("mcp_servers.") for key in config["harness"]["settings"]["config_overrides"])
 
 
 def test_protected_run_reads_the_skynet_relay_variable_when_the_app_one_is_unset(tmp_path: Path) -> None:

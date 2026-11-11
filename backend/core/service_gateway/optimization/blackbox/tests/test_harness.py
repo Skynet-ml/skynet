@@ -560,7 +560,7 @@ def test_a_proposer_mcp_file_stops_every_other_harness_by_name(harness: str) -> 
 
 
 def test_the_mcp_harness_list_names_every_harness_that_loads_the_relay_urls() -> None:
-    """Name exactly the harnesses that write the relay urls into their config (SKY-618, SKY-619, SKY-620)."""
+    """Name exactly the harnesses that write the relay urls into their config (SKY-618, SKY-619, SKY-620, SKY-621)."""
     assert MCP_HARNESSES == (
         "codex",
         "opencode",
@@ -571,6 +571,13 @@ def test_the_mcp_harness_list_names_every_harness_that_loads_the_relay_urls() ->
         "openhands",
         "hermes",
         "goose",
+        "openhands_sdk",
+        "antigravity_sdk",
+        "deerflow",
+        "eve",
+        "fabric",
+        "code_puppy",
+        "grok_build",
     )
 
 

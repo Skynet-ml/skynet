@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CODE_PUPPY
@@ -43,6 +44,16 @@ CODE_PUPPY_PYTHON = "3.13"
 # so the model file ships in the workspace (the bridge keeps launch files out of
 # the version patch). It holds no key.
 CODE_PUPPY_MODELS_FILE = ".app/code_puppy/extra_models.json"
+# Code Puppy 0.0.967 loads MCP servers from ``$XDG_CONFIG_HOME/code_puppy/
+# mcp_servers.json`` and starts only the servers that
+# ``mcp_agent_bindings.json`` binds with ``auto_start`` to the default agent,
+# also in a headless ``--prompt`` run. A project ``.code_puppy/mcp_servers.json``
+# loads only after ``/mcp trust``, so the workspace cannot add a server (SKY-621).
+CODE_PUPPY_MCP_FILES = {
+    ".app/code_puppy/mcp_servers.json": "mcp_servers.json",
+    ".app/code_puppy/mcp_agent_bindings.json": "mcp_agent_bindings.json",
+}
+_CODE_PUPPY_AGENT = "code-puppy"
 # Code Puppy reads ``$XDG_CONFIG_HOME/code_puppy/puppy.cfg`` and
 # ``$XDG_DATA_HOME/code_puppy/extra_models.json``, and writes its sessions and
 # caches under the XDG dirs. A file it writes in the workspace joins the version
@@ -254,7 +265,34 @@ def _extra_models(model: str, gateway: GatewayConfig, reasoning_effort: str | No
     return json.dumps({PROVIDER: entry}, indent=2) + "\n"
 
 
-def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _mcp_files(gateway: GatewayConfig, mcp_servers: tuple[str, ...]) -> dict[str, str]:
+    """Build the MCP server and binding files for the proposer MCP servers.
+
+    Args:
+        gateway: Gateway URL and key; only the URL goes into a file.
+        mcp_servers: Names of the proposer MCP servers.
+
+    Returns:
+        The launch files by workspace path, or no files when there are no servers.
+    """
+    if not mcp_servers:
+        return {}
+    servers = {name: {"type": "http", "url": gateway.url + "/mcp/" + quote(name, safe="")} for name in mcp_servers}
+    bindings = {"bindings": {_CODE_PUPPY_AGENT: {name: {"auto_start": True} for name in mcp_servers}}}
+    servers_file, bindings_file = CODE_PUPPY_MCP_FILES
+    return {
+        servers_file: json.dumps({"mcp_servers": servers}, indent=2) + "\n",
+        bindings_file: json.dumps(bindings, indent=2) + "\n",
+    }
+
+
+def _code_puppy_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for Code Puppy (:data:`CODE_PUPPY_PACKAGE`, pinned to :data:`CODE_PUPPY_VERSION`).
 
     Code Puppy has no JSON event stream on stdout, so its stdout goes to
@@ -267,6 +305,7 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Code Puppy's default.
+        mcp_servers: Names of the proposer MCP servers that a protected run reaches through the relay.
 
     Returns:
         The launch.
@@ -274,6 +313,10 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
     Raises:
         ServiceError: When Code Puppy has no effort with that name.
     """
+    mcp_files = _mcp_files(gateway, mcp_servers)
+    copy_mcp_files = "".join(
+        f'cp {path} "$XDG_CONFIG_HOME/code_puppy/{CODE_PUPPY_MCP_FILES[path]}" && ' for path in mcp_files
+    )
     xdg_exports = " ".join(f'{name}="$_cp_dir/{folder}"' for name, folder in _XDG_DIRS.items())
     run_command = (
         f"{_CODE_PUPPY_PATH}; "
@@ -283,6 +326,7 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
         f"{_RANDOM_KEY_ENV} && "
         f'sed "s/[$]{_CUSTOM_API_KEY_ENV}/\\$$_cp_key/" {CODE_PUPPY_MODELS_FILE} '
         '> "$XDG_DATA_HOME/code_puppy/extra_models.json" && '
+        f"{copy_mcp_files}"
         f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" || exit 1; "
         f"{_FRAMED_PROMPT}"
         "code-puppy --disable-ask-user-question "
@@ -296,7 +340,7 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_code_puppy_install(),
-        files={CODE_PUPPY_MODELS_FILE: _extra_models(model, gateway, reasoning_effort)},
+        files={CODE_PUPPY_MODELS_FILE: _extra_models(model, gateway, reasoning_effort), **mcp_files},
         run_command=run_command,
         env={**_base_env(model, gateway), **_BLANK_PROVIDER_KEYS},
         parse_output=parse_pi_output,
