@@ -103,6 +103,88 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 # its path: a planted json.py or .pth would run before any check (E38, E40).
 # -I drops PYTHONDONTWRITEBYTECODE and PYTHONUNBUFFERED, so -B and -u keep them.
 _ISOLATED = "-I -B -u"
+# -I still runs every .pth and module in the venv and system site-packages,
+# and the box's /app/.venv is writable on Vercel, so code the version plants
+# there would run in the metric step and in every later python3 -I check
+# (SKY-398). One script records, then checks, every folder on the box
+# python3's sys.path, sys.prefix and the PATH folders up to python3: a digest
+# of each entry's name, mode, inode, size, mtime and link target catches an
+# added, removed or replaced file, and a change time after the stamp catches
+# an edit whose mtime was set back (only root can set a change time back).
+# The check starts the stamped interpreter itself with -I -S, so nothing the
+# version planted runs in it. A folder named site-packages inside the
+# standard library is not on sys.path and is skipped.
+_PYTHON_GUARD = r"""
+import hashlib, json, os, stat, sys, time
+
+def ident(path):
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return [os.path.realpath(path), info.st_dev, info.st_ino]
+
+def entries(roots):
+    tops = {root for root, _kind, _ident in roots}
+    for root, kind, before in roots:
+        if before is None:
+            continue
+        yield root
+        if kind == "flat":
+            try:
+                names = sorted(os.listdir(root))
+            except OSError:
+                continue
+            for name in names:
+                yield os.path.join(root, name)
+            continue
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = sorted(
+                name for name in dirs
+                if name not in ("site-packages", "dist-packages") and os.path.join(folder, name) not in tops
+            )
+            for name in sorted(files) + dirs:
+                yield os.path.join(folder, name)
+
+def scan(roots, start):
+    sha = hashlib.sha256()
+    changed = []
+    for path in entries(roots):
+        try:
+            info = os.lstat(path)
+            link = os.readlink(path) if stat.S_ISLNK(info.st_mode) else ""
+        except OSError:
+            sha.update(f"{path}\0gone\n".encode("utf-8", "surrogateescape"))
+            continue
+        line = f"{path}\0{info.st_mode}\0{info.st_ino}\0{info.st_size}\0{info.st_mtime_ns}\0{link}\n"
+        sha.update(line.encode("utf-8", "surrogateescape"))
+        if start is not None and info.st_ctime_ns > start and len(changed) < 5:
+            changed.append(path)
+    return sha.hexdigest(), changed
+
+if sys.argv[1] == "stamp":
+    flats = [sys.prefix]
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if folder:
+            flats.append(os.path.abspath(folder))
+            if os.path.exists(os.path.join(folder, "python3")):
+                break
+    trees = [os.path.abspath(path) for path in sys.path if path]
+    roots = [[path, "tree", ident(path)] for path in dict.fromkeys(trees)]
+    roots += [[path, "flat", ident(path)] for path in dict.fromkeys(flats) if path not in trees]
+    start = time.time_ns()
+    digest, _changed = scan(roots, None)
+    print(json.dumps({"python": os.path.realpath(sys.executable), "roots": roots, "start": start, "digest": digest}))
+else:
+    stamp = json.loads(sys.argv[2])
+    roots = stamp["roots"]
+    moved = [path for path, _kind, before in roots if ident(path) != before]
+    digest, changed = scan(roots, stamp["start"])
+    if digest != stamp["digest"] and not moved and not changed:
+        changed = ["an entry was added, removed or replaced"]
+    print(json.dumps((moved + changed)[:5]))
+"""
+_PACKAGES_CHANGED = "The version's code changed the Python packages that the metric uses, so it has no score."
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # A stage box's relay answers, relative to the box; one folder for every call,
@@ -428,12 +510,14 @@ class RepoScorer:
             # [run] above and in earlier calls' metric steps. Every box shell is
             # bash --noprofile --norc, and the runners and the model mailbox
             # wrapper start python3 -I, so a profile or user-site .pth that a
-            # version plants does not run in a later step. A .pth or module in a
-            # writable venv or system site-packages still runs (SKY-398).
+            # version plants does not run in a later step. A .pth or module it
+            # plants in the venv or system site-packages ends the box at the
+            # package check (SKY-398); root in the box can still hide one.
             # stop_candidates kills the processes that keep the run's marker or
-            # stay its descendants; a process that drops both can still wait
-            # here. Separate boxes close this (SKY-398). No same-uid sweep: it
-            # would kill the supervisor.
+            # stay its descendants, and a supervisor that did not exit 0 ends
+            # the box. A process that drops both while the supervisor lives can
+            # still wait here. Separate boxes close this (SKY-398). No same-uid
+            # sweep: it would kill the supervisor.
             not_installed = self._workspace.install_metric_files()
             if not_installed:
                 raise RepoScoreError(not_installed)
@@ -444,6 +528,7 @@ class RepoScorer:
                 unstamped = self._workspace.stamp_before_run()
                 if unstamped:
                     raise RepoScoreError(unstamped)
+                packages = self._stamp_python(session, env)
                 # A sink makes the session stream stderr live, which is where log() events travel.
                 with sandbox_log.event_scope(source="scorer"):
                     result = session.run(
@@ -457,6 +542,7 @@ class RepoScorer:
                 # The runner never stopped the metric's processes; only a new box does.
                 self._workspace.close()
                 raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
+            self._check_python(session, packages, secrets)
             self._check_changes(relay, secrets)
             text = session.read_file(f"{call}/{runner.OUTPUT_FILE}")
         # The version's code runs next to the hidden metric and can print or
@@ -545,6 +631,7 @@ class RepoScorer:
             unstamped = self._workspace.stamp_before_run()
             if unstamped:
                 raise RepoScoreError(unstamped)
+            packages = self._stamp_python(session, env)
             calls = shlex.quote(CALLS_DIR)
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
@@ -555,13 +642,17 @@ class RepoScorer:
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
                     on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                 )
+        # Before the protected-file check: it starts python3 -I, which a planted .pth would join.
+        self._check_python(session, packages, secrets)
         self._check_changes(relay, secrets)
         text = session.read_file(f"{supervisor}/{runner.OUTPUT_FILE}")
         try:
             ran = json.loads(text) if text is not None else None
         except ValueError:
             ran = None
-        if not isinstance(ran, dict) or ran.get("stopped") is not True:
+        # The supervisor exits 0 once it wrote its output; the entry's code
+        # can kill it and write a "stopped" output of its own (SKY-398).
+        if not result.ok or not isinstance(ran, dict) or ran.get("stopped") is not True:
             logger.warning(
                 "The [run] supervisor did not stop every process (exit %s): %s",
                 result.exit_code,
@@ -573,6 +664,60 @@ class RepoScorer:
             raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
         _raise_control({"control": relay.control if relay is not None else None})
         return ran
+
+    def _stamp_python(self, session: SandboxSession, env: Mapping[str, str]) -> str:
+        """Record the box python3's package folders just before the version's code runs (SKY-398).
+
+        Args:
+            session: The workspace's box.
+            env: The environment the next step runs with, so the same python3 is found.
+
+        Returns:
+            The stamp, as JSON, for :meth:`_check_python`.
+
+        Raises:
+            RepoScoreError: When the folders could not be recorded.
+        """
+        result = session.run(f"python3 {_ISOLATED} -c {shlex.quote(_PYTHON_GUARD)} stamp", env=env, timeout_seconds=60)
+        try:
+            stamp = json.loads(result.stdout) if result.ok else None
+        except ValueError:
+            stamp = None
+        if not isinstance(stamp, dict) or not isinstance(stamp.get("python"), str):
+            logger.warning("The Python package stamp failed (exit %s): %s", result.exit_code, result.stderr[-2_000:])
+            self._workspace.close()
+            raise RepoScoreError("The Python packages could not be checked before the version ran.")
+        return json.dumps(stamp)
+
+    def _check_python(self, session: SandboxSession, stamp: str, secrets: list[str]) -> None:
+        """Refuse the version and end the box when its code changed the stamped package folders (SKY-398).
+
+        Args:
+            session: The workspace's box.
+            stamp: The JSON that :meth:`_stamp_python` returned.
+            secrets: Values to keep out of the log.
+
+        Raises:
+            RepoScoreError: When a folder changed, or the check could not run.
+        """
+        python = shlex.quote(json.loads(stamp)["python"])
+        result = session.run(
+            f"{python} -I -S -B -c {shlex.quote(_PYTHON_GUARD)} check {shlex.quote(stamp)}", timeout_seconds=60
+        )
+        try:
+            changed = json.loads(result.stdout) if result.ok else None
+        except ValueError:
+            changed = None
+        if changed == []:
+            return
+        logger.warning(
+            "The version changed the box's Python packages (exit %s): %s",
+            result.exit_code,
+            redact(f"{changed} {result.stderr[-2_000:]}", secrets),
+        )
+        # A planted .pth or module stays for every later step in this box.
+        self._workspace.close()
+        raise RepoScoreError(_PACKAGES_CHANGED)
 
     def _check_changes(self, relay: _StageRelay | None, secrets: list[str]) -> None:
         """Refuse the version when its code changed a protected or hidden file while it ran.

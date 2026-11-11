@@ -3361,6 +3361,7 @@ import os
 import site
 import subprocess
 import sys
+import sysconfig
 
 # The markers are split so this file does not match its own search.
 METRIC_MARK = "WEIGHT" + " = 0.3"
@@ -3476,6 +3477,46 @@ def plant_pth(value):
     with open(os.path.join(folder, "skynet_forge.pth"), "w") as handle:
         handle.write("import skynet_forge\\n")
     return folder
+
+
+WATCH = (
+    "import os, shutil, sys, time\\n"
+    "deadline = time.time() + 8\\n"
+    "while time.time() < deadline:\\n"
+    "    if os.path.exists('eval/metric.py'):\\n"
+    "        shutil.copy('eval/metric.py', sys.argv[1])\\n"
+    "        break\\n"
+    "    time.sleep(0.05)\\n"
+)
+
+
+def escape(value):
+    # A watcher without the run marker in a new session, then a forged
+    # "stopped" output and a killed supervisor, so nothing sweeps the watcher.
+    subprocess.Popen(
+        [sys.executable, "-c", WATCH, value["late"]],
+        env={"PATH": os.environ.get("PATH", "")},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    call_dir = os.path.dirname(os.path.abspath(sys.argv[2]))
+    with open(os.path.join(call_dir, "output.json"), "w") as handle:
+        handle.write(json.dumps({"output": "ESCAPED", "error": None, "stopped": True}))
+    os.kill(os.getppid(), 9)
+    return value
+
+
+def plant_venv(value):
+    folder = sysconfig.get_paths()["purelib"]
+    if not os.path.realpath(folder).startswith(value["allowed"] + os.sep):
+        return {"refused to plant in": folder}
+    with open(os.path.join(folder, "skynet_venv_forge.py"), "w") as handle:
+        handle.write(FORGE)
+    with open(os.path.join(folder, "skynet_venv_forge.pth"), "w") as handle:
+        handle.write("import skynet_venv_forge\\n")
+    return value
 """
 
 _PROBE_METRIC = """
@@ -3627,6 +3668,48 @@ def test_a_module_the_candidate_plants_for_the_metric_runner_never_runs(tmp_path
             assert result["feedback"] == "real metric"
     finally:
         scorer.close()
+
+
+def test_a_candidate_that_kills_its_supervisor_and_forges_stopped_has_no_score(tmp_path: Path) -> None:
+    """A killed supervisor with a forged ``stopped`` output is refused, and no watcher sees the metric (SKY-398)."""
+    late = tmp_path / "late.txt"
+    scorer = _probed(tmp_path, "src/cand.py:escape")
+    try:
+        with pytest.raises(RepoScoreError, match="could not be stopped"):
+            scorer.score("", {"input": {"late": str(late)}})
+    finally:
+        scorer.close()
+    time.sleep(1.0)
+    assert not late.exists()
+
+
+def _writable_venv(tmp_path: Path) -> dict[str, str]:
+    """Make a scratch venv the box's ``python3`` comes from, so a test may write into its packages.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The box environment with the venv first on PATH.
+    """
+    base = getattr(sys, "_base_executable", sys.executable)
+    venv = tmp_path / "boxvenv"
+    subprocess.run([base, "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True)
+    return {"PATH": os.pathsep.join([str(venv / "bin"), "/usr/bin", "/bin"])}
+
+
+def test_a_pth_the_candidate_plants_in_the_box_venv_has_no_score(tmp_path: Path) -> None:
+    """A ``.pth`` planted in the box's own site-packages ends the box before the metric runs (SKY-398)."""
+    env = _writable_venv(tmp_path)
+    allowed = os.path.realpath(tmp_path / "boxvenv")
+    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    scorer = _probed(tmp_path, "src/cand.py:plant_venv", code=metric, env=env)
+    try:
+        with pytest.raises(RepoScoreError, match="changed the Python packages"):
+            scorer.score("", {"input": {"allowed": allowed}})
+    finally:
+        scorer.close()
+    assert list(Path(allowed).glob("lib/python*/site-packages/skynet_venv_forge.pth"))
 
 
 _GIT_PLANT = r"""
