@@ -1716,7 +1716,7 @@
   "agent.slash.new": "Yeni sohbet başlat",
   "agent.slash.resume": "Önceki bir sohbeti aç",
   "agent.slash.name": "Bu sohbeti yeniden adlandır",
-  "agent.slash.name_needed": "/name komutundan sonra bir ad yazın.",
+  "agent.slash.name_needed": "⁦/name⁩ komutundan sonra bir ad yazın.",
   "agent.slash.share": "Bu sohbeti paylaş",
   "agent.slash.copy": "Son yanıtı kopyala",
   "agent.slash.export": "Sohbeti Markdown olarak indir",

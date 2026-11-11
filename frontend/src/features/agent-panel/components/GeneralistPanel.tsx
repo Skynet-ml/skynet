@@ -1100,7 +1100,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         case "thinking": {
           const value = resolveSlashOption(arg, command.options ?? []);
           if (!value) {
-            toast.error(formatMsg("agent.slash.pick_value", { command: `/${command.name}` }));
+            toast.error(formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }));
             return;
           }
           if (command.name === "thinking") {

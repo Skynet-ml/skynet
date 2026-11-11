@@ -309,10 +309,12 @@ export function Composer({
     const call = parseSlashCommand(text, slash.commands);
     if (!call) return false;
     if (call.command.hidden)
-      toast.error(msg("agent.slash.unavailable", { command: `/${call.command.name}` }));
+      // The isolates keep "/name" whole between right-to-left words.
+      toast.error(msg("agent.slash.unavailable", { command: `\u2066/${call.command.name}\u2069` }));
     else slash.run(call.command, call.arg);
     onChange("");
     setSlashIndex(0);
+    setSlashDismissed(null);
     resetHeight();
     return true;
   };
@@ -387,7 +389,7 @@ export function Composer({
         setSlashDismissed(draft.text);
         return;
       }
-      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+      if ((e.key === "Tab" && !e.shiftKey) || (e.key === "Enter" && !e.shiftKey)) {
         e.preventDefault();
         pickSlash(slashRow, e.key === "Enter" && enterRunsSlash(menu, slashRow, draft.text));
         return;
@@ -486,6 +488,8 @@ export function Composer({
             role="listbox"
             aria-label={menu.kind === "commands" ? msg("agent.slash.menu") : `/${menu.command.name}`}
             data-state="open"
+            // A click on the header, padding or scrollbar must not blur the textarea and close the menu.
+            onMouseDown={(e) => e.preventDefault()}
             className={cn(
               "bui-menu origin-bottom absolute inset-x-0 bottom-full z-20 mb-2",
               "flex max-h-72 flex-col gap-0.5 overflow-y-auto overscroll-contain rounded-2xl border border-border bg-card p-1.5 shadow-[var(--shadow-float)]",
@@ -545,8 +549,8 @@ export function Composer({
                       icon={o.icon}
                     >
                       <span className="flex min-w-0 flex-1 flex-col">
-                        <span dir="auto" className={cn("truncate text-foreground", current && "font-medium")}>
-                          {o.label}
+                        <span className={cn("truncate text-start text-foreground", current && "font-medium")}>
+                          <bdi dir="auto">{o.label}</bdi>
                         </span>
                         {o.label !== o.value && (
                           <span className="truncate text-start text-xs text-muted-foreground">
@@ -597,6 +601,7 @@ export function Composer({
               value={draft.text}
               onChange={(e) => {
                 setSlashIndex(0);
+                setSlashDismissed(null);
                 onChange(joinPastes({ ...draft, text: e.target.value }));
                 autoResizeTextarea(e.target);
               }}

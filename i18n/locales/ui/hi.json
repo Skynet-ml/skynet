@@ -1716,7 +1716,7 @@
   "agent.slash.new": "नई चैट शुरू करें",
   "agent.slash.resume": "पिछली चैट खोलें",
   "agent.slash.name": "इस चैट का नाम बदलें",
-  "agent.slash.name_needed": "/name के बाद एक नाम लिखें।",
+  "agent.slash.name_needed": "⁦/name⁩ के बाद एक नाम लिखें।",
   "agent.slash.share": "यह चैट शेयर करें",
   "agent.slash.copy": "आख़िरी जवाब कॉपी करें",
   "agent.slash.export": "चैट को Markdown के रूप में डाउनलोड करें",

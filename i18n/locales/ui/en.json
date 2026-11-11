@@ -89,7 +89,7 @@
   "agent.slash.new": "Start a new chat",
   "agent.slash.resume": "Open an earlier chat",
   "agent.slash.name": "Rename this chat",
-  "agent.slash.name_needed": "Type a name after /name.",
+  "agent.slash.name_needed": "Type a name after ⁦/name⁩.",
   "agent.slash.share": "Share this chat",
   "agent.slash.copy": "Copy the last reply",
   "agent.slash.export": "Download the chat as Markdown",

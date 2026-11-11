@@ -89,7 +89,7 @@
   "agent.slash.new": "התחלת שיחה חדשה",
   "agent.slash.resume": "פתיחת שיחה קודמת",
   "agent.slash.name": "שינוי שם השיחה",
-  "agent.slash.name_needed": "יש להקליד שם אחרי הפקודה /name",
+  "agent.slash.name_needed": "יש להקליד שם אחרי הפקודה ⁦/name⁩",
   "agent.slash.share": "שיתוף השיחה",
   "agent.slash.copy": "העתקת התשובה האחרונה",
   "agent.slash.export": "הורדת השיחה כקובץ Markdown",

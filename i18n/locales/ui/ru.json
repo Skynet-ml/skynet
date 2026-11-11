@@ -1716,7 +1716,7 @@
   "agent.slash.new": "Начать новый чат",
   "agent.slash.resume": "Открыть прошлый чат",
   "agent.slash.name": "Переименовать этот чат",
-  "agent.slash.name_needed": "Введите название после /name.",
+  "agent.slash.name_needed": "Введите название после ⁦/name⁩.",
   "agent.slash.share": "Поделиться этим чатом",
   "agent.slash.copy": "Скопировать последний ответ",
   "agent.slash.export": "Скачать чат в Markdown",

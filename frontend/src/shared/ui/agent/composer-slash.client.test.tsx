@@ -20,6 +20,7 @@ Object.assign(globalThis, {
   self: dom.window,
   document: dom.window.document,
   HTMLElement: dom.window.HTMLElement,
+  HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
   Element: dom.window.Element,
   Node: dom.window.Node,
   Event: dom.window.Event,
@@ -46,6 +47,7 @@ const { createRoot } = await import("react-dom/client");
 const { Composer } = await import("./composer");
 const { LocaleProvider } = await import("@/shared/providers/locale-provider");
 const { UserPrefsProvider } = await import("@/features/settings/hooks/use-user-prefs");
+const { ToastContainer } = await import("react-toastify");
 
 after(() => dom.window.close());
 
@@ -61,8 +63,22 @@ interface Mounted {
   ran: string[];
   sent: string[];
   drafts: string[];
-  press: (key: string) => Promise<void>;
+  press: (key: string, init?: KeyboardEventInit) => Promise<void>;
+  type: (text: string) => Promise<void>;
   unmount: () => Promise<void>;
+}
+
+// Keeps the draft in state, as the chat panels do, so typed text reaches the composer.
+function Controlled({ initial, onDraft, children }: {
+  initial: string;
+  onDraft: (text: string) => void;
+  children: (value: string, setValue: (text: string) => void) => React.ReactNode;
+}) {
+  const [value, setValue] = React.useState(initial);
+  return children(value, (text) => {
+    onDraft(text);
+    setValue(text);
+  });
 }
 
 async function mount(draft: string, streaming: boolean): Promise<Mounted> {
@@ -83,15 +99,20 @@ async function mount(draft: string, streaming: boolean): Promise<Mounted> {
     root.render(
       <LocaleProvider initialLocale="en">
         <UserPrefsProvider>
-          <Composer
-            value={draft}
-            onChange={(text) => drafts.push(text)}
-            onSubmit={() => sent.push("submit")}
-            onStop={() => {}}
-            streaming={streaming}
-            midTurn={midTurn}
-            slash={{ commands, run: (c, arg) => ran.push(`${c.name}:${arg}`) }}
-          />
+          <Controlled initial={draft} onDraft={(text) => drafts.push(text)}>
+            {(value, setValue) => (
+              <Composer
+                value={value}
+                onChange={setValue}
+                onSubmit={() => sent.push("submit")}
+                onStop={() => {}}
+                streaming={streaming}
+                midTurn={midTurn}
+                slash={{ commands, run: (c, arg) => ran.push(`${c.name}:${arg}`) }}
+              />
+            )}
+          </Controlled>
+          <ToastContainer />
         </UserPrefsProvider>
       </LocaleProvider>,
     );
@@ -102,9 +123,16 @@ async function mount(draft: string, streaming: boolean): Promise<Mounted> {
     ran,
     sent,
     drafts,
-    press: async (key) => {
+    press: async (key, init) => {
       await React.act(async () => {
-        textarea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true }));
+        textarea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+      });
+    },
+    type: async (text) => {
+      await React.act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")!.set!;
+        setter.call(textarea, text);
+        textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
       });
     },
     unmount: async () => {
@@ -183,4 +211,55 @@ void test("Enter on a partial command name completes it and does not run it", as
   await full.press("Enter");
   await full.unmount();
   assert.deepEqual(full.ran, ["new:"]);
+});
+
+void test("the toast for a hidden command isolates the command name", async () => {
+  const composer = await mount("/thinking high", false);
+  await composer.press("Enter");
+  await React.act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+  // Without the isolates, a right-to-left toast shows "thinking/".
+  assert.match(document.body.textContent ?? "", /\u2066\/thinking\u2069/);
+  await composer.unmount();
+});
+
+void test("a click inside the menu does not blur the textarea", async () => {
+  const composer = await mount("/", false);
+  await React.act(async () => composer.textarea.focus());
+  const down = new dom.window.MouseEvent("mousedown", { bubbles: true, cancelable: true });
+  listbox()!.firstElementChild!.dispatchEvent(down);
+  assert.equal(down.defaultPrevented, true);
+  await composer.unmount();
+});
+
+void test("Shift+Tab leaves the menu and does not complete the command", async () => {
+  const composer = await mount("/ne", false);
+  await React.act(async () => composer.textarea.focus());
+  await composer.press("Tab", { shiftKey: true });
+  assert.deepEqual(composer.drafts, []);
+  await composer.press("Tab");
+  assert.deepEqual(composer.drafts, ["/new"]);
+  await composer.unmount();
+});
+
+void test("a slash typed again after Escape shows the menu again", async () => {
+  const composer = await mount("/", false);
+  await React.act(async () => composer.textarea.focus());
+  await composer.press("Escape");
+  assert.equal(listbox(), null);
+  await composer.type("");
+  await composer.type("/");
+  assert.ok(listbox());
+  await composer.unmount();
+});
+
+void test("a slash typed after a command runs shows the menu again", async () => {
+  const composer = await mount("/new", false);
+  await React.act(async () => composer.textarea.focus());
+  await composer.press("Escape");
+  assert.equal(listbox(), null);
+  await composer.press("Enter");
+  assert.deepEqual(composer.ran, ["new:"]);
+  await composer.type("/new");
+  assert.ok(listbox());
+  await composer.unmount();
 });

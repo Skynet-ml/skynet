@@ -1716,7 +1716,7 @@
   "agent.slash.new": "新しいチャットを開始",
   "agent.slash.resume": "以前のチャットを開く",
   "agent.slash.name": "このチャットの名前を変更",
-  "agent.slash.name_needed": "/name の後に名前を入力してください。",
+  "agent.slash.name_needed": "⁦/name⁩ の後に名前を入力してください。",
   "agent.slash.share": "このチャットを共有",
   "agent.slash.copy": "最後の返信をコピー",
   "agent.slash.export": "チャットを Markdown でダウンロード",

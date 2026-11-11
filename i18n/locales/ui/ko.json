@@ -1716,7 +1716,7 @@
   "agent.slash.new": "새 채팅 시작",
   "agent.slash.resume": "이전 채팅 열기",
   "agent.slash.name": "이 채팅 이름 변경",
-  "agent.slash.name_needed": "/name 뒤에 이름을 입력하세요.",
+  "agent.slash.name_needed": "⁦/name⁩ 뒤에 이름을 입력하세요.",
   "agent.slash.share": "이 채팅 공유",
   "agent.slash.copy": "마지막 답변 복사",
   "agent.slash.export": "채팅을 Markdown으로 다운로드",

@@ -1716,7 +1716,7 @@
   "agent.slash.new": "Démarrer un nouveau chat",
   "agent.slash.resume": "Ouvrir un chat précédent",
   "agent.slash.name": "Renommer ce chat",
-  "agent.slash.name_needed": "Saisissez un nom après /name.",
+  "agent.slash.name_needed": "Saisissez un nom après ⁦/name⁩.",
   "agent.slash.share": "Partager ce chat",
   "agent.slash.copy": "Copier la dernière réponse",
   "agent.slash.export": "Télécharger le chat en Markdown",
