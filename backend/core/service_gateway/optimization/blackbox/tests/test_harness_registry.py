@@ -51,6 +51,7 @@ _BUILT_INS = (
     "mini_swe_agent",
     "openhands",
     "openhands_sdk",
+    "qwen_code",
     "antigravity_sdk",
     "goose",
     "hermes",
@@ -296,6 +297,7 @@ def test_registry_keeps_the_catalog_order() -> None:
             """ 'import importlib.metadata as m; print(m.version("openhands-sdk"))'""",
             "1.61.0",
         ),
+        "qwen_code": ("qwen", "0.27.2"),
         "antigravity_sdk": (
             "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with google-antigravity==0.1.20"
             " --with cryptography==46.0.7 --with fastapi==0.136.3 python -c"
