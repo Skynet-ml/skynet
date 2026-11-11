@@ -621,6 +621,7 @@ const refusal = async (call) => {
 const workspace = process.env.EVE_WORKSPACE;
 console.log(JSON.stringify({
   env: await run("env"),
+  path: await run('printf %s "$PATH"'),
   readRefused: await refusal(() => connection.readFile({ path: workspace + "/optimize.toml" })),
   bashRefused: await refusal(() => run("cat optimize.toml")),
   writeRefused: await refusal(() => connection.writeFiles({ files: [{ path: workspace + "/optimize.toml", content: "x" }] })),
@@ -632,7 +633,7 @@ console.log(JSON.stringify({
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_path: Path) -> None:
-    """Run the real sandbox provider: drop the key and token from commands and refuse hidden paths in every tool."""
+    """Run the real sandbox provider: drop the key and token from commands, keep PATH, and refuse hidden paths."""
     project = tmp_path / "eve"
     stubs = project / "node_modules/eve"
     stubs.mkdir(parents=True)
@@ -641,6 +642,8 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     (project / "sandbox.mjs").write_text(EVE_SANDBOX)
     workspace = tmp_path / "work"
     workspace.mkdir()
+    tools_bin = tmp_path / "bin"
+    tools_bin.mkdir()
     (workspace / "optimize.toml").write_text("hidden = true\n")
     (workspace / "main.py").write_text("print(1)\n")
     guard_env = install_guard(tmp_path / "session", workspace, ["optimize.toml"])
@@ -649,7 +652,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
         [_NODE, "--input-type=module", "-e", _SANDBOX_DRIVER, str((project / "sandbox.mjs").as_uri())],
         cwd=project,
         env={
-            "PATH": os.environ.get("PATH", os.defpath),
+            "PATH": f"{tools_bin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
             "APP_API_KEY": "secret-key",
             "SKYNET_API_KEY": "secret-key",
             "EVE_RUNNER_TOKEN": "runner-token",
@@ -665,7 +668,9 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     result = json.loads(completed.stdout)
     names = {line.split("=", 1)[0] for line in result["env"].splitlines()}
     assert not names & {"APP_API_KEY", "SKYNET_API_KEY", "EVE_RUNNER_TOKEN", "EVE_PROJECT_DIR", "EVE_WORKSPACE"}
-    assert "PATH" in names
+    # A login shell reads /etc/profile, which resets PATH on Debian images and
+    # would drop /opt/node24/bin and the venv from every tool command.
+    assert result["path"].split(os.pathsep)[0] == str(tools_bin)
     for key in ("readRefused", "bashRefused", "writeRefused", "removeRefused"):
         assert result[key] == GUARD_REFUSAL, key
     assert result["allowed"] == "print(1)\n"

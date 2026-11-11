@@ -269,8 +269,8 @@ def test_registry_keeps_the_catalog_order() -> None:
         ),
         "fx": ("fx", "0.0.16"),
         "goose": ("goose", "1.57.0"),
-        "cline": ("cline", "3.0.74"),
         "eve": ("eve", "1.0.0-rc.6"),
+        "cline": ("cline", "3.0.74"),
     }
 
 

@@ -253,7 +253,7 @@ function connect(root) {
     workspaceRoot: root,
     async spawn({ signal, stdin, command, env, workingDirectory }) {
       await guard("bash", { command, cwd: workingDirectory });
-      const child = spawn("bash", ["-lc", command], {
+      const child = spawn("bash", ["-c", command], {
         cwd: workingDirectory,
         env: { ...base, ...SANDBOX_AGENT_ENV, ...env },
         signal,
