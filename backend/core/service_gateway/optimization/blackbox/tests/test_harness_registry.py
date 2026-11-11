@@ -39,7 +39,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
 }
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
-_BUILT_INS = (*_PRE_REGISTRY, "aider", "antigravity_sdk", "goose", "cline")
+_BUILT_INS = (*_PRE_REGISTRY, "aider", "antigravity_sdk", "fx", "goose", "cline")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
 # SKY-529 changed the codex digests: Codex turns off web_search and multi_agent,
@@ -267,6 +267,7 @@ def test_registry_keeps_the_catalog_order() -> None:
             """ 'import importlib.metadata as m; print(m.version("google-antigravity"))'""",
             "0.1.20",
         ),
+        "fx": ("fx", "0.0.16"),
         "goose": ("goose", "1.57.0"),
         "cline": ("cline", "3.0.74"),
     }
