@@ -157,10 +157,11 @@ def _effort_flags(reasoning_effort: str | None) -> str:
     puts it in the request body as is. As a ``reasoning_effort`` argument,
     LiteLLM checks it against the model id: any id with ``gpt-5`` goes through
     ``OpenAIGPT5Config``, which refuses ``xhigh`` for ``gpt-5``, ``gpt-5-mini``
-    and ``gpt-5.1`` and ``minimal`` for ``gpt-5.1`` and ``gpt-5.2``. With
-    tools, it refuses every level except ``none`` for ``gpt-5.5``, and
-    ``gpt-4o`` refuses every level. The ``extra_body`` path avoids all of
-    these refusals. The gateway, not LiteLLM, decides on the level. LiteLLM
+    and ``gpt-5.1`` and ``minimal`` for ``gpt-5.1``, ``gpt-5.2`` and
+    ``gpt-5.5``. ``gpt-4o`` refuses every level. For ``gpt-5.5`` with tools,
+    LiteLLM sends every level except ``none`` to ``/v1/responses``, which the
+    gateway may not serve. The ``extra_body`` path avoids all of these
+    problems. The gateway, not LiteLLM, decides on the level. LiteLLM
     also refuses SWE-agent's default temperature 0 for OpenAI reasoning models
     when it does not see the level, so every level, ``none`` too, sets
     temperature 1.
