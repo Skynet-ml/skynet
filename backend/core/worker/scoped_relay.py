@@ -216,14 +216,16 @@ def _secret_forms(secret: str) -> set[str]:
     password alone. Padding is left off each base64 form, so the padded form
     is masked too. Each form is also listed JSON-escaped with ``\\/`` (PHP)
     and with ``\\u0026``-style HTML escapes (Go), because a base64 form holds
-    ``/`` and a decoded password may hold ``&``, ``<`` or ``>``.
+    ``/`` and a decoded password may hold ``&``, ``<`` or ``>``. The value's
+    Python ``repr`` form is listed too, because a relay refusal quotes a name
+    from box code with ``!r``.
 
     Args:
         secret: One nonempty secret value.
 
     Returns:
         The value and its derived forms, each with its escaped variants; at
-        most 40 strings.
+        most 41 strings.
     """
     raw = secret.encode()
     derived = {encode(raw).decode().rstrip("=") for encode in (base64.b64encode, base64.urlsafe_b64encode)}
@@ -243,7 +245,7 @@ def _secret_forms(secret: str) -> set[str]:
         credential = {decoded, password}
     # A short derived form, such as the base64 "MQ" of "1", would mask ordinary text.
     forms = {secret} | credential | {form for form in derived if len(form) >= _MIN_DERIVED_FORM_CHARS}
-    return forms | {variant for form in forms for variant in escaped_forms(form)}
+    return forms | {variant for form in forms for variant in escaped_forms(form)} | {repr(secret)[1:-1]}
 
 
 def _text(body: bytes | str) -> str:
@@ -295,6 +297,7 @@ class McpRelay:
         allowed_hosts: Mapping[str, Collection[str]] | None = None,
         budget: Any = None,
         services: Mapping[str, ServiceSpec] | None = None,
+        record_secrets: Callable[[], Collection[str]] = tuple,
     ) -> None:
         """Bind the relay to one role and the run's secrets.
 
@@ -307,6 +310,9 @@ class McpRelay:
             allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
             budget: The run budget, which meters a call with a Skynet key.
             services: The file's ``[services]`` tables.
+            record_secrets: Returns more values each call record must mask,
+                such as the role box's route tokens. Each call reads it again,
+                because a token can join the route after the relay is made.
         """
         self._label = label
         self._services = dict(services or {})
@@ -316,6 +322,7 @@ class McpRelay:
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
         self._budget = budget
+        self._record_secrets = record_secrets
         self._streams_lock = threading.Lock()
         self._open_streams = 0
 
@@ -348,7 +355,15 @@ class McpRelay:
             url, declared = mcp_endpoint(self._label, self._role, name)
         except RoleRelayError as error:
             if recorder is not None:
-                recorder.record(recorder.start(), kind="mcp", target=name, status="refused", failure_reason=str(error))
+                recorder.record(
+                    recorder.start(),
+                    kind="mcp",
+                    target=name,
+                    status="refused",
+                    failure_reason=str(error),
+                    # The name comes from box code and can be any value it holds (SKY-640).
+                    secrets=self._record_secrets(),
+                )
             return _mcp_error(403, str(error))
         # Only a GET listener streams, and it takes its place before the request goes out.
         listener = method == "GET"
@@ -423,8 +438,7 @@ class McpRelay:
             url, declared, label, name, method, body, headers, recorder, kind="host", query=self._services[name].query
         )
 
-    @staticmethod
-    def _refused(recorder: CallRecorder | None, name: str, status: int, message: str) -> ModelHTTPResult:
+    def _refused(self, recorder: CallRecorder | None, name: str, status: int, message: str) -> ModelHTTPResult:
         """Record a service call the relay refused, then return the refusal.
 
         Args:
@@ -437,7 +451,14 @@ class McpRelay:
             The error answer.
         """
         if recorder is not None:
-            recorder.record(recorder.start(), kind="host", target=name, status="refused", failure_reason=message)
+            recorder.record(
+                recorder.start(),
+                kind="host",
+                target=name,
+                status="refused",
+                failure_reason=message,
+                secrets=self._record_secrets(),
+            )
         return _mcp_error(status, message)
 
     def _release(self) -> None:
@@ -567,6 +588,8 @@ class McpRelay:
                 recorder=recorder,
                 kind=kind,
                 target=_tool_target(name, url, _json_object(body)) if kind == "mcp" else "",
+                # Box code can put its model route token into a tool call or a request body (SKY-640).
+                record_secrets=self._record_secrets(),
             )
         except _AnswerTooLargeError:
             return _mcp_error(502, f"{label} answered with more than 4 MiB.")

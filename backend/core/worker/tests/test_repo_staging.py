@@ -23,8 +23,9 @@ from sqlalchemy.pool import StaticPool
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
+from core.billing.host_agent import attach_host_agent_token
 from core.billing.model_dispatch import ModelHTTPResult
-from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY, ROUTE_KEY
+from core.billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
@@ -54,7 +55,8 @@ from core.service_gateway.optimization.blackbox.rule_judge import (
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.service import legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
-from core.worker import repo_staging
+from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
+from core.worker import repo_staging, scoped_relay
 from core.worker.repo_gate import check_hidden
 from core.worker.scoped_relay import McpRelay
 
@@ -1028,8 +1030,78 @@ def test_binding_hands_the_proposer_route_a_relay_for_its_services(tmp_path: Pat
     [relay] = relays
     assert relay._services == services
     assert relay._secrets == {"API_KEY": "secret-value"}
+    assert relay._record_secrets() == ("proposer-token", "mcp-token")
     assert "secret-value" not in repr(payload)
     assert "maps.example.com" not in repr(payload)
+    staged.close_scorers()
+
+
+_BOX_TOKENS = {
+    "model": "model-route-token-0123456789",
+    "host_agent": "host-agent-token-0123456789",
+    "embedding": "embedding-token-0123456789",
+    "mcp_relay": "mcp-relay-token-0123456789",
+    "extra_reflection": "extra-reflection-token-0123456789",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_BOX_TOKENS))
+def test_every_token_the_proposer_box_holds_is_masked_in_its_service_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Each token on the proposer's route is masked in a service call that carries it (SKY-640).
+
+    The host agent token joins the route after binding, as the worker attaches it.
+    """
+    # Pin the service host to a closed loopback port, so the call fails after the relay sends it.
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    payload, bare = _binding(tmp_path, None)
+    route = {
+        "url": "http://127.0.0.1:1/v1",
+        "token": _BOX_TOKENS["model"],
+        EMBEDDING_ROUTE_KEY: {"url": "http://127.0.0.1:1/v1", "token": _BOX_TOKENS["embedding"]},
+    }
+    payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
+    # A ShinkaEvolve box gets each extra reflection model's token as APP_SHINKA_KEY_<n>.
+    payload["extra_reflection_model_configs"] = [
+        {"name": "vendor/extra", "extra": {ROUTE_KEY: {"url": route["url"], "token": _BOX_TOKENS["extra_reflection"]}}}
+    ]
+    staged = dataclasses.replace(
+        bare,
+        proposer_role=RoleEnvironment(services=("maps",)),
+        services={"maps": ServiceSpec(url="http://maps.example.com:1/v1")},
+    )
+    gateway = _Gateway()
+    relays: list[McpRelay] = []
+
+    def bind_mcp_relay(relay: McpRelay) -> dict[str, str]:
+        """Keep the relay and hand back its route."""
+        relays.append(relay)
+        return {"url": "http://127.0.0.1:1/v1", "token": _BOX_TOKENS["mcp_relay"]}
+
+    gateway.bind_mcp_relay = bind_mcp_relay  # type: ignore[attr-defined]
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+    attach_host_agent_token(payload, _BOX_TOKENS["host_agent"])
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    store = PostgresRunCallStore(engine)
+    token = _BOX_TOKENS[kind]
+    body = json.dumps({"query": token}).encode()
+
+    answer = relays[0].service(
+        "maps",
+        "",
+        "POST",
+        body,
+        {"content-type": "application/json"},
+        scoped_relay.CallRecorder(store, "opt-1", "", ""),
+    )
+
+    assert answer.status == 502
+    [stored] = store.list_calls("opt-1", scoped_relay.NO_CANDIDATE_ID)
+    for field in ("target", "request", "response", "failure_reason"):
+        assert token not in (stored[field] or ""), field
+    assert SECRET_MASK in stored["request"]
     staged.close_scorers()
 
 
