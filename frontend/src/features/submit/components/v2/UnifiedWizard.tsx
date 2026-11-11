@@ -395,7 +395,7 @@ function UnifiedWizardFrame() {
         })}
       </div>
 
-      <div className="shrink-0">
+      <div className="shrink-0" data-toast-clearance>
         <SubmitNav
           w={{ ...w, runDisabledReason }}
           onBack={back}

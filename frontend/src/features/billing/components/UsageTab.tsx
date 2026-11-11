@@ -2,7 +2,15 @@
 
 import { ProgressBar } from "@/shared/ui/progress-bar";
 import * as React from "react";
-import { ArrowsClockwise, CaretDown, ChartBar, Coins, Sparkle, type Icon } from "@/shared/ui/icons";
+import {
+  ArrowsClockwise,
+  CalendarBlank,
+  CaretDown,
+  ChartBar,
+  Coins,
+  Sparkle,
+  type Icon,
+} from "@/shared/ui/icons";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ChartTooltip, ChartEmptyState } from "@/shared/charts/chart-utils";
 import { EmptyState } from "@/shared/ui/empty-state";
@@ -12,6 +20,7 @@ import { cn } from "@/shared/lib/utils";
 import { useLocale } from "@/shared/providers";
 import {
   getUsage,
+  getOptimizationCounts,
   hostedRunsAvailable,
   type BillingUsageEntry,
   type BillingUsageResponse,
@@ -22,9 +31,17 @@ import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { AppDatePicker, toISODate } from "@/shared/ui/app-date-picker";
 import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { Segmented } from "@/shared/ui/segmented";
-import { ResourceModeSwitch, useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { PanelHeading } from "@/shared/ui/panel-heading";
 import { Button } from "@/shared/ui/primitives/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
+import {
+  Tooltip as UiTooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/shared/ui/primitives/tooltip";
 import { useBalance } from "../providers/balance-provider";
 import { formatCents, formatCentsUsd, formatResetDate, type UsageEntry } from "../lib/wallet";
 import {
@@ -181,6 +198,45 @@ function StatCard({ icon: Icon, label, value }: { icon: Icon; label: string; val
       <span dir="ltr" className="text-2xl font-semibold tabular-nums text-foreground">
         {value}
       </span>
+    </div>
+  );
+}
+
+/** Bones of the stats, chart and breakdowns, in the same grids as the loaded tab. */
+function UsageSkeleton() {
+  return (
+    <div className="flex flex-col gap-6" aria-busy="true">
+      <div
+        className="grid gap-3"
+        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
+      >
+        {[0, 1].map((i) => (
+          <div
+            key={i}
+            className="flex flex-col gap-1 rounded-xl border border-border/60 bg-muted/20 px-4 py-3.5"
+          >
+            <Skeleton width={72} height={10} />
+            <Skeleton width={96} height={28} />
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-3">
+        <Skeleton width={120} height={12} />
+        <Skeleton height={220} borderRadius={8} />
+      </div>
+      <div
+        className="grid gap-x-8 gap-y-6"
+        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" }}
+      >
+        {[0, 1].map((i) => (
+          <div key={i} className="flex flex-col gap-3">
+            <Skeleton width={96} height={12} />
+            {[0, 1, 2].map((row) => (
+              <Skeleton key={row} height={20} />
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -389,6 +445,95 @@ function LedgerRow({
   );
 }
 
+/** Format a YYYY-MM-DD day for the range tooltip, or the raw string when it does not parse. */
+function formatRangeDay(iso: string, locale: string): string {
+  const day = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(day.getTime())) return iso;
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(day);
+}
+
+/**
+ * One calendar button for the usage window. Its popover holds the presets and
+ * a from/to pair; a picked day turns the window into a custom range.
+ */
+function RangePicker({
+  range,
+  customFrom,
+  customTo,
+  locale,
+  onPreset,
+  onCustom,
+}: {
+  range: RangeKey;
+  customFrom: string | null;
+  customTo: string | null;
+  locale: string;
+  onPreset: (range: PresetRange) => void;
+  onCustom: (from: string | null, to: string | null) => void;
+}) {
+  const [now] = React.useState(() => Date.now());
+  const todayIso = toISODate(new Date(now));
+  // A preset shows its own bounds, so a picked day keeps the other one.
+  const days = range === "custom" ? null : RANGE_DAYS[range];
+  const from =
+    range === "custom"
+      ? customFrom
+      : days == null
+        ? null
+        : toISODate(new Date(now - days * 86_400_000));
+  const to = range === "custom" ? customTo : todayIso;
+  const current =
+    range === "custom"
+      ? `${from ? formatRangeDay(from, locale) : "…"} – ${to ? formatRangeDay(to, locale) : "…"}`
+      : msg(RANGE_LABEL[range]);
+  const tip = msg("usage.range.current", { range: current });
+  const presets = (Object.keys(RANGE_DAYS) as PresetRange[]).map((value) => ({
+    value,
+    label: msg(RANGE_LABEL[value]),
+  }));
+  return (
+    <Popover>
+      <UiTooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label={tip}>
+              <CalendarBlank className="size-[1.05rem] text-primary" aria-hidden="true" />
+            </Button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{tip}</TooltipContent>
+      </UiTooltip>
+      <PopoverContent align="start" className="flex w-80 flex-col gap-3 p-3">
+        <Segmented
+          options={presets}
+          value={range === "custom" ? null : range}
+          onChange={onPreset}
+          size="sm"
+          className="w-full"
+          label={msg("usage.range.label")}
+        />
+        <div className="grid grid-cols-2 gap-2">
+          <AppDatePicker
+            value={from}
+            onChange={(next) => onCustom(next, to)}
+            max={to ?? todayIso}
+            ariaLabel={msg("usage.range.from")}
+            placeholder={msg("usage.range.from")}
+          />
+          <AppDatePicker
+            value={to}
+            onChange={(next) => onCustom(from, next)}
+            min={from}
+            max={todayIso}
+            ariaLabel={msg("usage.range.to")}
+            placeholder={msg("usage.range.to")}
+          />
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 /** Load the billed calls of one UTC day. */
 export type LoadDayCalls = (date: string) => Promise<BillingUsageEntry[]>;
 
@@ -539,21 +684,20 @@ export function DayRow({
  *
  * A full personal spend dashboard over the balance ledger: a date-ranged
  * window, headline stats (spent · runs), a billed-spend time series, per-model
- * and per-run breakdowns, and an activity list. In Remote mode the list has
- * one row per UTC day that opens to the day's single calls; in Local mode it
- * lists each ledger row. Data
+ * and per-run breakdowns, and a list with one row per UTC day that opens to
+ * the day's single calls. Data
  * comes from the backend `GET /billing/usage` rollup; if a local read fails the
  * tab derives the same shape client-side from the wallet's recent ledger so the
  * surface still renders. A failed web-account read shows an error instead.
  *
- * `localPanel` is the one mount point for extra Local-mode usage (SKY-341
- * plugs its CLI subscription panel in here). It renders only in Local mode,
- * in every state: loaded, loading, empty and failed.
+ * In Local mode the tab shows only `localPanel` (the CLI subscription panel
+ * of SKY-341) and the mode switch, with no date range: the CLI
+ * subscriptions, not Skynet's ledger, limit local runs (SKY-571).
  */
 export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) {
   const { wallet } = useBalance();
   const { locale } = useLocale();
-  const [range, setRange] = React.useState<RangeKey>("30d");
+  const [range, setRange] = React.useState<RangeKey>("all");
   const [customFrom, setCustomFrom] = React.useState<string | null>(null);
   const [customTo, setCustomTo] = React.useState<string | null>(null);
   const [data, setData] = React.useState<BillingUsageResponse | null>(null);
@@ -561,31 +705,33 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
   const [failed, setFailed] = React.useState(false);
   const reqId = React.useRef(0);
 
-  const todayIso = React.useMemo(() => toISODate(new Date()), []);
-
-  // Switching to Custom seeds a sensible 30-day window so the pickers never open
-  // empty; an existing custom selection is preserved across toggles.
-  const onRangeChange = React.useCallback(
-    (next: RangeKey) => {
-      if (next === "custom" && customFrom == null && customTo == null) {
-        setCustomFrom(toISODate(new Date(Date.now() - 30 * 86_400_000)));
-        setCustomTo(toISODate(new Date()));
-      }
-      setRange(next);
-    },
-    [customFrom, customTo],
-  );
+  const onCustomRange = React.useCallback((from: string | null, to: string | null) => {
+    setCustomFrom(from);
+    setCustomTo(to);
+    setRange("custom");
+  }, []);
 
   const resources = useResourceMode();
   const source = resources.mode;
+  // The side the figures on screen belong to; the other side's figures never show.
+  const [dataSource, setDataSource] = React.useState(source);
+  const swapping = useSourceSwap(source);
   const load = React.useCallback(() => {
     const { startIso, endIso, startMs, endMs } = rangeBounds(range, customFrom, customTo);
     const id = ++reqId.current;
     setLoading(true);
     setFailed(false);
-    getUsage(startIso, endIso, source)
-      .then((resp) => {
-        if (id === reqId.current) setData(resp);
+    // Older hosted deployments count charged calls instead of optimizations.
+    // Their unfiltered job count gives the linked account's exact all-time total.
+    const hostedTotal = range === "all" && source === "hosted" && hostedRunsAvailable();
+    Promise.all([
+      getUsage(startIso, endIso, source),
+      hostedTotal ? getOptimizationCounts(undefined, false, source) : Promise.resolve(null),
+    ])
+      .then(([resp, counts]) => {
+        if (id !== reqId.current) return;
+        setData(counts ? { ...resp, runs: counts.total } : resp);
+        setDataSource(source);
       })
       .catch(() => {
         if (id !== reqId.current) return;
@@ -596,6 +742,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
         } else {
           setData(deriveUsage(wallet.usage, startMs, endMs, startIso, endIso));
         }
+        setDataSource(source);
       })
       .finally(() => {
         if (id === reqId.current) setLoading(false);
@@ -641,72 +788,50 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
 
   const entries = data?.entries ?? [];
 
-  const rangeOptions = (Object.keys(RANGE_DAYS) as RangeKey[]).map((value) => ({
-    value,
-    label: msg(RANGE_LABEL[value]),
-  }));
-
-  const toolbar = (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-        <div className="max-w-full overflow-x-auto pb-0.5 no-scrollbar">
-          <Segmented
-            options={rangeOptions}
-            value={range}
-            onChange={onRangeChange}
-            size="sm"
-            label={msg("usage.range.label")}
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <ResourceModeSwitch {...resources} />
-          <ExportTableMenu
-            iconOnly
-            disabled={entries.length === 0}
-            getData={() => ({
-              columns: ["date", "label", "model", "kind", "cents"],
-              rows: entries.map((entry) => ({
-                date: entry.at,
-                label: entry.label,
-                model: entry.model,
-                kind: entry.kind,
-                cents: entry.cents,
-              })),
-              filename: "skynet-usage",
-            })}
-          />
-        </div>
-      </div>
-      {range === "custom" && (
-        <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[150px_auto_150px]">
-          <div className="w-full sm:w-[150px]">
-            <AppDatePicker
-              value={customFrom}
-              onChange={setCustomFrom}
-              max={customTo ?? todayIso}
-              ariaLabel={msg("usage.range.from")}
-              placeholder={msg("usage.range.from")}
-            />
-          </div>
-          <span className="hidden text-xs text-muted-foreground sm:inline" aria-hidden="true">
-            –
-          </span>
-          <div className="w-full sm:w-[150px]">
-            <AppDatePicker
-              value={customTo}
-              onChange={setCustomTo}
-              min={customFrom}
-              max={todayIso}
-              ariaLabel={msg("usage.range.to")}
-              placeholder={msg("usage.range.to")}
-            />
-          </div>
-        </div>
-      )}
+  const controls = (
+    <div className="flex items-center gap-2">
+      <ExportTableMenu
+        iconOnly
+        disabled={entries.length === 0}
+        getData={() => ({
+          columns: ["date", "label", "model", "kind", "cents"],
+          rows: entries.map((entry) => ({
+            date: entry.at,
+            label: entry.label,
+            model: entry.model,
+            kind: entry.kind,
+            cents: entry.cents,
+          })),
+          filename: "skynet-usage",
+        })}
+      />
     </div>
   );
 
-  const panel = source === "local" ? localPanel : null;
+  // Local mode has no date range: the CLI windows are live. The panel's own
+  // first row (the CLI toggle) takes the range button's place.
+  if (source === "local") {
+    return (
+      <div className="swap-in relative">
+        {localPanel}
+        <div className="absolute end-0 top-0">{controls}</div>
+      </div>
+    );
+  }
+
+  const toolbar = (
+    <div className="flex items-center justify-between gap-3">
+      <RangePicker
+        range={range}
+        customFrom={customFrom}
+        customTo={customTo}
+        locale={locale}
+        onPreset={setRange}
+        onCustom={onCustomRange}
+      />
+      {controls}
+    </div>
+  );
 
   if (failed) {
     return (
@@ -719,27 +844,21 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
             <RetryIconButton label={msg("billing.wallet.retry")} loading={loading} onClick={load} />
           }
         />
-        {panel}
       </div>
     );
   }
 
-  if (data == null) {
+  if (data == null || swapping || dataSource !== source) {
     return (
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-6">
         {toolbar}
-        <div className="flex h-64 items-center justify-center" aria-busy="true">
-          <ArrowsClockwise
-            className="size-5 animate-spin text-muted-foreground"
-            aria-hidden="true"
-          />
-        </div>
-        {panel}
+        <UsageSkeleton />
       </div>
     );
   }
 
-  const totallyEmpty = !loading && entries.length === 0 && data.billed_cents === 0;
+  const totallyEmpty =
+    !loading && entries.length === 0 && data.billed_cents === 0 && data.runs === 0;
 
   if (totallyEmpty) {
     return (
@@ -750,8 +869,8 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
           icon={ChartBar}
           title={msg("usage.empty.title")}
           description={msg("usage.empty.desc")}
+          className="swap-in"
         />
-        {panel}
       </div>
     );
   }
@@ -761,7 +880,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
       {toolbar}
 
       <div
-        className="grid gap-3"
+        className="swap-in grid gap-3"
         style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
       >
         <StatCard
@@ -776,15 +895,13 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
         />
       </div>
 
-      {panel}
-
-      <div className="flex flex-col gap-3">
+      <div className="swap-in flex flex-col gap-3">
         <PanelHeading className="mb-0">{msg("usage.panel.over_time")}</PanelHeading>
         <SpendChart buckets={buckets} locale={locale} />
       </div>
 
       <div
-        className="grid gap-x-8 gap-y-6"
+        className="swap-in grid gap-x-8 gap-y-6"
         style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" }}
       >
         <div className="flex flex-col gap-3">
@@ -797,35 +914,18 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
         </div>
       </div>
 
-      {source === "hosted" ? (
-        <div className="flex flex-col gap-2">
-          <PanelHeading className="mb-0">{msg("usage.panel.by_day")}</PanelHeading>
-          {days.length === 0 ? (
-            <EmptyState variant="list" title={msg("billing.wallet.filter_empty")} />
-          ) : (
-            <ul className="flex flex-col">
-              {days.map((day) => (
-                <DayRow key={day.date} day={day} locale={locale} loadCalls={loadDayCalls} />
-              ))}
-            </ul>
-          )}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-3">
-            <PanelHeading className="mb-0">{msg("usage.panel.recent")}</PanelHeading>
-          </div>
-          {entries.length === 0 ? (
-            <EmptyState variant="list" title={msg("billing.wallet.filter_empty")} />
-          ) : (
-            <ul className="flex max-h-72 flex-col overflow-y-auto pe-1">
-              {entries.map((entry) => (
-                <LedgerRow key={entry.id} entry={entry} locale={locale} />
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
+      <div className="swap-in flex flex-col gap-2">
+        <PanelHeading className="mb-0">{msg("usage.panel.by_day")}</PanelHeading>
+        {days.length === 0 ? (
+          <EmptyState variant="list" title={msg("billing.wallet.filter_empty")} />
+        ) : (
+          <ul className="flex flex-col">
+            {days.map((day) => (
+              <DayRow key={day.date} day={day} locale={locale} loadCalls={loadDayCalls} />
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

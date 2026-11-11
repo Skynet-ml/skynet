@@ -244,3 +244,55 @@ def test_spending_limit_null_removes_the_limit(wizard_client: TestClient) -> Non
     assert "max_cost_cents" in cleared.json()["wizard_state"]
     assert cleared.json()["wizard_state"]["max_cost_cents"] is None
     assert "max_cost_cents" not in untouched.json()["wizard_state"]
+
+
+_VALID_TOML = """
+version = 1
+
+[paths]
+editable = ["src"]
+
+[run]
+entry = "src/run.py:main"
+"""
+
+
+def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
+    """A file the parser accepts comes back ok with no errors."""
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "errors": []}
+
+
+@pytest.mark.parametrize(
+    ("text", "section", "key", "message"),
+    [
+        ('[target.planner]\nentry = "a.py:f"\nvcpus = 3\n', "target.planner", "vcpus", "vcpus must be 1 or an even"),
+        ("[paths]\neditable = []\n", "paths", "editable", "editable is empty"),
+        ("version = 2\n", None, "version", "version 2 is not supported"),
+        ("[paths\n", None, None, "is not valid TOML"),
+    ],
+)
+def test_a_bad_optimize_toml_returns_the_error_and_its_place(
+    wizard_client: TestClient, text: str, section: str | None, key: str | None, message: str
+) -> None:
+    """A parser error comes back with the section and key the editor shows it next to."""
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    [error] = body["errors"]
+    assert (error["section"], error["key"]) == (section, key)
+    assert message in error["message"]
+
+
+def test_a_lone_surrogate_in_the_text_is_a_parser_error_not_a_crash(wizard_client: TestClient) -> None:
+    """JSON can carry a lone surrogate that UTF-8 cannot encode; the parser refuses it as bad text."""
+    body = '{"text": "instructions = \\"\\ud800\\"\\n"}'
+    resp = wizard_client.post("/wizard/optimize-toml/check", content=body, headers={"content-type": "application/json"})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert "is not valid TOML" in resp.json()["errors"][0]["message"]

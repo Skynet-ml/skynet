@@ -30,6 +30,7 @@ from ..billing.service import run_cost_cents
 from ..config import settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
 from ..local.cli_catalog import parse_subscription_model_id
+from ..local.managed_models import HOSTED_INFERENCE_KEY
 from ..models import ModelConfig
 from .agents.code import ReasoningStreamListener, _reply_language
 from .agents.code_interview import INTERVIEW_TURN_ATTEMPTS, normalize_options
@@ -134,7 +135,8 @@ def _refuse_local_managed(config: ModelConfig) -> None:
     """Refuse a tagging model that would run on managed OpenRouter in local mode.
 
     The Mac app has no managed key, so a managed call fails with a 401. A BYOK
-    pick runs on the user's own key, and a subscription config on their CLI.
+    pick runs on the user's own key, a subscription config on their CLI, and a
+    hosted-inference config on the linked account through the loopback relay.
 
     Args:
         config: The tagging model config about to run.
@@ -146,6 +148,8 @@ def _refuse_local_managed(config: ModelConfig) -> None:
             mode for any other managed config.
     """
     if not settings.local_mode or config.token_source in {TOKEN_SOURCE_BYOK, "subscription"}:
+        return
+    if config.extra.get(HOSTED_INFERENCE_KEY):
         return
     if parse_subscription_model_id(config.name) is not None:
         raise DomainError("tagger.assist.unknown_model", status=422)

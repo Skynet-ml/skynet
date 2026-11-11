@@ -22,13 +22,12 @@ import {
   chromeCellAction,
   currentPushSubscription,
   heldChannels,
-  localOffChannels,
   localOffReason,
-  nativePermission,
   pushPermission,
   requestNativePermission,
   slackCellAction,
   slackConfigured,
+  slackGridReady,
   slackReturnParam,
   subscribePush,
   toastPushResult,
@@ -42,6 +41,7 @@ import {
   updateLocalMacosCells,
   updateLocalMacosHeld,
   updateNotificationPreferences,
+  webPicked,
   type LocalNotificationChannels,
   type SlackConnection,
   type NotificationChannel,
@@ -49,26 +49,21 @@ import {
   type NotificationPreferences,
   type NotificationPreferencesPatch,
 } from "@/shared/lib/api";
-import { msg, type MessageKey } from "@/shared/lib/messages";
+import { onLinkChange } from "@/shared/hooks/use-linked-account";
+import { isLocalMode } from "@/shared/lib/runtime-env";
+import { RESOURCE_MODE_EVENT } from "@/shared/lib/resource-mode";
+import { hostedAppUrl } from "@/shared/lib/share-link";
+import { msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
-import {
-  AppleLogo,
-  BellRinging,
-  CaretDown,
-  Check,
-  CircleNotch,
-  Clock,
-  GridFour,
-  ListChecks,
-} from "@/shared/ui/icons";
+import { CaretDown, Check, Clock, GridFour, ListChecks } from "@/shared/ui/icons";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { InlineWarningRow } from "@/shared/ui/inline-warning-row";
 import { NumberInput } from "@/shared/ui/number-input";
 import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { TooltipBody, TooltipButton } from "@/shared/ui/tooltip-button";
 import { Button } from "@/shared/ui/primitives/button";
 import {
   DropdownMenu,
@@ -93,25 +88,27 @@ const MAX_HOLD = 1440;
 // Typing "15" passes through "1"; only the settled value is saved.
 const HOLD_SAVE_DELAY_MS = 600;
 
-/** Why a cell can't be flipped, or null when it can. */
-function lockedReason(
-  event: NotificationEventType,
-  channel: GridChannel,
-  slackReady: boolean,
-  local: LocalNotificationChannels | null,
-): MessageKey | null {
-  if (cellEditable(event, channel, slackReady, local)) return null;
-  if (event === "product_news") return "notifications.channel.inbox_always";
-  return localOffReason(channel, local) ?? "notifications.slack.unavailable";
-}
+// Product news always shows in the inbox and nowhere else, so its row has nothing to set.
+const GRID_EVENTS = EVENT_TYPES.filter((event) => event !== "product_news");
 
-/**
- * A disabled control swallows pointer events, so its tooltip hangs on a
- * focusable wrapper instead.
- */
-function Tip({ tip, children }: { tip: React.ReactNode; children: React.ReactElement }) {
+/** A header is not focusable on its own, so its tooltip hangs on a focusable wrapper. */
+function Tip({
+  title,
+  detail,
+  atStart = false,
+  children,
+}: {
+  title: string;
+  detail?: string;
+  atStart?: boolean;
+  children: React.ReactElement;
+}) {
   return (
-    <TooltipButton tooltip={tip} side="top">
+    <TooltipButton
+      tooltip={<TooltipBody title={title} detail={detail} centered={!atStart} />}
+      side="top"
+      align={atStart ? "start" : "center"}
+    >
       <span
         tabIndex={0}
         className="inline-flex rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45"
@@ -126,7 +123,8 @@ function EventHeader({ event }: { event: NotificationEventType }) {
   const EventIcon = EVENT_ICONS[event];
   const keys = EVENT_KEYS[event];
   return (
-    <Tip tip={msg(keys.tip)}>
+    // Opens from the label's start edge, so a long detail never spills over the Settings rail.
+    <Tip title={msg(keys.label)} detail={msg(keys.tip)} atStart>
       <span className="inline-flex min-w-0 items-center gap-2 text-sm text-foreground">
         <EventIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
         <span className="min-w-0 text-pretty break-words">{msg(keys.label)}</span>
@@ -139,18 +137,24 @@ function ChannelHeader({
   channel,
   slackReady,
   local,
+  localGrid,
 }: {
   channel: GridChannel;
   slackReady: boolean;
   local: LocalNotificationChannels | null;
+  localGrid: boolean;
 }) {
   const ChannelIcon = CHANNEL_ICONS[channel];
-  const live = local ? localOffReason(channel, local) === null : channelLive(channel, slackReady);
-  const tip = channelHeaderTip(channel, slackReady, local)
+  const live =
+    channel === "macos"
+      ? localOffReason(channel, local) === null
+      : channelLive(channel, slackReady);
+  const detail = channelHeaderTip(channel, slackReady, local, localGrid)
+    .filter((key) => key !== CHANNEL_KEYS[channel])
     .map((key) => msg(key))
-    .join(": ");
+    .join(" ");
   return (
-    <Tip tip={tip}>
+    <Tip title={msg(CHANNEL_KEYS[channel])} detail={detail || undefined}>
       <ChannelIcon
         className={cn("size-4", live ? "text-muted-foreground" : "text-muted-foreground/45")}
         aria-label={msg(CHANNEL_KEYS[channel])}
@@ -172,31 +176,30 @@ interface CellProps {
 /** One grid cell as a switch: the desktop table. */
 function SwitchCell({ event, channel, checked, disabled, slackReady, local, onChange }: CellProps) {
   if (!cellExists(event, channel)) return null;
-  const locked = lockedReason(event, channel, slackReady, local);
+  const locked = !cellEditable(event, channel, slackReady, local);
   const label = `${msg(EVENT_KEYS[event].label)}: ${msg(CHANNEL_KEYS[channel])}`;
-  const control = (
+  return (
     <Switch
       checked={checked}
-      disabled={disabled || locked !== null}
+      disabled={disabled || locked}
       onCheckedChange={onChange}
       aria-label={label}
     />
   );
-  return locked ? <Tip tip={msg(locked)}>{control}</Tip> : control;
 }
 
 /** One grid cell as an icon toggle: the phone row. */
 function IconCell({ event, channel, checked, disabled, slackReady, local, onChange }: CellProps) {
   const ChannelIcon = CHANNEL_ICONS[channel];
   if (!cellExists(event, channel)) return <span className="size-11" aria-hidden="true" />;
-  const locked = lockedReason(event, channel, slackReady, local);
+  const locked = !cellEditable(event, channel, slackReady, local);
   const label = `${msg(EVENT_KEYS[event].label)}: ${msg(CHANNEL_KEYS[channel])}`;
-  const control = (
+  return (
     <button
       type="button"
       aria-pressed={checked}
       aria-label={label}
-      disabled={disabled || locked !== null}
+      disabled={disabled || locked}
       onClick={() => onChange(!checked)}
       className={cn(
         "flex size-11 items-center justify-center rounded-lg border transition-colors cursor-pointer",
@@ -208,13 +211,12 @@ function IconCell({ event, channel, checked, disabled, slackReady, local, onChan
       <ChannelIcon className="size-4" weight={checked ? "fill" : "bold"} aria-hidden="true" />
     </button>
   );
-  return locked ? <Tip tip={msg(locked)}>{control}</Tip> : control;
 }
 
 /**
  * Notification routing: a grid of update kinds by the places they reach the
- * user, the Chrome and Slack connections those places need, and how long
- * non-urgent updates wait and on which channels. Every change saves at once.
+ * user, the Slack connection, and how long non-urgent updates wait and on
+ * which channels. Every change saves at once.
  */
 export function NotificationsTab() {
   const { data: session } = useSession();
@@ -230,9 +232,8 @@ export function NotificationsTab() {
   const [subscribing, setSubscribing] = React.useState(false);
   const [slack, setSlack] = React.useState<SlackConnection | null>(null);
   const [slackConnecting, setSlackConnecting] = React.useState(false);
-  // Set only in the Mac app: the macOS column and which hosted channels this Mac can use.
+  // Native macOS delivery stays local; account channels use the hosted service.
   const [local, setLocal] = useLocalNotificationChannels(!signedOut);
-  const [macosPermission, setMacosPermission] = React.useState(nativePermission);
 
   React.useEffect(() => {
     let alive = true;
@@ -247,38 +248,52 @@ export function NotificationsTab() {
     };
   }, []);
 
+  const loadVersion = React.useRef(0);
   const load = React.useCallback(async () => {
+    const version = ++loadVersion.current;
     if (signedOut) return;
     setLoading(true);
     setLoadError(false);
     try {
-      const next = await getNotificationPreferences();
+      const [next, connection] = await Promise.all([
+        getNotificationPreferences(),
+        getSlackConnection().catch(() => null),
+      ]);
+      if (version !== loadVersion.current) return;
       setPrefs(next);
       setHold(next.hold_minutes);
+      setSlack(connection);
     } catch {
-      setLoadError(true);
+      if (version === loadVersion.current) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (version === loadVersion.current) setLoading(false);
     }
   }, [signedOut]);
 
+  const reloadCurrent = React.useRef<(() => Promise<void>) | null>(null);
   React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  // A failed status read leaves the Slack column off rather than erroring the tab.
-  React.useEffect(() => {
-    if (signedOut) return;
-    let alive = true;
-    void getSlackConnection()
-      .then((next) => {
-        if (alive) setSlack(next);
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
+    reloadCurrent.current = load;
+    const refresh = () => {
+      setPrefs(null);
+      setSlack(null);
+      if (holdTimer.current) clearTimeout(holdTimer.current);
+      void load();
     };
-  }, [signedOut]);
+    refresh();
+    const unsubscribe = onLinkChange(refresh);
+    window.addEventListener(RESOURCE_MODE_EVENT, refresh);
+    const onFocus = () => {
+      if (isLocalMode()) void load();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      ++loadVersion.current;
+      reloadCurrent.current = null;
+      unsubscribe();
+      window.removeEventListener(RESOURCE_MODE_EVENT, refresh);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [load, session?.user?.email]);
 
   // The Slack OAuth callback lands back here with ?slack=connected|error; say so once.
   React.useEffect(() => {
@@ -296,6 +311,11 @@ export function NotificationsTab() {
   }, []);
 
   const connectSlack = React.useCallback(async () => {
+    if (isLocalMode()) {
+      const url = hostedAppUrl("/?settings=notifications");
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
     setSlackConnecting(true);
     try {
       const { authorize_url } = await startSlackOAuth();
@@ -317,12 +337,21 @@ export function NotificationsTab() {
   const save = React.useCallback(
     async (patch: NotificationPreferencesPatch, optimistic: NotificationPreferences) => {
       const before = prefs;
+      const version = loadVersion.current;
       setPrefs(optimistic);
       try {
         const saved = await updateNotificationPreferences(patch);
+        if (version !== loadVersion.current) {
+          void reloadCurrent.current?.();
+          return;
+        }
         setPrefs(saved);
         toast.success(msg("settings.notifications.prefs_saved"));
       } catch {
+        if (version !== loadVersion.current) {
+          void reloadCurrent.current?.();
+          return;
+        }
         setPrefs(before);
         if (before) setHold(before.hold_minutes);
         toast.error(msg("settings.notifications.prefs_save_error"));
@@ -346,11 +375,7 @@ export function NotificationsTab() {
   };
 
   // Turning macOS on asks for permission first; this click is the user gesture it needs.
-  const turnOnMacos = async () => {
-    const permission = await requestNativePermission();
-    setMacosPermission(permission);
-    return permission === "granted";
-  };
+  const turnOnMacos = async () => (await requestNativePermission()) === "granted";
 
   const writeCell = (event: NotificationEventType, channel: NotificationChannel, on: boolean) => {
     if (!prefs) return;
@@ -370,7 +395,7 @@ export function NotificationsTab() {
       writeCell(event, channel, on);
       return void connectSlack();
     }
-    if (channel !== "chrome" || !on) return writeCell(event, channel, on);
+    if (channel !== "chrome" || !on || isLocalMode()) return writeCell(event, channel, on);
     const action = chromeCellAction(pushPermission(), pushSubscribed);
     if (action === "blocked") return setChromeBlocked(true);
     if (action === "unsupported") return toastPushResult("unsupported");
@@ -383,16 +408,6 @@ export function NotificationsTab() {
       setPushSubscribed(true);
     }
     writeCell(event, channel, on);
-  };
-
-  // The Chrome row's own switch-on: this browser only, the grid says which updates it gets.
-  const turnOnChrome = async () => {
-    setSubscribing(true);
-    const result = await subscribePush();
-    setSubscribing(false);
-    if (result === "denied") setChromeBlocked(true);
-    if (result === "subscribed") setPushSubscribed(true);
-    toastPushResult(result);
   };
 
   const setHoldMinutes = (minutes: number) => {
@@ -428,7 +443,9 @@ export function NotificationsTab() {
   };
 
   const disabled = signedOut || prefs === null;
-  const slackReady = slackConfigured(slack);
+  // The grid follows the Local/Web pick; only the web account's grid can reach Slack.
+  const localGrid = isLocalMode() && !webPicked();
+  const slackReady = slackGridReady(slackConfigured(slack), localGrid);
   const columns = local ? LOCAL_CHANNELS : CHANNELS;
   const cellProps = (event: NotificationEventType, channel: GridChannel): CellProps => ({
     event,
@@ -447,34 +464,8 @@ export function NotificationsTab() {
     onChange: (on) => void setCell(event, channel, on),
   });
 
-  const permission = pushPermission();
-  // In the Mac app without VAPID keys, push cannot work: say so in place of the turn-on button.
-  const chromeState: MessageKey | null =
-    localOffReason("chrome", local) ??
-    (permission === "unsupported"
-      ? "notifications.push.unsupported"
-      : permission === "denied"
-        ? "settings.notifications.chrome.blocked"
-        : pushSubscribed
-          ? "settings.notifications.chrome.on"
-          : null);
-  const offChannels = localOffChannels(local);
-
-  const macosState: MessageKey | null =
-    macosPermission === "granted"
-      ? "settings.notifications.macos.on"
-      : macosPermission === "denied"
-        ? "settings.notifications.macos.blocked"
-        : macosPermission === "unsupported"
-          ? "notifications.push.unsupported"
-          : null;
-
   const holdable = heldChannels(local);
   const heldNow = prefs ? holdable.filter((c) => channelHeld(c, prefs.held_channels, local)) : [];
-  const heldSummary =
-    heldNow.length > 0
-      ? heldNow.map((c) => msg(CHANNEL_KEYS[c])).join(", ")
-      : msg("settings.notifications.hold.none");
 
   return (
     <div className="space-y-4">
@@ -493,19 +484,14 @@ export function NotificationsTab() {
       )}
 
       <section data-setup="notification-grid" className="space-y-2">
-        <div className="flex flex-col gap-0.5">
-          <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-            <GridFour className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-            {msg("settings.notifications.grid.label")}
-          </span>
-          <span className="text-xs text-muted-foreground/80">
-            {msg("settings.notifications.grid.description")}
-          </span>
-        </div>
+        <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <GridFour className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          {msg("settings.notifications.grid.label")}
+        </span>
 
         {prefs === null && !loadError ? (
           <div className="space-y-2" aria-busy="true">
-            {EVENT_TYPES.map((event) => (
+            {GRID_EVENTS.map((event) => (
               <Skeleton key={event} height={28} borderRadius={8} />
             ))}
           </div>
@@ -513,22 +499,29 @@ export function NotificationsTab() {
           <>
             <div className="hidden sm:block">
               <Table>
-                <TableHeader>
+                {/* The shared sticky, tinted header is for long scrolling tables; this
+                    short grid sits on the Settings card, so only a hairline divides it. */}
+                <TableHeader className="static bg-transparent backdrop-blur-none">
                   <TableRow>
-                    <TableHead>
+                    <TableHead className="h-10">
                       <span className="sr-only">{msg("settings.notifications.grid.label")}</span>
                     </TableHead>
                     {columns.map((channel) => (
-                      <TableHead key={channel} className="w-16">
+                      <TableHead key={channel} className="h-10 w-16">
                         <div className="flex justify-center">
-                          <ChannelHeader channel={channel} slackReady={slackReady} local={local} />
+                          <ChannelHeader
+                            channel={channel}
+                            slackReady={slackReady}
+                            local={local}
+                            localGrid={localGrid}
+                          />
                         </div>
                       </TableHead>
                     ))}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {EVENT_TYPES.map((event) => (
+                  {GRID_EVENTS.map((event) => (
                     <TableRow key={event}>
                       <TableHead
                         scope="row"
@@ -550,7 +543,7 @@ export function NotificationsTab() {
             </div>
 
             <ul className="flex flex-col sm:hidden">
-              {EVENT_TYPES.map((event) => (
+              {GRID_EVENTS.map((event) => (
                 <li
                   key={event}
                   className="flex flex-col gap-2 border-b border-border/30 py-2.5 last:border-b-0"
@@ -567,12 +560,6 @@ export function NotificationsTab() {
           </>
         )}
 
-        {offChannels.length > 0 && (
-          <p data-local-off className="pt-2 text-xs text-muted-foreground">
-            {`${offChannels.map((c) => msg(CHANNEL_KEYS[c])).join(", ")}: ${msg("notifications.local.not_configured")}`}
-          </p>
-        )}
-
         {chromeBlocked && (
           <InlineWarningRow
             message={msg("notifications.push.blocked")}
@@ -581,68 +568,16 @@ export function NotificationsTab() {
         )}
       </section>
 
-      <section data-setup="notification-channels" className="border-t border-border/40 pt-2">
-        {local && (
-          <SettingsRow
-            icon={AppleLogo}
-            label={msg(CHANNEL_KEYS.macos)}
-            description={msg("settings.notifications.macos.description")}
-          >
-            {macosState ? (
-              <span className="text-xs text-muted-foreground">{msg(macosState)}</span>
-            ) : (
-              <TooltipButton tooltip={msg("settings.notifications.macos.turn_on")} side="top">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-sm"
-                  onClick={() => void turnOnMacos()}
-                  aria-label={msg("settings.notifications.macos.turn_on")}
-                >
-                  <BellRinging className="size-4" aria-hidden="true" />
-                </Button>
-              </TooltipButton>
-            )}
-          </SettingsRow>
-        )}
-        <SettingsRow
-          icon={CHANNEL_ICONS.chrome}
-          label={msg(CHANNEL_KEYS.chrome)}
-          description={msg("settings.notifications.chrome.description")}
-        >
-          {chromeState ? (
-            <span className="text-xs text-muted-foreground">{msg(chromeState)}</span>
-          ) : (
-            <TooltipButton tooltip={msg("settings.notifications.chrome.turn_on")} side="top">
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                onClick={() => void turnOnChrome()}
-                disabled={signedOut || subscribing}
-                aria-label={msg("settings.notifications.chrome.turn_on")}
-              >
-                {subscribing ? (
-                  <CircleNotch
-                    className="animate-spin motion-reduce:animate-none"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <BellRinging className="size-4" aria-hidden="true" />
-                )}
-              </Button>
-            </TooltipButton>
-          )}
-        </SettingsRow>
-        {slack?.configured && (
+      {slack?.configured && (
+        <section className="border-t border-border/40 pt-2">
           <SlackConnectionSection
             connection={slack}
             onConnect={() => void connectSlack()}
             connecting={slackConnecting}
             onChange={setSlack}
           />
-        )}
-      </section>
+        </section>
+      )}
 
       <section className="border-t border-border/40 pt-2">
         <SettingsRow
@@ -684,7 +619,22 @@ export function NotificationsTab() {
                 aria-label={msg("settings.notifications.hold.channels")}
                 className="h-auto min-h-8 min-w-32 justify-between gap-2 whitespace-normal py-1.5 text-start"
               >
-                <span className="min-w-0 break-words">{heldSummary}</span>
+                <span className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+                  {heldNow.length > 0
+                    ? heldNow.map((channel) => {
+                        const ChannelIcon = CHANNEL_ICONS[channel];
+                        return (
+                          <span key={channel} className="inline-flex items-center gap-1.5">
+                            <ChannelIcon
+                              className="size-4 shrink-0 text-muted-foreground"
+                              aria-hidden="true"
+                            />
+                            {msg(CHANNEL_KEYS[channel])}
+                          </span>
+                        );
+                      })
+                    : msg("settings.notifications.hold.none")}
+                </span>
                 <CaretDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
               </Button>
             </DropdownMenuTrigger>
@@ -692,11 +642,14 @@ export function NotificationsTab() {
               {holdable.map((channel) => {
                 const ChannelIcon = CHANNEL_ICONS[channel];
                 const on = heldNow.includes(channel);
+                // Local runs never post to Slack, so holding Slack here would do nothing.
+                const slackLocked = channel === "slack" && localGrid;
                 return (
                   <DropdownMenuItem
                     key={channel}
                     role="menuitemcheckbox"
                     aria-checked={on}
+                    disabled={slackLocked}
                     // Picking several channels is the point; keep the menu open.
                     onSelect={(e) => {
                       e.preventDefault();
@@ -704,7 +657,14 @@ export function NotificationsTab() {
                     }}
                   >
                     <ChannelIcon className="size-4 text-muted-foreground" aria-hidden="true" />
-                    <span className="flex-1">{msg(CHANNEL_KEYS[channel])}</span>
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      {msg(CHANNEL_KEYS[channel])}
+                      {slackLocked && (
+                        <span className="max-w-56 text-pretty text-xs text-muted-foreground">
+                          {msg("notifications.slack.local_grid")}
+                        </span>
+                      )}
+                    </span>
                     <Check
                       className={cn("size-4 text-primary", on ? "opacity-100" : "opacity-0")}
                       aria-hidden="true"

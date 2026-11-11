@@ -172,8 +172,6 @@ async function mount(config: ModelConfig) {
 const dialog = () => document.querySelector('[role="dialog"]')!;
 const buttonByText = (text: string) =>
   [...dialog().querySelectorAll("button")].find((b) => b.textContent?.trim() === text);
-const labels = () =>
-  [...dialog().querySelectorAll("button")].map((b) => b.getAttribute("aria-label"));
 
 async function click(el: Element) {
   await React.act(async () => {
@@ -182,7 +180,7 @@ async function click(el: Element) {
   await settle();
 }
 
-void test("a Claude Code model gets the slider over the CLI's levels, with no reset, model line or switch", async () => {
+void test("a Claude Code model gets the slider over the CLI's levels, its reset, and no model line or switch", async () => {
   setLocal(true);
   const m = await mount({
     name: "anthropic/claude-opus-4.5",
@@ -197,8 +195,10 @@ void test("a Claude Code model gets the slider over the CLI's levels, with no re
     assert.equal(slider.getAttribute("aria-valuemax"), "3");
     assert.match(slider.getAttribute("aria-valuetext") ?? "", /^Medium/);
     const box = slider.closest(".effort-charge")!;
-    assert.equal(box.querySelectorAll("button").length, 0);
-    assert.equal(labels().includes("Reset to the model default"), false);
+    assert.deepEqual(
+      [...box.querySelectorAll("button")].map((b) => b.getAttribute("aria-label")),
+      ["Reset to the model default"],
+    );
     assert.equal(dialog().querySelector('[role="switch"]'), null);
   } finally {
     await m.unmount();

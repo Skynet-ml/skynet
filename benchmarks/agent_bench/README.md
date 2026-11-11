@@ -37,8 +37,9 @@ harnesses running the same model over the same tools.
 |---|---|
 | `dspy-reactv2` | the project's `RetryingReActV2` on DSPy's stock text prompt layout |
 | `dspy-reactv2-stable` | the same loop under `StableRosterChatAdapter`: same text tool protocol, tool roster pinned to the first user message. This is what the platform's served and optimized ReAct agents run |
-| `dspy-reactv2-fixed` | `ConversationReAct`: the same loop with an append-only native-tool-call prompt, stored native history and a pinned reply language |
 | `dspy-react` | stock classic `dspy.ReAct` |
+
+SKY-327 removed `dspy-reactv2-fixed` (`ConversationReAct`): every Skynet agent now runs on Pi. Its results below are history.
 | `codex` | `codex exec` with an OpenRouter provider |
 | `opencode` | `opencode run` with a tools-only agent |
 | `pi` | `pi -p`; Pi has no MCP client, so a small extension bridges the JSON API |

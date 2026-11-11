@@ -48,8 +48,10 @@ _BUILT_INS = (
     "opencode_v2",
     "prime",
     "aider",
+    "mini_swe_agent",
     "openhands",
     "openhands_sdk",
+    "qwen_code",
     "antigravity_sdk",
     "terminus",
     "goose",
@@ -283,6 +285,12 @@ def test_registry_keeps_the_catalog_order() -> None:
         "opencode_v2": ("opencode2", "v2.2.7"),
         "prime": ("prime-agent", "0.9.7"),
         "aider": ("aider", "0.86.2"),
+        "mini_swe_agent": (
+            '"$(uv tool dir 2>/dev/null)/mini-swe-agent/bin/python" -I -c'
+            """ 'import importlib.metadata as m; l = m.version("litellm"); """
+            """print(m.version("mini-swe-agent") if l == "1.103.1" else "litellm " + l)'""",
+            "2.4.6",
+        ),
         "openhands": ("openhands", "1.6.0"),
         "openhands_sdk": (
             "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with openhands-sdk==1.61.0"
@@ -290,6 +298,7 @@ def test_registry_keeps_the_catalog_order() -> None:
             """ 'import importlib.metadata as m; print(m.version("openhands-sdk"))'""",
             "1.61.0",
         ),
+        "qwen_code": ("qwen", "0.27.2"),
         "antigravity_sdk": (
             "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with google-antigravity==0.1.20"
             " --with cryptography==46.0.7 --with fastapi==0.136.3 python -c"

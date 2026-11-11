@@ -107,13 +107,13 @@ void test("a CLI model with no saved level sits on the default stop", async () =
   }
 });
 
-void test("the dialog's slider shows no reset and no model line, and Home reaches the default stop", async () => {
+void test("the dialog's slider keeps reset, omits the model line, and Home reaches the default stop", async () => {
   const m = await mount({ cli: true, efforts: CLAUDE, stored: "max" });
   try {
     const buttons = [...m.container.querySelectorAll("button")];
     assert.deepEqual(
       buttons.map((b) => b.getAttribute("aria-label")),
-      [],
+      ["Reset to the model default"],
     );
     // The model line is the only truncated text in the slider.
     assert.equal(m.container.querySelector(".truncate"), null);
