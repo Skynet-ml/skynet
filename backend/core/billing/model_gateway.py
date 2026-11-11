@@ -14,7 +14,7 @@ from dataclasses import asdict
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -38,6 +38,7 @@ from .credential_safety import credential_fragments, scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
 from .env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS_KEY
+from .guest_model_proxy import MCP_PATH, METHOD_HEADER
 from .mcp_broker import McpToolsBroker, _pinned_address, _PinnedTransport
 from .mcp_oauth_client import McpOAuthError, access_token, connected_server_url
 from .model_batch import BatchCollector
@@ -67,6 +68,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ROUTE_KEY = "_skynet_budget_route"
+# Payload key of the route a role box's MCP servers go through (``bind_mcp_relay``).
+MCP_RELAY_ROUTE_KEY = "_skynet_mcp_route"
 # Key, inside a model config's ``extra``, of that model's own economy choice.
 ECONOMY_KEY = "economy_mode"
 # Key, inside the first optimization model's route, of the embeddings route
@@ -205,6 +208,16 @@ class EvaluatorEndpoint(Protocol):
         ...
 
 
+class McpRelayEndpoint(Protocol):
+    """Send a role box's MCP requests to its own servers; ``scoped_relay.McpRelay`` is the real one."""
+
+    def dispatch(
+        self, name: str, method: str, body: bytes, headers: Mapping[str, str], recorder: CallRecorder | None
+    ) -> ModelHTTPResult:
+        """Send one MCP request and return the masked answer."""
+        ...
+
+
 class SandboxControl(Protocol):
     """Describe the parent-owned sandbox boundary without importing optimizer code."""
 
@@ -294,6 +307,7 @@ class ModelGateway:
         self._connectors: dict[str, McpToolsBroker] = {}
         self._connector_tokens: dict[str, str] = {}
         self._evaluator: EvaluatorEndpoint | None = None
+        self._mcp_relays: dict[str, McpRelayEndpoint] = {}
         self._packages: PackageBroker | None = None
         self._package_token = secrets.token_urlsafe(32)
         self._evaluator_token = secrets.token_urlsafe(32)
@@ -325,9 +339,26 @@ class ModelGateway:
                 """Write a bounded protocol response with no credential-bearing headers."""
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.content_type)
-                self.send_header("Content-Length", str(len(response.body)))
+                for name, value in response.headers:
+                    self.send_header(name, value)
+                if response.stream is None:
+                    self.send_header("Content-Length", str(len(response.body)))
+                    self.end_headers()
+                    self.wfile.write(response.body)
+                    return
+                # An MCP event stream has no length; it ends when the connection closes.
+                self.close_connection = True
                 self.end_headers()
-                self.wfile.write(response.body)
+                try:
+                    self.wfile.write(response.body)
+                    self.wfile.flush()
+                    for chunk in response.stream:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except OSError:
+                    pass  # The reader closed its event stream.
+                finally:
+                    response.stream.close()
 
             def _error(self, status: int, code: str, message: str) -> None:
                 """Report a machine-readable admission result to every guest protocol."""
@@ -362,6 +393,9 @@ class ModelGateway:
 
             def do_GET(self) -> None:
                 """Return state only to a token already bound to this spending authority."""
+                if self.path.startswith(MCP_PATH):
+                    self._mcp_request()
+                    return
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 if self._route() is None and not (
                     gateway._tool_broker(token) is not None
@@ -375,8 +409,43 @@ class ModelGateway:
                 body = gateway._budget_state()
                 self._reply(ModelHTTPResult(200, "application/json", json.dumps(body, default=str).encode()))
 
+            def do_DELETE(self) -> None:
+                """End an MCP session; no other path takes DELETE."""
+                if not self.path.startswith(MCP_PATH):
+                    self._error(405, "method_not_allowed", "Only an MCP relay path takes DELETE.")
+                    return
+                self._mcp_request()
+
+            def _mcp_request(self) -> None:
+                """Send one MCP request of a role box to its own server through the bound relay."""
+                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                if gateway._mcp_relay(token) is None:
+                    self._error(401, "unauthorized", "Unknown scoped MCP relay route.")
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= _MAX_REQUEST_BYTES:
+                    self._error(413, "request_too_large", "The MCP request exceeds the supported size.")
+                    return
+                headers = {name.lower(): value for name, value in self.headers.items()}
+                # The real method wins over any header a caller set.
+                headers[METHOD_HEADER] = self.command
+                try:
+                    body = self.rfile.read(length) if length else b""
+                    self._reply(gateway.dispatch_guest(token, self.path, body, headers))
+                except BudgetReached:
+                    self._error(402, "budget_reached", "The remaining budget cannot cover the next operation.")
+                except BudgetInsufficientError:
+                    self._error(402, "budget_insufficient", "Increase the total budget or add funds to continue.")
+                except (UsagePendingError, BudgetError):
+                    self._error(424, "usage_pending", "Previous work must settle before another attempt is admitted.")
+                except (UnpricedOperationError, ValueError, TypeError) as error:
+                    self._unpriced(error)
+
             def do_POST(self) -> None:
                 """Admit the fully resolved SDK body before forwarding any provider request."""
+                if self.path.startswith(MCP_PATH):
+                    self._mcp_request()
+                    return
                 if self.path == "/v1/_sandbox":
                     self._sandbox_request()
                     return
@@ -741,6 +810,68 @@ class ModelGateway:
         self._evaluator = evaluator
         return {"url": self.url, "token": self._evaluator_token}
 
+    def bind_mcp_relay(self, relay: McpRelayEndpoint) -> dict[str, str]:
+        """Serve one role box's MCP servers at ``/v1/mcp/<name>`` behind their own token.
+
+        Write the box's ``.mcp.json`` with ``repo_services.box_mcp_config`` and
+        the box's relay url; the box's proxy adds the token to each request.
+
+        Args:
+            relay: Sends the role's MCP requests to its own servers.
+
+        Returns:
+            The opaque route: this gateway's url and the relay's token.
+        """
+        token = secrets.token_urlsafe(32)
+        self._mcp_relays[token] = relay
+        return {"url": self.url, "token": token}
+
+    def _mcp_relay(self, token: str) -> McpRelayEndpoint | None:
+        """Find the MCP relay a scoped token opens.
+
+        Args:
+            token: Bearer token from the guest request.
+
+        Returns:
+            The relay this gateway bound to that token, or None. A token from
+            another run's gateway opens nothing here.
+        """
+        for relay_token, relay in list(self._mcp_relays.items()):
+            # Bytes, because compare_digest refuses non-ASCII str from a hostile header.
+            if secrets.compare_digest(token.encode(), relay_token.encode()):
+                return relay
+        return None
+
+    def _mcp_relay_call(
+        self, token: str, path: str, body: Mapping[str, Any] | bytes, headers: Mapping[str, str]
+    ) -> ModelHTTPResult:
+        """Send one MCP relay request and write it under this run and the candidate its usage tags name.
+
+        Args:
+            token: The MCP relay token.
+            path: ``/v1/mcp/<name>``, with the name percent-encoded.
+            body: The client's raw body; a mapping from an in-process caller.
+            headers: The request headers, with the HTTP method in ``METHOD_HEADER``.
+
+        Returns:
+            The relay's answer.
+
+        Raises:
+            ValueError: When the token opens no MCP relay of this gateway.
+        """
+        relay = self._mcp_relay(token)
+        if relay is None:
+            raise ValueError("Unknown scoped MCP relay route.")
+        lowered = {name.lower(): value for name, value in headers.items()}
+        recorder = self.recorder
+        candidate = header_tags(lowered).get("candidate")
+        if recorder is not None and candidate:
+            recorder = recorder.bind(candidate_id=call_candidate_key(candidate, header_tags(lowered).get(LANE_KEY)))
+        method = lowered.get(METHOD_HEADER, "POST").upper()
+        raw = body if isinstance(body, bytes) else json.dumps(dict(body)).encode()
+        name = unquote(path[len(MCP_PATH) :].partition("?")[0])
+        return relay.dispatch(name, method, raw, lowered, recorder)
+
     def bind_sandbox(
         self, broker: SandboxControl, *, image: str, lifetime_seconds: float, allowed_hosts: tuple[str, ...] = ()
     ) -> None:
@@ -820,19 +951,26 @@ class ModelGateway:
         return self._sandbox.parent_runtime(tuple(hosts))
 
     def dispatch_guest(
-        self, token: str, path: str, body: Mapping[str, Any], headers: Mapping[str, str]
+        self, token: str, path: str, body: Mapping[str, Any] | bytes, headers: Mapping[str, str]
     ) -> ModelHTTPResult:
         """Serve a sandbox mailbox request under its original fixed model role.
 
         Args:
             token: Short-lived scoped role credential registered by this parent.
-            path: Supported model protocol path or own-budget state endpoint.
-            body: Exact model request emitted by the guest SDK.
+            path: Supported model protocol path, own-budget state endpoint or MCP relay path.
+            body: Exact model request emitted by the guest SDK; raw bytes for an MCP relay path.
             headers: Permitted protocol headers, never upstream credentials.
 
         Returns:
             Model response after authoritative admission and settlement.
+
+        Raises:
+            TypeError: When a path other than an MCP relay path gets raw bytes.
         """
+        if path.startswith(MCP_PATH):
+            return self._mcp_relay_call(token, path, body, headers)
+        if isinstance(body, bytes):
+            raise TypeError("A JSON object is required.")
         route = self._routes.get(token)
         if path in self._capabilities:
             refusal = self._capability_refusal(path, token)

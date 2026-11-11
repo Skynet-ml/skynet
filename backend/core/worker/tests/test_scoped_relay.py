@@ -5,13 +5,17 @@ from __future__ import annotations
 import base64
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
 
 from core.billing.budgets import BudgetService
+from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.protected_execution import run_call_recorder
+from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment
 from core.service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
+from core.service_gateway.optimization.blackbox.repo_services import box_mcp_config
 from core.storage.run_call_store import PostgresRunCallStore, strip_secrets
 from core.worker import scoped_relay
 
@@ -259,3 +263,59 @@ def test_short_secret_adds_no_derived_form() -> None:
     """Keep derived forms of at least eight characters, so a short value masks no common text."""
     assert scoped_relay._secret_forms("1") == {"1"}
     assert "MQ" not in scoped_relay._secret_forms("1")
+
+
+_MCP_ROUTE = {"url": "http://127.0.0.1:9000/v1", "token": "mcp-relay"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/mcp/", "/v1/mcp/../_sandbox", "/v1/mcp/a/b", "/v1/mcp/%2e%2e", "/v1/mcp/.", "/v1/mcp/a?b", "/v1/mcp/a#b"],
+)
+def test_the_mcp_route_refuses_a_path_that_leaves_one_server_name(client: type[_Client], path: str) -> None:
+    """An MCP relay path must name exactly one server; anything else never leaves the parent.
+
+    Args:
+        client: The fake HTTP client.
+        path: The path the box asks for.
+    """
+    dispatch = scoped_relay.model_forwarder({MCP_RELAY_ROUTE_KEY: _MCP_ROUTE})
+
+    with pytest.raises(ValueError, match="outside the MCP relay"):
+        dispatch(_MCP_ROUTE["token"], path, b"{}", {})
+
+    assert client.timeouts == []
+
+
+def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) -> None:
+    """The MCP token opens no model route, and a model token opens no MCP server.
+
+    Args:
+        client: The fake HTTP client.
+    """
+    dispatch = scoped_relay.model_forwarder({"_skynet_target_route": _ROUTE, MCP_RELAY_ROUTE_KEY: _MCP_ROUTE})
+
+    with pytest.raises(ValueError, match="unknown metered model capability"):
+        dispatch(_MCP_ROUTE["token"], "/v1/chat/completions", {"model": "fixture/text"}, {})
+    with pytest.raises(ValueError, match="unknown metered model capability"):
+        dispatch(_ROUTE["token"], "/v1/mcp/search", b"{}", {})
+
+    assert client.timeouts == []
+
+
+def test_box_mcp_urls_name_each_server_and_hold_no_secret() -> None:
+    """Each ``.mcp.json`` url the box gets maps back to its server name and carries no real url or key."""
+    role = RoleEnvironment(
+        mcp=".mcp.json",
+        mcp_servers=(
+            McpServer(name="search", url="https://mcp.example.test/x", headers={"Authorization": "Bearer ${KEY}"}),
+            McpServer(name="a b/c", url="https://other.example.test/y", headers={}),
+        ),
+    )
+
+    config = box_mcp_config(role, "http://127.0.0.1:4100/v1")
+
+    names = {name: scoped_relay._mcp_name(urlsplit(entry["url"]).path) for name, entry in config["mcpServers"].items()}
+    assert names == {"search": "search", "a b/c": "a b/c"}
+    assert "example.test" not in str(config)
+    assert "KEY" not in str(config)

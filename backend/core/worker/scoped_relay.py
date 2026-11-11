@@ -8,23 +8,44 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
+import json
 import logging
+import threading
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Generator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib.parse import quote, quote_plus, urlsplit
+from urllib.parse import quote, quote_plus, unquote, urlsplit
 
 import httpx
 
-from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms
+from ..billing.budgets import BudgetError
+from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms, relay_request
+from ..billing.guest_model_proxy import MCP_PATH, METHOD_HEADER
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
+from ..billing.mcp_broker import _pinned_address, _PinnedTransport
 from ..billing.model_dispatch import ModelHTTPResult
+from ..billing.model_gateway import MCP_RELAY_ROUTE_KEY, _tool_target
+from ..billing.operation_pricing import UnpricedOperationError
 from ..billing.usage_tags import LANE_KEY, current_tags
 from ..config import settings
 from ..models.blackbox import BLACKBOX_TARGET_REPO
-from ..service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
+from ..service_gateway.optimization.blackbox.repo_constraints import RoleEnvironment
+from ..service_gateway.optimization.blackbox.repo_scorer import (
+    _DECODED_HEADERS,
+    _HEAD_END,
+    _MCP_STREAMS,
+    _SERVICE_BODY_BYTES,
+    _SERVICE_TIMEOUT_SECONDS,
+    SETUP_ALLOWANCE_SECONDS,
+    _AnswerTooLargeError,
+    _json_object,
+    _streamed,
+    _UnreachableError,
+)
+from ..service_gateway.optimization.blackbox.repo_services import RoleRelayError, mcp_endpoint
 from ..storage.run_call_store import call_candidate_key
 
 logger = logging.getLogger(__name__)
@@ -32,6 +53,10 @@ logger = logging.getLogger(__name__)
 _MIN_DERIVED_FORM_CHARS = 8
 # Run calls that serve no candidate, such as proposer calls; the calls route needs a nonempty id.
 NO_CANDIDATE_ID = "run"
+# The MCP streamable HTTP headers. Every other guest header, its relay token included, stays in the parent.
+_MCP_REQUEST_HEADERS = frozenset({"accept", "content-type", "last-event-id", "mcp-protocol-version", "mcp-session-id"})
+_MCP_ANSWER_HEADERS = frozenset({"mcp-session-id", "mcp-protocol-version"})
+_MCP_METHODS = frozenset({"GET", "POST", "DELETE"})
 
 
 class RunCallSink(Protocol):
@@ -212,6 +237,302 @@ def _text(body: bytes | str) -> str:
     return body.decode("utf-8", "replace") if isinstance(body, bytes) else body
 
 
+def _mcp_error(status: int, message: str) -> ModelHTTPResult:
+    """Return a relay refusal as a JSON error.
+
+    Args:
+        status: The HTTP status.
+        message: Why the relay refused; it names the fix.
+
+    Returns:
+        The error answer.
+    """
+    error = {"error": {"type": "mcp_relay", "code": "mcp_relay", "message": message}}
+    return ModelHTTPResult(status, "application/json", json.dumps(error).encode())
+
+
+class McpRelay:
+    """Send a role box's MCP requests to the servers of the role's own MCP file (E49, E55).
+
+    The box's ``.mcp.json`` names only relay urls. The parent holds each real
+    url and header, fills the secrets with :func:`relay_request`, and removes
+    every filled value from the answer. A server outside the role's file gets
+    a 403 that names the file to change. The relay url builder is
+    ``repo_services.box_mcp_config``, so any harness can write the same urls.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        role: RoleEnvironment,
+        *,
+        secrets: Mapping[str, str] | None = None,
+        bindings: Mapping[str, str] | None = None,
+        secret_hosts: Mapping[str, str] | None = None,
+        allowed_hosts: Mapping[str, Collection[str]] | None = None,
+        budget: Any = None,
+    ) -> None:
+        """Bind the relay to one role and the run's secrets.
+
+        Args:
+            label: The role's label, such as ``[proposer]``.
+            role: The role, with the servers of its own MCP file.
+            secrets: The run's secret values, filled in here in the parent.
+            bindings: ``user`` or ``managed`` for each secret name.
+            secret_hosts: The one host each secret may go to.
+            allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
+            budget: The run budget, which meters a call with a Skynet key.
+        """
+        self._label = label
+        self._role = role
+        self._secrets = dict(secrets or {})
+        self._bindings = dict(bindings or {})
+        self._secret_hosts = dict(secret_hosts or {})
+        self._allowed_hosts = dict(allowed_hosts or {})
+        self._budget = budget
+        self._streams_lock = threading.Lock()
+        self._open_streams = 0
+
+    def dispatch(
+        self, name: str, method: str, body: bytes, headers: Mapping[str, str], recorder: CallRecorder | None
+    ) -> ModelHTTPResult:
+        """Send one MCP request to its declared server and return the masked answer.
+
+        Args:
+            name: The server, as the box's relay url names it.
+            method: ``GET``, ``POST`` or ``DELETE``.
+            body: The client's raw request body.
+            headers: The guest's headers; only the MCP headers go out.
+            recorder: Writes the call into the run record; ``None`` records nothing.
+
+        Returns:
+            The answer, with its MCP session header. A GET event stream comes
+            back with ``stream`` set, and the caller must read or close it.
+
+        Raises:
+            BudgetError: When the budget stops a metered call.
+            UnpricedOperationError: When a metered call has no price.
+        """
+        if recorder is not None:
+            recorder = recorder.bind(role=self._label.strip("[]"))
+        label = f"MCP server {name!r}"
+        try:
+            if method not in _MCP_METHODS:
+                raise RoleRelayError(f"{label} takes only GET, POST and DELETE requests.")
+            url, declared = mcp_endpoint(self._label, self._role, name)
+        except RoleRelayError as error:
+            if recorder is not None:
+                recorder.record(recorder.start(), kind="mcp", target=name, status="refused", failure_reason=str(error))
+            return _mcp_error(403, str(error))
+        # Only a GET listener streams, and it takes its place before the request goes out.
+        listener = method == "GET"
+        if listener:
+            with self._streams_lock:
+                opened = self._open_streams < _MCP_STREAMS
+                self._open_streams += opened
+            if not opened:
+                return _mcp_error(503, f"{label} has {_MCP_STREAMS} event streams open already.")
+        try:
+            response = self._request(url, declared, label, name, method, body, headers, recorder)
+        except BaseException:
+            if listener:
+                self._release()
+            raise
+        if listener and response.stream is None:
+            self._release()
+        return response
+
+    def _release(self) -> None:
+        """Free one event stream place."""
+        with self._streams_lock:
+            self._open_streams -= 1
+
+    def _request(
+        self,
+        url: str,
+        declared: Mapping[str, str],
+        label: str,
+        name: str,
+        method: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        recorder: CallRecorder | None,
+    ) -> ModelHTTPResult:
+        """Send the request through :func:`relay_request` to the declared url, pinned and with no redirect.
+
+        Args:
+            url: The server's declared url.
+            declared: The declared headers, with ``${SECRET}`` placeholders.
+            label: ``MCP server '<name>'``, for the errors.
+            name: The server, for the record target.
+            method: The HTTP method.
+            body: The raw request body.
+            headers: The guest's headers.
+            recorder: Writes the call into the run record.
+
+        Returns:
+            The masked answer.
+
+        Raises:
+            BudgetError: When the budget stops a metered call.
+            UnpricedOperationError: When a metered call has no price.
+        """
+        overrides = {key.lower() for key in declared}
+        guest = [
+            (key, value)
+            for key, value in headers.items()
+            if key.lower() in _MCP_REQUEST_HEADERS and key.lower() not in overrides
+        ]
+        status: list[int] = []
+
+        def send(address: str, filled: dict[str, str], content: bytes) -> bytes | Generator[bytes, None, None]:
+            """Send the filled request once and return its header lines and body together.
+
+            Args:
+                address: The declared url.
+                filled: The declared headers with their secrets filled in.
+                content: The guest's body.
+
+            Returns:
+                The answer's header lines, a blank line, then its body; for a
+                GET event stream, an iterator that yields them as they arrive.
+
+            Raises:
+                _UnreachableError: When the host resolves to a private,
+                    loopback or link-local address.
+                _AnswerTooLargeError: When the body passes 4 MiB.
+            """
+            try:
+                pinned = _pinned_address(url, False, label=f"{label} url")
+            except ValueError as error:
+                # Not a secret refusal: relay_request's ValueError means only that.
+                raise _UnreachableError(str(error)) from error
+            transport = _PinnedTransport(url, pinned)
+            with contextlib.ExitStack() as stack:
+                stack.callback(transport.close)
+                client = stack.enter_context(
+                    httpx.Client(
+                        transport=transport, follow_redirects=False, trust_env=False, timeout=_SERVICE_TIMEOUT_SECONDS
+                    )
+                )
+                response = stack.enter_context(
+                    client.stream(method, address, headers=[*guest, *filled.items()], content=content)
+                )
+                head = (
+                    b"".join(
+                        key + b": " + value + b"\r\n"
+                        for key, value in response.headers.raw
+                        if key.decode("latin-1").lower() not in _DECODED_HEADERS
+                    )
+                    + _HEAD_END[2:]
+                )
+                status.append(response.status_code)
+                if method == "GET" and response.headers.get("content-type", "").lower().startswith("text/event-stream"):
+                    return _streamed(stack.pop_all(), head, response.iter_bytes())
+                answer = bytearray()
+                for chunk in response.iter_bytes():
+                    answer.extend(chunk)
+                    if len(answer) > _SERVICE_BODY_BYTES:
+                        raise _AnswerTooLargeError
+                return head + bytes(answer)
+
+        try:
+            answer = relay_request(
+                url=url,
+                headers=declared,
+                body=body,
+                user_secrets=self._secrets,
+                bindings=self._bindings,
+                secret_hosts=self._secret_hosts,
+                allowed_hosts=self._allowed_hosts,
+                send=send,
+                runtime=self._budget,
+                recorder=recorder,
+                kind="mcp",
+                target=_tool_target(name, url, _json_object(body)),
+            )
+        except _AnswerTooLargeError:
+            return _mcp_error(502, f"{label} answered with more than 4 MiB.")
+        except (BudgetError, UnpricedOperationError):
+            # These are ValueErrors too, but a budget stop, not a secret refusal.
+            raise
+        except ValueError as error:
+            # relay_request names the secret and the host, never a value.
+            return _mcp_error(403, f"{label} was refused: {error}")
+        except (_UnreachableError, httpx.HTTPError) as error:
+            # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
+            logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
+            return _mcp_error(502, f"{label} could not be reached.")
+        if isinstance(answer, bytes):
+            head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
+            return _answer(status[0], head, content)
+        # The masker may hold the head back with the first event; read on until the head is whole.
+        buffered = b"\r\n"
+        try:
+            for chunk in answer:
+                buffered += chunk
+                if _HEAD_END in buffered:
+                    break
+        except _AnswerTooLargeError:
+            return _mcp_error(502, f"{label} answered with more than 4 MiB.")
+        except BaseException:
+            answer.close()
+            raise
+        head, _, content = buffered.partition(_HEAD_END)
+        return replace(_answer(status[0], head, content), stream=self._events(answer))
+
+    def _events(self, answer: Generator[bytes, None, None]) -> Generator[bytes, None, None]:
+        """Pass an event stream on, and free its place when it ends or the reader closes it.
+
+        Args:
+            answer: The masked stream after its head.
+
+        Yields:
+            Each masked chunk.
+        """
+        try:
+            yield from answer
+        except _AnswerTooLargeError:
+            return
+        finally:
+            answer.close()
+            self._release()
+
+
+def _answer(status: int, head: bytes, content: bytes) -> ModelHTTPResult:
+    """Build the box's answer from the masked header lines and body.
+
+    Args:
+        status: The server's HTTP status.
+        head: The masked header lines.
+        content: The masked body.
+
+    Returns:
+        The answer with its content type and MCP headers only.
+    """
+    lines = [line.decode("latin-1").split(": ", 1) for line in head.split(b"\r\n") if b": " in line]
+    content_type = next((value for key, value in lines if key.lower() == "content-type"), "application/json")
+    kept = tuple((key, value) for key, value in lines if key.lower() in _MCP_ANSWER_HEADERS)
+    return ModelHTTPResult(status, content_type, content, headers=kept)
+
+
+def _mcp_name(path: str) -> str | None:
+    """Return the server name of an MCP relay path, or None when the path could leave the relay prefix.
+
+    Args:
+        path: A path under ``/v1/mcp/``.
+
+    Returns:
+        The decoded name, or None for an empty name, a dot segment, or a
+        raw slash, query or fragment.
+    """
+    segment = path[len(MCP_PATH) :]
+    name = unquote(segment)
+    if not segment or any(mark in segment for mark in "/?#") or name in {".", ".."}:
+        return None
+    return name
+
+
 def model_forwarder(payload: dict[str, Any]) -> Any:
     """Restrict the supervisor relay to explicitly issued parent capabilities.
 
@@ -279,6 +600,10 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
             register(route, frozenset({"/v1/_mcp", "/v1/_budget/state"}))
     register(payload.get("_skynet_packages_route"), frozenset({"/v1/_packages"}))
     register(payload.get("_skynet_evaluator_route"), frozenset({"/v1/_evaluator", "/v1/_budget/state"}))
+    mcp_route = payload.get(MCP_RELAY_ROUTE_KEY)
+    register(mcp_route, frozenset())
+    # Each server of the role's MCP file has its own path under the prefix.
+    mcp_tokens = {mcp_route["token"]} if isinstance(mcp_route, dict) else set()
     target = payload.get("target")
     evaluator_timeout = 630.0
     if isinstance(target, dict) and target.get("kind") == BLACKBOX_TARGET_REPO:
@@ -301,6 +626,10 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
         Raises:
             ValueError: When the token or requested path is outside its scope.
         """
+        if token in mcp_tokens and path.startswith(MCP_PATH):
+            if _mcp_name(path) is None:
+                raise ValueError("The guest requested a path outside the MCP relay.")
+            return _forward_mcp(routes[token][0] + path, token, body, headers)
         if token not in routes or path not in routes[token][1]:
             raise ValueError("The guest requested an unknown metered model capability.")
         timeout = evaluator_timeout if path == "/v1/_evaluator" else 600
@@ -321,3 +650,58 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
         )
 
     return dispatch
+
+
+def _forward_mcp(url: str, token: str, body: bytes, headers: Mapping[str, str]) -> ModelHTTPResult:
+    """Send one MCP relay request to the parent gateway with its own method, and stream an event stream back.
+
+    Args:
+        url: The gateway's MCP relay url for the server.
+        token: The MCP relay token.
+        body: The client's raw body.
+        headers: The mailbox headers, with the method header.
+
+    Returns:
+        The gateway's answer; a GET event stream comes back with ``stream`` set.
+    """
+    method = headers.get(METHOD_HEADER, "POST")
+    sent = {key: value for key, value in headers.items() if key.lower() != "authorization"}
+    client = httpx.Client(trust_env=False, timeout=600)
+    try:
+        response = client.send(
+            client.build_request(method, url, headers={**sent, "Authorization": f"Bearer {token}"}, content=body),
+            stream=True,
+        )
+    except BaseException:
+        client.close()
+        raise
+    answer = ModelHTTPResult(
+        response.status_code,
+        response.headers.get("Content-Type", "application/json"),
+        b"",
+        headers=tuple((key, value) for key, value in response.headers.items() if key.lower() in _MCP_ANSWER_HEADERS),
+    )
+    if method == "GET" and answer.content_type.lower().startswith("text/event-stream"):
+        return replace(answer, stream=_gateway_events(client, response))
+    try:
+        return replace(answer, body=response.read())
+    finally:
+        response.close()
+        client.close()
+
+
+def _gateway_events(client: httpx.Client, response: httpx.Response) -> Generator[bytes, None, None]:
+    """Pass the gateway's event stream on, and close its connection at the end.
+
+    Args:
+        client: The client that holds the connection.
+        response: The open event stream.
+
+    Yields:
+        Each chunk as it arrives.
+    """
+    try:
+        yield from response.iter_bytes()
+    finally:
+        response.close()
+        client.close()

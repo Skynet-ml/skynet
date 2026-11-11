@@ -6,8 +6,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Generator, Mapping
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -60,6 +60,10 @@ class ModelHTTPResult:
     status: int
     content_type: str
     body: bytes
+    # Only an MCP relay answer carries these: its session header, and a GET
+    # event stream that goes on after ``body``.
+    headers: tuple[tuple[str, str], ...] = ()
+    stream: Generator[bytes, None, None] | None = field(default=None, compare=False)
 
 
 def funds_refusal(managed: bool, retry_after: str | None) -> tuple[bytes, float]:
