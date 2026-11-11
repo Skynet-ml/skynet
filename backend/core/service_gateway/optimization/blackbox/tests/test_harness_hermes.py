@@ -341,7 +341,8 @@ def test_run_seeds_a_fresh_update_check_cache(tmp_path: Path) -> None:
     assert cache["ver"] == HERMES_VERSION
     assert cache["rev"] is None
     assert cache["behind"] == 0
-    assert isinstance(cache["ts"], int) and cache["ts"] > 0
+    assert isinstance(cache["ts"], int)
+    assert cache["ts"] > 0
 
 
 def test_launch_never_writes_the_gateway_key_or_a_provider_key() -> None:
@@ -372,7 +373,8 @@ def test_install_pins_the_checksummed_wheel_and_uv_without_a_piped_script() -> N
     assert "--require-hashes" in install
     assert all(f"--hash=sha256:{digest}" in install for digest in UV_WHEEL_SHA256)
     assert "curl" not in install
-    assert "| sh" not in install and "| bash" not in install
+    assert "| sh" not in install
+    assert "| bash" not in install
     assert "sudo" not in install
 
 
@@ -383,7 +385,8 @@ def test_install_without_uv_installs_hash_checked_uv_and_removes_the_download_fo
     assert code == 0
     assert stdout.splitlines() == ["Hermes Agent v0.19.0 (2026.7.20)", "after-install"]
     (pip,) = [line for line in log.splitlines() if line.startswith("python3 [-m]")]
-    assert "[--require-hashes]" in pip and "[--no-deps]" in pip and "[--only-binary]" in pip
+    for flag in ("[--require-hashes]", "[--no-deps]", "[--only-binary]"):
+        assert flag in pip
     assert _logged(log, "REQ").startswith(f"uv=={UV_VERSION} --hash=sha256:")
     (uv,) = [line for line in log.splitlines() if line.startswith("uv ")]
     assert uv.startswith("uv [tool] [install] [--force] [--python] [3.12] [")
@@ -460,7 +463,8 @@ def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Pat
     for key, value in _PROTECTED_ENV.items():
         assert launch.env[key] == value
     assert launch.env["DO_NOT_TRACK"] == "1"
-    assert _DIRECT_PROVIDER_KEYS <= {name for name, value in _PROTECTED_ENV.items() if value == ""}
+    blanked = {name for name, value in _PROTECTED_ENV.items() if value == ""}
+    assert blanked >= _DIRECT_PROVIDER_KEYS
     assert {"CLAUDE_CODE_OAUTH_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} <= set(_PROTECTED_ENV)
     for name, content in launch.files.items():
         path = tmp_path / name
@@ -493,9 +497,7 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
 
     assert result.returncode == 0
     (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
-    assert run == (
-        f"ARGS [--yolo] [chat] [-q] [{_PROMPT}] [-Q] [--model] [target-model] [--provider] [custom:runtime]"
-    )
+    assert run == (f"ARGS [--yolo] [chat] [-q] [{_PROMPT}] [-Q] [--model] [target-model] [--provider] [custom:runtime]")
     assert _logged(calls, "OPENAI_BASE_URL") == _RELAY_URL
     assert _logged(calls, "OPENAI_API_KEY") == _GATEWAY.api_key
     assert _logged(calls, "ANTHROPIC_API_KEY") == ""
@@ -503,7 +505,10 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
     assert _GATEWAY.url not in calls
     home = Path(_logged(calls, "HERMES_HOME"))
     assert not home.is_relative_to(workspace)
-    assert parse_plain_output(result.stdout)[0] == "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42."
+    assert (
+        parse_plain_output(result.stdout)[0]
+        == "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42."
+    )
     assert "session_id" not in result.stdout
 
 
