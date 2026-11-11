@@ -14,7 +14,16 @@ from __future__ import annotations
 from .....models.blackbox import BLACKBOX_HARNESS_GOOSE
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
-from .base import ENV_API_KEY, ENV_MODEL, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import (
+    ENV_API_KEY,
+    ENV_MODEL,
+    ENV_PROMPT_FILE,
+    GatewayConfig,
+    HarnessLaunch,
+    _base_env,
+    _temp_root,
+    _version_check,
+)
 
 # GitHub release ``v1.57.0`` of aaif-goose/goose (Apache-2.0), 2026-10-28.
 GOOSE_VERSION = "1.57.0"
@@ -109,7 +118,8 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
 
     Each run gets a fresh goose root directory outside the workspace, so the
     session and log files never land in the files the run hands back. An EXIT
-    trap removes it when the run's shell exits and keeps goose's exit status.
+    trap removes it when the run's shell exits and keeps goose's exit status,
+    and the next run removes it when a timeout's SIGKILL skipped the trap.
     Goose's quiet one-shot output is the answer; the bridge has no parser for
     its stream-json format.
 
@@ -133,8 +143,7 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     # appends it to the gateway URL, path prefix included.
     run_command = (
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
-        'export GOOSE_PATH_ROOT="$(mktemp -d)" && '
-        "trap 'rm -rf \"$GOOSE_PATH_ROOT\"' EXIT && "
+        f"{_temp_root('GOOSE_PATH_ROOT', 'goose')} && "
         f'OPENAI_HOST="$(cat {GOOSE_BASE_URL_FILE})" OPENAI_BASE_PATH=chat/completions '
         f'OPENAI_API_KEY="${ENV_API_KEY}" '
         "goose run --no-session --quiet --no-profile --with-builtin developer "
