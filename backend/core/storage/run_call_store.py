@@ -27,7 +27,7 @@ BODY_CAP_BYTES = 64 * 1024
 # A failure reason can carry a whole stage error or exception text; every polling page reads it.
 FAILURE_REASON_CAP_BYTES = 4 * 1024
 SECRET_MASK = "[REDACTED]"
-CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host"})
+CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host", "egress"})
 CANDIDATE_STATES = frozenset({"running", "done", "failed"})
 CANDIDATE_ID_MAX = 64
 # A GEPA program event carries this flag: its calls are tagged with the
