@@ -5352,6 +5352,9 @@ dev = [
 e2b = [
     { name = "e2b" },
 ]
+ec2 = [
+    { name = "boto3" },
+]
 gke = [
     { name = "kubernetes" },
 ]
@@ -5401,6 +5404,7 @@ training = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "anyio", specifier = ">=4.14" },
+    { name = "boto3", marker = "extra == 'ec2'", specifier = ">=1.41.5" },
     { name = "build123d", marker = "extra == 'render'", specifier = ">=0.11" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.210.0" },
@@ -5462,7 +5466,7 @@ requires-dist = [
     { name = "webauthn", specifier = ">=2.5,<3" },
     { name = "xlrd", specifier = ">=2" },
 ]
-provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "kernel", "mosaic", "prime", "sail", "sbx", "smol", "gke"]
+provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "kernel", "mosaic", "prime", "sail", "sbx", "ec2", "smol", "gke"]
 
 [[package]]
 name = "smolmachines"
