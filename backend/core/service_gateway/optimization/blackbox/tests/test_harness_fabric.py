@@ -262,7 +262,7 @@ def test_open_launch_pins_the_packages_and_sends_model_calls_only_to_the_gateway
         ("minimal", "minimal"),
         ("high", "high"),
         ("xhigh", "xhigh"),
-        ("max", "xhigh"),
+        ("max", None),
         ("turbo", None),
     ],
 )

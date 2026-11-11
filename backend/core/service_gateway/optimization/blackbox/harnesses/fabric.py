@@ -16,7 +16,7 @@ import shlex
 from .....models.blackbox import BLACKBOX_HARNESS_FABRIC
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
-from .base import PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import ENV_API_KEY, PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _version_check
 
 FABRIC_VERSION = "0.5.0"
 # The runtime ships abi3 manylinux wheels for Python >= 3.11. The ``harness``
@@ -39,7 +39,7 @@ FABRIC_CONFIG_FILE = ".app/fabric/config.json"
 # The Codex adapter reads a custom provider's key from the variable that
 # ``api_key_env`` names and passes that one variable through to Codex. The
 # runner path puts no rule on the name, so it reads the gateway token directly.
-FABRIC_KEY_ENV = "APP_API_KEY"
+FABRIC_KEY_ENV = ENV_API_KEY
 # The uv installer puts uv here, and the install puts the ``fabric`` launcher here.
 _FABRIC_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
 # The install calls uv by this path, never through ``PATH``, so an unpinned uv
@@ -62,9 +62,8 @@ _FABRIC_LAUNCHER = (
     "fi\n"
     'PATH="$venv/bin:$PATH" exec "$venv/bin/python" "$@"\n'
 )
-# Skynet's effort names that Codex spells differently; Codex knows none,
-# minimal, low, medium, high and xhigh, and gets no setting for anything else.
-_FABRIC_EFFORTS = {"max": "xhigh"}
+# Codex knows these efforts. Fabric passes them unchanged and sets no effort
+# for any other name, so Codex uses its default.
 _FABRIC_EFFORTS_KNOWN = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 # The Codex adapter passes ``OPENAI_API_KEY`` through to Codex, so a protected
 # run blanks it and an inherited key never gives Codex a route around the
@@ -250,9 +249,8 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
         "approval_mode": "deny_all",
         "config_overrides": _FABRIC_CODEX_OVERRIDES,
     }
-    effort = _FABRIC_EFFORTS.get(reasoning_effort, reasoning_effort) if reasoning_effort else None
-    if effort in _FABRIC_EFFORTS_KNOWN:
-        settings["reasoning_effort"] = effort
+    if reasoning_effort in _FABRIC_EFFORTS_KNOWN:
+        settings["reasoning_effort"] = reasoning_effort
     config = {
         "metadata": {"name": "skynet-fabric"},
         "harness": {"adapter_id": FABRIC_ADAPTER, "resolution": "preinstalled", "settings": settings},
