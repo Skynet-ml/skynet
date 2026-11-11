@@ -559,9 +559,9 @@ def test_a_proposer_mcp_file_stops_every_other_harness_by_name(harness: str) -> 
         build_launch(_target(harness), _GATEWAY, protected=True, mcp_servers=("search",))
 
 
-def test_the_mcp_harness_list_names_codex_opencode_opencode_v2_and_qwen_code() -> None:
-    """Name exactly the harnesses that write the relay urls into their config (SKY-618)."""
-    assert MCP_HARNESSES == ("codex", "opencode", "opencode_v2", "qwen_code")
+def test_the_mcp_harness_list_names_every_harness_that_loads_the_relay_urls() -> None:
+    """Name exactly the harnesses that write the relay urls into their config (SKY-618, SKY-619)."""
+    assert MCP_HARNESSES == ("codex", "opencode", "opencode_v2", "qwen_code", "cline", "kimi_code", "openhands")
 
 
 @pytest.mark.parametrize("harness", MCP_HARNESSES)

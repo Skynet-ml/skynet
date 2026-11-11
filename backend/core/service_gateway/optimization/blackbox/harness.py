@@ -22,10 +22,13 @@ from typing import Any
 from ....config import settings, with_legacy_env
 from ....exceptions import ServiceError
 from ....models.blackbox import (
+    BLACKBOX_HARNESS_CLINE,
     BLACKBOX_HARNESS_CODEX,
     BLACKBOX_HARNESS_CUSTOM,
+    BLACKBOX_HARNESS_KIMI_CODE,
     BLACKBOX_HARNESS_OPENCODE,
     BLACKBOX_HARNESS_OPENCODE_V2,
+    BLACKBOX_HARNESS_OPENHANDS,
     BLACKBOX_HARNESS_PI,
     BLACKBOX_HARNESS_QWEN_CODE,
     BlackboxTarget,
@@ -89,12 +92,15 @@ _OPENROUTER_PREFIX = "openrouter/"
 
 # The catalog harnesses that load the [proposer] MCP servers from the relay
 # urls in their generated config. Any other harness would run without the
-# tools the file lists, so its launch stops (SKY-610, SKY-618).
+# tools the file lists, so its launch stops (SKY-610, SKY-618, SKY-619).
 MCP_HARNESSES = (
     BLACKBOX_HARNESS_CODEX,
     BLACKBOX_HARNESS_OPENCODE,
     BLACKBOX_HARNESS_OPENCODE_V2,
     BLACKBOX_HARNESS_QWEN_CODE,
+    BLACKBOX_HARNESS_CLINE,
+    BLACKBOX_HARNESS_KIMI_CODE,
+    BLACKBOX_HARNESS_OPENHANDS,
 )
 
 

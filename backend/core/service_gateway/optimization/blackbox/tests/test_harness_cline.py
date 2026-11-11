@@ -26,7 +26,7 @@ from core.models.blackbox import (
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
-from ..harnesses.cline import CLINE_BASE_URL_FILE, CLINE_THINKING_LEVELS, CLINE_VERSION
+from ..harnesses.cline import CLINE_BASE_URL_FILE, CLINE_MCP_SETTINGS_FILE, CLINE_THINKING_LEVELS, CLINE_VERSION
 from ..service import _check_proposer_effort
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
@@ -43,6 +43,8 @@ log="$FAKE_LOG"
   printf 'ANTHROPIC_API_KEY=%s\\n' "$ANTHROPIC_API_KEY"
   printf 'CLINE_DATA_DIR=%s\\n' "$CLINE_DATA_DIR"
   if [ -f "$CLINE_DATA_DIR/globalState.json" ]; then printf 'STATE=%s\\n' "$(cat "$CLINE_DATA_DIR/globalState.json")"; fi
+  printf 'MCP_PATH=%s\\n' "$CLINE_MCP_SETTINGS_PATH"
+  if [ -f "$CLINE_MCP_SETTINGS_PATH" ]; then printf 'MCP=%s\\n' "$(cat "$CLINE_MCP_SETTINGS_PATH")"; fi
 } >> "$log"
 if [ "$1" = "auth" ]; then echo "saved"; exit 0; fi
 [ -z "$FAKE_SLEEP" ] || sleep "$FAKE_SLEEP"
@@ -62,7 +64,13 @@ def _target() -> BlackboxTarget:
 
 
 def _start_fake_cline(
-    tmp_path: Path, tag: str, *, protected: bool = False, fake_exit: int = 0, sleep: int = 0
+    tmp_path: Path,
+    tag: str,
+    *,
+    protected: bool = False,
+    fake_exit: int = 0,
+    sleep: int = 0,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[subprocess.Popen[str], Path, Path]:
     """Start the built Cline command in its own process group against a fake ``cline`` binary.
 
@@ -74,11 +82,12 @@ def _start_fake_cline(
         protected: Build the protected launch, with the sandbox-local relay set.
         fake_exit: Exit status the fake binary returns.
         sleep: Seconds the fake binary waits before it answers.
+        mcp_servers: The ``[proposer]`` MCP server names.
 
     Returns:
         The running shell, its call log, and its workspace.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected)
+    launch = build_launch(_target(), _GATEWAY, protected=protected, mcp_servers=mcp_servers)
     workspace = tmp_path / f"work-{tag}"
     for name, content in launch.files.items():
         path = workspace / name
@@ -118,19 +127,24 @@ def _start_fake_cline(
     return process, log, workspace
 
 
-def _run_with_fake_cline(tmp_path: Path, *, protected: bool, fake_exit: int = 0) -> tuple[str, str, Path, int]:
+def _run_with_fake_cline(
+    tmp_path: Path, *, protected: bool, fake_exit: int = 0, mcp_servers: tuple[str, ...] = ()
+) -> tuple[str, str, Path, int]:
     """Run the built Cline command in a scratch workspace against a fake ``cline`` binary.
 
     Args:
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
         protected: Build the protected launch, with the sandbox-local relay set.
         fake_exit: Exit status the fake binary returns.
+        mcp_servers: The ``[proposer]`` MCP server names.
 
     Returns:
         The command's stdout, the fake binary's call log, the workspace, and
         the command's exit status.
     """
-    process, log, workspace = _start_fake_cline(tmp_path, "run", protected=protected, fake_exit=fake_exit)
+    process, log, workspace = _start_fake_cline(
+        tmp_path, "run", protected=protected, fake_exit=fake_exit, mcp_servers=mcp_servers
+    )
     stdout, _ = process.communicate(timeout=10)
     return stdout, log.read_text(), workspace, process.returncode
 
@@ -310,3 +324,32 @@ def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_pa
     )
     assert parse_plain_output("  \n") == (None, {})
     assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "plain"
+
+
+def test_protected_run_gives_cline_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give each [proposer] server one streamable HTTP entry at the relay, in the temp data dir (SKY-619)."""
+    _, calls, workspace, code = _run_with_fake_cline(tmp_path, protected=True, mcp_servers=("search", "my tools"))
+
+    assert code == 0
+    data_dir = _data_dir(calls)
+    paths = {line.split("=", 1)[1] for line in calls.splitlines() if line.startswith("MCP_PATH=")}
+    assert paths == {str(data_dir / "settings" / "cline_mcp_settings.json")}
+    (settings,) = {line.split("=", 1)[1] for line in calls.splitlines() if line.startswith("MCP=")}
+    assert json.loads(settings) == {
+        "mcpServers": {
+            "search": {"type": "streamableHttp", "url": f"{_RELAY}/mcp/search"},
+            "my tools": {"type": "streamableHttp", "url": f"{_RELAY}/mcp/my%20tools"},
+        }
+    }
+    assert _GATEWAY.url not in calls
+    assert _GATEWAY.api_key not in (workspace / CLINE_MCP_SETTINGS_FILE).read_text()
+
+
+def test_launch_without_proposer_mcp_servers_writes_no_mcp_settings(tmp_path: Path) -> None:
+    """Keep the files and the command as before when the proposer's file lists no server."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+    _, calls, _, _ = _run_with_fake_cline(tmp_path, protected=True)
+
+    assert list(launch.files) == [CLINE_BASE_URL_FILE]
+    assert "CLINE_MCP_SETTINGS_PATH" not in launch.run_command
+    assert not [line for line in calls.splitlines() if line.startswith("MCP=")]

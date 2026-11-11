@@ -25,6 +25,7 @@ from ..harnesses.kimi_code import (
     KIMI_CODE_BASE_URL_FILE,
     KIMI_CODE_EFFORTS,
     KIMI_CODE_ID,
+    KIMI_CODE_MCP_FILE,
     KIMI_CODE_SHA256,
     KIMI_CODE_TO_PI,
     KIMI_CODE_VERSION,
@@ -84,10 +85,11 @@ _FAKE_KIMI = (
   for v in """
     + " ".join(_MODEL_ENV)
     + """ \\
-    KIMI_CODE_HOME KIMI_DISABLE_TELEMETRY KIMI_CODE_NO_AUTO_UPDATE OPENAI_API_KEY; do
+    KIMI_CODE_HOME KIMI_DISABLE_TELEMETRY KIMI_CODE_NO_AUTO_UPDATE KIMI_CODE_TRUST_WORKSPACE OPENAI_API_KEY; do
     eval "printf '%s=%s\\n' $v \\"\\${$v-<unset>}\\""
   done
   printf 'CONFIG:'; cat "$KIMI_CODE_HOME/config.toml" 2>/dev/null || printf ' none\\n'
+  printf 'MCP:'; cat "$KIMI_CODE_HOME/mcp.json" 2>/dev/null || printf ' none'; printf '\\n'
 } >> "$FAKE_LOG"
 if [ -f main.py ]; then echo 'print(2)' > main.py; fi
 s="$KIMI_CODE_HOME/sessions/ws1/sess1/agents"
@@ -141,6 +143,7 @@ def _run_with_fake_kimi(
     parser_fails: bool = False,
     inherited: dict[str, str] | None = None,
     prompt: str | None = "Fix `main.py` and say $(echo done).",
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Kimi Code command in a scratch workspace against a fake ``kimi`` binary.
 
@@ -153,11 +156,14 @@ def _run_with_fake_kimi(
         parser_fails: Put a ``python3`` on PATH that fails, so the usage parse step fails.
         inherited: Sandbox env that the launch env overrides, as the bridge applies it.
         prompt: The task prompt the bridge writes, or ``None`` to leave the prompt file missing.
+        mcp_servers: The ``[proposer]`` MCP server names.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort)
+    launch = build_launch(
+        _target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort, mcp_servers=mcp_servers
+    )
     if workspace is None:
         workspace = tmp_path / "work"
     else:
@@ -547,3 +553,34 @@ def test_version_patch_holds_only_the_code_change(tmp_path: Path) -> None:
     patch = repo_tree.version_patch(checkout)
     assert [line for line in patch.splitlines() if line.startswith("diff --git")] == ["diff --git a/main.py b/main.py"]
     assert "+print(2)" in patch
+
+
+def test_protected_run_gives_kimi_code_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give each [proposer] server one user-layer HTTP entry at the relay, and never trust the workspace (SKY-619)."""
+    result, calls, workspace = _run_with_fake_kimi(
+        tmp_path, protected=True, inherited={"KIMI_CODE_TRUST_WORKSPACE": "1"}, mcp_servers=("search", "my tools")
+    )
+
+    assert result.returncode == 0, result.stderr
+    (mcp,) = [line.removeprefix("MCP:") for line in calls.splitlines() if line.startswith("MCP:")]
+    assert json.loads(mcp) == {
+        "mcpServers": {
+            "search": {"transport": "http", "url": f"{_RELAY}/mcp/search"},
+            "my tools": {"transport": "http", "url": f"{_RELAY}/mcp/my%20tools"},
+        }
+    }
+    assert "KIMI_CODE_TRUST_WORKSPACE=\n" in calls
+    assert "KIMI_DISABLE_TELEMETRY=true\n" in calls
+    assert _GATEWAY.api_key not in (workspace / KIMI_CODE_MCP_FILE).read_text()
+
+
+def test_launch_without_proposer_mcp_servers_writes_no_mcp_config(tmp_path: Path) -> None:
+    """Keep the files, the command and the env as before when the proposer's file lists no server."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+    result, calls, _ = _run_with_fake_kimi(tmp_path, protected=True)
+
+    assert result.returncode == 0, result.stderr
+    assert list(launch.files) == [KIMI_CODE_BASE_URL_FILE]
+    assert "mcp.json" not in launch.run_command
+    assert "KIMI_CODE_TRUST_WORKSPACE" not in launch.env
+    assert "MCP: none\n" in calls
