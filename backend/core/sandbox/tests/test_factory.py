@@ -154,6 +154,7 @@ def test_registry_lists_every_provider() -> None:
         "docker",
         "e2b",
         "ec2",
+        "gke",
         "kata",
         "kernel",
         "langsmith",

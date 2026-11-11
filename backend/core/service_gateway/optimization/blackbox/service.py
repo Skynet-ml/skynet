@@ -98,6 +98,7 @@ from .agent_runs import PHASE_BASELINE, PHASE_FINAL, AgentRunRecorder, AgentRunS
 from .auto import LaneOutcome, run_strategy
 from .feedback import FEEDBACK_KEY, named_scores, without_images
 from .harness import GatewayConfig
+from .harnesses import REGISTRY
 from .native_runtime import NATIVE_ENGINES, NativeOptions, native_runtime_unavailable_reason
 from .protocol import (
     METRIC_ERROR,
@@ -129,8 +130,9 @@ _REPO_ENGINE_REASON = "This engine does not optimize a repository."
 _PROGRESS_EVENTS = 100
 
 # No choice, or one of the catalog's ``ReasoningEffort`` levels (core/api/model_catalog.py). Pi and Prime Agent put
-# the effort into a shell command line, so a free-form value must never reach them.
-_NATIVE_EFFORTS = (None, "none", "minimal", "low", "medium", "high", "xhigh", "max")
+# the effort into a shell command line, so a free-form value must never reach them. An empty string is no choice:
+# the proposer launch turns it into ``None``, the harness default.
+_NATIVE_EFFORTS = (None, "", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def _proposer_runtime() -> Literal["vercel", "docker"]:
@@ -424,6 +426,7 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
             raise ServiceError(
                 "Native proposers accept a model selection; custom sampling and routing settings are unsupported."
             )
+        _check_proposer_effort(payload.proposer, payload.reflection_model_settings.extra.get("reasoning_effort"))
         # A run backed by an execution budget keeps its allowance in the ledger
         # and is metered by the gateway route; the parent hands its guest the
         # ceiling the proposer plans against, so only a budget-less run must
@@ -432,6 +435,28 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
             raise ServiceError("Set a total spending budget before starting an upstream agent proposer.")
     if payload.strategy.mode == "auto" and payload.budget.max_scorer_runs < len(AUTO_ENGINES) + 1:
         raise ServiceError(f"Auto needs at least {len(AUTO_ENGINES) + 1} scorer runs.")
+
+
+def _check_proposer_effort(proposer: BlackboxProposer, effort: str | None) -> None:
+    """Refuse an effort level the proposer harness does not support.
+
+    A host CLI and a custom command have no registry entry, so they accept every level.
+
+    Args:
+        proposer: The job's proposer.
+        effort: The chosen effort level; ``None`` or an empty string keeps the harness default.
+
+    Raises:
+        ServiceError: When the harness declares its levels and ``effort`` is not one of them.
+    """
+    spec = REGISTRY.get(proposer.harness)
+    if not effort or proposer.host_cli is not None or spec is None or spec.supported_efforts is None:
+        return
+    if effort not in spec.supported_efforts:
+        raise ServiceError(
+            f"The {proposer.harness} proposer does not support the '{effort}' effort level. "
+            f"Supported levels: {', '.join(spec.supported_efforts)}."
+        )
 
 
 def _agent_scorer(
