@@ -167,7 +167,11 @@ def verify_anything_in_sandbox(
     if remote:
         route = payload.get("_skynet_evaluator_route")
         if not route:
-            raise ValueError("Remote evaluation requires its protected parent relay.")
+            raise ValueError(
+                "Repository scoring requires its protected parent scorer."
+                if repo
+                else "Remote evaluation requires its protected parent relay."
+            )
         if repo:
             scorer_instance = RemoteScorer(
                 REPO_SCORER_URL,
@@ -195,6 +199,10 @@ def verify_anything_in_sandbox(
     with sandbox_runtime_context(runtime):
         try:
             candidate = payload.get("seed_candidate")
+            if candidate is None and repo:
+                # A repository version is a patch: the empty patch scores the staged checkout itself,
+                # so a metric that cannot run fails here, not in the run.
+                candidate = ""
             if candidate is None:
                 if not remote:
                     scorer_instance.check_ready()

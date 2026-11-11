@@ -346,17 +346,18 @@ def test_route_dispatch_refuses_every_non_route_token_and_capability_path(
             model_gateway.dispatch_route(token, path, {}, {})
 
 
-def test_the_setup_check_scores_the_checkout_the_run_scores(
-    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
-) -> None:
-    """The setup check scores through the parent's repository scorer, so the metric reads the real checkout (SKY-644)."""
-    model_gateway, _ = gateway
-    metric_code = (
-        "from pathlib import Path\n"
-        "def score(repo_path, case):\n"
-        "    text = Path(repo_path, 'README').read_text()\n"
-        "    return {'score': 1.0 if text == 'hello' else 0.0, 'feedback': text}\n"
-    )
+def _repo_setup_check(model_gateway: ModelGateway, tmp_path: Path, metric_code: str, **extra: Any) -> dict[str, Any]:
+    """Run a repository setup check through a real parent ``RepoScorer`` on a checkout whose README is ``hello``.
+
+    Args:
+        model_gateway: The real parent gateway.
+        tmp_path: Scratch folder for the checkout archive.
+        metric_code: The repository's metric.
+        **extra: Payload keys to add, such as ``seed_candidate``.
+
+    Returns:
+        The setup check's result.
+    """
     scorer = RepoScorer(
         RepoWorkspace(
             runtime=model_gateway.parent_sandbox_runtime(),
@@ -373,16 +374,49 @@ def test_the_setup_check_scores_the_checkout_the_run_scores(
     payload = {
         "scorer": {"kind": "python", "metric_code": metric_code},
         "target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["README"]}},
-        "seed_candidate": "",
         "cases": [{"input": "x"}],
         "_skynet_evaluator_route": model_gateway.bind_evaluator(scorer),
+        **extra,
     }
     try:
-        result = verify_anything_in_sandbox(
+        return verify_anything_in_sandbox(
             payload, scope="evaluation", identity="repo-check", runtime=LocalSubprocessRuntime()
         )
     finally:
         scorer.close()
 
+
+def test_the_setup_check_scores_the_checkout_the_run_scores(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """The setup check scores through the parent's repository scorer, so the metric reads the real checkout (SKY-644)."""
+    metric_code = (
+        "from pathlib import Path\n"
+        "def score(repo_path, case):\n"
+        "    text = Path(repo_path, 'README').read_text()\n"
+        "    return {'score': 1.0 if text == 'hello' else 0.0, 'feedback': text}\n"
+    )
+
+    result = _repo_setup_check(gateway[0], tmp_path, metric_code, seed_candidate="")
+
     assert result["checks"] == [{"key": "scorer", "status": "succeeded", "field": "scorer"}]
     assert result["scorer_result"]["score"] == 1.0
+
+
+def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """A repository has no seed, so the check scores the checkout itself and a metric that raises fails it (SKY-644)."""
+    metric_code = (
+        "from pathlib import Path\n"
+        "def score(repo_path, case):\n"
+        "    return {'score': float(Path(repo_path, 'MISSING').read_text()), 'feedback': ''}\n"
+    )
+
+    result = _repo_setup_check(gateway[0], tmp_path, metric_code)
+
+    [check] = result["checks"]
+    assert check["key"] == "scorer"
+    assert check["status"] == "failed"
+    assert "The scorer raised an error" in check["message"]
+    assert "evaluator_readiness" not in result
