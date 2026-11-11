@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from ..harnesses import REGISTRY
 from ..harnesses.qwen_code import (
     _PROTECTED_ENV,
     _PROTECTED_KEY_VALUE,
+    _STASH_DIR,
     QWEN_CODE_BASE_URL_FILE,
     QWEN_CODE_SETTINGS_FILE,
 )
@@ -94,6 +97,8 @@ log="$FAKE_LOG"
   if [ -e .qwen/QWEN.md ]; then echo 'WORKSPACE_CONTEXT=yes'; else echo 'WORKSPACE_CONTEXT=no'; fi
 } >> "$log"
 cat "$QWEN_CODE_SYSTEM_SETTINGS_PATH" > "$FAKE_LOG.settings" 2>/dev/null
+if [ -n "$FAKE_BREAK_QWEN_DIR" ]; then rm -rf .qwen && echo x > .qwen; fi
+if [ -n "$FAKE_SLEEP" ]; then echo started > "$FAKE_LOG.started"; sleep "$FAKE_SLEEP"; fi
 printf '%s' "$FAKE_ANSWER"
 exit "${FAKE_EXIT:-0}"
 """
@@ -108,15 +113,19 @@ def _target() -> BlackboxTarget:
     return BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=BLACKBOX_HARNESS_QWEN_CODE, model="target-model")
 
 
-def _run_with_fake_qwen(
+def _fake_qwen_run(
     tmp_path: Path,
     *,
     protected: bool,
     fake_exit: int = 0,
     reasoning_effort: str | None = None,
     workspace_files: dict[str, str] | None = None,
-) -> tuple[str, str, Path, int]:
-    """Run the built qwen command in a scratch workspace against a fake ``qwen`` binary.
+    extra_env: dict[str, str] | None = None,
+) -> tuple[list[str], Path, dict[str, str], Path]:
+    """Set up the built qwen command in a scratch workspace against a fake ``qwen`` binary.
+
+    A second call with the same ``tmp_path`` reuses the workspace, as a later
+    run in one checkout does, and writes the launch files again.
 
     The env also carries an inherited ``OPENAI_BASE_URL``, ``OPENAI_API_KEY``
     and ``DASHSCOPE_API_KEY``, which the run must replace or a protected run
@@ -128,10 +137,10 @@ def _run_with_fake_qwen(
         fake_exit: Exit status the fake binary returns.
         reasoning_effort: The effort to build the launch with.
         workspace_files: Extra files the candidate repo puts in the workspace.
+        extra_env: Env values for the fake binary.
 
     Returns:
-        The command's stdout, the fake binary's call log, the workspace, and
-        the command's exit status.
+        The command arguments, the workspace, the env and the call log path.
     """
     launch = build_launch(_target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort)
     workspace = tmp_path / "work"
@@ -139,10 +148,10 @@ def _run_with_fake_qwen(
         path = workspace / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
-    (workspace / "task").mkdir(parents=True)
+    (workspace / "task").mkdir(parents=True, exist_ok=True)
     (workspace / "task" / "PROMPT.md").write_text(_PROMPT)
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     fake = bin_dir / "qwen"
     fake.write_text(_FAKE_QWEN)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
@@ -157,19 +166,43 @@ def _run_with_fake_qwen(
         "FAKE_LOG": str(log),
         "FAKE_ANSWER": _RECORDED_STDOUT,
         "FAKE_EXIT": str(fake_exit),
+        **(extra_env or {}),
     }
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
     # The sandbox runs the command with bash, not /bin/sh.
-    result = subprocess.run(
-        [shutil.which("bash") or "/bin/sh", "-c", launch.run_command],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
+    return [shutil.which("bash") or "/bin/sh", "-c", launch.run_command], workspace, env, log
+
+
+def _run_with_fake_qwen(
+    tmp_path: Path,
+    *,
+    protected: bool,
+    fake_exit: int = 0,
+    reasoning_effort: str | None = None,
+    workspace_files: dict[str, str] | None = None,
+) -> tuple[str, str, Path, int]:
+    """Run the built qwen command once in a scratch workspace against a fake ``qwen`` binary; see :func:`_fake_qwen_run`.
+
+    Args:
+        tmp_path: Scratch directory for the workspace, the fake binary and its log.
+        protected: Build the protected launch, with the sandbox-local relay set.
+        fake_exit: Exit status the fake binary returns.
+        reasoning_effort: The effort to build the launch with.
+        workspace_files: Extra files the candidate repo puts in the workspace.
+
+    Returns:
+        The command's stdout, the fake binary's call log, the workspace, and
+        the command's exit status.
+    """
+    args, workspace, env, log = _fake_qwen_run(
+        tmp_path,
+        protected=protected,
+        fake_exit=fake_exit,
+        reasoning_effort=reasoning_effort,
+        workspace_files=workspace_files,
     )
+    result = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False)
     return result.stdout, log.read_text(), workspace, result.returncode
 
 
@@ -515,6 +548,90 @@ def test_run_without_workspace_qwen_files_creates_none(tmp_path: Path) -> None:
     assert code == 0
     assert _logged(calls, "WORKSPACE_SETTINGS") == "no"
     assert not (workspace / ".qwen").exists()
+
+
+def test_next_run_restores_the_stash_of_a_run_that_a_timeout_killed(tmp_path: Path) -> None:
+    """Bring the workspace ``.qwen`` files back in the next run after a SIGKILL skipped the EXIT trap.
+
+    The harness bridge kills a timed-out run's process group with SIGKILL. The
+    stash stays in the workspace and git ignores it, so the version patch never
+    holds it. The next run moves the files back before it stashes again.
+    """
+    files = {".qwen/settings.json": _HOSTILE_HELPER_SETTINGS, ".qwen/agents/helper.md": _HOSTILE_AGENT}
+    args, workspace, env, log = _fake_qwen_run(
+        tmp_path, protected=True, workspace_files=files, extra_env={"FAKE_SLEEP": "30"}
+    )
+    git = ["git", "-c", "core.excludesFile=/dev/null", "-c", "user.name=t", "-c", "user.email=t@localhost"]
+    subprocess.run([*git, "init", "-q"], cwd=workspace, check=True)
+    subprocess.run([*git, "add", "--all"], cwd=workspace, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "base"], cwd=workspace, check=True)
+    process = subprocess.Popen(args, cwd=workspace, env=env, start_new_session=True)
+    started = Path(f"{log}.started")
+    deadline = time.monotonic() + 10
+    while not started.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+
+    assert not (workspace / ".qwen/settings.json").exists()
+    assert (workspace / _STASH_DIR / "settings.json").read_text() == _HOSTILE_HELPER_SETTINGS
+    status = subprocess.run(
+        [*git, "status", "--porcelain", "--untracked-files=all"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert _STASH_DIR not in status.stdout
+
+    started.unlink()
+    log.unlink()
+    args, workspace, env, log = _fake_qwen_run(tmp_path, protected=True)
+    result = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False)
+
+    assert result.returncode == 0
+    calls = log.read_text()
+    assert _logged(calls, "WORKSPACE_SETTINGS") == "no"
+    assert _logged(calls, "WORKSPACE_AGENTS") == "no"
+    for name, content in files.items():
+        assert (workspace / name).read_text() == content
+    assert not (workspace / _STASH_DIR).exists()
+
+
+def test_failed_restore_keeps_the_stash_and_the_next_run_stops_until_it_restores(tmp_path: Path) -> None:
+    """Keep the stashed originals when ``.qwen`` turns into a file, and refuse to stash again over them.
+
+    The run keeps qwen's exit status and says on stderr where the originals
+    are. The next run cannot restore them either, so it stops before qwen
+    starts. Once ``.qwen`` is a folder again, a run puts the originals back.
+    """
+    files = {".qwen/settings.json": _HOSTILE_HELPER_SETTINGS, ".qwen/agents/helper.md": _HOSTILE_AGENT}
+    args, workspace, env, log = _fake_qwen_run(
+        tmp_path, protected=False, fake_exit=3, workspace_files=files, extra_env={"FAKE_BREAK_QWEN_DIR": "1"}
+    )
+    first = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False)
+
+    assert first.returncode == 3
+    assert f"The originals stay in {_STASH_DIR}." in first.stderr
+    assert (workspace / _STASH_DIR / "settings.json").read_text() == _HOSTILE_HELPER_SETTINGS
+    assert (workspace / _STASH_DIR / "agents/helper.md").read_text() == _HOSTILE_AGENT
+
+    log.unlink()
+    args, workspace, env, log = _fake_qwen_run(tmp_path, protected=False)
+    second = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False)
+
+    assert second.returncode == 1
+    assert not log.exists()
+    assert (workspace / _STASH_DIR / "settings.json").read_text() == _HOSTILE_HELPER_SETTINGS
+
+    (workspace / ".qwen").unlink()
+    third = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False)
+
+    assert third.returncode == 0
+    assert _logged(log.read_text(), "WORKSPACE_SETTINGS") == "no"
+    for name, content in files.items():
+        assert (workspace / name).read_text() == content
+    assert not (workspace / _STASH_DIR).exists()
 
 
 def test_hostile_helper_models_cannot_select_a_non_gateway_provider() -> None:

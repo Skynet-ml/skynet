@@ -7,7 +7,7 @@ provider key with ``--openai-api-key`` and records the chat under
 ``~/.qwen``; Skynet pins one release, gives Qwen Code the gateway token only
 through ``OPENAI_API_KEY``, points ``OPENAI_BASE_URL`` at the model gateway,
 keeps Qwen Code's home in a per-run temp folder, moves the candidate repo's
-Qwen Code settings and agents aside for the run, and loads a fixed system
+Qwen Code settings and agents into a stash folder for the run, and loads a fixed system
 settings file that pins the model provider to the gateway.
 """
 
@@ -46,11 +46,18 @@ QWEN_CODE_SETTINGS_FILE = ".app/qwen/settings.json"
 # model. Qwen Code 0.27.2 has no flag that skips workspace settings and keeps
 # ``--yolo``: an untrusted folder forces the ``default`` approval mode, and
 # ``--bare`` also drops the system settings and the AGENTS.md context. So the
-# run moves these paths into its temp folder before it starts Qwen Code, and
-# puts them back when its shell exits. A file the agent writes at one of these
-# paths during the run is replaced by the original. The other ``.qwen`` files
+# run moves these paths into :data:`_STASH_DIR` before it starts Qwen Code,
+# and an EXIT trap moves them back. A timeout kills the shell with SIGKILL, so
+# the trap does not run; the stash then stays, and the next run moves it back
+# before it stashes again. A file the agent writes at one of these paths
+# during the run is replaced by the original. The other ``.qwen`` files
 # (``.env``, commands, skills, QWEN.md) stay in place.
 _WORKSPACE_QWEN_FILES = ("settings.json", "agents")
+# A fixed folder in the workspace, so a stash survives a killed run and each
+# move is a rename on one filesystem. Its ``.gitignore`` keeps the folder out
+# of the version patch. A version reset (``git clean -fdx``) removes it, but
+# the reset also brings back the committed ``.qwen`` files.
+_STASH_DIR = ".skynet-qwen-stash"
 # Qwen Code's own ``model.reasoningEffort`` values (``normalizeReasoningEffort``
 # plus ``none``); Skynet sends no effort for any other name.
 _QWEN_CODE_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
@@ -120,9 +127,10 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
 
     Each run gets a fresh ``QWEN_HOME`` outside the workspace, so the settings,
     chat history and installation id never land in the files the run hands
-    back. The run moves the workspace :data:`_WORKSPACE_QWEN_FILES` into it
-    before Qwen Code starts. An EXIT trap puts them back, removes the folder
-    and keeps Qwen Code's exit status. The plain text that ``--prompt`` mode
+    back. The run first puts back a stash that a killed run left, then moves
+    the workspace :data:`_WORKSPACE_QWEN_FILES` into :data:`_STASH_DIR`. An
+    EXIT trap puts them back, removes the temp folder and keeps Qwen Code's
+    exit status. A restore that fails keeps the stash and says so on stderr. The plain text that ``--prompt`` mode
     prints is the answer.
 
     Args:
@@ -149,17 +157,25 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     # list with a name no server has, and ``--disable-mcp-server '*'`` marks
     # every server disabled, so discovery starts none.
     files = " ".join(_WORKSPACE_QWEN_FILES)
+    # The stash goes only after every file is back, so a failed move (``.qwen``
+    # is now a file, a full disk) never loses the originals.
     restore = (
+        "_qwen_restore() { _ok=0; "
         f"for f in {files}; do "
-        'if [ -e "$QWEN_HOME/workspace/$f" ] || [ -L "$QWEN_HOME/workspace/$f" ]; then '
-        'mkdir -p .qwen && rm -rf ".qwen/$f" && mv "$QWEN_HOME/workspace/$f" ".qwen/$f"; fi; done'
+        f'if [ -e "{_STASH_DIR}/$f" ] || [ -L "{_STASH_DIR}/$f" ]; then '
+        f'{{ mkdir -p .qwen && rm -rf ".qwen/$f" && mv "{_STASH_DIR}/$f" ".qwen/$f"; }} || _ok=1; fi; done; '
+        f'if [ "$_ok" = 0 ]; then rm -rf {_STASH_DIR}; else '
+        f'echo "Skynet could not restore .qwen/settings.json or .qwen/agents. The originals stay in {_STASH_DIR}." >&2; '
+        'fi; return "$_ok"; }'
     )
     run_command = (
+        f"{restore}; "
+        f"if [ -e {_STASH_DIR} ] || [ -L {_STASH_DIR} ]; then _qwen_restore || exit 1; fi && "
         'export QWEN_HOME="$(mktemp -d)" && '
-        'mkdir "$QWEN_HOME/workspace" && '
-        f"trap '{restore}; rm -rf \"$QWEN_HOME\"' EXIT && "
+        "trap '_qwen_restore; rm -rf \"$QWEN_HOME\"' EXIT && "
+        f"mkdir {_STASH_DIR} && printf '*\\n' > {_STASH_DIR}/.gitignore && "
         f"for f in {files}; do "
-        'if [ -e ".qwen/$f" ] || [ -L ".qwen/$f" ]; then mv ".qwen/$f" "$QWEN_HOME/workspace/$f" || exit 1; fi; '
+        f'if [ -e ".qwen/$f" ] || [ -L ".qwen/$f" ]; then mv ".qwen/$f" "{_STASH_DIR}/$f" || exit 1; fi; '
         "done && "
         f'cp {QWEN_CODE_SETTINGS_FILE} "$QWEN_HOME/system-settings.json" && '
         'QWEN_CODE_SYSTEM_SETTINGS_PATH="$QWEN_HOME/system-settings.json" '
