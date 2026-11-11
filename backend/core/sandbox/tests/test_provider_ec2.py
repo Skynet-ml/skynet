@@ -74,10 +74,11 @@ FAKE_SSH = textwrap.dedent(
     """
 )
 
-# Logs each call, and removes the lines of one host as ``ssh-keygen -R <host> -f <file>`` does.
+# Logs each call, and removes the lines of one host as ``ssh-keygen -R <host> -f <file>`` does,
+# with the ``.old`` backup. A ``keygen_slow`` flag widens the gap between the read and the write.
 FAKE_KEYGEN = textwrap.dedent(
     """
-    import json, os, sys
+    import json, os, sys, time
     from pathlib import Path
 
     state = Path(os.environ["SKYNET_FAKE_SSH_STATE"])
@@ -89,7 +90,11 @@ FAKE_KEYGEN = textwrap.dedent(
         sys.exit(1)
     path = Path(args[args.index("-f") + 1])
     host = args[args.index("-R") + 1]
-    lines = path.read_text().splitlines(keepends=True)
+    text = path.read_text()
+    if (state / "keygen_slow").exists():
+        time.sleep(0.3)
+    Path(str(path) + ".old").write_text(text)
+    lines = text.splitlines(keepends=True)
     path.write_text("".join(line for line in lines if line.split(" ", 1)[0] != host))
     """
 )
@@ -1358,7 +1363,7 @@ async def test_ssh_keys_each_host_key_by_its_instance_id(fake_ec2: FakeEC2, tmp_
     assert all("CheckHostIP=no" in argv for argv in calls)
 
 
-@pytest.mark.parametrize("value", ["yes", "Yes"])
+@pytest.mark.parametrize("value", ["yes", "Yes", "true", "TRUE"])
 async def test_strict_host_key_checking_yes_keeps_the_address_as_the_key(
     fake_ec2: FakeEC2, tmp_path: Path, value: str
 ) -> None:
@@ -1380,8 +1385,34 @@ async def test_stop_removes_the_host_key_of_the_terminated_instance(fake_ec2: Fa
     known.write_text(f"{instance_id} ssh-ed25519 AAAA1\ni-other ssh-ed25519 AAAA2\n")
     await env.stop()
     assert known.read_text() == "i-other ssh-ed25519 AAAA2\n"
+    assert not (tmp_path / "known_hosts.old").exists()
     calls = [json.loads(line) for line in (fake_ec2.state / "keygen.jsonl").read_text().splitlines()]
     assert calls == [["-R", instance_id, "-f", str(known)]]
+
+
+async def test_stop_skips_the_host_key_removal_when_the_known_hosts_file_is_missing(
+    fake_ec2: FakeEC2, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Run no ssh-keygen and log no warning when the configured known hosts file does not exist."""
+    known = tmp_path / "known_hosts"
+    env = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
+    await env.start()
+    with caplog.at_level(logging.WARNING, logger=ec2_provider.__name__):
+        await env.stop()
+    assert not (fake_ec2.state / "keygen.jsonl").exists()
+    assert "Could not remove the host key" not in caplog.text
+    assert not known.exists()
+
+
+async def test_parallel_host_key_removals_keep_every_other_line(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Run the removals from one shared known hosts file one at a time, so no removal drops the line of another."""
+    known = tmp_path / "known_hosts"
+    known.write_text("i-a ssh-ed25519 AAAA1\ni-b ssh-ed25519 AAAA2\ni-c ssh-ed25519 AAAA3\n")
+    (fake_ec2.state / "keygen_slow").touch()
+    first = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
+    second = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
+    await asyncio.gather(first._forget_host_key("i-a"), second._forget_host_key("i-b"))
+    assert known.read_text() == "i-c ssh-ed25519 AAAA3\n"
 
 
 async def test_a_failed_host_key_removal_only_logs(
@@ -1389,6 +1420,7 @@ async def test_a_failed_host_key_removal_only_logs(
 ) -> None:
     """Finish the stop and log a warning when ssh-keygen cannot remove the host key."""
     known = tmp_path / "known_hosts"
+    known.write_text("")
     env = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
     await env.start()
     (fake_ec2.state / "keygen_fail").touch()

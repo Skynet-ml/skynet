@@ -43,6 +43,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
@@ -164,6 +165,11 @@ _READ_STDIN_SCRIPT = 'eval "$(cat)"'
 # and find the regions that they run in.
 _LIVE: set[EC2Environment] = set()
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
+# One lock for each known hosts file, kept for each event loop because an
+# asyncio lock works in one loop only.
+_KNOWN_HOSTS_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 @dataclasses.dataclass
@@ -301,9 +307,11 @@ class EC2Environment(SandboxEnvironment):
         terminates its own instance. A failed start removes its temporary
         known hosts file.
 
-        A stop from another task during the start terminates the instance of
-        the launch, and the start then raises ``SandboxInfraError``. The
-        start never keeps an instance that such a stop terminated.
+        A stop from another task after the launch joins the lost launches,
+        that is after the image lookup, terminates the instance of the
+        launch, and the start then raises ``SandboxInfraError``. The start
+        never keeps an instance that such a stop terminated. A stop before
+        that point, during the image lookup, does not affect this start.
 
         The launch stays in the lost launches until its instance runs for
         this start or a terminate succeeds, so stop tries again when the
@@ -870,10 +878,10 @@ class EC2Environment(SandboxEnvironment):
         """Tell if ssh keys each host key by the instance id instead of the address.
 
         Returns:
-            True unless ``strict_host_key_checking`` is ``"yes"`` in any case,
-            as ssh reads the value.
+            True unless ``strict_host_key_checking`` is ``"yes"`` or
+            ``"true"`` in any case, as ssh reads the value.
         """
-        return self._strict_host_key_checking.lower() != "yes"
+        return self._strict_host_key_checking.lower() not in {"yes", "true"}
 
     async def _forget_host_key(self, instance_id: str) -> None:
         """Remove the host key of a terminated instance from the configured known hosts file.
@@ -882,24 +890,39 @@ class EC2Environment(SandboxEnvironment):
         instance, and no later instance uses that line again. A temporary
         file goes away with the sandbox, so only a configured file needs
         this. A failure only logs, because the terminate itself succeeded.
+        A missing file holds no key, so the call is skipped. ``ssh-keygen``
+        leaves a ``.old`` backup, which this removes.
 
         Args:
             instance_id: The id of the terminated instance, which is its host key alias.
         """
         if not self._known_hosts_path or not self._aliases_host_keys():
             return
-        argv = ["ssh-keygen", "-R", instance_id, "-f", self._known_hosts_path]
-        try:
-            code, _, err = await _run_process(argv, None, _SSH_PROBE_TIMEOUT_SEC)
-        except (OSError, TimeoutError) as error:
-            logger.warning("Could not remove the host key of ec2 instance %s: %s", instance_id, type(error).__name__)
-            return
-        if code != 0:
-            logger.warning(
-                "Could not remove the host key of ec2 instance %s: %s",
-                instance_id,
-                err.decode("utf-8", errors="replace")[:500],
-            )
+        path = self._known_hosts_path
+        argv = ["ssh-keygen", "-R", instance_id, "-f", path]
+        # ssh-keygen -R rewrites the file through a temporary file and a
+        # rename, so a parallel removal can drop the line of another. This
+        # lock covers one process only: another process that shares the file
+        # can still lose a line, and that only costs one extra host key prompt.
+        async with _known_hosts_lock(path):
+            if not Path(path).exists():  # noqa: ASYNC240 - one stat of a local file
+                return
+            try:
+                code, _, err = await _run_process(argv, None, _SSH_PROBE_TIMEOUT_SEC)
+            except (OSError, TimeoutError) as error:
+                logger.warning(
+                    "Could not remove the host key of ec2 instance %s: %s", instance_id, type(error).__name__
+                )
+                return
+            if code != 0:
+                logger.warning(
+                    "Could not remove the host key of ec2 instance %s: %s",
+                    instance_id,
+                    err.decode("utf-8", errors="replace")[:500],
+                )
+                return
+            with contextlib.suppress(OSError):
+                Path(path + ".old").unlink()  # noqa: ASYNC240 - one local file
 
     def _known_hosts(self) -> str:
         """Return the known hosts file, and make a temporary one when none is set.
@@ -1311,6 +1334,19 @@ def _raise_if_cancelled(state: _LaunchState) -> None:
         raise _stopped_during_start()
     if state.cancelled:
         raise asyncio.CancelledError
+
+
+def _known_hosts_lock(path: str) -> asyncio.Lock:
+    """Return the lock of one known hosts file in the running event loop.
+
+    Args:
+        path: The known hosts file.
+
+    Returns:
+        The lock.
+    """
+    locks = _KNOWN_HOSTS_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return locks.setdefault(path, asyncio.Lock())
 
 
 def _stopped_during_start() -> SandboxInfraError:
