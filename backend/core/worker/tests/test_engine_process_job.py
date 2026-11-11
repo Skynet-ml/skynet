@@ -44,9 +44,9 @@ from .mocks import (
     make_mp_context,
     make_progress_event,
     make_result_event,
+    stopped_box_event,
 )
 from .test_budget_lifecycle import _checkpoint
-from .test_vercel_dspy import stopped_box_event
 
 
 @pytest.fixture(autouse=True)

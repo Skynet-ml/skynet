@@ -12,16 +12,15 @@ from typing import Any
 
 import pytest
 
-from core.billing.model_gateway import _sandbox_failure_kind
 from core.billing.vercel_usage import proposer_hosts
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
-from core.sandbox.errors import SandboxInfraError
 from core.service_gateway.optimization.blackbox import remote_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from core.service_gateway.optimization.blackbox.tests.test_sandbox_broker import IMAGE, FakeRuntime
 from core.worker import vercel_dspy
 from core.worker.isolated_runner import SANDBOX_PROTOCOL
+from core.worker.tests.mocks import SESSION_STOPPED, stopped_box_event
 
 
 class FakeSession:
@@ -505,86 +504,6 @@ def test_a_real_broker_opens_the_setup_check_box_offline_and_the_run_box_with_it
     assert spec.network_disabled is (not expected)
     messages = [str(item) for item in events.queue]
     assert not any("cannot open network access" in message for message in messages)
-
-
-SESSION_STOPPED = "The Vercel sandbox session stopped: SandboxApiError"
-
-
-class StoppedSession(FakeSession):
-    """Pass the protocol probe, then lose the box under the optimizer command after ``elapsed`` seconds."""
-
-    def __init__(self, clock: list[float], elapsed: float) -> None:
-        """Keep the shared fake clock and the time the box stops.
-
-        Args:
-            clock: One-item list that holds the fake monotonic time.
-            elapsed: Seconds after the box opened at which the session stops.
-        """
-        super().__init__()
-        self.clock = clock
-        self.elapsed = elapsed
-
-    def run(self, command: str, **kwargs: Any) -> CommandResult:
-        """Answer the probe, then raise the error frame the parent sends for a stopped session.
-
-        Args:
-            command: The probe or the optimizer command.
-            **kwargs: The run options, which this fake ignores.
-
-        Returns:
-            The probe answer. The optimizer command never returns.
-
-        Raises:
-            ServiceError: The guest-side error for the stopped session.
-        """
-        if command == vercel_dspy.PROTOCOL_PROBE:
-            return CommandResult(0, stdout=f"{SANDBOX_PROTOCOL}\n")
-        self.clock[0] += self.elapsed
-        stopped = SandboxInfraError(SESSION_STOPPED)
-        remote_sandbox._raise_remote_error(
-            {
-                "type": "error",
-                "error_type": type(stopped).__name__,
-                "failure_kind": _sandbox_failure_kind(stopped),
-                "message": str(stopped),
-            }
-        )
-        raise AssertionError("unreachable")
-
-
-def stopped_box_event(monkeypatch: pytest.MonkeyPatch, *, lifetime: float, elapsed: float) -> dict[str, Any]:
-    """Run the guest box until its session stops and return the error event the worker gets.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        lifetime: The guest box lifetime in the descriptor (the run deadline).
-        elapsed: Seconds after the box opened at which the session stops.
-
-    Returns:
-        The single error event on the worker queue.
-    """
-    clock = [1000.0]
-    session = StoppedSession(clock, elapsed)
-    monkeypatch.setattr(vercel_dspy, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
-    events: queue.Queue = queue.Queue()
-    vercel_dspy.run_vercel_dspy(
-        {
-            "_budget_gateway_descriptor": {
-                "url": "http://127.0.0.1:9876",
-                "control_token": "control",
-                "image": "backend@sha256:" + "a" * 64,
-                "lifetime_seconds": lifetime,
-            },
-        },
-        "job-deadline",
-        events,
-        "spawn",
-    )
-    assert session.closed
-    event = events.get_nowait()
-    assert events.empty()
-    return event
 
 
 def test_a_guest_box_that_stops_at_its_deadline_is_an_infrastructure_interruption(
