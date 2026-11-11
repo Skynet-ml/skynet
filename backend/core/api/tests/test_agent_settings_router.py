@@ -128,9 +128,20 @@ def _area_tabs(job_store: Any = None) -> set[str]:
 
 
 def test_list_settings_keeps_hosted_tabs_on_the_hosted_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hosted service always lists the security and billing areas."""
+    """The hosted service lists the security and billing areas, but not the Mac's Agent tab."""
     monkeypatch.setattr(agent_settings_module.settings, "local_mode", False)
-    assert {"security", "billing"} <= _area_tabs()
+    tabs = _area_tabs()
+    assert {"security", "billing"} <= tabs
+    assert "agent" not in tabs
+
+
+def test_tools_refuse_the_agent_tab_on_the_hosted_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hosted service refuses the Agent tab, which only the Mac app shows."""
+    monkeypatch.setattr(agent_settings_module.settings, "local_mode", False)
+    client, calls = _client()
+    _assert_hosted_only(client.get("/agent/settings/agent_engine"), "agent")
+    _assert_hosted_only(client.post("/agent/open-page", json={"tab": "agent"}), "agent")
+    assert calls == []
 
 
 def test_list_settings_hides_hosted_tabs_in_an_unlinked_mac_app(monkeypatch: pytest.MonkeyPatch) -> None:

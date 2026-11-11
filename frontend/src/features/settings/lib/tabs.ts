@@ -132,6 +132,7 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
 /**
  * List the tabs this user may open, in rail order. The Mac app leaves out the
  * web-only tabs, and the linked-only tabs while no hosted account is linked.
+ * The web leaves out the Mac-only tabs.
  */
 export function visibleSettingsTabs(isAdmin: boolean, hostedAvailable = true): SettingsTab[] {
   return withoutHostedOnlyTabs(

@@ -70,12 +70,14 @@ ProtectedAction = Literal[
 ]
 
 MASK = "••••"
-# Must match WEB_ONLY_SETTINGS_TABS and LINKED_ONLY_SETTINGS_TABS in
-# frontend/src/shared/lib/hosted-features.ts. The Mac app never shows the
-# web-only tabs (its local sign-in is a placeholder), and shows the
-# linked-only tabs only while a hosted account is linked.
+# Must match WEB_ONLY_SETTINGS_TABS, LINKED_ONLY_SETTINGS_TABS and
+# LOCAL_ONLY_SETTINGS_TABS in frontend/src/shared/lib/hosted-features.ts. The
+# Mac app never shows the web-only tabs (its local sign-in is a placeholder),
+# and shows the linked-only tabs only while a hosted account is linked. The
+# web never shows the local-only tabs (they set up the Mac's coding CLIs).
 _WEB_ONLY_TABS = frozenset({"security"})
 _LINKED_ONLY_TABS = frozenset({"billing"})
+_LOCAL_ONLY_TABS = frozenset({"agent"})
 # Key names whose values are credentials. ``last4`` and ``has_*`` flags stay
 # readable because the settings UI already shows them.
 _SECRET_KEY = re.compile(r"secret|token|password|passwd|api_?key|private|otpauth|recovery|hash|cookie", re.IGNORECASE)
@@ -315,11 +317,12 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
             username: The caller.
 
         Returns:
-            No tabs on the hosted service. In the Mac app, the web-only tabs,
-            plus the linked-only tabs while no hosted account is linked.
+            The local-only tabs on the hosted service. In the Mac app, the
+            web-only tabs, plus the linked-only tabs while no hosted account is
+            linked.
         """
         if not settings.local_mode:
-            return frozenset()
+            return _LOCAL_ONLY_TABS
         linked = job_store is not None and hosted_link.link_status(job_store.engine, username) is not None
         return _WEB_ONLY_TABS if linked else _WEB_ONLY_TABS | _LINKED_ONLY_TABS
 

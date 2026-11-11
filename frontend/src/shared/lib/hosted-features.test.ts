@@ -7,29 +7,31 @@ import {
   createLinkStore,
   hostedFeaturesAvailable,
   LINKED_ONLY_SETTINGS_TABS,
+  LOCAL_ONLY_SETTINGS_TABS,
   WEB_ONLY_SETTINGS_TABS,
   withoutHostedOnlyTabs,
 } from "./hosted-features.ts";
 
-const TABS = ["wizard", "account", "security", "privacy", "billing", "usage"] as const;
+const TABS = ["wizard", "agent", "account", "security", "privacy", "billing", "usage"] as const;
 
-test("the web always shows hosted features and every tab", () => {
+test("the web always shows hosted features and every tab but the Mac's Agent tab", () => {
   for (const linked of [undefined, false, true]) {
     assert.equal(hostedFeaturesAvailable(false, linked), true);
   }
-  assert.deepEqual(withoutHostedOnlyTabs(TABS, false, true), [...TABS]);
+  assert.deepEqual(withoutHostedOnlyTabs(TABS, false, true), TABS.filter((tab) => tab !== "agent"));
 });
 
 test("an unlinked Mac app hides them, also while the link is unknown", () => {
   assert.equal(hostedFeaturesAvailable(true, false), false);
   assert.equal(hostedFeaturesAvailable(true, undefined), false);
-  assert.deepEqual(withoutHostedOnlyTabs(TABS, true, false), ["wizard", "account", "privacy", "usage"]);
+  assert.deepEqual(withoutHostedOnlyTabs(TABS, true, false), ["wizard", "agent", "account", "privacy", "usage"]);
 });
 
 test("a linked Mac app shows billing but never security", () => {
   assert.equal(hostedFeaturesAvailable(true, true), true);
   assert.deepEqual(withoutHostedOnlyTabs(TABS, true, hostedFeaturesAvailable(true, true)), [
     "wizard",
+    "agent",
     "account",
     "privacy",
     "billing",
@@ -49,6 +51,7 @@ test("the agent's settings tools hide the same tabs", () => {
   };
   assert.deepEqual(backendSet("_WEB_ONLY_TABS"), [...WEB_ONLY_SETTINGS_TABS].sort());
   assert.deepEqual(backendSet("_LINKED_ONLY_TABS"), [...LINKED_ONLY_SETTINGS_TABS].sort());
+  assert.deepEqual(backendSet("_LOCAL_ONLY_TABS"), [...LOCAL_ONLY_SETTINGS_TABS].sort());
 });
 
 test("the link store reads once for many listeners and tells them about changes", async () => {

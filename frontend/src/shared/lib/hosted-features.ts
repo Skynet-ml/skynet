@@ -16,6 +16,9 @@ export const WEB_ONLY_SETTINGS_TABS: ReadonlySet<string> = new Set(["security"])
 /** Settings tabs that need a hosted account: the Mac app shows them once linked. */
 export const LINKED_ONLY_SETTINGS_TABS: ReadonlySet<string> = new Set(["billing"]);
 
+/** Settings tabs only the Mac app shows: they set up the coding CLIs on this computer. */
+export const LOCAL_ONLY_SETTINGS_TABS: ReadonlySet<string> = new Set(["agent"]);
+
 /**
  * Whether hosted-only UI shows: always outside local mode, and in local mode
  * only once the link is known to exist (an unknown link hides it).
@@ -26,7 +29,8 @@ export function hostedFeaturesAvailable(local: boolean, linked: boolean | undefi
 
 /**
  * Drop the settings tabs this runtime cannot use: the web-only tabs in local
- * mode, and the linked-only tabs while hosted features are not available.
+ * mode, the local-only tabs on the web, and the linked-only tabs while hosted
+ * features are not available.
  */
 export function withoutHostedOnlyTabs<T extends string>(
   tabs: readonly T[],
@@ -36,6 +40,7 @@ export function withoutHostedOnlyTabs<T extends string>(
   return tabs.filter(
     (tab) =>
       !(local && WEB_ONLY_SETTINGS_TABS.has(tab)) &&
+      !(!local && LOCAL_ONLY_SETTINGS_TABS.has(tab)) &&
       (available || !LINKED_ONLY_SETTINGS_TABS.has(tab)),
   );
 }
