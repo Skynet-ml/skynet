@@ -275,6 +275,8 @@ def test_image_lock_pins_the_same_eve_packages_as_the_harness() -> None:
 def test_reasoning_levels_match_eve() -> None:
     """Offer exactly eve's own levels, without ``provider-default``, which no effort already means."""
     assert EVE_REASONING_LEVELS == ("none", "minimal", "low", "medium", "high", "xhigh")
+    # Submit offers and checks these levels before the run reserves budget (SKY-585).
+    assert REGISTRY[BLACKBOX_HARNESS_EVE].supported_efforts == EVE_REASONING_LEVELS
 
 
 @pytest.mark.parametrize("effort", [None, *EVE_REASONING_LEVELS])

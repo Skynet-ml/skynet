@@ -289,6 +289,7 @@ def test_normal_end_kills_a_background_job_that_a_detached_tool_command_left(tmp
                 os.kill(job, signal.SIGKILL)
 
 
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the normal-end group kill needs /proc")
 def test_normal_end_kills_a_background_job_left_in_the_harness_group(tmp_path: Path) -> None:
     """Kill a ``sleep &`` that the harness shell left in its own group when the shell ends on its own."""
     pid_file = tmp_path / "job.pid"
@@ -358,6 +359,40 @@ def test_cap_stop_lets_the_harness_exit_trap_remove_its_temp_folder(tmp_path: Pa
 
     assert outcome.tool_cap_reached is True
     assert not scratch.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
+def test_cap_stop_kills_a_shell_that_ignores_sigterm_without_a_timeout(tmp_path: Path) -> None:
+    """End a cap stop after the reaper's grace when the shell ignores SIGTERM and the session has no timeout."""
+    events = _tool_events_command(3).replace("sleep 5", "sleep 120")
+    outcome = run_session(
+        {**_PLAIN, "output_format": "pi", "run_command": f"trap '' TERM; {events}", "max_tool_calls": 1},
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=None,
+    )
+
+    assert outcome.tool_cap_reached is True
+    assert outcome.duration_seconds < 60
+    assert not (tmp_path / "work" / "late.txt").exists()
+
+
+def test_normal_end_sends_no_group_kill_when_the_reaped_pid_cannot_be_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skip the normal-end group kill without a start time, as the reaped shell pid can belong to a new process."""
+    stops: list[int] = []
+    monkeypatch.setattr(harness_bridge, "_start_time", lambda pid: None)
+    monkeypatch.setattr(harness_bridge, "_stop_group", lambda process, signum, root_start: stops.append(signum))
+
+    outcome = run_session(
+        _PLAIN, workspace=tmp_path / "work", prompt="x", model="m", session_dir=tmp_path / "session", timeout_seconds=30
+    )
+
+    assert outcome.returncode == 0
+    assert stops == []
 
 
 def _running(pid: int) -> bool:

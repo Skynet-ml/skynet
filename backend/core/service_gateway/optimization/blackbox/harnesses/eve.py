@@ -575,5 +575,6 @@ SPEC = register(
         output_format="pi",
         protected_env=_PROTECTED_ENV,
         position=66,
+        supported_efforts=EVE_REASONING_LEVELS,
     )
 )

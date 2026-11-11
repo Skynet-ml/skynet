@@ -413,6 +413,10 @@ _PR_SET_CHILD_SUBREAPER = 36
 # The reaper stops sweeping after this many rounds, so a descendant that keeps
 # forking cannot hold the session open.
 _REAPER_SWEEPS = 50
+# After a stop signal, the reaper gives the shell this long to finish its EXIT
+# trap, then kills the tree, so a shell that ignores SIGTERM cannot hold the
+# session open when the bridge has no timeout.
+_REAPER_STOP_GRACE_SECONDS = 5.0
 # One check function shared by the Pi extension, the OpenCode plugin and the
 # eve sandbox. It asks this module for the verdict, so the matching lives in
 # one place.
@@ -1267,7 +1271,8 @@ def reaper_main(command: list[str]) -> int:
     # shell's EXIT trap. A Python handler, unlike SIG_IGN, resets to the
     # default in the shell at exec.
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(signum, lambda *_: None)
+        signal.signal(signum, _arm_stop_grace)
+    signal.signal(signal.SIGALRM, _kill_descendants)
     returncode = subprocess.Popen(command, restore_signals=True).wait()
     for _ in range(_REAPER_SWEEPS):
         left = _descendants(_proc_stats() or {}, os.getpid())
@@ -1280,6 +1285,19 @@ def reaper_main(command: list[str]) -> int:
         time.sleep(0.05)
     _reap_children()
     return returncode if returncode >= 0 else 128 - returncode
+
+
+def _arm_stop_grace(*_: Any) -> None:
+    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends."""
+    if signal.getitimer(signal.ITIMER_REAL)[0] == 0:
+        signal.setitimer(signal.ITIMER_REAL, _REAPER_STOP_GRACE_SECONDS)
+
+
+def _kill_descendants(*_: Any) -> None:
+    """Kill every descendant of this process, so the reaper's wait for the shell ends."""
+    for pid in _descendants(_proc_stats() or {}, os.getpid()):
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
 
 
 def _reap_children() -> None:
@@ -1396,8 +1414,10 @@ def run_session(
             process.wait()
         else:
             # A job the shell left in its group would outlive the session, and
-            # the native runtime runs many sessions in one box.
-            _stop_group(process, signal.SIGKILL, monitor.root_start)
+            # the native runtime runs many sessions in one box. Without /proc
+            # (macOS) nothing proves the reaped pid is still ours, so skip it.
+            if monitor.root_start is not None:
+                _stop_group(process, signal.SIGKILL, monitor.root_start)
         # A child forked while the first signal landed can outlive the shell and
         # keep the pipe open, so keep sweeping the group until the reader sees EOF.
         deadline = time.monotonic() + 5.0
