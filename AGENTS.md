@@ -112,11 +112,11 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 - **Among agents, only the orchestrator merges**, in the daily window (03:00
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
-- Every PR merges into `staging` when all gates pass, with one exception.
-  A PR that touches a human-approval path waits for Gilad's approval. These
-  paths are CI (`.github/**`), deploy and infra config, and the agent rule
-  files. The full list is in the `skynet-pr-workflow` skill, section 7. The
-  automatic merge never covers `main`.
+- Every PR merges into `staging` when the Opus review approves its current
+  commit and all gates pass (Gilad, 2026-11-11). This includes CI
+  (`.github/**`), deploy and infra config, and the agent rule files. A PR
+  that Gilad marks "do not merge" stays unmerged. The automatic merge never
+  covers `main` or production.
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates and Linear flow: the `skynet-pr-workflow` skill.

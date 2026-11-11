@@ -47,9 +47,8 @@ locally, check them again, and then push them together in one push.
 ## 2. Required for every PR
 
 - State the problem, the resulting behavior and the linked Linear issue in
-  plain language. For a PR that waits for Gilad (section 7), put the
-  decision for him in plain language. He must not need to read source code
-  to understand the change or its evidence.
+  plain language. Gilad must not need to read source code to understand the
+  change or its evidence.
 - Name the tested head commit and the baseline commit. Refresh the evidence
   after changes that affect it.
 - Explain the test scope: which behaviors, failure cases and integration
@@ -81,8 +80,7 @@ Use the repository template when there is one. Include, in this order:
    UI PRs need no Before and After images or videos (section 5).
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
-5. Automated review verdicts. For a PR that waits for Gilad (section 7),
-   the decision requested from him.
+5. Automated review verdicts.
 
 Also list the PR's `## Files` (the issue's Files list). For a PR without a
 visible UI change, say so, explain what each test group proves, and add
@@ -120,10 +118,10 @@ for review until the evidence is there.
   description or evidence needs a new evidence check.
 - Add a short review table: reviewer model, reviewed commit, verdict, report
   link.
-- Approval permits human review, or the automatic merge below (section 7).
-  It never permits a production deploy.
+- Approval permits the automatic merge into `staging` (section 7). It never
+  permits a production deploy.
 - For a PR the automation cannot control, record the failed gate. Do not
-  call it ready for human review.
+  call it ready to merge.
 
 ## 4. Acceptance on staging or the PR preview
 
@@ -200,8 +198,7 @@ for review until the evidence is there.
   and fix (sections 1a and 3). The acceptance checks in section 4 still
   apply.
 - UI PRs merge like backend PRs, when all gates pass (Gilad, 2026-11-11).
-  They wait for Gilad only when they touch a human-approval path. The gates
-  and the paths are in section 7.
+  The gates are in section 7.
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -238,21 +235,17 @@ A PR merges into `staging` only when **all** of these gates pass:
    commit>`) and reopen its issue with the failure. The revert goes in its
    own PR and through the batch CI flow below.
 
-### Human-approval paths (Gilad, 2026-11-11)
+### Every PR merges on the gates (Gilad, 2026-11-11)
 
-This list is the single source for the human-approval paths. A PR that
-touches one or more of these paths waits for Gilad's approval. This is also
-true when its other files are outside the list:
+Every PR merges into `staging` when the five gates pass, with no human
+approval. Gilad scopes and designs each issue with the agent, so the review
+gate is enough. This includes backend, UI, docs-only, i18n-only,
+`scripts/**`, CI (`.github/**`), deploy and infra config, and agent rule
+file PRs.
 
-- `.github/**`: CI, workflows and rulesets.
-- Deploy and infra config: `deploy/**`, `infra/**`, and every `Dockerfile`,
-  `docker-compose*.yml` and `.dockerignore` in any folder.
-- Agent rule files: `AGENTS.md` and `CLAUDE.md` in any folder,
-  `.agents/**` and `.claude/**`.
-
-Every other PR merges when the five gates pass, with no human approval. This
-includes backend, UI, docs-only, i18n-only and `scripts/**` PRs. A PR that
-waits for Gilad must also pass the five gates.
+A PR that Gilad marks "do not merge" (for example SKY-318) stays unmerged
+until he removes the mark. A manual hold or a `Changes requested:` comment
+also stops a merge.
 
 **`staging` → `main`**: a change in `staging` is approved for production.
 The orchestrator promotes `staging` to `main` when the staging checks pass
@@ -262,17 +255,18 @@ A manual hold on a change or on a promotion still stops it.
 
 ### Automatic merges (2026-10-19, all PRs 2026-11-11)
 
-- The orchestrator may put a PR that touches no human-approval path into the
-  batch (see "PR tests and batch CI") without another human approval.
+- The orchestrator may put any PR into the batch (see "PR tests and batch
+  CI") without human approval.
   Gates: one current Opus 5.5 medium-effort approval of the current head and
   base, and the PR's own checks and its local test evidence pass. The full
   CI runs on the batch, not on the PR.
-- Automatic scope: every path except the human-approval paths above. It
-  covers only merges into `staging`. It never covers `main`, production or
-  other repositories.
+- Automatic scope: every path. It covers only merges into `staging`. It
+  never covers `main`, production or other repositories.
 - Just before a PR goes into the batch, check the full changed-file list
-  against the human-approval paths. Also check the current revision, base,
-  evidence and review policy. Merge the reviewed head commit into the batch.
+  against the issue's `## Files` list. Check that no "do not merge" mark,
+  manual hold or `Changes requested:` applies. Also check the current
+  revision, base, evidence and review policy. Merge the reviewed head commit
+  into the batch.
   Merge the batch PR with a command that requires its reviewed head commit
   (`gh pr merge <n> --merge --match-head-commit <sha>`). Never bypass
   branch protection or queue an unchecked future merge.
@@ -280,28 +274,21 @@ A manual hold on a change or on a promotion still stops it.
   daily merge window below). Gilad can also merge.
   Implementation and review agents leave the final action to the orchestrator.
 
-### Linear approval and revisions (2026-10-19)
+### Linear revisions and holds (2026-10-19, 2026-11-11)
 
-- An issue in **Ready for Review** is Gilad's review inbox. After the Opus
-  5.5 approval, the orchestrator moves the issue there and notifies Gilad
-  only for changes that need human review (PR, preview, checks, review
-  evidence). Withdraw readiness quietly if commits, checks or evidence
-  change. An automatic merge needs no notification.
-- Gilad approves with a new comment that contains `Approved for merge`. It
-  authorizes only the version in the latest completed review handoff, and
-  only from Gilad's Linear account after that handoff. Delegated agent
-  comments, old or quoted comments, praise and unclear links do not count.
+- A merge into `staging` needs no `Approved for merge` comment and no
+  notification to Gilad.
 - Gilad asks for a revision with a new comment that starts with
-  `Changes requested:`. A newer `Changes requested:`, a deleted approval or a
-  changed review identity stops the merge. The orchestrator moves the issue
+  `Changes requested:`. A newer `Changes requested:` or a changed review
+  identity stops the merge. The orchestrator moves the issue
   back to In Progress and delegates the revision in the existing worktree
   and branch. Never interrupt active work for it. Update the same draft PR,
   refresh evidence and repeat the review.
 - **Implementation and review agents never post `Approved for merge` or
   `Changes requested:` comments**, even from Gilad's account.
 - Before a merge, recheck the commit, base, policy, evidence, review, checks
-  and the latest Linear decision. This approval never covers production or
-  other repositories.
+  and the latest Linear decision (`Changes requested:`, "do not merge" or a
+  manual hold). No merge rule covers production or other repositories.
 
 ### PR tests and batch CI (Gilad, 2026-11-10)
 
