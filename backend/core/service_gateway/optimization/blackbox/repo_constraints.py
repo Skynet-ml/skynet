@@ -576,16 +576,13 @@ def _network(section: Mapping[str, Any], label: str) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(host.lower() for host in hosts))
 
 
-def _role(
-    section: Mapping[str, Any], label: str, services: Mapping[str, ServiceSpec], *, query: bool = False
-) -> dict[str, Any]:
+def _role(section: Mapping[str, Any], label: str, services: Mapping[str, ServiceSpec]) -> dict[str, Any]:
     """Read the settings every role shares: mcp, network, services and illegal.
 
     Args:
         section: The parsed ``[proposer]`` or ``[target.<name>]`` table.
         label: The table as the file names it, used in errors.
         services: The services the file declares.
-        query: Whether this role's relay fills a service's ``query`` secrets.
 
     Returns:
         Keyword arguments for :class:`RoleEnvironment`.
@@ -598,14 +595,6 @@ def _role(
         if name not in services:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: {label} services names '{name}', but the file has no [services.{name}] table.",
-                **_at(f"{label} services"),
-            )
-        # The proposer and target relays (scoped_relay.py) send no query yet; without this the call
-        # would go out with no key and fail at run time (SKY-630).
-        if services[name].query and not query:
-            raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: {label} services names '{name}', which has a query. Only [run] and"
-                " [metric] can use a service with a query.",
                 **_at(f"{label} services"),
             )
     return {
@@ -1370,9 +1359,9 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     proposer = _role(document.get("proposer", {}), "[proposer]", services)
     run_entry, run_timeout = _run(document.get("run"))
     run_section = document.get("run", {})
-    run_role = _role(run_section, "[run]", services, query=True)
+    run_role = _role(run_section, "[run]", services)
     metric_section = document.get("metric", {})
-    metric_role = _role(metric_section, "[metric]", services, query=True)
+    metric_role = _role(metric_section, "[metric]", services)
     _check_secret_receivers(services, {})
     instructions_file = None if instructions is None else _one_file(instructions, "instructions")
     cases_file = _cases_file(document.get("data"))

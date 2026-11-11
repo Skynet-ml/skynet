@@ -6,8 +6,11 @@ import asyncio
 import base64
 import json
 import re
+import shutil
 import subprocess
 import threading
+import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +26,7 @@ from core.billing.model_gateway import _sandbox_failure_kind
 from core.billing.model_mailbox import ModelMailbox
 from core.billing.signals import BudgetReached
 from core.exceptions import DETERMINISTIC_FAILURE
-from core.sandbox import sync_bridge
+from core.sandbox import egress_record, sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
@@ -34,6 +37,7 @@ from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.services import ComposeService, ServicesTooLargeError
 from core.sandbox.telemetry import use_output_sink
 from core.service_gateway.optimization.blackbox import remote_sandbox
+from core.worker.scoped_relay import CallRecorder
 
 _PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); echo \$\? > (\S+)$")
 
@@ -212,6 +216,8 @@ class FakeSession:
         self.log: list[str] | None = None
         self.box: FakeBox | None = None
         self.tail_reads = 0
+        self.scripts: list[str] = []
+        self.script_answers: list[tuple[int, str]] = []
 
     @property
     def fs(self) -> FakeFs:
@@ -241,7 +247,9 @@ class FakeSession:
         return await self.box.create_process(command, args, **kwargs)
 
     async def run_process(self, command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
-        """Answer the output tail read: one base64 line for each ``start path`` pair.
+        """Answer the output tail read, or give the next planned answer to any other script.
+
+        The tail read gets one base64 line for each ``start path`` pair.
 
         Args:
             command: The program.
@@ -256,6 +264,10 @@ class FakeSession:
         """
         if self.stops:
             raise _gone()
+        if args[3] != vercel.TAIL_SCRIPT:
+            self.scripts.append(args[3])
+            code, stdout = self.script_answers.pop(0) if self.script_answers else (0, "")
+            return SimpleNamespace(returncode=code, stdout=stdout, stderr="")
         self.tail_reads += 1
         pairs = args[5:]
         lines = []
@@ -622,6 +634,7 @@ def make_env(
     protected: bool = True,
     clock: FakeClock | None = None,
     services: tuple[ComposeService, ...] = (),
+    recorder: CallRecorder | None = None,
     **spec_fields: Any,
 ) -> VercelEnvironment:
     """Make a provider wired to the fakes.
@@ -633,6 +646,7 @@ def make_env(
         protected: Fund the box from a fake budget.
         clock: The fake clock.
         services: The compose services.
+        recorder: The run's call recorder, or ``None``.
         spec_fields: Other spec fields.
 
     Returns:
@@ -674,6 +688,7 @@ def make_env(
         usage_factory=usage_factory,
         clock=clock or FakeClock(),
         services=services,
+        recorder=recorder,
     )
 
 
@@ -2326,3 +2341,185 @@ def test_model_mailbox_round_trip_through_the_vercel_provider(client: FakeClient
     assert result.exit_code == 0
     assert result.stdout == 'before\n{"answer": 42}\n'
     assert calls == [("", "/v1/chat", {"q": 1})]
+
+
+_BOX_VALUE = "route-value-for-tests"
+
+
+def _egress_recorder() -> tuple[CallRecorder, list[dict[str, Any]]]:
+    """Return a recorder of a fresh run and the calls it writes.
+
+    Returns:
+        The recorder and its written calls, each with the secrets the store must mask.
+    """
+    calls: list[dict[str, Any]] = []
+    sink = SimpleNamespace(record_call=lambda _run, call, secrets: calls.append({**call, "secrets": secrets}))
+    return CallRecorder(sink, f"run-{uuid.uuid4().hex}", "", ""), calls
+
+
+def _egress_log(host: str) -> str:
+    """Return an in-box proxy log with one request line.
+
+    Args:
+        host: The requested host.
+
+    Returns:
+        The log text.
+    """
+    line = {
+        "event": egress_record.CALL_EVENT,
+        "seq": 1,
+        "host": host,
+        "port": 443,
+        "status": "ok",
+        "code": 200,
+        "reason": None,
+        "bytes_sent": 1,
+        "bytes_received": 2,
+        "started_at": "2026-11-11T10:00:00.000+00:00",
+        "duration_ms": 3,
+    }
+    return f"{egress_record.READY_MARKER}\n{json.dumps(line)}\n"
+
+
+async def test_a_recorded_box_routes_commands_through_the_in_box_proxy(client: FakeClient, log: list[str]) -> None:
+    """Start the record-only proxy in the box and give each command its address (SKY-634)."""
+    recorder, _ = _egress_recorder()
+    env = make_env(client, log, recorder=recorder)
+    await env.start()
+    box = client.boxes[env.name]
+    [start] = box.current_session.scripts
+    [script] = [path for path, text in box.fs.files.items() if text == egress_record.PROXY_SOURCE]
+    assert f"python3 -I {script} {vercel.EGRESS_PROXY_PORT}" in start
+    assert "'*'" in start
+    await env.exec("pip download x")
+    proxy_env = box.create_calls[-1]["env"]
+    url = f"http://127.0.0.1:{vercel.EGRESS_PROXY_PORT}"
+    assert (proxy_env["HTTPS_PROXY"], proxy_env["https_proxy"]) == (url, url)
+    assert "localhost" in proxy_env["NO_PROXY"]
+    # The proxy address is no secret, so the box can still become a snapshot.
+    assert not env._secret_exposed
+    await env.stop()
+
+
+async def test_stop_records_the_in_box_proxy_requests_as_cooperative(client: FakeClient, log: list[str]) -> None:
+    """Read the end of the proxy log before the box stops, and mark and mask each row."""
+    recorder, calls = _egress_recorder()
+    env = make_env(client, log, recorder=recorder, env={"APP_KEY": _BOX_VALUE})
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.script_answers.append((0, _egress_log(f"{_BOX_VALUE}.example.com")))
+    await env.stop()
+    read = session.scripts[-1]
+    assert f"tail -n {egress_record.LOG_LINES}" in read
+    assert f"head -c {egress_record.LOG_BYTES}" in read
+    [call] = calls
+    assert (call["kind"], call["status"]) == ("egress", "ok")
+    # The store masks each box env secret in the row.
+    assert _BOX_VALUE in call["secrets"]
+    assert json.loads(call["request"])["source"] == egress_record.VERCEL_SOURCE
+
+
+def _run_start_script(start: str, tools: Path, python: str | None) -> tuple[int, float]:
+    """Run a proxy start script in local bash with only the given tools on PATH.
+
+    Args:
+        start: The start script.
+        tools: An empty folder for the tools.
+        python: The ``python3`` stub, or ``None`` for no python3.
+
+    Returns:
+        The exit code and the seconds the script ran.
+    """
+    tools.mkdir()
+    for tool in ("grep", "seq", "sleep"):
+        (tools / tool).symlink_to(shutil.which(tool))
+    for tool, body in (("setsid", '#!/bin/sh\nexec "$@"\n'), ("nohup", '#!/bin/sh\nexec "$@"\n'), ("python3", python)):
+        if body is not None:
+            (tools / tool).write_text(body)
+            (tools / tool).chmod(0o755)
+    began = time.monotonic()
+    done = subprocess.run([shutil.which("bash"), "-c", start], env={"PATH": str(tools)}, check=False)
+    seconds = time.monotonic() - began
+    Path(re.search(r"> (\S+\.log)", start)[1]).unlink(missing_ok=True)
+    return done.returncode, seconds
+
+
+@pytest.mark.parametrize("python", [None, "#!/bin/sh\nexit 1\n"])
+async def test_the_proxy_start_gives_up_at_once_without_a_working_python(
+    client: FakeClient, log: list[str], tmp_path: Path, python: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End the start script at once when python3 is missing or the proxy exits."""
+    # Without the early exit the script would wait the full 30 s.
+    monkeypatch.setattr(vercel, "EGRESS_READY_POLLS", 300)
+    recorder, _ = _egress_recorder()
+    env = make_env(client, log, recorder=recorder)
+    await env.start()
+    [start] = client.boxes[env.name].current_session.scripts
+    await env.stop()
+    code, seconds = await asyncio.to_thread(_run_start_script, start, tmp_path / "bin", python)
+    assert code != 0
+    assert seconds < 10
+
+
+async def test_a_snapshot_records_the_proxy_requests_first(client: FakeClient, log: list[str]) -> None:
+    """Write the builder's requests before the snapshot stops it, and read them only once."""
+    recorder, calls = _egress_recorder()
+    env = make_env(client, log, protected=False, recorder=recorder)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    session.script_answers.append((0, _egress_log("pypi.org")))
+    rows_at_snapshot: list[int] = []
+
+    async def snapshot(*, expiration: Any = None) -> Any:
+        """Count the rows written before the snapshot call.
+
+        Args:
+            expiration: Unused.
+
+        Returns:
+            The snapshot handle.
+        """
+        rows_at_snapshot.append(len(calls))
+        return SimpleNamespace(id="snap-1", status="created", expires_at=1_000)
+
+    session.snapshot = snapshot
+    await env.snapshot(run_deadline=DEADLINE, now=NOW)
+    await env.stop()
+    assert rows_at_snapshot == [1]
+    assert len(session.scripts) == 2
+
+
+async def test_a_proxy_that_does_not_start_leaves_commands_unproxied(client: FakeClient, log: list[str]) -> None:
+    """Run the box without the proxy, and read no log, when the proxy start fails."""
+    recorder, calls = _egress_recorder()
+    env = make_env(client, log, recorder=recorder)
+    box = client.boxes[env.name] = FakeBox(env.name, FakeSession(client.readback))
+    box.current_session.script_answers.append((1, ""))
+    await env.start()
+    await env.exec("true")
+    assert box.create_calls[-1]["env"] is None
+    await env.stop()
+    assert len(box.current_session.scripts) == 1
+    assert calls == []
+
+
+async def test_a_proxy_set_by_the_user_wins(client: FakeClient, log: list[str]) -> None:
+    """Add no proxy env when the box env already names a proxy."""
+    recorder, _ = _egress_recorder()
+    env = make_env(client, log, recorder=recorder, env={"HTTPS_PROXY": "http://corp-proxy:3128"})
+    await env.start()
+    await env.exec("true")
+    assert client.boxes[env.name].create_calls[-1]["env"] is None
+    await env.stop()
+
+
+async def test_a_box_without_a_recorder_starts_no_proxy(client: FakeClient, log: list[str]) -> None:
+    """Start no proxy and add no env outside a run."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("true")
+    box = client.boxes[env.name]
+    assert box.current_session.scripts == []
+    assert box.create_calls[-1]["env"] is None
+    await env.stop()

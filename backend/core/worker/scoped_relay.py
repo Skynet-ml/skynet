@@ -39,11 +39,13 @@ from ..service_gateway.optimization.blackbox.repo_scorer import (
     _HOP_HEADERS,
     _HTTP_METHOD,
     _MCP_STREAMS,
+    _QUERY_MARK,
     _SERVICE_BODY_BYTES,
     _SERVICE_TIMEOUT_SECONDS,
     SETUP_ALLOWANCE_SECONDS,
     _AnswerTooLargeError,
     _json_object,
+    _SecretQueryTransport,
     _streamed,
     _under,
     _UnreachableError,
@@ -214,14 +216,16 @@ def _secret_forms(secret: str) -> set[str]:
     password alone. Padding is left off each base64 form, so the padded form
     is masked too. Each form is also listed JSON-escaped with ``\\/`` (PHP)
     and with ``\\u0026``-style HTML escapes (Go), because a base64 form holds
-    ``/`` and a decoded password may hold ``&``, ``<`` or ``>``.
+    ``/`` and a decoded password may hold ``&``, ``<`` or ``>``. The value's
+    Python ``repr`` form is listed too, because a relay refusal quotes a name
+    from box code with ``!r``.
 
     Args:
         secret: One nonempty secret value.
 
     Returns:
         The value and its derived forms, each with its escaped variants; at
-        most 40 strings.
+        most 41 strings.
     """
     raw = secret.encode()
     derived = {encode(raw).decode().rstrip("=") for encode in (base64.b64encode, base64.urlsafe_b64encode)}
@@ -241,7 +245,7 @@ def _secret_forms(secret: str) -> set[str]:
         credential = {decoded, password}
     # A short derived form, such as the base64 "MQ" of "1", would mask ordinary text.
     forms = {secret} | credential | {form for form in derived if len(form) >= _MIN_DERIVED_FORM_CHARS}
-    return forms | {variant for form in forms for variant in escaped_forms(form)}
+    return forms | {variant for form in forms for variant in escaped_forms(form)} | {repr(secret)[1:-1]}
 
 
 def _text(body: bytes | str) -> str:
@@ -293,6 +297,7 @@ class McpRelay:
         allowed_hosts: Mapping[str, Collection[str]] | None = None,
         budget: Any = None,
         services: Mapping[str, ServiceSpec] | None = None,
+        record_secrets: Callable[[], Collection[str]] = tuple,
     ) -> None:
         """Bind the relay to one role and the run's secrets.
 
@@ -305,6 +310,9 @@ class McpRelay:
             allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
             budget: The run budget, which meters a call with a Skynet key.
             services: The file's ``[services]`` tables.
+            record_secrets: Returns more values each call record must mask,
+                such as the role box's route tokens. Each call reads it again,
+                because a token can join the route after the relay is made.
         """
         self._label = label
         self._services = dict(services or {})
@@ -314,6 +322,7 @@ class McpRelay:
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
         self._budget = budget
+        self._record_secrets = record_secrets
         self._streams_lock = threading.Lock()
         self._open_streams = 0
 
@@ -346,7 +355,15 @@ class McpRelay:
             url, declared = mcp_endpoint(self._label, self._role, name)
         except RoleRelayError as error:
             if recorder is not None:
-                recorder.record(recorder.start(), kind="mcp", target=name, status="refused", failure_reason=str(error))
+                recorder.record(
+                    recorder.start(),
+                    kind="mcp",
+                    target=name,
+                    status="refused",
+                    failure_reason=str(error),
+                    # The name comes from box code and can be any value it holds (SKY-640).
+                    secrets=self._record_secrets(),
+                )
             return _mcp_error(403, str(error))
         # Only a GET listener streams, and it takes its place before the request goes out.
         listener = method == "GET"
@@ -417,10 +434,11 @@ class McpRelay:
             or not _under(target, base)
         ):
             return self._refused(recorder, name, 400, f"{label} got a malformed request or a path outside its url.")
-        return self._request(url, declared, label, name, method, body, headers, recorder, kind="host")
+        return self._request(
+            url, declared, label, name, method, body, headers, recorder, kind="host", query=self._services[name].query
+        )
 
-    @staticmethod
-    def _refused(recorder: CallRecorder | None, name: str, status: int, message: str) -> ModelHTTPResult:
+    def _refused(self, recorder: CallRecorder | None, name: str, status: int, message: str) -> ModelHTTPResult:
         """Record a service call the relay refused, then return the refusal.
 
         Args:
@@ -433,7 +451,14 @@ class McpRelay:
             The error answer.
         """
         if recorder is not None:
-            recorder.record(recorder.start(), kind="host", target=name, status="refused", failure_reason=message)
+            recorder.record(
+                recorder.start(),
+                kind="host",
+                target=name,
+                status="refused",
+                failure_reason=message,
+                secrets=self._record_secrets(),
+            )
         return _mcp_error(status, message)
 
     def _release(self) -> None:
@@ -453,6 +478,7 @@ class McpRelay:
         recorder: CallRecorder | None,
         *,
         kind: str = "mcp",
+        query: Mapping[str, str] | None = None,
     ) -> ModelHTTPResult:
         """Send the request through :func:`relay_request` to the declared url, pinned and with no redirect.
 
@@ -468,6 +494,8 @@ class McpRelay:
             kind: ``mcp`` for an MCP server, ``host`` for a service. A service
                 gets the guest's own headers, never streams, and answers with
                 its own headers.
+            query: A service's declared query parameters, with ``${SECRET}``
+                placeholders; the relay fills them and adds them to the url.
 
         Returns:
             The masked answer.
@@ -490,7 +518,8 @@ class McpRelay:
 
             Args:
                 address: The declared url.
-                filled: The declared headers with their secrets filled in.
+                filled: The declared headers with their secrets filled in, and
+                    the filled query parameters under ``_QUERY_MARK``.
                 content: The guest's body.
 
             Returns:
@@ -507,7 +536,11 @@ class McpRelay:
             except ValueError as error:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
-            transport = _PinnedTransport(url, pinned)
+            secret_query = {key[1:]: value for key, value in filled.items() if key.startswith(_QUERY_MARK)}
+            filled = {key: value for key, value in filled.items() if not key.startswith(_QUERY_MARK)}
+            transport: httpx.BaseTransport = _PinnedTransport(url, pinned)
+            if secret_query:
+                transport = _SecretQueryTransport(transport, secret_query)
             with contextlib.ExitStack() as stack:
                 stack.callback(transport.close)
                 client = stack.enter_context(
@@ -543,7 +576,8 @@ class McpRelay:
         try:
             answer = relay_request(
                 url=url,
-                headers=declared,
+                # relay_request fills and masks headers only, so the query rides as marked headers (SKY-638).
+                headers={**declared, **{_QUERY_MARK + key: value for key, value in (query or {}).items()}},
                 body=body,
                 user_secrets=self._secrets,
                 bindings=self._bindings,
@@ -554,6 +588,8 @@ class McpRelay:
                 recorder=recorder,
                 kind=kind,
                 target=_tool_target(name, url, _json_object(body)) if kind == "mcp" else "",
+                # Box code can put its model route token into a tool call or a request body (SKY-640).
+                record_secrets=self._record_secrets(),
             )
         except _AnswerTooLargeError:
             return _mcp_error(502, f"{label} answered with more than 4 MiB.")

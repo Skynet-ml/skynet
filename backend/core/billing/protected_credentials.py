@@ -356,14 +356,16 @@ def resolve_repo_secrets(
         Environment variable name to value; empty without a repository target.
 
     Raises:
-        ValueError: When a reference is incomplete or no longer current.
+        ValueError: When a reference is incomplete or no longer current, or
+            a saved secret asks for a host its owner did not approve.
     """
     repository, entries = _repo_secrets(payload)
     values: dict[str, str] = {}
     for entry in entries:
         name = str(entry.get("name") or "")
         if entry.get("saved_secret_id") is not None:
-            values[name] = saved.resolve(username, str(entry["saved_secret_id"]))
+            hosts = [str(host) for host in entry.get("allowed_hosts") or ()]
+            values[name] = saved.resolve(username, str(entry["saved_secret_id"]), hosts)
             continue
         identity = entry.get(REPO_SECRET_REF_FIELD)
         revision = entry.get(REPO_SECRET_REVISION_FIELD)

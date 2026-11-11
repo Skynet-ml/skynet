@@ -31,6 +31,7 @@ import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from ..errors import SandboxFatalError, SandboxInfraError
 from ..resources import SandboxSpec
@@ -50,6 +51,10 @@ from .docker import (
     _CliResult,
     _label_args,
 )
+
+if TYPE_CHECKING:
+    # The worker relay imports the blackbox runtimes, which import this package.
+    from ...worker.scoped_relay import CallRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +89,14 @@ class PodmanEnvironment(DockerEnvironment):
 
     capabilities = PODMAN_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, image: str | None = None, podman_bin: str = DEFAULT_PODMAN_BIN) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        image: str | None = None,
+        podman_bin: str = DEFAULT_PODMAN_BIN,
+        recorder: CallRecorder | None = None,
+    ) -> None:
         """Check the spec and choose the image.
 
         Args:
@@ -92,11 +104,13 @@ class PodmanEnvironment(DockerEnvironment):
             image: The local image to boot when the spec names none. Podman
                 never pulls it; it must already be on this machine.
             podman_bin: The Podman CLI path.
+            recorder: Writes each egress proxy request into the run record,
+                or None outside a run.
 
         Raises:
             SandboxSpecError: The spec breaks a provider rule or names no image.
         """
-        super().__init__(spec, image=image, docker_bin=podman_bin)
+        super().__init__(spec, image=image, docker_bin=podman_bin, recorder=recorder)
 
     @classmethod
     def preflight(cls, podman_bin: str = DEFAULT_PODMAN_BIN) -> None:
@@ -291,8 +305,9 @@ class PodmanEnvironment(DockerEnvironment):
             await asyncio.sleep(_EGRESS_POLL_SECONDS)
 
     async def _drop_egress(self) -> None:
-        """Remove the proxy, then the network. Never raises an Exception."""
+        """Record the proxy's requests, then remove the proxy and the network. Never raises an Exception."""
         egress = self._require_egress()
+        await self._record_egress()
         await docker_provider._remove(self._docker_bin, ["rm", "-f", egress.proxy], _MISSING_CONTAINER)
         await docker_provider._remove(self._docker_bin, ["network", "rm", egress.network], _MISSING_NETWORK)
         self._egress_up = False

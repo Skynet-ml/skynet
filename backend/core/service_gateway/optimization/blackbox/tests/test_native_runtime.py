@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -1111,6 +1112,24 @@ def test_autosaddler_bootstrap_pins_upstream_into_a_python_312_venv() -> None:
     assert "uv venv" not in protected
     assert f"sys.version_info >= {native_runtime.AUTOSADDLER_PYTHON_FLOOR!r}" in protected
     assert "import autosaddler.v2.core.engine" in protected
+    assert f"if [ -x {native_runtime.AUTOSADDLER_IMAGE_PYTHON} ]" in protected
+
+
+def test_autosaddler_pins_come_from_the_requirements_file_at_the_pinned_revision() -> None:
+    """Read the AutoSaddler pins from the file the image build installs, at the backend's pinned revision."""
+    assert native_runtime._AUTOSADDLER_PINS[0] == (
+        f"autosaddler @ https://github.com/microsoft/AutoSaddler/archive/{native_runtime.AUTOSADDLER_REVISION}.tar.gz"
+    )
+    assert all("==" in pin for pin in native_runtime._AUTOSADDLER_PINS[1:])
+
+
+def test_dockerfile_bakes_autosaddler_into_the_venv_the_runtime_uses() -> None:
+    """Bake the AutoSaddler venv at the runtime's path from the same pinned requirements (SKY-645)."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    venv = native_runtime.AUTOSADDLER_IMAGE_PYTHON.removesuffix("/bin/python")
+    assert f"python -m venv {venv}" in dockerfile
+    assert "core/service_gateway/optimization/blackbox/autosaddler_requirements.txt" in dockerfile
+    assert f'{native_runtime.AUTOSADDLER_IMAGE_PYTHON} -c "import autosaddler.v2.core.engine"' in dockerfile
 
 
 def test_shinka_bootstrap_installs_the_pinned_requirements_into_a_python_312_venv() -> None:
@@ -1172,6 +1191,33 @@ def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.Mo
     assert native_runtime.SHINKA_IMAGE_PYTHON in probe
     assert "os.X_OK" in probe
     assert "find_spec(" in probe
+    assert native_runtime.AUTOSADDLER_IMAGE_PYTHON in probe
+
+
+def test_native_readiness_probe_runs_and_reports_both_own_venv_engines(tmp_path: Path) -> None:
+    """Run the real probe script so a syntax slip cannot hide behind the scripted session.
+
+    Args:
+        tmp_path: Directory holding stub runner modules the probe imports.
+    """
+    session = ReadinessSession()
+    options = NativeOptions(
+        runtime="vercel",
+        model="test/model",
+        gateway=GatewayConfig(url="http://127.0.0.1:9000/v1", api_key="scoped"),
+        budget_route={"url": "http://127.0.0.1:9000/v1", "token": "scoped"},
+        sandbox_runtime=FakeRuntime(session),
+        max_token_cost=1,
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(native_runtime, "_source_archive", lambda: "verified-source")
+        check_native_runtime(options)
+    script = shlex.split(session.calls[1][0])[-1]
+    for name in ("native_runner", "autosaddler_runner", "shinka_runner"):
+        (tmp_path / f"{name}.py").write_text("")
+    (tmp_path / "native_engines.py").write_text("def check_assets():\n    pass\n")
+    result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {"ready": True, "autosaddler": False, "shinka": False}
 
 
 def test_shinka_runner_files_carry_the_pinned_requirements() -> None:

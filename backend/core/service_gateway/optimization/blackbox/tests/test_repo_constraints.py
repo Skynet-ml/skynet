@@ -926,28 +926,16 @@ def test_a_query_secret_and_a_header_secret_still_go_to_one_host() -> None:
 
 
 @pytest.mark.parametrize(
-    ("role", "label"),
+    "roles",
     [
-        (b'[proposer]\nservices = ["geo"]\n', "proposer"),
-        (b'[target.s]\nentry = "s.py:f"\nservices = ["geo"]\n', "target.s"),
+        b'[proposer]\nservices = ["geo"]\n',
+        b'[target.s]\nentry = "s.py:f"\nservices = ["geo"]\n',
+        b'[run]\nentry = "run.py:main"\nservices = ["geo"]\n[metric]\nservices = ["geo"]\n',
     ],
 )
-def test_only_run_and_metric_can_use_a_service_with_a_query(role: bytes, label: str) -> None:
-    """The proposer and target relays do not send a query yet, so the file refuses that pairing (SKY-630)."""
-    raw = b'[services.geo]\nurl = "https://maps.example.com"\nquery = { key = "${MAPS_KEY}" }\n' + role
-
-    with pytest.raises(ConstraintsError, match=r"Only \[run\] and \[metric\]") as caught:
-        parse_constraints(raw)
-
-    assert (caught.value.section, caught.value.key) == (label, "services")
-
-
-def test_run_and_metric_can_use_a_service_with_a_query() -> None:
-    """The run and metric relays fill a query secret, so those roles may list the service (SKY-630)."""
-    raw = (
-        b'[services.geo]\nurl = "https://maps.example.com"\nquery = { key = "${MAPS_KEY}" }\n'
-        b'[run]\nentry = "run.py:main"\nservices = ["geo"]\n[metric]\nservices = ["geo"]\n'
-    )
+def test_every_role_can_use_a_service_with_a_query(roles: bytes) -> None:
+    """Every role's relay fills a query secret, so any role may list the service (SKY-630, SKY-638)."""
+    raw = b'[services.geo]\nurl = "https://maps.example.com"\nquery = { key = "${MAPS_KEY}" }\n' + roles
 
     constraints = parse_constraints(raw)
 

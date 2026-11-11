@@ -3,8 +3,9 @@
 Ported from Skynet's sync ``blackbox/docker_sandbox.py``. Changes: every
 Docker CLI call runs through ``asyncio.create_subprocess_exec`` instead of
 ``subprocess`` and pump threads, the box implements ``SandboxEnvironment``,
-the network policy can change after start (deny-all and allowlist), and the
-proxy call record is left out.
+and the network policy can change after start (deny-all and allowlist). The
+box writes each proxy request into the run record before the proxy goes away
+(SKY-634).
 
 Harbor runs a compose project with an egress sidecar. This provider keeps
 Skynet's per-box proxy container instead: it is the same sidecar pattern
@@ -34,12 +35,18 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
+from ..egress_record import LOG_LINES, PROXY_SOURCE, READY_MARKER, box_secrets, record_calls
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxInfraError
 from ..resources import ResourceMode, SandboxSpec
 from ..transfer import unpack
+
+if TYPE_CHECKING:
+    # The worker relay imports the blackbox runtimes, which import this package.
+    from ...worker.scoped_relay import CallRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +69,7 @@ SANDBOX_LABELS: Mapping[str, str] = {"skynet": "blackbox"}
 ROLE_LABEL = "skynet.role"
 EGRESS_ROLE = "egress"
 
-READY_MARKER = "skynet-egress-proxy-ready"
-_EGRESS_PROXY_SOURCE = (
-    Path(__file__).resolve().parents[2] / "service_gateway/optimization/blackbox/docker_egress_proxy.py"
-).read_text(encoding="utf-8")
+_EGRESS_PROXY_SOURCE = PROXY_SOURCE
 
 _TMPFS_MOUNTS = (
     f"{WORKSPACE_DIR}:rw,exec,nosuid,mode=1777,size=4g",
@@ -379,7 +383,14 @@ class DockerEnvironment(SandboxEnvironment):
 
     capabilities = DOCKER_CAPABILITIES
 
-    def __init__(self, spec: SandboxSpec, *, image: str | None = None, docker_bin: str = DEFAULT_DOCKER_BIN) -> None:
+    def __init__(
+        self,
+        spec: SandboxSpec,
+        *,
+        image: str | None = None,
+        docker_bin: str = DEFAULT_DOCKER_BIN,
+        recorder: CallRecorder | None = None,
+    ) -> None:
         """Check the spec and choose the image.
 
         Args:
@@ -387,6 +398,8 @@ class DockerEnvironment(SandboxEnvironment):
             image: The local image to boot when the spec names none. Docker
                 never pulls it; it must already be on this machine.
             docker_bin: The Docker CLI path; OrbStack works through the same CLI.
+            recorder: Writes each egress proxy request into the run record,
+                or None outside a run.
 
         Raises:
             SandboxSpecError: The spec breaks a provider rule or names no image.
@@ -396,9 +409,11 @@ class DockerEnvironment(SandboxEnvironment):
         if not self._image:
             raise SandboxSpecError("The Docker sandbox needs an image in the spec or the provider.")
         self._docker_bin = docker_bin
+        self._recorder = recorder
         self._name: str | None = None
         self._egress: _Egress | None = None
         self._egress_up = False
+        self._egress_rows = 0
         self._stopped = False
         self._started_at = 0.0
         owner = spec.tags.get(JOB_TAG)
@@ -741,6 +756,7 @@ class DockerEnvironment(SandboxEnvironment):
             # proxy variables in the box stay valid. The network and the box's
             # place on it stay when the proxy fails, so the box is offline
             # until a retry, which takes this path again.
+            await self._record_egress()
             await _remove(self._docker_bin, ["rm", "-f", egress.proxy], b"No such container")
             try:
                 await self._start_proxy(policy.allowed_hosts)
@@ -970,9 +986,34 @@ class DockerEnvironment(SandboxEnvironment):
         networks = json.loads(result.stdout.decode() or "null") or {}
         return [network for network in networks if network != "none"]
 
-    async def _drop_egress(self) -> None:
-        """Remove the proxy, then the network. Never raises an Exception."""
+    async def _record_egress(self) -> None:
+        """Write each request that the running proxy logged into the run record. Never raises an Exception.
+
+        ``--rm`` deletes the proxy's log with the proxy, so this runs before
+        each removal. A proxy that exited on its own leaves no log to read.
+        The read takes only the end of the log, and the rows count against the
+        box and run caps of ``egress_record``.
+        """
+        if self._recorder is None or not self._egress_up:
+            return
         egress = self._require_egress()
+        try:
+            logs = await _docker(self._docker_bin, ["logs", "--tail", str(LOG_LINES), egress.proxy])
+        except SandboxInfraError as error:
+            logger.warning("Could not read the egress requests of %s: %s", egress.proxy, error)
+            return
+        if logs.returncode != 0:
+            logger.warning("Could not read the egress requests of %s: %s", egress.proxy, logs.error_line)
+            return
+        # Each record is a synchronous database write, so it runs off the event loop.
+        self._egress_rows += await asyncio.to_thread(
+            record_calls, self._recorder, logs.stdout, box_secrets(self.spec.env), box_rows=self._egress_rows
+        )
+
+    async def _drop_egress(self) -> None:
+        """Record the proxy's requests, then remove the proxy and the network. Never raises an Exception."""
+        egress = self._require_egress()
+        await self._record_egress()
         await _remove(self._docker_bin, ["rm", "-f", egress.proxy], b"No such container")
         await _remove(self._docker_bin, ["network", "rm", egress.network], b"not found")
         self._egress_up = False

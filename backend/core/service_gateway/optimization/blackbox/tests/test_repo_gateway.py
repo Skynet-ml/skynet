@@ -28,6 +28,7 @@ from core.exceptions import ServiceError
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import repo_staging
 
+from ..preflight import verify_anything_in_sandbox
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
@@ -356,3 +357,92 @@ def test_route_dispatch_refuses_every_non_route_token_and_capability_path(
     ):
         with pytest.raises(ValueError, match="only its scoped model route"):
             model_gateway.dispatch_route(token, path, {}, {})
+
+
+_READ_README = "def read(value):\n    with open('README') as handle:\n        return handle.read()\n"
+
+
+def _repo_setup_check(
+    model_gateway: ModelGateway,
+    tmp_path: Path,
+    metric_code: str,
+    run_entry: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Run a repository setup check through a real parent ``RepoScorer`` on a checkout whose README is ``hello``.
+
+    Args:
+        model_gateway: The real parent gateway.
+        tmp_path: Scratch folder for the checkout archive.
+        metric_code: The repository's metric.
+        run_entry: The ``[run]`` entry; ``run.py:read`` returns the README.
+        **extra: Payload keys to add, such as ``seed_candidate``.
+
+    Returns:
+        The setup check's result.
+    """
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=model_gateway.parent_sandbox_runtime(),
+            spec=SandboxSpec(lifetime_seconds=120, image=IMAGE, network_disabled=True, operation_key="repo-scorer:job"),
+            archive=_archive(tmp_path, {"README": "hello", "run.py": _READ_README}),
+            editable_paths=["README"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        metric_code,
+        timeout_seconds=60,
+        run_entry=run_entry,
+    )
+    payload = {
+        "scorer": {"kind": "python", "metric_code": metric_code},
+        "target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["README"]}},
+        "cases": [{"input": "x"}],
+        "_skynet_evaluator_route": model_gateway.bind_evaluator(scorer),
+        **extra,
+    }
+    try:
+        return verify_anything_in_sandbox(
+            payload, scope="evaluation", identity="repo-check", runtime=LocalSubprocessRuntime()
+        )
+    finally:
+        scorer.close()
+
+
+def test_the_setup_check_scores_the_checkout_the_run_scores(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """The setup check scores through the parent's repository scorer, so the metric gets the real checkout's output (SKY-644).
+
+    The metric box holds no repository file (SKY-398), so the ``[run]``
+    entry reads the checkout and the metric scores its output.
+    """
+    metric_code = (
+        "def score(repo_path, case, output):\n"
+        "    return {'score': 1.0 if output == 'hello' else 0.0, 'feedback': str(output)}\n"
+    )
+
+    result = _repo_setup_check(gateway[0], tmp_path, metric_code, run_entry="run.py:read", seed_candidate="")
+
+    assert result["checks"] == [{"key": "scorer", "status": "succeeded", "field": "scorer"}]
+    assert result["scorer_result"]["score"] == 1.0
+
+
+def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """A repository has no seed, so the check scores the checkout itself and a metric that raises fails it (SKY-644)."""
+    metric_code = (
+        "from pathlib import Path\n"
+        "def score(repo_path, case):\n"
+        "    return {'score': float(Path(repo_path, 'MISSING').read_text()), 'feedback': ''}\n"
+    )
+
+    result = _repo_setup_check(gateway[0], tmp_path, metric_code)
+
+    [check] = result["checks"]
+    assert check["key"] == "scorer"
+    assert check["status"] == "failed"
+    assert "The scorer raised an error" in check["message"]
+    assert "evaluator_readiness" not in result

@@ -23,6 +23,7 @@ from sqlalchemy.pool import StaticPool
 
 from ... import i18n
 from ...config import Settings, settings
+from ...connectors.saved_secrets import SavedSecretStore
 from ...models import BlackboxRunRequest
 from ...models.optimizations import JobCancelResponse
 from ...models.unified import UnifiedRunRequest
@@ -34,6 +35,7 @@ from ..model_billing import enforce_local_mode_sources, normalize_model_token_so
 from ..remote_mcp import mount_remote_mcp
 from ..routers import _helpers as routers_helpers
 from ..sharing_access import ShareRole
+from .test_connectors_router import vault_key  # noqa: F401 - fixture re-export
 from .test_submissions_router import unified_payload
 
 RESOURCE = "https://mcp.example.test/mcp"
@@ -245,12 +247,21 @@ def test_unconfigured_server_serves_nothing(harness: Any, monkeypatch: pytest.Mo
 
 
 def test_tools_list_names_the_run_tools(harness: Any) -> None:
-    """List check, start, get, progress, list and stop, and no money tools."""
+    """List the run tools and the two secret tools, and no money tools."""
     client, _store, _calls = harness
     resp = _rpc(client, "tools/list", {})
     assert resp.status_code == 200, resp.text
     names = {tool["name"] for tool in resp.json()["result"]["tools"]}
-    assert names == {"check_run", "start_run", "get_run", "get_run_progress", "list_runs", "stop_run"}
+    assert names == {
+        "check_run",
+        "start_run",
+        "get_run",
+        "get_run_progress",
+        "list_runs",
+        "stop_run",
+        "list_secrets",
+        "request_secret",
+    }
 
 
 @pytest.mark.parametrize(
@@ -715,3 +726,53 @@ def test_local_mode_serves_the_mcp_on_the_app_port(tmp_path: Any) -> None:
         mcp_resource_url="http://127.0.0.1:8123/other",
     )
     assert explicit.mcp_resource_url == "http://127.0.0.1:8123/other"
+
+
+_SENTINEL = "test-SENTINEL-mcp-41d2"
+
+
+def test_no_tool_takes_a_secret_value(harness: Any) -> None:
+    """No tool has an input that could carry a secret value (SKY-641)."""
+    client, _store, _calls = harness
+    tools = _rpc(client, "tools/list", {}).json()["result"]["tools"]
+    inputs = {tool["name"]: set(tool["inputSchema"].get("properties", {})) for tool in tools}
+    assert inputs["list_secrets"] == set()
+    assert inputs["request_secret"] == {"name"}
+    assert all("value" not in names and "secret" not in names for names in inputs.values())
+
+
+@pytest.mark.usefixtures("vault_key")
+def test_list_secrets_returns_names_only(harness: Any) -> None:
+    """List the caller's secret names; never a value, never another account's secret."""
+    client, store, _calls = harness
+    secrets = SavedSecretStore(store.engine)
+    secrets.save(USER, "MAPS_KEY", _SENTINEL)
+    secrets.save("bob@example.test", "BOB_KEY", "bob-value")
+    result = _call(client, "list_secrets", {}, token=READ_TOKEN)
+    assert [item["name"] for item in _payload(result)["secrets"]] == ["MAPS_KEY"]
+    assert set(_payload(result)["secrets"][0]) == {"name", "updated_at"}
+    assert _SENTINEL not in json.dumps(result)
+
+
+@pytest.mark.usefixtures("vault_key")
+def test_request_secret_links_to_the_prefilled_settings_page(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return the settings link with the name filled in, and whether it is saved."""
+    client, store, _calls = harness
+    monkeypatch.setattr(settings, "app_public_url", "https://app.example.test/")
+    assert _payload(_call(client, "request_secret", {"name": "MAPS_KEY"}, token=READ_TOKEN)) == {
+        "name": "MAPS_KEY",
+        "url": "https://app.example.test/?settings=connectors&secret=MAPS_KEY",
+        "already_saved": False,
+    }
+    SavedSecretStore(store.engine).save(USER, "MAPS_KEY", _SENTINEL)
+    result = _call(client, "request_secret", {"name": "MAPS_KEY"}, token=READ_TOKEN)
+    assert _payload(result)["already_saved"] is True
+    assert _SENTINEL not in json.dumps(result)
+
+
+@pytest.mark.parametrize("name", ["maps-key", "1KEY", "A&secret=x", ""])
+def test_request_secret_refuses_a_bad_name(harness: Any, name: str) -> None:
+    """Refuse a name that is not an environment variable name."""
+    client, _store, _calls = harness
+    result = _call(client, "request_secret", {"name": name}, token=READ_TOKEN)
+    assert result.get("isError") is True

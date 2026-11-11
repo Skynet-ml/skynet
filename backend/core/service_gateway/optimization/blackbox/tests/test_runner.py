@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -1184,10 +1185,20 @@ def not_json(value):
 
 def slow(value):
     time.sleep(30)
+
+
+def fakes_its_time(value):
+    # Patch every clock in this process and report a fake time; neither reaches the supervisor.
+    time.sleep(value)
+    for name in ("monotonic", "perf_counter", "time", "process_time"):
+        setattr(time, name, lambda: 0.0)
+    return {"elapsed_s": 0.0}
 """
 
 
-def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
+def _candidate(
+    tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30, token: str | None = None
+) -> dict[str, Any]:
     """Run the ``[run]`` supervisor once in a fresh folder, as the candidate box does.
 
     Args:
@@ -1195,6 +1206,9 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
         entry: The ``[run]`` entry.
         value: The case input.
         timeout: The run timeout.
+        token: The run's marker. Each call gets its own by default, because
+            ``stop_candidates`` kills every process with the marker, and
+            parallel tests that shared one killed each other's candidates.
 
     Returns:
         The supervisor's output document.
@@ -1206,6 +1220,7 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
         "entry": entry,
         "input": value,
         "timeout": timeout,
+        "token": token or f"tok-{uuid.uuid4().hex}",
         "stages": None,
     }
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
@@ -1220,16 +1235,20 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
 
 def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Path) -> None:
     """A ``path.py:function`` entry gets the case input; its JSON return value is the output."""
-    assert _candidate(tmp_path, "cand.py:echo", {"a": 1}) == {
+    ran = _candidate(tmp_path, "cand.py:echo", {"a": 1})
+    assert ran.pop(runner.ELAPSED_PARAM) >= 0
+    assert ran == {
         "output": {"got": {"a": 1}},
         "error": None,
+        "stopped": True,
     }
 
 
 def test_a_command_entry_reads_stdin_and_a_nonzero_exit_is_an_output(tmp_path: Path) -> None:
     """A command gets the input as JSON on stdin; its exit code and stdout are the output, not a failure."""
     ran = _candidate(tmp_path, ["sh", "-c", "cat; echo; exit 3"], {"a": 1})
-    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None}
+    assert ran.pop(runner.ELAPSED_PARAM) >= 0
+    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None, "stopped": True}
 
 
 def test_a_command_stdout_is_capped(tmp_path: Path) -> None:
@@ -1256,15 +1275,43 @@ def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> 
     ran = _candidate(tmp_path, entry, timeout=1 if "timeout" in error else 30)
     assert ran["output"] is None
     assert error in ran["error"]
-    assert set(ran) == {"output", "error"}
+    assert ran["stopped"] is True
 
 
-def test_the_supervisor_returns_without_waiting_for_a_process_the_candidate_left(tmp_path: Path) -> None:
-    """The supervisor does not hunt the candidate's other processes: closing the candidate box ends them (SKY-398)."""
-    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
-    assert ran == {"output": 7, "error": None}
-    assert not hasattr(runner, "stop_candidates")
-    assert not hasattr(runner, "CANDIDATE_TOKEN_ENV")
+def test_the_supervisor_stops_every_process_the_candidate_left(tmp_path: Path) -> None:
+    """A background process in its own session still stops before the metric files go in."""
+    token = f"tok-{uuid.uuid4().hex}"
+    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7, token=token)
+    ran.pop(runner.ELAPSED_PARAM)
+    assert ran == {"output": 7, "error": None, "stopped": True}
+    assert _marked(runner.candidate_processes(token), token) == set()
+
+
+def _marked(pids: set[int], token: str) -> set[int]:
+    """Keep the processes that carry the run's marker.
+
+    On Linux ``candidate_processes`` also returns every child of the calling
+    process, which under xdist includes the shared worker's own children.
+
+    Args:
+        pids: Process ids to filter.
+        token: The run's marker.
+
+    Returns:
+        The ids whose environment holds the marker; on macOS, all of them,
+        because there the function finds processes by the marker only.
+    """
+    if not sys.platform.startswith("linux"):
+        return pids
+    marker = f"{runner.CANDIDATE_TOKEN_ENV}={token}".encode()
+    found: set[int] = set()
+    for pid in pids:
+        try:
+            if marker in Path(f"/proc/{pid}/environ").read_bytes():
+                found.add(pid)
+        except OSError:
+            continue
+    return found
 
 
 def test_a_stage_client_names_its_role_in_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1283,6 +1330,80 @@ def test_accepts_output_counts_the_third_argument() -> None:
     assert not runner.accepts_output(lambda repo, case=None: 0, ran=True)
     assert runner.accepts_output(lambda *args: 0, ran=True)
     assert not runner.accepts_output(lambda *args: 0, ran=False)
+
+
+def test_the_supervisor_times_the_entry_whatever_clock_the_candidate_patches(tmp_path: Path) -> None:
+    """The run time comes from the supervisor's process; a patched clock or a faked output cannot lower it (SKY-642)."""
+    ran = _candidate(tmp_path, "cand.py:fakes_its_time", 0.4)
+    assert ran["error"] is None
+    assert ran["output"] == {"elapsed_s": 0.0}
+    assert ran[runner.ELAPSED_PARAM] >= 0.4
+
+
+def test_the_supervisor_times_a_command_entry(tmp_path: Path) -> None:
+    """A command entry gets the same time from the supervisor (SKY-642)."""
+    ran = _candidate(tmp_path, ["sh", "-c", "sleep 0.4"])
+    assert ran["error"] is None
+    assert 0.4 <= ran[runner.ELAPSED_PARAM] < 30
+
+
+def test_a_timed_out_entry_still_reports_its_time(tmp_path: Path) -> None:
+    """A timeout is a failure; its time is about the timeout (SKY-642)."""
+    ran = _candidate(tmp_path, ["sh", "-c", "sleep 30"], timeout=1)
+    assert "timeout" in ran["error"]
+    assert 1 <= ran[runner.ELAPSED_PARAM] < 30
+
+
+def test_accepts_elapsed_needs_the_name_after_the_output() -> None:
+    """Pass ``elapsed_s`` only to a metric that names it after ``output``, never to ``*args`` or ``**kwargs`` (SKY-642)."""
+    assert runner.accepts_elapsed(lambda repo, case, output=None, elapsed_s=None: 0)
+    assert runner.accepts_elapsed(lambda repo, case, output=None, *, elapsed_s=None: 0)
+    assert not runner.accepts_elapsed(lambda repo, case, output=None: 0)
+    assert not runner.accepts_elapsed(lambda repo, case, elapsed_s=None: 0)
+    assert not runner.accepts_elapsed(lambda *args: 0)
+    assert not runner.accepts_elapsed(lambda repo, case, output=None, **kwargs: 0)
+
+
+def _metric_call(tmp_path: Path, code: str, document: dict[str, Any]) -> dict[str, Any]:
+    """Run one metric call in a fresh folder, as the scorer box does.
+
+    Args:
+        tmp_path: Scratch folder.
+        code: The metric's source.
+        document: The rest of ``input.json``.
+
+    Returns:
+        The runner's output document.
+    """
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    payload = {"code": code, "candidate": str(tmp_path), "case": None, "gateway": None, **document}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
+    subprocess.run([sys.executable, runner.__file__, str(call_dir)], cwd=tmp_path, check=True, timeout=60)
+    return json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("def score(repo_path, case, output=None, elapsed_s=None):\n    return elapsed_s, 'f'\n", 0.75),
+        ("def score(repo_path, case, output=None, *, elapsed_s=None):\n    return elapsed_s, 'f'\n", 0.75),
+        ("def score(repo_path, case, output):\n    return output['n'], 'f'\n", 0.5),
+        ("def score(repo_path, case=None):\n    return 0.25, 'f'\n", 0.25),
+        ("def score(*args):\n    return len(args) / 10, 'f'\n", 0.3),
+    ],
+)
+def test_the_metric_gets_the_run_time_only_when_it_asks(tmp_path: Path, code: str, expected: float) -> None:
+    """A metric that names ``elapsed_s`` gets the time; older 1-, 2- and 3-argument metrics get the same call (SKY-642)."""
+    result = _metric_call(tmp_path, code, {"output": {"n": 0.5}, runner.ELAPSED_PARAM: 0.75})
+    assert result["error"] is None
+    assert result["score"] == pytest.approx(expected)
+
+
+def test_a_metric_without_a_run_gets_no_time(tmp_path: Path) -> None:
+    """With no ``[run]`` entry, ``elapsed_s`` keeps its default (SKY-642)."""
+    code = "def score(repo_path, case, output=None, elapsed_s=None):\n    return (1.0 if elapsed_s is None else 0.0), 'f'\n"
+    assert _metric_call(tmp_path, code, {})["score"] == 1.0
 
 
 def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path) -> None:

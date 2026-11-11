@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -19,7 +20,8 @@ from .. import docker_egress_proxy as proxy
         (b"CONNECT PyPI.org.:443 HTTP/1.0\r\n\r\n", ("pypi.org", 443)),
         (b"GET http://pypi.org/ HTTP/1.1\r\n\r\n", None),
         (b"CONNECT pypi.org HTTP/1.1\r\n\r\n", None),
-        (b"CONNECT [::1]:443 HTTP/1.1\r\n\r\n", None),
+        (b"CONNECT [::1]:443 HTTP/1.1\r\n\r\n", ("::1", 443)),
+        (b"CONNECT [not-an-address]:443 HTTP/1.1\r\n\r\n", None),
         (b"CONNECT pypi.org:443\r\n\r\n", None),
     ],
 )
@@ -330,3 +332,184 @@ def test_handle_logs_a_bad_gateway_as_failed(monkeypatch: pytest.MonkeyPatch) ->
         proxy.handle(theirs, frozenset({"pypi.org"}))
     [line] = logged
     assert (line["status"], line["code"], line["reason"]) == ("failed", 502, "no checked address answered")
+
+
+def test_log_call_numbers_each_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """Number the request lines, so a reader of the log end knows how many came before it."""
+    proxy.log_call({"host": "a.example.com"})
+    proxy.log_call({"host": "b.example.com"})
+    first, second = (json.loads(line) for line in capsys.readouterr().out.splitlines())
+    assert second["seq"] == first["seq"] + 1
+
+
+def test_record_only_mode_tunnels_any_connect_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tunnel any host and port with no allowlist, because the Vercel edge enforces it."""
+    upstream = socket.create_server(("127.0.0.1", 0))
+    logged: list[dict] = []
+    monkeypatch.setattr(proxy, "log_call", logged.append)
+
+    def answer() -> None:
+        """Answer the tunnel with two bytes, then close it."""
+        connection, _ = upstream.accept()
+        with connection:
+            connection.sendall(b"ok")
+
+    threading.Thread(target=answer, daemon=True).start()
+    port = upstream.getsockname()[1]
+    ours, theirs = socket.socketpair()
+    with upstream, ours:
+        ours.sendall(f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n".encode())
+        proxy.handle(theirs, None)
+    [line] = logged
+    assert (line["host"], line["port"], line["status"], line["bytes_received"]) == ("127.0.0.1", port, "ok", 2)
+
+
+def test_record_only_mode_still_refuses_a_non_connect_request(capsys: pytest.CaptureFixture[str]) -> None:
+    """Refuse a plain-HTTP request in record-only mode; the proxy reads no path."""
+    ours, theirs = socket.socketpair()
+    with ours:
+        ours.sendall(b"GET http://pypi.org/ HTTP/1.1\r\n\r\n")
+        proxy.handle(theirs, None)
+        assert ours.recv(1024).startswith(b"HTTP/1.1 403 ")
+    [line] = (json.loads(line) for line in capsys.readouterr().out.splitlines())
+    assert (line["host"], line["status"]) == (None, "refused")
+
+
+def test_main_reads_a_star_as_record_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve with no allowlist and a larger client cap when the host list is ``*``."""
+    served: list[tuple] = []
+    monkeypatch.setattr(proxy, "serve", lambda listener, allowed, max_clients: served.append((allowed, max_clients)))
+    monkeypatch.setattr(proxy.socket, "create_server", lambda *args, **kwargs: None)
+    idle_timer = threading.Timer
+    monkeypatch.setattr(proxy.threading, "Timer", lambda *args, **kwargs: idle_timer(3600, lambda: None))
+    proxy.main(["0", "1", "*"])
+    proxy.main(["0", "1", "pypi.org"])
+    assert served == [(None, proxy.RECORD_ONLY_MAX_CLIENTS), (frozenset({"pypi.org"}), proxy.MAX_CLIENTS)]
+
+
+def _open_tunnel(target: str, allowed: frozenset[str] | None) -> tuple[socket.socket, threading.Thread, bytes]:
+    """Start ``handle`` on one end of a socket pair and open a tunnel through it.
+
+    Args:
+        target: The ``CONNECT`` target.
+        allowed: The allowlist, or ``None`` for record-only mode.
+
+    Returns:
+        The client end, with the ``200`` answer read, the handler thread, and
+        the tunnel bytes that came in the same read as the answer.
+    """
+    ours, theirs = socket.socketpair()
+    handler = threading.Thread(target=proxy.handle, args=(theirs, allowed), daemon=True)
+    handler.start()
+    ours.settimeout(5)
+    ours.sendall(f"CONNECT {target} HTTP/1.1\r\n\r\n".encode())
+    answer = b""
+    while b"\r\n\r\n" not in answer:
+        answer += ours.recv(1024)
+    assert answer.startswith(b"HTTP/1.1 200")
+    return ours, handler, answer.partition(b"\r\n\r\n")[2]
+
+
+@pytest.mark.parametrize("record_only", [True, False])
+def test_a_tunnel_stays_open_while_the_upstream_streams_to_a_silent_client(
+    monkeypatch: pytest.MonkeyPatch, record_only: bool
+) -> None:
+    """Keep a long download open past the idle time while the client sends nothing."""
+    monkeypatch.setattr(proxy, "_IDLE_SECONDS", 0.2)
+    monkeypatch.setattr(proxy, "log_call", lambda call: None)
+    upstream = socket.create_server(("127.0.0.1", 0))
+    port = upstream.getsockname()[1]
+    monkeypatch.setattr(
+        proxy, "public_addresses", lambda host, port, public_only=True: [(socket.AF_INET, upstream.getsockname())]
+    )
+
+    def stream() -> None:
+        """Send one byte every 50 ms for 0.8 s, then answer one ping."""
+        connection, _ = upstream.accept()
+        with connection:
+            for _ in range(16):
+                connection.sendall(b"x")
+                time.sleep(0.05)
+            if connection.recv(16) == b"ping":
+                connection.sendall(b"pong")
+
+    threading.Thread(target=stream, daemon=True).start()
+    with upstream:
+        target = f"127.0.0.1:{port}" if record_only else "pypi.org:443"
+        ours, handler, received = _open_tunnel(target, None if record_only else frozenset({"pypi.org"}))
+        with ours:
+            while received.count(b"x") < 16:
+                chunk = ours.recv(1024)
+                assert chunk, "the proxy closed the tunnel during the download"
+                received += chunk
+            ours.sendall(b"ping")
+            while not received.endswith(b"pong"):
+                chunk = ours.recv(1024)
+                assert chunk, "the proxy closed the tunnel during the download"
+                received += chunk
+        handler.join(5)
+
+
+def test_an_allowlist_tunnel_closes_when_both_directions_are_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Free a sidecar slot when neither side sends for the idle time."""
+    monkeypatch.setattr(proxy, "_IDLE_SECONDS", 0.2)
+    monkeypatch.setattr(proxy, "log_call", lambda call: None)
+    upstream = socket.create_server(("127.0.0.1", 0))
+    monkeypatch.setattr(proxy, "public_addresses", lambda host, port: [(socket.AF_INET, upstream.getsockname())])
+    accepted: list[socket.socket] = []
+    threading.Thread(target=lambda: accepted.append(upstream.accept()[0]), daemon=True).start()
+    with upstream:
+        ours, handler, _ = _open_tunnel("pypi.org:443", frozenset({"pypi.org"}))
+        with ours:
+            assert ours.recv(1024) == b""
+        handler.join(5)
+        assert not handler.is_alive()
+    for connection in accepted:
+        connection.close()
+
+
+def test_record_only_mode_tunnels_a_bracketed_ipv6_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tunnel a ``[v6]:port`` target, which the edge checks like any other."""
+    logged: list[dict] = []
+    monkeypatch.setattr(proxy, "log_call", logged.append)
+    try:
+        upstream = socket.create_server(("::1", 0), family=socket.AF_INET6)
+    except OSError:
+        pytest.skip("This host has no IPv6 loopback.")
+    port = upstream.getsockname()[1]
+
+    def answer() -> None:
+        """Answer the tunnel with two bytes, then close it."""
+        connection, _ = upstream.accept()
+        with connection:
+            connection.sendall(b"ok")
+
+    threading.Thread(target=answer, daemon=True).start()
+    with upstream:
+        ours, handler, early = _open_tunnel(f"[::1]:{port}", None)
+        with ours:
+            assert early + ours.recv(16) == b"ok"
+        handler.join(5)
+    [line] = logged
+    assert (line["host"], line["port"], line["status"]) == ("[::1]", port, "ok")
+
+
+def test_the_allowlist_still_refuses_a_bracketed_ipv6_target(capsys: pytest.CaptureFixture[str]) -> None:
+    """Refuse an IP literal in allowlist mode: only exact host names pass."""
+    ours, theirs = socket.socketpair()
+    with ours:
+        ours.sendall(b"CONNECT [2606:4700::1111]:443 HTTP/1.1\r\n\r\n")
+        proxy.handle(theirs, frozenset({"pypi.org"}))
+        assert ours.recv(1024).startswith(b"HTTP/1.1 403")
+    [line] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert line["status"] == "refused"
+
+
+def test_the_log_keeps_the_host_exactly_as_the_client_sent_it(capsys: pytest.CaptureFixture[str]) -> None:
+    """Log the host before lower-casing, so the store masks a secret in it exactly."""
+    ours, theirs = socket.socketpair()
+    with ours:
+        ours.sendall(b"CONNECT Route-Value-For-Tests.Example.com.:443 HTTP/1.1\r\n\r\n")
+        proxy.handle(theirs, frozenset({"pypi.org"}))
+    [line] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert line["host"] == "Route-Value-For-Tests.Example.com."
