@@ -378,7 +378,7 @@ class _BridgeApp:
                     yield b" "
             try:
                 outcome = task.result()
-            except Exception as error:
+            except (Exception, BudgetReached) as error:
                 self._fail(error)
                 reply = {"ok": False, "error": f"Execution error in {name}: {error}"}
             else:
@@ -456,7 +456,7 @@ class _BridgeApp:
             try:
                 async for chunk in self._handlers.complete(body):
                     yield f"data: {chunk}\n\n".encode()
-            except Exception as error:
+            except (Exception, BudgetReached) as error:
                 self._fail(error)
                 yield b'data: {"error": {"message": "Skynet model relay failed"}}\n\n'
                 return
@@ -812,8 +812,9 @@ class PiSandbox:
             files: Text files to put in the box when it opens, for example a
                 repository checkout, relative to the directory Pi runs in.
             read_back: Paths to read after each turn into ``read_back_files``.
-            operation_key: The session's idempotency key. Each box gets
-                its own key from it. A billable box needs one.
+            operation_key: The session's idempotency key. Give each
+                session its own key; each box gets a key made from it, a
+                random part and the box number. A billable box needs one.
             tags: The box's usage tags.
             builtin_tools: Pi's own tools to turn on.
             lifetime_seconds: The box's longest life, at most the
@@ -840,6 +841,9 @@ class PiSandbox:
         self._session: Any = None
         self._opened_at = 0.0
         self._boxes = 0
+        # The box counter starts again in every instance; the random part
+        # keeps two sessions that reuse one operation key apart.
+        self._key_prefix = None if operation_key is None else f"{operation_key}:{secrets.token_hex(4)}"
         self._busy = False
         self._closed = False
         self._idle: threading.Timer | None = None
@@ -884,7 +888,7 @@ class PiSandbox:
         self._boxes += 1
         # The box name and budget reservation come from the key, so a reopened
         # box with the old key would replay the old, settled reservation.
-        box_key = None if self.operation_key is None else f"{self.operation_key}:box:{self._boxes}"
+        box_key = None if self._key_prefix is None else f"{self._key_prefix}:box:{self._boxes}"
         spec = SandboxSpec(
             lifetime_seconds=self.lifetime_seconds,
             tags=self.tags,
@@ -911,9 +915,33 @@ class PiSandbox:
             return None
 
         started = time.monotonic()
+        loop = asyncio.get_running_loop()
+        opening: asyncio.Future[Any] = loop.create_future()
+
+        def deliver(setter: Callable[[Any], None], value: Any) -> None:
+            """Hand the open's outcome to the loop, unless the loop already ended.
+
+            Args:
+                setter: ``opening.set_result`` or ``opening.set_exception``.
+                value: The outcome.
+            """
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(lambda: opening.done() or setter(value))
+
+        def run_open() -> None:
+            """Open the box and hand the outcome to the loop."""
+            try:
+                result = open_box()
+            except BaseException as error:
+                deliver(opening.set_exception, error)
+            else:
+                deliver(opening.set_result, result)
+
+        # A daemon thread, not the loop's executor: ``asyncio.run`` waits for
+        # its executor at exit, so an abandoned slow open would hold the turn.
         # Shielded: a cancel or the cold-start limit must not drop a box that
-        # is still opening. The worker thread closes it when it arrives.
-        opening = asyncio.ensure_future(asyncio.to_thread(open_box))
+        # is still opening. The thread closes it when it arrives.
+        threading.Thread(target=run_open, name="pi-sandbox-open", daemon=True).start()
         try:
             session = await asyncio.wait_for(asyncio.shield(opening), self.cold_start_limit_seconds)
         except (asyncio.CancelledError, TimeoutError) as error:
@@ -1128,6 +1156,10 @@ class _SandboxPi:
         while (record := await self._records.get()) is not None:
             yield record
 
+    def stopped(self) -> bool:
+        """Return whether Pi's command ended, or never started."""
+        return self._task is None or self._task.done()
+
     async def stop(self) -> None:
         """Close Pi's stdin and wait a while for it to exit; closing the box ends it anyway."""
         if self._task is None or self._task.done():
@@ -1255,10 +1287,15 @@ async def _run_in_sandbox(
                     await _drive(pi, app, translator, prompt)
                 finally:
                     await pi.stop()
+                    if not pi.stopped():
+                        # Pi ignored the end of its input. Closing the box ends
+                        # it, so the next turn never meets a second Pi.
+                        failed = True
             except BaseException as error:
-                if pi.box_error is None:
+                if pi.box_error is not None:
+                    failed = True
+                if pi.box_error is None or not isinstance(error, Exception):
                     raise
-                failed = True
                 raise pi.box_error from error
             finally:
                 client.close()

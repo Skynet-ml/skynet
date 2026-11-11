@@ -9,8 +9,11 @@ whole transport runs without a paid sandbox.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import re
+import signal
 import stat
 import subprocess
 import sys
@@ -76,6 +79,10 @@ if __SETTLE__:
     with open("repo/notes.txt", "a") as handle:
         handle.write("edited\n")
     out({"type": "agent_settled"})
+    if __HANG__:
+        # Ignores the end of its input, as a stuck Pi would.
+        import time
+        time.sleep(60)
     sys.stdin.read()
     open(".stopped", "w").close()
 else:
@@ -149,6 +156,7 @@ class _Session:
                 budget stop would, or ``None``.
         """
         self.root = root
+        self._proc: subprocess.Popen[str] | None = None
         self._run_error = run_error
         self.close_error: BaseException | None = None
         self._path_dir = path_dir
@@ -195,13 +203,14 @@ class _Session:
         if self._run_error is not None:
             raise self._run_error
         full_env = {**os.environ, **self.env, "PATH": f"{self._path_dir}:{os.environ['PATH']}"}
-        proc = subprocess.Popen(
+        proc = self._proc = subprocess.Popen(
             ["bash", "--noprofile", "--norc", "-c", command],
             cwd=self.root,
             env=full_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
         captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
 
@@ -242,6 +251,10 @@ class _Session:
             BaseException: The configured close failure.
         """
         self.closed = True
+        # A real box stop ends every command in it.
+        if self._proc is not None and self._proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self._proc.pid, signal.SIGKILL)
         if self.close_error is not None:
             raise self.close_error
 
@@ -256,6 +269,7 @@ class _Runtime:
         root: Path,
         *,
         settle: bool = True,
+        hang: bool = False,
         protected: bool = True,
         billable: bool = True,
         gate: Any = None,
@@ -266,6 +280,7 @@ class _Runtime:
         Args:
             root: Directory for the fake ``pi`` and the boxes.
             settle: Whether the fake ``pi`` settles, else it crashes.
+            hang: Whether the fake ``pi`` keeps running after its input ends.
             protected: The runtime's ``protected`` flag.
             billable: The runtime's ``billable`` flag.
             gate: A :class:`threading.Event` that each open waits for, or
@@ -281,7 +296,9 @@ class _Runtime:
         self._bin = root / "bin"
         self._bin.mkdir()
         script = self._bin / "pi"
-        script.write_text(f"#!{sys.executable}\n{_FAKE_PI.replace('__SETTLE__', repr(settle))}")
+        script.write_text(
+            f"#!{sys.executable}\n{_FAKE_PI.replace('__SETTLE__', repr(settle)).replace('__HANG__', repr(hang))}"
+        )
         script.chmod(script.stat().st_mode | stat.S_IXUSR)
         self.specs: list[SandboxSpec] = []
         self.sessions: list[_Session] = []
@@ -438,7 +455,7 @@ async def test_sandbox_turn_runs_pi_in_the_box_and_reads_files_back(
     }
     (spec,) = runtime.specs
     assert spec.network_disabled
-    assert spec.operation_key == "op-1:box:1"
+    assert re.fullmatch(r"op-1:[0-9a-f]{8}:box:1", spec.operation_key or "")
     assert spec.image == "image-for-anything"
     assert spec.tags == {"agent": "test"}
     assert spec.lifetime_seconds == sandbox.lifetime_seconds == 1800.0
@@ -521,8 +538,24 @@ async def test_a_turn_that_would_outlive_the_box_opens_a_new_one(
     assert first.closed
     assert not second.closed
     # Each box reserves its own budget, so a reopen never replays the first one.
-    assert [spec.operation_key for spec in runtime.specs] == ["op:box:1", "op:box:2"]
+    first_key, second_key = (spec.operation_key or "" for spec in runtime.specs)
+    assert first_key.endswith(":box:1")
+    assert second_key == first_key.removesuffix("1") + "2"
     sandbox.close()
+
+
+async def test_two_sessions_with_one_operation_key_get_different_box_keys(
+    tmp_path: Path, sandbox_for: Callable[..., PiSandbox]
+) -> None:
+    """A reused operation key still gives each session's first box its own key."""
+    runtime = _Runtime(tmp_path)
+    first, second = sandbox_for(runtime), sandbox_for(runtime)
+    await _turn(first)
+    await _turn(second)
+    first.close()
+    second.close()
+    first_key, second_key = (spec.operation_key for spec in runtime.specs)
+    assert first_key != second_key
 
 
 def test_the_box_lifetime_never_exceeds_the_deployment_limit() -> None:
@@ -757,3 +790,48 @@ async def test_a_turn_inbox_is_new_each_turn(tmp_path: Path, sandbox_for: Callab
     sandbox.close()
     inboxes = {name.rsplit("/", 2)[0] for name in runtime.sessions[0].writes if "/in/" in name}
     assert len(inboxes) == 2
+
+
+async def test_a_pi_that_ignores_the_end_of_its_input_loses_its_box(
+    tmp_path: Path, sandbox_for: Callable[..., PiSandbox], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi still running after the stop wait closes the box, so the next turn gets a fresh one."""
+    monkeypatch.setattr(pi_bridge, "_SANDBOX_STOP_SECONDS", 0.2)
+    runtime = _Runtime(tmp_path, hang=True)
+    sandbox = sandbox_for(runtime)
+    await _turn(sandbox)
+    assert runtime.sessions[0].closed
+    assert sandbox._session is None
+    await _turn(sandbox)
+    assert len(runtime.sessions) == 2
+    sandbox.close()
+
+
+async def test_a_handler_budget_stop_ends_the_turn_as_itself_and_drops_the_box(
+    tmp_path: Path, sandbox_for: Callable[..., PiSandbox]
+) -> None:
+    """A BudgetReached from the model relay reaches the caller unchanged, and the box closes."""
+    runtime = _Runtime(tmp_path)
+    sandbox = sandbox_for(runtime)
+    stop = BudgetReached("budget reached")
+    with pytest.raises(BudgetReached) as caught:
+        await _turn(sandbox, _Handlers(fail=stop))
+    assert caught.value is stop
+    assert runtime.sessions[0].closed
+    assert sandbox._session is None
+
+
+def test_a_slow_open_does_not_hold_a_turn_run_by_asyncio_run(
+    tmp_path: Path, sandbox_for: Callable[..., PiSandbox]
+) -> None:
+    """A worker's ``asyncio.run`` returns at the cold-start limit, before the abandoned open ends."""
+    gate = threading.Event()
+    runtime = _Runtime(tmp_path, gate=gate)
+    sandbox = sandbox_for(runtime, cold_start_limit_seconds=0.05)
+    started = time.monotonic()
+    with pytest.raises(PiBridgeError, match="did not open within"):
+        asyncio.run(_turn(sandbox))
+    assert time.monotonic() - started < 2
+    assert runtime.sessions == []
+    gate.set()
+    assert _wait_for(lambda: bool(runtime.sessions) and runtime.sessions[0].closed)
