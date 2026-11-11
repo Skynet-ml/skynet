@@ -37,7 +37,8 @@ bugs before you push. Follow this order for every PR:
    example, two subagents). Verify each finding with a failing test, then
    fix it. Repeat until a review finds nothing new.
 3. Push once. Let CI, the preview build and the automated review gate run.
-4. Run the acceptance checks on the PR preview.
+4. Run the acceptance checks on the PR preview. A visual-only change can use
+   the section 4 exemption.
 
 If the review gate or the acceptance checks find a bug, fix all findings
 locally, check them again, and then push them together in one push.
@@ -242,9 +243,13 @@ Opus 5.5 review gate (section 3) approves the current head. CI passes. The
 acceptance checks pass, or a section 4 exemption applies. The PR stays
 unmerged. Attach a proof card: one line naming the decision and the Linear
 issue, the acceptance check results, the review verdict, and the diff size.
-Merge only after one of two events. Gilad approves that specific PR in chat,
-on GitHub or with `Approved for merge` on the Linear issue. Or Gilad tells the
-orchestrator to merge it. Merge only in the daily window or when Gilad asks.
+Merge only after one of two events:
+
+- Gilad approves that specific PR in chat, on GitHub or with `Approved for
+  merge` on the Linear issue.
+- Gilad tells the orchestrator to merge it.
+
+Merge only in the daily window or when Gilad asks.
 A frontend PR with no meaningful visible change can use the backend path
 (the 2026-10-22 exception below).
 

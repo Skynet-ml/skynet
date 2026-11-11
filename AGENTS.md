@@ -102,7 +102,7 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 
 - Each PR gets a preview (staging copy, empty database) at
   `https://pr-<n>.staging.skynetml.com`. Run acceptance checks there. UI PRs
-  need no before/after images or videos.
+  need no Before and After images or videos.
 - **Fix bugs locally, deploy once.** Each push rebuilds the preview and
   starts a new review. Test and review the full diff locally, then push once.
 - **Among agents, only the orchestrator merges**, in the daily window (03:00
