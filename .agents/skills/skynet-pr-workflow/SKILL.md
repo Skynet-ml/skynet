@@ -201,9 +201,9 @@ for review until the evidence is there.
   review gate (section 3) approves the current head. The PR checks and local
   tests pass. The acceptance checks pass, or a section 4 exemption applies.
   Then the orchestrator marks the PR ready for review (not draft). It does
-  not merge it. Gilad reviews the finished UI PRs. He approves them (in chat, on GitHub
-  or with `Approved for merge` on the Linear issue), or tells the orchestrator
-  to merge them.
+  not merge it. Gilad reviews the finished UI PRs. He approves them (in
+  chat, on GitHub or with `Approved for merge` on the Linear issue), or tells
+  the orchestrator to merge them.
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -336,7 +336,9 @@ A manual hold on a change or on a promotion still stops it.
   3. Run `gh workflow run ci.yml --ref batch/<date>-<n>` and `gh workflow
      run i18n.yml --ref batch/<date>-<n>`. Wait for both runs to pass.
   4. Open one PR from `batch/<date>-<n>` to `staging`. List the included PRs
-     and their merged heads, and link the CI run.
+     and their merged heads, and link the CI run. The batch PR also asks
+     for a preview slot. A "Preview skipped" (no free slot) comment on it is
+     harmless.
   5. Merge it with a merge commit (`gh pr merge <pr> --merge --delete-branch
      --match-head-commit <sha>`).
 - The `staging merge gates` ruleset requires only `scope`. So the
@@ -368,10 +370,10 @@ A manual hold on a change or on a promotion still stops it.
   `agent-review/ready-to-merge` status on the approved head.
 - The approval stays valid when only `staging` moves. A new PR commit, a move
   back to draft or a Linear move withdraws it.
-- The orchestrator's cloud merger routine runs the window. It builds one batch from every
-  PR in **Ready to Merge** (see "PR tests and batch CI"). A PR branch does
-  not need a merge from `staging`, because the batch starts from current
-  `staging`.
+- The orchestrator's cloud merger routine runs the window. It builds one
+  batch from every PR in **Ready to Merge** (see "PR tests and batch CI"). A
+  PR branch does not need a merge from `staging`, because the batch starts
+  from current `staging`.
 - A PR that the batch cannot take (a conflict it cannot resolve, a CI
   failure) leaves the batch. It waits for the next window, with the reason
   in the PR and in Linear.

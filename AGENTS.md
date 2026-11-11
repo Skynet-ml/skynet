@@ -121,10 +121,10 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   approval.
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
+  Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
 - **CI runs only per batch and on the promotion PR** (`staging` → `main`).
   A red batch run or a red promotion run blocks the promotion. Put its fix
   in a new PR.
-  Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
 
 ## Test accounts and environments (MANDATORY)
 
