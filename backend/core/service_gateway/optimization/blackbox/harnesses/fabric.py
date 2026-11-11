@@ -27,6 +27,13 @@ FABRIC_PACKAGES = (
 )
 FABRIC_ADAPTER = "nvidia.fabric.codex"
 FABRIC_UV_VERSION = "0.13.7"
+_UV_RELEASE_URL = f"https://github.com/astral-sh/uv/releases/download/{FABRIC_UV_VERSION}"
+# sha256 digests the GitHub release API reports for the uv musl tarballs, so a
+# swapped asset fails the install instead of running.
+FABRIC_UV_SHA256 = {
+    "x86_64": "287491da03f2a785c70fa75b13e1f849918c2f2b5415fe84876b8214eeb792f9",
+    "aarch64": "2d3ec076a0c4c0e8250bb6418c44080828b544f1a3be0b6e46adf9fb6923de45",
+}
 FABRIC_PYTHON = "3.12"
 FABRIC_CONFIG_FILE = ".app/fabric/config.json"
 # The Codex adapter reads a custom provider's key from the variable that
@@ -54,6 +61,20 @@ _FABRIC_EFFORTS_KNOWN = frozenset({"none", "minimal", "low", "medium", "high", "
 # The Codex adapter passes ``OPENAI_API_KEY`` through to Codex, so a protected
 # run blanks it and an inherited key never gives Codex a route around the
 # gateway. The other flags stop OpenTelemetry export and opt-in usage tracking.
+# The adapter merges these dotted keys into the Codex thread config, the same
+# layer as ``codex -c``. The gateway prices only function and custom tools, so
+# web search and multi-agent tools stay off, as in the Codex harness (SKY-529).
+# The retry and websocket settings also match it: a refused request fails at
+# once, and Codex talks to the gateway over plain HTTP.
+_FABRIC_CODEX_OVERRIDES = {
+    "analytics.enabled": False,
+    "check_for_update_on_startup": False,
+    "web_search": "disabled",
+    "features.multi_agent": False,
+    f"model_providers.{PROVIDER}.request_max_retries": 0,
+    f"model_providers.{PROVIDER}.stream_max_retries": 0,
+    f"model_providers.{PROVIDER}.supports_websockets": False,
+}
 _PROTECTED_ENV = {
     "OPENAI_API_KEY": "",
     "OTEL_SDK_DISABLED": "true",
@@ -62,8 +83,8 @@ _PROTECTED_ENV = {
 # Runs inside the box with the venv's Python and only the standard library. It
 # goes inline on the command line, not as a launch file: the protected relay
 # rewrite needs every launch file to carry the gateway URL.
-# Fabric's state, Codex's home and the logs go to a fresh directory outside
-# the workspace, so they never show up in the scored workspace. The script
+# Fabric's state, Codex's home (the adapter puts it under the artifacts
+# folder) and the logs go to a fresh directory outside the workspace, so they never show up in the scored workspace. The script
 # removes it on exit: one box runs many proposer turns.
 _FABRIC_RUN_SCRIPT = """\
 import json
@@ -120,12 +141,39 @@ sys.exit(main())
 """
 
 
+def _uv_install() -> str:
+    """Return a command that installs the pinned uv release into ``$HOME/.local/bin``.
+
+    Returns:
+        The shell command. It downloads one tarball and checks its sha256
+        digest before it installs the binary. It removes the download folder
+        on success and on failure, and exits non-zero when a step fails.
+    """
+    arch_cases = " ".join(
+        f"{pattern}) a={arch}; s={FABRIC_UV_SHA256[arch]};;"
+        for pattern, arch in (("x86_64|amd64", "x86_64"), ("aarch64|arm64", "aarch64"))
+    )
+    # Same shape as the goose install: ``|| r=$?`` keeps the bootstrap's
+    # ``set -e`` from skipping the cleanup, and no EXIT trap replaces the caller's.
+    return (
+        f'case "$(uname -m)" in {arch_cases} *) echo "fabric: unsupported architecture" >&2; exit 1;; esac; '
+        'f="uv-$a-unknown-linux-musl.tar.gz"; d="$(mktemp -d)"; r=0; '
+        f'curl -fsSL -o "$d/$f" "{_UV_RELEASE_URL}/$f" && '
+        'echo "$s  $d/$f" | sha256sum -c - >/dev/null && '
+        'tar -xzf "$d/$f" -C "$d" && '
+        'mkdir -p "$HOME/.local/bin" && '
+        'install -m 755 "$d/uv-$a-unknown-linux-musl/uv" "$HOME/.local/bin/uv" || r=$?; '
+        'rm -rf "$d"; [ "$r" -eq 0 ] || exit "$r"'
+    )
+
+
 def _fabric_install() -> str:
     """Return the command that pins Fabric to :data:`FABRIC_VERSION` and logs the version that will run.
 
     Harbor installs an unpinned ``fabric_package`` into a task-local venv; this
-    pins uv, Python, the runtime and the Codex adapter instead, and writes the
-    launcher inline so it does not depend on when the launch files arrive.
+    pins uv (checked against its sha256 digest), Python, the runtime and the
+    Codex adapter instead, and writes the launcher inline so it does not depend
+    on when the launch files arrive.
 
     Returns:
         The shell command.
@@ -135,8 +183,7 @@ def _fabric_install() -> str:
     packages = " ".join(shlex.quote(package) for package in FABRIC_PACKAGES)
     return (
         f"{_FABRIC_PATH}; {_version_check('fabric', FABRIC_VERSION)} || "
-        "{ { command -v uv >/dev/null 2>&1 || "
-        f"curl -LsSf https://astral.sh/uv/{FABRIC_UV_VERSION}/install.sh | sh; }} && "
+        f"{{ {{ command -v uv >/dev/null 2>&1 || {{ {_uv_install()}; }}; }} && "
         f"rm -rf {venv} && uv venv --python {FABRIC_PYTHON} {venv} >/dev/null && "
         f"uv pip install --python {venv_python} {packages} >/dev/null && "
         f'mkdir -p "$HOME/.local/bin" && printf %s {shlex.quote(_FABRIC_LAUNCHER)} > "$HOME/.local/bin/fabric" && '
@@ -162,7 +209,7 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
         # The sandbox is the isolation boundary, and no one is there to approve.
         "sandbox": "danger-full-access",
         "approval_mode": "deny_all",
-        "config_overrides": {"analytics.enabled": False, "check_for_update_on_startup": False},
+        "config_overrides": _FABRIC_CODEX_OVERRIDES,
     }
     effort = _FABRIC_EFFORTS.get(reasoning_effort, reasoning_effort) if reasoning_effort else None
     if effort in _FABRIC_EFFORTS_KNOWN:

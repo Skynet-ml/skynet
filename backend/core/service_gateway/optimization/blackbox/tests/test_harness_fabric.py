@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -20,6 +24,7 @@ from ..harnesses.fabric import (
     FABRIC_ADAPTER,
     FABRIC_CONFIG_FILE,
     FABRIC_PACKAGES,
+    FABRIC_UV_SHA256,
     FABRIC_VERSION,
 )
 
@@ -171,10 +176,11 @@ def _run(tmp_path: Path, *, protected: bool, result: dict) -> tuple[subprocess.C
     return finished, json.loads(runner_log.read_text()), workspace
 
 
-def test_fabric_is_registered_before_cline_with_its_pin() -> None:
-    """List Fabric in the registry and the request model, pinned to the exact runtime release."""
+def test_fabric_is_registered_at_position_61_before_cline_with_its_pin() -> None:
+    """List Fabric at position 61 in the registry and in the request model, pinned to the exact runtime release."""
     spec = REGISTRY[BLACKBOX_HARNESS_FABRIC]
     assert (spec.binary, spec.version, spec.output_format) == ("fabric", "0.5.0", "plain")
+    assert spec.position == 61
     order = list(REGISTRY)
     # Relative order only, so later harnesses can join the registry without breaking this test.
     assert order.index("prime") < order.index(BLACKBOX_HARNESS_FABRIC) < order.index("cline")
@@ -191,7 +197,10 @@ def test_open_launch_pins_the_packages_and_sends_model_calls_only_to_the_gateway
     assert FABRIC_PACKAGES == ("nemo-fabric-runtime==0.5.0", "nemo-fabric-adapters-codex[harness]==0.5.0")
     assert launch.install_command is not None
     assert "nemo-fabric-runtime==0.5.0 'nemo-fabric-adapters-codex[harness]==0.5.0' >" in launch.install_command
-    assert "https://astral.sh/uv/0.13.7/install.sh" in launch.install_command
+    assert "https://github.com/astral-sh/uv/releases/download/0.13.7/" in launch.install_command
+    assert "install.sh" not in launch.install_command
+    assert "| sh;" not in launch.install_command
+    assert launch.install_command.index("sha256sum -c -") < launch.install_command.index("tar -xzf")
     assert "uv venv --python 3.12" in launch.install_command
     assert "harbor" not in launch.install_command
     assert launch.install_command.endswith("&& fabric --version")
@@ -203,7 +212,15 @@ def test_open_launch_pins_the_packages_and_sends_model_calls_only_to_the_gateway
         "settings": {
             "sandbox": "danger-full-access",
             "approval_mode": "deny_all",
-            "config_overrides": {"analytics.enabled": False, "check_for_update_on_startup": False},
+            "config_overrides": {
+                "analytics.enabled": False,
+                "check_for_update_on_startup": False,
+                "web_search": "disabled",
+                "features.multi_agent": False,
+                "model_providers.app.request_max_retries": 0,
+                "model_providers.app.stream_max_retries": 0,
+                "model_providers.app.supports_websockets": False,
+            },
         },
     }
     assert config["models"] == {
@@ -276,6 +293,87 @@ def test_install_builds_the_pinned_venv_and_a_launcher_that_answers_the_version_
     assert version.stdout.strip() == "fabric 0.5.0"
     subprocess.run(install, shell=True, cwd=tmp_path, env=env, capture_output=True, timeout=60, check=True)
     assert uv_log.read_text().splitlines() == calls
+
+
+def _uv_download_install(
+    tmp_path: Path, served: bytes, *, pinned: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run only the install's uv step, with ``curl`` and ``uname`` faked, the real ``sha256sum``, and no uv on PATH.
+
+    Args:
+        tmp_path: Scratch directory for the home, the fakes and the served tarball.
+        served: The bytes the fake ``curl`` writes as the uv tarball.
+        pinned: A digest to put in place of the real x86_64 pin, or ``None`` to keep it.
+
+    Returns:
+        The finished install and the ``$HOME`` it used.
+    """
+    install = build_launch(_target(), _GATEWAY).install_command or ""
+    step = install[install.index('case "$(uname -m)"') : install.index('[ "$r" -eq 0 ] || exit "$r"')]
+    if pinned is not None:
+        step = step.replace(FABRIC_UV_SHA256["x86_64"], pinned)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    served_file = tmp_path / "served.tar.gz"
+    served_file.write_bytes(served)
+    for name, body in (
+        ("uname", "#!/bin/sh\necho x86_64\n"),
+        ("curl", f'#!/bin/sh\nwhile [ "$1" != "-o" ]; do shift; done\ncp {served_file} "$2"\n'),
+    ):
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    sha256sum = shutil.which("sha256sum")
+    if sha256sum is None:
+        pytest.skip("The uv step needs sha256sum.")
+    home = tmp_path / "home"
+    finished = subprocess.run(
+        f'{step}[ "$r" -eq 0 ] || exit "$r"',
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{Path(sha256sum).parent}{os.pathsep}{os.defpath}",
+            "HOME": str(home),
+            "TMPDIR": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    return finished, home
+
+
+def test_uv_install_refuses_a_tarball_whose_digest_does_not_match(tmp_path: Path) -> None:
+    """Fail the uv step on a swapped tarball, install no uv, and remove the download folder."""
+    finished, home = _uv_download_install(tmp_path, b"not the uv release")
+
+    assert finished.returncode == 1, finished.stderr
+    assert not (home / ".local" / "bin" / "uv").exists()
+    assert list(tmp_path.glob("tmp.*")) == []
+
+
+def test_uv_install_unpacks_uv_when_the_digest_matches(tmp_path: Path) -> None:
+    """Install ``uv`` from a tarball with the release layout once its digest matches the pin."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        body = b"#!/bin/sh\necho uv 0.13.7\n"
+        member = tarfile.TarInfo("uv-x86_64-unknown-linux-musl/uv")
+        member.size, member.mode = len(body), 0o755
+        archive.addfile(member, io.BytesIO(body))
+    served = buffer.getvalue()
+    finished, home = _uv_download_install(tmp_path, served, pinned=hashlib.sha256(served).hexdigest())
+
+    assert finished.returncode == 0, finished.stderr
+    uv = home / ".local" / "bin" / "uv"
+    assert subprocess.run([str(uv)], capture_output=True, text=True, check=True).stdout == "uv 0.13.7\n"
+    assert list(tmp_path.glob("tmp.*")) == []
+
+
+def test_uv_install_pins_one_digest_per_architecture() -> None:
+    """Carry a sha256 digest for each musl tarball the install can pick."""
+    install = build_launch(_target(), _GATEWAY).install_command or ""
+    assert set(FABRIC_UV_SHA256) == {"x86_64", "aarch64"}
+    assert all(len(digest) == 64 and f"s={digest};;" in install for digest in FABRIC_UV_SHA256.values())
 
 
 def test_protected_run_points_codex_at_the_relay_and_returns_the_response(tmp_path: Path) -> None:
