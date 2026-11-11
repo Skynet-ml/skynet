@@ -1532,13 +1532,19 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
     assert [t["function"]["name"] for t in lm.requests[0]["tools"]] == [
         "list_models_for_agent",
         "search_docs",
+        "request_secret",
         "share_plan",
         "submit",
     ]
     # The second request only appends to the first: the cacheable prefix holds.
     assert lm.requests[1]["messages"][: len(first)] == first
     assert events[0]["event"] == "turn_metadata"
-    assert events[0]["data"]["allowed_tools"] == ["list_models_for_agent", "search_docs", "share_plan"]
+    assert events[0]["data"]["allowed_tools"] == [
+        "list_models_for_agent",
+        "request_secret",
+        "search_docs",
+        "share_plan",
+    ]
     assert [e["event"] for e in events if e["event"] in ("tool_start", "tool_end")] == ["tool_start", "tool_end"]
     # One clear per loop step, so a pending row whose call never ran is dropped.
     assert [e["event"] for e in events if e["event"] in ("tool_pending_clear", "tool_start")] == [
@@ -1651,7 +1657,9 @@ async def test_turn_offers_web_tools_when_firecrawl_is_configured(monkeypatch: p
     )
 
     assert reply == "found it"
-    assert events[0]["data"]["allowed_tools"] == sorted({*web_tools.WEB_TOOLS, "search_docs", "share_plan"})
+    assert events[0]["data"]["allowed_tools"] == sorted(
+        {*web_tools.WEB_TOOLS, "request_secret", "search_docs", "share_plan"}
+    )
     assert posted == [("/search", {"query": "dspy gepa", "limit": 5})]
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
     assert [(e["tool"], e["status"]) for e in ends] == [("web_search", "ok")]

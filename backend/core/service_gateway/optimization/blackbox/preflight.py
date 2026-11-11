@@ -13,7 +13,7 @@ from ....config import settings
 from ....exceptions import ServiceError
 from ....i18n_en import t_en
 from ....models import BlackboxRunRequest
-from ....models.blackbox import BlackboxScorer, BlackboxTarget
+from ....models.blackbox import BLACKBOX_TARGET_REPO, BlackboxScorer, BlackboxTarget
 from ....models.unified import (
     CONTRACT_SAMPLE_COUNT_KEY,
     CONTRACT_SAMPLE_DEFAULT,
@@ -29,10 +29,11 @@ from ..unified.split import split_seed
 from .agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
 from .harness import GatewayConfig
 from .native_runtime import NativeOptions, check_native_runtime
+from .repo_scorer import REPO_SCORER_URL, SETUP_ALLOWANCE_SECONDS
 from .sandbox_contract import SandboxRuntime
 from .sandbox_runtime import sandbox_runtime_context
 from .sandbox_scorer import SandboxPythonScorer, scorer_gateway
-from .scorer import build_scorer
+from .scorer import RemoteScorer, build_scorer
 from .service import JobSpec, _agent_scorer, uses_native_runtime, validate_blackbox_payload, validate_job
 
 
@@ -148,9 +149,11 @@ def verify_anything_in_sandbox(
     if error:
         raise ValueError(t_en(error))
     scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
-    remote = scorer.kind == "remote"
+    # A repository's scorer runs in the parent's box on the staged checkout, as in the run (SKY-644).
+    repo = (payload.get("target") or {}).get("kind") == BLACKBOX_TARGET_REPO
+    remote = scorer.kind == "remote" or repo
     code = str(scorer.metric_code)
-    if not remote and scorer.model is None and _needs_model(code):
+    if scorer.kind != "remote" and scorer.model is None and _needs_model(code):
         return {
             "checks": [
                 _check(
@@ -164,8 +167,21 @@ def verify_anything_in_sandbox(
     if remote:
         route = payload.get("_skynet_evaluator_route")
         if not route:
-            raise ValueError("Remote evaluation requires its protected parent relay.")
-        scorer_instance = build_scorer(scorer, job_id=identity, protected_route=route)
+            raise ValueError(
+                "Repository scoring requires its protected parent scorer."
+                if repo
+                else "Remote evaluation requires its protected parent relay."
+            )
+        if repo:
+            scorer_instance = RemoteScorer(
+                REPO_SCORER_URL,
+                secret=None,
+                timeout_seconds=scorer.timeout_seconds + SETUP_ALLOWANCE_SECONDS,
+                protected_route=route,
+                label="repository scorer",
+            )
+        else:
+            scorer_instance = build_scorer(scorer, job_id=identity, protected_route=route)
     else:
         scorer_instance = SandboxPythonScorer(
             code,
@@ -183,6 +199,10 @@ def verify_anything_in_sandbox(
     with sandbox_runtime_context(runtime):
         try:
             candidate = payload.get("seed_candidate")
+            if candidate is None and repo:
+                # A repository version is a patch: the empty patch scores the staged checkout itself,
+                # so a metric that cannot run fails here, not in the run.
+                candidate = ""
             if candidate is None:
                 if not remote:
                     scorer_instance.check_ready()

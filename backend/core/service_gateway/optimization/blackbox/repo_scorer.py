@@ -103,6 +103,16 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 # its path: a planted json.py or .pth would run before any check (E38, E40).
 # -I drops PYTHONDONTWRITEBYTECODE and PYTHONUNBUFFERED, so -B and -u keep them.
 _ISOLATED = "-I -B -u"
+# The supervisor needs the standard library alone. Without site-packages, a .pth
+# that an earlier call's version code planted there cannot patch the clock that
+# times the [run] entry. The supervisor starts a function entry with python3
+# from PATH, so the entry still gets the [setup] packages (SKY-642).
+_NO_SITE = "-S"
+# The supervisor starts with the image's root-owned base interpreter, not a
+# PATH lookup: /app/.venv/bin is group-writable for the box user, so a version
+# could replace its python3 for the next case. A host without this path (local
+# tests) falls back to PATH (SKY-642).
+_BASE_PYTHON = "/usr/local/bin/python3"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # A stage box's relay answers, relative to the box; one folder for every call,
@@ -409,6 +419,9 @@ class RepoScorer:
                         "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
                     }
                 document["output"] = ran.get("output")
+                elapsed = ran.get(runner.ELAPSED_PARAM)
+                if isinstance(elapsed, int | float) and math.isfinite(elapsed) and elapsed >= 0:
+                    document[runner.ELAPSED_PARAM] = float(elapsed)
                 # The version's code could rewrite the runner, swap the calls
                 # folder for a link, leave files in this call's folder for the
                 # metric run to read, or plant a module next to the runner
@@ -520,11 +533,12 @@ class RepoScorer:
             secrets: Values to keep out of anything that leaves the box.
 
         Returns:
-            ``{"output", "error"}`` from the supervisor.
+            ``{"output", "error", "stopped", "elapsed_s"}`` from the supervisor.
 
         Raises:
-            RepoScoreError: When the version changed a protected file, or not
-                every process it started could be shown to have stopped.
+            RepoScoreError: When the version changed a protected file, the
+                supervisor did not exit cleanly, or not every process the
+                version started could be shown to have stopped.
             BudgetReached: When the run's budget stopped a service or MCP call.
             BudgetError: When a service or MCP call had insufficient budget coverage.
             UsagePendingError: When a service or MCP call needs reconciliation.
@@ -546,11 +560,16 @@ class RepoScorer:
             if unstamped:
                 raise RepoScoreError(unstamped)
             calls = shlex.quote(CALLS_DIR)
+            done = f"{root}/{supervisor}/{runner.OUTPUT_FILE}"
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
-                    f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
-                    f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
+                    f"/usr/bin/find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
+                    f" -exec /bin/rm -rf {{}} +; /bin/rm -rf {shlex.quote(done)} {shlex.quote(done + '.part')}"
+                    f'; p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                    # exec leaves no shell parent that the entry could trace
+                    # to fake the supervisor's exit code.
+                    f'; cd {shlex.quote(path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
+                    f" {shlex.quote(f'{root}/{RUNNER_PATH}')} {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
                     on_output=relay.output if relay is not None else sandbox_log.ignore_output,
@@ -561,7 +580,9 @@ class RepoScorer:
             ran = json.loads(text) if text is not None else None
         except ValueError:
             ran = None
-        if not isinstance(ran, dict) or ran.get("stopped") is not True:
+        # The entry can write this file and then kill the supervisor, so the
+        # file counts only when the supervisor itself exited cleanly (SKY-642).
+        if not result.ok or not isinstance(ran, dict) or ran.get("stopped") is not True:
             logger.warning(
                 "The [run] supervisor did not stop every process (exit %s): %s",
                 result.exit_code,

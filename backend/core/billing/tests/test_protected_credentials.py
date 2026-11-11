@@ -556,6 +556,47 @@ def test_repo_secrets_are_vaulted_at_submit_and_resolved_only_in_the_parent(harn
     assert has_exposed_execution_credentials(stored)
 
 
+def test_saved_secret_goes_only_to_a_host_its_owner_approved(harness: _Harness) -> None:
+    """Refuse a run host that is not in the secret's stored list, as an edited optimize.toml would ask (SKY-641)."""
+    vault = ProtectedCredentialVault(engine=harness.engine)
+    binding_id = harness.execution_budget(key="repo-secret-hosts")
+    store = SavedSecretStore(harness.engine)
+    saved = store.save("alice", "MAPS_KEY", "maps-saved-value", ["maps.googleapis.com", "*.example.com"])
+
+    def resolve(hosts: list[str]) -> dict[str, str]:
+        """Resolve the saved secret for a run that sends it to ``hosts``.
+
+        Args:
+            hosts: The run's ``allowed_hosts`` for the secret.
+
+        Returns:
+            The resolved environment.
+        """
+        payload = _repo_payload([{"name": "MAPS_KEY", "saved_secret_id": saved.id, "allowed_hosts": hosts}])
+        return resolve_repo_secrets(payload, username="alice", binding_id=binding_id, vault=vault, saved=store)
+
+    assert resolve(["maps.googleapis.com"]) == {"MAPS_KEY": "maps-saved-value"}
+    assert resolve(["*.example.com"]) == {"MAPS_KEY": "maps-saved-value"}
+    for hosts in (["attacker.example.net"], ["maps.googleapis.com", "attacker.example.net"], ["api.example.com"]):
+        with pytest.raises(ValueError, match="may not go to") as caught:
+            resolve(hosts)
+        assert "maps-saved-value" not in str(caught.value)
+
+
+def test_saved_secret_without_stored_hosts_goes_to_no_host(harness: _Harness) -> None:
+    """A secret saved before SKY-641 has no approved host, so a run that names a host gets no value."""
+    vault = ProtectedCredentialVault(engine=harness.engine)
+    binding_id = harness.execution_budget(key="repo-secret-legacy")
+    store = SavedSecretStore(harness.engine)
+    saved = store.save("alice", "MAPS_KEY", "legacy-saved-value")
+    payload = _repo_payload(
+        [{"name": "MAPS_KEY", "saved_secret_id": saved.id, "allowed_hosts": ["maps.googleapis.com"]}]
+    )
+
+    with pytest.raises(ValueError, match="may not go to"):
+        resolve_repo_secrets(payload, username="alice", binding_id=binding_id, vault=vault, saved=store)
+
+
 def test_repo_secret_without_value_or_reference_is_refused(harness: _Harness) -> None:
     """Ask for the value again rather than running with a secret that silently went missing."""
     vault = ProtectedCredentialVault(engine=harness.engine)

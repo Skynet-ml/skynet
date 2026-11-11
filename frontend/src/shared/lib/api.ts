@@ -1985,6 +1985,8 @@ export function getConnectors(source?: ApiSource) {
 export interface SavedSecret {
   id: string;
   name: string;
+  /** The only hosts a run may send this secret to. The server enforces the list; empty means no host. */
+  allowed_hosts: string[];
   created_at: string;
   updated_at: string;
 }
@@ -1993,12 +1995,25 @@ export function listSavedSecrets() {
   return request<{ secrets: SavedSecret[] }>("/secrets");
 }
 
-/** Save a secret under `name`, replacing the value of one already saved under it. */
-export function saveSecret(name: string, value: string) {
-  return request<SavedSecret>("/secrets", {
+/** Browser event fired when a saved secret is saved or deleted, so an open run setup reads the names again. */
+export const SAVED_SECRETS_CHANGED_EVENT = "saved-secrets-changed";
+
+function announceSavedSecretsChange(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(SAVED_SECRETS_CHANGED_EVENT));
+}
+
+/**
+ * Save a secret under `name`, replacing the value and hosts of one already
+ * saved under it. `allowedHosts` are the hosts the user approves; a run may
+ * send the secret to no other host.
+ */
+export async function saveSecret(name: string, value: string, allowedHosts: string[]) {
+  const saved = await request<SavedSecret>("/secrets", {
     method: "PUT",
-    body: JSON.stringify({ name, value }),
+    body: JSON.stringify({ name, value, allowed_hosts: allowedHosts }),
   });
+  announceSavedSecretsChange();
+  return saved;
 }
 
 /** Forget one saved secret. The route returns 204. */
@@ -2013,6 +2028,7 @@ export async function deleteSavedSecret(id: string): Promise<void> {
       { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
+  announceSavedSecretsChange();
 }
 
 /**
