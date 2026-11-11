@@ -53,9 +53,10 @@ _USAGE_FILE = '"$_cp_dir/usage.json"'
 # ``$XDG_CACHE_HOME/code_puppy/autosaves``; the usage file gives the tokens and
 # one Pi ``tool_execution_start`` line per tool call, so the bridge's cost and
 # tool-call stops read them. The answer line comes first, because a stop
-# signals the whole group while the script prints. It runs inline
-# (``python3 -I -c '...'``) for the reasons :data:`.fx.FX_TO_PI` gives, so it
-# must hold no single quote.
+# signals the whole group while the script prints. A script in ``files`` would
+# land in the working directory that the harness can edit and would go through
+# a protected run's relay rewrite, so it runs inline (``python3 -I -c '...'``)
+# and must hold no single quote.
 CODE_PUPPY_TO_PI = """import glob
 import json
 import os
