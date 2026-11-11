@@ -69,6 +69,8 @@ _FAKE_HERMES = """#!/bin/sh
   printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
   printf 'ANTHROPIC_API_KEY=%s\\n' "$ANTHROPIC_API_KEY"
   printf 'NOUS_API_KEY=%s\\n' "$NOUS_API_KEY"
+  printf 'HERMES_LANGFUSE_PUBLIC_KEY=%s\\n' "$HERMES_LANGFUSE_PUBLIC_KEY"
+  printf 'HERMES_LANGFUSE_SECRET_KEY=%s\\n' "$HERMES_LANGFUSE_SECRET_KEY"
   printf 'HERMES_HOME=%s\\n' "$HERMES_HOME"
   printf 'CONFIG=%s\\n' "$(tr -d '\\n' < "$HERMES_HOME/config.yaml")"
 } >> "$FAKE_LOG"
@@ -222,8 +224,8 @@ def _run_with_fake_hermes(
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Hermes command in a scratch workspace against a fake ``hermes`` binary.
 
-    The env also carries an inherited OpenAI URL and an Anthropic key, which
-    the run must not pass on.
+    The env also carries an inherited OpenAI URL, an Anthropic key and Hermes
+    Langfuse keys, which a protected run must not pass on.
 
     Args:
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
@@ -252,6 +254,8 @@ def _run_with_fake_hermes(
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
         "ANTHROPIC_API_KEY": "inherited-key",
         "NOUS_API_KEY": "inherited-key",
+        "HERMES_LANGFUSE_PUBLIC_KEY": "inherited-key",
+        "HERMES_LANGFUSE_SECRET_KEY": "inherited-key",
         **launch.env,
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
@@ -526,6 +530,8 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
     assert _logged(calls, "OPENAI_API_KEY") == _GATEWAY.api_key
     assert _logged(calls, "ANTHROPIC_API_KEY") == ""
     assert _logged(calls, "NOUS_API_KEY") == ""
+    assert _logged(calls, "HERMES_LANGFUSE_PUBLIC_KEY") == ""
+    assert _logged(calls, "HERMES_LANGFUSE_SECRET_KEY") == ""
     assert _RELAY_URL in _logged(calls, "CONFIG")
     assert _GATEWAY.url not in calls
     home = Path(_logged(calls, "HERMES_HOME"))

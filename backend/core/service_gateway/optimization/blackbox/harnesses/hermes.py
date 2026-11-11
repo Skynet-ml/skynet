@@ -128,6 +128,9 @@ _PROTECTED_ENV = {
     "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "",
     "LANGFUSE_BASE_URL": "",
+    # Hermes also reads Langfuse keys under its own prefix.
+    "HERMES_LANGFUSE_PUBLIC_KEY": "",
+    "HERMES_LANGFUSE_SECRET_KEY": "",
     "DO_NOT_TRACK": "1",
 }
 
