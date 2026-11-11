@@ -68,11 +68,11 @@ _WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
 # for a model name it does not know, so ``allowed_openai_params`` forces it
 # through. OpenHands also adds ``thinking`` for a model whose name is
 # ``gemini-2.5-pro`` (a 128-token budget, with ``allowed_openai_params``
-# set to ``["thinking"]``) or contains ``claude-opus-4-1`` (disabled),
-# because the harness never sets ``LLM_REASONING_EFFORT``. With
-# ``LLM_DROP_PARAMS=false``, LiteLLM 1.80.10 refuses that ``thinking`` on
-# the ``openai/`` route, so every such run fails. ``None`` removes it. ``allowed_openai_params=None``
-# also removes the OpenHands ``["thinking"]``: with no effort, LiteLLM would
+# set to ``["thinking"]``, because the harness never sets
+# ``LLM_REASONING_EFFORT``) or contains ``claude-opus-4-1`` (always
+# disabled). With ``LLM_DROP_PARAMS=false``, LiteLLM 1.80.10 refuses that
+# ``thinking`` on the ``openai/`` route, so every such run fails. ``None``
+# removes it. ``allowed_openai_params=None`` also removes the OpenHands ``["thinking"]``: with no effort, LiteLLM would
 # otherwise pass ``thinking=None`` to the OpenAI client, which rejects it.
 _DEFAULTS_OFF = {"temperature": None, "top_p": None, "thinking": None, "allowed_openai_params": None}
 # LiteLLM reads these keys for its other providers. A protected run blanks
