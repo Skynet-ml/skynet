@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   endSplash,
+  fadesInEntrance,
   playsEntrance,
   readSplashState,
   setupCoversPath,
@@ -70,6 +71,18 @@ test("a splash that already left never gives a later setup the entrance", () => 
   assert.equal(playsEntrance({ ...fresh, splash: "gone" }), false);
 });
 
+test("a first run after a password sign-in fades in on the entrance frame, with no glance", () => {
+  // The splash faded on /login; the soft navigation mounts the setup with no splash above it.
+  assert.equal(fadesInEntrance({ ...fresh, splash: "gone" }), true);
+  assert.equal(fadesInEntrance({ ...fresh, splash: "handoff" }), true);
+});
+
+test("only a fresh, not rerun setup with no playing splash fades in", () => {
+  assert.equal(fadesInEntrance(fresh), false);
+  assert.equal(fadesInEntrance({ ...fresh, splash: "gone", rerunning: true }), false);
+  assert.equal(fadesInEntrance({ ...fresh, splash: "gone", languageAnswered: true }), false);
+});
+
 test("the splash ends once per page load and tells its listeners", () => {
   assert.equal(readSplashState(), "playing");
   let calls = 0;
@@ -81,12 +94,13 @@ test("the splash ends once per page load and tells its listeners", () => {
   assert.equal(calls, 1);
 });
 
-test("a fade marks the splash gone at once, so a setup that opens during the fade plays its glance", async () => {
+test("a fade marks the splash gone at once, so a setup that opens during the fade fades in", async () => {
   // The splash state is per page load, so this case needs its own module instance.
   const fade: typeof import("./entrance.ts") = await import("./entrance.ts?fade");
   fade.commitSplashExit("fade");
   assert.equal(fade.readSplashState(), "gone");
   assert.equal(playsEntrance({ ...fresh, splash: fade.readSplashState() }), false);
+  assert.equal(fadesInEntrance({ ...fresh, splash: fade.readSplashState() }), true);
 
   const handoff: typeof import("./entrance.ts") = await import("./entrance.ts?handoff");
   handoff.commitSplashExit("handoff");
