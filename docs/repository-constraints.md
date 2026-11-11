@@ -156,9 +156,6 @@ stops the run.
 
 ## What fails the setup check
 
-- A `[services]` section, a `services` list, or an `mcp` file in any role.
-  The file format below is checked, but runs cannot use these settings yet
-  (SKY-385).
 - A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
@@ -221,8 +218,17 @@ mcp = "eval/.mcp.json"
   servers of its own file, so the proposer gets none of the metric's
   servers. Skynet reads the files from the same commit as `optimize.toml`,
   checks them with the same secret rules, lists their servers in the
-  environment record, and protects them like rule files. No box gets the
-  proposer's or a target's servers yet: SKY-385 owns that wiring.
+  environment record, and protects them like rule files.
+- A `[target.<name>]` stage reaches the servers of its own `mcp` file
+  through its box's relay (SKY-611). The stage box's copy of the file lists
+  only that stage's servers, each with a loopback url, and holds no secret.
+  The stage also gets `SKYNET_MCP_<NAME>_URL` and `SKYNET_MCP_CONFIG`.
+  Skynet checks each call against that stage's own file, so a stage cannot
+  reach the proposer's, the scorer's or another stage's servers.
+- A stage with an `mcp` file runs one call at a time in its box, even when
+  the scorer calls it in parallel. Its file names one fixed loopback port,
+  and only one call can serve that port. Stages without an `mcp` file still
+  run calls in parallel.
 - Only http servers are supported now. Each server has a `url` and goes
   through Skynet's relay. A stdio server (`command`, `args`, `env`) fails
   the setup check before any sandbox starts.

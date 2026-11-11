@@ -1022,7 +1022,8 @@ class _StageRelay:
 
     Calls to one stage run in parallel, each in its own process and folder,
     up to ``max_concurrency`` at a time (E34). Service requests run in their
-    own pool with the same limit. An MCP GET event stream passes on in its own
+    own pool with the same limit. A stage whose MCP file holds a server runs one
+    call at a time instead (SKY-611). An MCP GET event stream passes on in its own
     thread, up to ``_MCP_STREAMS`` at a time, so it never holds that pool.
     A stage with MCP servers has its own relay, which reads the frames of
     each call in that stage's box and answers them there.
@@ -1089,8 +1090,12 @@ class _StageRelay:
         # A fresh nonce for each evaluation: version code cannot forge a frame
         # it never saw, and a frame from an earlier call never matches.
         self._prefix = f"APP_STAGE_{uuid.uuid4().hex}:"
+        # A stage with MCP runs one call at a time: its own MCP file names
+        # RELAY_PORT, and only one runner in the box can serve that port.
         self._pools = {
-            name: ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix=f"stage-{name}")
+            name: ThreadPoolExecutor(
+                max_workers=1 if name in self._stage_relays else max_concurrency, thread_name_prefix=f"stage-{name}"
+            )
             for name in self._boxes
         }
         self._refusals = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stage-refusal")

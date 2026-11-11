@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import http.server
+import itertools
 import json
 import logging
 import os
@@ -2609,6 +2610,7 @@ def test_the_scorer_gives_each_role_only_the_servers_of_its_own_mcp_file(tmp_pat
 # A stage that calls its own ``search`` MCP server through the stage box's loopback relay (SKY-611).
 _LOOKUP_STAGE = """
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -2619,6 +2621,9 @@ class _Keep(urllib.request.HTTPRedirectHandler):
 
 
 def lookup(value):
+    started = time.time()
+    # Long enough that calls in parallel boxes would overlap.
+    time.sleep(0.3)
     body = value["body"].encode() if value.get("body") else None
     url = os.environ["SKYNET_MCP_SEARCH_URL"] + value.get("path", "")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Keep)
@@ -2627,7 +2632,7 @@ def lookup(value):
             status, text = response.status, response.read().decode()
     except urllib.error.HTTPError as error:
         status, text = error.code, ""
-    return {"status": status, "body": text, "key_in_env": "JUDGE_KEY" in os.environ}
+    return {"status": status, "body": text, "key_in_env": "JUDGE_KEY" in os.environ, "span": [started, time.time()]}
 """
 _LOOKUP_COMMAND = (
     "python3",
@@ -2650,7 +2655,10 @@ _LOOKUP_SCORER = (
 def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
     tmp_path: Path, echo: _Echo, entry: str | tuple[str, ...]
 ) -> None:
-    """Parallel stage calls each get their own redacted answer, a redirect stays unfollowed, and each call is recorded."""
+    """Stage calls with MCP run one at a time even at ``max_concurrency=3``, and each gets its own redacted answer.
+
+    A redirect stays unfollowed, and each call is recorded.
+    """
     echo.release.set()
     sink = _CallSink()
     runtime = RecordingRuntime()
@@ -2665,6 +2673,7 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
         secret_hosts={"JUDGE_KEY": "judge.example.test"},
         secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
         recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+        max_concurrency=3,
     )
     try:
         result = scorer.score("")
@@ -2672,6 +2681,8 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
         scorer.close()
 
     posted, redirected, streamed = json.loads(result["feedback"])
+    spans = sorted(answer["span"] for answer in (posted, redirected, streamed))
+    assert all(earlier[1] <= later[0] for earlier, later in itertools.pairwise(spans))
     assert (posted["status"], json.loads(posted["body"])) == (200, {"seen": "[REDACTED]"})
     assert redirected["status"] == 302
     assert streamed["status"] == 200

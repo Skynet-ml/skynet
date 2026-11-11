@@ -108,8 +108,6 @@ STAGE_FLAG = "--stage"
 STAGE_COMMAND_FLAG = "--stage-command"
 # A stage call's relay config, next to its input; only a stage whose own MCP file holds a server gets one.
 STAGE_RELAY_FILE = "relay.json"
-# A call that does not hold RELAY_PORT gets this copy of the stage's MCP file, with its own proxy's urls.
-STAGE_MCP_FILE = "mcp.json"
 # The metric reaches each listed service at this variable's loopback address (E45).
 SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
 # Each server of the role's own MCP file is at this variable's loopback address (E49).
@@ -1651,12 +1649,8 @@ def run_stage_command(call_dir: Path, command: Sequence[str]) -> int:
 def _stage_relay_env(call_dir: Path) -> dict[str, str]:
     """Start the stage's loopback relay when the parent wrote a relay config for this call.
 
-    Parallel calls to one stage share its box, and only one of them can hold
-    ``RELAY_PORT``; the others serve on a free port, and their MCP variable
-    names a copy of the stage's MCP file with that port. The stage's own file
-    names ``RELAY_PORT``, whose proxy stops when its call ends. Every proxy in
-    the box sends its frames to the same parent relay, and each answer file
-    carries its own request's id, so no call gets another's answer.
+    The parent runs one call at a time in a stage box with a relay, so this
+    call's proxy can hold ``RELAY_PORT``, which the stage's own MCP file names.
 
     Args:
         call_dir: The call's folder in the stage box.
@@ -1671,16 +1665,7 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
     # The stage's code may change its directory; the answer folder must not move with it.
     config["response_dir"] = str(Path(str(config["response_dir"])).resolve())
     client = StageClient(config)
-    try:
-        return _relay_env(client, config)
-    except OSError:
-        env = _relay_env(client, {**config, "port": 0})
-    if MCP_CONFIG_ENV in env:
-        servers = {str(name): {"type": "http", "url": env[mcp_env_name(str(name))]} for name in config["mcp"]}
-        copy = call_dir / STAGE_MCP_FILE
-        copy.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
-        env[MCP_CONFIG_ENV] = str(copy.resolve())
-    return env
+    return _relay_env(client, config)
 
 
 if __name__ == "__main__":
