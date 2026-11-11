@@ -103,7 +103,7 @@ class Terminus2:
             "reasoning_effort": reasoning_effort,
             "record_terminal_session": record_terminal_session,
         }
-        self.options = SimpleNamespace(tmux_pane_width=160, tmux_pane_height=40)
+        self.options = SimpleNamespace(tmux_pane_width=160, tmux_pane_height=40, llm_kwargs=llm_kwargs)
         self._extra_env = {}
         self._chat = None
 
@@ -118,6 +118,12 @@ class Terminus2:
         result = await environment.exec("echo hi > out.txt; env")
         shell_env = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         tmux = TmuxSession.started
+        # Harbor 0.25.0 dumps ``options.llm_kwargs`` into this file after every turn.
+        trajectory = os.path.join(self.seen["logs_dir"], "trajectory.json")
+        with open(trajectory, "w") as handle:
+            json.dump({"agent": {"extra": {"llm_kwargs": self.options.llm_kwargs}}}, handle)
+        with open(trajectory) as handle:
+            trajectory_text = handle.read()
         record = {
             **self.seen,
             "instruction": instruction,
@@ -126,6 +132,7 @@ class Terminus2:
             "tmux_tmpdir_set": "TMUX_TMPDIR" in shell_env,
             "pane_log_in_logs_parent": str(tmux["logging_path"]).startswith(str(os.path.dirname(self.seen["logs_dir"]))),
             "asciinema": [tmux["local_asciinema_recording_path"], tmux["remote_asciinema_recording_path"]],
+            "trajectory": trajectory_text,
         }
         with open(os.environ["FAKE_HARBOR_RECORD"], "w") as handle:
             json.dump(record, handle)
@@ -355,7 +362,7 @@ def test_pinned_check_accepts_only_the_exact_harbor_version(tmp_path: Path, repo
 
 
 def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_path: Path) -> None:
-    """Against a fake Harbor, the runner wires the gateway, keeps the token out of the shell and cleans up."""
+    """Against a fake Harbor, the runner wires the gateway, keeps the token out of the shell and its files, and cleans up."""
     launch = SPEC.launch("gpt-x", _GATEWAY, reasoning_effort="xhigh")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Write out.txt.\n")
@@ -381,6 +388,11 @@ def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_pa
         "tmux_tmpdir_set": True,
         "pane_log_in_logs_parent": True,
         "asciinema": [None, None],
+        "trajectory": seen["trajectory"],
+    }
+    assert _GATEWAY.api_key not in seen["trajectory"]
+    assert json.loads(seen["trajectory"])["agent"]["extra"]["llm_kwargs"] == {
+        "extra_body": {"reasoning_effort": "xhigh"}
     }
     assert seen["logs_dir"].startswith(str(tmp_path / "tmp"))
     assert list((tmp_path / "tmp").iterdir()) == []
@@ -429,7 +441,7 @@ def test_litellm_sends_the_extra_body_effort_unchanged_with_drop_params(model: s
 
 
 def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
-    """A run timeout or budget stop sends SIGTERM; the runner still kills tmux and removes its temp folder."""
+    """A budget or tool-cap stop sends SIGTERM; the runner still kills tmux and removes its temp folder."""
     launch = SPEC.launch("m", _GATEWAY)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Fix it.\n")
@@ -445,12 +457,18 @@ def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
     }
     proc = _start_runner(tmp_path, launch.files, **env)
     deadline = time.monotonic() + 20
-    while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert ready.exists(), proc.communicate(timeout=5)[1]
-
-    proc.send_signal(signal.SIGTERM)
-    _, stderr = proc.communicate(timeout=20)
+    try:
+        while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not ready.exists():
+            proc.kill()
+            pytest.fail(proc.communicate(timeout=5)[1])
+        proc.send_signal(signal.SIGTERM)
+        _, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
     assert proc.returncode == 128 + signal.SIGTERM, stderr
     assert "kill-server" in tmux_log.read_text()

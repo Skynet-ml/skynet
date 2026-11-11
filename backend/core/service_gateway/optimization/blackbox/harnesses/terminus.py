@@ -148,9 +148,14 @@ class SkynetTerminus(Terminus2):
     \"\"\"Terminus 2 with its pane log in the run's temp folder instead of Harbor's ``/logs`` mount.\"\"\"
 
     def __init__(self, *args, pane_log, **kwargs):
-        \"\"\"Keep the pane log path for ``setup``.\"\"\"
+        \"\"\"Keep the pane log path for ``setup`` and drop the gateway token from the options.\"\"\"
         super().__init__(*args, **kwargs)
         self._pane_log = pane_log
+        # The LLM client already holds its own copy of the key. Harbor 0.25.0
+        # writes ``options.llm_kwargs`` into every trajectory file in
+        # ``logs_dir``, which the model's shell (same user) can read.
+        kept = {{k: v for k, v in (self.options.llm_kwargs or {{}}).items() if k != "api_key"}}
+        self.options.llm_kwargs = kept or None
 
     async def setup(self, environment):
         \"\"\"Start the tmux session as Harbor's ``setup`` does, minus the asciinema recording.\"\"\"
@@ -179,6 +184,8 @@ def _answer(chat):
 
 def _stop(signum, frame):
     \"\"\"Turn SIGTERM into ``SystemExit`` so the ``finally`` blocks kill tmux and remove the temp folder.\"\"\"
+    # A second SIGTERM must not interrupt the cleanup.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     raise SystemExit(128 + signum)
 
 
@@ -236,11 +243,15 @@ def main():
     # Harbor's own loggers set DEBUG on themselves; the log goes to stderr only.
     logging.getLogger("harbor").setLevel(logging.ERROR)
     logging.getLogger("harbor.utils.logger").setLevel(logging.ERROR)
-    # A run timeout or a budget stop ends the runner with SIGTERM, whose
-    # default action skips every ``finally``.
+    # A budget or tool-cap stop ends the runner with SIGTERM, whose default
+    # action skips every ``finally``.
     signal.signal(signal.SIGTERM, _stop)
+    # A SIGTERM that lands between ``mkdtemp`` and ``try`` waits until the
+    # ``try`` is in place, so the folder is still removed.
+    signal.pthread_sigmask(signal.SIG_BLOCK, {{signal.SIGTERM}})
     scratch = Path(tempfile.mkdtemp(prefix="terminus-"))
     try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {{signal.SIGTERM}})
         asyncio.run(_run(scratch))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
