@@ -203,10 +203,19 @@ RUN umask 0002; \
         && "$PY" -c "from tree_sitter_languages import get_parser; get_parser('python')"
 
 # SWE-agent 1.1.0 hard-codes /root for its tools (/root/tools), its state
-# (/root/state.json, /root/.swe-agent-env) and its patch copy (/root/model.patch).
-# Runs use UID 1001 with GID 0, so /root goes to that user and group. Only the
-# parent's fixed setup commands run as root, and they read no /root dotfiles.
-RUN chown 1001:0 /root && chmod 0770 /root
+# (/root/state.json, /root/.swe-agent-env) and its patch copy (/root/model.patch),
+# and no setting moves them. /root stays root-owned, so UID 1001 cannot plant
+# dotfiles that a root command reads. Root-owned links send only those four
+# paths to /opt/swe-agent-root, which UID 1001 and GID 0 own. Mode 0711 lets
+# UID 1001 follow the links and read the stock /root/.bashrc that SWE-agent
+# sources, but not list or create entries in /root. The build leaves
+# group-writable caches in /root (umask 0002), so go-w closes them first.
+RUN install -d -o 1001 -g 0 -m 0770 /opt/swe-agent-root /opt/swe-agent-root/tools \
+    && chmod -R go-w /root \
+    && chmod 0711 /root \
+    && for P in tools state.json model.patch .swe-agent-env; do \
+        ln -s "/opt/swe-agent-root/$P" "/root/$P" || exit 1; \
+    done
 
 ARG GIT_SHA=unknown
 
