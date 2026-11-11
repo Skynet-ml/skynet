@@ -15,10 +15,12 @@ import json
 import pickle
 import runpy
 import zipfile
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pyarrow.feather as feather
 import pyarrow.parquet as pq
@@ -29,11 +31,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import create_engine, select
+from sqlalchemy import Engine, create_engine, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ...config import settings
+from ...billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
+from ...config import app_env, settings
 from ...storage.models import (
     ApiTokenModel,
     Base,
@@ -50,7 +53,7 @@ from ...storage.models import (
     UserModel,
     WalletLedgerModel,
 )
-from ..account_data_service import _anonymized_username
+from ..account_data_service import _anonymized_username, delete_account
 from ..account_export_formats import EXPORT_FORMATS
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -62,6 +65,7 @@ _AUTH_HEADER = {"X-Internal-Auth": _SECRET}
 _EMAIL = "owner@example.com"
 _PASSWORD = "correct horse battery"
 _OTHER = "bystander@example.com"
+_PG_URL = app_env("APP_BUDGET_TEST_DB_URL")
 
 
 def _seed_user_data(engine: Any, username: str, stripe_id: str) -> None:
@@ -250,7 +254,7 @@ def test_delete_purges_owned_data_and_anonymizes_records(harness: SimpleNamespac
         assert session.get(ApiTokenModel, _EMAIL) is None
         assert session.get(NotificationPreferenceModel, _EMAIL) is None
 
-        tombstone = _anonymized_username(_EMAIL)
+        tombstone = _wallet_tombstone(session)
         ledger = session.scalars(select(WalletLedgerModel).where(WalletLedgerModel.username == tombstone)).all()
         assert len(ledger) == 1
         assert not session.scalars(select(WalletLedgerModel).where(WalletLedgerModel.username == _EMAIL)).all()
@@ -367,6 +371,22 @@ def test_delete_removes_channels_and_connectors(harness: SimpleNamespace) -> Non
             assert _OTHER in owners
 
 
+def _wallet_tombstone(session: Session) -> str:
+    """Return the tombstone name of the primary account's one closed wallet.
+
+    Args:
+        session: Open session on the harness engine.
+
+    Returns:
+        The closed wallet's ``deleted-user-<hash>-<random>`` username.
+    """
+    return session.scalars(
+        select(BillingCustomerModel.username).where(
+            BillingCustomerModel.username.startswith(f"{_anonymized_username(_EMAIL)}-")
+        )
+    ).one()
+
+
 def _open_wallets(engine: Any) -> None:
     """Give both seeded wallets a spendable balance and an unspent free grant.
 
@@ -385,9 +405,9 @@ def test_delete_closes_the_wallet_and_records_the_forfeited_balance(harness: Sim
     _open_wallets(harness.engine)
     assert harness.client.post("/account/delete", json={"password": _PASSWORD}).status_code == 200
 
-    tombstone = _anonymized_username(_EMAIL)
     with Session(harness.engine) as session:
         assert session.get(BillingCustomerModel, _EMAIL) is None
+        tombstone = _wallet_tombstone(session)
         wallet = session.get(BillingCustomerModel, tombstone)
         assert (wallet.balance_cents, wallet.grant_remaining) == (0, 0)
         assert wallet.stripe_customer_id == "cus_owner"
@@ -431,3 +451,113 @@ def test_migration_closes_wallets_deleted_before_the_fix(harness: SimpleNamespac
         other = session.get(BillingCustomerModel, _OTHER)
         assert (other.balance_cents, other.grant_remaining) == (200, 300)
         assert session.get(BillingCustomerModel, "deleted-user-look@example.com").balance_cents == 50
+
+
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param(
+            "postgresql",
+            marks=pytest.mark.skipif(
+                not _PG_URL or not _PG_URL.startswith("postgresql"),
+                reason="Set APP_BUDGET_TEST_DB_URL to an explicitly disposable PostgreSQL database.",
+            ),
+        ),
+    ]
+)
+def full_schema_engine(request: pytest.FixtureRequest) -> Iterator[Engine]:
+    """Yield SQLite, and PostgreSQL when supplied, with the full ORM schema.
+
+    The PostgreSQL engine works in its own schema, which it drops at the end.
+
+    Args:
+        request: Selects the database dialect.
+
+    Yields:
+        Engine holding every table that account deletion touches.
+    """
+    if request.param == "sqlite":
+        engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        Base.metadata.create_all(engine)
+        yield engine
+        engine.dispose()
+        return
+    schema = f"account_delete_test_{uuid4().hex}"
+    admin = create_engine(_PG_URL)
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_engine(_PG_URL, connect_args={"options": f"-csearch_path={schema},public"})
+    try:
+        Base.metadata.create_all(engine)
+        yield engine
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+def _sign_up_with_local_wallet(engine: Engine, balance_cents: int) -> None:
+    """Create the user row, and the wallet and grant row that a first local credit writes.
+
+    Args:
+        engine: Engine holding the full schema.
+        balance_cents: Spendable balance of the new wallet.
+    """
+    with Session(engine) as session:
+        session.add(UserModel(email=_EMAIL, name="Owner", password_hash="x"))
+        session.add(
+            BillingCustomerModel(
+                username=_EMAIL, stripe_customer_id=local_customer_id(_EMAIL), balance_cents=balance_cents
+            )
+        )
+        session.add(WalletLedgerModel(username=_EMAIL, delta_cents=balance_cents, kind="grant", description="g"))
+        session.commit()
+
+
+def _delete(engine: Engine) -> None:
+    """Delete the account in one committed transaction.
+
+    Args:
+        engine: Engine holding the full schema.
+    """
+    with Session(engine) as session:
+        delete_account(session, _EMAIL)
+        session.commit()
+
+
+def test_repeat_deletion_of_one_email_keeps_each_closed_wallet(full_schema_engine: Engine) -> None:
+    """Delete, sign up again and delete again: each deletion keeps its own closed wallet (SKY-602)."""
+    _sign_up_with_local_wallet(full_schema_engine, 200)
+    _delete(full_schema_engine)
+    _sign_up_with_local_wallet(full_schema_engine, 70)
+    _delete(full_schema_engine)
+
+    with Session(full_schema_engine) as session:
+        assert session.get(BillingCustomerModel, _EMAIL) is None
+        wallets = session.scalars(select(BillingCustomerModel)).all()
+        assert len(wallets) == 2
+        for wallet in wallets:
+            assert wallet.username.startswith(_anonymized_username(_EMAIL))
+            assert "@" not in wallet.username
+            assert (wallet.balance_cents, wallet.grant_remaining) == (0, 0)
+            assert wallet.stripe_customer_id.startswith(LOCAL_CUSTOMER_PREFIX)
+            assert wallet.stripe_customer_id != local_customer_id(_EMAIL)
+            # Each closed wallet keeps its own audit trail: its grant and its closure.
+            ledger = session.scalars(
+                select(WalletLedgerModel.delta_cents).where(WalletLedgerModel.username == wallet.username)
+            ).all()
+            assert sorted(ledger) in ([-200, 200], [-70, 70])
+        assert len({wallet.username for wallet in wallets}) == 2
+
+
+def test_deletion_keeps_a_real_stripe_customer_id(full_schema_engine: Engine) -> None:
+    """A closed wallet keeps its real Stripe customer id, so a later webhook still finds it."""
+    with Session(full_schema_engine) as session:
+        session.add(BillingCustomerModel(username=_EMAIL, stripe_customer_id="cus_real"))
+        session.commit()
+    _delete(full_schema_engine)
+    with Session(full_schema_engine) as session:
+        wallet = session.scalars(select(BillingCustomerModel)).one()
+        assert wallet.stripe_customer_id == "cus_real"
+        assert wallet.username.startswith(_anonymized_username(_EMAIL))
