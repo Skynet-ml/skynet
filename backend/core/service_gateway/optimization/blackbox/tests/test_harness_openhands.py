@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import stat
@@ -280,7 +281,10 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.env["AGENT_ENABLE_MCP"] == "false"
     assert launch.env["AGENT_ENABLE_BROWSING"] == "false"
     assert launch.env["ENABLE_BROWSER"] == "false"
+    assert launch.env["LLM_NATIVE_TOOL_CALLING"] == "true"
+    assert launch.env["LOG_ALL_EVENTS"] == "true"
     assert "LLM_REASONING_EFFORT" not in launch.env
+    assert "LLM_COMPLETION_KWARGS" not in launch.env
     assert not set(_PROVIDER_KEYS) & set(launch.env)
     assert launch.parse_output is parse_plain_output
 
@@ -290,9 +294,21 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     [(None, None), ("minimal", "low"), ("medium", "medium"), ("xhigh", "high"), ("max", "high"), ("turbo", None)],
 )
 def test_reasoning_effort_maps_to_the_litellm_level(effort: str | None, level: str | None) -> None:
-    """Pass the user's effort as ``LLM_REASONING_EFFORT``, or nothing for the model default."""
+    """Force the user's effort through ``LLM_COMPLETION_KWARGS``, or set nothing for the model default.
+
+    OpenHands drops ``LLM_REASONING_EFFORT`` for models outside its own list,
+    so the launch must not rely on it.
+    """
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
-    assert launch.env.get("LLM_REASONING_EFFORT") == level
+    assert "LLM_REASONING_EFFORT" not in launch.env
+    if level is None:
+        assert "LLM_COMPLETION_KWARGS" not in launch.env
+    else:
+        assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == {
+            "reasoning_effort": level,
+            "temperature": None,
+            "top_p": None,
+        }
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:

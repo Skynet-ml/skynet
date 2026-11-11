@@ -55,6 +55,10 @@ _LOCAL_BIN = '"$HOME/.local/bin"'
 _WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
 # LiteLLM's ``reasoning_effort`` takes only low, medium and high here; other
 # Skynet effort names map to the closest one, and unknown names set nothing.
+# OpenHands 1.6.0 sends ``LLM_REASONING_EFFORT`` only for model names in its
+# own reasoning list, which misses models such as ``claude-opus-5.5`` and
+# ``gpt-6``. Its ``completion_kwargs`` reach every LiteLLM call, so the
+# effort goes there.
 _REASONING_LEVELS = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 # LiteLLM reads these keys for its other providers. A protected run blanks
 # them, so an inherited key never gives OpenHands a route around the gateway.
@@ -110,7 +114,11 @@ def _openhands_install() -> str:
 
 
 def _openhands_reasoning(reasoning_effort: str | None) -> dict[str, str]:
-    """Return the ``LLM_REASONING_EFFORT`` setting for the user's effort, or nothing for the model default.
+    """Return the ``LLM_COMPLETION_KWARGS`` setting for the user's effort, or nothing for the model default.
+
+    OpenHands parses the value with ``ast.literal_eval``. It also unsets
+    ``temperature`` and ``top_p``, as OpenHands does for the models it sends
+    an effort to, because reasoning models reject them.
 
     Args:
         reasoning_effort: The user's effort for the model, or ``None``.
@@ -119,7 +127,9 @@ def _openhands_reasoning(reasoning_effort: str | None) -> dict[str, str]:
         The env entry, or an empty dict.
     """
     level = _REASONING_LEVELS.get(reasoning_effort or "")
-    return {"LLM_REASONING_EFFORT": level} if level else {}
+    if not level:
+        return {}
+    return {"LLM_COMPLETION_KWARGS": repr({"reasoning_effort": level, "temperature": None, "top_p": None})}
 
 
 def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
@@ -136,8 +146,9 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     status.
 
     The task file holds the workspace ``AGENTS.md``, when there is one, then
-    the prompt. OpenHands writes its log, with the agent's messages, to
-    stderr, so the run merges it into stdout for the bridge, as Harbor does.
+    the prompt. OpenHands writes its log to stderr, so the run merges it into
+    stdout for the bridge, as Harbor does. ``LOG_ALL_EVENTS`` puts the
+    agent's actions, with the final finish message, into that log.
     A failed OpenHands exit status stays. After a clean exit, the run exits 1
     unless the agent's final state is ``finished``: an error, a stop, or the
     500-iteration default limit fails the run instead of scoring the log as
@@ -190,6 +201,14 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
             # The default MCP setup adds OpenHands' own MCP server and tools,
             # which the harness does not configure or route.
             "AGENT_ENABLE_MCP": "false",
+            # OpenHands 1.6.0 turns native tool calling on only for model
+            # names in its own list, which misses models such as
+            # ``claude-opus-5.5`` and ``gpt-6``. The fallback prompts the
+            # model to write tool calls as text.
+            "LLM_NATIVE_TOOL_CALLING": "true",
+            # Without it, OpenHands logs actions at debug level, so the log
+            # the bridge returns has no agent message or final answer.
+            "LOG_ALL_EVENTS": "true",
             **_openhands_reasoning(reasoning_effort),
         }
     )
