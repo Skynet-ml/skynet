@@ -28,8 +28,9 @@ _LABELS = {"vercel": "Vercel Sandbox", "docker": "Local Docker"}
 
 
 # These providers run an egress proxy whose request log each box writes into
-# the run record. Vercel enforces the allowlist at its edge and exposes no log.
-_EGRESS_RECORDING_PROVIDERS = frozenset({"docker", "podman"})
+# the run record. Vercel enforces the allowlist at its edge; its box runs the
+# proxy in record-only mode, so its record is cooperative (SKY-634).
+_EGRESS_RECORDING_PROVIDERS = frozenset({"docker", "podman", "vercel"})
 
 
 class ProtectedBridgeRuntime(AsyncBridgeRuntime):
@@ -163,8 +164,8 @@ def protected_runtime(
         settings: Trusted deployment configuration.
         image: The immutable image of every box.
         budget: The run's budget runtime.
-        recorder: The run's call recorder. Docker and Podman boxes write
-            each egress proxy request into it (SKY-634).
+        recorder: The run's call recorder. Docker, Podman and Vercel boxes
+            write each egress proxy request into it (SKY-634).
         provider: The run's chosen provider; the deployment default when None.
 
     Returns:

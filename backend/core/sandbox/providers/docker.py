@@ -33,12 +33,12 @@ import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
+from ..egress_record import LOG_LINES, PROXY_SOURCE, READY_MARKER, box_secrets, record_calls
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxInfraError
 from ..resources import ResourceMode, SandboxSpec
@@ -69,11 +69,7 @@ SANDBOX_LABELS: Mapping[str, str] = {"skynet": "blackbox"}
 ROLE_LABEL = "skynet.role"
 EGRESS_ROLE = "egress"
 
-READY_MARKER = "skynet-egress-proxy-ready"
-CALL_EVENT = "skynet-egress-call"
-_EGRESS_PROXY_SOURCE = (
-    Path(__file__).resolve().parents[2] / "service_gateway/optimization/blackbox/docker_egress_proxy.py"
-).read_text(encoding="utf-8")
+_EGRESS_PROXY_SOURCE = PROXY_SOURCE
 
 _TMPFS_MOUNTS = (
     f"{WORKSPACE_DIR}:rw,exec,nosuid,mode=1777,size=4g",
@@ -150,9 +146,6 @@ _EGRESS_USER = "65534:65534"
 _IDLE_NETWORK_MIN_AGE_SECONDS = 300
 _NAME_UNSAFE = re.compile(r"[^a-z0-9-]+")
 _NAME_STEM_CHARS = 40
-# Shorter env values (ports, flags, "1") are not secrets, and masking them would
-# mangle the byte counts; the job log scrubber uses the same floor.
-_SECRET_MIN_CHARS = 8
 
 
 @dataclass(frozen=True)
@@ -278,56 +271,6 @@ async def _remove(docker_bin: str, args: Sequence[str], missing: bytes) -> None:
         return
     if result.returncode != 0 and missing not in result.stderr:
         logger.warning("Could not remove the Docker sandbox object %s: %s", args[-1], result.error_line)
-
-
-def _proxy_calls(log: bytes) -> list[dict]:
-    """Parse the request lines of an egress proxy log, in start order.
-
-    Args:
-        log: The proxy's output.
-
-    Returns:
-        One dict for each request line; the ready marker and other lines are skipped.
-    """
-    calls: list[dict] = []
-    for line in log.decode("utf-8", errors="replace").splitlines():
-        try:
-            call = json.loads(line)
-            if not isinstance(call, dict) or call.get("event") != CALL_EVENT:
-                continue
-            call["started_at"] = datetime.fromisoformat(call["started_at"])
-            call["duration_ms"] = int(call["duration_ms"])
-        except (ValueError, TypeError, KeyError):
-            continue
-        calls.append(call)
-    # The proxy prints a line when a tunnel ends, so a long tunnel comes after
-    # shorter ones that started later.
-    return sorted(calls, key=lambda call: call["started_at"])
-
-
-def _record_proxy_calls(recorder: CallRecorder, calls: Sequence[dict], secrets: Sequence[str]) -> None:
-    """Write each proxy request into the run record as one ``egress`` call.
-
-    The proxy sees only the host and port inside the TLS tunnel, so a record
-    keeps the byte counts and the proxy's answer code, never a body.
-
-    Args:
-        recorder: The run's call recorder.
-        calls: The parsed request lines.
-        secrets: Values the box can see; the store masks them in each record.
-    """
-    for call in calls:
-        recorder.record(
-            replace(recorder.start(), at=call["started_at"]),
-            kind="egress",
-            target=str(call.get("host") or ""),
-            status=str(call.get("status") or "failed"),
-            request=json.dumps({"port": call.get("port"), "bytes_sent": call.get("bytes_sent")}),
-            response=json.dumps({"code": call.get("code"), "bytes_received": call.get("bytes_received")}),
-            failure_reason=call.get("reason") or None,
-            secrets=secrets,
-            duration_ms=call["duration_ms"],
-        )
 
 
 def _label_args(labels: Mapping[str, str]) -> list[str]:
@@ -470,6 +413,7 @@ class DockerEnvironment(SandboxEnvironment):
         self._name: str | None = None
         self._egress: _Egress | None = None
         self._egress_up = False
+        self._egress_rows = 0
         self._stopped = False
         self._started_at = 0.0
         owner = spec.tags.get(JOB_TAG)
@@ -1047,21 +991,24 @@ class DockerEnvironment(SandboxEnvironment):
 
         ``--rm`` deletes the proxy's log with the proxy, so this runs before
         each removal. A proxy that exited on its own leaves no log to read.
+        The read takes only the end of the log, and the rows count against the
+        box and run caps of ``egress_record``.
         """
         if self._recorder is None or not self._egress_up:
             return
         egress = self._require_egress()
         try:
-            logs = await _docker(self._docker_bin, ["logs", egress.proxy])
+            logs = await _docker(self._docker_bin, ["logs", "--tail", str(LOG_LINES), egress.proxy])
         except SandboxInfraError as error:
             logger.warning("Could not read the egress requests of %s: %s", egress.proxy, error)
             return
         if logs.returncode != 0:
             logger.warning("Could not read the egress requests of %s: %s", egress.proxy, logs.error_line)
             return
-        secrets = [value for value in self.spec.env.values() if len(value) >= _SECRET_MIN_CHARS]
         # Each record is a synchronous database write, so it runs off the event loop.
-        await asyncio.to_thread(_record_proxy_calls, self._recorder, _proxy_calls(logs.stdout), secrets)
+        self._egress_rows += await asyncio.to_thread(
+            record_calls, self._recorder, logs.stdout, box_secrets(self.spec.env), box_rows=self._egress_rows
+        )
 
     async def _drop_egress(self) -> None:
         """Record the proxy's requests, then remove the proxy and the network. Never raises an Exception."""

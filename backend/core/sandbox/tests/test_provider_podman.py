@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from core.sandbox import egress_record
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError
@@ -547,7 +548,7 @@ async def test_stop_records_each_proxy_request(fake_podman: _FakePodman) -> None
     """Write one egress row for each Podman proxy request before the proxy goes away (SKY-634)."""
     line = json.dumps(
         {
-            "event": docker_provider.CALL_EVENT,
+            "event": egress_record.CALL_EVENT,
             "host": "pypi.org",
             "port": 443,
             "status": "ok",

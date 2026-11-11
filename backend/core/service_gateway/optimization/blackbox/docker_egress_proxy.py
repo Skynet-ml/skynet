@@ -12,20 +12,29 @@ loopback and link-local range. The proxy connects to the address it checked,
 so a second DNS answer cannot swap in a private one.
 
 Each request prints one JSON line to stdout (``event`` is ``CALL_EVENT``) with
-the host, port, outcome, byte counts, start time and duration, so the parent can
-write the call into the run record (E28). The proxy sees only TLS bytes, so a
-line never holds a body, a header or a path.
+the host, port, outcome, byte counts, start time, duration and a line number
+(``seq``), so the parent can write the call into the run record (E28). The
+parent reads only the end of the log; ``seq`` tells it how many lines came
+before. The proxy sees only TLS bytes, so a line never holds a body, a header
+or a path.
+
+With ``*`` as the host list the proxy runs in record-only mode inside a Vercel
+box: it tunnels any ``CONNECT`` target and checks nothing, because the Vercel
+edge enforces the allowlist on every connection the box makes. The proxy can
+reach only what the box itself can reach, so this mode never widens the
+allowlist. Code that ignores ``HTTPS_PROXY`` goes around it unrecorded.
 
 The sidecar runs this file with the image's own Python, so it must use the
 standard library only. It is also importable for unit tests.
 
-Usage: ``python3 -I -c <this file> <port> <lifetime seconds> <host> [<host> ...]``
+Usage: ``python3 -I -c <this file> <port> <lifetime seconds> <host> [<host> ...]``, or ``*`` for the hosts.
 """
 
 from __future__ import annotations
 
 import contextlib
 import ipaddress
+import itertools
 import json
 import os
 import socket
@@ -35,7 +44,9 @@ import time
 
 READY_MARKER = "skynet-egress-proxy-ready"
 CALL_EVENT = "skynet-egress-call"
+RECORD_ONLY = "*"
 _PRINT_LOCK = threading.Lock()
+_SEQ = itertools.count(1)
 _ALLOWED_PORT = 443
 _HEAD_LIMIT = 8192
 _HANDSHAKE_SECONDS = 30.0
@@ -43,6 +54,9 @@ _CONNECT_SECONDS = 10.0
 _IDLE_SECONDS = 300.0
 # Each tunnel takes two threads; the sidecar runs under --pids-limit 256.
 MAX_CLIENTS = 64
+# In a Vercel box the proxy is not a sidecar with a pid limit, and a lower cap
+# would break code whose connections the edge allows.
+RECORD_ONLY_MAX_CLIENTS = 512
 _FORBIDDEN = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 _BAD_GATEWAY = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
@@ -68,12 +82,14 @@ def parse_connect(head: bytes) -> tuple[str, int] | None:
     return host.rstrip(".").lower(), int(port)
 
 
-def public_addresses(host: str, port: int) -> list[tuple[int, tuple]] | None:
+def public_addresses(host: str, port: int, *, public_only: bool = True) -> list[tuple[int, tuple]] | None:
     """Resolve ``host`` and keep the answer only when every address is public.
 
     Args:
         host: The allowlisted host name.
         port: The destination port.
+        public_only: Refuse an answer with a non-global address. Record-only
+            mode turns it off: the box reaches those addresses without the proxy.
 
     Returns:
         ``(family, sockaddr)`` pairs to connect to, or ``None`` when the name
@@ -85,7 +101,7 @@ def public_addresses(host: str, port: int) -> list[tuple[int, tuple]] | None:
         return None
     addresses = []
     for family, _, _, _, sockaddr in infos:
-        if not ipaddress.ip_address(sockaddr[0].split("%")[0]).is_global:
+        if public_only and not ipaddress.ip_address(sockaddr[0].split("%")[0]).is_global:
             return None
         addresses.append((family, sockaddr))
     return addresses or None
@@ -154,9 +170,8 @@ def log_call(call: dict) -> None:
     Args:
         call: The request's host, port, outcome, byte counts and timing.
     """
-    line = json.dumps({"event": CALL_EVENT, **call}, sort_keys=True)
     with _PRINT_LOCK, contextlib.suppress(OSError, ValueError):
-        print(line, flush=True)
+        print(json.dumps({"event": CALL_EVENT, "seq": next(_SEQ), **call}, sort_keys=True), flush=True)
 
 
 def _open_upstream(addresses: list[tuple[int, tuple]]) -> socket.socket | None:
@@ -181,12 +196,12 @@ def _open_upstream(addresses: list[tuple[int, tuple]]) -> socket.socket | None:
     return None
 
 
-def handle(client: socket.socket, allowed: frozenset[str]) -> None:
+def handle(client: socket.socket, allowed: frozenset[str] | None) -> None:
     """Serve one client connection: refuse it, or tunnel it to its checked target.
 
     Args:
         client: The accepted connection.
-        allowed: Exact allowlisted host names.
+        allowed: Exact allowlisted host names, or ``None`` in record-only mode.
     """
     # The box image's own python3 runs this file, so no datetime.UTC (Python 3.11+).
     wall = time.time()
@@ -206,7 +221,10 @@ def handle(client: socket.socket, allowed: frozenset[str]) -> None:
             # Only the host and port go in the log: a refused plain-HTTP line could carry a path or query.
             call = {"host": target[0] if target else None, "port": target[1] if target else None}
             call.update(status="refused", code=403, reason="host or port is not allowed")
-            addresses = public_addresses(*target) if target_allowed(target, allowed) else None
+            if allowed is None:
+                addresses = public_addresses(*target, public_only=False) if target else None
+            else:
+                addresses = public_addresses(*target) if target_allowed(target, allowed) else None
             if addresses is None:
                 client.sendall(_FORBIDDEN)
                 return
@@ -246,12 +264,12 @@ def handle(client: socket.socket, allowed: frozenset[str]) -> None:
                 )
 
 
-def _handle_slot(client: socket.socket, allowed: frozenset[str], slots: threading.BoundedSemaphore) -> None:
+def _handle_slot(client: socket.socket, allowed: frozenset[str] | None, slots: threading.BoundedSemaphore) -> None:
     """Serve one client, then free its slot.
 
     Args:
         client: The accepted connection.
-        allowed: Exact allowlisted host names.
+        allowed: Exact allowlisted host names, or ``None`` in record-only mode.
         slots: The semaphore that caps concurrent clients.
     """
     try:
@@ -260,7 +278,7 @@ def _handle_slot(client: socket.socket, allowed: frozenset[str], slots: threadin
         slots.release()
 
 
-def serve(listener: socket.socket, allowed: frozenset[str], max_clients: int = MAX_CLIENTS) -> None:
+def serve(listener: socket.socket, allowed: frozenset[str] | None, max_clients: int = MAX_CLIENTS) -> None:
     """Accept connections, one thread each, until the listener closes.
 
     A listener that fails stops the proxy, which leaves the box with no way
@@ -269,7 +287,7 @@ def serve(listener: socket.socket, allowed: frozenset[str], max_clients: int = M
 
     Args:
         listener: A bound, listening socket.
-        allowed: Exact allowlisted host names.
+        allowed: Exact allowlisted host names, or ``None`` in record-only mode.
         max_clients: Most clients served at the same time.
     """
     slots = threading.BoundedSemaphore(max_clients)
@@ -292,16 +310,18 @@ def main(argv: list[str]) -> None:
     """Listen on every interface of the sidecar and exit when the box's lifetime ends.
 
     Args:
-        argv: ``<port> <lifetime seconds> <host> [<host> ...]``.
+        argv: ``<port> <lifetime seconds> <host> [<host> ...]``, or ``*`` as
+            the only host for record-only mode.
     """
     port, lifetime, *hosts = argv
-    allowed = frozenset(host.rstrip(".").lower() for host in hosts)
+    record_only = hosts == [RECORD_ONLY]
+    allowed = None if record_only else frozenset(host.rstrip(".").lower() for host in hosts)
     listener = socket.create_server(("0.0.0.0", int(port)), backlog=128)
     timer = threading.Timer(float(lifetime), os._exit, args=(0,))
     timer.daemon = True
     timer.start()
     print(READY_MARKER, flush=True)
-    serve(listener, allowed)
+    serve(listener, allowed, RECORD_ONLY_MAX_CLIENTS if record_only else MAX_CLIENTS)
 
 
 if __name__ == "__main__":

@@ -330,3 +330,56 @@ def test_handle_logs_a_bad_gateway_as_failed(monkeypatch: pytest.MonkeyPatch) ->
         proxy.handle(theirs, frozenset({"pypi.org"}))
     [line] = logged
     assert (line["status"], line["code"], line["reason"]) == ("failed", 502, "no checked address answered")
+
+
+def test_log_call_numbers_each_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """Number the request lines, so a reader of the log end knows how many came before it."""
+    proxy.log_call({"host": "a.example.com"})
+    proxy.log_call({"host": "b.example.com"})
+    first, second = (json.loads(line) for line in capsys.readouterr().out.splitlines())
+    assert second["seq"] == first["seq"] + 1
+
+
+def test_record_only_mode_tunnels_any_connect_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tunnel any host and port with no allowlist, because the Vercel edge enforces it."""
+    upstream = socket.create_server(("127.0.0.1", 0))
+    logged: list[dict] = []
+    monkeypatch.setattr(proxy, "log_call", logged.append)
+
+    def answer() -> None:
+        """Answer the tunnel with two bytes, then close it."""
+        connection, _ = upstream.accept()
+        with connection:
+            connection.sendall(b"ok")
+
+    threading.Thread(target=answer, daemon=True).start()
+    port = upstream.getsockname()[1]
+    ours, theirs = socket.socketpair()
+    with upstream, ours:
+        ours.sendall(f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n".encode())
+        proxy.handle(theirs, None)
+    [line] = logged
+    assert (line["host"], line["port"], line["status"], line["bytes_received"]) == ("127.0.0.1", port, "ok", 2)
+
+
+def test_record_only_mode_still_refuses_a_non_connect_request(capsys: pytest.CaptureFixture[str]) -> None:
+    """Refuse a plain-HTTP request in record-only mode; the proxy reads no path."""
+    ours, theirs = socket.socketpair()
+    with ours:
+        ours.sendall(b"GET http://pypi.org/ HTTP/1.1\r\n\r\n")
+        proxy.handle(theirs, None)
+        assert ours.recv(1024).startswith(b"HTTP/1.1 403 ")
+    [line] = (json.loads(line) for line in capsys.readouterr().out.splitlines())
+    assert (line["host"], line["status"]) == (None, "refused")
+
+
+def test_main_reads_a_star_as_record_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve with no allowlist and a larger client cap when the host list is ``*``."""
+    served: list[tuple] = []
+    monkeypatch.setattr(proxy, "serve", lambda listener, allowed, max_clients: served.append((allowed, max_clients)))
+    monkeypatch.setattr(proxy.socket, "create_server", lambda *args, **kwargs: None)
+    idle_timer = threading.Timer
+    monkeypatch.setattr(proxy.threading, "Timer", lambda *args, **kwargs: idle_timer(3600, lambda: None))
+    proxy.main(["0", "1", "*"])
+    proxy.main(["0", "1", "pypi.org"])
+    assert served == [(None, proxy.RECORD_ONLY_MAX_CLIENTS), (frozenset({"pypi.org"}), proxy.MAX_CLIENTS)]

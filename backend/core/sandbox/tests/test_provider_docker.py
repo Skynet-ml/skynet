@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
+from core.sandbox import egress_record
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
@@ -408,7 +409,7 @@ _PROXY_LOG = "\n".join(
 def test_call_event_matches_the_proxy() -> None:
     """Read the same event name that the proxy prints."""
     proxy = importlib.import_module("core.service_gateway.optimization.blackbox.docker_egress_proxy")
-    assert proxy.CALL_EVENT == docker_provider.CALL_EVENT
+    assert proxy.CALL_EVENT == egress_record.CALL_EVENT
 
 
 async def test_stop_records_each_proxy_request_in_start_order(fake_docker: _FakeDocker) -> None:
@@ -433,7 +434,24 @@ async def test_stop_records_each_proxy_request_in_start_order(fake_docker: _Fake
     assert json.loads(ok["request"]) == {"port": 443, "bytes_sent": 10}
     assert json.loads(ok["response"]) == {"code": 200, "bytes_received": 20}
     proxy = f"{env.container_name}-egress"
-    assert fake_docker.calls.index(["logs", proxy], 4) < fake_docker.calls.index(["rm", "-f", proxy])
+    # The read takes only the end of the log, so a flood of requests cannot flood the worker.
+    read = ["logs", "--tail", str(egress_record.LOG_LINES), proxy]
+    assert fake_docker.calls.index(read) < fake_docker.calls.index(["rm", "-f", proxy])
+
+
+async def test_the_box_cap_spans_proxy_restarts(fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Count the rows of every proxy of one box against the box cap, then write one summary row."""
+    monkeypatch.setattr(egress_record, "BOX_ROWS", 3)
+    fake_docker.answers["logs"] = _CliResult(0, _PROXY_LOG, b"")
+    store, recorder = _run_record()
+    env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("pypi.org",)), recorder=recorder)
+    await env.start()
+    fake_docker.answers["inspect"] = _CliResult(0, json.dumps({f"{env.container_name}-net": {}}).encode(), b"")
+    await env.set_network_policy(NetworkPolicy(allowed_hosts=("b.example.com",)))
+    await env.stop()
+    calls = store.list_calls("job-1", "cand-1")
+    assert [call["status"] for call in calls] == ["refused", "ok", "refused", egress_record.TRUNCATED_STATUS]
+    assert calls[-1]["failure_reason"] == "1 further requests not recorded"
 
 
 async def test_a_proxy_restart_records_the_old_proxy_requests(fake_docker: _FakeDocker) -> None:

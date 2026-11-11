@@ -204,10 +204,11 @@ def test_async_docker_runtime_passes_the_run_recorder_to_its_boxes() -> None:
     assert runtime._options == {"docker_bin": "dk", "image": _LOCAL_IMAGE, "recorder": recorder}
 
 
-def test_async_vercel_runtime_takes_no_recorder() -> None:
-    """Pass no recorder to a provider that has no egress proxy to read."""
-    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET, recorder=object())
-    assert runtime._options == {"budget": _BUDGET}
+def test_async_vercel_runtime_passes_the_run_recorder_to_its_boxes() -> None:
+    """Give each Vercel box the run's recorder for its in-box egress proxy (SKY-634)."""
+    recorder = object()
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET, recorder=recorder)
+    assert runtime._options == {"budget": _BUDGET, "recorder": recorder}
 
 
 @pytest.mark.parametrize(
