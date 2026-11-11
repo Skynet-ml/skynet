@@ -21,7 +21,16 @@ from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_OPENHANDS
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
-from .base import ENV_API_KEY, ENV_MODEL, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import (
+    ENV_API_KEY,
+    ENV_MODEL,
+    ENV_PROMPT_FILE,
+    GatewayConfig,
+    HarnessLaunch,
+    _base_env,
+    _temp_root,
+    _version_check,
+)
 
 # PyPI ``openhands-ai`` 1.6.0 (MIT), 2026-03-30. It is the last release with
 # the headless ``openhands.core.main`` entry point; 1.7.0 removed it.
@@ -170,7 +179,7 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     OpenHands loads no user microagents, ``AGENTS.md`` or ``config.toml``
     from the real ``HOME``. The agent's shell also sees that ``HOME``. An
     EXIT trap removes the root when the run's shell exits and keeps the exit
-    status.
+    status, and the next run removes it when a timeout's SIGKILL skipped the trap.
 
     The task file holds the workspace ``AGENTS.md``, when there is one, then
     the prompt. OpenHands writes its log to stderr, so the run merges it into
@@ -200,8 +209,7 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         )
     run_command = (
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
-        'export OPENHANDS_ROOT="$(mktemp -d)" && '
-        "trap 'rm -rf \"$OPENHANDS_ROOT\"' EXIT && "
+        f"{_temp_root('OPENHANDS_ROOT', 'openhands')} && "
         'mkdir "$OPENHANDS_ROOT/home" "$OPENHANDS_ROOT/tmp" && '
         f"{{ if [ -f {_INSTRUCTIONS_FILE} ]; then cat {_INSTRUCTIONS_FILE}; printf '\\n\\n'; fi; "
         f'cat "${ENV_PROMPT_FILE}"; }} > "$OPENHANDS_ROOT/task.md" && '

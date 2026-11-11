@@ -5,8 +5,10 @@ from __future__ import annotations
 import ast
 import os
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,7 +42,9 @@ _RECORDED_STDOUT = (
 # ``<FILE_STORE_PATH>/sessions/<sid>/events/<id>.json``, one ``json.dumps``
 # line each. Event 10 sorts before event 2 as text, so the run must order
 # the events by id. Event 11 quotes a state event inside a message, which
-# must not count as one.
+# must not count as one. With $FAKE_KILL_SHELL set, it SIGKILLs the run's
+# shell, as the bridge does at a timeout, so the EXIT trap does not run.
+# OpenHands is not the shell's last command, so its parent is that shell.
 _FAKE_OPENHANDS = """#!/bin/sh
 log="$FAKE_LOG"
 prev=''
@@ -70,6 +74,7 @@ fi
   printf 'ROOT=%s\\n' "$OPENHANDS_ROOT"
   if [ -d "$OPENHANDS_ROOT" ]; then echo 'ROOT_DIR=yes'; else echo 'ROOT_DIR=no'; fi
 } >> "$log"
+if [ -n "$FAKE_KILL_SHELL" ]; then kill -KILL "$PPID"; exit 0; fi
 printf '%s' "$FAKE_ANSWER" >&2
 exit "${FAKE_EXIT:-0}"
 """
@@ -106,6 +111,8 @@ def _run_with_fake_openhands(
     reasoning_effort: str | None = None,
     candidate: str | dict[str, str] | None = None,
     final_state: str = "finished",
+    temp: Path | None = None,
+    kill_shell: bool = False,
 ) -> tuple[str, str, Path, int]:
     """Run the built OpenHands command in a scratch workspace against a fake ``openhands`` binary.
 
@@ -122,6 +129,8 @@ def _run_with_fake_openhands(
         final_state: The agent state of the fake's last state event, or an
             empty string for no session events. The task file the fake
             receives is copied to ``tmp_path / "task.md"``.
+        temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
+        kill_shell: Make the fake SIGKILL the run's shell after it logs.
 
     Returns:
         The command's stdout, the fake binary's call log, the
@@ -142,10 +151,14 @@ def _run_with_fake_openhands(
     fake.write_text(_FAKE_OPENHANDS)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "calls.log"
+    temp = temp or tmp_path / "tmp"
+    temp.mkdir(parents=True, exist_ok=True)
     env = {
         **launch.env,
-        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        # The venv's python3 goes on PATH so the run takes the locked, swept temp root.
+        "PATH": f"{bin_dir}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(temp),
         "LLM_BASE_URL": "https://api.openai.com/v1",
         "LLM_API_KEY": "inherited-key",
         "FAKE_LOG": str(log),
@@ -154,6 +167,8 @@ def _run_with_fake_openhands(
         "FAKE_STATE": final_state,
         "FAKE_TASK_COPY": str(tmp_path / "task.md"),
     }
+    if kill_shell:
+        env["FAKE_KILL_SHELL"] = "1"
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
     # The sandbox runs the command with bash, not /bin/sh.
@@ -431,7 +446,33 @@ def test_run_removes_the_root_and_keeps_the_exit_status_and_output(tmp_path: Pat
     assert code == fake_exit
     assert stdout == _RECORDED_STDOUT
     assert _logged(calls, "ROOT_DIR") == "yes"
-    assert not Path(_logged(calls, "ROOT")).exists()
+    root = Path(_logged(calls, "ROOT"))
+    assert root.parent == tmp_path / "tmp"
+    assert root.name.startswith("app-openhands-")
+    assert not root.exists()
+
+
+def test_next_run_removes_the_root_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the root that a SIGKILL left behind when the next run starts (SKY-613).
+
+    The bridge kills a timed-out run with SIGKILL, so the EXIT trap does not
+    run and the root stays until the next run sweeps it.
+    """
+    temp = tmp_path / "tmp"
+    (tmp_path / "killed").mkdir()
+    (tmp_path / "after").mkdir()
+    _, killed_calls, _, killed_code = _run_with_fake_openhands(
+        tmp_path / "killed", protected=False, temp=temp, kill_shell=True
+    )
+    killed_root = Path(_logged(killed_calls, "ROOT"))
+    assert killed_code == -signal.SIGKILL
+    assert killed_root.is_dir()
+
+    _, after_calls, _, after_code = _run_with_fake_openhands(tmp_path / "after", protected=False, temp=temp)
+
+    assert after_code == 0
+    assert not killed_root.exists()
+    assert not Path(_logged(after_calls, "ROOT")).exists()
 
 
 @pytest.mark.parametrize(
