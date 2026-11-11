@@ -39,6 +39,9 @@ dagger check -l                             # list the checks
 dagger check skynet-ci/backend-gates        # one check; `dagger check 'skynet-ci/*'` runs all
 ```
 
+- PRs to `staging` run no CI (SKY-570). This local gate is the PR check.
+  Run all of it that the change touches before every push, and put the
+  commands and results in the PR body.
 - CI jobs call `dagger check skynet-ci/<name>`. The module is in
   `.dagger/modules/skynet-ci/`. Add a new CI gate there, not only in `ci.yml`.
 
@@ -109,16 +112,16 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 - **Among agents, only the orchestrator merges**, in the daily window (03:00
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
-- Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
-  gates pass. UI PRs (`frontend/`) follow the same review loop. A UI PR is
-  ready for review when the `skynet-pr-workflow` section 5 conditions are
-  true. The PR stays unmerged until Gilad approves it or tells the
-  orchestrator to merge it. Gilad approves in chat, on GitHub or with
-  `Approved for merge` on the Linear issue. Other PRs wait for Gilad's
-  approval.
+- Backend PRs (`backend/**`, optional `i18n/locales/ui/*.json` and
+  `docs/**/*.md`) merge when all gates pass. UI PRs (`frontend/**`,
+  optional `backend/**`, `i18n/locales/ui/*.json` and `docs/**/*.md`) merge
+  the same way, when all gates pass. Other PRs wait for Gilad's approval.
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
-  Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
+  Steps, gates and Linear flow: the `skynet-pr-workflow` skill.
+- **CI runs only per batch and on the promotion PR** (`staging` → `main`).
+  A red batch run or a red promotion run blocks the promotion. Put its fix
+  in a new PR.
 
 ## Test accounts and environments (MANDATORY)
 

@@ -45,10 +45,16 @@ CLI_MODELS: dict[CliProvider, dict[str, str]] = {
         "anthropic/claude-sonnet-5.5": "claude-sonnet-5-5",
         "anthropic/claude-sonnet-5": "claude-sonnet-5",
         "anthropic/claude-sonnet-4.6": "claude-sonnet-4-6",
-        "anthropic/claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
         "anthropic/claude-haiku-5.5": "claude-haiku-5-5",
-        "anthropic/claude-haiku-4.5": "claude-haiku-4-5",
     },
+}
+
+# Slugs removed from CLI_MODELS. Saved prefs, stored conversations and run
+# configs may still name one; it runs on the CLI's default model instead of
+# failing with billing.subscription_unmapped_model.
+REMOVED_CLI_MODELS: dict[CliProvider, frozenset[str]] = {
+    "codex": frozenset(),
+    "claude": frozenset({"anthropic/claude-sonnet-4.5", "anthropic/claude-haiku-4.5"}),
 }
 
 _FULL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -72,8 +78,6 @@ CLI_EFFORTS: dict[CliProvider, dict[str, tuple[str, ...]]] = {
         "anthropic/claude-opus-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-sonnet-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-opus-4.5": ("low", "medium", "high"),
-        "anthropic/claude-sonnet-4.5": (),
-        "anthropic/claude-haiku-4.5": (),
     },
 }
 # The slugs that take fast mode, from the same check. Every Codex model
@@ -133,12 +137,32 @@ def parse_subscription_model_id(model_id: str) -> tuple[CliProvider, str] | None
     return cli, slug  # type: ignore[return-value]
 
 
-def cli_model_arg(cli: CliProvider, slug: str) -> str:
+def current_cli_slug(cli: CliProvider, slug: str) -> str | None:
+    """Return the slug ``cli`` runs for a stored slug, mapping a removed one to the default.
+
+    Args:
+        cli: The CLI that runs the call.
+        slug: OpenRouter catalog slug from a request or a stored config.
+
+    Returns:
+        ``slug`` when ``cli`` runs it; the CLI's default (first) model when
+        the slug was removed from ``CLI_MODELS``; ``None`` for any other slug.
+    """
+    models = CLI_MODELS.get(cli, {})
+    if slug in models:
+        return slug
+    if slug in REMOVED_CLI_MODELS.get(cli, frozenset()):
+        return next(iter(models))
+    return None
+
+
+def cli_model_arg(cli: CliProvider, slug: str, *, internal: bool = False) -> str:
     """Return the ``--model`` argument ``cli`` takes for a catalog slug.
 
     Args:
         cli: The CLI that runs the call.
         slug: OpenRouter catalog slug, such as ``anthropic/claude-sonnet-4.6``.
+        internal: Allow the fixed thinking-label model for internal side calls.
 
     Returns:
         The CLI's own model name for that slug.
@@ -149,7 +173,9 @@ def cli_model_arg(cli: CliProvider, slug: str) -> str:
     models = CLI_MODELS.get(cli)
     if models is None:
         raise ValueError(f"Unknown CLI {cli!r}")
-    try:
-        return models[slug]
-    except KeyError:
-        raise ValueError(f"{cli} has no model for {slug!r}") from None
+    if internal and cli == "claude" and slug == "anthropic/claude-haiku-4.5":
+        return "claude-haiku-4-5"
+    current = current_cli_slug(cli, slug)
+    if current is None:
+        raise ValueError(f"{cli} has no model for {slug!r}")
+    return models[current]

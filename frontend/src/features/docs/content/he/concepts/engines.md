@@ -79,7 +79,7 @@ Auto הוא ברירת המחדל לכל ריצה. הוא עובד בשני של
 
 | הגדרה                          | ברירת מחדל | טווח                                                    |
 | ------------------------------ | ---------- | ------------------------------------------------------- |
-| סוכן קוד                       | Codex      | Pi,‏ Codex,‏ OpenCode,‏ Prime Agent, פקודה מותאמת אישית |
+| סוכן קוד                       | Codex      | Pi,‏ Codex,‏ OpenCode,‏ OpenCode V2,‏ Prime Agent,‏ Aider,‏ OpenHands,‏ OpenHands SDK,‏ Antigravity SDK,‏ Goose,‏ Hermes Agent,‏ eve,‏ DeerFlow,‏ Cline,‏ Code Puppy, פקודה מותאמת אישית |
 | מועמדים לכל איטרציה            | 3          | 1 עד 8. |
 | מקסימום קריאות לכלים לכל מועמד | 100        | 1 עד 1000                                               |
 

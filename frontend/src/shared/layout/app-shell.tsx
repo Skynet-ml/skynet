@@ -18,8 +18,8 @@ import { JobsStreamProvider } from "@/shared/hooks/use-jobs-stream";
 import { PageContainer } from "@/shared/layout/page-container";
 import { MobileShell } from "@/shared/layout/mobile-shell";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
-import { BalanceChip } from "@/features/billing";
 import { NotificationBell } from "@/features/notifications";
+import { ResourceModeSwitch } from "@/shared/ui/resource-mode-switch";
 import {
   GeneralistPanel,
   GeneralistPanelProvider,
@@ -51,14 +51,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const dir = dirForLocale(locale);
   const isPhone = useIsPhone();
   const { status } = useSession();
-
-  if (pathname === "/download") {
-    return (
-      <div className="min-h-dvh" dir={dir}>
-        {children}
-      </div>
-    );
-  }
 
   // Shared-optimization pages render bare — no sidebar, agent panel, or other
   // app chrome — to keep the focus on the shared item. The recipient is still
@@ -212,10 +204,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-1.5" dir={dir}>
-          {/* The balance sits in the global chrome so what a run may cost is
-              never more than a glance away; the chip's own popover carries the
-              breakdown and the wallet path. */}
-          <BalanceChip />
+          <ResourceModeSwitch />
           <NotificationBell />
           <Button
             type="button"

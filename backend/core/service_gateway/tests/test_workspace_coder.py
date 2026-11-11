@@ -15,7 +15,7 @@ import pytest
 from core.api.errors import DomainError
 from core.config import settings
 from core.service_gateway.agents import generalist as generalist_module
-from core.service_gateway.agents import repo_browser, workspace_coder
+from core.service_gateway.agents import pi_react, repo_browser, workspace_coder
 from core.service_gateway.agents.generalist import (
     REPO_COLUMN_MAPPING,
     SCREEN_FOCUS,
@@ -30,6 +30,20 @@ from core.service_gateway.agents.generalist import (
     tools_for,
 )
 from core.service_gateway.agents.workspace_coder import CODING_AGENT_TOOL, coder_tools, open_repo
+from core.service_gateway.optimization.blackbox import repo_constraints
+
+from .test_pi_react import _simulated_pi
+
+
+@pytest.fixture(autouse=True)
+def _simulated_pi_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the agent turns on the in-process Pi stand-in, so no ``pi`` binary is needed.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
+
 
 _REPO_METRIC: dict[str, Any] = {
     "wizard_screen": "metric",
@@ -313,6 +327,7 @@ async def test_setup_agent_resumes_from_the_coding_agents_result(monkeypatch: py
                 {
                     "run_code": "ignored for a repository run",
                     "metric_code": _SCORER,
+                    "optimize_toml": "",
                     "summary": "Runs the tests and scores their time.",
                     "open_questions": ["Which test counts as the main one?"],
                 },
@@ -451,3 +466,132 @@ def test_coding_agent_reports_the_rate_limit_not_a_private_repository(monkeypatc
     assert reason == "GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit."
     assert linked_browser is None
     assert linked_reason == "GitHub's rate limit is reached. Try again later."
+
+
+def _schema_bullets() -> dict[str, str]:
+    """Split the prompt's optimize.toml schema block into its bullets.
+
+    Returns:
+        Each bullet's text by the table it starts with, such as ``[run]``; ``top`` for the top-level keys.
+    """
+    prompt = workspace_coder.CODER_PROMPT
+    block = prompt[prompt.index("Use\n  only this schema.") : prompt.index("The errors you must avoid most")]
+    bullets: dict[str, str] = {}
+    for bullet in block.split("\n  - ")[1:]:
+        text = " ".join(bullet.split())
+        name = "top" if text.startswith("Top level") else text[2 : text.index("``", 2)]
+        bullets[name] = text
+    return bullets
+
+
+def test_coder_prompt_names_every_optimize_toml_section_and_key() -> None:
+    """Each schema bullet lists the keys the parser accepts for its table (SKY-184)."""
+    bullets = _schema_bullets()
+
+    for section, keys in repo_constraints._SECTIONS.items():
+        role_keys = repo_constraints._ROLE_KEYS if section == "proposer" else set()
+        for key in keys - role_keys:
+            assert f"``{key}``" in bullets[f"[{section}]"], (section, key)
+    for key in repo_constraints._ROLE_KEYS:
+        assert f"``{key}``" in bullets["[proposer]"], key
+    for key in repo_constraints._TARGET_KEYS - repo_constraints._ROLE_KEYS:
+        assert f"``{key}``" in bullets["[target.<name>]"], key
+    assert "the role keys" in bullets["[target.<name>]"]
+    assert "``url``" in bullets["[services.<name>]"]
+    assert "``headers``" in bullets["[services.<name>]"]
+    assert "``version = 1``" in bullets["top"]
+    assert "``instructions" in bullets["top"]
+    assert len(bullets) == len(repo_constraints._SECTIONS) + len(repo_constraints._NAMED_SECTIONS) + 1
+
+
+def test_coder_prompt_example_is_a_valid_optimize_toml() -> None:
+    """The example in the prompt passes the parser, so the agent never copies a broken file (SKY-184)."""
+    constraints = repo_constraints.parse_constraints(workspace_coder.OPTIMIZE_TOML_EXAMPLE.encode())
+
+    assert workspace_coder.OPTIMIZE_TOML_EXAMPLE in workspace_coder.CODER_PROMPT
+    assert constraints.run_entry == ("pytest", "-q", "--junitxml=out.xml")
+    assert constraints.editable_paths == ("src",)
+
+
+def test_coder_prompt_quotes_the_parser_errors() -> None:
+    """The prompt names the errors the parser gives most, so the agent avoids them (SKY-184)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "is not a supported setting" in prompt
+    assert "[run] entry is missing" in prompt
+    assert "share one box" in prompt
+    assert "must be a host name such as api.example.com, not a URL" in prompt
+
+
+def _run_coder(toml_text: str, context: dict[str, Any]) -> dict[str, Any]:
+    """Run the coding agent once with a scripted answer that writes ``toml_text``.
+
+    Args:
+        toml_text: The optimize.toml the agent returns.
+        context: The run's setup.
+
+    Returns:
+        The hand-off result.
+    """
+    lm = _ScriptedLM(
+        [
+            (
+                "submit",
+                {
+                    "run_code": "",
+                    "metric_code": _SCORER,
+                    "optimize_toml": toml_text,
+                    "summary": "Runs the tests.",
+                    "open_questions": [],
+                },
+            )
+        ]
+    )
+    return workspace_coder.run_coding_agent(context, "Score the tests.", lm=lm, emit=lambda _e: None, github_token=None)
+
+
+def test_coding_agent_returns_optimize_toml_as_a_file() -> None:
+    """The agent's optimize.toml goes into the wizard_state patch, beside metric.py (SKY-184)."""
+    toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+
+    assert result["wizard_state"] == {"metric_code": _SCORER, "optimize_toml": toml_text}
+    assert "optimize_toml_error" not in result
+
+
+def test_coding_agent_reports_the_parser_error_of_its_optimize_toml() -> None:
+    """A file the parser refuses still reaches the draft, with the error and its place for the setup agent."""
+    toml_text = "[run]\ntimeout = 30\n"
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+
+    assert result["wizard_state"]["optimize_toml"] == toml_text
+    error = result["optimize_toml_error"]
+    assert (error["section"], error["key"]) == ("run", "entry")
+    assert "[run] entry is missing" in error["message"]
+
+
+def test_coding_agent_leaves_an_unchanged_optimize_toml_out_of_the_patch() -> None:
+    """The agent gets the current optimize.toml and an unchanged file is no write."""
+    toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo", "optimize_toml": toml_text})
+
+    assert "optimize_toml" in workspace_coder.CONTEXT_FIELDS
+    assert result["wizard_state"] == {"metric_code": _SCORER}
+
+
+def test_coding_agent_writes_no_optimize_toml_for_a_dspy_program() -> None:
+    """Only a repository run has an optimize.toml, so another run's file stays out of the patch."""
+    result = _run_coder(workspace_coder.OPTIMIZE_TOML_EXAMPLE, {"artifact_kind": "dspy_program"})
+
+    assert result["wizard_state"] == {"metric_code": _SCORER}
+    assert "optimize_toml_error" not in result
+
+
+def test_coder_prompt_marks_the_example_paths_as_placeholders() -> None:
+    """The agent replaces the example's paths with ones it confirmed, not docs/intent.md as is (SKY-184)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "The paths in this example, such as docs/intent.md and docs/rules.md, are placeholders" in prompt

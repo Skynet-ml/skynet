@@ -26,6 +26,36 @@ prompt that reads the log.
 - Codex, Factory, Pi and other harnesses: run `just setup` or
   `just maintain`, then follow the matching prompt file.
 
+## Agent harness binaries
+
+The backend's agents run on the Pi harness. The setup agent's GitHub tools
+come from the GitHub MCP server. The Docker image installs both. For local
+backend work, install them yourself:
+
+```bash
+npm install -g @earendil-works/pi-coding-agent@0.87.1
+pi --version                            # 0.87.1
+
+# github-mcp-server 2.1.0 (macOS arm64; use Darwin_x86_64 on Intel).
+curl -fsSLO https://github.com/github/github-mcp-server/releases/download/v2.1.0/github-mcp-server_Darwin_arm64.tar.gz
+echo "3fb2936c33416693a8b268442ab9b1e838d4fbb8c2a6813d8a77f87c3009ced6  github-mcp-server_Darwin_arm64.tar.gz" | shasum -a 256 -c -
+tar -xzf github-mcp-server_Darwin_arm64.tar.gz github-mcp-server
+mv github-mcp-server ~/.local/bin/      # any folder on PATH
+```
+
+- The Intel macOS checksum is
+  `3c4b023b0d90bdc8f3a2ab63307ff55d293e98c27e733008eed0fa35aca55499`.
+- If the binaries are not on `PATH`, set `PI_BINARY` and `GITHUB_MCP_BINARY`
+  in `backend/.env` to their full paths. The real-Pi bridge test in
+  `test_pi_bridge.py` reads the same `PI_BINARY`.
+- Without `pi`, agent turns fail with a clear error. Without
+  `github-mcp-server`, a setup turn with GitHub linked fails with a clear error.
+- The backend gives the server the user's GitHub token only in its
+  environment. Never put a token on its command line.
+- When you change a version, change the pins here, in `backend/Dockerfile`,
+  and in `backend/core/service_gateway/agents/github_mcp.py` or
+  `backend/core/service_gateway/optimization/blackbox/harnesses/pi.py`.
+
 ## CI checks with Dagger
 
 GitHub Actions runs the CI gates as Dagger checks. You can run the same

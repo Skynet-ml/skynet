@@ -13,7 +13,7 @@ from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_DEERFLOW
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
-from .base import ENV_API_KEY, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import ENV_API_KEY, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _temp_root, _version_check
 
 HARNESS_ID = BLACKBOX_HARNESS_DEERFLOW
 DEERFLOW_REPO = "https://github.com/bytedance/deer-flow.git"
@@ -36,11 +36,11 @@ RUNNER_FILE = f"{STATE_DIR}/run_agent.py"
 _RUNNER = f'"{_VENV_PYTHON}" {RUNNER_FILE}'
 # DeerFlow writes config.yaml, threads and checkpoints under these roots. They
 # live outside the workspace, so none of it enters a version patch. The trap
-# removes them when the run's shell exits and keeps the runner's exit status.
+# removes them when the run's shell exits and keeps the runner's exit status,
+# and the next run removes them when a timeout's SIGKILL skipped the trap.
 _DATA_DIR = "DEERFLOW_DATA_DIR"
 _RUN_COMMAND = (
-    f'export {_DATA_DIR}="$(mktemp -d)" && '
-    f"trap 'rm -rf \"${_DATA_DIR}\"' EXIT && "
+    f"{_temp_root(_DATA_DIR, 'deerflow')} && "
     f'DEER_FLOW_PROJECT_ROOT="${_DATA_DIR}/project" DEER_FLOW_HOME="${_DATA_DIR}/home" {_RUNNER}'
 )
 # The probe needs no workspace file, so the protected bootstrap can run it

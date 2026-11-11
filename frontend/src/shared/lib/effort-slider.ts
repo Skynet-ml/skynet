@@ -3,9 +3,11 @@
 /**
  * A saved effort, with a retired level read as "max". Codex's "ultra" and
  * Claude Code's "ultracode" only added subagents, which Skynet keeps off; the
- * backend also runs either one at the model's top level.
+ * backend also runs either one at the model's top level. "none" now uses
+ * the model default instead of a separate reasoning-off stop.
  */
 export function liveEffort(effort: string | null): string | null {
+  if (effort === "none") return null;
   return effort === "ultra" || effort === "ultracode" ? "max" : effort;
 }
 
@@ -91,8 +93,10 @@ export function effortCharge(
   const spray = heat > 0 ? 2 + Math.round(heat * 4) : 0;
   return { heat, sparks, pulse: sparks > 0, spray };
 }
-/** Whether a turn sends fast mode: only to a local CLI model (`sent` is the
- * model id the request runs). The backend drops it on a model without it. */
+/** Send fast mode for local CLI or OpenRouter turns, including the server default.
+ * The backend checks the resolved model's support before applying it. */
 export function sentFastMode(fast: boolean, sent: string | null): boolean {
-  return fast && !!sent?.startsWith("subscription/");
+  return (
+    fast && (sent === null || sent.startsWith("subscription/") || sent.startsWith("openrouter/"))
+  );
 }

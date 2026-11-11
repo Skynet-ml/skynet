@@ -79,7 +79,7 @@ Auto 係每次運行嘅預設選擇。佢分兩個階段運作：
 
 | 設定                       | 預設  | 範圍                                             |
 | -------------------------- | ----- | ------------------------------------------------ |
-| 編程代理                   | Codex | Pi、Codex、OpenCode、Prime Agent、自訂指令       |
+| 編程代理                   | Codex | Pi、Codex、OpenCode、OpenCode V2、Prime Agent、Aider、OpenHands、OpenHands SDK、Antigravity SDK、Goose、Hermes Agent、eve、DeerFlow、Cline、Code Puppy、自訂指令       |
 | 每輪候選數                 | 3     | 1 至 8。 |
 | 每個候選最多工具呼叫次數   | 100   | 1 至 1000                                        |
 
