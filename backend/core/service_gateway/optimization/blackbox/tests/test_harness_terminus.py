@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import litellm
 import pytest
 
 from core.api.model_catalog import REASONING_EFFORTS
@@ -19,6 +20,7 @@ from ..harness_bridge import parse_output, parse_pi_output
 from ..harnesses import REGISTRY
 from ..harnesses.base import _version_check
 from ..harnesses.terminus import ENV_REASONING_EFFORT, HARBOR_VERSION, HARNESS_ID, RUNNER_FILE, SPEC
+from .mocks import FakeGateway
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -342,8 +344,8 @@ def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_pa
         "logs_dir": seen["logs_dir"],
         "model_name": "openai/gpt-x",
         "api_base": _GATEWAY.url,
-        "llm_kwargs": {"api_key": _GATEWAY.api_key, "allowed_openai_params": ["reasoning_effort"]},
-        "reasoning_effort": "xhigh",
+        "llm_kwargs": {"api_key": _GATEWAY.api_key, "extra_body": {"reasoning_effort": "xhigh"}},
+        "reasoning_effort": None,
         "record_terminal_session": False,
         "instruction": "Write out.txt.\n",
         "exit": 0,
@@ -356,6 +358,46 @@ def test_runner_drives_terminus_through_the_gateway_and_prints_a_pi_event(tmp_pa
     assert list((tmp_path / "tmp").iterdir()) == []
     assert (tmp_path / "ws" / "out.txt").read_text() == "hi\n"
     assert parse_pi_output(result.stdout) == ("answer to Write out.txt.", {"input_tokens": 11, "output_tokens": 7})
+
+
+def test_runner_without_an_effort_sends_no_effort(tmp_path: Path) -> None:
+    """Without an effort, the runner adds no ``extra_body`` and the model default applies."""
+    launch = SPEC.launch("gpt-x", _GATEWAY)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix it.\n")
+    record = tmp_path / "record.json"
+    env = {**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
+
+    result = _run_runner(tmp_path, launch.files, **env)
+
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(record.read_text())
+    assert (seen["llm_kwargs"], seen["reasoning_effort"]) == ({"api_key": _GATEWAY.api_key}, None)
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-5.5", "openai/gpt-5.2", "openai/o3", "openai/gateway-model"])
+@pytest.mark.parametrize("effort", _EFFORTS)
+def test_litellm_sends_the_extra_body_effort_unchanged_with_drop_params(model: str, effort: str) -> None:
+    """LiteLLM puts the ``extra_body`` effort in the request as is, even for a gpt-5 id with ``drop_params``.
+
+    This uses the backend's LiteLLM, not the box's 1.93.0 pin. A check with the
+    pinned Harbor and LiteLLM is in the PR body.
+
+    Args:
+        model: A LiteLLM model id on the ``openai/`` route.
+        effort: A Skynet effort level.
+    """
+    with FakeGateway(reply="ok") as gateway:
+        litellm.completion(
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            api_base=gateway.url,
+            api_key="k",
+            drop_params=True,
+            extra_body={"reasoning_effort": effort},
+        )
+
+    assert gateway.requests[-1]["body"]["reasoning_effort"] == effort
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:

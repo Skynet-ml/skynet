@@ -50,9 +50,9 @@ _HARBOR_ENV = (
 _PROBE = f"uv run --quiet --offline {_HARBOR_ENV}"
 _WARM = f"uv run --quiet {_HARBOR_ENV}"
 ENV_REASONING_EFFORT = "TERMINUS_REASONING_EFFORT"
-# The levels ``Terminus2`` accepts and LiteLLM 1.93.0 sends unchanged as
-# ``reasoning_effort`` on an ``openai/`` route; Harbor's extra ``default`` is
-# not a Skynet effort.
+# Every Skynet effort. The runner sends the level as a raw body field, so each
+# one reaches the gateway unchanged; Harbor's extra ``default`` is not a Skynet
+# effort.
 _EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # Empty values override any key the host shell leaks into the box, so LiteLLM
 # cannot fall back to a direct provider route.
@@ -188,16 +188,22 @@ async def _run(scratch):
     tmux_dir.mkdir()
     (scratch / "logs").mkdir()
     shell = LocalShell(str(Path.cwd().resolve()), str(tmux_dir))
+    llm_kwargs = {{"api_key": api_key}}
+    effort = os.environ.get({env_effort!r})
+    if effort:
+        # Not Terminus 2's ``reasoning_effort``: for a gpt-5 id, LiteLLM 1.93.0
+        # (OpenAIGPT5Config) drops ``xhigh`` and ``minimal``, and Harbor forces
+        # ``drop_params``. LiteLLM merges ``extra_body`` into the request body
+        # as is, so the gateway gets the exact level for every model id.
+        llm_kwargs["extra_body"] = {{"reasoning_effort": effort}}
     agent = SkynetTerminus(
         logs_dir=scratch / "logs",
         # LiteLLM sends an ``openai/`` model to the OpenAI-compatible api_base
         # with the id after the prefix, which is the gateway's model id.
         model_name="openai/" + model,
         api_base=GATEWAY_URL,
-        # LiteLLM drops ``reasoning_effort`` for a model its catalog does not
-        # list, and a gateway model id is never listed; this keeps it.
-        llm_kwargs={{"api_key": api_key, "allowed_openai_params": ["reasoning_effort"]}},
-        reasoning_effort=os.environ.get({env_effort!r}) or None,
+        llm_kwargs=llm_kwargs,
+        reasoning_effort=None,
         record_terminal_session=False,
         pane_log=scratch / "terminus.pane",
     )
