@@ -47,9 +47,7 @@ from .. import agent_engine, interview_model, model_catalog, model_router
 from .. import auth as auth_mod
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..routers import agent_engine as engine_router_mod
 from ..routers import generalist_agent as agent_mod
-from ..routers.agent_engine import create_agent_engine_router
 from ..routers.billing import create_billing_router
 from ..routers.generalist_agent import create_generalist_agent_router
 from .test_generalist_persistence import _SECRET, _fund, _session_token
@@ -106,10 +104,10 @@ def _probe(status_code: int) -> httpx.Response:
 
 
 def _client(store: object) -> TestClient:
-    """Mount the billing and agent-engine routers for one caller, rendering domain errors with their code.
+    """Mount the billing router for one caller, rendering domain errors with their code.
 
     Args:
-        store: The job store both routers use.
+        store: The job store the router uses.
 
     Returns:
         A test client.
@@ -122,7 +120,6 @@ def _client(store: object) -> TestClient:
         return JSONResponse(status_code=exc.status_code, content={"code": exc.code})
 
     app.include_router(create_billing_router(job_store=store))
-    app.include_router(create_agent_engine_router(job_store=store))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(username=_USER, role="user", groups=())
     return TestClient(app)
 
@@ -159,7 +156,6 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[obje
     for module in (
         config,
         agent_engine,
-        engine_router_mod,
         model_router,
         language_models,
         byok_vault,
@@ -231,7 +227,7 @@ def test_hosted_mode_never_reads_the_vault(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_without_a_verified_key_local_turns_stay_refused(local: list[object]) -> None:
-    """Refuse managed turns and the OpenRouter engine with no key, or with a key OpenRouter rejected.
+    """Refuse managed turns with no key, and route nothing on a key OpenRouter rejected.
 
     Args:
         local: The blocked remote addresses.
@@ -242,12 +238,9 @@ def test_without_a_verified_key_local_turns_stay_refused(local: list[object]) ->
     with pytest.raises(DomainError) as caught:
         model_router.route_agent_model(None)
     assert caught.value.code == "models.managed_unavailable_local"
-    refused = client.put("/account/agent-engine", json={"engine": "openrouter"})
-    assert (refused.status_code, refused.json()) == (422, {"code": "models.managed_unavailable_local"})
 
     assert _save(client, status_code=401)["status"] == "invalid"
     assert model_router.route_local_byok_model(_MODEL, job_store=store, username=_USER) is None
-    assert client.put("/account/agent-engine", json={"engine": "openrouter"}).status_code == 422
 
 
 def test_save_route_and_clear_the_key(local: list[object]) -> None:
@@ -282,10 +275,6 @@ def test_save_route_and_clear_the_key(local: list[object]) -> None:
         model_router.route_local_byok_model("anthropic/not-an-openrouter-id", job_store=store, username=_USER)
     assert caught.value.status_code == 422
 
-    chosen = client.put("/account/agent-engine", json={"engine": "openrouter"})
-    assert (chosen.status_code, chosen.json()) == (200, {"engine": "openrouter", "stored": True})
-    with Session(engine) as session:
-        assert session.get(AgentEnginePreferenceModel, _USER).engine == "openrouter"
     assert agent_engine.engine_agent_model(store, _USER, None) is None
 
     assert client.delete("/billing/byok/keys/openrouter").json()["keys"] == []
@@ -295,13 +284,13 @@ def test_save_route_and_clear_the_key(local: list[object]) -> None:
     assert caught.value.code == "models.managed_unavailable_local"
 
 
-@pytest.mark.parametrize("stored", [None, "droid"])
-def test_get_engine_reports_openrouter_when_turns_run_on_the_saved_key(local: list[object], stored: str | None) -> None:
-    """Report ``openrouter`` when no CLI is ready and turns run on the saved key.
+@pytest.mark.parametrize("stored", [None, "openrouter", "droid"])
+def test_empty_pick_with_no_ready_cli_runs_on_the_saved_key(local: list[object], stored: str | None) -> None:
+    """Keep an empty pick empty with no ready CLI, so the router runs it on the saved key.
 
     Args:
         local: The blocked remote addresses.
-        stored: The saved engine row: none, or a ``droid`` row this build no longer knows.
+        stored: An old engine row, which the engine ignores, or ``None`` for no row.
     """
     engine = _engine()
     store = SimpleNamespace(engine=engine)
@@ -310,23 +299,23 @@ def test_get_engine_reports_openrouter_when_turns_run_on_the_saved_key(local: li
         with Session(engine) as session:
             session.add(AgentEnginePreferenceModel(username=_USER, engine=stored))
             session.commit()
-    assert client.get("/account/agent-engine").json() == {"engine": None, "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) is None
+    assert agent_engine.engine_agent_model(store, _USER, None) is None
     assert model_router.route_local_byok_model(None, job_store=store, username=_USER) is None
 
     _save(client)
-    assert client.get("/account/agent-engine").json() == {"engine": "openrouter", "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) is None
     picked = agent_engine.engine_agent_model(store, _USER, None)
+    assert picked is None
     routed = model_router.route_local_byok_model(picked, job_store=store, username=_USER)
     assert routed is not None
     assert (routed.token_source, routed.byok_provider) == (TOKEN_SOURCE_BYOK, "openrouter")
 
     client.delete("/billing/byok/keys/openrouter")
-    assert client.get("/account/agent-engine").json() == {"engine": None, "stored": False}
+    assert model_router.route_local_byok_model(None, job_store=store, username=_USER) is None
 
 
-def test_get_engine_prefers_a_ready_cli_over_the_saved_key(
-    local: list[object], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_engine_prefers_a_ready_cli_over_the_saved_key(local: list[object], monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the first ready CLI as the default when a verified key is also saved.
 
     Args:
@@ -338,7 +327,7 @@ def test_get_engine_prefers_a_ready_cli_over_the_saved_key(
     store = SimpleNamespace(engine=_engine())
     client = _client(store)
     _save(client)
-    assert client.get("/account/agent-engine").json() == {"engine": "codex", "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) == "codex"
     assert (
         agent_engine.engine_agent_model(store, _USER, None) == f"subscription/codex/{next(iter(CLI_MODELS['codex']))}"
     )

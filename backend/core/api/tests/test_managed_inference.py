@@ -14,7 +14,6 @@ from pydantic import SecretStr
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from core.api import agent_engine
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.routers import managed_inference
 from core.billing import metering
@@ -187,19 +186,6 @@ def test_local_relay_binds_model_and_refreshes_through_existing_link(monkeypatch
     finally:
         gateway.server.shutdown()
         gateway.server.server_close()
-
-
-def test_linked_mac_without_key_keeps_openrouter_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the selected OpenRouter engine on the linked account without a saved key.
-
-    Args:
-        monkeypatch: Supply a signed-in local account and no verified key.
-    """
-    store = SimpleNamespace(engine=object())
-    monkeypatch.setattr(agent_engine, "_has_verified_key", lambda *args: False)
-    monkeypatch.setattr(agent_engine, "link_status", lambda *args: object())
-    monkeypatch.setattr(agent_engine, "effective_agent_engine", lambda *args: "openrouter")
-    assert agent_engine._turn_engine(store, "local") == "openrouter"
 
 
 def test_managed_model_preserves_proxy_and_native_tools(monkeypatch: pytest.MonkeyPatch) -> None:

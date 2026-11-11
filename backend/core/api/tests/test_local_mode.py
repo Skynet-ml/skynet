@@ -658,13 +658,14 @@ def test_local_wizard_check_passes_the_raw_gate(monkeypatch: pytest.MonkeyPatch)
 
 
 def _engine_setup(monkeypatch: pytest.MonkeyPatch, store: Any, *, ready: tuple[str, ...], stored: str | None) -> None:
-    """Make CLIs look ready and store the caller's engine choice.
+    """Make CLIs look ready and write an old engine row for the caller.
 
     Args:
         monkeypatch: Pytest fixture used to replace the CLI probe.
-        store: Job store whose engine holds the engine setting.
+        store: Job store whose database receives the row.
         ready: The CLIs the probe reports as ready, in probe order.
-        stored: The engine ``alice`` chose in Settings, or ``None`` for no row.
+        stored: The engine an old ``alice`` row names, or ``None`` for no row.
+            The engine ignores these rows.
     """
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status(cli) for cli in ready])
     if stored is not None:
@@ -689,17 +690,17 @@ def _stored_proposer(store: _FakeJobStore, resp: Any) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     ("ready", "stored", "expected"),
-    [(("codex", "claude"), None, "codex"), (("codex",), "claude", "claude")],
+    [(("codex", "claude"), None, "codex"), (("claude",), None, "claude"), (("codex", "claude"), "claude", "codex")],
 )
 def test_local_proposer_follows_the_agent_engine(
     monkeypatch: pytest.MonkeyPatch, ready: tuple[str, ...], stored: str | None, expected: str
 ) -> None:
-    """A local run with no proposer CLI pick runs its proposer on the engine CLI.
+    """A local run with no proposer CLI pick runs its proposer on the first ready CLI.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
         ready: The CLIs the probe reports as ready.
-        stored: The engine stored in Settings, if any.
+        stored: The engine an old row names, if any; it must not apply.
         expected: The proposer CLI the stored run must name.
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
@@ -722,7 +723,7 @@ def test_explicit_proposer_pick_overrides_the_agent_engine(
         expected: The proposer CLI the stored run must name.
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
-    _engine_setup(monkeypatch, store, ready=("codex", "claude"), stored="codex")
+    _engine_setup(monkeypatch, store, ready=("codex", "claude"), stored=None)
 
     resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN, proposer={"host_cli": pick}))
 
@@ -746,14 +747,9 @@ def _save_openrouter_key(monkeypatch: pytest.MonkeyPatch, store: Any, status: st
         session.commit()
 
 
-@pytest.mark.parametrize("key", [None, "unverified", "invalid"])
-def test_local_proposer_follows_the_default_cli_when_the_openrouter_key_is_gone(
-    monkeypatch: pytest.MonkeyPatch, key: str | None
-) -> None:
-    """A stored OpenRouter engine with no verified key runs the proposer on the default CLI.
-
-    Settings shows that CLI in this state ("agents run on Codex"), so the
-    proposer must not stay in the sandbox.
+@pytest.mark.parametrize("key", [None, "unverified", "invalid", "verified"])
+def test_local_proposer_ignores_a_stored_openrouter_engine(monkeypatch: pytest.MonkeyPatch, key: str | None) -> None:
+    """An old OpenRouter engine row runs the proposer on the first ready CLI, with or without a key.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
@@ -773,17 +769,18 @@ def test_local_proposer_follows_the_default_cli_when_the_openrouter_key_is_gone(
     [
         (("codex", "claude"), None, _CODEX_ID),
         (("codex", "claude"), "unverified", _CODEX_ID),
-        (("codex", "claude"), "verified", None),
+        (("codex", "claude"), "verified", _CODEX_ID),
         ((), None, None),
+        ((), "verified", None),
     ],
 )
-def test_local_agent_turn_with_no_model_follows_the_default_cli_when_the_openrouter_key_is_gone(
+def test_local_agent_turn_with_no_model_ignores_a_stored_openrouter_engine(
     monkeypatch: pytest.MonkeyPatch, ready: tuple[str, ...], key: str | None, expected: str | None
 ) -> None:
-    """A stored OpenRouter engine with no verified key fills an empty agent pick from the default CLI.
+    """An old OpenRouter engine row does not stop the first ready CLI from filling an empty agent pick.
 
-    With the verified key the pick stays empty, so the router runs it on the
-    key. With no ready CLI it also stays empty, and the router refuses it.
+    With no ready CLI the pick stays empty, so the router runs it on a
+    verified key or refuses it.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
@@ -801,7 +798,7 @@ def test_local_agent_turn_with_no_model_follows_the_default_cli_when_the_openrou
 @pytest.mark.parametrize(
     ("ready", "stored", "key", "proposer"),
     [
-        (("codex",), "openrouter", "verified", {}),
+        ((), "openrouter", "verified", {}),
         ((), "openrouter", None, {}),
         ((), None, None, {}),
         (("codex",), None, None, {"harness": "custom", "run_command": "my-agent --model {model}"}),
@@ -814,12 +811,12 @@ def test_local_proposer_stays_in_the_sandbox_without_an_engine_cli(
     key: str | None,
     proposer: dict[str, Any],
 ) -> None:
-    """The OpenRouter engine with its key, no ready CLI, or a custom harness leaves ``host_cli`` unset.
+    """No ready CLI, also with a saved key, or a custom harness leaves ``host_cli`` unset.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
         ready: The CLIs the probe reports as ready.
-        stored: The engine stored in Settings, if any.
+        stored: The engine an old row names, if any; it must not apply.
         key: The status of the caller's saved OpenRouter key, or ``None`` for no key.
         proposer: The run's proposer settings.
     """
@@ -833,7 +830,7 @@ def test_local_proposer_stays_in_the_sandbox_without_an_engine_cli(
 
 
 def test_hosted_proposer_ignores_the_agent_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hosted mode never probes a CLI or reads the setting for a proposer.
+    """Hosted mode never probes a CLI for a proposer.
 
     Args:
         monkeypatch: Pytest fixture used to keep local mode off.
@@ -861,7 +858,7 @@ def test_local_execution_check_fills_the_proposer_cli(monkeypatch: pytest.Monkey
     """
     monkeypatch.setattr(settings, "local_mode", True)
     store = SimpleNamespace(engine=_billing_engine())
-    _engine_setup(monkeypatch, store, ready=("codex", "claude"), stored="claude")
+    _engine_setup(monkeypatch, store, ready=("claude", "codex"), stored=None)
 
     payload = _canonical_execution_payload(_execution_request(models=_SUBSCRIPTION_MODELS), "alice", store)
 

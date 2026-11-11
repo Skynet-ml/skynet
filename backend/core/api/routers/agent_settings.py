@@ -37,7 +37,6 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 
 SettingsTab = Literal[
     "wizard",
-    "agent",
     "account",
     "notifications",
     "security",
@@ -52,7 +51,6 @@ SettingsTab = Literal[
 SettingKey = Literal[
     "profile",
     "appearance",
-    "agent_engine",
     "notifications",
     "privacy",
     "preferences",
@@ -70,14 +68,12 @@ ProtectedAction = Literal[
 ]
 
 MASK = "••••"
-# Must match WEB_ONLY_SETTINGS_TABS, LINKED_ONLY_SETTINGS_TABS and
-# LOCAL_ONLY_SETTINGS_TABS in frontend/src/shared/lib/hosted-features.ts. The
-# Mac app never shows the web-only tabs (its local sign-in is a placeholder),
-# and shows the linked-only tabs only while a hosted account is linked. The
-# web never shows the local-only tabs (they set up the Mac's coding CLIs).
+# Must match WEB_ONLY_SETTINGS_TABS and LINKED_ONLY_SETTINGS_TABS in
+# frontend/src/shared/lib/hosted-features.ts. The Mac app never shows the
+# web-only tabs (its local sign-in is a placeholder), and shows the linked-only
+# tabs only while a hosted account is linked.
 _WEB_ONLY_TABS = frozenset({"security"})
 _LINKED_ONLY_TABS = frozenset({"billing"})
-_LOCAL_ONLY_TABS = frozenset({"agent"})
 # Key names whose values are credentials. ``last4`` and ``has_*`` flags stay
 # readable because the settings UI already shows them.
 _SECRET_KEY = re.compile(r"secret|token|password|passwd|api_?key|private|otpauth|recovery|hash|cookie", re.IGNORECASE)
@@ -122,12 +118,6 @@ _SETTINGS: dict[str, _Setting] = {
     "appearance": _Setting(
         "account",
         "Theme (system, light or dark) and UI language on this device (fields: theme, locale).",
-    ),
-    "agent_engine": _Setting(
-        "agent",
-        "Which engine runs the assistant (fields: engine).",
-        "/account/agent-engine",
-        ("PUT", "/account/agent-engine"),
     ),
     "notifications": _Setting(
         "notifications",
@@ -317,12 +307,11 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
             username: The caller.
 
         Returns:
-            The local-only tabs on the hosted service. In the Mac app, the
-            web-only tabs, plus the linked-only tabs while no hosted account is
-            linked.
+            No tabs on the hosted service. In the Mac app, the web-only tabs,
+            plus the linked-only tabs while no hosted account is linked.
         """
         if not settings.local_mode:
-            return _LOCAL_ONLY_TABS
+            return frozenset()
         linked = job_store is not None and hosted_link.link_status(job_store.engine, username) is not None
         return _WEB_ONLY_TABS if linked else _WEB_ONLY_TABS | _LINKED_ONLY_TABS
 
@@ -402,7 +391,7 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
     @router.post(
         "/agent/settings/{key}",
         operation_id="change_setting",
-        summary="Change an ordinary account setting (profile, appearance, engine, notifications, privacy)",
+        summary="Change an ordinary account setting (profile, appearance, notifications, privacy)",
         tags=["agent"],
     )
     async def change_setting(

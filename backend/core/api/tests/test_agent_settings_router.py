@@ -127,20 +127,22 @@ def _area_tabs(job_store: Any = None) -> set[str]:
     return {row["tab"] for row in TestClient(app).get("/agent/settings").json()["settings"]}
 
 
-def test_list_settings_keeps_hosted_tabs_on_the_hosted_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hosted service lists the security and billing areas, but not the Mac's Agent tab."""
+def test_list_settings_keeps_every_tab_on_the_hosted_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hosted service hides no tab, so it lists every settings area."""
     monkeypatch.setattr(agent_settings_module.settings, "local_mode", False)
-    tabs = _area_tabs()
-    assert {"security", "billing"} <= tabs
-    assert "agent" not in tabs
+    assert _area_tabs() == {spec.tab for spec in agent_settings_module._SETTINGS.values()}
 
 
-def test_tools_refuse_the_agent_tab_on_the_hosted_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hosted service refuses the Agent tab, which only the Mac app shows."""
-    monkeypatch.setattr(agent_settings_module.settings, "local_mode", False)
+@pytest.mark.parametrize("local_mode", [False, True])
+def test_tools_know_no_agent_engine_setting(monkeypatch: pytest.MonkeyPatch, local_mode: bool) -> None:
+    """No app has an Agent tab or an agent engine setting, so the tools reject both as unknown."""
+    monkeypatch.setattr(agent_settings_module.settings, "local_mode", local_mode)
     client, calls = _client()
-    _assert_hosted_only(client.get("/agent/settings/agent_engine"), "agent")
-    _assert_hosted_only(client.post("/agent/open-page", json={"tab": "agent"}), "agent")
+    rows = client.get("/agent/settings").json()["settings"]
+    assert "agent_engine" not in {row["key"] for row in rows}
+    assert client.get("/agent/settings/agent_engine").status_code == 422
+    assert client.post("/agent/settings/agent_engine", json={"values": {"engine": "codex"}}).status_code == 422
+    assert client.post("/agent/open-page", json={"tab": "agent"}).status_code == 422
     assert calls == []
 
 

@@ -1,9 +1,9 @@
-"""The per-user agent engine: which engine runs an agent turn that picks no model.
+"""The agent engine: which engine runs an agent turn that picks no model.
 
-Hosted mode always runs on OpenRouter, so it never reads the stored setting.
-Local mode runs agent turns on the engine the user chose: a subscription CLI,
-or OpenRouter with the user's verified key or signed-in Skynet account. With
-no choice, it runs them on the first ready CLI, then an available OpenRouter route. A CLI engine never falls back to OpenRouter. In local mode an
+Hosted mode always runs on OpenRouter. Local mode runs agent turns on the
+first ready subscription CLI. With no ready CLI, the turn keeps its empty
+pick, and the model router runs it on an available OpenRouter route or
+refuses it. A CLI engine never falls back to OpenRouter. In local mode an
 optimization proposer with no CLI pick follows the same engine CLI.
 """
 
@@ -11,21 +11,15 @@ from __future__ import annotations
 
 from typing import Any, Literal, get_args
 
-from sqlalchemy.orm import Session
-
-from ..billing.byok_vault import ProviderKeyVault
 from ..config import settings
 from ..local.cli_catalog import CLI_MODELS, CliProvider, parse_subscription_model_id
 from ..local.cli_probe import CliStatus, probe_clis
-from ..local.hosted_link import link_status
 from ..models.blackbox import BLACKBOX_HARNESS_CUSTOM
-from ..storage.models import AgentEnginePreferenceModel
 from .model_catalog import is_removed_model
 from .model_router import _RETIRED_AUTO_ID
 
 # Droid has no flag that skips the user's own config, hooks and MCP servers,
-# so it cannot run like the hosted setup and is not an engine option. A saved
-# "droid" row is unknown here and falls back to the default engine.
+# so it cannot run like the hosted setup and is never an engine.
 AgentEngine = Literal["openrouter", "codex", "claude"]
 AGENT_ENGINES: tuple[AgentEngine, ...] = get_args(AgentEngine)
 OPENROUTER_ENGINE: AgentEngine = "openrouter"
@@ -49,7 +43,7 @@ def _ready(status: CliStatus) -> bool:
 
 
 def default_agent_engine() -> AgentEngine | None:
-    """Return the engine a caller runs on before choosing one.
+    """Return the engine that runs agent turns.
 
     Returns:
         ``openrouter`` in hosted mode; in local mode the first ready engine
@@ -63,109 +57,45 @@ def default_agent_engine() -> AgentEngine | None:
     )
 
 
-def stored_agent_engine(job_store: object | None, username: str) -> AgentEngine | None:
-    """Read the caller's stored engine in local mode.
-
-    Args:
-        job_store: Job store whose ORM engine holds the setting, or ``None``.
-        username: The caller.
-
-    Returns:
-        The stored engine, or ``None`` in hosted mode, with no store, with no
-        row, or for a value this build does not know.
-    """
-    if not settings.local_mode or job_store is None:
-        return None
-    engine = getattr(job_store, "engine", None)
-    if engine is None:
-        return None
-    with Session(engine) as session:
-        row = session.get(AgentEnginePreferenceModel, username)
-    value = row.engine if row is not None else None
-    return value if value in AGENT_ENGINES else None  # type: ignore[return-value]
-
-
 def effective_agent_engine(job_store: object | None, username: str) -> AgentEngine | None:
     """Return the engine the caller's agent turns run on.
 
     Args:
-        job_store: Job store whose ORM engine holds the setting, or ``None``.
-        username: The caller.
+        job_store: Unused; old stored engine rows no longer apply.
+        username: Unused; the engine is the same for every caller.
 
     Returns:
-        The stored engine, else the default (see :func:`default_agent_engine`).
-        In local mode with neither, ``openrouter`` when the caller has a
-        verified OpenRouter key or a signed-in Skynet account; else None.
+        The automatic pick (see :func:`default_agent_engine`).
     """
-    chosen = stored_agent_engine(job_store, username) or default_agent_engine()
-    if chosen is not None or not settings.local_mode:
-        return chosen
-    return OPENROUTER_ENGINE if openrouter_available(job_store, username) else None
-
-
-def _has_verified_key(job_store: object | None, username: str) -> bool:
-    """Return whether the caller has a saved, verified OpenRouter key.
-
-    Args:
-        job_store: Job store whose ORM engine holds the key vault, or ``None``.
-        username: The caller.
-
-    Returns:
-        ``True`` when the vault holds a verified OpenRouter key for the caller.
-    """
-    engine = getattr(job_store, "engine", None)
-    return engine is not None and ProviderKeyVault(engine=engine).has_verified_connection(username, OPENROUTER_ENGINE)
-
-
-def openrouter_available(job_store: object | None, username: str) -> bool:
-    """Check whether OpenRouter can use the saved key or the signed-in Skynet account.
-
-    Args:
-        job_store: Local store containing keys and the account link.
-        username: Authenticated local user.
-
-    Returns:
-        Whether either authorized inference route exists.
-    """
-    if _has_verified_key(job_store, username):
-        return True
-    engine = getattr(job_store, "engine", None)
-    return engine is not None and link_status(engine, username) is not None
+    return default_agent_engine()
 
 
 def _turn_engine(job_store: object | None, username: str) -> AgentEngine | None:
     """Return the engine that runs a local agent turn or proposer with no pick.
 
     Args:
-        job_store: Job store whose ORM engine holds the setting, or ``None``.
+        job_store: Passed to :func:`effective_agent_engine`.
         username: The caller.
 
     Returns:
-        The effective engine, except that a stored OpenRouter engine with no
-        saved key or account link gives the default engine.
+        The effective engine.
     """
-    engine = effective_agent_engine(job_store, username)
-    # A lost key does not change the engine while the signed-in account can serve it.
-    if engine == OPENROUTER_ENGINE and not openrouter_available(job_store, username):
-        return default_agent_engine()
-    return engine
+    return effective_agent_engine(job_store, username)
 
 
 def engine_agent_model(job_store: object | None, username: str, model: str | None) -> str | None:
     """Fill an agent turn's empty model pick from the caller's engine.
 
     Args:
-        job_store: Job store whose ORM engine holds the setting, or ``None``.
+        job_store: Passed to :func:`effective_agent_engine`.
         username: The caller.
         model: The request's raw ``model`` value.
 
     Returns:
-        ``model`` unchanged when it names a model, in hosted mode, or when the
-        turn engine (see :func:`_turn_engine`) is OpenRouter or unknown (in
-        local mode the model router then
-        runs on the saved key or signed-in account, or refuses it).
-        Otherwise ``subscription/<cli>/<slug>`` on the engine
-        CLI's first catalog model.
+        ``model`` unchanged when it names a model, in hosted mode, or when no
+        engine CLI is ready (in local mode the model router then runs it on
+        the saved key or signed-in account, or refuses it). Otherwise
+        ``subscription/<cli>/<slug>`` on the engine CLI's first catalog model.
     """
     name = str(model or "").strip()
     if not settings.local_mode or parse_subscription_model_id(name) is not None:
@@ -185,7 +115,7 @@ def fill_proposer_host_cli(job_store: object | None, username: str, payload: Any
     """Run a local proposer with no CLI pick on the caller's engine CLI.
 
     Args:
-        job_store: Job store whose ORM engine holds the setting, or ``None``.
+        job_store: Passed to :func:`effective_agent_engine`.
         username: The caller.
         payload: A black-box (``proposer``) or unified (``optimizer.proposer``)
             request, mutated in place.

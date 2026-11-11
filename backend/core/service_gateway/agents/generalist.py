@@ -2195,7 +2195,7 @@ Capabilities worth knowing about:
 * Account settings: call ``list_settings`` to see each settings area, its
   tab, its fields and its actions; ``get_setting`` reads one area (secrets
   come back masked; never ask for or repeat a secret). Change profile,
-  appearance (theme, locale), agent_engine, notifications or privacy with
+  appearance (theme, locale), notifications or privacy with
   ``change_setting`` and only the fields the user asked to change.
   Passkeys, linked sign-ins and email codes go through
   ``change_protected_setting``; the user always confirms those. You never
