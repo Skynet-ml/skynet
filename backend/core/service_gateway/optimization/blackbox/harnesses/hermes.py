@@ -35,8 +35,10 @@ HERMES_WHEEL_SHA256 = "bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3
 # ``hermes-agent`` requires Python >= 3.11 and < 3.14.
 HERMES_PYTHON = "3.12"
 UV_VERSION = "0.9.13"
-# PyPI's sha256 digests for the x86_64 and aarch64 Linux wheels of uv
-# :data:`UV_VERSION`; pip installs only a wheel that matches one of them.
+# PyPI's sha256 digests for four Linux wheels of uv :data:`UV_VERSION`: x86_64
+# manylinux_2_17, x86_64 musllinux_1_1, aarch64 manylinux_2_17 with
+# musllinux_1_1, and aarch64 manylinux_2_28. pip installs only a wheel that
+# matches one of them.
 UV_WHEEL_SHA256 = (
     "6627d0abbaf58f9ff6e07e3f8522d65421230969aa2d7b10421339f0cb30dec4",
     "d50cea327b994786866b2d12c073097b9c8d883d42f0c0408b2d968492f571a4",
@@ -112,8 +114,23 @@ _PROTECTED_ENV = {
     "DEEPINFRA_API_KEY": "",
     "NOVITA_API_KEY": "",
     "QWEN_API_KEY": "",
-    # Not read by 0.19.0; blanked so a later Hermes cannot pick it up.
+    # Not in the 0.19.0 code; blanked so a later Hermes cannot pick it up.
+    # Hermes also takes an unknown provider's key names from the models.dev
+    # catalog at run time, which can name these keys.
     "AI_GATEWAY_API_KEY": "",
+    "ACTUAL_API_KEY": "",
+    "NEBIUS_API_KEY": "",
+    "RAMP_ROUTER_API_KEY": "",
+    "TOKENPLAN_API_KEY": "",
+    # The Azure Anthropic route takes its own key.
+    "AZURE_ANTHROPIC_KEY": "",
+    # Web, image, speech and memory tools call paid services with their own keys.
+    "FIRECRAWL_API_KEY": "",
+    "TAVILY_API_KEY": "",
+    "EXA_API_KEY": "",
+    "FAL_KEY": "",
+    "ELEVENLABS_API_KEY": "",
+    "HONCHO_API_KEY": "",
     # Speech tools call Groq and OpenAI audio with their own keys.
     "GROQ_API_KEY": "",
     "VOICE_TOOLS_OPENAI_KEY": "",
@@ -218,7 +235,9 @@ def _hermes_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
     sessions and logs never join the files the run hands back. An EXIT trap
     removes it when the run's shell exits and keeps Hermes's exit status.
     Hermes has no prompt-file option, so the prompt is one argument that the
-    shell reads from the prompt file and never parses. ``OPENAI_BASE_URL``
+    shell reads from the prompt file and never parses. It joins ``--query=``
+    in that argument, so argparse reads a prompt that starts with ``-`` as the
+    value and never as an option. ``OPENAI_BASE_URL``
     also names the gateway, so a side task that Hermes routes to its OpenAI
     provider still reaches the gateway. ``-Q`` prints only the final answer.
 
@@ -239,7 +258,7 @@ def _hermes_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
         f'cp {HERMES_CONFIG_FILE} "$HERMES_HOME/config.yaml" && '
         f'printf {shlex.quote(_UPDATE_CHECK_CACHE)} "$(date +%s)" > "$HERMES_HOME/.update_check" && '
         f'OPENAI_API_KEY="${ENV_API_KEY}" OPENAI_BASE_URL="$(cat {HERMES_BASE_URL_FILE})" '
-        f'hermes --yolo chat -q {_PROMPT_ARG} -Q --model "${ENV_MODEL}" --provider {HERMES_PROVIDER} < /dev/null'
+        f'hermes --yolo chat --query={_PROMPT_ARG} -Q --model "${ENV_MODEL}" --provider {HERMES_PROVIDER} < /dev/null'
     )
     return HarnessLaunch(
         instructions_file="AGENTS.md",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import io
@@ -59,6 +60,22 @@ _EXTRA_MODEL_KEYS = {
     "AUXILIARY_VISION_API_KEY",
     "AUXILIARY_WEB_EXTRACT_API_KEY",
     "AUXILIARY_APPROVAL_API_KEY",
+}
+# Keys that 0.19.0 can take from the models.dev catalog, the Azure Anthropic
+# key, and the keys of paid web, image, speech and memory tools.
+_CATALOG_AND_TOOL_KEYS = {
+    "ACTUAL_API_KEY",
+    "NEBIUS_API_KEY",
+    "RAMP_ROUTER_API_KEY",
+    "TOKENPLAN_API_KEY",
+    "AZURE_ANTHROPIC_KEY",
+    "ALIBABA_CODING_PLAN_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "TAVILY_API_KEY",
+    "EXA_API_KEY",
+    "FAL_KEY",
+    "ELEVENLABS_API_KEY",
+    "HONCHO_API_KEY",
 }
 _PROMPT = "Fix `solution.py` and say $(echo done)."
 # Stand-in for the hermes binary: it records its call and prints a fixed answer.
@@ -220,7 +237,12 @@ def _run_install(
 
 
 def _run_with_fake_hermes(
-    tmp_path: Path, *, protected: bool, relay_env: str = "APP_BUDGET_RELAY_URL", fake_exit: int = 0
+    tmp_path: Path,
+    *,
+    protected: bool,
+    relay_env: str = "APP_BUDGET_RELAY_URL",
+    fake_exit: int = 0,
+    prompt: str = _PROMPT,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Hermes command in a scratch workspace against a fake ``hermes`` binary.
 
@@ -232,6 +254,7 @@ def _run_with_fake_hermes(
         protected: Build the protected launch, with the sandbox-local relay set.
         relay_env: The env name that carries the relay URL in a protected run.
         fake_exit: Exit status the fake binary returns.
+        prompt: Text of the task's prompt file.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -243,7 +266,7 @@ def _run_with_fake_hermes(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     (workspace / "task").mkdir(parents=True)
-    (workspace / "task" / "PROMPT.md").write_text(_PROMPT)
+    (workspace / "task" / "PROMPT.md").write_text(prompt)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "hermes"
@@ -341,7 +364,7 @@ def test_launch_points_hermes_at_the_gateway_through_its_config_files() -> None:
     assert f'OPENAI_BASE_URL="$(cat {HERMES_BASE_URL_FILE})"' in launch.run_command
     assert 'OPENAI_API_KEY="$APP_API_KEY"' in launch.run_command
     assert (
-        'hermes --yolo chat -q "$(cat "$APP_PROMPT_FILE")" -Q --model "$APP_MODEL" --provider custom:runtime'
+        'hermes --yolo chat --query="$(cat "$APP_PROMPT_FILE")" -Q --model "$APP_MODEL" --provider custom:runtime'
         in launch.run_command
     )
     assert "--ignore-rules" not in launch.run_command
@@ -493,6 +516,7 @@ def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Pat
     blanked = {name for name, value in _PROTECTED_ENV.items() if value == ""}
     assert blanked >= _EXTRA_MODEL_KEYS
     assert blanked >= _DIRECT_PROVIDER_KEYS
+    assert blanked >= _CATALOG_AND_TOOL_KEYS
     assert {"CLAUDE_CODE_OAUTH_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} <= set(_PROTECTED_ENV)
     for name, content in launch.files.items():
         path = tmp_path / name
@@ -525,7 +549,9 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
 
     assert result.returncode == 0
     (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
-    assert run == (f"ARGS [--yolo] [chat] [-q] [{_PROMPT}] [-Q] [--model] [target-model] [--provider] [custom:runtime]")
+    assert (
+        run == f"ARGS [--yolo] [chat] [--query={_PROMPT}] [-Q] [--model] [target-model] [--provider] [custom:runtime]"
+    )
     assert _logged(calls, "OPENAI_BASE_URL") == _RELAY_URL
     assert _logged(calls, "OPENAI_API_KEY") == _GATEWAY.api_key
     assert _logged(calls, "ANTHROPIC_API_KEY") == ""
@@ -541,6 +567,26 @@ def test_protected_run_sends_hermes_to_the_relay_with_the_gateway_token(tmp_path
         == "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42."
     )
     assert "session_id" not in result.stdout
+
+
+def test_prompt_that_starts_with_an_option_stays_the_query_value(tmp_path: Path) -> None:
+    """A prompt that looks like a Hermes option reaches argparse as the ``--query`` value, never as an option."""
+    prompt = "--model=other-model -Q --provider=openrouter"
+    result, calls, _ = _run_with_fake_hermes(tmp_path, protected=False, prompt=prompt)
+
+    assert result.returncode == 0
+    (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
+    argv = re.findall(r"\[(.*?)\](?= \[|$)", run)
+    # The options of Hermes 0.19.0's ``chat`` parser that this run uses.
+    parser = argparse.ArgumentParser(prog="hermes chat")
+    parser.add_argument("-q", "--query")
+    parser.add_argument("-Q", "--quiet", action="store_true")
+    parser.add_argument("-m", "--model")
+    parser.add_argument("--provider")
+    args = parser.parse_args(argv[2:])
+    assert args.query == prompt
+    assert args.model == "target-model"
+    assert args.provider == "custom:runtime"
 
 
 @pytest.mark.parametrize("fake_exit", [0, 3])
