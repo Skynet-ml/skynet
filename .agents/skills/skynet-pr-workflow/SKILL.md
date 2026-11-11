@@ -182,9 +182,9 @@ for review until the evidence is there.
   Explain the reason, boundary and coverage gap.
 - Costly or rare workflows (for example expensive scheduled runs): backend
   algorithmic tests and source review may verify the backend. The frontend
-  may use clearly labeled simulated state on the real running UI. Label it
-  in the PR. State the cost, the simulated boundary, the real coverage and the
-  remaining gap. Never claim the expensive run happened.
+  may use clearly labeled simulated state on the real running UI. Label the
+  simulated state in the PR. State the cost, the simulated boundary, the real
+  coverage and the remaining gap. Never claim the expensive run happened.
 - This exception does not cover cheap authentication, data or navigation
   flows. Test those on real staging.
 
@@ -239,9 +239,9 @@ gates pass:
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) follow
 section 5. A UI PR is ready for review when the section 5 conditions are
-true. The PR stays unmerged. Attach a proof card. It names the decision, the
-Linear issue, the acceptance check results, the review verdict and the diff
-size.
+true. The PR stays unmerged until Gilad approves it or tells the orchestrator
+to merge it. Attach a proof card. It names the decision, the Linear issue, the
+acceptance check results, the review verdict and the diff size.
 Merge only after one of two events:
 
 - Gilad approves that specific PR in chat, on GitHub or with `Approved for

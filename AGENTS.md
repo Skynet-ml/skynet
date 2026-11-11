@@ -96,7 +96,8 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   (`.github/workflows/pr-files-scope.yml` checks this).
 - Never bypass branch protection or hooks. Never force-push.
 - The repository is **public**. Never commit secrets, passwords, tokens,
-  emails, account data, or images or videos. Secret names are fine.
+  emails, account data, or screenshots or screen recordings. Secret names
+  are fine.
 
 ## Merge policy (MANDATORY)
 
@@ -111,10 +112,10 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 - Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
   gates pass. UI PRs (`frontend/`) follow the same review loop. A UI PR is
   ready for review when the `skynet-pr-workflow` section 5 conditions are
-  true. The PR stays unmerged. Gilad approves it (in chat, on GitHub or with
-  `Approved for merge` on the Linear issue), or tells the orchestrator to
-  merge it.
-  Other PRs wait for Gilad's approval.
+  true. The PR stays unmerged until Gilad approves it or tells the
+  orchestrator to merge it. Gilad approves in chat, on GitHub or with
+  `Approved for merge` on the Linear issue. Other PRs wait for Gilad's
+  approval.
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
