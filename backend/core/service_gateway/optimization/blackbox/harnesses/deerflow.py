@@ -120,7 +120,9 @@ def _instructions(workdir):
     \"\"\"Return the workdir's instructions file as a message section, or ``""`` when it is absent or empty.\"\"\"
     path = Path(workdir) / INSTRUCTIONS_FILE
     text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
-    return f"Follow these instructions from {{INSTRUCTIONS_FILE}}:\\n{{text}}\\n\\n" if text else ""
+    # The closing tag ends the candidate's text, so a ``Task:`` line inside it
+    # cannot pass for the real task that follows.
+    return f"Follow these instructions from {{INSTRUCTIONS_FILE}}:\\n<{{INSTRUCTIONS_FILE}}>\\n{{text}}\\n</{{INSTRUCTIONS_FILE}}>\\n\\n" if text else ""
 
 
 def _count(usage, field):
@@ -217,10 +219,17 @@ def _run():
                 if piece:
                     last_text = message_id
                     texts[last_text] = texts.get(last_text, "") + piece
+            elif event.type == "values":
+                # DeerFlow puts usage only on AI text deltas, but OpenAI-style streams
+                # send it in a final empty chunk, so tool-call turns report it only in
+                # these state snapshots. The same id holds the same total in both.
+                for message in data.get("messages") or []:
+                    if isinstance(message, dict) and message.get("type") == "ai" and isinstance(message.get("usage_metadata"), dict):
+                        message_usage[message.get("id") or ""] = message["usage_metadata"]
     except errors.GraphRecursionError as exc:
-        # The stream stops before its ``end`` event, and tool-call-only AI events
-        # carry no usage, so the per-message sum may undercount. Report it as
-        # partial usage with no answer, so the record shows the model did work,
+        # The stream stops before its ``end`` event, so the per-message sum from
+        # the deltas and the finished nodes' snapshots stands in for it. Report it
+        # as partial usage with no answer, so the record shows the model did work,
         # and fail the run.
         _print_end("", list(message_usage.values()), partial=True)
         sys.exit(f"deerflow: recursion limit reached: {{exc}}")
