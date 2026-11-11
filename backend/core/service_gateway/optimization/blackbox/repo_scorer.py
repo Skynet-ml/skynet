@@ -1366,7 +1366,13 @@ class _StageRelay:
         """
         if self._recorder is not None:
             self._recorder.record(
-                self._recorder.start(), kind=kind, target=str(name), status="refused", failure_reason=refusal["error"]
+                self._recorder.start(),
+                kind=kind,
+                target=str(name),
+                status="refused",
+                failure_reason=refusal["error"],
+                # The frame's name comes from box code and can be any value it holds (SKY-637).
+                secrets=self._stage_secrets,
             )
         self._answer(identity, refusal)
 
@@ -1678,6 +1684,8 @@ class _StageRelay:
                 recorder=self._recorder,
                 kind=kind,
                 target=record_target,
+                # Box code can put its model route key into a tool call or a request body (SKY-637).
+                record_secrets=self._stage_secrets,
             )
         except _AnswerTooLargeError:
             return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
