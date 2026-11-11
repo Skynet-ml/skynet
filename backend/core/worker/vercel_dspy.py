@@ -8,13 +8,14 @@ import logging
 import re
 import secrets
 import shlex
+import time
 from pathlib import Path
 from typing import Any
 
 from ..billing.runtime import UsagePendingError
 from ..billing.signals import BudgetReached
 from ..brand import APP_NAME
-from ..exceptions import InfrastructureInterruptionError
+from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..models.blackbox import BLACKBOX_HARNESS_CODEX
 from ..models.unified import DSPY_OPTIMIZERS
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
@@ -39,6 +40,7 @@ PROTOCOL_PROBE = (
 _PROBE_TIMEOUT_SECONDS = 120.0
 _MISSING_CORE_MODULE = re.compile(r"(?:ModuleNotFoundError|ImportError): .*\bcore\.")
 _DIAGNOSTIC_LINES = 40
+DEADLINE_MESSAGE = "The run reached its deadline: the cloud sandbox lifetime of {lifetime:.0f} s ended."
 
 
 def _save_checkpoint(directory: Path, event: dict[str, Any]) -> None:
@@ -162,6 +164,10 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             raise TypeError("The Vercel optimizer requires a trusted sandbox descriptor.")
         runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
         lifetime = float(descriptor["lifetime_seconds"])
+        # Read before the open, so the provider's lifetime clock never starts
+        # earlier than this one and a stop at the real lifetime end always
+        # counts as the deadline (SKY-586).
+        opened_at = time.monotonic()
         nonce = secrets.token_hex(24)
         checkpoint_root = Path(guest_payload["_gepa_log_dir"]) if guest_payload.get("_gepa_log_dir") else None
         checkpoints = {}
@@ -255,12 +261,20 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         command = f"PYTHONPATH=/app python3 -m core.worker.isolated_runner {shlex.quote(request_path)}"
         if "_preflight" in guest_payload:
             event_queue.put({"type": "preflight_phase", "phase": "evaluator"})
-        result = session.run(
-            command,
-            env={"PYTHONUNBUFFERED": "1", "LITELLM_LOCAL_MODEL_COST_MAP": "True"},
-            timeout_seconds=lifetime,
-            on_output=output,
-        )
+        try:
+            result = session.run(
+                command,
+                env={"PYTHONUNBUFFERED": "1", "LITELLM_LOCAL_MODEL_COST_MAP": "True"},
+                timeout_seconds=lifetime,
+                on_output=output,
+            )
+        except ServiceError as error:
+            # The provider ends the box at its lifetime (the run deadline,
+            # SKY-572) and the parent reports only a generic session stop. A
+            # stop before the lifetime ends is a real failure and stays one.
+            if time.monotonic() - opened_at < lifetime:
+                raise
+            raise InfrastructureInterruptionError(DEADLINE_MESSAGE.format(lifetime=lifetime)) from error
         if not terminal or not result.ok:
             raise _guest_failure(result)
     except BudgetReached as error:
