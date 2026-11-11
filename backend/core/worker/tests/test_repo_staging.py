@@ -748,6 +748,8 @@ class _Gateway:
         class _Runtime:
             """Open one recording box per call."""
 
+            max_lifetime_seconds = 3600.0
+
             def open(self, spec: SandboxSpec) -> _Box:
                 """Open a recording box over ``spec``."""
                 box = _Box(spec, gateway._cutoff_works)
@@ -2500,7 +2502,9 @@ class _LocalGateway(_Gateway):
 
     def parent_sandbox_runtime(self) -> Any:
         """Return a runtime that runs each box as a local process."""
-        return LocalSubprocessRuntime()
+        runtime = LocalSubprocessRuntime()
+        runtime.max_lifetime_seconds = 120.0  # type: ignore[attr-defined]
+        return runtime
 
 
 _SEEING_CANDIDATE = """

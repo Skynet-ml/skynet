@@ -150,6 +150,7 @@ def bind_protected_sandbox(
     workflow: str,
     owner_id: str,
     lifetime_seconds: int | None = None,
+    guest_lifetime_seconds: int | None = None,
     parent_hosts: tuple[str, ...] = (),
     image: str | None = None,
 ) -> dict[str, Any]:
@@ -162,13 +163,17 @@ def bind_protected_sandbox(
         workflow: Execution family selecting its immutable prebuilt image.
         owner_id: Stable job or setup identity used for cleanup after interruption.
         lifetime_seconds: Optional shorter ceiling for one bounded interaction.
+        guest_lifetime_seconds: Optional shorter ceiling for the guest's boxes
+            alone, such as a per-run deadline; the parent's own boxes keep the
+            full lifetime.
         parent_hosts: Package registries the parent's own repository scoring
             box may reach during setup; empty when the run opens no such box.
         image: The immutable image the run is pinned to; the deployment's
             current image when None.
 
     Returns:
-        Non-secret deployment identity usable in setup evidence.
+        Non-secret deployment identity usable in setup evidence; its
+        ``lifetime_seconds`` is the guest's lifetime.
 
     Raises:
         UnpricedOperationError: When the protected runtime cannot be configured.
@@ -185,6 +190,7 @@ def bind_protected_sandbox(
     lifetime = min(
         lifetime_seconds or configured_lifetime, configured_lifetime, VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
     )
+    guest_lifetime = min(guest_lifetime_seconds or lifetime, lifetime)
     recorder = run_call_recorder(gateway, owner_id)
     gateway.recorder = recorder
     runtime = protected_runtime(settings, image=image, budget=gateway.runtime, recorder=recorder)
@@ -203,12 +209,13 @@ def bind_protected_sandbox(
         runtime,
         image=image,
         max_lifetime_seconds=lifetime,
+        guest_lifetime_seconds=guest_lifetime,
         tags={JOB_TAG: owner_id},
         command_runner=mailbox.run,
         parent_command_runner=ModelMailbox(gateway.dispatch_route).run,
         snapshots=snapshots,
     )
-    gateway.bind_sandbox(broker, image=image, lifetime_seconds=lifetime)
+    gateway.bind_sandbox(broker, image=image, lifetime_seconds=guest_lifetime)
     if parent_hosts:
         gateway.fund_parent_sandbox(parent_hosts)
-    return {"image": image, "lifetime_seconds": lifetime}
+    return {"image": image, "lifetime_seconds": guest_lifetime}

@@ -41,6 +41,7 @@ BLACKBOX_HARNESS_CLAUDE_CODE = "claude_code"
 BLACKBOX_HARNESS_OPENCODE = "opencode"
 BLACKBOX_HARNESS_PRIME = "prime"
 BLACKBOX_HARNESS_AIDER = "aider"
+BLACKBOX_HARNESS_OPENHANDS_SDK = "openhands_sdk"
 BLACKBOX_HARNESS_ANTIGRAVITY_SDK = "antigravity_sdk"
 BLACKBOX_HARNESS_FX = "fx"
 BLACKBOX_HARNESS_DEERFLOW = "deerflow"
@@ -53,6 +54,7 @@ BLACKBOX_HARNESSES = (
     BLACKBOX_HARNESS_OPENCODE,
     BLACKBOX_HARNESS_PRIME,
     BLACKBOX_HARNESS_AIDER,
+    BLACKBOX_HARNESS_OPENHANDS_SDK,
     BLACKBOX_HARNESS_ANTIGRAVITY_SDK,
     BLACKBOX_HARNESS_FX,
     BLACKBOX_HARNESS_GOOSE,
@@ -495,6 +497,14 @@ class BlackboxRunRequest(BaseModel):
             "token price. Each round of calls waits for its batch, typically minutes and at most a "
             "day, so the run finishes much later. Coding-agent proposer calls and calls on the "
             "user's own OpenRouter key run normally."
+        ),
+    )
+    deadline_seconds: int | None = Field(
+        default=None,
+        ge=60,
+        description=(
+            "A shorter run deadline in seconds for this run only. The deployment's sandbox "
+            "lifetime still caps it, so it can only shorten the run."
         ),
     )
     # The setup's metric-hardening job (SKY-356). A finished job of the same

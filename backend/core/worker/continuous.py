@@ -351,7 +351,7 @@ def run_models(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _request_copy(stored: dict[str, Any]) -> dict[str, Any]:
-    """Drop the fields of a stored request that belong to that run's funding alone.
+    """Drop the fields of a stored request that belong to that run alone: its funding and deadline.
 
     Args:
         stored: A stored unified request, with credentials scrubbed.
@@ -364,7 +364,15 @@ def _request_copy(stored: dict[str, Any]) -> dict[str, Any]:
         for key, value in stored.items()
         if not key.startswith("_budget")
         and not key.startswith("execution_budget_")
-        and key not in {"preflight_id", "preflight_fingerprint", "estimated_cents_low", "estimated_cents_high"}
+        and key
+        not in {
+            "preflight_id",
+            "preflight_fingerprint",
+            "estimated_cents_low",
+            "estimated_cents_high",
+            # A deadline override shortens only the run that asked for it (SKY-572).
+            "deadline_seconds",
+        }
     }
 
 
