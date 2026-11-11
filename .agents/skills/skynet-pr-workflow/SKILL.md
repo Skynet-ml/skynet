@@ -120,8 +120,8 @@ for review until the evidence is there.
   description or evidence needs a new evidence check.
 - Add a short review table: reviewer model, reviewed commit, verdict, report
   link.
-- Approval permits human review, or the backend-only merge below. It never
-  permits a production deploy.
+- Approval permits human review, or the backend or UI merge below (section
+  7). It never permits a production deploy.
 - For a PR the automation cannot control, record the failed gate. Do not
   call it ready for human review.
 
@@ -279,7 +279,7 @@ A manual hold on a change or on a promotion still stops it.
   5.5 approval, the orchestrator moves the issue there and notifies Gilad
   only for changes that need human review (PR, preview, checks, review
   evidence). Withdraw readiness quietly if commits, checks or evidence
-  change. A backend merge needs no notification.
+  change. A backend or UI merge needs no notification.
 - Gilad approves with a new comment that contains `Approved for merge`. It
   authorizes only the version in the latest completed review handoff, and
   only from Gilad's Linear account after that handoff. Delegated agent
