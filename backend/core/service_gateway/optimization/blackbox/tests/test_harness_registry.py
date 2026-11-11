@@ -42,7 +42,11 @@ _OVERRIDES: dict[str, dict[str, str]] = {
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
 _BUILT_INS = (
-    *_PRE_REGISTRY,
+    "pi",
+    "codex",
+    "opencode",
+    "opencode_v2",
+    "prime",
     "aider",
     "openhands_sdk",
     "antigravity_sdk",
@@ -271,6 +275,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "pi": ("pi", "0.87.1"),
         "codex": ("codex", "0.153.0"),
         "opencode": ("opencode", "1.18.27"),
+        "opencode_v2": ("opencode2", "v2.2.7"),
         "prime": ("prime-agent", "0.9.7"),
         "aider": ("aider", "0.86.2"),
         "openhands_sdk": (
