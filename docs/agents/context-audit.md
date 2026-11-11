@@ -7,7 +7,7 @@ and list what to cut.
 ## 1. Summary
 
 - A Claude Code session in this repo loads about **121k tokens before the
-  first action**. About 60k of it is the desktop app's own tool schemas.
+  first action**. About 54k of it is the desktop app's own tool schemas.
 - The user controls about **24–28k tokens** of the rest. The biggest parts are
   unused MCP servers and connectors (about 14–18k), duplicated global
   instructions (about 7.3k), unused plugin skills (about 2k) and MCP server
