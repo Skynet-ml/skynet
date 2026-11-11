@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-toastify";
 
@@ -33,6 +33,7 @@ import { SubmitNav, type RunFailureNotice } from "../SubmitNav";
 import { SubmitSplash } from "../SubmitSplash";
 import { SubmitStepper } from "../SubmitStepper";
 import { belowFloorMessage, shortBalanceMessage } from "../TotalBudgetCard";
+import { shortfallToast } from "./shortfall-toast";
 import { InputsStep } from "./InputsStep";
 import { MetricStep } from "./MetricStep";
 import { OptimizerStep } from "./OptimizerStep";
@@ -157,6 +158,11 @@ function UnifiedWizardFrame() {
   );
   const { openTo } = useSettingsModal();
   const addFunds = useAddFundsAction();
+  // The hook returns a new object each render; a ref keeps ``forward`` stable.
+  const addFundsRef = useRef(addFunds);
+  useLayoutEffect(() => {
+    addFundsRef.current = addFunds;
+  });
   const inputsOpen = canMoveForward(current, w.stepIssue("inputs"));
   // Until every model's one-call hold has loaded, the floor reads low and a
   // run the account can't fund would pass; a press made meanwhile waits.
@@ -173,7 +179,10 @@ function UnifiedWizardFrame() {
       return;
     }
     if (shortfall !== null) {
-      toast.error(shortfallMessage(shortfall), { toastId: SHORTFALL_TOAST_ID });
+      toast.error(
+        shortfallToast(shortfallMessage(shortfall), shortfall.kind === "balance" ? addFundsRef.current : null),
+        { toastId: SHORTFALL_TOAST_ID },
+      );
       return;
     }
     if (page < pageCount - 1) {
