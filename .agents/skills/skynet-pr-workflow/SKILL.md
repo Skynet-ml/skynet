@@ -225,8 +225,8 @@ for review until the evidence is there.
 ### Merge gates (MANDATORY)
 
 **Backend PRs** (only files under `backend/`, at least one, plus optional
-`i18n/locales/ui/*.json` and Markdown under `docs/`) merge into `staging` only when **all** of these
-gates pass:
+`i18n/locales/ui/*.json` and Markdown under `docs/`) merge into `staging`
+only when **all** of these gates pass:
 
 1. Agent code review is clean.
 2. Tests and the Linear issue's acceptance checks pass in the PR environment.
