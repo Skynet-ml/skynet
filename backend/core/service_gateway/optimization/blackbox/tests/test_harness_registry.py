@@ -39,7 +39,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
 }
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
-_BUILT_INS = (*_PRE_REGISTRY, "aider", "antigravity_sdk", "fx", "goose", "cline")
+_BUILT_INS = (*_PRE_REGISTRY, "aider", "antigravity_sdk", "fx", "goose", "terminus", "cline")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
 # SKY-529 changed the codex digests: Codex turns off web_search and multi_agent,
@@ -269,6 +269,12 @@ def test_registry_keeps_the_catalog_order() -> None:
         ),
         "fx": ("fx", "0.0.16"),
         "goose": ("goose", "1.57.0"),
+        "terminus": (
+            "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with harbor==0.25.0"
+            " --with litellm==1.93.0 --with openai==2.24.0 python -c"
+            """ 'import importlib.metadata as m; print(m.version("harbor"))'""",
+            "0.25.0",
+        ),
         "cline": ("cline", "3.0.74"),
     }
 
