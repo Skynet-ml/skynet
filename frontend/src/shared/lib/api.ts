@@ -663,6 +663,16 @@ export function getExecutionRuntimes(hasImageInputs: boolean, signal?: AbortSign
   );
 }
 
+/** The sandbox providers a run may choose on a server, and the one it uses when it names none. */
+export interface SandboxProviderCatalog {
+  providers: Array<{ id: string; label: string }>;
+  default_provider: string;
+}
+
+export function getSandboxProviders(source?: ApiSource, signal?: AbortSignal) {
+  return request<SandboxProviderCatalog>("/sandbox-providers", { signal }, source);
+}
+
 /** Charged cents one call of a model reserves before it is sent; null when unpriced. */
 export interface ModelCallHold {
   name: string;

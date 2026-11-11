@@ -317,6 +317,7 @@
     "optimization.protected_interactive_sandbox_required": "この保護された最適化は API プロセス内で評価または提供できません。個別に従量課金される {runtime} サンドボックスが必要ですが、このエンドポイントではまだ利用できません。",
     "sandbox.docker_unavailable": "このコンピューターで Docker が動作していません。Docker Desktop または OrbStack を起動して、もう一度お試しください。",
     "sandbox.docker_image_missing": "ローカルのサンドボックスイメージがまだ作成されていません。アプリを再起動して作成してください。",
+    "sandbox.provider_unavailable": "このサンドボックスプロバイダーはこのサーバーでは使えません。一覧からプロバイダーを選んでください。",
     "repo_gate.unenforced_local": "optimize.toml で {key} が設定されています。ローカルの Docker サンドボックスはまだこの設定を適用できません。実行するには削除してください。",
     "repo_gate.unenforced_cloud": "optimize.toml で {key} が設定されています。クラウドのサンドボックスはまだこの設定を適用できません。実行するには削除してください。",
     "repo_gate.missing_secret": "optimize.toml のサービス {service} にはシークレット {secret} が必要ですが、この実行にはその名前のシークレットがありません。シークレットを実行に追加するか、ファイルから名前を削除してください。",

@@ -689,6 +689,8 @@ export interface BlackboxRunRequest {
   budget: BlackboxBudget;
   strategy: BlackboxStrategy;
   proposer_runtime?: BlackboxProposerRuntime;
+  // One id from GET /sandbox-providers; unset runs on the server default.
+  sandbox_provider?: string | null;
   proposer?: BlackboxProposer;
   target: BlackboxTarget;
   task_model_config?: ModelConfig | null;

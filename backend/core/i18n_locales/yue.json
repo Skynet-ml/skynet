@@ -303,6 +303,7 @@
     "optimization.protected_interactive_sandbox_required": "呢個受保護嘅最佳化唔可以喺 API 程序入面評估或者提供服務。需要一個獨立計費嘅 {runtime} 沙盒，但呢個端點暫時未支援。",
     "sandbox.docker_unavailable": "呢部電腦冇運行緊 Docker。請開啟 Docker Desktop 或者 OrbStack，然後再試。",
     "sandbox.docker_image_missing": "本機沙盒映像仲未建立。重新開啟應用程式就會建立。",
+    "sandbox.provider_unavailable": "呢個沙盒供應商喺呢部伺服器用唔到。請喺清單揀一個供應商。",
     "repo_gate.unenforced_local": "optimize.toml 設定咗 {key}。本機 Docker 沙盒暫時未能強制執行呢個設定。請刪走佢再運行。",
     "repo_gate.unenforced_cloud": "optimize.toml 設定咗 {key}。雲端沙盒暫時未能強制執行呢個設定。請刪走佢再運行。",
     "repo_gate.missing_secret": "optimize.toml 入面嘅服務 {service} 需要密鑰 {secret}，但係今次運行冇呢個名嘅密鑰。請將密鑰加入運行，或者喺檔案度刪走呢個名。",

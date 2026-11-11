@@ -317,6 +317,7 @@
     "optimization.protected_interactive_sandbox_required": "Esta optimización protegida no se puede evaluar ni servir en el proceso de la API. Se requiere un entorno aislado {runtime} con medición independiente, que aún no está disponible en este endpoint.",
     "sandbox.docker_unavailable": "Docker no se está ejecutando en este equipo. Inicia Docker Desktop u OrbStack e inténtalo de nuevo.",
     "sandbox.docker_image_missing": "La imagen del sandbox local aún no está creada. Reinicia la aplicación para crearla.",
+    "sandbox.provider_unavailable": "Este proveedor de sandbox no está disponible en este servidor. Elige un proveedor de la lista.",
     "repo_gate.unenforced_local": "optimize.toml define {key}. El sandbox local de Docker todavía no puede aplicar esta configuración. Elimínala para ejecutar.",
     "repo_gate.unenforced_cloud": "optimize.toml define {key}. El sandbox en la nube todavía no puede aplicar esta configuración. Elimínala para ejecutar.",
     "repo_gate.missing_secret": "El servicio {service} de optimize.toml necesita el secreto {secret}, pero esta ejecución no tiene ningún secreto con ese nombre. Añade el secreto a la ejecución o elimina el nombre del archivo.",

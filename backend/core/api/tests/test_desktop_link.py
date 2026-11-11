@@ -589,6 +589,7 @@ _POLICY_CASES: list[tuple[str, bool]] = [
     ("/account/experience", True),
     ("/settings/user-preferences", True),
     ("/notifications", True),
+    ("/sandbox-providers", True),
     ("/admin/quotas", False),
     ("/settings/api-token", False),
     ("/settings/desktop-links", False),

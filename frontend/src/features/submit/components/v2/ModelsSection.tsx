@@ -23,6 +23,13 @@ import {
   harnessLabel,
   keepHarnessEffort,
 } from "@/shared/lib/blackbox-harness";
+import {
+  SandboxProviderIcon,
+  sandboxProviderLabel,
+  shownSandboxProvider,
+  showsSandboxPicker,
+  type SandboxProviders,
+} from "@/shared/lib/sandbox-provider";
 import { tip } from "@/shared/lib/tooltips";
 import { cn } from "@/shared/lib/utils";
 import { defaultOpen, useExperienceLevel } from "@/features/experience";
@@ -74,7 +81,8 @@ type Editing = {
  * metric model lives with the metric in step 4.
  */
 export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice: OptimizerChoice }) {
-  const { state, patchOptimizer, guided, runSource } = useWizardV2Shell();
+  const { state, patchOptimizer, guided, runSource, sandboxProviders } =
+    useWizardV2Shell();
   const t = (key: string) => v2Msg(key, guided);
   const level = useExperienceLevel();
   const catalog = useModelCatalog(runSource);
@@ -87,7 +95,8 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
     defaultOpen("wizard.shinka_settings", level),
   );
 
-  const { taskModel, reflectionModel, extraReflectionModels, proposer, shinka } = state.optimizer;
+  const { taskModel, reflectionModel, extraReflectionModels, proposer, shinka, sandboxProvider } =
+    state.optimizer;
   const resolved = resolveOptimizer(choice, kind);
   const nativeProposer = usesNativeProposer(choice, kind);
   const knobs = proposerKnobs(choice, kind);
@@ -267,6 +276,15 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
         />
       </ModelRoleRow>
 
+      {showsSandboxPicker(kind, sandboxProviders) && (
+        <SandboxProviderField
+          sandboxProvider={sandboxProvider}
+          sandboxProviders={sandboxProviders}
+          onChange={(value) => patchOptimizer({ sandboxProvider: value })}
+          t={t}
+        />
+      )}
+
       {nativeProposer && (
         <Disclosure
           id="v2-proposer"
@@ -407,5 +425,57 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
         />
       )}
     </StepCard>
+  );
+}
+
+/**
+ * The sandbox picker of a repository run. A failed provider read disables the
+ * picker and says, under it, that the run uses the server default.
+ */
+export function SandboxProviderField({
+  sandboxProvider,
+  sandboxProviders,
+  onChange,
+  t,
+}: {
+  sandboxProvider: string | null | undefined;
+  sandboxProviders: SandboxProviders;
+  onChange: (value: string) => void;
+  t: (key: string) => string;
+}) {
+  const { catalog } = sandboxProviders;
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field
+        label={t("submit.v2.optimizer.sandbox.label")}
+        htmlFor="v2-sandbox-provider"
+        hint={catalog ? t("submit.v2.optimizer.sandbox.hint") : undefined}
+      >
+        <Select
+          value={catalog ? shownSandboxProvider(sandboxProvider, catalog) : undefined}
+          onValueChange={onChange}
+          disabled={!catalog}
+        >
+          <SelectTrigger id="v2-sandbox-provider" className={cn("w-full", TOUCH_FIELD)}>
+            <SelectValue placeholder={t("submit.v2.optimizer.sandbox.server_default")} />
+          </SelectTrigger>
+          <SelectContent>
+            {catalog?.providers.map((provider) => (
+              <SelectItem key={provider.id} value={provider.id}>
+                <span className="flex items-center gap-2">
+                  <SandboxProviderIcon id={provider.id} size={16} aria-hidden />
+                  <span>{sandboxProviderLabel(provider.id, provider.label)}</span>
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {!catalog && (
+          <p className="text-xs text-muted-foreground">
+            {t("submit.v2.optimizer.sandbox.load_failed")}
+          </p>
+        )}
+      </Field>
+    </div>
   );
 }
