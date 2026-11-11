@@ -337,6 +337,10 @@ class EC2Environment(SandboxEnvironment):
                     await _wait_through_cancels(launch, _CANCEL_GRACE_SEC)
                 if not launch.done():
                     launch.add_done_callback(lambda done: _terminate_late_launch(client, done))
+                elif not launch.cancelled():
+                    # The cancelled shield no longer reads the launch, so an
+                    # unread launch error would log "never retrieved".
+                    launch.exception()
                 if state.instance_id is not None and await _terminate_bounded(
                     client, state.instance_id, _CANCEL_GRACE_SEC
                 ):
@@ -648,6 +652,8 @@ class EC2Environment(SandboxEnvironment):
             grace = _CANCEL_GRACE_SEC if cancelled else _FAILED_START_GRACE_SEC
             if await _terminate_bounded(client, instance_id, grace):
                 self._lost_launches.pop(state.launch_id, None)
+            # An SSH probe can have written the host key before the failure.
+            await self._forget_host_key(instance_id)
             raise
         return instance_id, host
 
@@ -872,7 +878,7 @@ class EC2Environment(SandboxEnvironment):
     async def _forget_host_key(self, instance_id: str) -> None:
         """Remove the host key of a terminated instance from the configured known hosts file.
 
-        A shared file with an instance id alias gets one new line for each
+        Stop and a failed launch both call this. A shared file with an instance id alias gets one new line for each
         instance, and no later instance uses that line again. A temporary
         file goes away with the sandbox, so only a configured file needs
         this. A failure only logs, because the terminate itself succeeded.

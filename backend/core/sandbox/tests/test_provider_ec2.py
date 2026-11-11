@@ -9,6 +9,7 @@ and root switches, and a ``timeout`` shim that drops its limits. No test calls A
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -1441,3 +1442,43 @@ async def test_a_stop_after_the_launch_returns_never_leaves_a_terminated_instanc
     assert env._instance_id is None
     assert env._lost_launches == {}
     assert env not in ec2_provider._LIVE
+
+
+async def test_a_failed_start_removes_the_host_key_that_its_probe_wrote(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Remove the alias line of the instance from a configured known hosts file when the SSH wait fails."""
+    known = tmp_path / "known_hosts"
+    (fake_ec2.state / "ssh_down").touch()
+    env = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
+    env._connect_timeout = 1.0
+    task = asyncio.create_task(env.start())
+    await _until(lambda: len(_ssh_calls(fake_ec2)) >= 1)
+    alias = next(arg for arg in _ssh_calls(fake_ec2)[0] if arg.startswith("HostKeyAlias=")).split("=", 1)[1]
+    # ssh with accept-new writes the key once the probe reaches the host, also when the probe then fails.
+    known.write_text(f"{alias} ssh-ed25519 AAAA1\ni-other ssh-ed25519 AAAA2\n")
+    with pytest.raises(StartTimeoutError):
+        await task
+    assert known.read_text() == "i-other ssh-ed25519 AAAA2\n"
+    assert fake_ec2.live() == []
+
+
+async def test_a_cancel_and_a_stop_together_leave_no_unread_launch_error(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Read the launch error when a cancel and a stop end the start together, so asyncio logs no unread error."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.5)
+    fake_ec2.run_gate = threading.Event()
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "run_instances" in fake_ec2.ops())
+    await env.stop()
+    task.cancel()
+    threading.Timer(0.05, fake_ec2.run_gate.set).start()
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _until(lambda: fake_ec2.live() == [] and not ec2_provider._LATE_TERMINATES)
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+    assert "never retrieved" not in caplog.text
+    assert "terminate_instances" in fake_ec2.ops()
