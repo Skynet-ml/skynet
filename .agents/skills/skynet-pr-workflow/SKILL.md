@@ -318,10 +318,14 @@ A manual hold on a change or on a promotion still stops it.
      conflicts in the batch branch. Never force-push.
   3. Run `gh workflow run ci.yml --ref batch/<date>`. Wait for the run to
      pass. If it fails, fix the cause or remove that PR, then run it again.
-  4. Open one PR from `batch/<date>` to `staging` with the `no-issue` label.
-     List the included PRs and link the CI run.
+  4. Open one PR from `batch/<date>` to `staging`. List the included PRs
+     and link the CI run. The `scope` check passes for a `batch/` branch,
+     because each included PR passed it on its own PR.
   5. Merge it with a merge commit (`gh pr merge <n> --merge`). GitHub then
      marks each included PR as merged.
+- Required checks match by commit. The dispatched CI run reports the `ci`
+  checks on the batch head commit, so the batch PR meets the `staging merge
+  gates` ruleset. An individual PR never merges on its own.
 - The push to `staging` runs the full CI again.
 
 ### Daily merge window (2026-10-20)
