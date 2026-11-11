@@ -54,6 +54,15 @@ HERMES_BASE_URL_FILE = ".app/hermes/base_url"
 HERMES_PROVIDER = "custom:runtime"
 # ``uv tool install`` puts its binaries here.
 _HERMES_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
+# A protected run checks only the preinstalled version, so a Hermes without the
+# ``mcp`` extra would pass and then skip every MCP server with no error. The
+# run imports ``mcp`` with the interpreter on Hermes's shebang line, left
+# unquoted so an ``/usr/bin/env python3`` line splits into its words. ``-I``
+# keeps an ``mcp`` folder in the workspace from passing the check (SKY-620).
+_MCP_CHECK = (
+    "$(sed -n '1s/^#!//p' \"$(command -v hermes)\") -I -c 'import mcp' || "
+    "{ echo 'hermes has no mcp extra: install hermes-agent[mcp] to load the [proposer] MCP servers' >&2; exit 1; }; "
+)
 # Downloads one file and keeps it only when its sha256 matches; ``-I`` keeps
 # the interpreter from importing anything from the working directory.
 _WHEEL_FETCH = (
@@ -303,7 +312,8 @@ def _hermes_launch(
         ServiceError: When the effort is not one of :data:`HERMES_EFFORTS`.
     """
     run_command = (
-        f'{_HERMES_PATH}; export HERMES_HOME="$(mktemp -d)" && '
+        f"{_HERMES_PATH}; {_MCP_CHECK if mcp_servers else ''}"
+        'export HERMES_HOME="$(mktemp -d)" && '
         "trap 'rm -rf \"$HERMES_HOME\"' EXIT && "
         f'cp {HERMES_CONFIG_FILE} "$HERMES_HOME/config.yaml" && '
         f'printf {shlex.quote(_UPDATE_CHECK_CACHE)} "$(date +%s)" > "$HERMES_HOME/.update_check" && '
