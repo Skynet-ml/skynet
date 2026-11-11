@@ -21,6 +21,7 @@ from ..harness_bridge import parse_pi_output
 from ..harnesses import REGISTRY
 from ..harnesses.base import _version_check
 from ..harnesses.openhands_sdk import (
+    EFFORTS,
     ENV_REASONING_EFFORT,
     HARNESS_ID,
     OPENHANDS_SDK_VERSION,
@@ -296,18 +297,24 @@ def test_version_probe_needs_no_workspace_file_and_never_downloads() -> None:
         assert f"--with {pin}" in SPEC.binary
 
 
-@pytest.mark.parametrize(
-    ("effort", "expected"),
-    [("none", "none"), ("low", "low"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max"), ("HIGH", "high")],
-)
-def test_reasoning_effort_passes_to_the_sdk(effort: str, expected: str) -> None:
-    """Each known Skynet effort reaches the runner in the SDK's lower-case form."""
-    assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == expected
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_supported_effort_passes_to_the_sdk_unchanged(effort: str) -> None:
+    """Each level the pinned SDK documents reaches the runner exactly as the user chose it."""
+    assert effort in EFFORTS
+    assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == effort
 
 
-def test_unknown_effort_keeps_the_sdk_default() -> None:
-    """An effort LiteLLM does not know sets nothing, so the SDK keeps its default."""
-    assert ENV_REASONING_EFFORT not in SPEC.launch("m", _GATEWAY, reasoning_effort="turbo").env
+@pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH", "High", " high", "off"])
+def test_unsupported_effort_is_refused(effort: str) -> None:
+    """A level the SDK does not support stops the launch instead of a silent drop or remap."""
+    with pytest.raises(ServiceError, match="does not support the effort level"):
+        SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
+    """No effort sets nothing, so the SDK keeps its own default."""
+    assert ENV_REASONING_EFFORT not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
 @pytest.mark.parametrize(
