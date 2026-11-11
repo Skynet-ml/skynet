@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import litellm
@@ -83,6 +85,7 @@ class TmuxSession:
         TmuxSession.started = self.kwargs
 """,
     "harbor/agents/terminus_2/__init__.py": """
+import asyncio
 import json
 import os
 from types import SimpleNamespace
@@ -109,6 +112,9 @@ class Terminus2:
         return "terminus-2"
 
     async def run(self, instruction, environment, context):
+        if os.environ.get("FAKE_HARBOR_HANG"):
+            open(os.environ["FAKE_HARBOR_HANG"], "w").close()
+            await asyncio.sleep(3600)
         result = await environment.exec("echo hi > out.txt; env")
         shell_env = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         tmux = TmuxSession.started
@@ -150,10 +156,45 @@ def _fake_harbor(root: Path) -> Path:
     return root
 
 
+def _start_runner(tmp_path: Path, launch_files: dict[str, str], *, tmux: bool = True, **env: str) -> subprocess.Popen:
+    """Start the generated runner with the current Python against the fake Harbor package.
+
+    The fake ``tmux`` appends its arguments to ``FAKE_TMUX_LOG`` when that is set.
+
+    Args:
+        tmp_path: Test directory; the workspace and fake package live under it.
+        launch_files: Generated launch files to write into the workspace.
+        tmux: Whether a fake ``tmux`` is on ``PATH``.
+        **env: Extra environment variables.
+
+    Returns:
+        The running process.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if tmux:
+        fake_tmux = bin_dir / "tmux"
+        fake_tmux.write_text('#!/bin/sh\necho "$@" >> "${FAKE_TMUX_LOG:-/dev/null}"\n')
+        fake_tmux.chmod(0o755)
+    workspace = tmp_path / "ws"
+    for name, content in launch_files.items():
+        path = workspace / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return subprocess.Popen(
+        [sys.executable, RUNNER_FILE],
+        cwd=workspace,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "PYTHONPATH": str(_fake_harbor(tmp_path / "fake")), **env},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
 def _run_runner(
     tmp_path: Path, launch_files: dict[str, str], *, tmux: bool = True, **env: str
 ) -> subprocess.CompletedProcess:
-    """Run the generated runner with the current Python against the fake Harbor package.
+    """Run the generated runner to the end against the fake Harbor package.
 
     Args:
         tmp_path: Test directory; the workspace and fake package live under it.
@@ -164,26 +205,13 @@ def _run_runner(
     Returns:
         The finished process.
     """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    if tmux:
-        fake_tmux = bin_dir / "tmux"
-        fake_tmux.write_text("#!/bin/sh\nexit 0\n")
-        fake_tmux.chmod(0o755)
-    workspace = tmp_path / "ws"
-    for name, content in launch_files.items():
-        path = workspace / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    return subprocess.run(
-        [sys.executable, RUNNER_FILE],
-        cwd=workspace,
-        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "PYTHONPATH": str(_fake_harbor(tmp_path / "fake")), **env},
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    proc = _start_runner(tmp_path, launch_files, tmux=tmux, **env)
+    try:
+        stdout, stderr = proc.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def test_spec_is_registered_with_a_pinned_version_and_the_pi_parser() -> None:
@@ -398,6 +426,35 @@ def test_litellm_sends_the_extra_body_effort_unchanged_with_drop_params(model: s
         )
 
     assert gateway.requests[-1]["body"]["reasoning_effort"] == effort
+
+
+def test_sigterm_kills_tmux_and_removes_the_temp_folder(tmp_path: Path) -> None:
+    """A run timeout or budget stop sends SIGTERM; the runner still kills tmux and removes its temp folder."""
+    launch = SPEC.launch("m", _GATEWAY)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix it.\n")
+    ready = tmp_path / "ready"
+    tmux_log = tmp_path / "tmux.log"
+    (tmp_path / "tmp").mkdir()
+    env = {
+        **launch.env,
+        "APP_PROMPT_FILE": str(prompt),
+        "FAKE_HARBOR_HANG": str(ready),
+        "FAKE_TMUX_LOG": str(tmux_log),
+        "TMPDIR": str(tmp_path / "tmp"),
+    }
+    proc = _start_runner(tmp_path, launch.files, **env)
+    deadline = time.monotonic() + 20
+    while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ready.exists(), proc.communicate(timeout=5)[1]
+
+    proc.send_signal(signal.SIGTERM)
+    _, stderr = proc.communicate(timeout=20)
+
+    assert proc.returncode == 128 + signal.SIGTERM, stderr
+    assert "kill-server" in tmux_log.read_text()
+    assert list((tmp_path / "tmp").iterdir()) == []
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:

@@ -89,6 +89,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -176,6 +177,11 @@ def _answer(chat):
     return ""
 
 
+def _stop(signum, frame):
+    \"\"\"Turn SIGTERM into ``SystemExit`` so the ``finally`` blocks kill tmux and remove the temp folder.\"\"\"
+    raise SystemExit(128 + signum)
+
+
 async def _run(scratch):
     \"\"\"Run the agent to completion and print one Pi-shaped ``message_end`` event.\"\"\"
     api_key, model = _env("API_KEY"), _env("MODEL")
@@ -230,6 +236,9 @@ def main():
     # Harbor's own loggers set DEBUG on themselves; the log goes to stderr only.
     logging.getLogger("harbor").setLevel(logging.ERROR)
     logging.getLogger("harbor.utils.logger").setLevel(logging.ERROR)
+    # A run timeout or a budget stop ends the runner with SIGTERM, whose
+    # default action skips every ``finally``.
+    signal.signal(signal.SIGTERM, _stop)
     scratch = Path(tempfile.mkdtemp(prefix="terminus-"))
     try:
         asyncio.run(_run(scratch))
