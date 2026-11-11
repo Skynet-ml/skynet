@@ -24,7 +24,16 @@ from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_SWE_AGENT
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
-from .base import ENV_API_KEY, ENV_MODEL, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import (
+    ENV_API_KEY,
+    ENV_MODEL,
+    ENV_PROMPT_FILE,
+    GatewayConfig,
+    HarnessLaunch,
+    _base_env,
+    _temp_root,
+    _version_check,
+)
 
 # Git tag v1.1.0 of SWE-agent/SWE-agent (MIT), 2025-05-22. The PyPI name
 # ``sweagent`` is an unrelated 0.0.1 upload, so the install uses the tag.
@@ -190,11 +199,12 @@ def _swe_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     """Build the launch for SWE-agent (``sweagent``, pinned to :data:`SWE_AGENT_VERSION`).
 
     Each run gets a fresh folder outside the workspace for the task file, an
-    empty ``.env`` and SWE-agent's output. An EXIT trap removes it. AGENTS.md
-    and the prompt reach the task file through ``cat``, never through shell
-    words. The key stays in the environment: SWE-agent reads ``$APP_API_KEY``
-    itself. The command keeps SWE-agent's exit status and prints the submitted
-    patch.
+    empty ``.env`` and SWE-agent's output. An EXIT trap removes it when the
+    run's shell exits, and the next run removes it when a timeout's SIGKILL
+    skipped the trap. AGENTS.md and the prompt reach the task file through
+    ``cat``, never through shell words. The key stays in the environment:
+    SWE-agent reads ``$APP_API_KEY`` itself. The command keeps SWE-agent's
+    exit status and prints the submitted patch.
 
     Args:
         model: Target model id.
@@ -209,8 +219,7 @@ def _swe_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     """
     run_command = (
         f"{SWE_AGENT_ROOT_GUARD}; "
-        f'h={_HOME} && d="$(mktemp -d)" && '
-        "trap 'rm -rf \"$d\"' EXIT && "
+        f"h={_HOME} && {_temp_root('d', 'swe_agent')} && "
         f"{{ {_SNAPSHOT_WORKSPACE}; }} && "
         # SWE-agent reads these fixed paths again when a submission fails, so a
         # copy from an earlier run in a reused sandbox must not stand in.

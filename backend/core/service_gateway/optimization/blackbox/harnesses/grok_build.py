@@ -23,7 +23,16 @@ from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_GROK_BUILD
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
-from .base import _PROMPT_ARG, ENV_API_KEY, ENV_MODEL, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .base import (
+    _PROMPT_ARG,
+    ENV_API_KEY,
+    ENV_MODEL,
+    GatewayConfig,
+    HarnessLaunch,
+    _base_env,
+    _temp_root,
+    _version_check,
+)
 
 # The ``stable`` release that ``https://x.ai/cli/stable`` served on 2026-11-10.
 GROK_VERSION = "1.0.77"
@@ -279,7 +288,8 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
 
     Each run gets a fresh Grok home outside the workspace, so Grok's session
     and log files never land in the files the run hands back. An EXIT trap
-    removes it. The run keeps Grok's exit status.
+    removes it when the run's shell exits, and the next run removes it when a
+    timeout's SIGKILL skipped the trap. The run keeps Grok's exit status.
 
     Args:
         model: Target model id as the gateway knows it.
@@ -295,7 +305,8 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
     effort_flag = _effort_flag(reasoning_effort)
     run_command = (
         f"{_PATH_EXPORT} && "
-        'g="$(mktemp -d)" && trap \'rm -rf "$g"\' EXIT && mkdir -p "$g/.grok" && '
+        f"{_temp_root('g', 'grok_build')} && "
+        'mkdir -p "$g/.grok" && '
         f'cp {GROK_CONFIG_FILE} "$g/.grok/config.toml" && {{ '
         'HOME="$g" GROK_LOG_FILE="$g/grok.log" '
         # ``--single=`` keeps a prompt that starts with "-" a value; clap reads a

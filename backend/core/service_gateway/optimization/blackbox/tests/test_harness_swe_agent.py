@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -41,7 +42,10 @@ _RECORDED_PATCH = (
 )
 # Stand-in for ``sweagent``: it logs its argv, its environment and the task
 # file, prints a banner on stdout as the real CLI does, edits the workspace
-# and writes the recorded patch where SWE-agent saves it.
+# and writes the recorded patch where SWE-agent saves it. With
+# $FAKE_KILL_SHELL set, it SIGKILLs the run's shell, as the bridge does at a
+# timeout, so the EXIT trap does not run. SWE-agent is not the shell's last
+# command, so its parent is that shell.
 _FAKE_SWEAGENT = """#!/bin/sh
 log="$FAKE_LOG"
 printf 'ARGS' >> "$log"; for a in "$@"; do printf ' [%s]' "$a" >> "$log"; done; printf '\\n' >> "$log"
@@ -60,6 +64,7 @@ done
   printf 'WORKDIR=%s\\n' "$(dirname "$task")"
   printf 'TASK<<\\n'; cat "$task"; printf '\\n>>TASK\\n'
 } >> "$log"
+if [ -n "$FAKE_KILL_SHELL" ]; then kill -KILL "$PPID"; exit 0; fi
 echo 'SWE-agent has produced a patch'
 echo fixed > a.txt
 mkdir -p "$out/abc123"
@@ -124,7 +129,13 @@ def _host_env(path: str) -> dict[str, str]:
 
 
 def _run_with_fake_sweagent(
-    tmp_path: Path, *, protected: bool, reasoning_effort: str | None = None, fake_exit: int = 0
+    tmp_path: Path,
+    *,
+    protected: bool,
+    reasoning_effort: str | None = None,
+    fake_exit: int = 0,
+    temp: Path | None = None,
+    kill_shell: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built command in a scratch workspace against a fake ``sweagent``.
 
@@ -136,6 +147,8 @@ def _run_with_fake_sweagent(
         protected: Build the protected launch, with the sandbox-local relay set.
         reasoning_effort: The user's effort, or ``None``.
         fake_exit: Exit status the fake binary returns.
+        temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
+        kill_shell: Make the fake SIGKILL the run's shell after it logs.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -155,20 +168,25 @@ def _run_with_fake_sweagent(
     home = tmp_path / "home"
     _write_tools(home / _INSTALL_DIR / "venv" / "bin", {"sweagent": _FAKE_SWEAGENT})
     log = tmp_path / "calls.log"
+    temp = temp or tmp_path / "tmp"
+    temp.mkdir(parents=True, exist_ok=True)
     # Inherited values come first; the launch env overrides them, as in the sandbox.
     env = {
         "OPENAI_API_KEY": "sk-inherited",
         "ANTHROPIC_API_KEY": "sk-ant-inherited",
         **launch.env,
-        **_host_env(str(tmp_path / "unused-bin")),
+        # The venv's python3 goes first on PATH so the run takes the locked, swept temp root.
+        **_host_env(str(Path(sys.executable).parent)),
         "HOME": str(home),
-        "TMPDIR": str(tmp_path),
+        "TMPDIR": str(temp),
         "APP_PROMPT_FILE": str(prompt),
         "SKYNET_PROMPT_FILE": str(prompt),
         "FAKE_LOG": str(log),
         "FAKE_PATCH": _RECORDED_PATCH,
         "FAKE_EXIT": str(fake_exit),
     }
+    if kill_shell:
+        env["FAKE_KILL_SHELL"] = "1"
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
     assert SWE_AGENT_ROOT_GUARD in launch.run_command
@@ -593,6 +611,39 @@ def test_run_keeps_the_exit_status_and_still_prints_the_patch(tmp_path: Path, fa
 
     assert result.returncode == fake_exit
     assert result.stdout == _RECORDED_PATCH
+
+
+@pytest.mark.parametrize("fake_exit", [0, 3])
+def test_run_removes_its_folder_from_the_box_temp_folder_on_exit(tmp_path: Path, fake_exit: int) -> None:
+    """Make the run folder under ``TMPDIR`` with the harness prefix and remove it on a normal or an error exit."""
+    result, calls, _ = _run_with_fake_sweagent(tmp_path, protected=False, fake_exit=fake_exit)
+
+    assert result.returncode == fake_exit
+    workdir = Path(_logged(calls, "WORKDIR"))
+    assert workdir.parent == tmp_path / "tmp"
+    assert workdir.name.startswith("app-swe_agent-")
+    assert not workdir.exists()
+
+
+def test_next_run_removes_the_folder_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the run folder that a SIGKILL left behind when the next run starts (SKY-615).
+
+    The bridge kills a timed-out run with SIGKILL, so the EXIT trap does not
+    run and the folder stays until the next run sweeps it.
+    """
+    temp = tmp_path / "tmp"
+    (tmp_path / "killed").mkdir()
+    (tmp_path / "after").mkdir()
+    killed, killed_calls, _ = _run_with_fake_sweagent(tmp_path / "killed", protected=False, temp=temp, kill_shell=True)
+    killed_dir = Path(_logged(killed_calls, "WORKDIR"))
+    assert killed.returncode == -signal.SIGKILL
+    assert killed_dir.is_dir()
+
+    after, after_calls, _ = _run_with_fake_sweagent(tmp_path / "after", protected=False, temp=temp)
+
+    assert after.returncode == 0, after.stderr
+    assert not killed_dir.exists()
+    assert not Path(_logged(after_calls, "WORKDIR")).exists()
 
 
 @pytest.mark.skipif(os.access("/root", os.W_OK), reason="/root is writable on this host")
