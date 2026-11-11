@@ -37,8 +37,6 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 
 SettingsTab = Literal[
     "wizard",
-    "tagging",
-    "agent",
     "account",
     "notifications",
     "security",
@@ -49,12 +47,10 @@ SettingsTab = Literal[
     "connectors",
     "api",
     "admin",
-    "about",
 ]
 SettingKey = Literal[
     "profile",
     "appearance",
-    "agent_engine",
     "notifications",
     "privacy",
     "preferences",
@@ -74,8 +70,8 @@ ProtectedAction = Literal[
 MASK = "••••"
 # Must match WEB_ONLY_SETTINGS_TABS and LINKED_ONLY_SETTINGS_TABS in
 # frontend/src/shared/lib/hosted-features.ts. The Mac app never shows the
-# web-only tabs (its local sign-in is a placeholder), and shows the
-# linked-only tabs only while a hosted account is linked.
+# web-only tabs (its local sign-in is a placeholder), and shows the linked-only
+# tabs only while a hosted account is linked.
 _WEB_ONLY_TABS = frozenset({"security"})
 _LINKED_ONLY_TABS = frozenset({"billing"})
 # Key names whose values are credentials. ``last4`` and ``has_*`` flags stay
@@ -123,12 +119,6 @@ _SETTINGS: dict[str, _Setting] = {
         "account",
         "Theme (system, light or dark) and UI language on this device (fields: theme, locale).",
     ),
-    "agent_engine": _Setting(
-        "agent",
-        "Which engine runs the assistant (fields: engine).",
-        "/account/agent-engine",
-        ("PUT", "/account/agent-engine"),
-    ),
     "notifications": _Setting(
         "notifications",
         "Which events notify on which channel, quiet-hold minutes, and alert thresholds "
@@ -143,7 +133,7 @@ _SETTINGS: dict[str, _Setting] = {
         ("PUT", "/account/model-privacy"),
     ),
     "preferences": _Setting(
-        "tagging",
+        "wizard",
         "Device preferences: wizard code assist, split mode and AI tagging assist. "
         "Change them with update_user_preferences.",
     ),
@@ -401,7 +391,7 @@ def create_agent_settings_router(*, job_store: Any = None) -> APIRouter:
     @router.post(
         "/agent/settings/{key}",
         operation_id="change_setting",
-        summary="Change an ordinary account setting (profile, appearance, engine, notifications, privacy)",
+        summary="Change an ordinary account setting (profile, appearance, notifications, privacy)",
         tags=["agent"],
     )
     async def change_setting(

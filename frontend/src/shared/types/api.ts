@@ -515,7 +515,23 @@ export type BlackboxEngineId =
   | "meta_harness"
   | "autosaddler"
   | "shinka_evolve";
-export type BlackboxHarness = "pi" | "codex" | "opencode" | "prime" | "custom";
+export type BlackboxHarness =
+  | "pi"
+  | "codex"
+  | "opencode"
+  | "opencode_v2"
+  | "prime"
+  | "aider"
+  | "openhands"
+  | "openhands_sdk"
+  | "antigravity_sdk"
+  | "goose"
+  | "hermes"
+  | "eve"
+  | "deerflow"
+  | "cline"
+  | "code_puppy"
+  | "custom";
 export type BlackboxProposerRuntime = "vercel";
 
 export interface ScorerDependencyLock {
@@ -986,6 +1002,7 @@ export interface OptimizationDatasetResponse {
 
 export interface ServeInfoResponse {
   optimization_id: string;
+  endpoint_url?: string | null;
   module_name: string;
   optimizer_name: string;
   model_name: string;

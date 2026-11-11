@@ -4,18 +4,29 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import stat
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from core.models.blackbox import BLACKBOX_HARNESS_GOOSE, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
+from core.exceptions import ServiceError
+from core.models.blackbox import (
+    BLACKBOX_HARNESS_GOOSE,
+    BLACKBOX_HARNESSES,
+    BLACKBOX_TARGET_AGENT,
+    BlackboxProposer,
+    BlackboxTarget,
+)
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
 from ..harnesses.goose import _PROTECTED_ENV, GOOSE_BASE_URL_FILE, GOOSE_SHA256, GOOSE_VERSION
+from ..service import _check_proposer_effort
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -35,6 +46,7 @@ log="$FAKE_LOG"
   printf 'GOOSE_PATH_ROOT=%s\\n' "$GOOSE_PATH_ROOT"
   if [ -d "$GOOSE_PATH_ROOT" ]; then echo 'ROOT_DIR=yes'; else echo 'ROOT_DIR=no'; fi
 } >> "$log"
+[ -z "$FAKE_SLEEP" ] || sleep "$FAKE_SLEEP"
 printf '%s' "$FAKE_ANSWER"
 exit "${FAKE_EXIT:-0}"
 """
@@ -51,6 +63,9 @@ _FAKE_INSTALL_TOOLS = {
     "sha256sum": '#!/bin/sh\ncat > /dev/null\nexit "${FAKE_SHA_EXIT:-0}"\n',
     "tar": "#!/bin/sh\nprintf '#!/bin/sh\\necho goose 1.57.0\\n' > \"$4/goose\"\n",
 }
+# The run command calls ``python3``; this puts the test's interpreter first, as
+# a CI image may keep its python3 outside the default path.
+_PATH = f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}"
 
 
 def _target() -> BlackboxTarget:
@@ -96,7 +111,7 @@ def _run_with_fake_goose(
     log = tmp_path / "calls.log"
     env = {
         **launch.env,
-        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        "PATH": f"{bin_dir}{os.pathsep}{_PATH}",
         "HOME": str(tmp_path / "home"),
         "OPENAI_HOST": "https://api.openai.com",
         "OPENAI_BASE_PATH": "v1/other",
@@ -261,20 +276,41 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.parse_output is parse_plain_output
 
 
-@pytest.mark.parametrize(
-    ("effort", "level"),
-    [(None, None), ("none", "none"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max"), ("minimal", "low")],
-)
-def test_reasoning_effort_maps_to_the_thinking_env(effort: str | None, level: str | None) -> None:
-    """Pass the user's effort as goose's ``GOOSE_THINKING_EFFORT``, or nothing for goose's default."""
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "max"])
+def test_supported_reasoning_effort_passes_unchanged(effort: str) -> None:
+    """Pass each effort goose supports as ``GOOSE_THINKING_EFFORT`` with no change."""
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
-    assert launch.env.get("GOOSE_THINKING_EFFORT") == level
+    assert launch.env["GOOSE_THINKING_EFFORT"] == effort
 
 
-def test_unknown_reasoning_effort_sets_no_thinking_env() -> None:
-    """Give goose no thinking setting for an effort name it does not know."""
-    launch = build_launch(_target(), _GATEWAY, reasoning_effort="turbo")
+def test_goose_declares_its_effort_levels_for_the_submit_check() -> None:
+    """Declare goose's levels on its registry entry, so submit refuses the rest before paid work."""
+    assert REGISTRY[BLACKBOX_HARNESS_GOOSE].supported_efforts == ("none", "low", "medium", "high", "max")
+
+
+@pytest.mark.parametrize(("effort", "accepted"), [("high", True), (None, True), ("xhigh", False), ("minimal", False)])
+def test_submit_check_uses_the_goose_levels(effort: str | None, accepted: bool) -> None:
+    """Refuse at submit an effort goose has no level for, and accept a supported one or none."""
+    proposer = BlackboxProposer(harness=BLACKBOX_HARNESS_GOOSE)
+    if accepted:
+        _check_proposer_effort(proposer, effort)
+    else:
+        with pytest.raises(ServiceError, match=f"goose proposer does not support the '{effort}' effort level"):
+            _check_proposer_effort(proposer, effort)
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_reasoning_effort_keeps_the_goose_default(effort: str | None) -> None:
+    """Give goose no thinking setting when the user picks no effort."""
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
     assert "GOOSE_THINKING_EFFORT" not in launch.env
+
+
+@pytest.mark.parametrize("effort", ["minimal", "xhigh", "turbo"])
+def test_unsupported_reasoning_effort_raises(effort: str) -> None:
+    """Refuse an effort goose has no level for, instead of a remap or a silent drop."""
+    with pytest.raises(ServiceError, match="Goose does not support effort"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers_and_telemetry() -> None:
@@ -366,3 +402,148 @@ def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_pa
     )
     assert parse_plain_output("  \n") == (None, {})
     assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "plain"
+
+
+def _spawn_goose(tmp_path: Path, tag: str, *, sleep: int = 0, path: str = _PATH) -> tuple[subprocess.Popen[str], Path]:
+    """Start the built goose command against a fake goose in its own process group.
+
+    Every run shares one fake binary and one temp directory, as runs in one box do.
+
+    Args:
+        tmp_path: Scratch directory for the workspaces, the fake binary and the temp directory.
+        tag: Name of this run's workspace and call log.
+        sleep: Seconds the fake goose waits before it answers.
+        path: ``PATH`` after the fake binary's folder.
+
+    Returns:
+        The running shell and its call log.
+    """
+    launch = build_launch(_target(), _GATEWAY)
+    workspace = tmp_path / f"work-{tag}"
+    for name, content in launch.files.items():
+        (workspace / name).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / name).write_text(content)
+    (workspace / "task").mkdir()
+    (workspace / "task" / "PROMPT.md").write_text("Fix it.")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake = bin_dir / "goose"
+    fake.write_text(_FAKE_GOOSE)
+    fake.chmod(0o755)
+    (tmp_path / "tmp").mkdir(exist_ok=True)
+    log = tmp_path / f"calls-{tag}.log"
+    env = {
+        **launch.env,
+        "PATH": f"{bin_dir}{os.pathsep}{path}",
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(tmp_path / "tmp"),
+        "FAKE_LOG": str(log),
+        "FAKE_ANSWER": "done",
+        "FAKE_SLEEP": str(sleep or ""),
+    }
+    process = subprocess.Popen(
+        [shutil.which("bash") or "/bin/sh", "-c", launch.run_command],
+        cwd=workspace,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    return process, log
+
+
+def _goose_root(log: Path) -> Path:
+    """Wait until the fake goose logs its root, and return that root.
+
+    Args:
+        log: The run's call log.
+
+    Returns:
+        The run's goose root.
+    """
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if log.exists() and "ROOT_DIR=" in log.read_text():
+            return Path(_logged(log.read_text(), "GOOSE_PATH_ROOT"))
+        time.sleep(0.05)
+    raise AssertionError("the fake goose never started")
+
+
+def test_next_run_removes_the_root_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the goose root that a SIGKILL left behind when the next run starts (SKY-594).
+
+    The bridge kills a timed-out run's process group with SIGKILL, so the EXIT
+    trap does not run and the root stays until the next run sweeps it.
+    """
+    killed, killed_log = _spawn_goose(tmp_path, "killed", sleep=30)
+    killed_root = _goose_root(killed_log)
+    os.killpg(killed.pid, signal.SIGKILL)
+    killed.wait(timeout=10)
+    assert killed_root.is_dir()
+
+    after, after_log = _spawn_goose(tmp_path, "after")
+    assert after.wait(timeout=10) == 0
+
+    assert not killed_root.exists()
+    assert not _goose_root(after_log).exists()
+
+
+def test_a_run_keeps_the_root_of_a_concurrent_live_run(tmp_path: Path) -> None:
+    """Keep the root of a run that still holds its lock while another run sweeps."""
+    live, live_log = _spawn_goose(tmp_path, "live", sleep=30)
+    try:
+        live_root = _goose_root(live_log)
+        deadline = time.monotonic() + 10
+        while not (live_root / "owner.lock").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        other, _ = _spawn_goose(tmp_path, "other")
+        assert other.wait(timeout=10) == 0
+        assert (live_root / "owner.lock").is_file()
+    finally:
+        os.killpg(live.pid, signal.SIGKILL)
+        live.wait(timeout=10)
+
+
+def test_sweep_removes_an_old_lockless_root_and_keeps_a_new_one(tmp_path: Path) -> None:
+    """Remove a lockless root older than the stale limit, but keep a fresh one that may still get its lock."""
+    temp = tmp_path / "tmp"
+    old = temp / "app-goose-old"
+    new = temp / "app-goose-new"
+    other = temp / "app-other-old"
+    for folder in (old, new, other):
+        folder.mkdir(parents=True)
+    hour_ago = time.time() - 3600
+    for folder in (old, other):
+        os.utime(folder, (hour_ago, hour_ago))
+
+    run, _ = _spawn_goose(tmp_path, "sweep")
+    assert run.wait(timeout=10) == 0
+
+    assert not old.exists()
+    assert new.is_dir()
+    assert other.is_dir()
+
+
+def test_a_box_without_python3_still_runs_and_removes_its_root(tmp_path: Path) -> None:
+    """Fall back to a plain ``mktemp`` root without the sweep when the box has no python3 (SKY-594)."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("cat", "mktemp", "rm", "sleep"):
+        found = shutil.which(name)
+        assert found is not None
+        (tools / name).symlink_to(found)
+    old = tmp_path / "tmp" / "app-goose-old"
+    old.mkdir(parents=True)
+    hour_ago = time.time() - 3600
+    os.utime(old, (hour_ago, hour_ago))
+
+    run, log = _spawn_goose(tmp_path, "nopython", path=str(tools))
+    assert run.wait(timeout=10) == 0
+
+    assert "ROOT_DIR=yes" in log.read_text()
+    root = _goose_root(log)
+    assert root.parent == tmp_path / "tmp"
+    assert root.name.startswith("app-goose-")
+    assert not root.exists()
+    assert old.is_dir()

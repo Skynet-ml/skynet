@@ -275,23 +275,31 @@ def test_cents_spent_since_empty_window_is_zero() -> None:
     assert service.cents_spent_since(datetime.now(UTC) - timedelta(hours=24)) == 0
 
 
-class _ProStore(_FakeStore):
-    """A store whose account holds an entitled Pro subscription."""
+class _HistoricalSubscriberStore(_FakeStore):
+    """Expose an old subscription method that admission must not consult."""
 
     def has_pro_plan(self, username: str) -> bool:
-        """Report every account as Pro."""
-        return True
+        """Fail if admission consults retired subscription entitlements.
+
+        Args:
+            username: Account under admission review.
+
+        Raises:
+            AssertionError: Always, because the retired entitlement must be ignored.
+        """
+        raise AssertionError("Retired subscription entitlement was consulted")
 
 
-def test_admission_pro_plan_uses_higher_concurrency_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Pro account is held to the Pro active-run cap, not the free one."""
+def test_admission_uses_common_concurrency_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apply the baseline active-run cap even when historical subscription data exists.
+
+    Args:
+        monkeypatch: Configure baseline admission limits.
+    """
     monkeypatch.setattr(settings, "submissions_paused", False)
     monkeypatch.setattr(settings, "global_daily_spend_ceiling_cents", 0)
     monkeypatch.setattr(settings, "max_concurrent_jobs_per_user", 2)
-    monkeypatch.setattr(settings, "pro_max_concurrent_jobs_per_user", 5)
-
-    submissions._enforce_submission_admission(_ProStore(active=4), "alice")
+    submissions._enforce_submission_admission(_HistoricalSubscriberStore(active=1), "alice")
     with pytest.raises(DomainError) as exc:
-        submissions._enforce_submission_admission(_ProStore(active=5), "alice")
-
-    assert exc.value.params["limit"] == 5
+        submissions._enforce_submission_admission(_HistoricalSubscriberStore(active=2), "alice")
+    assert exc.value.params["limit"] == 2

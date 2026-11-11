@@ -13,6 +13,9 @@ Two deliberate exceptions to "hard delete everything":
   audit trail are *anonymized*, not deleted — their retention has an accounting
   and audit basis, so the identity link is severed to a stable, PII-free
   tombstone token while the rows themselves survive.
+  The wallet (``billing_customers``) is also *closed*: its spendable balance
+  and free grant go to zero, and a ``closure`` ledger row records the
+  forfeited balance.
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
@@ -609,8 +612,27 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     tombstone = _anonymized_username(username)
     _run_anonymize(update(TelemetryEventModel).where(TelemetryEventModel.username == username).values(username=None))
+    # SKY-567: close the wallet instead of deleting it. The row keeps its
+    # Stripe customer id so a later refund or dispute webhook still finds it.
+    # A zero balance and grant keep it out of the outstanding liability, and
+    # the closure ledger row records the forfeited balance for audit.
+    forfeited = session.scalar(
+        select(BillingCustomerModel.balance_cents).where(BillingCustomerModel.username == username).with_for_update()
+    )
+    if forfeited:
+        session.add(
+            WalletLedgerModel(
+                username=tombstone,
+                delta_cents=-int(forfeited),
+                kind="closure",
+                description="Account deleted",
+                created_at=datetime.now(UTC),
+            )
+        )
     _run_anonymize(
-        update(BillingCustomerModel).where(BillingCustomerModel.username == username).values(username=tombstone)
+        update(BillingCustomerModel)
+        .where(BillingCustomerModel.username == username)
+        .values(username=tombstone, balance_cents=0, grant_remaining=0, updated_at=datetime.now(UTC))
     )
     _run_anonymize(update(WalletLedgerModel).where(WalletLedgerModel.username == username).values(username=tombstone))
     _run_anonymize(update(UserQuotaAuditModel).where(UserQuotaAuditModel.actor == username).values(actor=tombstone))
