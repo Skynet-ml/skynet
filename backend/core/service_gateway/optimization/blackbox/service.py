@@ -519,7 +519,8 @@ class FinalRun:
     # service cost); ``None`` where the scorer does not measure one.
     observations: list[dict[str, Any] | None] = field(default_factory=list)
     # Error text of each run that failed: a metric error, or, on a repository
-    # run, the version's own run crashed ("Run failed: ..."), which scores 0 (SKY-221).
+    # run, the traceback of the version's own crashed run, which scores 0 (SKY-221).
+    # The traceback is stored without its "Run failed: " prefix.
     failures: list[str] = field(default_factory=list)
 
 
@@ -615,7 +616,8 @@ def _final_run(
     Returns:
         The mean score, the feedback and named scores, and each case's result.
         The score is ``None``, and the named scores empty, when the metric
-        crashed on any case.
+        crashed on any case. ``failures`` holds the error text of each failed
+        case: metric errors, and on a repository run the crashed runs.
 
     Raises:
         ServiceError: When the scorer fails on the candidate, including when
@@ -1047,6 +1049,7 @@ def run_job(
     Raises:
         BudgetReached: When the run's budget stopped it; ``result`` carries
             the partial response.
+        ServiceError: When the reported version failed on every final case.
     """
     try:
         return _run_job(
@@ -1373,6 +1376,15 @@ def _run_job(
             )
             if baseline_val is not None and best_val.score is None:
                 logger.info("the optimized version has no score (%s); keeping the starting point", METRIC_ERROR)
+                best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
+            elif (
+                baseline_val is not None
+                and len(best_val.failures) == best_val.runs
+                and len(baseline_val.failures) < baseline_val.runs
+            ):
+                # SKY-221: every run of the winner crashed, so its 0 scores are
+                # not a measurement; keep the starting point, as for a metric error.
+                logger.info("the optimized version failed on every case; keeping the starting point")
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
             elif (
                 baseline_val is not None

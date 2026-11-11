@@ -1513,6 +1513,7 @@ def test_budget_stop_preserves_only_evaluated_incumbent_and_skips_final_test(fak
         assert response.best_candidate == "tested candidate"
         assert response.best_score is None
         assert response.details["optimizer_best_score"] == 0.7
+        assert response.details["failed_cases"] is None
         assert caught.value.evidence["candidate_origin"] == "optimized"
     else:
         response = caught.value.result
@@ -1996,20 +1997,24 @@ def test_a_run_where_every_case_scores_a_valid_zero_succeeds(
     assert _failure_counts(caplog, "optimized version") == []
 
 
-def test_a_repository_run_fails_when_the_winner_fails_on_every_final_case(
+def test_a_repository_run_keeps_the_starting_point_when_the_winner_fails_on_every_case(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The final-run check fails a winner whose run crashes on every case (SKY-221).
+    """The regression guard keeps a valid starting point over a winner whose run crashes on every case (SKY-221).
 
-    The seed scores a valid 0.0, so the regression guard keeps the winner.
+    The seed scores a valid 0.0, as high as the crashed winner, so only the
+    failure count makes the guard keep the seed and the run succeeds.
     """
     calls = _winner_strategy(monkeypatch)
     code = _run_fails_code({"winner"}, valid_score=0.0)
 
-    with pytest.raises(ServiceError, match=r"optimized version failed on every case .*ConnectionError: egress blocked"):
-        _run_as_repository(_payload(scorer={"kind": "python", "metric_code": code}), tmp_path, "job-winner-fail")
+    response = _run_as_repository(_payload(scorer={"kind": "python", "metric_code": code}), tmp_path, "job-winner-fail")
 
     assert calls == ["search"]
+    assert response.regression_guard_applied is True
+    assert response.best_candidate == "hello world"
+    assert response.best_score == 0.0
+    assert response.details["failed_cases"] == 0
 
 
 def test_a_user_scorer_status_never_fails_a_run(
