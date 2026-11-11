@@ -96,6 +96,7 @@ import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-
 import {
   SCREEN_KICKOFF,
   SETUP_CHAT_KEY,
+  adoptedSetupChatId,
   autoFeedbackAction,
   decodeSetupChat,
   encodeSetupChat,
@@ -107,6 +108,7 @@ import {
   parseScreenNav,
   registerSetupChatFlush,
   setupChatLedger,
+  setupChatReopen,
   setupChatSnapshot,
   storedKickedScreens,
   trackAutoTurn,
@@ -261,8 +263,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
   // a reload or a return to a left setup brings it back, and submitting or
-  // starting a new setup drops it. The server never saves it, so the tab
-  // keeps its messages. Each screen the wizard reaches gives the agent a
+  // starting a new setup drops it from the setup. The server saves it like
+  // any other chat, so it can be shared; the tab's copy finds it again. Each screen the wizard reaches gives the agent a
   // turn of its own; an agent's Back leaves the earlier screen its request.
   const shownScreen = wizardCtx?.wizardScreen ?? null;
   const inSetup = shownScreen !== null;
@@ -417,6 +419,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const handleConversationMeta = React.useCallback(
     (id: string, title: string, ctx: SessionEventContext) => {
       store.upsertFromMeta(id, title);
+      const adopted = adoptedSetupChatId(setupChatRef.current, id, ctx.isActive);
+      if (adopted) keepSetupChat(adopted);
       if (!ctx.isActive) return;
       store.setActiveId(id);
       // The user is actively in this conversation — every new turn is "seen"
@@ -424,7 +428,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       // moment the server bumps its updated_at.
       store.markSeen(id);
     },
-    [store],
+    [store, keepSetupChat],
   );
 
   const agent = useGeneralistAgent({
@@ -583,12 +587,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       // A kept chat this setup does not reopen lost its draft (a cloned run
       // reloads from its source run, not the tab's draft), so it goes too.
       if (saved) discardConversation(saved.id);
-      const id = newSetupChatId();
       const start = newSetupChatStart(shownScreen, reopenedScreenRef.current);
       kickedScreensRef.current = new Set(start.kicked);
       setupMessagesRef.current = [];
-      keepSetupChat(id);
-      openConversation(id, [], { unsaved: true });
+      // The first turn saves the chat and gives it the server's id.
+      keepSetupChat(newSetupChatId());
+      newSession();
       if (start.kickoff) setKickoffScreen(shownScreen);
       return;
     }
@@ -600,11 +604,26 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       restoreWriteBefore?.(saved.ledger);
     }
     keepSetupChat(id);
-    if (!activateConversation(id)) openConversation(id, saved.messages, { unsaved: true });
     // A reload in the middle of this screen's kickoff left it out of the copy.
-    if (!saved.kicked.includes(shownScreen) && opensWithKickoff(shownScreen)) {
-      setKickoffScreen(shownScreen);
+    const kickoff = !saved.kicked.includes(shownScreen) && opensWithKickoff(shownScreen);
+    const reopen = setupChatReopen(saved);
+    if (reopen === "new") newSession();
+    else if (activateConversation(id)) {
+      // The chat is still in memory: the wizard came back without a reload.
+    } else if (reopen === "unsaved") openConversation(id, saved.messages, { unsaved: true });
+    else {
+      // The server's copy wins; the tab's copy covers a failed load. The
+      // kickoff waits for the chat, so it does not go to the blank one shown meanwhile.
+      newSession();
+      const screen = shownScreen;
+      void getConversation(id).then((detail) => {
+        if (setupChatRef.current !== id) return;
+        openConversation(id, detail ? hideKickoffs(detail.messages) : saved.messages);
+        if (kickoff) setKickoffScreen(screen);
+      });
+      return;
     }
+    if (kickoff) setKickoffScreen(shownScreen);
   }, [
     shownScreen,
     activateConversation,
@@ -1097,7 +1116,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     return extra ? [extra, ...rows] : rows;
   }, [localModels, catalogModels, slashPick]);
   const canShareChat =
-    !inSetup && canShare && !webChat && !!agent.conversationId && agent.messages.length > 0;
+    canShare && !webChat && !!agent.conversationId && agent.messages.length > 0;
   const slashCommands = React.useMemo(() => {
     const effective =
       slashPick ??
@@ -1317,7 +1336,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <CopyChatMenu messages={agent.messages} />
-          {/* The setup's chat is the draft's own: no history, sharing or second chat. */}
+          {/* The setup's chat is the draft's own: no history or second chat. */}
           {!inSetup && (
           <Tooltip>
             <TooltipTrigger asChild>

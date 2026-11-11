@@ -29,6 +29,8 @@ const {
   newSetupChatStart,
   opensWithKickoff,
   setupChatLedger,
+  adoptedSetupChatId,
+  setupChatReopen,
 } = await import("./screen-agent.ts");
 
 const hook = "src/features/agent-panel/hooks/use-generalist-agent.ts";
@@ -92,13 +94,43 @@ test("openConversation stores the unsaved flag only when asked", () => {
   assert.equal(draft.get("k1")?.unsaved, undefined);
 });
 
-test("the panel opens every setup chat as unsaved", () => {
+test("a new setup chat starts as a normal chat, so its first turn saves it on the server", () => {
   const text = source(panel);
-  assert.ok(text.includes("openConversation(id, [], { unsaved: true })"));
-  assert.ok(text.includes("openConversation(id, saved.messages, { unsaved: true })"));
-  const meta = /const handleConversationMeta = React\.useCallback\(([\s\S]*?)\n  \);/.exec(text)?.[1] ?? "";
-  assert.ok(meta.includes("upsertFromMeta"));
-  assert.ok(!meta.includes("keepSetupChat"));
+  assert.ok(!text.includes("openConversation(id, [], { unsaved: true })"));
+  assert.ok(text.includes("keepSetupChat(newSetupChatId());\n      newSession();"));
+});
+
+test("the setup chat takes the server's id from its first saved turn", () => {
+  assert.equal(adoptedSetupChatId("setup-1", "c1", true), "c1");
+  assert.equal(adoptedSetupChatId("setup-1", "c1", false), null);
+  assert.equal(adoptedSetupChatId("c0", "c1", true), null);
+  assert.equal(adoptedSetupChatId(null, "c1", true), null);
+  const kept: (string | null)[] = [];
+  const seen: string[] = [];
+  const meta = expression(panel, "handleConversationMeta", {
+    store: { upsertFromMeta: () => {}, setActiveId: () => {}, markSeen: (id: string) => seen.push(id) },
+    setupChatRef: { current: "setup-1" }, adoptedSetupChatId, keepSetupChat: (id: string | null) => kept.push(id),
+  });
+  meta("c1", "Title", { isActive: true, conversationId: "c1" });
+  meta("c2", "Other", { isActive: false, conversationId: "c2" });
+  assert.deepEqual(kept, ["c1"]);
+  assert.deepEqual(seen, ["c1"]);
+});
+
+test("a reopened setup chat loads the server copy; only an older tab-only copy stays unsaved", () => {
+  const msgs = [{ role: "user", content: "q" }];
+  assert.equal(setupChatReopen({ id: "c1", kicked: [], messages: msgs }), "server");
+  assert.equal(setupChatReopen({ id: "hosted:c1", kicked: [], messages: [] }), "server");
+  assert.equal(setupChatReopen({ id: "setup-1", kicked: [], messages: msgs }), "unsaved");
+  assert.equal(setupChatReopen({ id: "setup-1", kicked: ["brief"], messages: [] }), "new");
+  const text = source(panel);
+  assert.match(text, /void getConversation\(id\)\.then\(\(detail\) => \{\n\s+if \(setupChatRef\.current !== id\) return;/);
+  assert.ok(text.includes("openConversation(id, detail ? hideKickoffs(detail.messages) : saved.messages);"));
+});
+
+test("the setup chat shows the Share button", () => {
+  const text = source(panel);
+  assert.match(text, /const canShareChat =\n\s+canShare && !webChat && !!agent\.conversationId && agent\.messages\.length > 0;/);
 });
 
 function keepWith(
@@ -192,7 +224,7 @@ test("a new setup chat on a screen the wizard did not reopen starts with a kicko
 test("the panel starts a new setup chat through newSetupChatStart", () => {
   const text = source(panel);
   assert.ok(text.includes("const start = newSetupChatStart(shownScreen, reopenedScreenRef.current);"));
-  assert.ok(text.indexOf("kickedScreensRef.current = new Set(start.kicked);") < text.indexOf("keepSetupChat(id);\n      openConversation(id, [], { unsaved: true });"));
+  assert.ok(text.indexOf("kickedScreensRef.current = new Set(start.kicked);") < text.indexOf("keepSetupChat(newSetupChatId());\n      newSession();"));
 });
 
 test("a chat deep link waits while the setup is open", () => {

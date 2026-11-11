@@ -167,9 +167,9 @@ export function reachedReturnScreen(returnScreen: string, screen: string | null)
 
 /**
  * Where the setup's chat is kept for the tab: its id, the screens its agent
- * already had a turn on, and its messages. The server never saves a setup
- * chat, so a reload that reopens the setup reopens its chat from here and
- * does not start those screens over.
+ * already had a turn on, and its messages. The server saves the chat like
+ * any other, and the draft carries this copy to a reload or another device:
+ * its id finds the server copy, and its started screens are not started over.
  */
 export const SETUP_CHAT_KEY = "skynet.agent.setup-chat.v1";
 
@@ -215,9 +215,41 @@ export function setupChatLedger(
 // else the app keeps there.
 export const SETUP_CHAT_MAX_CHARS = 300_000;
 
-/** A new id for a setup chat; it never reaches the server's conversation list. */
+/** The browser's own id for a setup chat until its first turn saves it on the server. */
 export function newSetupChatId(): string {
   return `setup-${crypto.randomUUID()}`;
+}
+
+/**
+ * The id the setup chat keeps when a turn's server conversation arrives. A
+ * chat with no server copy yet takes the server's id, so the tab's copy and
+ * the Share button point at the saved conversation.
+ *
+ * Args:
+ *   current: The setup chat's id, or null when no setup is open.
+ *   serverId: The conversation the server saved the turn in.
+ *   isActive: The turn's chat is the one on view, which in a setup is the setup chat.
+ *
+ * Returns:
+ *   The id to keep, or null when nothing changes.
+ */
+export function adoptedSetupChatId(
+  current: string | null,
+  serverId: string,
+  isActive: boolean,
+): string | null {
+  return current?.startsWith("setup-") && isActive ? serverId : null;
+}
+
+/**
+ * How a reopened setup gets its chat back. A saved chat loads from the
+ * server, whose copy wins. A browser id with messages is an older build's
+ * chat the server never saved, so it stays in the browser; with no messages,
+ * no turn ran yet and the chat starts new.
+ */
+export function setupChatReopen(chat: SetupChat): "server" | "unsaved" | "new" {
+  if (!chat.id.startsWith("setup-")) return "server";
+  return chat.messages.length ? "unsaved" : "new";
 }
 
 /**
