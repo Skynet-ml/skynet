@@ -64,7 +64,8 @@ _FABRIC_LAUNCHER = (
     'PATH="$venv/bin:$PATH" exec "$venv/bin/python" "$@"\n'
 )
 # The Codex efforts. Fabric passes them unchanged and refuses any other effort,
-# so a run never gets an effort the user did not pick.
+# so a run never gets an effort the user did not pick. The spec declares them
+# too, so submit refuses another effort before the run reserves budget (SKY-585).
 FABRIC_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 # The Codex adapter passes ``OPENAI_API_KEY`` through to Codex, so a protected
 # run blanks it and an inherited key never gives Codex a route around the
@@ -333,5 +334,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=61,
+        supported_efforts=FABRIC_EFFORTS,
     )
 )

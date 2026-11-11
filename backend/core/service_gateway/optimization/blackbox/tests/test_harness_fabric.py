@@ -299,6 +299,11 @@ def test_reasoning_effort_maps_to_the_codex_setting(effort: str | None, setting:
     assert config["harness"]["settings"].get("reasoning_effort") == setting
 
 
+def test_spec_declares_the_six_codex_efforts_for_the_submit_check() -> None:
+    """Declare exactly the Codex efforts on the spec, so submit refuses any other effort before paid work."""
+    assert REGISTRY[BLACKBOX_HARNESS_FABRIC].supported_efforts == ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
 @pytest.mark.parametrize("effort", ["max", "turbo", "HIGH"])
 def test_reasoning_effort_that_codex_lacks_is_refused(effort: str) -> None:
     """Refuse an effort Codex does not have, with its name, instead of a silent remap or drop."""
