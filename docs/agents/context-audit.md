@@ -20,8 +20,9 @@ and list what to cut.
 - The repo files are small (about 13 KB loaded). This PR trims them only a
   little, because the large costs are outside the repo.
 - On 2026-11-10 Gilad removed the RTK and AXI tool hints, the CLI design
-  rules import and the RTK and gh-axi hooks from the global config. This
-  saves about 1.1k. Claude now uses plain `gh`. The tradeoff: the RTK hook
+  rules import and the RTK and gh-axi hooks from the global config. The two
+  removed files save about 1.1k. Nobody measured the hook saving. Claude now
+  uses plain `gh`. The tradeoff: the RTK hook
   no longer compresses Bash output, so long command output uses more context.
 - Droid starts much smaller: 5 MCP servers, about 22 KB of instructions, no
   desktop-app tool schemas, and rolling compaction.
@@ -119,7 +120,7 @@ keeps more recent context after each compaction.
 2. **Turn off unused MCP servers and connectors in Skynet sessions.**
    About 14k tokens (about 18k with Vercel). See §6.
 3. **Apply the global instruction trims.** About 6.1k tokens on every session
-   in every repo, plus about 0.65k in Skynet. See §7.
+   in every repo, plus about 0.6k in Skynet. See §7.
 4. **Make the per-PR policy file defer to the repo skill for Skynet.** About
    5.5k tokens per PR task. See §7.
 5. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
