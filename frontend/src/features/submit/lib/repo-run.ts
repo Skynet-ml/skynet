@@ -17,8 +17,8 @@ export interface RepoRunOptions {
   username: string;
   tokenSource: "managed" | "byok" | "subscription";
   maxCostCents: number | null;
-  /** The secrets saved on the account of the run's server, by name; never values. */
-  savedSecrets?: ReadonlyArray<{ id: string; name: string }>;
+  /** The secrets saved on the account of the run's server, with their approved hosts; never values. */
+  savedSecrets?: ReadonlyArray<{ id: string; name: string; allowed_hosts?: string[] }>;
 }
 
 const OPTIMIZE_TOML = "optimize.toml";
@@ -76,23 +76,34 @@ export function serviceSecretHosts(toml: string): Map<string, string> {
  * card or in Settings) serves every run whose optimize.toml names it (SKY-641).
  * A secret the user typed for this run wins over a saved one.
  *
+ * An agent can edit optimize.toml, so its host is only a request. A saved
+ * secret goes only when a host the user approved for it covers that host, and
+ * the server checks the same list again. A secret with no approved host (saved
+ * before SKY-641) is never sent.
+ *
  * Args:
  *   toml: The optimize.toml text.
- *   saved: The account's saved secrets; names and ids only.
+ *   saved: The account's saved secrets; names, ids and approved hosts only.
  *   typed: The names of the secrets typed for this run.
  *
  * Returns:
- *   One request entry per service secret that has a saved secret, sent only to its host.
+ *   One request entry per service secret whose saved secret approves its host,
+ *   carrying the approved host entry that covers it.
  */
 export function savedServiceSecrets(
   toml: string,
-  saved: ReadonlyArray<{ id: string; name: string }>,
+  saved: ReadonlyArray<{ id: string; name: string; allowed_hosts?: string[] }>,
   typed: ReadonlySet<string>,
 ): Array<{ name: string; saved_secret_id: string; allowed_hosts: string[] }> {
-  const byName = new Map(saved.map((secret) => [secret.name, secret.id]));
+  const byName = new Map(saved.map((secret) => [secret.name, secret]));
   return [...serviceSecretHosts(toml)].flatMap(([name, host]) => {
-    const id = byName.get(name);
-    return id && !typed.has(name) ? [{ name, saved_secret_id: id, allowed_hosts: [host] }] : [];
+    const secret = byName.get(name);
+    if (!secret || typed.has(name)) return [];
+    const approved = secret.allowed_hosts ?? [];
+    const match =
+      approved.find((entry) => entry === host) ??
+      approved.find((entry) => entry.startsWith("*.") && host.endsWith(entry.slice(1)));
+    return match ? [{ name, saved_secret_id: secret.id, allowed_hosts: [match] }] : [];
   });
 }
 

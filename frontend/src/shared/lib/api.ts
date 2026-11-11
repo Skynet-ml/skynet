@@ -1985,6 +1985,8 @@ export function getConnectors(source?: ApiSource) {
 export interface SavedSecret {
   id: string;
   name: string;
+  /** The only hosts a run may send this secret to. The server enforces the list; empty means no host. */
+  allowed_hosts: string[];
   created_at: string;
   updated_at: string;
 }
@@ -2000,11 +2002,15 @@ function announceSavedSecretsChange(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(SAVED_SECRETS_CHANGED_EVENT));
 }
 
-/** Save a secret under `name`, replacing the value of one already saved under it. */
-export async function saveSecret(name: string, value: string) {
+/**
+ * Save a secret under `name`, replacing the value and hosts of one already
+ * saved under it. `allowedHosts` are the hosts the user approves; a run may
+ * send the secret to no other host.
+ */
+export async function saveSecret(name: string, value: string, allowedHosts: string[]) {
   const saved = await request<SavedSecret>("/secrets", {
     method: "PUT",
-    body: JSON.stringify({ name, value }),
+    body: JSON.stringify({ name, value, allowed_hosts: allowedHosts }),
   });
   announceSavedSecretsChange();
   return saved;

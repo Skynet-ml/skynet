@@ -26,17 +26,23 @@ interface SecretRequestCardProps {
 export function SecretRequestCard({ payload, onResolve, className }: SecretRequestCardProps) {
   const name = String(payload.arguments?.name ?? "");
   const purpose = String(payload.arguments?.purpose ?? "");
-  const host = String(payload.arguments?.host ?? "");
+  const host = String(payload.arguments?.host ?? "").trim().replace(/\.$/, "").toLowerCase();
   const [value, setValue] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [failed, setFailed] = React.useState(false);
-  const [alreadySaved, setAlreadySaved] = React.useState(false);
+  const [storedHosts, setStoredHosts] = React.useState<string[] | null>(null);
+  // The saved value may be kept only when the user already approved this
+  // host for it; a new host needs the value typed again with the host shown.
+  const alreadySaved = storedHosts?.includes(host) ?? false;
 
   React.useEffect(() => {
     let live = true;
     // A card shown again after a failed confirm finds the value it saved.
     listSavedSecrets()
-      .then((res) => live && setAlreadySaved(res.secrets.some((secret) => secret.name === name)))
+      .then((res) => {
+        const saved = res.secrets.find((secret) => secret.name === name);
+        if (live && saved) setStoredHosts(saved.allowed_hosts ?? []);
+      })
       .catch(() => {});
     return () => {
       live = false;
@@ -61,7 +67,9 @@ export function SecretRequestCard({ payload, onResolve, className }: SecretReque
     setBusy(true);
     setFailed(false);
     try {
-      await saveSecret(name, value);
+      // The host shown here is the consent the user gives, so it is stored
+      // with the secret, and the server sends the secret to no other host.
+      await saveSecret(name, value, [...new Set([...(storedHosts ?? []), host])]);
     } catch {
       // The server's error text stays out of the card; it may name the input.
       setFailed(true);
@@ -69,7 +77,7 @@ export function SecretRequestCard({ payload, onResolve, className }: SecretReque
       return;
     }
     setValue("");
-    setAlreadySaved(true);
+    setStoredHosts((hosts) => [...new Set([...(hosts ?? []), host])]);
     await resolve(true);
   };
 

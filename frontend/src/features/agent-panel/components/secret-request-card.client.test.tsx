@@ -38,7 +38,7 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.
 
 const VALUE = "test-SENTINEL-card-93be";
 const sent: Array<{ method: string; path: string; body: string }> = [];
-let saved: string[] = [];
+let saved: Record<string, string[]> = {};
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
   const path = new URL(String(input), "https://api.example.test").pathname;
@@ -47,11 +47,19 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const json = (data: unknown) =>
     new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
   if (path === "/secrets" && method === "GET") {
-    return json({ secrets: saved.map((name) => ({ id: `id-${name}`, name, created_at: "", updated_at: "" })) });
+    const secrets = Object.entries(saved).map(([name, hosts]) => ({
+      id: `id-${name}`,
+      name,
+      allowed_hosts: hosts,
+      created_at: "",
+      updated_at: "",
+    }));
+    return json({ secrets });
   }
   if (path === "/secrets" && method === "PUT") {
-    saved = [...saved, JSON.parse(body).name];
-    return json({ id: "id-MAPS_KEY", name: "MAPS_KEY", created_at: "", updated_at: "" });
+    const parsed = JSON.parse(body) as { name: string; allowed_hosts: string[] };
+    saved = { ...saved, [parsed.name]: parsed.allowed_hosts };
+    return json({ id: "id-MAPS_KEY", name: "MAPS_KEY", allowed_hosts: parsed.allowed_hosts, created_at: "", updated_at: "" });
   }
   if (path === "/optimizations/generalist-agent/confirm") return json({ resolved: true });
   throw new Error(`unexpected request ${method} ${path}`);
@@ -66,7 +74,7 @@ after(() => dom.window.close());
 const payload = {
   id: "call-1",
   tool: "request_secret",
-  arguments: { name: "MAPS_KEY", purpose: "Google Maps geocoding", host: "maps.googleapis.com" },
+  arguments: { name: "MAPS_KEY", purpose: "Google Maps geocoding", host: "Maps.GoogleAPIs.com" },
 };
 
 /** Render the card the way the chat panel does: its answer goes to the confirm route. */
@@ -97,7 +105,7 @@ function type(input: HTMLInputElement, text: string) {
 
 void test("the card saves the value to /secrets and confirms with a plain yes", async () => {
   sent.length = 0;
-  saved = [];
+  saved = {};
   const answers: boolean[] = [];
   const { container, root } = await renderCard(answers);
   try {
@@ -111,7 +119,8 @@ void test("the card saves the value to /secrets and confirms with a plain yes", 
     });
 
     const put = sent.find((r) => r.method === "PUT");
-    assert.deepEqual(JSON.parse(put!.body), { name: "MAPS_KEY", value: VALUE });
+    // The host the card shows is the host the server stores and enforces.
+    assert.deepEqual(JSON.parse(put!.body), { name: "MAPS_KEY", value: VALUE, allowed_hosts: ["maps.googleapis.com"] });
     const confirm = sent.find((r) => r.path === "/optimizations/generalist-agent/confirm");
     assert.deepEqual(JSON.parse(confirm!.body), { call_id: "call-1", approved: true });
     assert.deepEqual(answers, [true]);
@@ -130,7 +139,7 @@ void test("the card saves the value to /secrets and confirms with a plain yes", 
 
 void test("skip confirms with a plain no and sends nothing to /secrets", async () => {
   sent.length = 0;
-  saved = [];
+  saved = {};
   const answers: boolean[] = [];
   const { container, root } = await renderCard(answers);
   try {
@@ -140,6 +149,54 @@ void test("skip confirms with a plain no and sends nothing to /secrets", async (
     assert.equal(sent.some((r) => r.method === "PUT"), false);
     const confirm = sent.find((r) => r.path === "/optimizations/generalist-agent/confirm");
     assert.deepEqual(JSON.parse(confirm!.body), { call_id: "call-1", approved: false });
+  } finally {
+    await React.act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+/** Submit the card's form. */
+async function submit(container: HTMLElement) {
+  const form = container.querySelector("form")!;
+  await React.act(async () => {
+    form.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }));
+  });
+}
+
+void test("a secret saved for another host needs a new value and keeps its old hosts", async () => {
+  sent.length = 0;
+  saved = { MAPS_KEY: ["api.example.com"] };
+  const answers: boolean[] = [];
+  const { container, root } = await renderCard(answers);
+  try {
+    const submitButton = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    assert.notEqual(submitButton.textContent, "Keep the saved value");
+    assert.equal(submitButton.disabled, true);
+    await submit(container);
+    assert.deepEqual(answers, []);
+
+    await React.act(async () => type(container.querySelector<HTMLInputElement>('input[type="password"]')!, VALUE));
+    await submit(container);
+    const put = sent.find((r) => r.method === "PUT");
+    assert.deepEqual(JSON.parse(put!.body).allowed_hosts, ["api.example.com", "maps.googleapis.com"]);
+    assert.deepEqual(answers, [true]);
+  } finally {
+    await React.act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+void test("a secret saved for the shown host can be kept without a new value", async () => {
+  sent.length = 0;
+  saved = { MAPS_KEY: ["maps.googleapis.com"] };
+  const answers: boolean[] = [];
+  const { container, root } = await renderCard(answers);
+  try {
+    const submitButton = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    assert.equal(submitButton.textContent, "Keep the saved value");
+    await submit(container);
+    assert.equal(sent.some((r) => r.method === "PUT"), false);
+    assert.deepEqual(answers, [true]);
   } finally {
     await React.act(async () => root.unmount());
     container.remove();
