@@ -15,17 +15,19 @@ from pydantic import ValidationError
 from core.api.routers.submissions import _persistable_payload
 from core.billing.protected_execution import bind_protected_sandbox
 from core.billing.tests.test_protected_execution_local import _Gateway, local_settings  # noqa: F401
-from core.config import Settings
+from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
 from core.models.blackbox import BlackboxRunRequest
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from core.storage.base import JobStore
 from core.storage.models import ContinuousPlanModel
 
-from .. import continuous
+from .. import continuous, repo_staging
 from .. import engine as engine_module
 from ..engine import BackgroundWorker, reset_worker_for_tests
 from .conftest import FakeJobStore
 from .mocks import make_mp_context, make_result_event
+from .test_repo_staging import _binding
+from .test_repo_staging import _Gateway as _ScorerGateway
 
 _OVERVIEW = {"optimization_type": "blackbox", "username": "alice"}
 
@@ -58,13 +60,13 @@ def _request(**extra: Any) -> BlackboxRunRequest:
 
 
 def _bound_lifetime(payload: dict[str, Any]) -> Any:
-    """Run one stored repository job and return the lifetime it binds its sandbox with.
+    """Run one stored repository job and return the guest lifetime it binds its sandbox with.
 
     Args:
         payload: The stored run request.
 
     Returns:
-        The ``lifetime_seconds`` argument the engine passed to the sandbox bind.
+        The ``guest_lifetime_seconds`` argument the engine passed to the sandbox bind.
     """
     store = FakeJobStore()
     store.engine = MagicMock()
@@ -121,11 +123,12 @@ def _bound_lifetime(payload: dict[str, Any]) -> Any:
         stack.enter_context(patch.object(worker, "_close_budget_gateway", return_value=(None, None)))
         worker._process_job("repo-deadline", 0)
     bind.assert_called_once()
-    return bind.call_args.kwargs["lifetime_seconds"]
+    assert "lifetime_seconds" not in bind.call_args.kwargs
+    return bind.call_args.kwargs["guest_lifetime_seconds"]
 
 
 def test_stored_run_binds_its_deadline_override() -> None:
-    """A run that asks for a 120 s deadline binds its sandbox with 120 s."""
+    """A run that asks for a 120 s deadline binds its guest boxes with 120 s."""
     payload = _request(deadline_seconds=120).model_dump(mode="json", by_alias=True)
 
     assert payload["deadline_seconds"] == 120
@@ -146,18 +149,39 @@ def test_override_below_one_minute_is_refused() -> None:
 def test_override_only_shortens_the_configured_deadline(
     local_settings: tuple[Settings, Path],  # noqa: F811
 ) -> None:
-    """The bind uses a shorter override and caps a longer one at the configured lifetime."""
+    """The guest gets a shorter override, a longer one is capped, and parent boxes keep the configured lifetime."""
     settings, _ = local_settings
     configured = settings.vercel_sandbox_max_lifetime_seconds
+    gateways = [_Gateway() for _ in range(3)]
 
-    short = bind_protected_sandbox(_Gateway(), settings, workflow="anything", owner_id="job-1", lifetime_seconds=120)
-    long = bind_protected_sandbox(
-        _Gateway(), settings, workflow="anything", owner_id="job-2", lifetime_seconds=configured + 1000
+    short = bind_protected_sandbox(
+        gateways[0], settings, workflow="anything", owner_id="job-1", guest_lifetime_seconds=120
     )
-    default = bind_protected_sandbox(_Gateway(), settings, workflow="anything", owner_id="job-3")
+    long = bind_protected_sandbox(
+        gateways[1], settings, workflow="anything", owner_id="job-2", guest_lifetime_seconds=configured + 1000
+    )
+    default = bind_protected_sandbox(gateways[2], settings, workflow="anything", owner_id="job-3")
 
-    assert short["lifetime_seconds"] == 120
+    assert short["lifetime_seconds"] == gateways[0].bound["lifetime_seconds"] == 120
     assert long["lifetime_seconds"] == default["lifetime_seconds"] == configured
+    assert [gateway.broker._guest_maximum for gateway in gateways] == [120, configured, configured]
+    assert [gateway.broker._maximum for gateway in gateways] == [configured] * 3
+
+
+def test_scorer_box_does_not_take_the_guest_deadline(tmp_path: Path) -> None:
+    """The scorer box opens before the guest, so it asks for the ceiling, not the 120 s guest lifetime.
+
+    The broker caps a parent box at the configured profile
+    (``test_a_run_deadline_caps_only_the_guest_so_the_scorer_outlives_it``).
+    """
+    payload, staged = _binding(tmp_path, None)
+    payload["_budget_gateway_descriptor"]["lifetime_seconds"] = 120
+    gateway = _ScorerGateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert gateway.boxes[0].spec.lifetime_seconds == VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
+    staged.close_scorers()
 
 
 def test_stored_payload_keeps_the_override() -> None:

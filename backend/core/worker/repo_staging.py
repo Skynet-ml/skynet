@@ -33,7 +33,7 @@ from ..billing.protected_credentials import (
 )
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, proposer_hosts
 from ..brand import APP_NAME
-from ..config import settings
+from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from ..connectors import repo_hosts
 from ..connectors.github_publish import (
     BEST_BRANCH,
@@ -778,7 +778,10 @@ def bind_repo_scorer(
         RepoWorkspace(
             runtime=gateway.parent_sandbox_runtime(),
             spec=SandboxSpec(
-                lifetime_seconds=descriptor["lifetime_seconds"],
+                # The descriptor's lifetime is the guest's, which a per-run deadline
+                # shortens (SKY-572). This box opens before the guest and must outlive
+                # it, so it asks for the ceiling and the broker caps it at the profile.
+                lifetime_seconds=VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS,
                 image=descriptor["image"],
                 network_disabled=not hosts,
                 allowed_hosts=hosts,
