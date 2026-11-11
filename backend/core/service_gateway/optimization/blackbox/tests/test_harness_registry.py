@@ -262,8 +262,9 @@ def test_registry_keeps_the_catalog_order() -> None:
         "prime": ("prime-agent", "0.9.7"),
         "aider": ("aider", "0.86.2"),
         "mini_swe_agent": (
-            '"$(uv tool dir 2>/dev/null)/mini-swe-agent/bin/python" -c'
-            """ 'import importlib.metadata as m; print(m.version("mini-swe-agent"))'""",
+            '"$(uv tool dir 2>/dev/null)/mini-swe-agent/bin/python" -I -c'
+            """ 'import importlib.metadata as m; l = m.version("litellm"); """
+            """print(m.version("mini-swe-agent") if l == "1.103.1" else "litellm " + l)'""",
             "2.4.6",
         ),
         "antigravity_sdk": (
