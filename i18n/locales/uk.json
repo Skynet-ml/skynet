@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} — це не {expected}. Skynet підключається лише до gitlab.com і Bitbucket Cloud, а не до самокерованих серверів. Використайте адресу репозиторію на {expected} або перенесіть репозиторій на {expected}.",
     "connectors.not_connected": "Спочатку підключіть обліковий запис {provider}.",
     "connectors.not_found": "Цей елемент не знайдено в {provider} або ваш обліковий запис не має до нього доступу.",
+    "connectors.rate_limited": "Досягнуто ліміт запитів {provider}. Спробуйте пізніше.",
     "connectors.oauth_failed": "Не вдалося завершити вхід через {provider}. Спробуйте ще раз.",
     "connectors.oauth_not_configured": "Вхід через {provider} не налаштовано для цього розгортання. Введіть облікові дані вручну.",
     "connectors.oauth_state_invalid": "Посилання для входу недійсне або застаріле. Почніть спочатку.",

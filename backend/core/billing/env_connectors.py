@@ -18,14 +18,14 @@ import base64
 import json
 import re
 import uuid
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, quote_plus, urlencode, urlsplit
 
 from ..config import settings
-from .credential_safety import REDACTED_CREDENTIAL, credential_fragments, redact_secret_bytes
+from .credential_safety import DESKTOP_LINK_TOKEN_RE, REDACTED_CREDENTIAL, credential_fragments
 from .mcp_broker import ToolCall
 from .operation_pricing import ChargePolicy, operation_quote
 from .runtime import BudgetRuntime, PaidResult
@@ -38,6 +38,8 @@ CONNECTOR_PRICE_VERSION = "env-connectors-2026-11-06"
 # The base64 form of a 1-3 character secret is 2-4 common characters; hiding it would mangle unrelated answer text.
 _MIN_ENCODED_FRAGMENT = 4
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-F]{2}")
+_REDACTED = REDACTED_CREDENTIAL.encode()
+_DESKTOP_LINK_TOKEN = re.compile(DESKTOP_LINK_TOKEN_RE.pattern.encode())
 CONNECTOR_COST_KIND = "tool"
 # Payload key listing the owner's OAuth MCP connections, by name, that a run asks for.
 CONNECTORS_KEY = "env_connectors"
@@ -408,32 +410,114 @@ def _either_case(hex_digits: str) -> bytes:
     return "".join(f"[{d}{d.upper()}]" if d.isalpha() else d for d in hex_digits).encode()
 
 
-def json_escape_pattern(fragment: str) -> re.Pattern[bytes] | None:
-    """Return a regex for every JSON string form in which a server may echo a fragment.
+def echo_pattern(fragment: str) -> tuple[bytes, int, int] | None:
+    """Return a regex for every JSON-escaped and percent-encoded form in which a server may echo a fragment.
 
     A JSON encoder may write any character as ``\\uXXXX`` with lower- or
-    upper-case hex (.NET writes ``+`` as ``\\u002B``) and ``/`` as ``\\/``,
-    and it may mix forms in one string. A list of literal forms cannot hold
-    every mix, so each character gets its own set of choices.
+    upper-case hex (.NET writes ``+`` as ``\\u002B``) and ``/`` as ``\\/``.
+    A URL encoder may escape any byte, also an unreserved one such as ``a``
+    (``%61``), in lower- or upper-case hex, and may write a space as ``+``.
+    One echo may mix all of these forms, such as ``ab\\/cd%2B``, and a list
+    of literal forms cannot hold every mix, so each character gets one set
+    of choices that holds every form.
 
     Args:
-        fragment: One secret fragment.
+        fragment: One secret fragment, or one of its base64 forms.
 
     Returns:
-        The compiled regex, or None for a fragment shorter than
-        ``_MIN_ENCODED_FRAGMENT``.
+        The regex source and the lengths of its shortest and longest match,
+        or None for a fragment shorter than ``_MIN_ENCODED_FRAGMENT``.
     """
     if len(fragment) < _MIN_ENCODED_FRAGMENT:
         return None
     parts: list[bytes] = []
+    longest = 0
     for char in fragment:
-        choices = {re.escape(char.encode()), re.escape(json.dumps(char)[1:-1].encode())}
+        literal, escaped = char.encode(), json.dumps(char)[1:-1].encode()
+        units = char.encode("utf-16-be")
+        choices = {
+            re.escape(literal),
+            re.escape(escaped),
+            b"".join(re.escape(b"\\u") + _either_case(units[i : i + 2].hex()) for i in range(0, len(units), 2)),
+            b"".join(b"%" + _either_case(f"{byte:02x}") for byte in literal),
+        }
         if char == "/":
             choices.add(re.escape(b"\\/"))
-        units = char.encode("utf-16-be")
-        choices.add(b"".join(re.escape(b"\\u") + _either_case(units[i : i + 2].hex()) for i in range(0, len(units), 2)))
+        if char == " ":
+            choices.add(re.escape(b"+"))
         parts.append(b"(?:" + b"|".join(sorted(choices)) + b")")
-    return re.compile(b"".join(parts))
+        longest += max(len(escaped), 3 * len(units), 3 * len(literal))
+    return b"".join(parts), len(fragment.encode()), longest
+
+
+class AnswerMask:
+    """Replace every form of the filled secrets in an answer, whole or chunk by chunk.
+
+    One regex holds every form, so a stream chunk is safe to pass on once no
+    form can still start in it: the mask holds back the last ``reach`` bytes,
+    or, when no form can hold a newline, only the bytes after the last one.
+    """
+
+    def __init__(self, literals: Collection[str], patterns: Collection[tuple[bytes, int, int]]) -> None:
+        """Build the one regex.
+
+        Args:
+            literals: Exact forms to replace.
+            patterns: Regex sources with the lengths of their shortest and longest match.
+        """
+        alternatives = [(re.escape(form.encode()), len(form.encode()), len(form.encode())) for form in literals if form]
+        alternatives += patterns
+        # The regex takes the first alternative that matches, not the longest. A longer value
+        # goes first, so a padded base64 form is not cut short by its unpadded form; at equal
+        # length a pattern goes first. The desktop-link token has no fixed length, so it leads.
+        alternatives.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        sources = [_DESKTOP_LINK_TOKEN.pattern, *(source for source, _, _ in alternatives)]
+        self._pattern = re.compile(b"|".join(sources))
+        # A desktop-link token needs 9 bytes before the regex can tell that it starts one.
+        self._reach = max([9, *(longest for _, _, longest in alternatives)])
+        self._lines = not any("\n" in form for form in literals)
+
+    def redact(self, answer: bytes) -> bytes:
+        """Return a whole answer with every form replaced.
+
+        Args:
+            answer: The untrusted answer.
+
+        Returns:
+            The redacted answer.
+        """
+        return self._pattern.sub(_REDACTED, answer)
+
+    def stream(self, chunks: Iterable[bytes]) -> Generator[bytes, None, None]:
+        """Yield a streamed answer with every form replaced, also one cut across two chunks.
+
+        Args:
+            chunks: The untrusted answer, in the order it arrives.
+
+        Yields:
+            The redacted bytes that no later chunk can change.
+        """
+        tail = b""
+        for chunk in chunks:
+            data = tail + chunk
+            cut = max(len(data) - self._reach, data.rfind(b"\n") + 1 if self._lines else 0, 0)
+            out, done = bytearray(), 0
+            for match in self._pattern.finditer(data):
+                if match.start() >= cut:
+                    break
+                if match.end() >= len(data):
+                    # A desktop-link token can go on in the next chunk.
+                    cut = match.start()
+                    break
+                out += data[done : match.start()] + _REDACTED
+                done = match.end()
+            cut = max(cut, done)
+            out += data[done:cut]
+            tail = data[cut:]
+            if out:
+                yield bytes(out)
+        if tail:
+            yield self.redact(tail)
 
 
 def encoded_forms(fragment: str) -> set[str]:
@@ -483,12 +567,12 @@ def relay_request(
     bindings: Mapping[str, str],
     secret_hosts: Mapping[str, str],
     allowed_hosts: Mapping[str, Collection[str]],
-    send: Callable[[str, dict[str, str], bytes], bytes],
+    send: Callable[[str, dict[str, str], bytes], bytes | Iterator[bytes]],
     runtime: BudgetRuntime | None = None,
     recorder: CallRecorder | None = None,
     kind: str = "host",
     target: str = "",
-) -> bytes:
+) -> bytes | Generator[bytes, None, None]:
     """Send one ``[services]`` or MCP http request with its secrets filled in (E49-E53).
 
     The box holds only ``${NAME}`` placeholders. This parent-side step fills
@@ -508,7 +592,8 @@ def relay_request(
         allowed_hosts: Each user secret's ``allowed_hosts`` from the run. The
             repository's files cannot widen them; a managed secret goes only
             to its catalog endpoint.
-        send: Sends the filled request and returns the answer body.
+        send: Sends the filled request and returns the answer body, whole or
+            as an iterator of chunks for a streamed answer.
         runtime: The run budget; required when a managed secret is used.
         recorder: Writes this call into the run record: ``ok``, ``failed``
             or ``refused`` with its reason. Every user secret value and every
@@ -519,7 +604,9 @@ def relay_request(
             host when empty.
 
     Returns:
-        The answer body without any filled secret value.
+        The answer body without any filled secret value: whole, or, when
+        ``send`` streams, an iterator that the caller must read to its end or
+        close. The record is written when the stream ends.
 
     Raises:
         ValueError: When a secret has no value, goes to a host it is not bound
@@ -534,35 +621,75 @@ def relay_request(
             target = (urlsplit(url).hostname or "").rstrip(".").lower()
         except ValueError:  # a malformed url such as "http://[::1/x" is refused by _relay, and still recorded
             target = ""
-    try:
-        answer = _relay(url, headers, body, user_secrets, bindings, secret_hosts, allowed_hosts, send, runtime, state)
-    except BaseException as error:  # a worker stop or cancel must still leave the call in the record
-        if recorder is not None and started is not None:
+
+    def record(error: BaseException | None, answer: bytes = b"") -> None:
+        """Write the call into the run record, if the relay has a recorder.
+
+        Args:
+            error: Why the call failed, or None for a call that succeeded.
+            answer: The redacted answer of a call that succeeded.
+        """
+        if recorder is None or started is None:
+            return
+        if error is None:
             recorder.record(
                 started,
                 kind=kind,
                 target=target,
-                # Only a refusal raised by the relay's own checks is "refused".
-                status="failed" if state.sent or not isinstance(error, Exception) else "refused",
+                status="ok",
                 request=body,
-                failure_reason=f"{type(error).__name__}: {error}",
-                # A tool that failed after the send still settles its price.
-                cost_usd=state.cost_usd if state.sent else None,
+                response=answer,
+                cost_usd=state.cost_usd,
                 secrets=state.secrets,
             )
-        raise
-    if recorder is not None and started is not None:
+            return
         recorder.record(
             started,
             kind=kind,
             target=target,
-            status="ok",
+            # Only a refusal raised by the relay's own checks is "refused".
+            status="failed" if state.sent or not isinstance(error, Exception) else "refused",
             request=body,
-            response=answer,
-            cost_usd=state.cost_usd,
+            failure_reason=f"{type(error).__name__}: {error}",
+            # A tool that failed after the send still settles its price.
+            cost_usd=state.cost_usd if state.sent else None,
             secrets=state.secrets,
         )
-    return answer
+
+    try:
+        answer = _relay(url, headers, body, user_secrets, bindings, secret_hosts, allowed_hosts, send, runtime, state)
+    except BaseException as error:  # a worker stop or cancel must still leave the call in the record
+        record(error)
+        raise
+    if isinstance(answer, bytes):
+        record(None, answer)
+        return answer
+    return _recorded(answer, record)
+
+
+def _recorded(chunks: Iterator[bytes], record: Callable[..., None]) -> Generator[bytes, None, None]:
+    """Pass a streamed answer on, and record the call when the stream ends.
+
+    Args:
+        chunks: The redacted stream.
+        record: Writes the call into the run record.
+
+    Yields:
+        Each redacted chunk.
+    """
+    seen: list[bytes] = []
+    try:
+        for chunk in chunks:
+            seen.append(chunk)
+            yield chunk
+    except GeneratorExit:
+        # The consumer closed the stream, such as an MCP client that ends its event stream: a normal end.
+        record(None, b"".join(seen))
+        raise
+    except BaseException as error:  # a worker stop or cancel must still leave the call in the record
+        record(error)
+        raise
+    record(None, b"".join(seen))
 
 
 @dataclass
@@ -582,10 +709,10 @@ def _relay(
     bindings: Mapping[str, str],
     secret_hosts: Mapping[str, str],
     allowed_hosts: Mapping[str, Collection[str]],
-    send: Callable[[str, dict[str, str], bytes], bytes],
+    send: Callable[[str, dict[str, str], bytes], bytes | Iterator[bytes]],
     runtime: BudgetRuntime | None,
     state: _RelayState,
-) -> bytes:
+) -> bytes | Generator[bytes, None, None]:
     """Fill, check, meter and send one relay call; see :func:`relay_request`.
 
     Args:
@@ -596,12 +723,12 @@ def _relay(
         bindings: ``user`` or ``managed`` for each secret name.
         secret_hosts: The one host each secret may go to.
         allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
-        send: Sends the filled request and returns the answer body.
+        send: Sends the filled request and returns the answer body, whole or streamed.
         runtime: The run budget; required when a managed secret is used.
         state: Gets the filled secrets, whether the call was sent, and its cost.
 
     Returns:
-        The answer body without any filled secret value.
+        The answer body without any filled secret value, whole or streamed.
     """
     host = (urlsplit(url).hostname or "").rstrip(".").lower()
     names = tuple(dict.fromkeys(name for value in headers.values() for name in _PLACEHOLDER.findall(value)))
@@ -623,7 +750,10 @@ def _relay(
     base = set(fragments)
     fragments |= {form for fragment in fragments for form in escaped_forms(fragment)}
     state.secrets |= set(values.values()) | fragments
-    ordered = sorted(fragments, key=len, reverse=True)
+    # An encoder may also percent-encode a value or its base64 form, with any escape case, and may
+    # mix percent and JSON escapes in one echo, so one pattern for each fragment holds every mix.
+    patterns = [found for fragment in base if (found := echo_pattern(fragment))]
+    mask = AnswerMask(fragments, patterns)
     managed = any(bindings.get(name) == MANAGED_BINDING for name in names)
     if managed and not _same_endpoint(url, CONNECTORS[host]):
         raise ValueError(f"A Skynet key for {host} may go only to {CONNECTORS[host].url}.")
@@ -645,16 +775,13 @@ def _relay(
                 The raw answer, wrapped for the meter.
             """
             progress.sent = state.sent = True
-            return {"body": send(url, filled, body)}
+            answer = send(url, filled, body)
+            # The meter settles one whole answer, so a managed call is never streamed.
+            return {"body": answer if isinstance(answer, bytes) else b"".join(answer)}
 
         tool, arguments = call
         if tool in CONNECTORS[host].tools:
             policy = ChargePolicy("managed_model")
             state.cost_usd = float(policy.convert(CONNECTORS[host].tools[tool]).total * policy.cent_usd)
         answer = tool_meter(runtime, CONNECTORS[host])(tool, arguments, ToolCall(run))["body"]
-    redacted = redact_secret_bytes(answer, ordered)
-    for fragment in sorted(base, key=len, reverse=True):
-        pattern = json_escape_pattern(fragment)
-        if pattern is not None:
-            redacted = pattern.sub(REDACTED_CREDENTIAL.encode(), redacted)
-    return redacted
+    return mask.redact(answer) if isinstance(answer, bytes) else mask.stream(answer)

@@ -3,8 +3,8 @@
 This leaf module holds the runtime context binding, the local and contained
 subprocess runtimes, the bridge onto the async ``core.sandbox`` providers, and
 the Codex requirements helpers. ``sandbox.py`` re-exports every name here, so
-SKY-433 can delete the legacy Vercel runtime without breaking these callers.
-It never imports ``sandbox.py``, ``docker_sandbox.py``, httpx or the Vercel SDK.
+callers that import from ``sandbox.py`` keep working (SKY-433). It never
+imports ``sandbox.py``, httpx or the Vercel SDK.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import inspect
 import logging
 import os
 import shlex
@@ -34,10 +35,21 @@ from ....config import app_env, with_legacy_env
 from ....exceptions import ServiceError
 from ....sandbox import ExecResult, ResourceRequest, SandboxSpecError, network_mode
 from ....sandbox import SandboxSpec as AsyncSandboxSpec
-from ....sandbox.errors import SandboxFatalError, SandboxInfraError, SandboxRejectedError
+from ....sandbox.errors import (
+    SandboxError,
+    SandboxFatalError,
+    SandboxInfraError,
+    SandboxRejectedError,
+    SandboxRunOutcomeError,
+    SandboxTransientError,
+)
 from ....sandbox.factory import create_environment, load_provider
+from ....sandbox.network import NetworkPolicyError
+from ....sandbox.pool import TrialFingerprintError
+from ....sandbox.snapshots import BuiltSnapshot, SnapshotCache
 from ....sandbox.sync_bridge import SyncSession, open_session
 from ....sandbox.sync_bridge import run as bridge_run
+from ....sandbox.transfer import UnsafeArchiveError
 from .sandbox_contract import (
     JOB_TAG,
     SANDBOX_TAG,
@@ -364,8 +376,12 @@ def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
     other error as a dead box, which they close and retry in a fresh paid box.
     A bad spec, a rejected request, a fatal error or a command that outlived
     its kill deadline fails the same way in a fresh box, and the async path
-    never retries by default (SKY-406 D3, D10). Transient box-death errors
-    stay as they are, so the callers' one fresh box still applies to them.
+    never retries by default (SKY-406 D3, D10). The other ``core.sandbox``
+    errors that a retry cannot fix map to ``ServiceError`` too (SKY-564).
+    Transient box-death errors and run outcomes stay as they are: the
+    callers read their group for the one fresh box and for grading.
+    Cancellation and budget errors are not ``core.sandbox`` errors, so they
+    pass through unchanged.
 
     Args:
         timed: The call is a command with a timeout, so an infra error caused
@@ -389,6 +405,10 @@ def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
         if timed and isinstance(error.__cause__, TimeoutError):
             raise ServiceError(f"The sandbox command outlived its kill deadline: {error}") from error
         raise
+    except (SandboxTransientError, SandboxRunOutcomeError):
+        raise
+    except (SandboxError, NetworkPolicyError, UnsafeArchiveError, TrialFingerprintError) as error:
+        raise ServiceError(f"The sandbox refused the request: {error}") from error
 
 
 # The async Vercel teardown waits up to 60 s (``STOP_TIMEOUT`` in
@@ -488,8 +508,52 @@ class AsyncBridgeSession:
         with _bridge_errors():
             bridge_run(self._session.environment.disable_network)
 
+    def start_services(self, base_dir: str) -> None:
+        """Start the box's compose services, with the repository folder as their base.
+
+        Args:
+            base_dir: The absolute folder of the repository in the box.
+
+        Raises:
+            ServiceError: The provider refused the start for good.
+        """
+        with _bridge_errors():
+            bridge_run(self._session.environment.start_services, base_dir)
+
+    def snapshot(self, cache: SnapshotCache, cache_key: str) -> str:
+        """Save this box as an after-setup snapshot in the run's cache, once per key.
+
+        The provider stops the box when it takes the snapshot, so the caller
+        closes this session and opens a new box from the returned id.
+
+        Args:
+            cache: The run's snapshot cache, which owns and deletes the snapshot.
+            cache_key: Names this box's setup; a second call with it reuses the snapshot.
+
+        Returns:
+            The snapshot id.
+
+        Raises:
+            ServiceError: The provider refused the snapshot for good.
+        """
+        environment = self._session.environment
+
+        async def build(_builder: str) -> BuiltSnapshot:
+            """Snapshot this box on the bridge loop.
+
+            Args:
+                _builder: The builder name the cache passes; the box is the builder.
+
+            Returns:
+                The built snapshot.
+            """
+            return await environment.snapshot(run_deadline=cache.run_deadline)
+
+        with _bridge_errors():
+            return bridge_run(cache.get_or_build, cache_key, build).snapshot_id
+
     def close(self) -> None:
-        """Stop the sandbox, and log a teardown failure like the legacy sessions do.
+        """Stop the sandbox, and log a teardown failure instead of raising it.
 
         Callers close in ``finally`` blocks and catch only usage errors, so any
         other stop failure here would replace a finished result or the real error.
@@ -534,13 +598,25 @@ class AsyncBridgeRuntime:
                 build, or not allowed in production.
         """
         self.provider = provider
-        self._capabilities = load_provider(provider).capabilities
+        provider_class = load_provider(provider)
+        self._capabilities = provider_class.capabilities
+        # No capability flag names compose services, so the constructor says
+        # whether this provider can start them.
+        self._runs_services = "services" in inspect.signature(provider_class).parameters
         self.injects_headers = self._capabilities.injects_headers
         self._sweep_options: dict[str, Any] = {} if docker_bin is None else {"docker_bin": docker_bin}
         self._options: dict[str, Any] = {**self._sweep_options, **({} if image is None else {"image": image})}
 
+    @property
+    def supports_snapshots(self) -> bool:
+        """Return whether this provider can save and start from after-setup snapshots."""
+        return self._capabilities.snapshots
+
     def open(self, spec: SandboxSpec) -> SandboxSession:
         """Create and start a sandbox per ``spec``.
+
+        A ``snapshot_id`` on a provider without snapshots is dropped, so the
+        box opens empty and the caller's tree check sends it back to setup.
 
         Args:
             spec: Lifetime, environment, image, header injection and labels for the sandbox.
@@ -553,14 +629,23 @@ class AsyncBridgeRuntime:
         """
         mode = network_mode(disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts))
         if mode not in self._capabilities.network_modes:
-            # The legacy Docker runtime allows open egress; the async Docker
-            # provider allows only deny-all or an allowlist (SKY-419 review).
+            # The async Docker provider allows only deny-all or an allowlist
+            # (SKY-419 review); open egress has no runtime to fall back to.
             raise ServiceError(
-                f"The async {self._capabilities.name} sandbox does not support {mode.value} network egress. "
-                "Set SANDBOX_BACKEND=legacy, or give the sandbox an allowlist of hosts."
+                f"The {self._capabilities.name} sandbox does not support {mode.value} network egress. "
+                "Give the sandbox an allowlist of hosts, or disable its network."
             )
+        extra: dict[str, Any] = {}
+        if spec.services:
+            if not self._runs_services:
+                raise ServiceError(
+                    f"The {self._capabilities.name} sandbox cannot run the repository's compose services."
+                )
+            extra["services"] = tuple(spec.services)
+        if spec.snapshot_id is not None and self._capabilities.snapshots:
+            extra["snapshot_id"] = spec.snapshot_id
         with _bridge_errors():
-            environment = create_environment(self.provider, _async_spec(spec), **self._options)
+            environment = create_environment(self.provider, _async_spec(spec), **self._options, **extra)
             return AsyncBridgeSession(open_session(environment))
 
     def stop_job_sandboxes(self, job_id: str) -> int:
@@ -592,7 +677,7 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
 
     Returns:
         The same sandbox, with ``vcpus`` moved into the resource request and
-        the Skynet sandbox tag added, as the legacy runtime adds it.
+        the Skynet sandbox tag added.
     """
     return AsyncSandboxSpec(
         lifetime_seconds=spec.lifetime_seconds,
@@ -641,14 +726,23 @@ def _require_codex_requirements(result: CommandResult) -> None:
 
 
 def write_codex_requirements(session: SandboxSession) -> None:
-    """Write the root-owned Codex requirements file and read it back before Codex starts.
+    """Make sure the root-owned Codex requirements file is in place before Codex starts.
+
+    The sandbox image ships the file root-owned, so the plain read-back passes
+    and the box needs no root. The image carries no ``sudo``: Codex runs as the
+    image user with its own sandbox off, so a root path in the box would let the
+    model rewrite the file (SKY-389). Only a box without the file, such as the
+    local Docker box that mounts an empty ``/etc/codex``, gets the root write.
 
     Args:
-        session: A control-plane session whose ``run`` can run as root.
+        session: A control-plane session; its ``run`` must run as root only when the box lacks the file.
 
     Raises:
-        ServiceError: When the write fails or the read-back does not match, so Codex never starts.
+        ServiceError: When the file is missing and the root write fails, or the read-back does not match.
     """
+    check = session.run(_CODEX_REQUIREMENTS_CHECK, timeout_seconds=60)
+    if check.ok and not check.timed_out and check.stdout == _CODEX_REQUIREMENTS_READBACK:
+        return
     _require_codex_requirements(session.run(_CODEX_REQUIREMENTS_COMMAND, timeout_seconds=60, sudo=True))
 
 

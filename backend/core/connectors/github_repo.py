@@ -45,6 +45,24 @@ class RepoFetchError(RuntimeError):
     """Explain, in words a run's owner can act on, why the repository could not be fetched."""
 
 
+class RepoRateLimitError(RepoFetchError):
+    """The host's rate limit stopped the lookup, so the repository itself may be readable."""
+
+
+def rate_limit_message(host: str, anonymous: bool) -> str:
+    """Explain a spent rate limit, with the advice to connect only for a read without a token.
+
+    Args:
+        host: The repository host's display name.
+        anonymous: Whether the read ran without a token.
+
+    Returns:
+        The message for the run's owner.
+    """
+    message = f"{host}'s rate limit is reached. Try again later."
+    return f"{message} Connect {host} to raise the limit." if anonymous else message
+
+
 @dataclass(frozen=True)
 class RepoSnapshot:
     """A repository tree fetched at one commit, ready to ship into a sandbox."""
@@ -74,11 +92,12 @@ def github_token(engine: Any, username: str) -> str:
         raise RepoFetchError("Connect GitHub again: the connection is missing or has expired.") from error
 
 
-def resolve_commit(token: str, repository: str, branch: str | None) -> str:
+def resolve_commit(token: str | None, repository: str, branch: str | None) -> str:
     """Pin a branch, or the default branch, to its current commit.
 
     Args:
-        token: GitHub token with read access to the repository.
+        token: GitHub token with read access to the repository; ``None``
+            calls anonymously, which reaches public repositories only.
         repository: ``owner/name``.
         branch: Branch to pin; ``None`` picks the repository's default branch.
 
@@ -86,6 +105,7 @@ def resolve_commit(token: str, repository: str, branch: str | None) -> str:
         The 40-character commit id.
 
     Raises:
+        RepoRateLimitError: When GitHub's rate limit stops the lookup.
         RepoFetchError: When GitHub refuses the lookup.
     """
     headers = _headers(token)
@@ -97,6 +117,8 @@ def resolve_commit(token: str, repository: str, branch: str | None) -> str:
         url = f"{API_URL}/repos/{repository}/commits/{quote(branch, safe='')}"
         return str(get_json(url, provider=PROVIDER, headers=headers)["sha"])
     except DomainError as error:
+        if error.code == "connectors.rate_limited":
+            raise RepoRateLimitError(rate_limit_message("GitHub", not token)) from error
         raise RepoFetchError(f"GitHub could not find {repository} at '{branch or 'its default branch'}'.") from error
 
 

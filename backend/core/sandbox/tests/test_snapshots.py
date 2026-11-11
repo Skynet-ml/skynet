@@ -823,3 +823,166 @@ async def test_two_pods_build_one_snapshot_under_the_advisory_lock() -> None:
         assert {built.snapshot_id for built in results} == {"snap-1"}
     finally:
         engine.dispose()
+
+
+async def test_release_deletes_the_key_once_and_close_skips_it() -> None:
+    """Check that release deletes only its key's snapshot, a second release is a no-op, and close skips it."""
+    provider = Provider()
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    await cache.get_or_build(_key(), provider.build)
+    await cache.get_or_build(_key(install_command="uv sync"), provider.build)
+    await cache.release(_key())
+    assert provider.deletes == ["snap-1"]
+    await cache.release(_key())
+    assert provider.deletes == ["snap-1"]
+    await cache.close()
+    assert provider.deletes == ["snap-1", "snap-2"]
+
+
+async def test_failed_release_is_retried_by_close_and_deleted_once() -> None:
+    """Check that a failed release raises, close deletes it once, and nothing deletes it twice."""
+    provider = Provider()
+    calls: list[str] = []
+
+    async def flaky_delete(built: BuiltSnapshot) -> None:
+        """Fail the first delete, then delete.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            raise RuntimeError("provider error")
+        await provider.delete(built)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=flaky_delete)
+    await cache.get_or_build(_key(), provider.build)
+    with pytest.raises(RuntimeError):
+        await cache.release(_key())
+    await cache.close()
+    await cache.close()
+    await cache.release(_key())
+    assert calls == ["snap-1", "snap-1"]
+    assert provider.deletes == ["snap-1"]
+
+
+async def test_release_of_an_evicted_and_rebuilt_key_deletes_both_snapshots() -> None:
+    """Check that release finds the evicted snapshot of its key by its recorded id."""
+    provider = Provider()
+    clock = FakeClock()
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
+    await cache.get_or_build(_key(), provider.build)
+    clock.now = 1_000.0
+    assert await cache.evict_idle(600.0) == [_key()]
+    await cache.get_or_build(_key(), provider.build)
+    await cache.release(_key())
+    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
+
+
+async def test_release_of_a_borrowed_snapshot_only_drops_it() -> None:
+    """Check that a release never deletes a snapshot that another pod built."""
+    provider = Provider()
+    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    await owner.get_or_build(_key(), provider.build)
+    await borrower.get_or_build(_key(), provider.build)
+    await borrower.release(_key())
+    assert provider.deletes == []
+    await owner.release(_key())
+    assert provider.deletes == ["snap-1"]
+
+
+async def test_release_deletes_a_snapshot_whose_builder_is_the_provider_box() -> None:
+    """Check that release finds a snapshot by its key when the provider names the builder after its own box."""
+    deleted: list[tuple[str, object]] = []
+    hold = object()
+
+    async def delete(built: BuiltSnapshot) -> None:
+        """Record the delete and the hold it settles.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        deleted.append((built.snapshot_id, built.reservation))
+
+    async def build(_name: str) -> BuiltSnapshot:
+        """Return a snapshot named after the provider box, as the Vercel provider does.
+
+        Args:
+            _name: The cache's builder name, which the provider ignores.
+
+        Returns:
+            The snapshot.
+        """
+        return BuiltSnapshot(snapshot_id="snap-1", builder_name="skynet-0123456789abcdef", reservation=hold)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=delete)
+    await cache.get_or_build(_key(), build)
+    await cache.release(_key())
+    assert deleted == [("snap-1", hold)]
+    await cache.close()
+    assert deleted == [("snap-1", hold)]
+
+
+async def test_close_waits_for_a_release_delete_that_fails_and_deletes_it() -> None:
+    """Check that a close during a release's failing delete still deletes the snapshot."""
+    provider = Provider()
+    calls: list[str] = []
+    started = asyncio.Event()
+    go_on = asyncio.Event()
+
+    async def slow_flaky_delete(built: BuiltSnapshot) -> None:
+        """Wait, then fail the first delete; delete on later calls.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            started.set()
+            await go_on.wait()
+            raise RuntimeError("provider error")
+        await provider.delete(built)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=slow_flaky_delete)
+    await cache.get_or_build(_key(), provider.build)
+    release = asyncio.create_task(cache.release(_key()))
+    await started.wait()
+    close = asyncio.create_task(cache.close())
+    await asyncio.sleep(0)
+    assert not close.done()
+    go_on.set()
+    with pytest.raises(RuntimeError):
+        await release
+    await close
+    assert calls == ["snap-1", "snap-1"]
+    assert provider.deletes == ["snap-1"]
+
+
+async def test_cancelled_delete_is_kept_for_the_next_close() -> None:
+    """Check that a close cancelled during a delete keeps the snapshot for the next close."""
+    provider = Provider()
+    calls: list[str] = []
+    started = asyncio.Event()
+
+    async def hanging_delete(built: BuiltSnapshot) -> None:
+        """Hang on the first delete; delete on later calls.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            started.set()
+            await asyncio.Event().wait()
+        await provider.delete(built)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=hanging_delete)
+    await cache.get_or_build(_key(), provider.build)
+    close = asyncio.create_task(cache.close())
+    await started.wait()
+    close.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close
+    await cache.close()
+    assert provider.deletes == ["snap-1"]

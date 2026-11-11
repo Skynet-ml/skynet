@@ -4,8 +4,9 @@ A Vercel box has no container runtime, so a compose ``image`` is not pulled.
 Each service runs its ``entrypoint`` and ``command`` as a background process
 in the box, in ``depends_on`` order. The box grows by the declared ``cpus``
 and ``mem_limit`` of each service, so the reservation prices the services
-too. Services start after the box (or its snapshot restore) is up, and they
-stop before a snapshot, so a snapshot never holds a running service.
+too. Services start when the caller asks, once the repository is in the
+box, and they stop before a snapshot, so a snapshot never holds a running
+service.
 """
 
 from __future__ import annotations
@@ -355,7 +356,8 @@ def _compose_words(name: str, field: str, text: str) -> list[str]:
     Raises:
         ComposeError: The text has an unquoted ``;``, ``&``, ``|``, ``<`` or
             ``>``, which makes compose drop the rest; an unquoted ``(`` or
-            ``)`` that does not open or close ``$(...)``; or an unclosed
+            ``)`` that does not open or close ``$(...)``, which includes
+            a ``$(`` after a literal backslash; or an unclosed
             quote, backtick, ``$(`` or trailing backslash. Compose rejects
             the last two kinds too.
     """
@@ -394,7 +396,9 @@ def _compose_words(name: str, field: str, text: str) -> list[str]:
             backtick = not backtick
         elif backtick:
             pass
-        elif char == "(" and not dollar and word.endswith("$"):
+        elif char == "(" and not dollar and word.endswith("$") and not word.endswith("\\$"):
+            # go-shellwords refuses a $( after a literal backslash, so a
+            # backslash-dollar-paren falls through to the error below.
             dollar = True
         elif char == ")" and dollar:
             dollar = False

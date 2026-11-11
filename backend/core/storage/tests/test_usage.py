@@ -33,6 +33,7 @@ from core.storage.models import (
     DatasetModel,
     JobEmbeddingModel,
     LogEntryModel,
+    RunCallModel,
     TaggingSessionModel,
 )
 from core.storage.remote import RemoteDBJobStore
@@ -159,6 +160,65 @@ def test_byproducts_fold_into_optimization_footprint(store: _SQLiteJobStore, mon
 
     item = compute_user_storage_category_items(store.engine, "alice", "optimizations")[0]
     assert item.bytes == usage.breakdown["optimizations"]
+
+
+def test_run_calls_fold_into_optimization_footprint(store: _SQLiteJobStore) -> None:
+    """Stored relay-call text counts toward the owning optimization; other users' calls do not."""
+    store.create_job("job-1", username="alice")
+    store.update_job("job-1", payload={"a": 1})
+    store.create_job("job-2", username="bob")
+
+    base = compute_user_storage(store.engine, "alice").breakdown["optimizations"]
+
+    request, response, target, failure = "q" * 300, "r" * 200, "https://api.example.test/v1", "timeout"
+    with store._session_factory() as session:
+        session.add(
+            RunCallModel(
+                optimization_id="job-1",
+                candidate_id="c1",
+                seq=1,
+                kind="model",
+                target=target,
+                started_at=datetime.now(UTC),
+                status="failed",
+                failure_reason=failure,
+                request=request,
+                request_bytes=10_000,
+                response=response,
+                response_bytes=10_000,
+            )
+        )
+        session.add(
+            RunCallModel(
+                optimization_id="job-1",
+                candidate_id="c1",
+                seq=2,
+                kind="model",
+                started_at=datetime.now(UTC),
+                status="ok",
+                request="a" * 50,
+            )
+        )
+        session.add(
+            RunCallModel(
+                optimization_id="job-2",
+                candidate_id="c1",
+                seq=1,
+                kind="model",
+                started_at=datetime.now(UTC),
+                status="ok",
+                request="b" * 999,
+            )
+        )
+        session.commit()
+
+    expected = base + len(request) + len(response) + len(target) + len(failure) + 50
+    usage = compute_user_storage(store.engine, "alice")
+    assert usage.breakdown["optimizations"] == expected
+    assert usage.total == expected
+
+    item = compute_user_storage_category_items(store.engine, "alice", "optimizations")[0]
+    assert item.bytes == expected
 
 
 def _insert_dataset(store: _SQLiteJobStore, *, dataset_id: str, owner: str, name: str, byte_size: int) -> None:
@@ -365,7 +425,9 @@ def test_category_items_lists_tagging_sessions(store: _SQLiteJobStore) -> None:
     items = compute_user_storage_category_items(store.engine, "alice", "tagging_sessions")
     assert [item.id for item in items] == ["ts-big", "ts-small"]
     assert {item.type for item in items} == {"tagging_session"}
-    assert sum(item.bytes for item in items) == compute_user_storage(store.engine, "alice").breakdown["tagging_sessions"]
+    assert (
+        sum(item.bytes for item in items) == compute_user_storage(store.engine, "alice").breakdown["tagging_sessions"]
+    )
 
 
 def test_storage_counts_cover_every_category(store: _SQLiteJobStore) -> None:
@@ -437,7 +499,6 @@ def test_local_mode_gate_blocks_only_writes_larger_than_free_disk(
     assert set(measured) == {Path.home()}
 
 
-
 def test_local_mode_budget_uses_the_smaller_docker_disk(
     store: _SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -463,13 +524,12 @@ def test_local_postgres_free_bytes_reads_df_and_fails_soft(monkeypatch: pytest.M
     assert remote_store._local_postgres_free_bytes() == 32212254720
     assert calls[0][:3] == ["/usr/local/bin/docker", "exec", "skynet-local-postgres"]
 
-    monkeypatch.setattr(
-        remote_store.subprocess, "run", lambda args, **_: SimpleNamespace(returncode=1, stdout="")
-    )
+    monkeypatch.setattr(remote_store.subprocess, "run", lambda args, **_: SimpleNamespace(returncode=1, stdout=""))
     assert remote_store._local_postgres_free_bytes() is None
 
     monkeypatch.setattr(remote_store.shutil, "which", lambda name: None)
     assert remote_store._local_postgres_free_bytes() is None
+
 
 def test_storage_quota_override_replaces_default(store: _SQLiteJobStore) -> None:
     """An override becomes the user's effective budget, case-insensitively."""

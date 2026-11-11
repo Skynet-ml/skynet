@@ -177,7 +177,8 @@ async def _run_to_end(awaitable: Awaitable[_T]) -> _T:
 
     Raises:
         asyncio.CancelledError: The task was cancelled during the cleanup.
-            The cleanup ended first, and only the first cancel is raised.
+            The cleanup ended first, and only the first cancel is raised. A
+            cleanup error is logged, because the cancel replaces it.
     """
     work = asyncio.ensure_future(awaitable)
     cancelled: asyncio.CancelledError | None = None
@@ -187,6 +188,8 @@ async def _run_to_end(awaitable: Awaitable[_T]) -> _T:
         except asyncio.CancelledError as error:
             cancelled = cancelled or error
     if cancelled is not None:
+        if not work.cancelled() and (error := work.exception()) is not None:
+            logger.warning("A container cleanup failed during a cancel: %s", type(error).__name__)
         raise cancelled
     return work.result()
 
@@ -239,7 +242,7 @@ async def _cli(
         try:
             await asyncio.wait({communication}, timeout=deadline - loop.time())
         except asyncio.CancelledError as error:
-            cancelled = error
+            cancelled = cancelled or error
             if kill_on_cancel:
                 break
     if not communication.done():

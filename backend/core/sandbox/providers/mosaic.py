@@ -41,7 +41,6 @@ from typing import Any
 from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxError,
     SandboxFatalError,
     SandboxInfraError,
@@ -92,6 +91,8 @@ LIST_PAGE_SIZE = 500
 _TRANSIENT_CODES = frozenset({"transport", "client_timeout"})
 _ENDED_STATES = frozenset({"destroyed", "destroying", "deleted"})
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 
 MOSAIC_CAPABILITIES = EnvironmentCapabilities(name="mosaic", network_modes=frozenset(NetworkMode))
 
@@ -372,13 +373,14 @@ class MosaicEnvironment(SandboxEnvironment):
                 sandbox default user.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, it is killed first, and the result has exit code
+            124, ``timed_out`` set and the output so far.
 
         Raises:
             SandboxInfraError: The sandbox is not running, or Mosaic gave no
                 exit code.
             SandboxRejectedError: An environment variable name is not valid.
-            RunTimeoutError: The command ran past the time limit. It is killed first.
         """
         box = self._box
         if box is None:
@@ -390,6 +392,7 @@ class MosaicEnvironment(SandboxEnvironment):
         stdout: list[str] = []
         stderr: list[str] = []
         finished = False
+        timed_out = False
         try:
             async with asyncio.timeout(limit) as deadline:
                 with _mapped("wait for the command"):
@@ -398,11 +401,15 @@ class MosaicEnvironment(SandboxEnvironment):
         except TimeoutError:
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit) from None
+            timed_out = True
         finally:
             if not finished:
                 # A timeout, a cancel or a lost wait must not leave the command running.
                 await asyncio.shield(_kill(handle))
+        if timed_out:
+            return ExecResult(
+                exit_code=_TIMEOUT_EXIT_CODE, stdout="".join(stdout), stderr="".join(stderr), timed_out=True
+            )
         if exit_code is None:
             raise SandboxInfraError("Mosaic gave no exit code for the command.")
         return ExecResult(exit_code=exit_code, stdout="".join(stdout), stderr="".join(stderr))

@@ -31,6 +31,9 @@ class _Gateway:
         """Return the same authored source for assertion at the sandbox boundary."""
         return {**payload, "_protected_fixture": True}
 
+    def detach_sandbox(self) -> None:
+        """Report that no sandbox broker is bound to this fixture."""
+
     def close(self) -> None:
         """Close the transport fixture without external resources."""
 

@@ -462,10 +462,15 @@ def merge_allowlists(policy: EgressPolicy, *extra: Iterable[str]) -> AllowlistMe
 
     Returns:
         The merged policy and one notice for each extra host, in input order.
+
+    Raises:
+        TypeError: A group is a bare ``str``, which would merge one host per character.
     """
     hosts = list(policy.allow_hosts)
     notices: list[AllowlistNotice] = []
     for group in extra:
+        if isinstance(group, str):
+            raise TypeError(f"merge_allowlists needs a list of hosts, not the bare string {group!r}.")
         for raw in group:
             host = _normalize_host(raw)
             if not host:

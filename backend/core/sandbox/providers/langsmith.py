@@ -38,7 +38,6 @@ from typing import Any, ClassVar
 from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
 from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -108,6 +107,8 @@ _ONE_MIB = 1024 * 1024
 _EXEC_TIMEOUT_GRACE_SECONDS = 10
 _EXEC_CLEANUP_TIMEOUT_SECONDS = 5
 _MIN_COMMAND_TTL_SECONDS = 600
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 _DELETE_TIMEOUT_SECONDS = 60
 
 
@@ -285,12 +286,13 @@ class LangSmithEnvironment(SandboxEnvironment):
             sudo: Not supported; the provider never asks for root.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, it is killed first, and the result has exit code
+            124 and ``timed_out`` set; the output went to the sink.
 
         Raises:
             RuntimeError: The sandbox is not running.
             SandboxRejectedError: ``sudo`` is set, or the server refused the command.
-            RunTimeoutError: The command ran past the time limit. It is killed first.
             SandboxFatalError: The API key is not valid, or the sandbox is gone.
             SandboxTransientError: The quota is full, or the server or the
                 connection failed.
@@ -304,6 +306,7 @@ class LangSmithEnvironment(SandboxEnvironment):
         sink = on_output or current_output_sink()
         handle: Any = None
         finished = False
+        timed_out = False
         try:
             async with asyncio.timeout(remote + _EXEC_TIMEOUT_GRACE_SECONDS) as deadline:
                 with _mapped_errors():
@@ -327,12 +330,14 @@ class LangSmithEnvironment(SandboxEnvironment):
             # deadline is a run timeout.
             if not deadline.expired():
                 raise
-            raise RunTimeoutError(limit if limit is not None else remote) from None
+            timed_out = True
         except CommandTimeoutError:
-            raise RunTimeoutError(limit if limit is not None else remote) from None
+            timed_out = True
         finally:
             if handle is not None and not finished:
                 await asyncio.shield(_kill(handle))
+        if timed_out:
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
         return ExecResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
