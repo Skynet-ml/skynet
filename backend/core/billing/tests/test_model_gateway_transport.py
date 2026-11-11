@@ -2971,6 +2971,12 @@ def test_the_forwarder_passes_a_service_method_and_body_to_the_gateway(
         "/v1/service/echo/%2E%2E",
         "/v1/service/echo/%252e%252e/x",
         "/v1/service/echo/./x",
+        "/v1/service/echo/..\\x",
+        "/v1/service/echo/..%5cx",
+        "/v1/service/echo/..;/x",
+        "/v1/service/echo/x/..%5c..%5cadmin",
+        "/v1/service/echo/..%00/admin",
+        "/v1/service/echo/a;b",
     ],
 )
 def test_the_mailbox_path_refuses_a_service_path_that_leaves_the_service(

@@ -408,7 +408,7 @@ class McpRelay:
             base = target = None
         if (
             not _HTTP_METHOD.fullmatch(method)
-            or _has_dot_segment(path)
+            or _unsafe_path(path)
             or base is None
             or target is None
             or (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
@@ -688,32 +688,53 @@ def _service_path_safe(path: str) -> bool:
 
     Returns:
         False for an empty name, a raw query or fragment in the name, or a
-        dot segment anywhere, raw or percent-encoded; True otherwise.
+        path that :func:`_unsafe_path` refuses; True otherwise.
     """
     name, _, rest = path[len(SERVICE_PATH) :].partition("/")
-    return bool(name) and not any(mark in name for mark in "?#") and not _has_dot_segment(f"{name}/{rest}")
+    return bool(name) and not any(mark in name for mark in "?#") and not _unsafe_path(f"{name}/{rest}")
 
 
-def _has_dot_segment(path: str) -> bool:
-    """Check a relative service path for a ``.`` or ``..`` segment, in any percent-encoded form.
+def _decoded(path: str) -> str:
+    """Return a path without its query, percent-decoded until nothing changes.
 
-    It decodes until nothing changes, because a server may decode
-    ``%252e`` to ``%2e`` and then to ``.``.
+    A server may decode ``%252e`` to ``%2e`` and then to ``.``, so one pass is not enough.
+
+    Args:
+        path: A path, with or without a query.
+
+    Returns:
+        The fully decoded path.
+    """
+    path = path.partition("?")[0]
+    while (decoded := unquote(path)) != path:
+        path = decoded
+    return path
+
+
+def _unsafe_path(path: str) -> bool:
+    """Check a relative service path for anything a server could read as a way out of the service.
+
+    Some servers (Node, Bun, Deno, IIS, ASP.NET) read ``\\`` as ``/``, and
+    Tomcat and Spring drop ``;params``, so ``..\\x`` and ``..;/x`` climb as
+    ``../x`` does. A control character can end the path early.
 
     Args:
         path: The path after the service name, with its query.
 
     Returns:
-        True when a segment is ``.`` or ``..`` after decoding.
+        True when the decoded path has a ``.`` or ``..`` segment, a ``\\``,
+        a ``;`` or a control character.
     """
-    path = path.partition("?")[0]
-    while (decoded := unquote(path)) != path:
-        path = decoded
-    return bool({".", ".."} & set(path.split("/")))
+    path = _decoded(path)
+    return any(char in "\\;" or ord(char) < 0x20 or ord(char) == 0x7F for char in path) or bool(
+        {".", ".."} & set(path.split("/"))
+    )
 
 
 def _under(target: httpx.URL, base: httpx.URL) -> bool:
     """Check that a request url stays under the service's declared path, as a directory.
+
+    It compares the paths as :func:`_unsafe_path` reads them, fully decoded.
 
     Args:
         target: The url the relay is about to call.
@@ -723,8 +744,8 @@ def _under(target: httpx.URL, base: httpx.URL) -> bool:
         True when the target path is the base path or below it: base
         ``/api`` allows ``/api`` and ``/api/x``, not ``/apix``.
     """
-    root = unquote(base.raw_path.decode("ascii").partition("?")[0]).rstrip("/")
-    path = unquote(target.raw_path.decode("ascii").partition("?")[0])
+    root = _decoded(base.raw_path.decode("ascii")).rstrip("/")
+    path = _decoded(target.raw_path.decode("ascii"))
     return path == root or path.startswith(root + "/")
 
 
