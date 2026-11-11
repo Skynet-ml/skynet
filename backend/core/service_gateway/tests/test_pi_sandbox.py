@@ -19,10 +19,13 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
 from core.service_gateway.agents import pi_bridge
 from core.service_gateway.agents.pi_bridge import (
     PiBridgeError,
@@ -35,6 +38,7 @@ from core.service_gateway.agents.pi_bridge import (
 from core.service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSpec
 
 _BUDGET = object()
+_SETTINGS = SimpleNamespace(vercel_sandbox_max_lifetime_seconds=3600)
 
 _FAKE_PI = r"""
 import json, os, sys, urllib.request
@@ -135,14 +139,18 @@ class _Handlers:
 class _Session:
     """A fake sandbox: a temporary directory where commands run with local bash."""
 
-    def __init__(self, root: Path, path_dir: Path) -> None:
+    def __init__(self, root: Path, path_dir: Path, *, run_error: BaseException | None = None) -> None:
         """Bind the box to a directory.
 
         Args:
             root: The box's working directory.
             path_dir: Directory with the fake ``pi``, put first on ``PATH``.
+            run_error: An exception each command raises, as a dead box or a
+                budget stop would, or ``None``.
         """
         self.root = root
+        self._run_error = run_error
+        self.close_error: BaseException | None = None
         self._path_dir = path_dir
         self.writes: list[str] = []
         self.env: Mapping[str, str] = {}
@@ -184,6 +192,8 @@ class _Session:
         """
         self.env = dict(env or {})
         self.envs.append(self.env)
+        if self._run_error is not None:
+            raise self._run_error
         full_env = {**os.environ, **self.env, "PATH": f"{self._path_dir}:{os.environ['PATH']}"}
         proc = subprocess.Popen(
             ["bash", "--noprofile", "--norc", "-c", command],
@@ -226,8 +236,14 @@ class _Session:
         return target.read_text() if target.exists() else None
 
     def close(self) -> None:
-        """Mark the box closed."""
+        """Mark the box closed, then raise the configured close failure.
+
+        Raises:
+            BaseException: The configured close failure.
+        """
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _Runtime:
@@ -236,7 +252,14 @@ class _Runtime:
     injects_headers = False
 
     def __init__(
-        self, root: Path, *, settle: bool = True, protected: bool = True, billable: bool = True, gate: Any = None
+        self,
+        root: Path,
+        *,
+        settle: bool = True,
+        protected: bool = True,
+        billable: bool = True,
+        gate: Any = None,
+        run_error: BaseException | None = None,
     ) -> None:
         """Write the fake ``pi`` and keep the opened specs.
 
@@ -247,7 +270,9 @@ class _Runtime:
             billable: The runtime's ``billable`` flag.
             gate: A :class:`threading.Event` that each open waits for, or
                 ``None`` to open at once.
+            run_error: An exception the first box raises on each command.
         """
+        self._run_error = run_error
         self.protected = protected
         self.billable = billable
         self._gate = gate
@@ -274,7 +299,8 @@ class _Runtime:
         self.opening.set()
         if self._gate is not None:
             self._gate.wait(5)
-        session = _Session(Path(tempfile.mkdtemp(dir=self._root)), self._bin)
+        error = self._run_error if not self.sessions else None
+        session = _Session(Path(tempfile.mkdtemp(dir=self._root)), self._bin, run_error=error)
         self.sessions.append(session)
         return session
 
@@ -314,13 +340,15 @@ def sandbox_for(monkeypatch: pytest.MonkeyPatch) -> Callable[..., PiSandbox]:
         Args:
             runtime: The fake runtime.
             budget: The run's budget.
-            **options: Other :class:`PiSandbox` options.
+            **options: Other :class:`PiSandbox` options; ``operation_key``
+                is ``"op"`` unless given.
 
         Returns:
             The sandbox.
         """
         built["runtime"] = runtime
-        sandbox = PiSandbox("settings", budget, **options)
+        options.setdefault("operation_key", "op")
+        sandbox = PiSandbox(_SETTINGS, budget, **options)
         sandbox.built = built  # type: ignore[attr-defined]
         return sandbox
 
@@ -404,15 +432,16 @@ async def test_sandbox_turn_runs_pi_in_the_box_and_reads_files_back(
     await _turn(sandbox, handlers)
     assert sandbox.built == {
         "runtime": runtime,
-        "settings": "settings",
+        "settings": _SETTINGS,
         "image": "image-for-anything",
         "budget": _BUDGET,
     }
     (spec,) = runtime.specs
     assert spec.network_disabled
-    assert spec.operation_key == "op-1"
+    assert spec.operation_key == "op-1:box:1"
+    assert spec.image == "image-for-anything"
     assert spec.tags == {"agent": "test"}
-    assert spec.lifetime_seconds == sandbox.lifetime_seconds
+    assert spec.lifetime_seconds == sandbox.lifetime_seconds == 1800.0
     (session,) = runtime.sessions
     record = json.loads((session.root / ".record.json").read_text())
     assert "-nbt" not in record["argv"]
@@ -491,7 +520,14 @@ async def test_a_turn_that_would_outlive_the_box_opens_a_new_one(
     first, second = runtime.sessions
     assert first.closed
     assert not second.closed
+    # Each box reserves its own budget, so a reopen never replays the first one.
+    assert [spec.operation_key for spec in runtime.specs] == ["op:box:1", "op:box:2"]
     sandbox.close()
+
+
+def test_the_box_lifetime_never_exceeds_the_deployment_limit() -> None:
+    """A session lifetime above the deployment's sandbox lifetime is cut to it."""
+    assert PiSandbox(_SETTINGS, _BUDGET, lifetime_seconds=10_000.0).lifetime_seconds == 3600
 
 
 async def test_a_cancel_while_the_box_opens_closes_the_box(
@@ -529,7 +565,7 @@ async def test_a_box_slower_than_the_cold_start_limit_fails_the_turn_and_closes(
 def test_the_default_cold_start_limit_is_thirty_seconds() -> None:
     """A session waits at most 30 s for its box unless the caller sets a limit."""
     assert pi_bridge.PI_COLD_START_LIMIT_SECONDS == 30.0
-    assert PiSandbox("settings", _BUDGET).cold_start_limit_seconds == 30.0
+    assert PiSandbox(_SETTINGS, _BUDGET).cold_start_limit_seconds == 30.0
 
 
 @pytest.mark.parametrize(
@@ -538,6 +574,7 @@ def test_the_default_cold_start_limit_is_thirty_seconds() -> None:
         ({}, _BUDGET, None, "No immutable sandbox image"),
         ({"protected": False}, _BUDGET, "image", "protected sandbox runtime"),
         ({}, None, "image", "needs a budget"),
+        ({}, "no-key", "image", "needs an operation key"),
     ],
 )
 async def test_a_session_refuses_a_box_that_would_not_be_protected_and_metered(
@@ -549,9 +586,10 @@ async def test_a_session_refuses_a_box_that_would_not_be_protected_and_metered(
     image: str | None,
     message: str,
 ) -> None:
-    """No image, an unprotected runtime or a billable box with no budget fails before any box opens."""
+    """No image, an unprotected runtime, or a billable box with no budget or key fails before any box opens."""
     runtime = _Runtime(tmp_path, **runtime_options)
-    sandbox = sandbox_for(runtime, budget=budget)
+    options = {"operation_key": None} if budget == "no-key" else {"budget": budget}
+    sandbox = sandbox_for(runtime, **options)
     monkeypatch.setattr(pi_bridge, "protected_image", lambda settings, workflow: image)
     handlers = _Handlers()
     with pytest.raises(PiBridgeError, match=message):
@@ -566,9 +604,10 @@ async def test_a_bridge_tool_with_the_name_of_a_pi_tool_is_refused(
     """A bridge tool named like a Pi tool fails the turn before a box opens."""
     runtime = _Runtime(tmp_path)
     handlers = _Handlers()
-    handlers.tool_specs = lambda: [{"name": "bash", "description": "", "parameters": {}}]  # type: ignore[method-assign]
-    with pytest.raises(PiBridgeError, match=r"\['bash'\]"):
-        await _turn(sandbox_for(runtime), handlers)
+    handlers.tool_specs = lambda: [{"name": "grep", "description": "", "parameters": {}}]  # type: ignore[method-assign]
+    # Pi's grep is off in this session, and the name is still refused.
+    with pytest.raises(PiBridgeError, match=r"\['grep'\]"):
+        await _turn(sandbox_for(runtime, builtin_tools=("read",)), handlers)
     assert runtime.specs == []
 
 
@@ -604,7 +643,19 @@ async def test_sandbox_turn_re_raises_a_relay_failure_as_itself(
 
 
 @pytest.mark.parametrize(
-    "path", ["http://evil.example/x", "//evil.example/x", "/v1/../call", "\\\\evil\\x", "/v1/models"]
+    "path",
+    [
+        "http://evil.example/x",
+        "//evil.example/x",
+        "/v1/../call",
+        "/v1/%2e%2e/call",
+        "\\\\evil\\x",
+        "/v1/models",
+        "/call?next=http://evil.example",
+        "/call/",
+        "/CALL",
+        "/Tools",
+    ],
 )
 def test_the_relay_refuses_any_path_outside_the_bridge_routes(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """A guest path that is not an exact bridge route gets 404, and the host sends no request."""
@@ -618,3 +669,91 @@ def test_the_relay_refuses_any_path_outside_the_bridge_routes(path: str, monkeyp
     assert result.status == 404
     assert sent == []
     assert client.follow_redirects is False
+
+
+async def test_a_second_turn_while_one_runs_is_refused(tmp_path: Path, sandbox_for: Callable[..., PiSandbox]) -> None:
+    """A session runs one turn at a time; a concurrent turn fails and the first still finishes."""
+    gate = threading.Event()
+    runtime = _Runtime(tmp_path, gate=gate)
+    sandbox = sandbox_for(runtime)
+    first = asyncio.ensure_future(_turn(sandbox))
+    assert await asyncio.to_thread(runtime.opening.wait, 5)
+    with pytest.raises(PiBridgeError, match="still runs"):
+        await _turn(sandbox)
+    gate.set()
+    await first
+    assert len(runtime.sessions) == 1
+    sandbox.close()
+
+
+async def test_a_closed_session_refuses_turns_and_closes_a_box_that_opens_late(
+    tmp_path: Path, sandbox_for: Callable[..., PiSandbox]
+) -> None:
+    """A box whose open ends after close() closes at once, and no later turn runs."""
+    gate = threading.Event()
+    runtime = _Runtime(tmp_path, gate=gate)
+    sandbox = sandbox_for(runtime)
+    turn = asyncio.ensure_future(_turn(sandbox))
+    assert await asyncio.to_thread(runtime.opening.wait, 5)
+    sandbox.close()
+    gate.set()
+    with pytest.raises(PiBridgeError, match="closed while its sandbox opened"):
+        await turn
+    assert runtime.sessions[0].closed
+    with pytest.raises(PiBridgeError, match="session is closed"):
+        await _turn(sandbox)
+    assert len(runtime.specs) == 1
+
+
+class _ProviderError(RuntimeError):
+    """Stands in for a sandbox provider failure."""
+
+
+@pytest.mark.parametrize("error", [_ProviderError("box gone"), BudgetReached("sandbox budget reached")])
+async def test_a_failed_box_passes_its_error_through_and_is_dropped(
+    tmp_path: Path, sandbox_for: Callable[..., PiSandbox], error: BaseException
+) -> None:
+    """A provider failure or budget stop ends the turn as itself, closes the box, and the next turn opens a new one."""
+    runtime = _Runtime(tmp_path, run_error=error)
+    sandbox = sandbox_for(runtime)
+    with pytest.raises(type(error)) as caught:
+        await _turn(sandbox)
+    assert caught.value is error
+    assert runtime.sessions[0].closed
+    await _turn(sandbox)
+    assert len(runtime.sessions) == 2
+    sandbox.close()
+
+
+@pytest.mark.parametrize(
+    ("error", "level"), [(RuntimeError("close failed"), "WARNING"), (UsagePendingError("bill pending"), "ERROR")]
+)
+async def test_an_idle_close_that_raises_is_logged_and_the_box_is_dropped(
+    tmp_path: Path,
+    sandbox_for: Callable[..., PiSandbox],
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    level: str,
+) -> None:
+    """A failing idle close does not break the session; an unsettled bill logs as an error."""
+    runtime = _Runtime(tmp_path)
+    sandbox = sandbox_for(runtime, idle_seconds=0.05)
+    await _turn(sandbox)
+    runtime.sessions[0].close_error = error
+    with caplog.at_level("WARNING", logger=pi_bridge.logger.name):
+        assert _wait_for(lambda: any(record.levelname == level for record in caplog.records))
+    assert sandbox._session is None
+    await _turn(sandbox)
+    assert len(runtime.sessions) == 2
+    sandbox.close()
+
+
+async def test_a_turn_inbox_is_new_each_turn(tmp_path: Path, sandbox_for: Callable[..., PiSandbox]) -> None:
+    """Each turn reads commands from its own random folder."""
+    runtime = _Runtime(tmp_path)
+    sandbox = sandbox_for(runtime)
+    await _turn(sandbox)
+    await _turn(sandbox)
+    sandbox.close()
+    inboxes = {name.rsplit("/", 2)[0] for name in runtime.sessions[0].writes if "/in/" in name}
+    assert len(inboxes) == 2

@@ -60,6 +60,9 @@ from starlette.routing import Route
 from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_mailbox import ModelMailbox
 from core.billing.protected_execution import protected_image
+from core.billing.runtime import UsagePendingError
+from core.billing.signals import BudgetReached
+from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from core.sandbox.bridge import protected_runtime
 
 from ..optimization.blackbox.sandbox_contract import SandboxRuntime, SandboxSpec
@@ -759,13 +762,30 @@ PI_COLD_START_LIMIT_SECONDS = 30.0
 _BRIDGE_ROUTES: Mapping[str, str] = {"/tools": "GET", "/call": "POST", "/v1/chat/completions": "POST"}
 
 
+def _close_quietly(session: Any) -> None:
+    """Close a box on a cleanup path, and log a failure instead of raising it.
+
+    Args:
+        session: The box to close.
+    """
+    try:
+        session.close()
+    except UsagePendingError:
+        # The box may still hold unsettled usage; the budget ledger keeps the
+        # reservation, so an operator must see this.
+        logger.exception("A Pi sandbox closed with its usage still unsettled")
+    except Exception:
+        logger.warning("Could not close a Pi sandbox", exc_info=True)
+
+
 class PiSandbox:
     """One protected, metered sandbox for a whole Pi chat session.
 
     The first turn opens the box and uploads ``files``. Later turns of the
     session reuse the box, so what Pi changed stays there. The box closes at
-    :meth:`close`, after ``idle_seconds`` without a turn, or before a turn
-    that would outlive it. A session runs one turn at a time.
+    :meth:`close`, after ``idle_seconds`` without a turn, before a turn
+    that would outlive it, or when a sandbox call of a turn fails. A session
+    runs one turn at a time and cannot open again after :meth:`close`.
     """
 
     def __init__(
@@ -792,10 +812,12 @@ class PiSandbox:
             files: Text files to put in the box when it opens, for example a
                 repository checkout, relative to the directory Pi runs in.
             read_back: Paths to read after each turn into ``read_back_files``.
-            operation_key: The box's idempotency key.
+            operation_key: The session's idempotency key. Each box gets
+                its own key from it. A billable box needs one.
             tags: The box's usage tags.
             builtin_tools: Pi's own tools to turn on.
-            lifetime_seconds: The box's longest life.
+            lifetime_seconds: The box's longest life, at most the
+                deployment's sandbox lifetime.
             turn_seconds: The longest a turn may run.
             idle_seconds: How long the box waits for the next turn.
             cold_start_limit_seconds: The longest a box may take to open.
@@ -807,7 +829,9 @@ class PiSandbox:
         self.operation_key = operation_key
         self.tags = dict(tags or {})
         self.builtin_tools = tuple(builtin_tools)
-        self.lifetime_seconds = lifetime_seconds
+        self.lifetime_seconds = min(
+            lifetime_seconds, settings.vercel_sandbox_max_lifetime_seconds, VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
+        )
         self.turn_seconds = turn_seconds
         self.idle_seconds = idle_seconds
         self.cold_start_limit_seconds = cold_start_limit_seconds
@@ -815,22 +839,24 @@ class PiSandbox:
         self.cold_start_seconds: float | None = None
         self._session: Any = None
         self._opened_at = 0.0
-        self._turns = 0
+        self._boxes = 0
         self._busy = False
+        self._closed = False
         self._idle: threading.Timer | None = None
         # Turns of one session can run on different event loops (a worker
         # calls ``asyncio.run`` for each one), so the state uses a thread lock.
         self._lock = threading.Lock()
 
-    def _runtime(self) -> SandboxRuntime:
+    def _runtime(self) -> tuple[SandboxRuntime, str]:
         """Build the protected runtime, and refuse one that would not meter the box.
 
         Returns:
-            The deployment's protected runtime, bound to the budget.
+            The deployment's protected runtime, bound to the budget, and the
+            box image.
 
         Raises:
             PiBridgeError: When no immutable image is configured, or the box
-                is billable and no budget is given.
+                is billable and has no budget or no operation key.
         """
         image = protected_image(self.settings, "anything")
         if image is None:
@@ -838,24 +864,32 @@ class PiSandbox:
         runtime = protected_runtime(self.settings, image=image, budget=self.budget)
         if getattr(runtime, "protected", False) is not True:
             raise PiBridgeError("A Pi session needs the protected sandbox runtime")
-        if getattr(runtime, "billable", True) and self.budget is None:
-            raise PiBridgeError("A Pi session needs a budget to reserve and settle its sandbox usage")
-        return runtime
+        if getattr(runtime, "billable", True):
+            if self.budget is None:
+                raise PiBridgeError("A Pi session needs a budget to reserve and settle its sandbox usage")
+            if self.operation_key is None:
+                raise PiBridgeError("A Pi session needs an operation key to meter its sandbox")
+        return runtime, image
 
-    async def _open(self) -> Any:
+    async def _open(self) -> tuple[Any, float]:
         """Open the box within the cold-start limit, and close it if the wait ends first.
 
         Returns:
-            The open session.
+            The open session, and the time its open started.
 
         Raises:
             PiBridgeError: When the box takes longer than the limit to open.
         """
-        runtime = self._runtime()
+        runtime, image = self._runtime()
+        self._boxes += 1
+        # The box name and budget reservation come from the key, so a reopened
+        # box with the old key would replay the old, settled reservation.
+        box_key = None if self.operation_key is None else f"{self.operation_key}:box:{self._boxes}"
         spec = SandboxSpec(
             lifetime_seconds=self.lifetime_seconds,
             tags=self.tags,
-            operation_key=self.operation_key,
+            image=image,
+            operation_key=box_key,
             network_disabled=True,
         )
         guard = threading.Lock()
@@ -873,7 +907,7 @@ class PiSandbox:
                 if not abandoned.is_set():
                     opened.append(session)
                     return session
-            session.close()
+            _close_quietly(session)
             return None
 
         started = time.monotonic()
@@ -886,8 +920,11 @@ class PiSandbox:
             with guard:
                 abandoned.set()
                 late = opened.pop() if opened else None
+            # Nobody awaits the open any more; read its result so a late
+            # failure is not reported as never retrieved.
+            opening.add_done_callback(lambda done: done.cancelled() or done.exception())
             if late is not None:
-                await asyncio.shield(asyncio.to_thread(late.close))
+                await asyncio.shield(asyncio.to_thread(_close_quietly, late))
             if isinstance(error, TimeoutError):
                 raise PiBridgeError(
                     f"The Pi sandbox did not open within {self.cold_start_limit_seconds:.0f} s"
@@ -898,9 +935,9 @@ class PiSandbox:
         try:
             await asyncio.to_thread(session.write_files, self.files)
         except BaseException:
-            await asyncio.shield(asyncio.to_thread(session.close))
+            await asyncio.shield(asyncio.to_thread(_close_quietly, session))
             raise
-        return session
+        return session, started
 
     async def _acquire(self) -> tuple[Any, str]:
         """Start a turn: reuse the open box, or open one.
@@ -912,6 +949,8 @@ class PiSandbox:
             PiBridgeError: When another turn of the session still runs.
         """
         with self._lock:
+            if self._closed:
+                raise PiBridgeError("This Pi session is closed")
             if self._busy:
                 raise PiBridgeError("Another turn of this Pi session still runs")
             self._busy = True
@@ -927,26 +966,44 @@ class PiSandbox:
             session = self._session
         try:
             if stale is not None:
-                await asyncio.to_thread(stale.close)
+                await asyncio.to_thread(_close_quietly, stale)
             if session is None:
-                session = await self._open()
+                session, started = await self._open()
                 with self._lock:
-                    self._session, self._opened_at = session, time.monotonic()
+                    closed = self._closed
+                    if not closed:
+                        self._session, self._opened_at = session, started
+                if closed:
+                    await asyncio.to_thread(_close_quietly, session)
+                    raise PiBridgeError("This Pi session closed while its sandbox opened")
         except BaseException:
             with self._lock:
                 self._busy = False
             raise
-        self._turns += 1
-        return session, f"{_BOX_DIR}/{self._turns}"
+        # A fresh name each turn, so a turn never reads a command file that an
+        # earlier turn left behind.
+        return session, f"{_BOX_DIR}/{secrets.token_hex(8)}"
 
-    def _release(self) -> None:
-        """End a turn and start the idle timer."""
+    def _release(self, session: Any, *, failed: bool) -> None:
+        """End a turn and start the idle timer, or drop a box that failed.
+
+        Args:
+            session: The box the turn used.
+            failed: Whether a sandbox call of the turn failed, or a budget
+                stop ended it. The box is then closed, and the next turn opens
+                a new one.
+        """
         with self._lock:
             self._busy = False
-            if self._session is not None:
+            dead = failed and self._session is session
+            if dead:
+                self._session = None
+            elif self._session is not None:
                 self._idle = threading.Timer(self.idle_seconds, self._close_idle, args=(self._session,))
                 self._idle.daemon = True
                 self._idle.start()
+        if dead:
+            _close_quietly(session)
 
     def _close_idle(self, session: Any) -> None:
         """Close the box when no turn came within the idle time.
@@ -958,11 +1015,12 @@ class PiSandbox:
             if self._busy or self._session is not session:
                 return
             self._session = None
-        session.close()
+        _close_quietly(session)
 
     def close(self) -> None:
         """Close the session's box, when one is open. Call at the end of the chat session."""
         with self._lock:
+            self._closed = True
             if self._idle is not None:
                 self._idle.cancel()
                 self._idle = None
@@ -992,6 +1050,7 @@ class _SandboxPi:
         self._stderr: list[str] = []
         self._sent = 0
         self._task: asyncio.Future[None] | None = None
+        self.box_error: BaseException | None = None
 
     def start(self, mailbox: ModelMailbox, command: str, env: dict[str, str], timeout: float) -> None:
         """Start Pi in the box on a worker thread.
@@ -1015,7 +1074,9 @@ class _SandboxPi:
         """
         try:
             mailbox.run(self._session, command, env=env, timeout_seconds=timeout, on_output=self._output)
-        except Exception as error:
+        except BaseException as error:
+            # A provider failure or budget stop reaches the caller as itself.
+            self.box_error = self.box_error or error
             self._stderr.append(f"{type(error).__name__}: {error}")
         finally:
             self._loop.call_soon_threadsafe(self._records.put_nowait, None)
@@ -1049,9 +1110,14 @@ class _SandboxPi:
         Args:
             command: The command record.
         """
-        name = f"{self._inbox}/{self._sent}.json"
+        try:
+            await asyncio.to_thread(
+                self._session.write_files, {f"{self._inbox}/{self._sent}.json": json.dumps(command)}
+            )
+        except BaseException as error:
+            self.box_error = self.box_error or error
+            raise
         self._sent += 1
-        await asyncio.to_thread(self._session.write_files, {name: json.dumps(command)})
 
     async def records(self) -> AsyncIterator[dict[str, Any]]:
         """Yield Pi's stdout records until Pi exits.
@@ -1156,6 +1222,7 @@ async def _run_in_sandbox(
         tool_names: The bridge's tool names.
     """
     session, turn_dir = await sandbox._acquire()
+    failed = False
     try:
         # The sandbox image puts the pinned ``pi`` on its PATH.
         argv = pi_command(
@@ -1165,7 +1232,11 @@ async def _run_in_sandbox(
             tools=[*sandbox.builtin_tools, *tool_names],
             addon_dir=f"{turn_dir}/addons",
         )
-        await asyncio.to_thread(session.write_files, _turn_files(turn_dir, extensions, skills))
+        try:
+            await asyncio.to_thread(session.write_files, _turn_files(turn_dir, extensions, skills))
+        except BaseException:
+            failed = True
+            raise
         # The guest proxy's port is known only in the box, so the shell fills
         # it into Pi's model config before Pi starts. Pi alone waits in the
         # foreground; the feeder ends when it reads ``null``.
@@ -1184,11 +1255,28 @@ async def _run_in_sandbox(
                     await _drive(pi, app, translator, prompt)
                 finally:
                     await pi.stop()
+            except BaseException as error:
+                if pi.box_error is None:
+                    raise
+                failed = True
+                raise pi.box_error from error
             finally:
                 client.close()
-        sandbox.read_back_files = {path: await asyncio.to_thread(session.read_file, path) for path in sandbox.read_back}
+        if pi.box_error is not None:
+            # The turn settled, but the box failed after it. Drop the box; only
+            # a budget stop still ends the turn.
+            failed = True
+            if not isinstance(pi.box_error, Exception):
+                raise pi.box_error
+        try:
+            sandbox.read_back_files = {
+                path: await asyncio.to_thread(session.read_file, path) for path in sandbox.read_back
+            }
+        except BaseException:
+            failed = True
+            raise
     finally:
-        sandbox._release()
+        sandbox._release(session, failed=failed or isinstance(app.failure, BudgetReached))
 
 
 async def run_pi_turn(
@@ -1216,17 +1304,21 @@ async def run_pi_turn(
 
     Raises:
         PiBridgeError: When the ``pi`` executable is missing, a bridge tool
-            has the name of a Pi tool, the sandbox cannot open, Pi fails to
-            start, rejects the prompt, or ends the run with an error that no
-            handler raised.
-        Exception: The first exception a handler raised, as itself, so the
-            caller's budget and gateway error handling still applies.
+            has the name of a Pi tool, the sandbox session is closed, busy or
+            not protected, the box does not open in time, Pi fails to start,
+            rejects the prompt, or ends the run with an error that no handler
+            raised.
+        Exception: The first exception a handler raised, or a sandbox
+            provider or budget error, as itself, so the caller's budget and
+            gateway error handling still applies.
     """
     token = secrets.token_urlsafe(32)
     app = _BridgeApp(handlers, token)
     if sandbox is not None:
         tool_names = [spec["name"] for spec in handlers.tool_specs()]
-        clashes = sorted(set(tool_names) & set(sandbox.builtin_tools))
+        # Checked against all of Pi's tools: one that is off now can be on in
+        # a later Pi version or session.
+        clashes = sorted(set(tool_names) & set(PI_BUILTIN_TOOLS))
         if clashes:
             # Pi would run its own tool in the box in place of the backend's.
             raise PiBridgeError(f"Bridge tools {clashes} have the names of Pi's own tools")
