@@ -33,9 +33,24 @@ log="$FAKE_LOG"
   printf 'OPENAI_BASE_PATH=%s\\n' "${OPENAI_BASE_PATH-unset}"
   printf 'ANTHROPIC_API_KEY=%s\\n' "$ANTHROPIC_API_KEY"
   printf 'GOOSE_PATH_ROOT=%s\\n' "$GOOSE_PATH_ROOT"
+  if [ -d "$GOOSE_PATH_ROOT" ]; then echo 'ROOT_DIR=yes'; else echo 'ROOT_DIR=no'; fi
 } >> "$log"
 printf '%s' "$FAKE_ANSWER"
+exit "${FAKE_EXIT:-0}"
 """
+# Stand-ins for the install step's tools. ``curl`` logs the file it writes,
+# so a test can check that the download folder is gone afterwards. macOS
+# ``mktemp -d`` ignores ``TMPDIR``, so a fake one keeps the folder in scratch.
+_FAKE_INSTALL_TOOLS = {
+    "uname": "#!/bin/sh\necho x86_64\n",
+    "mktemp": '#!/bin/sh\nd="$TMPDIR/download.$$"\nmkdir "$d" && echo "$d"\n',
+    "curl": (
+        '#!/bin/sh\nprintf \'%s\\n\' "$3" >> "$FAKE_LOG"\n'
+        '[ "${FAKE_CURL_EXIT:-0}" -eq 0 ] || exit "$FAKE_CURL_EXIT"\nprintf archive > "$3"\n'
+    ),
+    "sha256sum": '#!/bin/sh\ncat > /dev/null\nexit "${FAKE_SHA_EXIT:-0}"\n',
+    "tar": "#!/bin/sh\nprintf '#!/bin/sh\\necho goose 1.57.0\\n' > \"$4/goose\"\n",
+}
 
 
 def _target() -> BlackboxTarget:
@@ -48,8 +63,8 @@ def _target() -> BlackboxTarget:
 
 
 def _run_with_fake_goose(
-    tmp_path: Path, *, protected: bool, gateway: GatewayConfig = _GATEWAY
-) -> tuple[str, str, Path]:
+    tmp_path: Path, *, protected: bool, gateway: GatewayConfig = _GATEWAY, fake_exit: int = 0
+) -> tuple[str, str, Path, int]:
     """Run the built goose command in a scratch workspace against a fake ``goose`` binary.
 
     The env also carries an inherited ``OPENAI_HOST`` and ``OPENAI_BASE_PATH``,
@@ -59,9 +74,11 @@ def _run_with_fake_goose(
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
         protected: Build the protected launch, with the sandbox-local relay set.
         gateway: Gateway URL and key for the launch.
+        fake_exit: Exit status the fake binary returns.
 
     Returns:
-        The command's stdout, the fake binary's call log, and the workspace.
+        The command's stdout, the fake binary's call log, the workspace, and
+        the command's exit status.
     """
     launch = build_launch(_target(), gateway, protected=protected)
     workspace = tmp_path / "work"
@@ -86,13 +103,62 @@ def _run_with_fake_goose(
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
         "FAKE_LOG": str(log),
         "FAKE_ANSWER": _RECORDED_STDOUT,
+        "FAKE_EXIT": str(fake_exit),
     }
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
     result = subprocess.run(
-        launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=True
+        launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False
     )
-    return result.stdout, log.read_text(), workspace
+    return result.stdout, log.read_text(), workspace, result.returncode
+
+
+def _run_install(tmp_path: Path, *, curl_exit: int = 0, sha_exit: int = 0) -> tuple[int, str, Path, Path]:
+    """Run the open install command under ``set -eu`` with fake download tools.
+
+    The command runs inside a ``set -eu`` script, as in the native bootstrap,
+    and ``TMPDIR`` points at a scratch folder, so the test can see every
+    folder ``mktemp -d`` leaves behind.
+
+    Args:
+        tmp_path: Scratch directory for the fake tools, ``HOME`` and ``TMPDIR``.
+        curl_exit: Exit status the fake ``curl`` returns.
+        sha_exit: Exit status the fake ``sha256sum`` returns.
+
+    Returns:
+        The exit status, the stdout, the ``TMPDIR`` folder, and the
+        downloaded file path the fake ``curl`` logged.
+    """
+    install = build_launch(_target(), _GATEWAY).install_command
+    assert install is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, script in _FAKE_INSTALL_TOOLS.items():
+        tool = bin_dir / name
+        tool.write_text(script)
+        tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    log = tmp_path / "curl.log"
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(scratch),
+        "FAKE_LOG": str(log),
+        "FAKE_CURL_EXIT": str(curl_exit),
+        "FAKE_SHA_EXIT": str(sha_exit),
+    }
+    shell = shutil.which("bash") or "/bin/sh"
+    result = subprocess.run(
+        [shell, "-c", f"set -eu; {install}; echo after-install"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return result.returncode, result.stdout, scratch, Path(log.read_text().strip())
 
 
 def _logged(calls: str, name: str) -> str:
@@ -137,6 +203,32 @@ def test_open_install_downloads_the_pinned_release_and_checks_its_digest() -> No
     assert "sudo" not in install
 
 
+def test_install_removes_the_download_folder_after_a_good_install(tmp_path: Path) -> None:
+    """Install the binary, remove the download folder, and let the caller's script continue."""
+    code, stdout, scratch, download = _run_install(tmp_path)
+
+    assert code == 0
+    assert stdout.strip() == "after-install"
+    assert (tmp_path / "home" / ".local" / "bin" / "goose").is_file()
+    assert download.parent.parent == scratch
+    assert not download.parent.exists()
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize(("curl_exit", "sha_exit", "code"), [(22, 0, 22), (0, 1, 1)])
+def test_failed_download_or_digest_check_removes_the_download_folder_and_fails(
+    tmp_path: Path, curl_exit: int, sha_exit: int, code: int
+) -> None:
+    """Remove the download folder when the download or digest check fails, and exit with that step's status."""
+    exit_code, stdout, scratch, download = _run_install(tmp_path, curl_exit=curl_exit, sha_exit=sha_exit)
+
+    assert exit_code == code
+    assert "after-install" not in stdout
+    assert not (tmp_path / "home" / ".local" / "bin" / "goose").exists()
+    assert not download.parent.exists()
+    assert list(scratch.iterdir()) == []
+
+
 def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     """Read the gateway URL from a file, pass the gateway token, and keep provider keys out of the env."""
     launch = build_launch(_target(), _GATEWAY)
@@ -179,7 +271,7 @@ def test_unknown_reasoning_effort_sets_no_thinking_env() -> None:
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers_and_telemetry() -> None:
-    """Use the offline version probe, blank every other provider key, force telemetry off, and keep the gateway key."""
+    """Use the offline version probe, blank other provider keys, force telemetry and the toolshim off, and keep the gateway key."""
     launch = build_launch(_target(), _GATEWAY, protected=True)
 
     assert launch.install_command == pinned_harness_check(BLACKBOX_HARNESS_GOOSE)
@@ -197,13 +289,16 @@ def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers_and_
     assert launch.env["GOOSE_TELEMETRY_OFF"] == "1"
     assert launch.env["GOOSE_TELEMETRY_ENABLED"] == "false"
     assert launch.env["DO_NOT_TRACK"] == "1"
+    assert launch.env["GOOSE_TOOLSHIM"] == "false"
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert "OPENAI_API_KEY" not in launch.env
 
 
 def test_protected_run_points_goose_at_the_relay_and_returns_its_answer(tmp_path: Path) -> None:
     """Run the protected command against a fake goose: the relay URL, gateway token and answer come through."""
-    stdout, calls, workspace = _run_with_fake_goose(tmp_path, protected=True)
+    stdout, calls, workspace, code = _run_with_fake_goose(tmp_path, protected=True)
+
+    assert code == 0
 
     (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
     assert run == (
@@ -216,10 +311,10 @@ def test_protected_run_points_goose_at_the_relay_and_returns_its_answer(tmp_path
     assert _logged(calls, "OPENAI_API_KEY") == "gateway-token"
     assert _logged(calls, "ANTHROPIC_API_KEY") == ""
     root = Path(_logged(calls, "GOOSE_PATH_ROOT"))
-    assert root.is_dir()
+    assert _logged(calls, "ROOT_DIR") == "yes"
+    assert not root.exists()
     assert not root.is_relative_to(workspace.resolve())
     assert not root.is_relative_to(workspace)
-    shutil.rmtree(root)
     assert parse_output("plain", stdout) == (
         "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.",
         {},
@@ -228,10 +323,9 @@ def test_protected_run_points_goose_at_the_relay_and_returns_its_answer(tmp_path
 
 def test_open_run_reads_the_gateway_url_from_the_generated_file(tmp_path: Path) -> None:
     """Without a relay, point goose at the gateway URL the launch wrote."""
-    _, calls, _ = _run_with_fake_goose(tmp_path, protected=False)
+    _, calls, _, _ = _run_with_fake_goose(tmp_path, protected=False)
 
     assert _logged(calls, "OPENAI_HOST") == _GATEWAY.url
-    shutil.rmtree(_logged(calls, "GOOSE_PATH_ROOT"))
 
 
 def test_run_forces_chat_completions_on_the_full_gateway_url(tmp_path: Path) -> None:
@@ -247,11 +341,21 @@ def test_run_forces_chat_completions_on_the_full_gateway_url(tmp_path: Path) -> 
     or ``OPENAI_BASE_URL`` must not change either value.
     """
     gateway = GatewayConfig(url="https://gw.example/relay/abc/v1", api_key="gateway-token")
-    _, calls, _ = _run_with_fake_goose(tmp_path, protected=False, gateway=gateway)
+    _, calls, _, _ = _run_with_fake_goose(tmp_path, protected=False, gateway=gateway)
 
     assert _logged(calls, "OPENAI_HOST") == gateway.url
     assert _logged(calls, "OPENAI_BASE_PATH") == "chat/completions"
-    shutil.rmtree(_logged(calls, "GOOSE_PATH_ROOT"))
+
+
+@pytest.mark.parametrize("fake_exit", [0, 3])
+def test_run_removes_the_goose_root_and_keeps_goose_exit_status_and_output(tmp_path: Path, fake_exit: int) -> None:
+    """Remove the per-run goose root when the shell exits, after a good or failed run, without changing the result."""
+    stdout, calls, _, code = _run_with_fake_goose(tmp_path, protected=False, fake_exit=fake_exit)
+
+    assert code == fake_exit
+    assert stdout == _RECORDED_STDOUT
+    assert _logged(calls, "ROOT_DIR") == "yes"
+    assert not Path(_logged(calls, "GOOSE_PATH_ROOT")).exists()
 
 
 def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_parser() -> None:

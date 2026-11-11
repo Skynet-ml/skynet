@@ -52,6 +52,9 @@ _PROTECTED_ENV = {
     # the manual ``goose update`` command.
     "GOOSE_TELEMETRY_ENABLED": "false",
     "DO_NOT_TRACK": "1",
+    # With the toolshim on, goose 1.57.0 sends tool-call interpretation to
+    # OLLAMA_HOST, a model route outside the gateway.
+    "GOOSE_TOOLSHIM": "false",
 }
 
 
@@ -60,22 +63,29 @@ def _goose_install() -> str:
 
     Returns:
         The shell command. It downloads one tarball and checks its sha256
-        digest before it unpacks the binary into ``$HOME/.local/bin``.
+        digest before it unpacks the binary into ``$HOME/.local/bin``. It
+        removes the download folder on success and on failure, and exits
+        non-zero when a step fails.
     """
     arch_cases = " ".join(
         f"{pattern}) a={arch}; s={GOOSE_SHA256[arch]};;"
         for pattern, arch in (("x86_64|amd64", "x86_64"), ("aarch64|arm64", "aarch64"))
     )
+    # The bootstrap runs this inside its own ``set -eu`` script, so the step
+    # records its status with ``|| r=$?`` (exempt from ``set -e``) and removes
+    # the download folder before it fails, rather than with an EXIT trap that
+    # would replace the caller's.
     return (
         f'export PATH={_LOCAL_BIN}:"$PATH"; '
         f"{_version_check('goose', GOOSE_VERSION)} || {{ "
         f'case "$(uname -m)" in {arch_cases} *) echo "goose: unsupported architecture" >&2; exit 1;; esac; '
-        'f="goose-$a-unknown-linux-musl.tar.gz"; d="$(mktemp -d)"; '
+        'f="goose-$a-unknown-linux-musl.tar.gz"; d="$(mktemp -d)"; r=0; '
         f'curl -fsSL -o "$d/$f" "{_RELEASE_URL}/$f" && '
         'echo "$s  $d/$f" | sha256sum -c - && '
         'tar -xzf "$d/$f" -C "$d" && '
         f"mkdir -p {_LOCAL_BIN} && "
-        f'install -m 755 "$d/goose" {_LOCAL_BIN}/goose && rm -rf "$d"; }}'
+        f'install -m 755 "$d/goose" {_LOCAL_BIN}/goose || r=$?; '
+        'rm -rf "$d"; [ "$r" -eq 0 ] || exit "$r"; }'
     )
 
 
@@ -98,9 +108,10 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     """Build the launch for Goose CLI (``goose``, pinned to :data:`GOOSE_VERSION`).
 
     Each run gets a fresh goose root directory outside the workspace, so the
-    session and log files never land in the files the run hands back. Goose's
-    quiet one-shot output is the answer; the bridge has no parser for its
-    stream-json format.
+    session and log files never land in the files the run hands back. An EXIT
+    trap removes it when the run's shell exits and keeps goose's exit status.
+    Goose's quiet one-shot output is the answer; the bridge has no parser for
+    its stream-json format.
 
     Args:
         model: Target model id.
@@ -123,6 +134,7 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     run_command = (
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
         'export GOOSE_PATH_ROOT="$(mktemp -d)" && '
+        "trap 'rm -rf \"$GOOSE_PATH_ROOT\"' EXIT && "
         f'OPENAI_HOST="$(cat {GOOSE_BASE_URL_FILE})" OPENAI_BASE_PATH=chat/completions '
         f'OPENAI_API_KEY="${ENV_API_KEY}" '
         "goose run --no-session --quiet --no-profile --with-builtin developer "
