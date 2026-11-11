@@ -49,13 +49,16 @@ _BUILT_INS = (
     "prime",
     "aider",
     "mini_swe_agent",
+    "swe_agent",
     "openhands",
     "openhands_sdk",
     "qwen_code",
     "antigravity_sdk",
+    "fabric",
     "goose",
     "hermes",
     "eve",
+    "grok_build",
     "deerflow",
     "cline",
     "kimi_code",
@@ -291,6 +294,12 @@ def test_registry_keeps_the_catalog_order() -> None:
             """print(m.version("mini-swe-agent") if l == "1.103.1" else "litellm " + l)'""",
             "2.4.6",
         ),
+        "swe_agent": (
+            '"$HOME/.local/share/swe-agent/venv/bin/python" -I -c \'import importlib.metadata as m;'
+            """ d = (m.version("litellm"), m.version("swe-rex")); print(m.version("sweagent")"""
+            """ if d == ("1.103.1", "1.4.0") else "litellm %s swe-rex %s" % d)'""",
+            "1.1.0",
+        ),
         "openhands": ("openhands", "1.6.0"),
         "openhands_sdk": (
             "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with openhands-sdk==1.61.0"
@@ -308,8 +317,10 @@ def test_registry_keeps_the_catalog_order() -> None:
         "goose": ("goose", "1.57.0"),
         "hermes": ("hermes", "v0.19.0"),
         "eve": ("eve", "1.0.0-rc.6"),
+        "grok_build": ("grok", "1.0.77"),
         "deerflow": (DEERFLOW_SPEC.binary, DEERFLOW_REF),
         "cline": ("cline", "3.0.74"),
+        "fabric": ("fabric", "0.5.0"),
         "kimi_code": ("kimi", "2.5.3"),
         "code_puppy": ("code-puppy", "0.0.967"),
     }
