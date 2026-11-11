@@ -9,6 +9,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from ..harnesses.openhands import (
     OPENHANDS_BASE_URL_FILE,
     OPENHANDS_EFFORTS,
     OPENHANDS_LITELLM_VERSION,
+    OPENHANDS_MCP_CONFIG_FILE,
     OPENHANDS_VERSION,
 )
 
@@ -50,6 +52,7 @@ log="$FAKE_LOG"
 prev=''
 for a in "$@"; do
   if [ "$prev" = -f ]; then cp "$a" "$FAKE_TASK_COPY"; fi
+  if [ "$prev" = --config-file ] && [ -f "$a" ]; then cp "$a" "$FAKE_CONFIG_COPY"; fi
   prev="$a"
 done
 if [ -n "$FAKE_STATE" ]; then
@@ -64,6 +67,7 @@ fi
   printf 'LLM_BASE_URL=%s\\n' "$LLM_BASE_URL"
   printf 'LLM_API_KEY=%s\\n' "$LLM_API_KEY"
   printf 'LLM_MODEL=%s\\n' "$LLM_MODEL"
+  printf 'AGENT_ENABLE_MCP=%s\\n' "$AGENT_ENABLE_MCP"
   printf 'OPENAI_API_KEY=%s\\n' "${OPENAI_API_KEY-unset}"
   printf 'SANDBOX_VOLUMES=%s\\n' "$SANDBOX_VOLUMES"
   printf 'FILE_STORE_PATH=%s\\n' "$FILE_STORE_PATH"
@@ -113,6 +117,7 @@ def _run_with_fake_openhands(
     final_state: str = "finished",
     temp: Path | None = None,
     kill_shell: bool = False,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[str, str, Path, int]:
     """Run the built OpenHands command in a scratch workspace against a fake ``openhands`` binary.
 
@@ -131,12 +136,16 @@ def _run_with_fake_openhands(
             receives is copied to ``tmp_path / "task.md"``.
         temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
         kill_shell: Make the fake SIGKILL the run's shell after it logs.
+        mcp_servers: The ``[proposer]`` MCP server names. The fake copies the
+            ``--config-file`` it receives, when it exists, to ``tmp_path / "config.toml"``.
 
     Returns:
         The command's stdout, the fake binary's call log, the
         workspace, and the command's exit status.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort)
+    launch = build_launch(
+        _target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort, mcp_servers=mcp_servers
+    )
     workspace = tmp_path / "work"
     files = {**launch.files, **(candidate_files(candidate, launch.instructions_file) if candidate is not None else {})}
     for name, content in files.items():
@@ -166,6 +175,7 @@ def _run_with_fake_openhands(
         "FAKE_EXIT": str(fake_exit),
         "FAKE_STATE": final_state,
         "FAKE_TASK_COPY": str(tmp_path / "task.md"),
+        "FAKE_CONFIG_COPY": str(tmp_path / "config.toml"),
     }
     if kill_shell:
         env["FAKE_KILL_SHELL"] = "1"
@@ -520,3 +530,28 @@ def test_recorded_output_parses_to_the_log_and_the_payload_names_the_plain_parse
     assert parse_plain_output(_RECORDED_STDOUT) == (_RECORDED_STDOUT.strip(), {})
     assert parse_plain_output("  \n") == (None, {})
     assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "plain"
+
+
+def test_protected_run_gives_openhands_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give each [proposer] server one ``[mcp]`` streamable HTTP entry at the relay and turn MCP on (SKY-619)."""
+    _, calls, workspace, code = _run_with_fake_openhands(tmp_path, protected=True, mcp_servers=("search", "my tools"))
+
+    assert code == 0
+    assert _logged(calls, "AGENT_ENABLE_MCP") == "true"
+    assert tomllib.loads((tmp_path / "config.toml").read_text()) == {
+        "mcp": {"shttp_servers": [{"url": f"{_RELAY}/mcp/search"}, {"url": f"{_RELAY}/mcp/my%20tools"}]}
+    }
+    assert _GATEWAY.api_key not in (workspace / OPENHANDS_MCP_CONFIG_FILE).read_text()
+    assert _logged(calls, "OPENAI_API_KEY") == ""
+    assert build_launch(_target(), _GATEWAY, protected=True, mcp_servers=("search",)).env["DO_NOT_TRACK"] == "1"
+
+
+def test_launch_without_proposer_mcp_servers_keeps_mcp_off_and_loads_no_config(tmp_path: Path) -> None:
+    """Keep MCP off and the config file missing when the proposer's file lists no server."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+    _, calls, _, code = _run_with_fake_openhands(tmp_path, protected=True)
+
+    assert code == 0
+    assert list(launch.files) == [OPENHANDS_BASE_URL_FILE]
+    assert _logged(calls, "AGENT_ENABLE_MCP") == "false"
+    assert not (tmp_path / "config.toml").exists()

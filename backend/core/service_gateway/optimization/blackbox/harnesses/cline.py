@@ -9,7 +9,9 @@ OpenAI-compatible provider with the model gateway URL and token instead.
 
 from __future__ import annotations
 
+import json
 import shlex
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CLINE
@@ -33,6 +35,11 @@ CLINE_PROVIDER = "openai"
 # The gateway URL lives in this file rather than on the command line, so a
 # protected run's relay rewrite of generated files reaches it.
 CLINE_BASE_URL_FILE = ".app/cline/base_url"
+# The [proposer] MCP servers, for the same relay rewrite. Cline 3.0.74 reads
+# MCP servers only from ``CLINE_MCP_SETTINGS_PATH`` or, without it,
+# ``$CLINE_DATA_DIR/settings/cline_mcp_settings.json`` (@cline/shared 0.2.0
+# storage), so the run copies this file there and the workspace adds none.
+CLINE_MCP_SETTINGS_FILE = ".app/cline/mcp_settings.json"
 _GLOBAL_STATE = '{"welcomeViewCompleted": true, "isNewUser": false}'
 # The ``--thinking`` levels of the pinned release (its README options table).
 # Skynet's ``minimal`` and ``max`` are other levels, not other spellings, so
@@ -73,7 +80,29 @@ def _cline_thinking(reasoning_effort: str | None) -> str:
     return f"--thinking {reasoning_effort} "
 
 
-def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _cline_mcp_settings(base_url: str, mcp_servers: tuple[str, ...]) -> str:
+    """Return Cline's MCP settings with one streamable HTTP entry for each [proposer] server.
+
+    Args:
+        base_url: The gateway URL.
+        mcp_servers: The ``[proposer]`` MCP server names.
+
+    Returns:
+        The ``cline_mcp_settings.json`` text.
+    """
+    servers = {
+        name: {"type": "streamableHttp", "url": f"{base_url}/mcp/{quote(name, safe='')}"} for name in mcp_servers
+    }
+    return json.dumps({"mcpServers": servers})
+
+
+def _cline_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for Cline CLI (``cline``, pinned to :data:`CLINE_VERSION`).
 
     Each run gets a fresh Cline data directory outside the workspace, so the
@@ -87,6 +116,9 @@ def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Cline's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so Cline never holds the real url or a secret (SKY-619).
 
     Returns:
         The launch.
@@ -94,11 +126,23 @@ def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     Raises:
         ServiceError: When Cline does not support the effort level.
     """
+    files = {CLINE_BASE_URL_FILE: gateway.url}
+    mcp_setup = ""
+    if mcp_servers:
+        files[CLINE_MCP_SETTINGS_FILE] = _cline_mcp_settings(gateway.url, mcp_servers)
+        # Cline writes OAuth state and a lock folder next to the settings
+        # file, so the copy sits in the temp data dir, not the workspace.
+        mcp_setup = (
+            'export CLINE_MCP_SETTINGS_PATH="$CLINE_DATA_DIR/settings/cline_mcp_settings.json" && '
+            'mkdir -p "$CLINE_DATA_DIR/settings" && '
+            f'cp {CLINE_MCP_SETTINGS_FILE} "$CLINE_MCP_SETTINGS_PATH" && '
+        )
     key = f'"${ENV_API_KEY}"'
     model_arg = f'"${ENV_MODEL}"'
     run_command = (
         f"{_temp_root('CLINE_DATA_DIR', 'cline')} && "
         f'printf %s {shlex.quote(_GLOBAL_STATE)} > "$CLINE_DATA_DIR/globalState.json" && '
+        f"{mcp_setup}"
         f"cline auth --provider {CLINE_PROVIDER} --apikey {key} --modelid {model_arg} "
         f'--baseurl "$(cat {CLINE_BASE_URL_FILE})" >/dev/null && '
         f"OPENAI_API_KEY={key} cline -P {CLINE_PROVIDER} -k {key} -m {model_arg} --yolo "
@@ -107,7 +151,7 @@ def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_npm_install("cline", "cline", CLINE_VERSION),
-        files={CLINE_BASE_URL_FILE: gateway.url},
+        files=files,
         run_command=run_command,
         env=_base_env(model, gateway),
         parse_output=parse_plain_output,

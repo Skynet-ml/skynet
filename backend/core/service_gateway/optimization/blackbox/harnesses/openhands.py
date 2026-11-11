@@ -17,6 +17,9 @@ microagents in a temporary copy. So the run puts the candidate's
 
 from __future__ import annotations
 
+import json
+from urllib.parse import quote
+
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_OPENHANDS
 from ..harness_bridge import parse_plain_output
@@ -46,6 +49,10 @@ OPENHANDS_VENV = '"$HOME/.local/share/openhands-venv"'
 # The gateway URL lives in this file rather than on the command line, so a
 # protected run's relay rewrite of generated files reaches it.
 OPENHANDS_BASE_URL_FILE = ".app/openhands/base_url"
+# The [proposer] MCP servers, for the same relay rewrite. The run copies the
+# file to the ``--config-file`` path, whose ``[mcp]`` section OpenHands 1.6.0
+# reads (core/config/utils.py ``load_from_toml``).
+OPENHANDS_MCP_CONFIG_FILE = ".app/openhands/config.toml"
 # OpenHands runs on LiteLLM, which routes an ``openai/`` model to the
 # OpenAI-style base URL; the gateway receives the id after the prefix.
 _LITELLM_PREFIX = "openai/"
@@ -168,12 +175,33 @@ def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]
     return {"LLM_COMPLETION_KWARGS": repr(kwargs)}
 
 
-def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _openhands_mcp_config(base_url: str, mcp_servers: tuple[str, ...]) -> str:
+    """Return an OpenHands ``config.toml`` with one streamable HTTP server for each [proposer] server.
+
+    Args:
+        base_url: The gateway URL.
+        mcp_servers: The ``[proposer]`` MCP server names.
+
+    Returns:
+        The ``config.toml`` text. A JSON string is also a TOML basic string.
+    """
+    urls = [f"{base_url}/mcp/{quote(name, safe='')}" for name in mcp_servers]
+    servers = ", ".join(f"{{url = {json.dumps(url)}}}" for url in urls)
+    return f"[mcp]\nshttp_servers = [{servers}]\n"
+
+
+def _openhands_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for OpenHands (``openhands``, pinned to :data:`OPENHANDS_VERSION`).
 
     Each run gets a fresh OpenHands root outside the workspace for the file
     store, the cache, the task file, ``TMPDIR`` and ``HOME``. The config path points into
-    that root but does not exist, so no user config loads. So
+    that root and holds only the ``[proposer]`` MCP servers, or does not exist, so no user config loads. So
     session files never land in the files the run hands back, a
     ``config.toml`` in the workspace cannot change the model route, and
     OpenHands loads no user microagents, ``AGENTS.md`` or ``config.toml``
@@ -195,6 +223,9 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for the model default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so OpenHands never holds the real url or a secret (SKY-619).
 
     Returns:
         The launch.
@@ -207,10 +238,16 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
             f"The OpenHands harness does not support the effort level {reasoning_effort!r}. "
             f"Supported levels: {', '.join(OPENHANDS_EFFORTS)}."
         )
+    files = {OPENHANDS_BASE_URL_FILE: gateway.url}
+    mcp_setup = ""
+    if mcp_servers:
+        files[OPENHANDS_MCP_CONFIG_FILE] = _openhands_mcp_config(gateway.url, mcp_servers)
+        mcp_setup = f'cp {OPENHANDS_MCP_CONFIG_FILE} "$OPENHANDS_ROOT/config.toml" && '
     run_command = (
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
         f"{_temp_root('OPENHANDS_ROOT', 'openhands')} && "
         'mkdir "$OPENHANDS_ROOT/home" "$OPENHANDS_ROOT/tmp" && '
+        f"{mcp_setup}"
         f"{{ if [ -f {_INSTRUCTIONS_FILE} ]; then cat {_INSTRUCTIONS_FILE}; printf '\\n\\n'; fi; "
         f'cat "${ENV_PROMPT_FILE}"; }} > "$OPENHANDS_ROOT/task.md" && '
         f'LLM_BASE_URL="$(cat {OPENHANDS_BASE_URL_FILE})" LLM_API_KEY="${ENV_API_KEY}" '
@@ -242,8 +279,12 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
             # ``.openhands_instructions`` load. They do not load ``AGENTS.md``.
             "AGENT_ENABLE_PROMPT_EXTENSIONS": "true",
             # The default MCP setup adds OpenHands' own MCP server and tools,
-            # which the harness does not configure or route.
-            "AGENT_ENABLE_MCP": "false",
+            # which the harness does not configure or route. With [proposer]
+            # servers it adds none: the Tavily server needs ``SEARCH_API_KEY``,
+            # which a protected run blanks. The runtime's own server comes only
+            # with a stdio server that a repo microagent lists, and it runs
+            # in the box like any command of the agent.
+            "AGENT_ENABLE_MCP": "true" if mcp_servers else "false",
             # OpenHands 1.6.0 turns native tool calling on only for model
             # names in its own list, which misses models such as
             # ``claude-opus-5.5`` and ``gpt-6``. The fallback prompts the
@@ -264,7 +305,7 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     return HarnessLaunch(
         instructions_file=_INSTRUCTIONS_FILE,
         install_command=_openhands_install(),
-        files={OPENHANDS_BASE_URL_FILE: gateway.url},
+        files=files,
         run_command=run_command,
         env=env,
         parse_output=parse_plain_output,

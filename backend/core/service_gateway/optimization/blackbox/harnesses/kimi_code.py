@@ -13,6 +13,9 @@ gateway with the gateway token, and blanks the other provider keys.
 
 from __future__ import annotations
 
+import json
+from urllib.parse import quote
+
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_KIMI_CODE
 from ..harness_bridge import parse_pi_output
@@ -30,6 +33,9 @@ KIMI_CODE_SHA256 = "7c6a44fb54265f9b0d10c35e32c538678a655598f49eba434780c60077fa
 # A protected run's relay rewrite reaches only launch files, so the gateway URL
 # lives in this file and not in the env. It holds no key.
 KIMI_CODE_BASE_URL_FILE = ".app/kimi_code/base_url"
+# The [proposer] MCP servers, for the same relay rewrite. The run copies the
+# file to the user layer, ``$KIMI_CODE_HOME/mcp.json`` (configLoader.ts).
+KIMI_CODE_MCP_FILE = ".app/kimi_code/mcp.json"
 # Kimi Code's effort names in 2.5.3: LATEST_OPUS_THINKING_EFFORTS in
 # agent-core-v2's Anthropic adapter, which the Gemini adapter also maps. ``off``
 # is not a Skynet level. The effort goes in ``$KIMI_CODE_HOME/config.toml`` as
@@ -244,7 +250,27 @@ def _effort_config(reasoning_effort: str | None) -> str:
     )
 
 
-def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _kimi_code_mcp_config(base_url: str, mcp_servers: tuple[str, ...]) -> str:
+    """Return Kimi Code's ``mcp.json`` with one HTTP entry for each [proposer] server.
+
+    Args:
+        base_url: The gateway URL.
+        mcp_servers: The ``[proposer]`` MCP server names.
+
+    Returns:
+        The ``mcp.json`` text.
+    """
+    servers = {name: {"transport": "http", "url": f"{base_url}/mcp/{quote(name, safe='')}"} for name in mcp_servers}
+    return json.dumps({"mcpServers": servers})
+
+
+def _kimi_code_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for Kimi Code CLI (:data:`KIMI_CODE_PACKAGE`, pinned to :data:`KIMI_CODE_VERSION`).
 
     Each run gets a fresh ``KIMI_CODE_HOME`` outside the workspace, so the
@@ -257,6 +283,9 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Kimi Code's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so Kimi Code never holds the real url or a secret (SKY-619).
 
     Returns:
         The launch.
@@ -273,6 +302,16 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         "KIMI_MODEL_PROVIDER_TYPE": "openai",
         "KIMI_MODEL_API_KEY": gateway.api_key,
     }
+    files = {KIMI_CODE_BASE_URL_FILE: gateway.url}
+    mcp_setup = ""
+    if mcp_servers:
+        files[KIMI_CODE_MCP_FILE] = _kimi_code_mcp_config(gateway.url, mcp_servers)
+        mcp_setup = f'mkdir -p "$KIMI_CODE_HOME" && cp {KIMI_CODE_MCP_FILE} "$KIMI_CODE_HOME/mcp.json" || exit 1; '
+        # The workspace ``.mcp.json`` and ``.kimi-code/mcp.json`` layers load
+        # only in a trusted workspace and override a user entry of the same
+        # name. The fresh home holds no trust record, so only this env name
+        # could trust the repo and let it move a relay name.
+        env["KIMI_CODE_TRUST_WORKSPACE"] = ""
     # Kimi Code 2.5.3 takes the prompt only as the ``--prompt`` value: print
     # mode has no prompt-file option and does not read stdin. So, unlike Pi's
     # ``@file``, the prompt is one argv string, and Linux refuses a single
@@ -285,6 +324,7 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         """trap 'rm -rf "$_kc_dir"' EXIT; """
         'export KIMI_CODE_HOME="$_kc_dir/home"; '
         f"{_effort_config(reasoning_effort)}"
+        f"{mcp_setup}"
         f'KIMI_MODEL_BASE_URL="$(cat {KIMI_CODE_BASE_URL_FILE})" || exit 1; export KIMI_MODEL_BASE_URL; '
         # Command substitution drops trailing newlines, so the sentinel ``x``
         # keeps them and the next step removes only it.
@@ -302,7 +342,7 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_kimi_code_install(),
-        files={KIMI_CODE_BASE_URL_FILE: gateway.url},
+        files=files,
         run_command=run_command,
         env=env,
         parse_output=parse_pi_output,
