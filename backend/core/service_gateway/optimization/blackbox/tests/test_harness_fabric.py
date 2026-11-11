@@ -323,6 +323,10 @@ def test_string_error_fails_the_run_with_that_string(tmp_path: Path) -> None:
     assert "fabric: model route refused" in finished.stderr
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="Root ignores the read-only mode, and non-POSIX systems handle chmod differently.",
+)
 def test_failed_relay_rewrite_stops_the_run_before_fabric_starts(tmp_path: Path) -> None:
     """Stop the protected command when the relay rewrite fails, so Fabric never runs with the parent gateway URL."""
     env, _ = _install(tmp_path, build_launch(_target(), _GATEWAY).install_command or "")

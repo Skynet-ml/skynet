@@ -211,6 +211,6 @@ SPEC = register(
         version=FABRIC_VERSION,
         output_format="plain",
         protected_env=_PROTECTED_ENV,
-        position=60,
+        position=61,
     )
 )
