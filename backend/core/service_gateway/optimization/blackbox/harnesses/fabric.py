@@ -292,6 +292,9 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
                 f"Pick one of: {', '.join(FABRIC_EFFORTS)}."
             )
         settings["reasoning_effort"] = reasoning_effort
+        # ``model_supports_reasoning_summaries`` exists in Codex 0.144.4, which
+        # nemo-fabric-adapters-codex 0.5.0 pins (openai-codex==0.144.4). Codex
+        # 0.153.0 removed it, so recheck it on any FABRIC_VERSION bump.
         settings["config_overrides"] = {**_FABRIC_CODEX_OVERRIDES, **_FABRIC_EFFORT_OVERRIDES}
     config = {
         "metadata": {"name": "skynet-fabric"},

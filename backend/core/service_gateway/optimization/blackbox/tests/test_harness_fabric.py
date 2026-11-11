@@ -301,7 +301,7 @@ def test_reasoning_effort_maps_to_the_codex_setting(effort: str | None, setting:
     assert config["harness"]["settings"].get("reasoning_effort") == setting
 
 
-@pytest.mark.parametrize("effort", ["none", "minimal", "high", "xhigh"])
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh"])
 def test_reasoning_effort_turns_on_the_codex_reasoning_field_for_any_model(effort: str) -> None:
     """Force Codex to send ``reasoning.effort`` for a model with no metadata, with no summary.
 
