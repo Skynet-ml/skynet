@@ -16,7 +16,7 @@ and list what to cut.
   tokens). One of them can defer to the other (about 5.5k saved per PR task).
 - The repo files are small (about 13 KB loaded). This PR trims them only a
   little, because the large costs are outside the repo.
-- Droid starts much smaller: 5 MCP servers, about 21 KB of instructions, no
+- Droid starts much smaller: 5 MCP servers, about 22 KB of instructions, no
   desktop-app tool schemas, and rolling compaction.
 
 ## 2. Method and coverage gaps
@@ -30,7 +30,7 @@ and list what to cut.
   transcripts are about 400 MB and the scan did not finish in time.
 - **Gap:** I did not run a Droid session. The Droid side comes from the public
   Factory docs and from the local Droid configuration files. Each Droid fact
-  is marked DOCUMENTED or INFERRED.
+  is marked DOCUMENTED, INFERRED, UNCONFIRMED or UNKNOWN.
 - **Gap:** The desktop app's built-in tools (Artifact, Browser, iOS
   Simulator, Workflow and others) have no documented on/off switch that I
   could find. I list them, but I do not estimate a saving for them.
@@ -53,10 +53,10 @@ says otherwise.
 | CLI design rules file | 2.1 KB | 0 (on demand) | CLI design rules | Move | Needed only when you design a CLI | 0.6k, every repo |
 | Tool hint files | 1.8 KB | 1.8 KB | Tool hints | Keep | Small and used | 0 |
 | Machine-local rules file (gitignored) | 3.5 KB | 1.4 KB | Machine rules | Trim | A stale rule; a third copy of the memory rules | 0.6k, Skynet only |
-| Repo `CLAUDE.md` | 0.6 KB | 0.4 KB | Imports AGENTS.md | Trim (this PR) | Repeats the local-rules note in AGENTS.md | 0.06k, Skynet only |
+| Repo `CLAUDE.md` | 0.6 KB | 0.4 KB | Imports AGENTS.md | Trim (this PR) | Repeats the local-rules note in AGENTS.md | 0.05k, Skynet only |
 | Repo `AGENTS.md` | 12.8 KB | 12.8 KB | Always-on repo rules | Keep | Devin and Codex read it; it is already lean | 0 |
 | `frontend/AGENTS.md` | 0.7 KB | 0.7 KB | Frontend rules | Keep | Loads only for frontend files | 0 |
-| `docs/agents/*.md` | 18.7 KB | 18.7 KB | Reference files | Keep | Load on demand only | 0 |
+| `docs/agents/*.md` | 18.7 KB | 30.9 KB | Reference files | Keep (this PR adds this report) | Load on demand only | 0 |
 | Skill listing | 19 KB, 428 skills | about 12 KB | Names and descriptions | Trim | Sales, finance, marketing, media and similar plugin skills are unused here | about 2k |
 | Repo skill descriptions | 1.0 KB | 0.6 KB | Two repo skills in the listing | Trim (this PR) | Long content lists; the trigger sentence is enough | 0.1k, Skynet only |
 | MCP server instructions | 14.5 KB | about 10.5 KB | Server usage notes | Trim | Long notes from servers that Skynet does not use (deepwiki stays) | 1.1k |
@@ -66,7 +66,7 @@ says otherwise.
 
 Total for instructions (global and repo files that load at start): about
 60 KB before, about 34 KB after. That is about 6.6k tokens saved in every
-repo, plus about 0.66k in Skynet only (about 7.3k in Skynet).
+repo, plus about 0.65k in Skynet only (about 7.3k in Skynet).
 
 ## 4. What Droid puts in context
 
@@ -88,7 +88,7 @@ repo, plus about 0.66k in Skynet only (about 7.3k in Skynet).
 Local Droid setup:
 
 - The user-level Droid `AGENTS.md` is 8.3 KB. With the repo `AGENTS.md` and
-  `CLAUDE.md`, Droid starts with about 21 KB of instructions.
+  `CLAUDE.md`, Droid starts with about 22 KB of instructions.
 - The Droid MCP configuration has 5 servers. Claude Code has about 40 servers
   and connectors in this session.
 - All Droid hooks run a notify script that adds no context.

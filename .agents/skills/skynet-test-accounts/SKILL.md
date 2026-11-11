@@ -1,6 +1,6 @@
 ---
 name: skynet-test-accounts
-description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, UI evidence or API calls with a user token. It holds the target choice, the served-commit check, the create, sign-in and delete steps for each check's test account, and the secret rules.
+description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, UI evidence or API calls with a user token. It holds the target choice, the served-commit check, the DNS fallback, the create, sign-in and delete steps for each check's test account, and the rules for secrets and test data.
 ---
 
 # Skynet test accounts and targets
