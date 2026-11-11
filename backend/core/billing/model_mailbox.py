@@ -81,6 +81,9 @@ class ModelMailbox:
         seen: set[str] = set()
         guard = threading.Lock()
         errors: list[BaseException] = []
+        # MCP event streams whose box reader left, and a flag for the end of the command.
+        abandoned: set[str] = set()
+        finished = threading.Event()
 
         def respond(document: dict[str, Any]) -> None:
             """Write one trusted response while preserving a paid attempt on transport failure."""
@@ -127,23 +130,29 @@ class ModelMailbox:
             # An event stream can stay open for the whole command, so it gets its own thread, not a pool worker.
             threading.Thread(
                 target=pump,
-                args=(f"{response_directory}/{document['id']}", response.stream),
+                args=(document["id"], response.stream),
                 daemon=True,
                 name="sandbox-mcp-stream",
             ).start()
 
-        def pump(base: str, stream: Any) -> None:
+        def pump(identity: str, stream: Any) -> None:
             """Write each part of an MCP event stream as its own response file, then an end part.
 
             Part ``n`` goes to ``<id>.<n>.json``. The last part has ``"more": false``.
+            The stream stops with no last part when the box's reader left or the
+            command ended, so a server that keeps it alive with pings cannot hold
+            its place.
 
             Args:
-                base: The response file path without ``.json``.
+                identity: The request's id.
                 stream: The relay's event stream.
             """
+            base = f"{response_directory}/{identity}"
             part = 0
             try:
                 for chunk in stream:
+                    if identity in abandoned or finished.is_set():
+                        return
                     part += 1
                     session.write_files(
                         {f"{base}.{part}.json": json.dumps({"body": base64.b64encode(chunk).decode(), "more": True})}
@@ -193,7 +202,10 @@ class ModelMailbox:
                                 raise ValueError("Invalid model mailbox identity.")
                             if identity not in seen:
                                 seen.add(identity)
-                                futures.append(executor.submit(respond, document))
+                                if "stop" in document:
+                                    abandoned.add(str(document["stop"]))
+                                else:
+                                    futures.append(executor.submit(respond, document))
                         else:
                             visible.setdefault(stream, []).append(line + "\n")
                             if on_output is not None:
@@ -206,7 +218,10 @@ class ModelMailbox:
                 f"python3 -I {shlex.quote(source_path)} {shlex.quote(config_path)}"
                 f" bash --noprofile --norc -c {shlex.quote(command)}"
             )
-            result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
+            try:
+                result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
+            finally:
+                finished.set()
             for future in futures:
                 future.result()
             for stream, data in pending.items():

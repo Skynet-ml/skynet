@@ -7,6 +7,7 @@ import http.server
 import json
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import nullcontext
 from decimal import Decimal
@@ -2370,3 +2371,129 @@ def test_the_forwarder_passes_mcp_methods_session_and_event_streams_to_the_gatew
     assert [request[0] for request in mcp_server.requests] == ["POST", "GET", "DELETE"]
     with pytest.raises(ValueError, match="unknown metered model capability"):
         dispatch(route["token"], "/v1/chat/completions", {"model": "fixture/text"}, {})
+
+
+def test_a_listener_closed_before_it_reads_frees_its_stream_place(mcp_server: _McpServer) -> None:
+    """Closing an event stream that nobody read frees its place, so a fifth listener still opens.
+
+    Args:
+        mcp_server: The echoing MCP server.
+    """
+    relay = _proposer_relay(mcp_server.port)
+
+    statuses = []
+    for _ in range(5):
+        answer = relay.dispatch("search", "GET", b"", {"mcp-session-id": "session-1"}, None)
+        statuses.append(answer.status)
+        assert answer.stream is not None
+        answer.stream.close()
+
+    assert statuses == [200] * 5
+
+
+def test_the_forwarder_closes_an_unread_gateway_stream(
+    gateway: ModelGateway, mcp_server: _McpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the forwarder's event stream before any read closes its gateway connection once.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        monkeypatch: Counts the connection closes.
+    """
+    closes: list[bool] = []
+    close = scoped_relay._close_gateway_stream
+
+    def counted(client: httpx.Client, response: httpx.Response) -> None:
+        """Close the connection and count it.
+
+        Args:
+            client: The client that holds the connection.
+            response: The open event stream.
+        """
+        close(client, response)
+        closes.append(response.is_closed)
+
+    monkeypatch.setattr(scoped_relay, "_close_gateway_stream", counted)
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    dispatch = model_forwarder({MCP_RELAY_ROUTE_KEY: route})
+
+    answer = dispatch(route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", "mcp-session-id": "session-1"})
+    assert answer.stream is not None
+    answer.stream.close()
+    answer.stream.close()
+
+    assert closes == [True]
+
+
+class _Pings:
+    """Keep an MCP event stream alive with a ping every 50 ms, as a server may, and note when it closes."""
+
+    def __init__(self) -> None:
+        """Start with the stream open."""
+        self.closed_at: float | None = None
+
+    def __iter__(self) -> _Pings:
+        """Return the stream as its own iterator."""
+        return self
+
+    def __next__(self) -> bytes:
+        """Return the next ping.
+
+        Returns:
+            One ping comment.
+
+        Raises:
+            StopIteration: When the stream is closed.
+        """
+        if self.closed_at is not None:
+            raise StopIteration
+        time.sleep(0.05)
+        return b": ping\n\n"
+
+    def close(self) -> None:
+        """Close the stream, once."""
+        if self.closed_at is None:
+            self.closed_at = time.monotonic()
+
+
+def test_the_mailbox_stops_a_pinged_stream_when_the_box_reader_leaves() -> None:
+    """A box that stops reading a pinged event stream makes the parent close it while the command still runs."""
+    pings = _Pings()
+
+    def dispatch(token: str, path: str, body: Any, headers: dict[str, str]) -> ModelHTTPResult:
+        """Answer the GET with an endless pinged stream.
+
+        Args:
+            token: The relay token.
+            path: The MCP path.
+            body: The raw body.
+            headers: The request headers.
+
+        Returns:
+            The stream answer.
+        """
+        assert path == "/v1/mcp/search"
+        return ModelHTTPResult(200, "text/event-stream", b"", stream=pings)
+
+    source = (
+        "import os, socket, time, urllib.parse\n"
+        "url=urllib.parse.urlsplit(os.environ['OPENAI_BASE_URL'])\n"
+        "sock=socket.create_connection((url.hostname, url.port))\n"
+        "sock.sendall(b'GET /v1/mcp/search HTTP/1.1\\r\\nHost: x\\r\\nAccept: text/event-stream\\r\\n\\r\\n')\n"
+        "print(b'ping' in sock.recv(4096) or b'ping' in sock.recv(4096), flush=True)\n"
+        "sock.close()\n"
+        "time.sleep(4)\n"
+    )
+    session = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=30))
+    session.write_files({"check.py": source})
+    try:
+        result = ModelMailbox(dispatch).run(session, "python3 check.py", timeout_seconds=25)
+        ended = time.monotonic()
+    finally:
+        session.close()
+
+    assert result.ok, result.stderr
+    assert result.stdout.strip() == "True"
+    assert pings.closed_at is not None
+    assert pings.closed_at < ended - 1

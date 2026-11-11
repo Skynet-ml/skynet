@@ -13,7 +13,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Collection, Generator, Mapping
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -479,24 +479,63 @@ class McpRelay:
             answer.close()
             raise
         head, _, content = buffered.partition(_HEAD_END)
-        return replace(_answer(status[0], head, content), stream=self._events(answer))
+        return replace(_answer(status[0], head, content), stream=_ClosingStream(answer, self._release))
 
-    def _events(self, answer: Generator[bytes, None, None]) -> Generator[bytes, None, None]:
-        """Pass an event stream on, and free its place when it ends or the reader closes it.
+
+class _ClosingStream:
+    """Pass an event stream on, and free it exactly once when it ends or its reader closes it.
+
+    A generator's ``finally`` does not run when it is closed before its first
+    ``next``, so a reader that fails before it reads would keep the stream's
+    place and connection forever.
+    """
+
+    def __init__(self, chunks: Iterator[bytes], on_close: Callable[[], None]) -> None:
+        """Keep the upstream chunks and the action that frees them.
 
         Args:
-            answer: The masked stream after its head.
+            chunks: The upstream chunks.
+            on_close: Frees the stream's place or connection.
+        """
+        self._chunks = chunks
+        self._on_close = on_close
+        self._lock = threading.Lock()
+        self._closed = False
 
-        Yields:
-            Each masked chunk.
+    def __iter__(self) -> _ClosingStream:
+        """Return this stream as its own iterator."""
+        return self
+
+    def __next__(self) -> bytes:
+        """Return the next chunk, and close the stream at its end.
+
+        Returns:
+            The next chunk.
+
+        Raises:
+            StopIteration: When the stream ends, breaks or passes its size cap.
         """
         try:
-            yield from answer
-        except _AnswerTooLargeError:
-            return
+            return next(self._chunks)
+        except (StopIteration, _AnswerTooLargeError):
+            self.close()
+            raise StopIteration from None
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """Close the upstream chunks and free the stream, once."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            close = getattr(self._chunks, "close", None)
+            if close is not None:
+                close()
         finally:
-            answer.close()
-            self._release()
+            self._on_close()
 
 
 def _answer(status: int, head: bytes, content: bytes) -> ModelHTTPResult:
@@ -682,7 +721,9 @@ def _forward_mcp(url: str, token: str, body: bytes, headers: Mapping[str, str]) 
         headers=tuple((key, value) for key, value in response.headers.items() if key.lower() in _MCP_ANSWER_HEADERS),
     )
     if method == "GET" and answer.content_type.lower().startswith("text/event-stream"):
-        return replace(answer, stream=_gateway_events(client, response))
+        return replace(
+            answer, stream=_ClosingStream(response.iter_bytes(), lambda: _close_gateway_stream(client, response))
+        )
     try:
         return replace(answer, body=response.read())
     finally:
@@ -690,18 +731,14 @@ def _forward_mcp(url: str, token: str, body: bytes, headers: Mapping[str, str]) 
         client.close()
 
 
-def _gateway_events(client: httpx.Client, response: httpx.Response) -> Generator[bytes, None, None]:
-    """Pass the gateway's event stream on, and close its connection at the end.
+def _close_gateway_stream(client: httpx.Client, response: httpx.Response) -> None:
+    """Close the gateway's event stream and the client that holds its connection.
 
     Args:
         client: The client that holds the connection.
         response: The open event stream.
-
-    Yields:
-        Each chunk as it arrives.
     """
     try:
-        yield from response.iter_bytes()
-    finally:
         response.close()
+    finally:
         client.close()

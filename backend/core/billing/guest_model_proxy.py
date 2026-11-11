@@ -117,7 +117,10 @@ def main() -> int:
                         self.wfile.write(base64.b64decode(document["body"]))
                         self.wfile.flush()
             except OSError:
-                pass  # The MCP client closed its event stream.
+                # The MCP client left. Tell the supervisor, so it stops the stream and frees its place.
+                stop = {"id": uuid4().hex, "stop": identity}
+                with _PRINT_LOCK:
+                    print(prefix + json.dumps(stop, separators=(",", ":")), flush=True)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
