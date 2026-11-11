@@ -244,7 +244,11 @@ def run_service_in_subprocess(
         if budget_gateway_descriptor is not None:
             runtime_scope.enter_context(
                 sandbox_runtime_context(
-                    RemoteSandboxRuntime(budget_gateway_descriptor["url"], budget_gateway_descriptor["control_token"])
+                    RemoteSandboxRuntime(
+                        budget_gateway_descriptor["url"],
+                        budget_gateway_descriptor["control_token"],
+                        lifetime_ceiling_seconds=budget_gateway_descriptor.get("lifetime_seconds"),
+                    )
                 )
             )
         progress_callback = partial(_emit_progress_event, event_queue)

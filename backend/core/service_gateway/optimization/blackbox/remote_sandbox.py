@@ -59,13 +59,22 @@ class RemoteSandboxRuntime:
     injects_headers = False
     protected = True
 
-    def __init__(self, gateway_url: str, control_token: str, *, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        gateway_url: str,
+        control_token: str,
+        *,
+        client: httpx.Client | None = None,
+        lifetime_ceiling_seconds: float | None = None,
+    ) -> None:
         """Bind an opaque parent capability without loading credentials or settings.
 
         Args:
             gateway_url: Parent loopback HTTP origin, optionally ending in /v1.
             control_token: Separate sandbox control capability, never a provider key.
             client: Optional owned test transport; normal requests use short-lived clients.
+            lifetime_ceiling_seconds: The parent broker's maximum box lifetime,
+                from the trusted descriptor; ``None`` sends requested lifetimes unchanged.
         """
         url = urlsplit(gateway_url)
         if (
@@ -83,6 +92,7 @@ class RemoteSandboxRuntime:
         self._url = f"{url.scheme}://{url.netloc}/v1/_sandbox"
         self._headers = {"Authorization": f"Bearer {control_token}"}
         self._client = client
+        self._ceiling = lifetime_ceiling_seconds
 
     def _request(self, action: str, payload: Mapping[str, Any], *, timeout: float = 90) -> dict[str, Any]:
         """Send one control operation without hidden retries or redirecting credentials.
@@ -124,12 +134,15 @@ class RemoteSandboxRuntime:
         Returns:
             A guest handle containing only an opaque broker identity.
         """
+        # Openers ask for the worker's lifetime setting, but a run deadline
+        # gives the parent broker a shorter maximum that it strictly enforces.
+        lifetime = spec.lifetime_seconds if self._ceiling is None else min(spec.lifetime_seconds, self._ceiling)
         value = self._request(
             "open",
             {
                 "request_id": spec.operation_key or uuid.uuid4().hex,
                 "spec": {
-                    "lifetime_seconds": spec.lifetime_seconds,
+                    "lifetime_seconds": lifetime,
                     "env": dict(spec.env),
                     "image": spec.image,
                     "vcpus": spec.vcpus,
@@ -137,12 +150,12 @@ class RemoteSandboxRuntime:
                     "allowed_hosts": list(spec.allowed_hosts),
                 },
             },
-            timeout=max(90, spec.lifetime_seconds + 60),
+            timeout=max(90, lifetime + 60),
         )
         identity = value.get("sandbox_id")
         if not isinstance(identity, str) or not identity:
             raise ServiceError("The parent did not return a sandbox capability.")
-        return RemoteSandboxSession(self, identity, spec.lifetime_seconds)
+        return RemoteSandboxSession(self, identity, lifetime)
 
 
 class RemoteSandboxSession:
@@ -154,7 +167,8 @@ class RemoteSandboxSession:
         Args:
             runtime: Authenticated parent transport.
             identity: Opaque broker capability.
-            lifetime_seconds: Timeout used only for waiting on parent control responses.
+            lifetime_seconds: Granted box lifetime; bounds command timeouts and
+                the wait for parent control responses.
         """
         self._runtime = runtime
         self._identity = identity
@@ -205,7 +219,7 @@ class RemoteSandboxSession:
         Args:
             command: Guest shell command.
             env: Optional guest environment.
-            timeout_seconds: Command timeout within the sandbox lifetime.
+            timeout_seconds: Command timeout; a longer one is cut to the box lifetime.
             on_output: Callback for stdout/stderr chunks after parent model interception.
             sudo: Refused; the child never sends a root command.
 
@@ -223,7 +237,9 @@ class RemoteSandboxSession:
                 "sandbox_id": self._identity,
                 "command": command,
                 "env": dict(env or {}),
-                "timeout_seconds": timeout_seconds,
+                # Callers derive timeouts from the lifetime they asked for, which
+                # can exceed a clamped box; no command outlives its box anyway.
+                "timeout_seconds": None if timeout_seconds is None else min(timeout_seconds, self._lifetime),
             },
         }
         context = (
