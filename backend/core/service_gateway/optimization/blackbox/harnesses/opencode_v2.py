@@ -40,14 +40,17 @@ OPENCODE_V2_VERSION_OUTPUT = f"v{OPENCODE_V2_VERSION}"
 OPENCODE_V2_BINARY = "opencode2"
 _RELEASE_URL = f"https://github.com/anomalyco/opencode/releases/download/v{OPENCODE_V2_VERSION}"
 # sha256 digests the GitHub release API reports for the glibc tarballs, so a
-# swapped asset fails the install instead of running.
+# swapped asset fails the install instead of running. Linux x64 uses the
+# ``-baseline`` build, as the release's Homebrew recipe does, so a CPU
+# without AVX2 can run it.
 OPENCODE_V2_SHA256 = {
-    "x64": "89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7",
+    "x64-baseline": "89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7",
     "arm64": "c1682057f0815cb2abdd6e00305f1146ebaf1c167f0335cdb74ddc80008120e7",
 }
 # The variants V2 2.2.7 builds for a config model on the openai-compatible
-# package with no ``capabilities.reasoning``: ``Variant.resolve`` uses the
-# ``openaiChat`` protocol and its ``EFFORTS`` (packages/core/src/variant.ts).
+# package with no ``capabilities.reasoning``: the ``PROTOCOLS`` table maps the
+# package to ``openaiCompatible``, which hands a non-nvidia provider to
+# ``openaiChat`` and its ``EFFORTS`` (packages/core/src/variant.ts).
 # Any other ``#variant`` fails with ``VariantUnavailableError``
 # (packages/core/src/model-resolver.ts).
 OPENCODE_V2_EFFORTS = ("low", "medium", "high")
@@ -63,7 +66,12 @@ _ENV = {
 # OpenCode reads these keys for its other providers. A protected run blanks
 # them, so an inherited key never gives OpenCode a route around the gateway.
 # A protected sandbox has no internet route, so the models.dev fetch is off.
+# V2 merges ``OPENCODE_CONFIG`` and ``OPENCODE_CONFIG_CONTENT`` into the
+# workspace config, so an inherited one could add a provider. An empty
+# object, not an empty string, because V2 parses any set content as JSON.
 _PROTECTED_ENV = {
+    "OPENCODE_CONFIG": "",
+    "OPENCODE_CONFIG_CONTENT": "{}",
     "OPENCODE_API_KEY": "",
     "OPENAI_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
@@ -107,7 +115,7 @@ def _opencode_v2_install() -> str:
     """
     arch_cases = " ".join(
         f"{pattern}) a={arch}; s={OPENCODE_V2_SHA256[arch]};;"
-        for pattern, arch in (("x86_64|amd64", "x64"), ("aarch64|arm64", "arm64"))
+        for pattern, arch in (("x86_64|amd64", "x64-baseline"), ("aarch64|arm64", "arm64"))
     )
     # The bootstrap runs this inside its own ``set -eu`` script, so the step
     # records its status with ``|| r=$?`` (exempt from ``set -e``) and removes

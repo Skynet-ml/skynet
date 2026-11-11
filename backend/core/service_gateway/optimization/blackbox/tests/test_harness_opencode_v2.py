@@ -67,6 +67,8 @@ _FAKE_OPENCODE2 = """#!/bin/sh
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
   printf 'APP_API_KEY=%s\\n' "$APP_API_KEY"
   printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
+  printf 'OPENCODE_CONFIG=%s\\n' "${OPENCODE_CONFIG-unset}"
+  printf 'OPENCODE_CONFIG_CONTENT=%s\\n' "${OPENCODE_CONFIG_CONTENT-unset}"
   printf 'STDIN=%s\\n' "$(cat)"
 } >> "$FAKE_LOG"
 printf '%s' "$FAKE_ANSWER"
@@ -100,6 +102,10 @@ def _run_with_fake_opencode2(
 ) -> tuple[str, str, Path]:
     """Run the built command in a scratch workspace against a fake ``opencode2`` binary.
 
+    The env also carries an inherited ``OPENCODE_CONFIG`` and
+    ``OPENCODE_CONFIG_CONTENT``, which a protected run must replace so they
+    cannot add a provider.
+
     Args:
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
         protected: Build the protected launch, with the sandbox-local relay set.
@@ -122,7 +128,10 @@ def _run_with_fake_opencode2(
     fake.write_text(_FAKE_OPENCODE2)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "calls.log"
+    # The sandbox layers the launch env over the inherited env.
     env = {
+        "OPENCODE_CONFIG": "/elsewhere/opencode.json",
+        "OPENCODE_CONFIG_CONTENT": '{"providers": {"openai": {}}}',
         **launch.env,
         "PATH": os.defpath,
         "HOME": str(tmp_path / "home"),
@@ -236,6 +245,7 @@ def test_open_install_downloads_the_pinned_release_and_checks_its_digest() -> No
     assert install.startswith(f'export PATH="$HOME/.local/bin":"$PATH"; {check} || {{ ')
     assert f"https://github.com/anomalyco/opencode/releases/download/v{OPENCODE_V2_VERSION}/$f" in install
     assert 'f="opencode-linux-$a.tar.gz"' in install
+    assert f"x86_64|amd64) a=x64-baseline; s={OPENCODE_V2_SHA256['x64-baseline']};;" in install
     for arch, digest in OPENCODE_V2_SHA256.items():
         assert f"a={arch}; s={digest};;" in install
         assert len(digest) == 64
@@ -337,6 +347,8 @@ def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() ->
     for name in blanked:
         assert launch.env[name] == ""
     assert launch.env["OPENCODE_DISABLE_MODELS_FETCH"] == "true"
+    assert launch.env["OPENCODE_CONFIG"] == ""
+    assert launch.env["OPENCODE_CONFIG_CONTENT"] == "{}"
     assert launch.env["OPENCODE_DISABLE_FREE_MODELS"] == "true"
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
 
@@ -355,6 +367,8 @@ def test_protected_run_points_opencode2_at_the_relay_and_returns_its_answer(tmp_
     assert _GATEWAY.url not in (workspace / "opencode.json").read_text()
     assert _logged(calls, "APP_API_KEY") == "gateway-token"
     assert _logged(calls, "OPENAI_API_KEY") == ""
+    assert _logged(calls, "OPENCODE_CONFIG") == ""
+    assert _logged(calls, "OPENCODE_CONFIG_CONTENT") == "{}"
     assert _logged(calls, "STDIN") == ""
     assert parse_output("opencode", stdout) == (
         "I fixed solution.py.\n\nThe answer is 42.",
