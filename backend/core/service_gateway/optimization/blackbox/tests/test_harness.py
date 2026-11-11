@@ -173,18 +173,17 @@ def test_opencode_launch_names_the_gateway_model() -> None:
     assert launch.parse_output is parse_opencode_output
 
 
-@pytest.mark.parametrize(("effort", "expected"), [("high", "high"), ("none", "none"), ("max", "max")])
-def test_codex_launch_sets_the_chosen_reasoning_effort(effort: str, expected: str) -> None:
-    """Codex reads the effort from its config unchanged; Codex 0.153 knows every Skynet level.
+@pytest.mark.parametrize("effort", ["high", "none", "max"])
+def test_codex_launch_sets_the_chosen_reasoning_effort(effort: str) -> None:
+    """Codex reads the effort from its config; it passes the seven declared levels unchanged.
 
     Args:
         effort: The optimization model's effort level.
-        expected: The level Codex receives.
     """
     launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, reasoning_effort=effort)
 
     config = tomllib.loads(launch.files[".app/codex/config.toml"])
-    assert config["model_reasoning_effort"] == expected
+    assert config["model_reasoning_effort"] == effort
     assert config["model_providers"]["app"]["env_key"] == "APP_API_KEY"
 
 
