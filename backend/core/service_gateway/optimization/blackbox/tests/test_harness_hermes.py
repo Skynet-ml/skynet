@@ -118,6 +118,11 @@ _FAKE_HERMES = """#!/bin/sh
   printf 'NOUS_API_KEY=%s\\n' "$NOUS_API_KEY"
   printf 'HERMES_LANGFUSE_PUBLIC_KEY=%s\\n' "$HERMES_LANGFUSE_PUBLIC_KEY"
   printf 'HERMES_LANGFUSE_SECRET_KEY=%s\\n' "$HERMES_LANGFUSE_SECRET_KEY"
+  printf 'BRAVE_SEARCH_API_KEY=%s\\n' "$BRAVE_SEARCH_API_KEY"
+  printf 'AWS_ACCESS_KEY_ID=%s\\n' "$AWS_ACCESS_KEY_ID"
+  printf 'AWS_SECRET_ACCESS_KEY=%s\\n' "$AWS_SECRET_ACCESS_KEY"
+  printf 'AWS_SESSION_TOKEN=%s\\n' "$AWS_SESSION_TOKEN"
+  printf 'AWS_PROFILE=%s\\n' "$AWS_PROFILE"
   printf 'HERMES_HOME=%s\\n' "$HERMES_HOME"
   printf 'CONFIG=%s\\n' "$(tr -d '\\n' < "$HERMES_HOME/config.yaml")"
 } >> "$FAKE_LOG"
@@ -276,8 +281,9 @@ def _run_with_fake_hermes(
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Hermes command in a scratch workspace against a fake ``hermes`` binary.
 
-    The env also carries an inherited OpenAI URL, an Anthropic key and Hermes
-    Langfuse keys, which a protected run must not pass on.
+    The env also carries an inherited OpenAI URL, an Anthropic key, a Brave
+    key and Hermes Langfuse keys, which a protected run must not pass on. It
+    also carries AWS credentials, which every run passes on unchanged.
 
     Args:
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
@@ -309,6 +315,8 @@ def _run_with_fake_hermes(
         "NOUS_API_KEY": "inherited-key",
         "HERMES_LANGFUSE_PUBLIC_KEY": "inherited-key",
         "HERMES_LANGFUSE_SECRET_KEY": "inherited-key",
+        "BRAVE_SEARCH_API_KEY": "inherited-key",
+        **{name: f"inherited-{name.lower()}" for name in _INHERITED_AWS_KEYS},
         **launch.env,
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
@@ -573,6 +581,16 @@ def test_open_build_keeps_the_protected_env_out() -> None:
     launch = build_launch(_target(), _GATEWAY)
 
     assert not set(_PROTECTED_ENV) & set(launch.env)
+
+
+def test_protected_run_passes_aws_credentials_on_and_blanks_a_tool_key(tmp_path: Path) -> None:
+    """Against a fake hermes, a protected run keeps inherited AWS credentials and blanks the Brave key."""
+    result, calls, _ = _run_with_fake_hermes(tmp_path, protected=True)
+
+    assert result.returncode == 0
+    for name in _INHERITED_AWS_KEYS:
+        assert _logged(calls, name) == f"inherited-{name.lower()}"
+    assert _logged(calls, "BRAVE_SEARCH_API_KEY") == ""
 
 
 @pytest.mark.parametrize("relay_env", ["APP_BUDGET_RELAY_URL", "SKYNET_BUDGET_RELAY_URL"])

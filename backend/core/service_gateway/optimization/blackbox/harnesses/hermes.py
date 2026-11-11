@@ -74,6 +74,11 @@ HERMES_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # inherited key never gives Hermes a route around the gateway. The run sets
 # ``OPENAI_API_KEY`` to the gateway token on the command itself. Hermes sends
 # no telemetry of its own; DO_NOT_TRACK covers the tools it starts.
+#
+# The dict leaves AWS credentials out on purpose, so they stay inherited.
+# Hermes reads them only for Bedrock, which this config never selects, and
+# passes them on to the terminal tool. An empty AWS_PROFILE makes boto3 fail
+# with ProfileNotFound.
 _PROTECTED_ENV = {
     "OPENAI_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
@@ -162,9 +167,6 @@ _PROTECTED_ENV = {
     "HUGGINGFACE_HUB_TOKEN": "",
     "HUGGING_FACE_HUB_TOKEN": "",
     "HUGGINGFACE_TOKEN": "",
-    # AWS credentials stay inherited. Hermes reads them only for Bedrock, which
-    # this config never selects, and passes them on to the terminal tool on
-    # purpose. An empty AWS_PROFILE makes boto3 fail with ProfileNotFound.
     "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "",
     "LANGFUSE_BASE_URL": "",
