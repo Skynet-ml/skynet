@@ -242,9 +242,13 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         {
             "QWEN_TELEMETRY_ENABLED": "false",
             "QWEN_USAGE_STATISTICS_ENABLED": "false",
-            # Skips the startup npm update check and the auto-install it can start.
+            # Qwen Code 0.27.2 reads this value on every start, despite "ONCE" in
+            # the name. It skips the npm update check and the auto-install it can
+            # start. Only the interactive UI runs that check today.
             "QWEN_CODE_SKIP_UPDATE_CHECK_ONCE": "true",
-            # Stops the models.dev catalog download, a network call outside the gateway.
+            # Turns off the models.dev catalog: no background download from
+            # models.dev (a call outside the gateway) and no catalog lookups.
+            # Qwen Code then uses its built-in regex model tables.
             "QWEN_CODE_MODELS_DEV": "off",
         }
     )
