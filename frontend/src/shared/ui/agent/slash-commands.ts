@@ -1,4 +1,5 @@
-// The chat's slash commands. Only React types here, so `node --test` covers them.
+// The chat's slash commands. Only React types and the effort rules here, so
+// `node --test` covers them.
 //
 // Every agent runs on the Pi harness (SKY-327), one RPC process per turn. Pi
 // runs its built-in commands only in its own terminal UI, so the composer
@@ -6,6 +7,8 @@
 // already has (SKY-604).
 
 import type { ComponentType, ReactNode } from "react";
+import { effortsFor, supportsEffortSlider } from "@/shared/lib/model-efforts";
+import type { CatalogModel } from "@/shared/types/api";
 
 /** One value a command's argument may take. */
 export interface SlashOption {
@@ -133,4 +136,27 @@ export function completeSlash(menu: SlashMenu, index: number): string {
   if (menu.kind === "options") return `/${menu.command.name} ${menu.items[index]!.value}`;
   const command = menu.items[index]!;
   return command.argHint ? `/${command.name} ` : `/${command.name}`;
+}
+
+/**
+ * The models /model and /thinking read, by the model menu's rule: an
+ * available model that takes the effort slider.
+ */
+export function slashModels(models: readonly CatalogModel[]): CatalogModel[] {
+  return models.filter((m) => m.available !== false && supportsEffortSlider(m));
+}
+
+/** The levels /thinking offers for a model: the model menu's slider levels, without "none". */
+export function slashEfforts(model: string | null, models: readonly CatalogModel[]): string[] {
+  if (!models.find((m) => m.value === model)?.supports_thinking) return [];
+  return effortsFor(model, models).filter((level) => level !== "none");
+}
+
+/**
+ * Whether fast mode stays on after /model picks a model, by the model menu's
+ * rule: a local CLI model keeps it when it supports fast mode, and an
+ * OpenRouter model keeps it until the menu's fast-mode check refuses it.
+ */
+export function slashKeepsFast(model: string, row: CatalogModel | undefined, cliRow: boolean): boolean {
+  return row && cliRow ? !!row.supports_fast : model.startsWith("openrouter/");
 }

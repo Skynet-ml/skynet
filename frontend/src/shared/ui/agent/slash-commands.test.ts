@@ -1,12 +1,33 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
+
+// The effort rules read messages only for their labels; node has no "@/" alias.
+const stubs: Record<string, string> = {
+  "@/shared/lib/messages": "export const msg = (key) => key;",
+};
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const source = stubs[specifier];
+    if (source !== undefined) {
+      return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` };
+    }
+    if (specifier === "@/shared/lib/model-efforts") {
+      return nextResolve(new URL("../../lib/model-efforts.ts", import.meta.url).href, context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
 
 const {
   completeSlash,
   enterRunsSlash,
   parseSlashCommand,
   resolveSlashOption,
+  slashEfforts,
+  slashKeepsFast,
   slashMenu,
+  slashModels,
   stepSlashMenu,
 } = await import("./slash-commands.ts");
 
@@ -143,4 +164,39 @@ test("Enter runs only a fully typed command name", () => {
   assert.equal(enterRunsSlash(slashMenu("/new", commands)!, 0, "/new"), true);
   assert.equal(enterRunsSlash(slashMenu("/NEW", commands)!, 0, "/NEW"), true);
   assert.equal(enterRunsSlash(slashMenu("/thinking h", commands)!, 0, "/thinking h"), true);
+});
+
+const row = (value: string, extra: Record<string, unknown> = {}) =>
+  ({ value, provider: "openrouter", available: true, supports_thinking: true, ...extra }) as never;
+
+test("/model lists only available models that take the effort slider, as the model menu does", () => {
+  const catalog = [
+    row("openai/gpt-5.5", { reasoning_efforts: ["none", "low", "high"] }),
+    row("openai/gpt-4o", { supports_thinking: false }),
+    // Only "none": the menu has no slider level for it.
+    row("openai/o-none", { reasoning_efforts: ["none"] }),
+    row("anthropic/claude-opus-5-5", { available: false }),
+  ];
+  assert.deepEqual(
+    slashModels(catalog).map((m: { value: string }) => m.value),
+    ["openai/gpt-5.5"],
+  );
+});
+
+test("/thinking offers the model menu's levels, without none", () => {
+  const catalog = [
+    row("openai/gpt-5.5", { reasoning_efforts: ["none", "low", "high"] }),
+    row("openai/gpt-4o", { supports_thinking: false }),
+  ];
+  assert.deepEqual(slashEfforts("openai/gpt-5.5", catalog), ["low", "high"]);
+  assert.deepEqual(slashEfforts("openai/gpt-4o", catalog), []);
+  assert.deepEqual(slashEfforts(null, catalog), []);
+});
+
+test("/model keeps fast mode by the model menu's rule", () => {
+  // OpenRouter rows carry no fast flag; the menu's fast-mode check decides later.
+  assert.equal(slashKeepsFast("openrouter/openai/gpt-5.5", row("openrouter/openai/gpt-5.5"), false), true);
+  assert.equal(slashKeepsFast("openai/gpt-5.5", row("openai/gpt-5.5", { supports_fast: true }), false), false);
+  assert.equal(slashKeepsFast("claude-cli/opus", row("claude-cli/opus", { supports_fast: true }), true), true);
+  assert.equal(slashKeepsFast("claude-cli/sonnet", row("claude-cli/sonnet"), true), false);
 });

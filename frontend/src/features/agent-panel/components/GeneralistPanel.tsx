@@ -34,11 +34,17 @@ import { Composer } from "@/shared/ui/agent/composer";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
-import { resolveSlashOption, type SlashCommand } from "@/shared/ui/agent/slash-commands";
+import {
+  resolveSlashOption,
+  slashEfforts,
+  slashKeepsFast,
+  slashModels as slashListedModels,
+  type SlashCommand,
+} from "@/shared/ui/agent/slash-commands";
 import { chatToMarkdown } from "@/shared/lib/chat-export";
 import { cliEffort, liveEffort } from "@/shared/lib/effort-slider";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
-import { effortLabel, effortsFor } from "@/shared/lib/model-efforts";
+import { effortLabel, effortsFor, supportsEffortSlider } from "@/shared/lib/model-efforts";
 import {
   catalogFallbackModel,
   modelDisplayName,
@@ -978,25 +984,26 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       cancelled = true;
     };
   }, []);
-  const catalogModels = React.useMemo(
-    () => (catalogAll ?? []).filter((m) => m.available),
-    [catalogAll],
+  const catalogModels = React.useMemo(() => slashListedModels(catalogAll ?? []), [catalogAll]);
+  const localModels = React.useMemo(
+    () => (localMenu.models ? slashListedModels(localMenu.models) : undefined),
+    [localMenu.models],
   );
-  const slashModels = localMenu.models ?? catalogModels;
-  // The model menu's pick rule: a retired "auto" pick, or one the list does
-  // not show, counts as no pick.
+  const slashModels = localModels ?? catalogModels;
+  // The model menu's pick rule: a retired "auto" pick, one the list does not
+  // show, or one without the effort slider counts as no pick.
   const savedModel = agent.model === RETIRED_AUTO_MODEL ? null : agent.model;
-  const slashPick = menuPickState(
-    savedModel,
-    localMenu.allModels ?? localMenu.models ?? catalogAll,
-    localMenu.side,
-  ).unlisted
-    ? null
-    : savedModel;
+  const pickSource = localMenu.allModels ?? localMenu.models ?? catalogAll;
+  const pickRow = pickSource?.find((m) => m.value === savedModel);
+  const slashPick =
+    menuPickState(savedModel, pickSource?.filter(supportsEffortSlider), localMenu.side).unlisted ||
+    (!!pickRow && !supportsEffortSlider(pickRow))
+      ? null
+      : savedModel;
   // /model offers what the model menu lists: its featured shortlist (the
   // first 50 when the catalog flags none) and a current pick outside it.
   const slashMenuModels = React.useMemo(() => {
-    if (localMenu.models) return localMenu.models;
+    if (localModels) return localModels;
     const featured = catalogModels.filter((m) => m.featured);
     const rows = featured.length ? featured : catalogModels.slice(0, 50);
     const extra =
@@ -1004,16 +1011,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         ? catalogModels.find((m) => m.value === slashPick)
         : undefined;
     return extra ? [extra, ...rows] : rows;
-  }, [localMenu.models, catalogModels, slashPick]);
+  }, [localModels, catalogModels, slashPick]);
   const canShareChat =
     !inSetup && canShare && !webChat && !!agent.conversationId && agent.messages.length > 0;
   const slashCommands = React.useMemo(() => {
     const effective =
       slashPick ??
-      (localMenu.models ? localMenu.models[0] : catalogFallbackModel(slashModels))?.value ??
+      (localModels ? localModels[0] : catalogFallbackModel(slashModels))?.value ??
       null;
     const current = slashModels.find((m) => m.value === effective);
-    const efforts = current?.supports_thinking ? effortsFor(effective, slashModels) : [];
+    const efforts = slashEfforts(effective, slashModels);
     // As the model menu shows it: a local CLI model checks the level it runs,
     // so a saved level above the model's top checks the top.
     const shownEffort =
@@ -1089,7 +1096,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     agent.reasoningEffort,
     agent.conversationId,
     agent.messages.length,
-    localMenu.models,
+    localModels,
     slashModels,
     slashMenuModels,
     inSetup,
@@ -1121,7 +1128,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             (effort !== null && !effortsFor(value, slashModels).includes(effort))
           )
             agent.setReasoningEffort(null);
-          if (agent.fastMode && !picked?.supports_fast) agent.setFastMode(false);
+          const cliRow = !!picked && isCliProvider(menuModelGroup(picked));
+          if (agent.fastMode && !slashKeepsFast(value, picked, cliRow)) agent.setFastMode(false);
           return;
         }
         case "new":
