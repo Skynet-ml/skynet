@@ -161,6 +161,7 @@ def test_launch_runs_the_runner_on_the_gateway_only() -> None:
     assert [group["name"] for group in config["tool_groups"]] == ["file:read", "file:write", "bash"]
     assert all(tool["use"].startswith("deerflow.sandbox.tools:") for tool in config["tools"])
     assert config["sandbox"]["use"] == "deerflow.sandbox.local:LocalSandboxProvider"
+    assert config["memory"] == {"enabled": False}
     assert "secret-key" not in launch.files[CONFIG_FILE] + launch.files[RUNNER_FILE]
     compile(launch.files[RUNNER_FILE], RUNNER_FILE, "exec")
     env = launch.env

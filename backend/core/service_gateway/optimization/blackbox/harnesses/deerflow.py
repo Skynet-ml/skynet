@@ -324,6 +324,9 @@ def _deerflow_config(model: str, gateway_url: str, reasoning_effort: str | None 
         ],
         "models": [model_entry],
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider", "allow_host_bash": True, "mounts": []},
+        # DeerFlow's memory middleware is on by default and queues a model call
+        # outside the graph stream, so the runner's usage total would miss it.
+        "memory": {"enabled": False},
     }
     return json.dumps(config, indent=2)
 
