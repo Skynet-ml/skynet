@@ -3,19 +3,25 @@
 The grant funds a temporary staging or PR-preview check account through
 :meth:`StripeBillingService.grant_test_credit`. Each test checks one guard or
 one effect. With ``APP_BUDGET_TEST_DB_URL`` set, the same tests also run on
-PostgreSQL, where the grant takes the advisory lock that serializes the cap.
+PostgreSQL, where the grant takes the advisory lock that serializes the cap,
+and a PostgreSQL-only test proves that lock blocks a grant on another account.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Engine, create_engine, select, text
+from sqlalchemy import Engine, create_engine, func, make_url, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from core.billing import service as billing_service
 from core.billing.grant_test_credit import dollars_to_cents, main
 from core.billing.service import (
     TEST_GRANT_DAILY_CAP_CENTS,
@@ -30,6 +36,8 @@ PG_URL = app_env("APP_BUDGET_TEST_DB_URL")
 TABLES = [model.__table__ for model in (BillingCustomerModel, WalletLedgerModel, UserModel)]
 STAGING_ID = "staging-credit-check-a1b2c3"
 PREVIEW_ID = "pr-107-credit-check-d4e5f6"
+STAGING_RDS_URL = "postgresql://app@skynet-staging.abc123.us-east-2.rds.amazonaws.com:5432/skynet"
+PRODUCTION_RDS_URL = "postgresql://app@skynet-production.abc123.us-east-2.rds.amazonaws.com:5432/skynet"
 
 
 @pytest.fixture(
@@ -59,6 +67,38 @@ def engine(request: pytest.FixtureRequest) -> Iterator[Engine]:
         yield database
         database.dispose()
         return
+    yield from _postgres_engine()
+
+
+@pytest.fixture
+def pg_engine() -> Iterator[Engine]:
+    """Yield only PostgreSQL, for behavior that SQLite does not have.
+
+    Yields:
+        Engine with the billing and user tables in an isolated schema.
+    """
+    if not PG_URL or not PG_URL.startswith("postgresql"):
+        pytest.skip("Set APP_BUDGET_TEST_DB_URL to an explicitly disposable PostgreSQL database.")
+    yield from _postgres_engine()
+
+
+@pytest.fixture(autouse=True)
+def test_database_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept the local test PostgreSQL host as the staging database host.
+
+    The grant refuses any PostgreSQL host but the staging RDS instance. Tests
+    that check that guard set the real label back.
+    """
+    host = make_url(PG_URL).host if PG_URL and PG_URL.startswith("postgresql") else None
+    monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", (host or "localhost").lower().split(".")[0])
+
+
+def _postgres_engine() -> Iterator[Engine]:
+    """Yield a PostgreSQL engine on a new schema, and drop the schema after.
+
+    Yields:
+        Engine with the billing and user tables in an isolated schema.
+    """
     schema = f"grant_test_credit_{uuid4().hex}"
     admin = create_engine(PG_URL)
     with admin.begin() as connection:
@@ -209,9 +249,22 @@ def test_writes_balance_and_grant_row_together(engine: Engine, staging: None) ->
     assert _balance(engine, email) == 725
     [row] = _ledger(engine)
     assert (row.username, row.delta_cents, row.kind, row.settlement_key) == (email, 725, "grant", "testgrant:k1")
-    assert "Run a paid optimization check" in row.description
-    assert "Gilad approved $5 in chat" in row.description
+    assert row.description == "Test grant: Run a paid optimization check"
     assert row.stripe_payment_intent_id is None
+
+
+def test_approval_goes_to_the_operator_log_not_the_ledger(
+    engine: Engine, staging: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The account sees the ledger description, so the approval text is only in the operator log."""
+    _add_user(engine, check_account_email(STAGING_ID))
+    with caplog.at_level(logging.WARNING, logger="app.billing.service"):
+        _grant(engine)
+    [row] = _ledger(engine)
+    assert "Gilad approved" not in row.description
+    assert "approval" not in row.description
+    assert "Gilad approved $5 in chat" in caplog.text
+    assert "testgrant:k1" in caplog.text
 
 
 def test_retry_with_the_same_key_credits_once(engine: Engine, staging: None) -> None:
@@ -287,12 +340,166 @@ def test_refuses_a_key_that_does_not_fit(engine: Engine, staging: None, key: str
         _grant(engine, key=key)
 
 
-def test_refuses_audit_text_longer_than_the_column(engine: Engine, staging: None) -> None:
-    """The audit text is never cut: too long a reason plus approval is refused."""
+def test_refuses_a_reason_longer_than_the_column(engine: Engine, staging: None) -> None:
+    """The reason is never cut: a reason that does not fit the description is refused."""
     _add_user(engine, check_account_email(STAGING_ID))
-    with pytest.raises(GrantRefusedError, match="at most 230 characters"):
-        _grant(engine, reason="r" * 200, approval="a" * 31)
-    _grant(engine, reason="r" * 200, approval="a" * 30)
+    with pytest.raises(GrantRefusedError, match="at most 243 characters"):
+        _grant(engine, reason="r" * 244)
+    _grant(engine, reason="r" * 243, approval="a" * 1000)
+    [row] = _ledger(engine)
+    assert len(row.description) == 255
+
+
+@pytest.mark.parametrize(
+    ("url", "staging_database"),
+    [
+        (STAGING_RDS_URL, True),
+        ("postgresql://app@SKYNET-STAGING.abc123.us-east-2.rds.amazonaws.com/skynet_pr_107", True),
+        (PRODUCTION_RDS_URL, False),
+        ("postgresql://app@skynet-staging-copy.abc123.us-east-2.rds.amazonaws.com/skynet", False),
+        ("postgresql://app@localhost:5432/skynet", False),
+        ("postgresql:///skynet", False),
+        ("sqlite:///:memory:", True),
+    ],
+)
+def test_staging_database_host_check(monkeypatch: pytest.MonkeyPatch, url: str, staging_database: bool) -> None:
+    """Only the staging RDS host passes; production, copies, tunnels and socket URLs do not."""
+    monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", "skynet-staging")
+    assert billing_service._is_staging_database(make_url(url)) is staging_database
+
+
+@pytest.mark.parametrize("environment", ["staging", "skynet-pr-107"])
+def test_refuses_the_production_database_even_with_a_staging_environment(
+    monkeypatch: pytest.MonkeyPatch, environment: str
+) -> None:
+    """An overridden ``APP_ENVIRONMENT`` cannot grant against the production RDS host."""
+    monkeypatch.setattr(settings, "app_environment", environment)
+    monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", "skynet-staging")
+    production = create_engine(PRODUCTION_RDS_URL)
+    with pytest.raises(GrantRefusedError, match="not the staging database") as refused:
+        _grant(production, PREVIEW_ID if environment != "staging" else STAGING_ID)
+    assert "skynet-production" not in str(refused.value)
+    production.dispose()
+
+
+def test_a_billing_row_created_concurrently_is_reread_once(
+    engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another writer creates the billing row before the grant inserts it; the grant retries and adds to it."""
+    email = check_account_email(STAGING_ID)
+    _add_user(engine, email)
+    original = billing_service.local_customer_id
+    calls: list[str] = []
+
+    def create_row_first(username: str) -> str:
+        """Commit the billing row from another connection, as a racing writer would.
+
+        Args:
+            username: Account the grant is about to create a billing row for.
+
+        Returns:
+            The local customer id, as the real function returns it.
+        """
+        calls.append(username)
+        if len(calls) == 1:
+            now = datetime.now(UTC)
+            with engine.begin() as connection:
+                connection.execute(
+                    BillingCustomerModel.__table__.insert().values(
+                        username=username,
+                        stripe_customer_id=original(username),
+                        balance_cents=100,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+        return original(username)
+
+    monkeypatch.setattr(billing_service, "local_customer_id", create_row_first)
+    result = _grant(engine, cents=500)
+    assert (result.credited_cents, result.balance_cents, result.replayed) == (500, 600, False)
+    assert _balance(engine, email) == 600
+    assert len(_ledger(engine)) == 1
+    assert len(calls) == 1
+
+
+def test_refuses_after_a_second_conflict(engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two conflicts in a row refuse the grant instead of retrying forever."""
+    _add_user(engine, check_account_email(STAGING_ID))
+    attempts: list[int] = []
+
+    def always_conflict(*_args: object) -> None:
+        """Fail as a concurrent insert would.
+
+        Args:
+            *_args: The grant arguments, ignored.
+
+        Raises:
+            IntegrityError: Always.
+        """
+        attempts.append(1)
+        raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+
+    monkeypatch.setattr(StripeBillingService, "_apply_test_grant", always_conflict)
+    with pytest.raises(GrantRefusedError, match="conflicted twice"):
+        _grant(engine)
+    assert len(attempts) == 2
+    assert _ledger(engine) == []
+
+
+def test_advisory_lock_blocks_a_grant_on_another_account_until_the_first_commits(
+    pg_engine: Engine, staging: None
+) -> None:
+    """While one grant holds the lock, a grant on another account waits, then sees the total and hits the cap."""
+    first, second = STAGING_ID, "staging-other-check-0f0f0f"
+    _add_user(pg_engine, check_account_email(first))
+    _add_user(pg_engine, check_account_email(second))
+    with ThreadPoolExecutor(max_workers=1) as pool, Session(pg_engine) as holder:
+        holder.execute(select(func.pg_advisory_xact_lock(billing_service._TEST_GRANT_LOCK_ID)))
+        holder.add(
+            WalletLedgerModel(
+                username=check_account_email(first),
+                delta_cents=3000,
+                kind="grant",
+                settlement_key="testgrant:held",
+                created_at=datetime.now(UTC),
+            )
+        )
+        holder.flush()
+        waiting = pool.submit(_grant, pg_engine, second, 3000, "second")
+        deadline = time.monotonic() + 10
+        while not _advisory_lock_waiters(pg_engine):
+            assert not waiting.done(), "the second grant finished without waiting for the lock"
+            assert time.monotonic() < deadline, "the second grant never waited for the lock"
+            time.sleep(0.05)
+        assert not waiting.done()
+        holder.commit()
+        with pytest.raises(GrantRefusedError, match=r"\$30\.00 already granted"):
+            waiting.result(timeout=10)
+    assert _balance(pg_engine, check_account_email(second)) is None
+    assert [row.settlement_key for row in _ledger(pg_engine)] == ["testgrant:held"]
+
+
+def _advisory_lock_waiters(engine: Engine) -> int:
+    """Count sessions in this database that wait for the grant's advisory lock.
+
+    Args:
+        engine: PostgreSQL engine on the test database.
+
+    Returns:
+        The number of ungranted advisory locks on the grant lock id.
+    """
+    with engine.connect() as connection:
+        return int(
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "
+                    "AND objid = :lock_id AND database = (SELECT oid FROM pg_database "
+                    "WHERE datname = current_database())"
+                ),
+                {"lock_id": billing_service._TEST_GRANT_LOCK_ID},
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -348,3 +555,30 @@ def test_cli_reports_a_refusal_with_exit_code_2(
     assert main(argv) == 2
     assert "refused" in capsys.readouterr().err
     assert _ledger(engine) == []
+
+
+def test_cli_hides_a_database_error_and_exits_1(
+    engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A database error prints only its class, never its text, which can hold the email."""
+    email = check_account_email(STAGING_ID)
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        """Fail as a lost database connection would, with the email in the error text.
+
+        Args:
+            *_args: The grant arguments, ignored.
+            **_kwargs: The grant keyword arguments, ignored.
+
+        Raises:
+            OperationalError: Always.
+        """
+        raise OperationalError(f"SELECT users WHERE email = '{email}'", {"email": email}, Exception(email))
+
+    monkeypatch.setattr("core.billing.grant_test_credit._engine", lambda: engine)
+    monkeypatch.setattr(StripeBillingService, "grant_test_credit", fail)
+    argv = ["--account-id", STAGING_ID, "--dollars", "1", "--reason", "r", "--approval", "a", "--idempotency-key", "k"]
+    assert main(argv) == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "Grant failed: OperationalError"
+    assert "@" not in captured.err + captured.out

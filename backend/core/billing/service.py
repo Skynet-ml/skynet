@@ -25,7 +25,8 @@ from datetime import UTC, datetime, time
 from typing import Any
 
 import stripe
-from sqlalchemy import func, select
+from sqlalchemy import URL, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..api.alerts import send_alert
@@ -165,10 +166,18 @@ TEST_GRANT_KEY_PREFIX = "testgrant:"
 _TEST_ACCOUNT_ID = re.compile(r"(staging|pr-\d+)-[a-z0-9-]+-[0-9a-f]{6}")
 _SETTLEMENT_KEY_MAX_LENGTH = 64
 _LEDGER_DESCRIPTION_MAX_LENGTH = 255
+# The account sees the ledger description in its wallet history, so it holds
+# only this label and the reason. The approval text goes to the operator log.
+_TEST_GRANT_LABEL = "Test grant: "
 # Arbitrary constant id for ``pg_advisory_xact_lock``: it serializes grants on
 # different accounts, which the per-account row lock cannot, so two grants
 # cannot both read a total under the cap and together pass it.
 _TEST_GRANT_LOCK_ID = 573_000_573
+# Terraform names each RDS instance ``skynet-<environment>``, and its address
+# starts with that identifier. Staging and every PR preview use the staging
+# instance, so a grant refuses any other PostgreSQL host even when
+# ``APP_ENVIRONMENT`` is overridden. A tunnel to ``localhost`` is refused too.
+_STAGING_DB_HOST_LABEL = "skynet-staging"
 
 
 class GrantRefusedError(Exception):
@@ -212,6 +221,23 @@ def _test_grant_target() -> str | None:
         return "staging"
     match = re.search(r"-(pr-\d+)$", settings.app_environment)
     return match.group(1) if match else None
+
+
+def _is_staging_database(url: URL) -> bool:
+    """Return whether ``url`` points at the staging database instance.
+
+    SQLite passes, because no deployed environment uses it, so it can never be
+    the production database.
+
+    Args:
+        url: The engine URL. Only its backend and host are read.
+
+    Returns:
+        ``True`` for SQLite or a host whose first label is the staging RDS identifier.
+    """
+    if url.get_backend_name() == "sqlite":
+        return True
+    return (url.host or "").lower().split(".")[0] == _STAGING_DB_HOST_LABEL
 
 
 def _is_test_account(username: str, target: str) -> bool:
@@ -1574,30 +1600,35 @@ class StripeBillingService:
 
         This is the only allowed way to fund a check account. It raises the
         purchased balance and writes one ``grant`` ledger row in one
-        transaction. The row records the reason and the approval text, and its
-        ``settlement_key`` (``testgrant:<key>``) makes a retry a no-op. A grant
-        row carries no payment intent and no ``topup`` kind, so revenue reports
-        and refund clawbacks never count it. Unlike a top-up, a grant does not
-        repay ``debt_cents``.
+        transaction. The row's description holds the reason, which the account
+        sees in its wallet history. The approval text goes only to the operator
+        log, so the account never sees it. The row's ``settlement_key``
+        (``testgrant:<key>``) makes a retry a no-op. A grant row carries no
+        payment intent and no ``topup`` kind, so revenue reports and refund
+        clawbacks never count it. Unlike a top-up, a grant does not repay
+        ``debt_cents``.
 
         Args:
             username: Test-account email, as built by :func:`check_account_email`.
             cents: Amount to credit, in cents.
             reason: Why the check needs the money.
-            approval: The approval text for this grant, recorded as given.
+            approval: The approval text for this grant, logged as given.
             idempotency_key: Caller key; a repeated key credits nothing.
 
         Returns:
             The credited cents, the new balance, and whether the key was a replay.
 
         Raises:
-            GrantRefusedError: The environment, account, amount, text, key or
-                daily cap fails a guard, or the key was used for a different
-                account or amount. Nothing is written.
+            GrantRefusedError: The environment, database, account, amount, text,
+                key or daily cap fails a guard, the key was used for a different
+                account or amount, or concurrent writes conflicted twice.
+                Nothing is written.
         """
         target = _test_grant_target()
         if target is None:
             raise GrantRefusedError("APP_ENVIRONMENT must be staging or a PR preview environment")
+        if not _is_staging_database(self._engine.url):
+            raise GrantRefusedError("the database is not the staging database")
         reason, approval, idempotency_key = reason.strip(), approval.strip(), idempotency_key.strip()
         if not approval:
             raise GrantRefusedError("approval text is required")
@@ -1610,15 +1641,47 @@ class StripeBillingService:
             raise GrantRefusedError(
                 f"idempotency key must be 1-{_SETTLEMENT_KEY_MAX_LENGTH - len(TEST_GRANT_KEY_PREFIX)} characters"
             )
-        description = f"Test grant: {reason} | approval: {approval}"
+        description = f"{_TEST_GRANT_LABEL}{reason}"
         if len(description) > _LEDGER_DESCRIPTION_MAX_LENGTH:
-            text_limit = _LEDGER_DESCRIPTION_MAX_LENGTH - len("Test grant:  | approval: ")
-            raise GrantRefusedError(
-                f"reason and approval are too long: together they may have at most {text_limit} characters"
-            )
+            text_limit = _LEDGER_DESCRIPTION_MAX_LENGTH - len(_TEST_GRANT_LABEL)
+            raise GrantRefusedError(f"reason is too long: it may have at most {text_limit} characters")
         username = username.strip().lower()
         if not _is_test_account(username, target):
             raise GrantRefusedError(f"the account is not a {target} test account from the test-account tool")
+        try:
+            result = self._apply_test_grant(username, cents, description, settlement_key)
+        except IntegrityError:
+            # Another writer created this account's billing row (or used this
+            # key) between our read and our insert. The transaction rolled back
+            # whole, so one fresh attempt reads that row and stays correct.
+            try:
+                result = self._apply_test_grant(username, cents, description, settlement_key)
+            except IntegrityError as error:
+                raise GrantRefusedError("concurrent writes conflicted twice; run the grant again") from error
+        if not result.replayed:
+            logger.warning(
+                "Test credit grant: %s cents, key %s, reason %r, approval %r", cents, settlement_key, reason, approval
+            )
+        return result
+
+    def _apply_test_grant(self, username: str, cents: int, description: str, settlement_key: str) -> GrantResult:
+        """Write one checked test grant in one transaction, or replay its key.
+
+        Args:
+            username: Checked test-account email.
+            cents: Positive amount to credit, in cents.
+            description: Ledger description the account sees.
+            settlement_key: ``testgrant:<key>`` for the ledger row.
+
+        Returns:
+            The credited cents, the new balance, and whether the key was a replay.
+
+        Raises:
+            GrantRefusedError: The account has no user row, the key was used for
+                a different account or amount, or the daily cap would pass.
+            IntegrityError: A concurrent writer inserted the same billing row or
+                key first; nothing from this attempt is kept.
+        """
         now = datetime.now(UTC)
         with Session(self._engine) as session:
             if session.get_bind().dialect.name == "postgresql":
@@ -1674,9 +1737,6 @@ class StripeBillingService:
             )
             balance = int(customer.balance_cents)
             session.commit()
-        logger.warning(
-            "Test credit grant: %s cents, key %s, reason %r, approval %r", cents, settlement_key, reason, approval
-        )
         return GrantResult(credited_cents=cents, balance_cents=balance, replayed=False)
 
     def handle_webhook(self, payload: bytes, sig_header: str | None) -> None:

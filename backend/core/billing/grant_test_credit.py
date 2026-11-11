@@ -24,6 +24,7 @@ from sqlalchemy import Engine, create_engine
 from core.billing.service import GrantRefusedError, StripeBillingService, check_account_email
 from core.config import settings
 
+EXIT_FAILED = 1
 EXIT_REFUSED = 2
 
 
@@ -90,7 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv: Arguments without the program name; ``None`` reads ``sys.argv``.
 
     Returns:
-        ``0`` on a grant or a replay, ``2`` on a refusal.
+        ``0`` on a grant or a replay, ``2`` on a refusal, ``1`` on any other error.
     """
     args = _parser().parse_args(argv)
     try:
@@ -105,6 +106,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except GrantRefusedError as error:
         print(f"Grant refused: {error}", file=sys.stderr)
         return EXIT_REFUSED
+    except Exception as error:
+        # A database error's text and traceback can hold the account email or
+        # the SQL parameters, and the task log keeps them. Print only the class.
+        print(f"Grant failed: {type(error).__name__}", file=sys.stderr)
+        return EXIT_FAILED
     verb = "Already granted" if result.replayed else "Granted"
     print(
         f"{verb} ${result.credited_cents / 100:.2f} to {args.account_id}. "
