@@ -1,4 +1,4 @@
-"""Tests for the OpenHands harness: registry entry, pinned install, gateway-only launch, protected env and output parsing."""
+"""Tests for the OpenHands harness: registry entry, pinned install, gateway-only launch, task file, final state, protected env and output parsing."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pytest
 
 from core.models.blackbox import BLACKBOX_HARNESS_OPENHANDS, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
+from ..agent_eval import candidate_files
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
@@ -25,10 +26,27 @@ _RECORDED_STDOUT = (
     "\n12:00:01 - openhands:INFO: main.py:120 - Agent Controller Initialized\n"
     "AgentFinishAction: I fixed the off-by-one error in solution.py. The answer is 42.\n\n"
 )
-# Stand-in for the ``openhands`` wrapper: it records each call, writes to both
-# streams, and checks that its per-run root exists.
+# Stand-in for the ``openhands`` wrapper: it records each call, copies the
+# ``-f`` task file, writes to both streams, checks that its per-run root
+# exists, and writes the session events headless OpenHands 1.6.0 stores:
+# ``<FILE_STORE_PATH>/sessions/<sid>/events/<id>.json``, one ``json.dumps``
+# line each. Event 10 sorts before event 2 as text, so the run must order
+# the events by id. Event 11 quotes a state event inside a message, which
+# must not count as one.
 _FAKE_OPENHANDS = """#!/bin/sh
 log="$FAKE_LOG"
+prev=''
+for a in "$@"; do
+  if [ "$prev" = -f ]; then cp "$a" "$FAKE_TASK_COPY"; fi
+  prev="$a"
+done
+if [ -n "$FAKE_STATE" ]; then
+  events="$FILE_STORE_PATH/sessions/sid1/events"
+  mkdir -p "$events"
+  printf '%s\\n' '{"id": 11, "source": "agent", "action": "message", "args": {"content": "\\"observation\\": \\"agent_state_changed\\", \\"agent_state\\": \\"finished\\""}}' > "$events/11.json"
+  printf '%s\\n' '{"id": 2, "source": "environment", "observation": "agent_state_changed", "content": "", "extras": {"agent_state": "running", "reason": ""}}' > "$events/2.json"
+  printf '%s\\n' '{"id": 10, "source": "environment", "observation": "agent_state_changed", "content": "", "extras": {"agent_state": "'"$FAKE_STATE"'", "reason": ""}}' > "$events/10.json"
+fi
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
   printf 'LLM_BASE_URL=%s\\n' "$LLM_BASE_URL"
@@ -38,6 +56,7 @@ log="$FAKE_LOG"
   printf 'SANDBOX_VOLUMES=%s\\n' "$SANDBOX_VOLUMES"
   printf 'FILE_STORE_PATH=%s\\n' "$FILE_STORE_PATH"
   printf 'CACHE_DIR=%s\\n' "$CACHE_DIR"
+  printf 'HOME=%s\\n' "$HOME"
   printf 'ROOT=%s\\n' "$OPENHANDS_ROOT"
   if [ -d "$OPENHANDS_ROOT" ]; then echo 'ROOT_DIR=yes'; else echo 'ROOT_DIR=no'; fi
 } >> "$log"
@@ -70,7 +89,13 @@ def _target() -> BlackboxTarget:
 
 
 def _run_with_fake_openhands(
-    tmp_path: Path, *, protected: bool, fake_exit: int = 0, reasoning_effort: str | None = None
+    tmp_path: Path,
+    *,
+    protected: bool,
+    fake_exit: int = 0,
+    reasoning_effort: str | None = None,
+    candidate: str | dict[str, str] | None = None,
+    final_state: str = "finished",
 ) -> tuple[str, str, Path, int]:
     """Run the built OpenHands command in a scratch workspace against a fake ``openhands`` binary.
 
@@ -82,14 +107,20 @@ def _run_with_fake_openhands(
         protected: Build the protected launch, with the sandbox-local relay set.
         fake_exit: Exit status the fake binary returns.
         reasoning_effort: The user's effort for the model, or ``None``.
+        candidate: A version to write into the workspace as the evaluator
+            maps it onto files, or ``None`` for no candidate files.
+        final_state: The agent state of the fake's last state event, or an
+            empty string for no session events. The task file the fake
+            receives is copied to ``tmp_path / "task.md"``.
 
     Returns:
-        The command's stdout, the fake binary's call log, the workspace, and
-        the command's exit status.
+        The command's stdout, the fake binary's call log, the
+        workspace, and the command's exit status.
     """
     launch = build_launch(_target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort)
     workspace = tmp_path / "work"
-    for name, content in launch.files.items():
+    files = {**launch.files, **(candidate_files(candidate, launch.instructions_file) if candidate is not None else {})}
+    for name, content in files.items():
         path = workspace / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
@@ -110,6 +141,8 @@ def _run_with_fake_openhands(
         "FAKE_LOG": str(log),
         "FAKE_ANSWER": _RECORDED_STDOUT,
         "FAKE_EXIT": str(fake_exit),
+        "FAKE_STATE": final_state,
+        "FAKE_TASK_COPY": str(tmp_path / "task.md"),
     }
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
@@ -213,7 +246,7 @@ def test_install_writes_a_wrapper_that_passes_the_pin_check(tmp_path: Path) -> N
     assert f"pip install --python {venv}/bin/python openhands-ai==1.6.0" in calls
     assert "curl" not in calls
     wrapper = tmp_path / "home" / ".local" / "bin" / "openhands"
-    assert wrapper.read_text() == f'#!/bin/sh\nexec "{venv}/bin/python" -m openhands.core.main "$@"\n'
+    assert wrapper.read_text() == f'#!/bin/sh\nexec "{venv}/bin/python" -P -m openhands.core.main "$@"\n'
 
 
 def test_failed_package_install_fails_the_install(tmp_path: Path) -> None:
@@ -237,13 +270,14 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert (
         f'LLM_BASE_URL="$(cat {OPENHANDS_BASE_URL_FILE})" LLM_API_KEY="$APP_API_KEY" LLM_MODEL="openai/$APP_MODEL" '
     ) in launch.run_command
-    assert 'openhands --config-file "$OPENHANDS_ROOT/config.toml" -f "$APP_PROMPT_FILE" 2>&1 < /dev/null' in (
+    assert 'openhands --config-file "$OPENHANDS_ROOT/config.toml" -f "$OPENHANDS_ROOT/task.md" 2>&1 < /dev/null' in (
         launch.run_command
     )
     assert "--task" not in launch.run_command
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert launch.env["RUNTIME"] == "local"
     assert launch.env["AGENT_ENABLE_PROMPT_EXTENSIONS"] == "true"
+    assert launch.env["AGENT_ENABLE_MCP"] == "false"
     assert launch.env["AGENT_ENABLE_BROWSING"] == "false"
     assert launch.env["ENABLE_BROWSER"] == "false"
     assert "LLM_REASONING_EFFORT" not in launch.env
@@ -272,6 +306,8 @@ def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() ->
         assert launch.env[name] == ""
     assert launch.env["LITELLM_LOCAL_MODEL_COST_MAP"] == "True"
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
+    assert launch.env["AGENT_ENABLE_MCP"] == "false"
+    assert launch.env["AGENT_ENABLE_BROWSING"] == "false"
 
 
 def test_protected_run_points_openhands_at_the_relay_and_returns_its_log(tmp_path: Path) -> None:
@@ -281,7 +317,7 @@ def test_protected_run_points_openhands_at_the_relay_and_returns_its_log(tmp_pat
     assert code == 0
     (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
     root = _logged(calls, "ROOT")
-    assert run == f"ARGS [--config-file] [{root}/config.toml] [-f] [task/PROMPT.md]"
+    assert run == f"ARGS [--config-file] [{root}/config.toml] [-f] [{root}/task.md]"
     assert _logged(calls, "LLM_BASE_URL") == _RELAY
     assert _GATEWAY.url not in calls
     assert _logged(calls, "LLM_API_KEY") == "gateway-token"
@@ -290,6 +326,7 @@ def test_protected_run_points_openhands_at_the_relay_and_returns_its_log(tmp_pat
     assert _logged(calls, "SANDBOX_VOLUMES") == f"{workspace}:/workspace:rw"
     assert _logged(calls, "FILE_STORE_PATH") == f"{root}/store"
     assert _logged(calls, "CACHE_DIR") == f"{root}/cache"
+    assert _logged(calls, "HOME") == f"{root}/home"
     assert _logged(calls, "ROOT_DIR") == "yes"
     assert not Path(root).exists()
     assert not Path(root).is_relative_to(workspace.resolve())
@@ -313,6 +350,46 @@ def test_run_removes_the_root_and_keeps_the_exit_status_and_output(tmp_path: Pat
     assert stdout == _RECORDED_STDOUT
     assert _logged(calls, "ROOT_DIR") == "yes"
     assert not Path(_logged(calls, "ROOT")).exists()
+
+
+@pytest.mark.parametrize(
+    "candidate", ["Always run the tests first.", {"AGENTS.md": "Always run the tests first.", "notes.md": "x"}]
+)
+def test_candidate_agents_md_leads_the_task_file_openhands_reads(
+    tmp_path: Path, candidate: str | dict[str, str]
+) -> None:
+    """Put the candidate's ``AGENTS.md`` in front of the prompt in the ``-f`` task file, for text and file-set versions."""
+    _, calls, workspace, code = _run_with_fake_openhands(tmp_path, protected=False, candidate=candidate)
+
+    assert code == 0
+    assert (workspace / "AGENTS.md").read_text() == "Always run the tests first."
+    task = (tmp_path / "task.md").read_text()
+    assert task == "Always run the tests first.\n\nFix `solution.py` and say $(echo done)."
+    assert f"[-f] [{_logged(calls, 'ROOT')}/task.md]" in calls
+
+
+def test_task_file_is_the_prompt_without_an_agents_md(tmp_path: Path) -> None:
+    """Pass the prompt unchanged when the workspace has no ``AGENTS.md``."""
+    _, _, _, code = _run_with_fake_openhands(tmp_path, protected=False)
+
+    assert code == 0
+    assert (tmp_path / "task.md").read_text() == "Fix `solution.py` and say $(echo done)."
+
+
+@pytest.mark.parametrize("final_state", ["error", "stopped", "rejected", ""])
+def test_clean_exit_without_a_finished_agent_fails_the_run(tmp_path: Path, final_state: str) -> None:
+    """Exit 1 when OpenHands exits 0 but its last state event is not ``finished``, or there is none."""
+    stdout, _, _, code = _run_with_fake_openhands(tmp_path, protected=False, final_state=final_state)
+
+    assert code == 1
+    assert stdout == _RECORDED_STDOUT
+
+
+def test_failed_exit_keeps_its_status_whatever_the_final_state(tmp_path: Path) -> None:
+    """Keep OpenHands' own non-zero exit status, even when the agent finished."""
+    _, _, _, code = _run_with_fake_openhands(tmp_path, protected=False, fake_exit=3, final_state="finished")
+
+    assert code == 3
 
 
 def test_recorded_output_parses_to_the_log_and_the_payload_names_the_plain_parser() -> None:

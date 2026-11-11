@@ -5,9 +5,14 @@ virtualenv install of ``openhands-ai`` with ``SKIP_VSCODE_BUILD``, the local
 runtime settings (``RUNTIME=local``, ``SKIP_DEPENDENCY_CHECK``, no browser)
 and the headless ``python -m openhands.core.main`` one-shot with
 ``SANDBOX_VOLUMES`` on the working directory and logs on stdout. Harbor passes
-the task inline with ``--task`` and turns prompt extensions off; Skynet passes
-the prompt file with ``-f``, keeps prompt extensions on so the candidate's
-``AGENTS.md`` loads, and points LiteLLM at the model gateway.
+the task inline with ``--task`` and turns prompt extensions off. Skynet passes
+a task file with ``-f`` and points LiteLLM at the model gateway.
+
+Headless OpenHands 1.6.0 never reads the workspace ``AGENTS.md``: it loads
+repo instructions only from ``.openhands_instructions`` and
+``.openhands/microagents``, and it resolves the ``AGENTS.md`` next to those
+microagents in a temporary copy. So the run puts the candidate's
+``AGENTS.md`` in front of the prompt in the task file that ``-f`` names.
 """
 
 from __future__ import annotations
@@ -30,10 +35,24 @@ OPENHANDS_BASE_URL_FILE = ".app/openhands/base_url"
 # OpenHands runs on LiteLLM, which routes an ``openai/`` model to the
 # OpenAI-style base URL; the gateway receives the id after the prefix.
 _LITELLM_PREFIX = "openai/"
+_INSTRUCTIONS_FILE = "AGENTS.md"
+# Prints the ``agent_state`` of the last ``agent_state_changed`` event in the
+# session's event files (``<id>.json``, one ``json.dumps`` line each).
+# ``openhands.core.main`` exits 0 when the agent ends in ``error``, so the run
+# reads the final state here instead.
+_FINAL_STATE_AWK = (
+    "BEGIN { last = -1 } "
+    'FNR == 1 { id = FILENAME; sub(/.*\\//, "", id); sub(/\\.json$/, "", id); id += 0 } '
+    '/"observation": "agent_state_changed"/ && id > last && match($0, /"agent_state": "[a-z_]+"/) '
+    "{ state = substr($0, RSTART + 16, RLENGTH - 17); last = id } "
+    "END { print state }"
+)
 _LOCAL_BIN = '"$HOME/.local/bin"'
 # The wheel ships no console script, so the install writes this wrapper; the
 # shared pin check then runs ``openhands --version`` like any other harness.
-_WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -m openhands.core.main "$@"\\n'
+# ``-P`` keeps the workspace off ``sys.path``: ``python -m`` puts the working
+# directory first, so a candidate's ``json.py`` would shadow the stdlib.
+_WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
 # LiteLLM's ``reasoning_effort`` takes only low, medium and high here; other
 # Skynet effort names map to the closest one, and unknown names set nothing.
 _REASONING_LEVELS = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
@@ -107,12 +126,22 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     """Build the launch for OpenHands (``openhands``, pinned to :data:`OPENHANDS_VERSION`).
 
     Each run gets a fresh OpenHands root outside the workspace for the file
-    store, the cache and an empty config file, so session files never land in
-    the files the run hands back and a ``config.toml`` in the workspace cannot
-    change the model route. An EXIT trap removes the root when the run's shell
-    exits and keeps the agent's exit status. OpenHands writes its log, with the
-    agent's messages, to stderr, so the run merges it into stdout for the
-    bridge, as Harbor does.
+    store, the cache, the task file, ``HOME`` and an empty config file. So
+    session files never land in the files the run hands back, a
+    ``config.toml`` in the workspace cannot change the model route, and
+    OpenHands loads no user microagents, ``AGENTS.md`` or ``config.toml``
+    from the real ``HOME``. The agent's shell also sees that ``HOME``. An
+    EXIT trap removes the root when the run's shell exits and keeps the exit
+    status.
+
+    The task file holds the workspace ``AGENTS.md``, when there is one, then
+    the prompt. OpenHands writes its log, with the agent's messages, to
+    stderr, so the run merges it into stdout for the bridge, as Harbor does.
+    A failed OpenHands exit status stays. After a clean exit, the run exits 1
+    unless the agent's final state is ``finished``: an error, a stop, or the
+    500-iteration default limit fails the run instead of scoring the log as
+    an answer. The run timeout and the run budget bound a run, as for the
+    other harnesses, so the run keeps the OpenHands iteration default.
 
     Args:
         model: Target model id.
@@ -126,12 +155,18 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
         'export OPENHANDS_ROOT="$(mktemp -d)" && '
         "trap 'rm -rf \"$OPENHANDS_ROOT\"' EXIT && "
+        'mkdir "$OPENHANDS_ROOT/home" && '
+        f"{{ if [ -f {_INSTRUCTIONS_FILE} ]; then cat {_INSTRUCTIONS_FILE}; printf '\\n\\n'; fi; "
+        f'cat "${ENV_PROMPT_FILE}"; }} > "$OPENHANDS_ROOT/task.md" && '
         f'LLM_BASE_URL="$(cat {OPENHANDS_BASE_URL_FILE})" LLM_API_KEY="${ENV_API_KEY}" '
         f'LLM_MODEL="{_LITELLM_PREFIX}${ENV_MODEL}" '
         'FILE_STORE_PATH="$OPENHANDS_ROOT/store" CACHE_DIR="$OPENHANDS_ROOT/cache" '
-        'SANDBOX_VOLUMES="$PWD:/workspace:rw" USER="$(id -un)" '
+        'SANDBOX_VOLUMES="$PWD:/workspace:rw" USER="$(id -un)" HOME="$OPENHANDS_ROOT/home" '
         'openhands --config-file "$OPENHANDS_ROOT/config.toml" '
-        f'-f "${ENV_PROMPT_FILE}" 2>&1 < /dev/null'
+        '-f "$OPENHANDS_ROOT/task.md" 2>&1 < /dev/null; '
+        'status=$?; [ "$status" -eq 0 ] || exit "$status"; '
+        f'state="$(awk \'{_FINAL_STATE_AWK}\' "$OPENHANDS_ROOT"/store/sessions/*/events/*.json 2>/dev/null)"; '
+        '[ "$state" = finished ] || { echo "OpenHands ended in agent state ${state:-unknown}, not finished." >&2; exit 1; }'
     )
     env = _base_env(model, gateway)
     env.update(
@@ -147,14 +182,18 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
             "AGENT_ENABLE_BROWSING": "false",
             "ENABLE_BROWSER": "false",
             "SANDBOX_ENABLE_AUTO_LINT": "true",
-            # Harbor turns prompt extensions off. Skynet keeps them on: they
-            # load the workspace ``AGENTS.md``, which holds the candidate.
+            # Harbor turns prompt extensions off. Skynet keeps the OpenHands
+            # default, so a candidate's ``.openhands/microagents`` and
+            # ``.openhands_instructions`` load. They do not load ``AGENTS.md``.
             "AGENT_ENABLE_PROMPT_EXTENSIONS": "true",
+            # The default MCP setup adds OpenHands' own MCP server and tools,
+            # which the harness does not configure or route.
+            "AGENT_ENABLE_MCP": "false",
             **_openhands_reasoning(reasoning_effort),
         }
     )
     return HarnessLaunch(
-        instructions_file="AGENTS.md",
+        instructions_file=_INSTRUCTIONS_FILE,
         install_command=_openhands_install(),
         files={OPENHANDS_BASE_URL_FILE: gateway.url},
         run_command=run_command,
