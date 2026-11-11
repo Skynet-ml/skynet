@@ -123,9 +123,7 @@ you return.
   Put placeholders such as ``${{MAPS_KEY}}`` only in ``headers``. Never write a secret value
   into any file, even when the user pastes one; write the placeholder and tell
   the user to add the secret to the run. Name every secret the run needs in
-  ``summary``, so the user can add it before the run. Give the
-  whole ``[run]`` section in ``summary``, so the setup assistant shows it to
-  the user. With no ``[run]``, nothing runs and the metric judges only the
+  ``summary``, so the user can add it before the run. With no ``[run]``, nothing runs and the metric judges only the
   checkout.
   Never put rule text in optimize.toml. When the user states the run's
   intent, write it in a markdown file, for example ``docs/intent.md``, and
@@ -134,8 +132,7 @@ you return.
   them in a markdown file, for example ``docs/rules.md``, one top-level
   ``- `` bullet for each rule, and set ``illegal = "docs/rules.md"`` in
   ``[proposer]``. {APP_NAME} protects both files, so no version can change
-  them. Give each file's contents and the optimize.toml lines in
-  ``summary``.
+  them. Give each file's contents in ``summary``.
   When the metric needs cases, write them in a JSONL file, for example
   ``data/cases.jsonl``, one ``{{"input": ..., "expected": ...}}`` object on
   each line (``expected`` is optional), and set
@@ -143,13 +140,13 @@ you return.
   user's data. {APP_NAME} hides the file from the agent and the candidate:
   the candidate gets only each case's ``input``, and the metric gets the
   whole case. When the metric needs no cases, such as a speed metric or a
-  metric that reads a test report, write no ``[data]`` section. Give the
-  ``[data]`` lines in ``summary``.
+  metric that reads a test report, write no ``[data]`` section.
   Read the files that show how the project runs and how it is judged (the
   entry point, its tests, the code the task names) with ``read_repo_file``
   and ``list_repo_folder`` before you write. Use only paths and commands
   that the files you read confirm.
-* ``optimize_toml`` is the whole optimize.toml at the repository root;
+* Repository run only: ``optimize_toml`` is the whole optimize.toml at the
+  repository root; for any other run, return it empty.
   ``context`` holds the current file, so start from it. {APP_NAME} checks
   it with its parser, which stops at the first error and refuses any
   section or key it does not know ("... is not a supported setting"). Use
@@ -204,9 +201,8 @@ class WorkspaceCoderSig(dspy.Signature):
     metric_code: str = dspy.OutputField(desc="The whole metric.py; empty to leave it unchanged.")
     optimize_toml: str = dspy.OutputField(desc="The whole optimize.toml; empty to leave it unchanged.")
     summary: str = dspy.OutputField(
-        desc="One or two sentences on what the code does and why, then the optimize.toml [run] section when"
-        " the metric needs one, any instructions or rule file, and the [data] cases file, with the optimize.toml"
-        " lines that name each file."
+        desc="One or two sentences on what the code does and why, then the contents of each .mcp.json,"
+        " instructions or rule file the run needs, and every secret it needs. optimize.toml comes back on its own."
     )
     open_questions: list[str] = dspy.OutputField(desc="Questions only the user can answer; empty when none.")
 
@@ -330,6 +326,8 @@ def run_coding_agent(
     for field in CODE_FIELDS:
         code = str(getattr(prediction, field, "") or "")
         if is_repo and field == "run_code":
+            continue
+        if not is_repo and field == "optimize_toml":
             continue
         if code.strip() and code != context.get(field):
             patch[field] = code

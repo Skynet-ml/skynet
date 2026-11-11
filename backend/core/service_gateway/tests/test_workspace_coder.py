@@ -455,19 +455,40 @@ def test_coding_agent_reports_the_rate_limit_not_a_private_repository(monkeypatc
     assert linked_reason == "GitHub's rate limit is reached. Try again later."
 
 
+def _schema_bullets() -> dict[str, str]:
+    """Split the prompt's optimize.toml schema block into its bullets.
+
+    Returns:
+        Each bullet's text by the table it starts with, such as ``[run]``; ``top`` for the top-level keys.
+    """
+    prompt = workspace_coder.CODER_PROMPT
+    block = prompt[prompt.index("Use\n  only this schema.") : prompt.index("The errors you must avoid most")]
+    bullets: dict[str, str] = {}
+    for bullet in block.split("\n  - ")[1:]:
+        text = " ".join(bullet.split())
+        name = "top" if text.startswith("Top level") else text[2 : text.index("``", 2)]
+        bullets[name] = text
+    return bullets
+
+
 def test_coder_prompt_names_every_optimize_toml_section_and_key() -> None:
-    """The coding agent sees the parser's whole schema, so it writes only keys the parser accepts (SKY-184)."""
-    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+    """Each schema bullet lists the keys the parser accepts for its table (SKY-184)."""
+    bullets = _schema_bullets()
 
     for section, keys in repo_constraints._SECTIONS.items():
-        assert f"``[{section}]``" in prompt
-        for key in keys:
-            assert f"``{key}``" in prompt, (section, key)
-    for key in repo_constraints._TARGET_KEYS:
-        assert f"``{key}``" in prompt, key
-    assert "``[target.<name>]``" in prompt
-    assert "``[services.<name>]``" in prompt
-    assert "``version = 1``" in prompt
+        role_keys = repo_constraints._ROLE_KEYS if section == "proposer" else set()
+        for key in keys - role_keys:
+            assert f"``{key}``" in bullets[f"[{section}]"], (section, key)
+    for key in repo_constraints._ROLE_KEYS:
+        assert f"``{key}``" in bullets["[proposer]"], key
+    for key in repo_constraints._TARGET_KEYS - repo_constraints._ROLE_KEYS:
+        assert f"``{key}``" in bullets["[target.<name>]"], key
+    assert "the role keys" in bullets["[target.<name>]"]
+    assert "``url``" in bullets["[services.<name>]"]
+    assert "``headers``" in bullets["[services.<name>]"]
+    assert "``version = 1``" in bullets["top"]
+    assert "``instructions" in bullets["top"]
+    assert len(bullets) == len(repo_constraints._SECTIONS) + len(repo_constraints._NAMED_SECTIONS) + 1
 
 
 def test_coder_prompt_example_is_a_valid_optimize_toml() -> None:
@@ -546,3 +567,11 @@ def test_coding_agent_leaves_an_unchanged_optimize_toml_out_of_the_patch() -> No
 
     assert "optimize_toml" in workspace_coder.CONTEXT_FIELDS
     assert result["wizard_state"] == {"metric_code": _SCORER}
+
+
+def test_coding_agent_writes_no_optimize_toml_for_a_dspy_program() -> None:
+    """Only a repository run has an optimize.toml, so another run's file stays out of the patch."""
+    result = _run_coder(workspace_coder.OPTIMIZE_TOML_EXAMPLE, {"artifact_kind": "dspy_program"})
+
+    assert result["wizard_state"] == {"metric_code": _SCORER}
+    assert "optimize_toml_error" not in result

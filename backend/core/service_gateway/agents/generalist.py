@@ -1886,9 +1886,10 @@ def coding_agent_tools(
             name=CODING_AGENT_TOOL,
             desc=(
                 "Hand the screen's code to the workspace coding agent. It gets the run's setup and, for a "
-                "repository run with GitHub linked, reads the repository. It writes the code and optimize.toml "
-                "into the editor and returns its summary, the files it read, its open questions and the "
-                "parser's optimize_toml_error when the file is not valid. Do not write the same code again "
+                "repository run with GitHub linked, reads the repository. It writes the code into the editor, "
+                "returns optimize.toml for a repository run in its wizard_state, and returns its summary, the "
+                "files it read, its open questions and the parser's optimize_toml_error when that file is not "
+                "valid. Do not write the same code again "
                 "with update_wizard_state."
             ),
             arg_desc={
