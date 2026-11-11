@@ -32,25 +32,48 @@ QWEN_CODE_BASE_URL_FILE = ".app/qwen/base_url"
 # ``modelFallbacks`` and agent model settings each pick an entry too, and
 # ``buildAgentContentGeneratorConfig`` sends that entry's ``envKey`` value (the
 # gateway token) to its ``baseUrl``. The run copies this file into its temp
-# folder and loads the copy as the system scope, the only scope with model
-# providers: the run moves the workspace settings aside (see
+# folder and loads the copy as the system scope. At startup it is the only
+# scope with model providers: the run moves the workspace settings aside (see
 # :data:`_WORKSPACE_QWEN_FILES`) and the user scope is the empty temp home. So
-# every provider entry is at the gateway URL. Its ``model.name`` and
+# every provider entry is at the gateway URL. Qwen Code also watches the user
+# and workspace settings files during a run and reloads ``modelProviders``
+# when they change, so the system scope pins every key that the reload can
+# route (see :data:`_QWEN_CODE_PROTOCOLS`). Its ``model.name`` and
 # ``model.baseUrl`` pick the gateway entry for the main model
 # (``resolveCliGenerationConfig``). The blank helper models fall back to the
 # main model, so no helper model can name another entry. The file holds the
 # gateway URL as text, like the base URL file, so a protected run's relay
 # rewrite reaches it and both base URLs stay the same.
 QWEN_CODE_SETTINGS_FILE = ".app/qwen/settings.json"
+# Qwen Code 0.27.2's ``AuthType`` values. ``registerModelProvidersHotReload``
+# reloads the merged ``modelProviders`` with the startup ``providerProtocol``
+# map, so a reload can register entries only under these keys; the registry
+# skips any other key. The system scope merges last and its arrays replace
+# the lower scopes' arrays, so the system settings set each key: the gateway
+# entry for ``openai`` and no entries for the others.
+_QWEN_CODE_PROTOCOLS = (
+    "openai",
+    "openai-responses",
+    "qwen-oauth",
+    "qwen-subscription",
+    "gemini",
+    "vertex-ai",
+    "anthropic",
+)
 # The candidate repo's Qwen Code files that can add a model provider or pick a
-# model. Qwen Code 0.27.2 has no flag that skips workspace settings and keeps
-# ``--yolo``: an untrusted folder forces the ``default`` approval mode, and
-# ``--bare`` also drops the system settings and the AGENTS.md context. So the
-# run moves these paths into :data:`_STASH_DIR` before it starts Qwen Code,
-# and an EXIT trap moves them back. A timeout kills the shell with SIGKILL, so
-# the trap does not run; the stash then stays, and the next run moves it back
-# before it stashes again. A file the agent writes at one of these paths
-# during the run is replaced by the original. The other ``.qwen`` files
+# model. Qwen Code 0.27.2 has no flag that skips workspace settings, or turns
+# off the settings watcher, and keeps ``--yolo`` and the system settings: an
+# untrusted folder forces the ``default`` approval mode, ``--bare`` drops the
+# system settings and the AGENTS.md context, and ``tools.executionSandbox``
+# is Linux-only and confines the shell. So the run moves these paths into
+# :data:`_STASH_DIR` before it starts Qwen Code, and an EXIT trap moves them
+# back. A timeout kills the shell with SIGKILL, so the trap does not run; the
+# stash then stays, and the next run moves it back before it stashes again.
+# The agent can still write ``.qwen/settings.json`` during the run, and the
+# trap's restore also writes it. Qwen Code then reloads the provider and
+# helper model settings; the system scope pins those, so a reload cannot add
+# a provider outside the gateway. When the stash holds an original, the
+# restore replaces the agent's file with it. The other ``.qwen`` files
 # (``.env``, commands, skills, QWEN.md) stay in place.
 _WORKSPACE_QWEN_FILES = ("settings.json", "agents")
 # A fixed folder in the workspace, so a stash survives a killed run and each
@@ -58,6 +81,10 @@ _WORKSPACE_QWEN_FILES = ("settings.json", "agents")
 # of the version patch. A version reset (``git clean -fdx``) removes it, but
 # the reset also brings back the committed ``.qwen`` files.
 _STASH_DIR = ".skynet-qwen-stash"
+# The first line of the stash's ``.gitignore``. A run restores and removes
+# only a folder with this mark, so a candidate repo's own file or folder at
+# :data:`_STASH_DIR` stops the run and stays.
+_STASH_MARK = "# Skynet Qwen Code stash"
 # Qwen Code's own ``model.reasoningEffort`` values (``normalizeReasoningEffort``
 # plus ``none``); Skynet sends no effort for any other name.
 _QWEN_CODE_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
@@ -80,9 +107,11 @@ def _qwen_code_settings(base_url: str, reasoning_effort: str | None) -> str:
     # write a migrated copy back to the file.
     # Empty helper models fall back to the main model, and ``inherit`` gives
     # the Explore agent the main model. They also win over a user scope value.
+    providers: dict[str, list[dict[str, str]]] = {protocol: [] for protocol in _QWEN_CODE_PROTOCOLS}
+    providers["openai"] = [{"id": f"${{{ENV_MODEL}}}", "baseUrl": base_url, "envKey": "OPENAI_API_KEY"}]
     settings = {
         "$version": 4,
-        "modelProviders": {"openai": [{"id": f"${{{ENV_MODEL}}}", "baseUrl": base_url, "envKey": "OPENAI_API_KEY"}]},
+        "modelProviders": providers,
         "providerProtocol": {"openai": "openai"},
         "model": model,
         "fastModel": "",
@@ -128,7 +157,9 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     Each run gets a fresh ``QWEN_HOME`` outside the workspace, so the settings,
     chat history and installation id never land in the files the run hands
     back. The run first puts back a stash that a killed run left, then moves
-    the workspace :data:`_WORKSPACE_QWEN_FILES` into :data:`_STASH_DIR`. An
+    the workspace :data:`_WORKSPACE_QWEN_FILES` into :data:`_STASH_DIR`. It
+    stops before Qwen Code starts if :data:`_STASH_DIR` exists and is not a
+    Skynet stash. An
     EXIT trap puts them back, removes the temp folder and keeps Qwen Code's
     exit status. A restore that fails keeps the stash and says so on stderr.
     The plain text that ``--prompt`` mode prints is the answer.
@@ -173,10 +204,17 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     # function definition.
     run_command = (
         f"{restore} && "
-        f"if [ -e {_STASH_DIR} ] || [ -L {_STASH_DIR} ]; then _qwen_restore || exit 1; fi && "
+        # A kill between ``mkdir`` and the mark leaves an empty folder, and
+        # git keeps no empty folder, so an empty one is never the repo's.
+        f"{{ rmdir {_STASH_DIR} 2>/dev/null || true; }} && "
+        f"if [ -e {_STASH_DIR} ] || [ -L {_STASH_DIR} ]; then "
+        f'if [ -d {_STASH_DIR} ] && [ ! -L {_STASH_DIR} ] && [ "$(head -n 1 {_STASH_DIR}/.gitignore 2>/dev/null)" = "{_STASH_MARK}" ]; '
+        "then _qwen_restore || exit 1; else "
+        f'echo "Skynet stopped: {_STASH_DIR} is in the repo and is not a Skynet stash. Remove or rename it." >&2; exit 1; '
+        "fi; fi && "
         'export QWEN_HOME="$(mktemp -d)" && '
         "trap '_qwen_restore; rm -rf \"$QWEN_HOME\"' EXIT && "
-        f"mkdir {_STASH_DIR} && printf '*\\n' > {_STASH_DIR}/.gitignore && "
+        f"mkdir {_STASH_DIR} && printf '{_STASH_MARK}\\n*\\n' > {_STASH_DIR}/.gitignore && "
         f"for f in {files}; do "
         f'if [ -e ".qwen/$f" ] || [ -L ".qwen/$f" ]; then mv ".qwen/$f" "{_STASH_DIR}/$f" || exit 1; fi; '
         "done && "
