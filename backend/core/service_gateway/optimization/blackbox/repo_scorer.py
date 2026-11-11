@@ -38,10 +38,12 @@ gets it (E56). The version's ``[run]`` entry reaches its own services the same
 way, checked against the ``[run]`` role. The scorer box never holds those
 secrets. Catalog connectors do not go through the relay.
 
-A stage whose own MCP file holds a server gets a relay of its own in each
-stage box: the stage's runner serves the same loopback proxy, the parent
-reads its frames from that box's output, checks each one against the
-``[target.<name>]`` role only, and writes the answer back into that box.
+A stage whose own MCP file holds a server gets a relay of its own for each
+call in its stage box: the call's runner serves the same loopback proxy on a
+free port of its own, with its own copy of the MCP file, so calls run in
+parallel (SKY-624). The parent reads the call's frames from its output under
+the call's own prefix, checks each one against the ``[target.<name>]`` role
+only, and writes the answer into the call's own folder in that box.
 """
 
 from __future__ import annotations
@@ -105,9 +107,9 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 _ISOLATED = "-I -B -u"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
-# A stage box's relay answers, relative to the box; one folder for every call,
-# since each answer file carries its own request's id.
-_STAGE_RELAY_DIR = f"{STAGE_DIR}/relay"
+# Each stage call's folder is ``<this>/<call id>``, relative to the box; a
+# call with a relay gets its answers in a ``relay`` folder inside it.
+_STAGE_CALLS_DIR = f"{STAGE_DIR}/calls"
 # The box's working directory, seen from the stage tree that each call runs in.
 _FROM_STAGE_TREE = "../.."
 # The exit code of a stage box from the stage snapshot that has no tree, so
@@ -749,8 +751,8 @@ class RepoScorer:
         """Build the relay for one call, checking service and MCP requests against one role.
 
         Each stage box whose stage has MCP servers gets its own relay for the
-        ``target.<name>`` role. All are built here, in the scorer thread, so
-        each records the scorer's candidate.
+        ``target.<name>`` role, which makes one relay for each call. All are
+        built here, in the scorer thread, so each records the scorer's candidate.
 
         Args:
             boxes: Each stage's open box, by stage name.
@@ -762,7 +764,7 @@ class RepoScorer:
             The relay for this call.
         """
         stage_relays = {
-            name: self._relay({}, _STAGE_RELAY_DIR, role=f"{_TARGET_ROLE}{name}", box=stage_box)
+            name: self._relay({}, _STAGE_CALLS_DIR, role=f"{_TARGET_ROLE}{name}", box=stage_box)
             for name, stage_box in boxes.items()
             if self._mcp_role(f"{_TARGET_ROLE}{name}").mcp_servers
         }
@@ -1081,12 +1083,13 @@ class _StageRelay:
     """Answer one scorer call's ``call(name, input)``, service and MCP frames.
 
     Calls to one stage run in parallel, each in its own process and folder,
-    up to ``max_concurrency`` at a time (E34). Service requests run in their
-    own pool with the same limit. A stage whose MCP file holds a server runs one
-    call at a time instead (SKY-611). An MCP GET event stream passes on in its own
-    thread, up to ``_MCP_STREAMS`` at a time, so it never holds that pool.
-    A stage with MCP servers has its own relay, which reads the frames of
-    each call in that stage's box and answers them there.
+    up to ``max_concurrency`` at a time (E34), also when the stage's MCP file
+    holds a server (SKY-624). Service requests run in their own pool with the
+    same limit. An MCP GET event stream passes on in its own thread, up to
+    ``_MCP_STREAMS`` at a time, so it never holds that pool. A stage with MCP
+    servers has its own relay, which makes one relay for each call with
+    :meth:`for_call`: that relay reads the call's frames under its own prefix
+    and answers them in the call's own folder in the stage box.
     """
 
     def __init__(
@@ -1140,6 +1143,7 @@ class _StageRelay:
                 box; ``None`` answers in the scorer box through ``workspace``.
             stage_relays: Each stage's own relay, by stage name, for the
                 stages whose MCP file holds a server; this relay closes them.
+                For a stage relay, ``response_dir`` is the stage's calls folder.
         """
         self._boxes = dict(boxes)
         self._box = box
@@ -1150,14 +1154,13 @@ class _StageRelay:
         # A fresh nonce for each evaluation: version code cannot forge a frame
         # it never saw, and a frame from an earlier call never matches.
         self._prefix = f"APP_STAGE_{uuid.uuid4().hex}:"
-        # A stage with MCP runs one call at a time: its own MCP file names
-        # RELAY_PORT, and only one runner in the box can serve that port.
+        self._max_concurrency = max_concurrency
         self._pools = {
-            name: ThreadPoolExecutor(
-                max_workers=1 if name in self._stage_relays else max_concurrency, thread_name_prefix=f"stage-{name}"
-            )
+            name: ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix=f"stage-{name}")
             for name in self._boxes
         }
+        # The relay of each stage call that for_call made, so close and first_control reach them.
+        self._calls: list[_StageRelay] = []
         self._refusals = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stage-refusal")
         self._declared = dict(services or {})
         self._services = {name: spec for name, spec in self._declared.items() if spec.url is not None}
@@ -1212,7 +1215,9 @@ class _StageRelay:
             ``{"prefix", "response_dir", "names", "services", "mcp", "mcp_file", "port"}``
             for the call's input; ``services`` and ``mcp`` list what the role
             may call, by name only. ``mcp_file`` is the role's own
-            ``.mcp.json``, which staging rewrote to loopback urls on ``port``.
+            ``.mcp.json``, which staging rewrote to loopback urls on
+            ``RELAY_PORT``. In a stage box ``port`` is ``0``: each call's
+            runner takes a free port and writes its own copy of that file.
         """
         return {
             "prefix": self._prefix,
@@ -1221,21 +1226,59 @@ class _StageRelay:
             "services": [name for name in self._services if name in self._allowed],
             "mcp": [server.name for server in self._mcp.mcp_servers],
             "mcp_file": self._mcp.mcp,
-            "port": runner.RELAY_PORT,
+            # Parallel calls share a stage box, so no call may hold the fixed port (SKY-624).
+            "port": runner.RELAY_PORT if self._box is None else 0,
         }
 
+    def for_call(self, identity: str) -> _StageRelay:
+        """Make the relay of one stage call, with its own prefix and answer folder in the stage box.
+
+        The new relay keeps this relay's role, MCP file, secrets, budget and
+        already bound recorder, so a call on a pool thread still records the
+        scorer's candidate.
+
+        Args:
+            identity: The stage call's id, also its folder name.
+
+        Returns:
+            The call's relay; the caller closes it when the call ends.
+        """
+        relay = _StageRelay(
+            {},
+            self._stages,
+            response_dir=f"{self._response_dir}/{identity}/relay",
+            max_concurrency=self._max_concurrency,
+            env=self._env,
+            workspace=self._workspace,
+            services=self._declared,
+            role=self._role,
+            allowed=self._allowed,
+            mcp=self._mcp,
+            secrets=self._secrets,
+            bindings=self._bindings,
+            secret_hosts=self._secret_hosts,
+            allowed_hosts=self._allowed_hosts,
+            budget=self._budget,
+            recorder=self._recorder,
+            box=self._box,
+        )
+        with self._answer_lock:
+            self._calls.append(relay)
+        return relay
+
     def first_control(self) -> dict[str, str] | None:
-        """Return this relay's first budget stop, or else the first one a stage's own relay kept.
+        """Return this relay's first budget stop, or else the first one a stage's or a call's relay kept.
 
         A stage's MCP stream can end in a budget stop after its call returned,
-        so the evaluation reads the stage relays too when it ends.
+        so the evaluation reads the stage and call relays too when it ends.
 
         Returns:
             The control answer, or ``None`` when no relayed call hit a stop.
         """
         with self._answer_lock:
             control = self.control
-        return control or next((relay.control for relay in self._stage_relays.values() if relay.control), None)
+            relays = [*self._stage_relays.values(), *self._calls]
+        return control or next((found for relay in relays if (found := relay.first_control())), None)
 
     def output(self, stream: str, data: str, *, source: str = "") -> None:
         """Take the scorer's output as it streams and hand each call frame to its stage's pool.
@@ -1671,10 +1714,9 @@ class _StageRelay:
         self._answer(identity, response)
 
     def _run(self, name: str, identity: str, value: Any) -> dict[str, Any]:
-        """Run one stage call in the stage's box.
+        """Run one stage call in the stage's box, with a relay of its own when the stage has MCP servers.
 
-        A Python entry runs through the runner's stage mode; a command reads
-        the input on stdin and writes its JSON output on stdout.
+        The call's relay closes when the call ends.
 
         Args:
             name: The stage.
@@ -1685,9 +1727,32 @@ class _StageRelay:
             ``{"output": ...}``, or ``{"error": ...}`` when the stage failed,
             passed its timeout, or returned no valid JSON.
         """
+        stage_relay = self._stage_relays.get(name)
+        relay = stage_relay.for_call(identity) if stage_relay is not None else None
+        try:
+            return self._run_in_box(name, identity, value, relay)
+        finally:
+            if relay is not None:
+                relay.close()
+
+    def _run_in_box(self, name: str, identity: str, value: Any, relay: _StageRelay | None) -> dict[str, Any]:
+        """Run one stage call in the stage's box, behind the call's own relay when the stage has one.
+
+        A Python entry runs through the runner's stage mode; a command reads
+        the input on stdin and writes its JSON output on stdout.
+
+        Args:
+            name: The stage.
+            identity: The call's id, also its folder name.
+            value: The JSON input.
+            relay: The call's relay, or ``None`` when the stage's MCP file holds no server.
+
+        Returns:
+            ``{"output": ...}``, or ``{"error": ...}`` when the stage failed,
+            passed its timeout, or returned no valid JSON.
+        """
         stage, box = self._stages[name], self._boxes[name]
-        relay = self._stage_relays.get(name)
-        folder = f"{STAGE_DIR}/calls/{identity}"
+        folder = f"{_STAGE_CALLS_DIR}/{identity}"
         files = {f"{folder}/{runner.INPUT_FILE}": json.dumps(value)}
         if relay is not None:
             files[f"{folder}/{runner.STAGE_RELAY_FILE}"] = json.dumps(relay.config(_FROM_STAGE_TREE))
@@ -1765,7 +1830,8 @@ class _StageRelay:
         """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
         with self._answer_lock:
             self._closed = True
-        for relay in self._stage_relays.values():
+            relays = [*self._stage_relays.values(), *self._calls]
+        for relay in relays:
             relay.close()
         for pool in (*self._pools.values(), self._refusals, self._service_pool, self._stream_pool):
             pool.shutdown(wait=False, cancel_futures=True)
