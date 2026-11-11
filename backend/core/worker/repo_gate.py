@@ -10,6 +10,7 @@ the same failures the run would stop on.
 
 from __future__ import annotations
 
+import ast
 import posixpath
 import tarfile
 import tomllib
@@ -48,8 +49,9 @@ Place = Literal["local", "cloud"]
 # (SKY-611). The proposer's box reaches the services ``[proposer] services``
 # lists only through the parent's relay, which checks the role and fills each
 # secret by host (SKY-612). The scorer runs each ``[run]`` entry under a
-# supervisor that stops it at its timeout, before the metric files go back in
-# (SKY-375); only the gate still refused it (SKY-635). No judge reads the
+# supervisor that stops it at its timeout (SKY-375); only the gate still
+# refused it (SKY-635). The candidate box and the metric box are separate, so
+# each opens with its own role's hosts and vCPUs (SKY-398). No judge reads the
 # ``[run] illegal`` rules yet, so that key still stops the run.
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
 _PROPOSER_NETWORK = frozenset({"proposer.network"})
@@ -59,6 +61,7 @@ _STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run
 _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "target.illegal"})
 _TARGET_MCP = frozenset({"target.mcp"})
 _RUN_ENTRY = frozenset({"run.entry", "run.timeout"})
+_ROLE_BOXES = frozenset({"run.network", "run.vcpus", "metric.network", "metric.vcpus"})
 _ENFORCED_EVERYWHERE = (
     _METRIC_HIDING
     | _PROPOSER_NETWORK
@@ -68,6 +71,7 @@ _ENFORCED_EVERYWHERE = (
     | _TARGET_STAGES
     | _TARGET_MCP
     | _RUN_ENTRY
+    | _ROLE_BOXES
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
@@ -329,6 +333,89 @@ def check_hidden(
     return list(failures.values())
 
 
+def metric_import_warnings(archive: Path, metric_files: Collection[str]) -> list[str]:
+    """List each repository module that a metric file imports.
+
+    The metric box holds only the metric files, never the repository tree
+    (SKY-398), so such an import fails when the metric runs. A module counts
+    as repository code when the tree holds it beside the importing file, at
+    the root or under ``src/``, and no metric file holds it. The scan reads
+    the source only; it never runs it.
+
+    Args:
+        archive: The full tree that ``stage_repository`` fetched.
+        metric_files: The ``[metric] files`` paths: files or folders.
+
+    Returns:
+        One warning for each metric file and module, which names the module
+        and the fix: move the check into a ``[run]`` entry.
+    """
+    roots = [posixpath.normpath(path) for path in metric_files]
+    with tarfile.open(archive) as packed:
+        members = {posixpath.normpath(member.name): member for member in packed.getmembers()}
+        sources = {
+            name: packed.extractfile(member)
+            for name, member in members.items()
+            if member.isfile() and name.endswith(".py") and inside(name, roots)
+        }
+        texts = {name: handle.read() for name, handle in sources.items() if handle is not None}
+    folders = {posixpath.dirname(name) for name in members} | set(members)
+    warnings: list[str] = []
+    for path, text in sorted(texts.items()):
+        try:
+            tree = ast.parse(text, filename=path)
+        except (SyntaxError, ValueError):
+            continue
+        here = posixpath.dirname(path)
+        for module in dict.fromkeys(_imported_modules(tree, here)):
+            if module.startswith("/"):
+                places = [module[1:]]
+            else:
+                places = [posixpath.join(base, module.replace(".", "/")) for base in (here, "", "src")]
+            found = [
+                candidate
+                for place in places
+                for candidate in (f"{posixpath.normpath(place)}.py", posixpath.normpath(place))
+                if candidate in members or candidate in folders
+            ]
+            if found and not any(inside(candidate, roots) for candidate in found):
+                warnings.append(
+                    f"The metric file {path} imports the repository module '{module.lstrip('/')}'. The metric box"
+                    " holds only the metric files, so this import fails when the metric runs. Move the check"
+                    " that needs this module into a [run] entry, and let the metric judge the entry's output."
+                )
+    return warnings
+
+
+def _imported_modules(tree: ast.AST, here: str) -> list[str]:
+    """List the modules a parsed file imports, by dotted name.
+
+    Args:
+        tree: The parsed metric file.
+        here: The file's folder in the tree, which a relative import starts from.
+
+    Returns:
+        Each module's dotted name; a relative import becomes ``/<folder path>``.
+    """
+    modules: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if not node.level:
+                modules.append(node.module or "")
+                continue
+            base = here
+            for _ in range(node.level - 1):
+                base = posixpath.dirname(base)
+            folder = posixpath.join(base, (node.module or "").replace(".", "/"))
+            # ``from . import name`` may name a module, not only a value.
+            names = [posixpath.join(folder, alias.name) for alias in node.names] if not node.module else [folder]
+            modules += ["/" + posixpath.normpath(name) for name in names]
+    # A relative import above the tree's root names nothing in the repository.
+    return [module for module in modules if module and not module.startswith(("/..", "/."))]
+
+
 def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -> list[tuple[str, str]]:
     """List the environment settings the file writes, as ``(kind, label)`` pairs.
 
@@ -363,8 +450,9 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         if key in stages[name] and not (key == "network" and stages[name][key] == [])
     ]
     keys += [("services", f"[services.{name}]") for name in services]
-    keys += [(f"run.{key}", f"[run] {key}") for key in ("entry", "timeout", "mcp", "services", "illegal") if key in run]
-    metric_keys = ("files", "exploits", "reference", "mcp", "services", "illegal")
+    run_keys = ("entry", "timeout", "mcp", "network", "services", "illegal", "vcpus")
+    keys += [(f"run.{key}", f"[run] {key}") for key in run_keys if key in run]
+    metric_keys = ("files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus")
     keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
     return keys
 

@@ -50,7 +50,8 @@ CATALOG = {
     ],
 }
 # The version's own code calls the route the way any OpenAI-compatible SDK would.
-APP = """
+APP = (
+    """
 import json, os, urllib.request
 
 def ask(text):
@@ -67,21 +68,30 @@ def ask(text):
     with urllib.request.urlopen(request) as response:
         return json.load(response)["choices"][0]["message"]["content"]
 """
-SCORER = f"""
-import os, sys
+    f"""
 
-def score(repo_path):
-    sys.path.insert(0, os.path.join(repo_path, "src"))
-    import app
-    direct = app.ask("candidate prompt")
+def run(value):
+    leaked = any(key in item for item in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r}))
+    return {{"direct": ask("candidate prompt"), "leaked": leaked, "has_key": bool(os.environ.get("APP_API_KEY"))}}
+"""
+)
+# The metric box holds no repository file, so the version's own call runs
+# in the candidate box through the [run] entry, and the metric gets its output (SKY-398).
+SCORER = f"""
+import os
+
+def score(repo_path, case, output):
+    direct = output["direct"]
     judged = llm("judge prompt")
-    leaked = any(key in value for value in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r}))
+    leaked = output["leaked"] or any(
+        key in value for value in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r})
+    )
     return {{
         "score": 1.0 if direct == "OK" and judged == "OK" else 0.0,
         "feedback": direct + " " + judged,
         "secret": os.environ.get("API_KEY"),
         "leaked": leaked,
-        "has_key": bool(os.environ.get("APP_API_KEY")),
+        "has_key": output["has_key"] and bool(os.environ.get("APP_API_KEY")),
     }}
 """
 
@@ -166,15 +176,17 @@ def _score(
     model: dict[str, Any],
     managed_key: str,
     metric_code: str = SCORER,
+    run_entry: str | None = "src/app.py:run",
 ) -> dict[str, Any]:
-    """Scope a repository run's scorer model, then score its baseline in the parent's box.
+    """Scope a repository run's scorer model, then score its baseline in the parent's boxes.
 
     Args:
         model_gateway: The run's gateway.
         tmp_path: Scratch folder.
         model: The scorer's model configuration.
         managed_key: The platform's provider key.
-        metric_code: The scorer the box runs.
+        metric_code: The scorer the metric box runs.
+        run_entry: The ``[run]`` entry the candidate box runs, if any.
 
     Returns:
         The protected payload's scorer and the scored document.
@@ -199,6 +211,7 @@ def _score(
         metric_code,
         timeout_seconds=60,
         gateway=repo_staging._repo_model_gateway(protected["scorer"]),
+        run_entry=run_entry,
     )
     try:
         return {"scorer": protected["scorer"], "document": scorer.score("")}
@@ -301,7 +314,7 @@ def _status(path, token):
     except urllib.error.HTTPError as error:
         return error.code
 
-def score(repo_path):
+def score(repo_path, case, output):
     route = os.environ["APP_API_KEY"]
     statuses = [
         _status("/_evaluator", route),
@@ -312,7 +325,7 @@ def score(repo_path):
     return {{"score": 0.0, "feedback": json.dumps(statuses)}}
 """
     started = time.monotonic()
-    result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY, probe)
+    result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY, probe, None)
 
     assert time.monotonic() - started < 60
     statuses = json.loads(result["document"]["feedback"])

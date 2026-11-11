@@ -137,10 +137,55 @@ which holds:
 The brief names no hidden path. It says only that some files are hidden and
 that the agent cannot change them.
 
-Each version's candidate runs in a box with no network. Setup runs first
-with package-registry network only. Then the box goes offline, a probe
-confirms it, and only then does version code run. A box that stays online
-stops the run.
+## Candidate box and metric box
+
+Each box holds only the code that it needs. The run uses these boxes:
+
+- **Setup box.** It runs once, before any version. It gets the repository
+  without the metric files, runs `[setup] command` with package-registry
+  network only, and closes. The parent saves the prepared state and its
+  digest.
+- **Metric setup.** It runs once, in a separate box, only when the
+  repository has `.optimize/metric-requirements.txt`. It installs only the
+  packages in that file, with package-registry network for the install only.
+  The parent saves this second state. It holds no repository code.
+- **Candidate box.** Each evaluation opens a new one from the prepared
+  state. The parent checks the digest and lays out the version. The box
+  runs the `[run]` entry on the case's `input` and reaches only the `[run]`
+  services and MCP servers. The parent reads the output, then closes the
+  box. Every process that the version started ends with the box.
+- **Metric box.** Each evaluation opens a new one from the metric state,
+  while the candidate box runs. It holds only the metric files and the
+  scorer's runner, never the repository tree. It gets the metric files and
+  the `[run]` output only after the candidate box closed. It reaches only
+  the `[metric]` services and MCP servers.
+
+Each box reserves its own budget hold, and releases or settles it when the
+evaluation ends or fails. The relay refuses a `[metric]` call from the
+candidate box and a `[run]` call from the metric box.
+
+The metric is called as `score(repo_path, case, output)`. In the metric
+box, `repo_path` is a folder that holds only the `[metric] files`, at their
+repository paths. For example, `[metric] files = ["eval"]` puts the metric
+at `repo_path/eval/`. The folder holds no other repository file and no
+version code.
+
+`.optimize/metric-requirements.txt` lists the metric's packages, one
+requirement on each line, in the pip format (for example `numpy==2.1.0`).
+Comments and blank lines are allowed. Options such as `-r`, `-e` or
+`--index-url`, and paths or URLs, fail setup. Without the file, the metric
+box has only the image's packages.
+
+The metric cannot run version code. A check that needs the version's code
+belongs in a `[run]` entry: the entry runs the code in the candidate box, and
+the metric judges the entry's output. Setup warns when a metric file imports
+a repository module that is not a metric file. The warning names the module
+and the fix: move the check into a `[run]` entry. A repository without a
+`[run]` entry gets no version output, so its metric judges only the files it
+holds.
+
+The box user can be root. The boxes depend on the microVM boundary between
+boxes, not on file permissions inside a box.
 
 ## What is enforced
 
@@ -149,7 +194,9 @@ stops the run.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
-| `[setup] command` | Runs once on the starting commit, with package-registry network and no secrets. The box goes offline before any version runs. |
+| `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
+| `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
+| `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
 | `instructions` | Not enforced. The agent reads the file in its brief. The scorer decides the score. |
 | `[proposer] illegal` | Enforced by judge models. See "Plain-language rules" below. |
 | Rule files | The `instructions` file and every `illegal` file (in `[proposer]`, `[run]`, `[metric]` and `[target.<name>]`) are protected, so no version can change its own rules. |
@@ -195,7 +242,7 @@ stops the run.
 The setup check response includes `environment`. The run saves the same
 record under `target.repo.environment`. It holds the commit, the editable,
 protected and read-only paths, the secret names (never values), the setup
-command, the network for setup and for versions, and each role's services
+command, the network for setup, for versions (`[run]`) and for the metric, and each role's services
 and MCP servers.
 A resumed run that arrives at different rules fails instead of continuing.
 

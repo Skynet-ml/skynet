@@ -790,10 +790,11 @@ def test_metric_services_empty_list_gives_the_metric_no_services() -> None:
 @pytest.mark.parametrize(
     ("raw", "message"),
     [
-        (b'[run]\nentry = "a.py:f"\nnetwork = []\n', r"\[run\] network is not supported: .* share one box"),
-        (b'[run]\nentry = "a.py:f"\nvcpus = 2\n', r"\[run\] vcpus is not supported: .* share one box"),
-        (b"[metric]\nnetwork = []\n", r"\[metric\] network is not supported: .* share one box"),
-        (b"[metric]\nvcpus = 4\n", r"\[metric\] vcpus is not supported: .* share one box"),
+        (b'[run]\nentry = "a.py:f"\nnetwork = "a.example.com"\n', r"\[run\] network must be a list"),
+        (b'[run]\nentry = "a.py:f"\nvcpus = 3\n', r"\[run\] vcpus must be 1 or an even number"),
+        (b'[metric]\nnetwork = ["https://a.example.com/x"]\n', r"\[metric\] network entry .* must be a host"),
+        (b"[metric]\nvcpus = true\n", r"\[metric\] vcpus must be 1 or an even number"),
+        (b"[metric]\nvcpus = 34\n", r"\[metric\] vcpus must be 1 or an even number"),
         (
             b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
             r"\[run\] services names 'maps', but .* \[services\.maps\]",
@@ -807,9 +808,23 @@ def test_metric_services_empty_list_gives_the_metric_no_services() -> None:
     ],
 )
 def test_bad_run_or_metric_role_keys_fail_with_a_reason(raw: bytes, message: str) -> None:
-    """network and vcpus fail (one shared box, E37); tools points to mcp (E46); services must be declared."""
+    """A bad network or vcpus value fails; tools points to mcp (E46); services must be declared."""
     with pytest.raises(ConstraintsError, match=message):
         parse_constraints(raw)
+
+
+def test_run_and_metric_set_their_own_network_and_vcpus() -> None:
+    """[run] sizes and walls off the candidate box, [metric] the metric box (SKY-398)."""
+    raw = b'[run]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\nvcpus = 4\n[metric]\nnetwork = []\nvcpus = 1\n'
+
+    constraints = parse_constraints(raw)
+
+    assert (constraints.run_role.network, constraints.run_vcpus) == (("api.example.com",), 4)
+    assert (constraints.metric_role.network, constraints.metric_vcpus) == ((), 1)
+    assert (parse_constraints(b'[run]\nentry = "a.py:f"\n').run_vcpus, parse_constraints(b"").metric_vcpus) == (
+        None,
+        None,
+    )
 
 
 def test_an_empty_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
@@ -1591,7 +1606,8 @@ def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.
         (b"[proposer]\nnetwork = ['https://a.example.com']\n", "proposer", "network"),
         (b'[proposer]\nillegal = ["no"]\n', "proposer", "illegal"),
         (b'[proposer]\nservices = ["maps"]\n', "proposer", "services"),
-        (b"[run]\nnetwork = []\n", "run", "network"),
+        (b'[run]\nentry = "a.py:f"\nvcpus = 3\n', "run", "vcpus"),
+        (b"[metric]\nnetwork = 1\n", "metric", "network"),
         (b'[run]\nentry = "a.py:f"\ntimeout = 0\n', "run", "timeout"),
         (b"[run]\ntimeout = 5\n", "run", "entry"),
         (b"[target]\nplanner = 1\n", "target", "planner"),

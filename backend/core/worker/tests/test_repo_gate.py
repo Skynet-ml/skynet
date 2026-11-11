@@ -817,3 +817,69 @@ def test_a_proposer_mcp_file_gets_the_allowed_host_check(tmp_path: Path) -> None
 
     assert failure.code == I18nKey.REPO_GATE_SECRET_HOST_UNLISTED
     assert failure.key == "[proposer] mcp secrets"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'[run]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\n',
+        b'[run]\nentry = "a.py:f"\nvcpus = 4\n',
+        b'[metric]\nnetwork = ["judge.example.com"]\n',
+        b"[metric]\nvcpus = 2\n",
+    ],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_role_network_and_vcpus_pass_the_gate(tmp_path: Path, raw: bytes, place: str) -> None:
+    """The candidate box and the metric box each open with their own role's hosts and vCPUs (SKY-398)."""
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
+_REPO_MODULES = {
+    "src/app/__init__.py": b"",
+    "src/app/core.py": b"def run(): ...\n",
+    "helpers.py": b"def help(): ...\n",
+    "eval/util.py": b"def util(): ...\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "module"),
+    [
+        (b"from app.core import run\n", "app.core"),
+        (b"import helpers\n", "helpers"),
+        (b"from util import util\n", "util"),
+        (b"from . import util\n", "eval/util"),
+    ],
+)
+def test_a_metric_that_imports_a_repo_module_gets_a_warning(tmp_path: Path, source: bytes, module: str) -> None:
+    """The metric box holds no repo file, so setup warns and names the [run] fix (SKY-398)."""
+    archive = _archive(tmp_path, {**_REPO_MODULES, "eval/score.py": source})
+
+    [warning] = repo_gate.metric_import_warnings(archive, ["eval/score.py"])
+
+    assert "eval/score.py" in warning
+    assert f"'{module}'" in warning
+    assert "[run] entry" in warning
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"import json\nimport numpy\n",
+        b"from helper import x\n",
+        b"from . import helper\n",
+        b"this is not python (\n",
+    ],
+)
+def test_a_self_contained_metric_gets_no_warning(tmp_path: Path, source: bytes) -> None:
+    """Imports of installed packages and of other metric files are fine, and a file that does not parse is skipped."""
+    files = {**_REPO_MODULES, "eval/score.py": source, "eval/helper.py": b"x = 1\n"}
+
+    assert repo_gate.metric_import_warnings(_archive(tmp_path, files), ["eval/score.py", "eval/helper.py"]) == []
+
+
+def test_a_metric_folder_counts_as_metric_files(tmp_path: Path) -> None:
+    """A module inside a ``[metric] files`` folder goes into the metric box, so no warning names it."""
+    files = {**_REPO_MODULES, "eval/score.py": b"from util import util\n"}
+
+    assert repo_gate.metric_import_warnings(_archive(tmp_path, files), ["eval"]) == []

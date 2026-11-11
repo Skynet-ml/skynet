@@ -14,7 +14,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -564,7 +563,6 @@ def test_main_runs_the_file_contract_end_to_end(tmp_path: Path, interpreter: str
         "side_info": {"feedback": "f", "render": "data:image/png;base64,aGk="},
         "error": None,
         "usage": [],
-        "stopped": True,
     }
     assert not (call_dir / (runner.OUTPUT_FILE + ".part")).exists()
 
@@ -1189,19 +1187,14 @@ def slow(value):
 """
 
 
-def _candidate(
-    tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30, token: str | None = None
-) -> dict[str, Any]:
-    """Run the ``[run]`` supervisor once in a fresh folder, as the scorer box does.
+def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
+    """Run the ``[run]`` supervisor once in a fresh folder, as the candidate box does.
 
     Args:
         tmp_path: Scratch folder; the candidate's code lives in ``cand.py`` there.
         entry: The ``[run]`` entry.
         value: The case input.
         timeout: The run timeout.
-        token: The run's marker. Each call gets its own by default, because
-            ``stop_candidates`` kills every process with the marker, and
-            parallel tests that shared one killed each other's candidates.
 
     Returns:
         The supervisor's output document.
@@ -1213,7 +1206,6 @@ def _candidate(
         "entry": entry,
         "input": value,
         "timeout": timeout,
-        "token": token or f"tok-{uuid.uuid4().hex}",
         "stages": None,
     }
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
@@ -1231,14 +1223,13 @@ def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Pa
     assert _candidate(tmp_path, "cand.py:echo", {"a": 1}) == {
         "output": {"got": {"a": 1}},
         "error": None,
-        "stopped": True,
     }
 
 
 def test_a_command_entry_reads_stdin_and_a_nonzero_exit_is_an_output(tmp_path: Path) -> None:
     """A command gets the input as JSON on stdin; its exit code and stdout are the output, not a failure."""
     ran = _candidate(tmp_path, ["sh", "-c", "cat; echo; exit 3"], {"a": 1})
-    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None, "stopped": True}
+    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None}
 
 
 def test_a_command_stdout_is_capped(tmp_path: Path) -> None:
@@ -1265,42 +1256,25 @@ def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> 
     ran = _candidate(tmp_path, entry, timeout=1 if "timeout" in error else 30)
     assert ran["output"] is None
     assert error in ran["error"]
-    assert ran["stopped"] is True
+    assert set(ran) == {"output", "error"}
 
 
-def test_the_supervisor_stops_every_process_the_candidate_left(tmp_path: Path) -> None:
-    """A background process in its own session still stops before the metric files go in."""
-    token = f"tok-{uuid.uuid4().hex}"
-    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7, token=token)
-    assert ran == {"output": 7, "error": None, "stopped": True}
-    assert _marked(runner.candidate_processes(token), token) == set()
+def test_the_supervisor_returns_without_waiting_for_a_process_the_candidate_left(tmp_path: Path) -> None:
+    """The supervisor does not hunt the candidate's other processes: closing the candidate box ends them (SKY-398)."""
+    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
+    assert ran == {"output": 7, "error": None}
+    assert not hasattr(runner, "stop_candidates")
+    assert not hasattr(runner, "CANDIDATE_TOKEN_ENV")
 
 
-def _marked(pids: set[int], token: str) -> set[int]:
-    """Keep the processes that carry the run's marker.
-
-    On Linux ``candidate_processes`` also returns every child of the calling
-    process, which under xdist includes the shared worker's own children.
-
-    Args:
-        pids: Process ids to filter.
-        token: The run's marker.
-
-    Returns:
-        The ids whose environment holds the marker; on macOS, all of them,
-        because there the function finds processes by the marker only.
-    """
-    if not sys.platform.startswith("linux"):
-        return pids
-    marker = f"{runner.CANDIDATE_TOKEN_ENV}={token}".encode()
-    found: set[int] = set()
-    for pid in pids:
-        try:
-            if marker in Path(f"/proc/{pid}/environ").read_bytes():
-                found.add(pid)
-        except OSError:
-            continue
-    return found
+def test_a_stage_client_names_its_role_in_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each frame carries the box's role, so the parent can refuse a frame from the other box (SKY-398)."""
+    stream = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", stream)
+    client = runner.StageClient({"prefix": "@@", "response_dir": "r", "names": [], "role": "run"})
+    client._send({"kind": "stop", "role": "metric"})
+    [frame] = [line for line in stream.getvalue().splitlines() if line]
+    assert json.loads(frame.removeprefix("@@"))["role"] == "run"
 
 
 def test_accepts_output_counts_the_third_argument() -> None:

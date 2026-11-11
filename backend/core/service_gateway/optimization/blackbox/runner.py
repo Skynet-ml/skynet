@@ -27,7 +27,7 @@ OpenAI-compatible endpoint the scorer's ``llm()`` helper talks to; its
 ``api_key`` may be absent when the sandbox injects the credential at the
 network edge instead.
 
-An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services", "mcp"}``)
+An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services", "mcp", "role"}``)
 lets the scorer reach the run's ``[target.<name>]`` stages through the
 parent's relay with ``call(name, input)``. Its optional ``services`` list
 names the ``[services.<name>]`` with a url that the metric may reach: each
@@ -45,22 +45,24 @@ stage's own MCP file holds a server, the parent also writes ``relay.json``
 loopback relay, checked against the stage's own role, and a command stage
 runs as ``--stage-command <call_dir> <command> [<arg> ...]`` behind it.
 
-A repository with a ``[run]`` entry runs the candidate first, before the
-metric files are in the tree (E38). ``python3 app_runner.py --candidate
-<call_dir>`` reads ``{"entry", "input", "timeout", "token", "stages"}``,
-starts the entry in its own session with only the case's input (E42),
-stops every process it left, and writes ``{"output", "error", "stopped"}``.
+A repository with a ``[run]`` entry runs the candidate first, in its own
+candidate box (SKY-398). ``python3 app_runner.py --candidate <call_dir>``
+reads ``{"entry", "input", "timeout", "stages"}``, starts the entry in its
+own session with only the case's input (E42), and writes ``{"output",
+"error"}``. The parent then ends the box, which ends every process the
+candidate left; the metric runs in another box that never holds its code.
 A function entry (``path/file.py:function``) runs as ``--run <dir>
 <entry>`` and its output is its JSON return value; a command entry
 (``["pytest", "-q"]``) gets the input as JSON on stdin and its output is
 ``{"exit_code", "stdout"}`` (E41). The metric call then gets that output as
 ``score(repo_path, case, output)``, and may start no process of its own (E40).
+Each relay frame names the box's role (``run`` or ``metric``), and the
+parent refuses a frame whose role is not the box's own.
 """
 
 from __future__ import annotations
 
 import base64
-import ctypes
 import http.server
 import importlib.util
 import inspect
@@ -121,14 +123,8 @@ RELAY_PORT = 47_311
 CANDIDATE_FLAG = "--candidate"
 # ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
 RUN_FLAG = "--run"
-# Every candidate process inherits this marker, so the supervisor finds the ones
-# that left its process group; a process that clears its environment is still
-# found on Linux, where the supervisor adopts every orphan.
-CANDIDATE_TOKEN_ENV = "APP_CANDIDATE_TOKEN"
 RUN_DIR = "run"
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
-_STOP_ROUNDS = 100
-_PR_SET_CHILD_SUBREAPER = 36
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
     " again: run its tests through the [run] entry, and read their report in the metric (its output"
@@ -137,8 +133,6 @@ RERUN_REFUSED = (
 _PROCESS_EVENTS = frozenset(
     {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}
 )
-# The macOS sweep starts ps after the metric call; only that thread may pass the refusal hook.
-_SWEEP = threading.local()
 _STAGE_POLL_SECONDS = 0.05
 # Frames one ``log()`` event on stderr; the host turns each into a run-log line.
 EVENT_PREFIX = "APP_SCORER_EVENT "
@@ -217,9 +211,10 @@ class StageClient:
         """Bind the relay's frame prefix, response folder and stage names.
 
         Args:
-            config: ``{"prefix", "response_dir", "names", "services", "mcp"}`` from the call's input.
+            config: ``{"prefix", "response_dir", "names", "services", "mcp", "role"}`` from the call's input.
         """
         self._prefix = str(config["prefix"])
+        self._role = config.get("role")
         self._responses = Path(str(config["response_dir"]))
         self._names = tuple(str(name) for name in config.get("names") or ())
         self._lock = threading.Lock()
@@ -297,7 +292,8 @@ class StageClient:
             The message's new id.
         """
         identity = os.urandom(16).hex()
-        frame = self._prefix + json.dumps({"id": identity, **message})
+        role = {"role": self._role} if self._role else {}
+        frame = self._prefix + json.dumps({"id": identity, **message, **role})
         # The real stdout: a scorer that redirects sys.stdout must still reach the relay.
         stream = sys.__stdout__ or sys.stdout
         with self._lock:
@@ -1288,17 +1284,10 @@ def main(argv: list[str] | None = None) -> int:
         code_path = Path(__file__).resolve().with_name(CODE_FILE)
         payload["code"] = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
     refused = refuse_processes() if "output" in payload else None
-    # The metric call runs the version's code without a [run] entry, and a
-    # ctypes fork passes the audit hook. So no process it starts may outlive
-    # it to write into the prepared tree or a later checkout (E38).
-    token = os.urandom(16).hex()
-    os.environ[CANDIDATE_TOKEN_ENV] = token
-    _become_subreaper()
     result = run_call(payload)
     if refused:
         # The metric may have caught the refusal; its score still does not count.
         result.update(score=None, side_info={}, error=RERUN_REFUSED)
-    result["stopped"] = stop_candidates(token)
     _write_output(call_dir, json.dumps(result))
     return 0
 
@@ -1318,9 +1307,9 @@ def _write_output(call_dir: Path, text: str) -> None:
 def refuse_processes() -> list[bool]:
     """Refuse every process the metric starts from now on in this process (E40).
 
-    The metric files are in the tree once the candidate has stopped, so code
-    the metric starts again could read them. An audit hook stays for the
-    life of the process, so only the metric call's own process installs it.
+    The metric reads the candidate's report; it must not run the candidate
+    again. An audit hook stays for the life of the process, so only the
+    metric call's own process installs it.
 
     Returns:
         A list that gets an entry each time a process start was refused.
@@ -1337,7 +1326,7 @@ def refuse_processes() -> list[bool]:
         Raises:
             ScorerError: When the event starts a process.
         """
-        if event in _PROCESS_EVENTS and not getattr(_SWEEP, "active", False):
+        if event in _PROCESS_EVENTS:
             refused.append(True)
             raise ScorerError(RERUN_REFUSED)
 
@@ -1346,29 +1335,24 @@ def refuse_processes() -> list[bool]:
 
 
 def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
-    """Run the ``[run]`` entry on one case's input, then stop every process it started.
+    """Run the ``[run]`` entry on one case's input in the candidate box.
 
-    The metric files enter the tree only after this returns, so no process
-    the candidate left may outlive it: the supervisor kills the candidate's
-    process group, then every process that carries the run's marker or, on
-    Linux, that it adopted, until none is left.
+    A process the candidate leaves behind ends with the box, which the parent
+    closes after this returns; the metric never shares a box with it (SKY-398).
 
     Args:
-        payload: ``{"entry", "input", "timeout", "token", "stages"}``.
+        payload: ``{"entry", "input", "timeout", "stages"}``.
         call_dir: The candidate call's folder.
 
     Returns:
-        ``{"output", "error", "stopped"}``: the entry's output, why the run
-        failed, and whether every candidate process is gone.
+        ``{"output", "error"}``: the entry's output, and why the run failed.
     """
-    entry, token = payload["entry"], str(payload["token"])
+    entry = payload["entry"]
     timeout = float(payload["timeout"])
-    _become_subreaper()
     env = dict(os.environ)
     stages = payload.get("stages")
     if isinstance(stages, dict):
         env.update(_relay_env(StageClient(stages), stages))
-    env[CANDIDATE_TOKEN_ENV] = token
     run_dir = call_dir / RUN_DIR
     run_dir.mkdir(parents=True, exist_ok=True)
     body = json.dumps(payload.get("input"))
@@ -1396,7 +1380,7 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
             for reader in readers:
                 reader.start()
     except OSError as exc:
-        return {"output": None, "error": f"The command could not start: {exc}", "stopped": stop_candidates(token)}
+        return {"output": None, "error": f"The command could not start: {exc}"}
     try:
         code: int | None = child.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1404,10 +1388,9 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
         with _quiet():
             os.killpg(child.pid, signal.SIGKILL)
         child.wait()
-    stopped = stop_candidates(token, child.pid)
     for reader in readers:
         reader.join(timeout=5)
-    result: dict[str, Any] = {"output": None, "error": None, "stopped": stopped}
+    result: dict[str, Any] = {"output": None, "error": None}
     if code is None:
         result["error"] = f"timeout after {timeout:g} s"
     elif code < 0:
@@ -1487,106 +1470,6 @@ def _signal_name(number: int) -> str:
         return signal.Signals(number).name
     except ValueError:
         return str(number)
-
-
-def _become_subreaper() -> None:
-    """Adopt every orphan of the candidate on Linux, so a double fork cannot hide a process."""
-    if not sys.platform.startswith("linux"):
-        return
-    with _quiet():
-        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
-
-
-def stop_candidates(token: str, leader: int | None = None) -> bool:
-    """Kill every candidate process, then check that none is left.
-
-    Args:
-        token: The run's marker in each candidate process's environment.
-        leader: The candidate's first process, whose group goes first.
-
-    Returns:
-        Whether no candidate process is left.
-    """
-    if leader is not None:
-        with _quiet():
-            os.killpg(leader, signal.SIGKILL)
-    for _ in range(_STOP_ROUNDS):
-        _reap()
-        left = candidate_processes(token)
-        if not left:
-            return True
-        for pid in left:
-            with _quiet():
-                os.kill(pid, signal.SIGKILL)
-        time.sleep(0.02)
-    _reap()
-    return not candidate_processes(token)
-
-
-def _reap() -> None:
-    """Collect every child that has exited, the adopted ones included."""
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return
-        if pid == 0:
-            return
-
-
-def candidate_processes(token: str) -> set[int]:
-    """Find the live processes that carry the run's marker or descend from this one.
-
-    Args:
-        token: The run's marker.
-
-    Returns:
-        Their process ids; exited processes that wait to be collected are left out.
-    """
-    marker = f"{CANDIDATE_TOKEN_ENV}={token}".encode()
-    me = os.getpid()
-    parents: dict[int, int] = {}
-    found: set[int] = set()
-    proc = Path("/proc")
-    if sys.platform.startswith("linux") and proc.is_dir():
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            try:
-                fields = (entry / "stat").read_text().rpartition(")")[2].split()
-                if fields[0] == "Z":
-                    continue
-                parents[pid] = int(fields[1])
-                if marker in (entry / "environ").read_bytes():
-                    found.add(pid)
-            except (OSError, IndexError, ValueError):
-                continue
-    else:
-        # macOS: no /proc, and orphans go to launchd, so only the marker finds them.
-        # The metric call puts the marker in os.environ, and ps must not find itself.
-        env = {key: value for key, value in os.environ.items() if key != CANDIDATE_TOKEN_ENV}
-        _SWEEP.active = True
-        try:
-            listing = subprocess.run(
-                ["ps", "-axwwE", "-o", "pid=,state=,command="], capture_output=True, check=False, env=env
-            ).stdout
-        finally:
-            _SWEEP.active = False
-        for line in listing.splitlines():
-            parts = line.split(None, 2)
-            if len(parts) == 3 and not parts[1].startswith(b"Z") and marker in parts[2]:
-                found.add(int(parts[0]))
-    children: dict[int, list[int]] = {}
-    for pid, parent in parents.items():
-        children.setdefault(parent, []).append(pid)
-    queue = list(children.get(me, ()))
-    while queue:
-        pid = queue.pop()
-        found.add(pid)
-        queue.extend(children.get(pid, ()))
-    found.discard(me)
-    return found
 
 
 def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:

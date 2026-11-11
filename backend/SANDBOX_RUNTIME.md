@@ -31,6 +31,18 @@ With `APP_LOCAL_MODE=1` (the Mac app), the protected parent opens its boxes as c
 
 Known gaps against Vercel: the setup box's egress has no byte cap (Vercel's `SANDBOX_NETWORK_BYTES_CAP`), and the proxy allows port 443 only. The box and command environment reach each command over stdin, never as `docker` arguments, because the box environment can hold the gateway key. tmpfs pages count toward the container's memory limit.
 
+## Repository scoring boxes
+
+A repository run scores each version in two new boxes (SKY-398). The
+candidate box opens from the saved after-setup state and runs the `[run]`
+entry. The metric box opens from the saved metric state and holds only the
+metric files and the runner. Each box has its own `operation_key`, so each
+reserves its own hold. On Vercel the saved states are snapshots. In local
+Docker mode they are tar files that the parent keeps, because a box keeps
+`--read-only` and the parent does not use `docker commit`. `SandboxSpec`
+names the state in `snapshot_id` or `snapshot_archive`. The opener checks the
+prepared tree's digest before it lays out a version.
+
 ## Offline dependencies
 
 | Dependency | Execution identity |
