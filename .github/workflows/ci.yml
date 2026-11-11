@@ -14,8 +14,75 @@ env:
   DAGGER_VERSION: v1.0.0-beta.25
 
 jobs:
+  # A pull request runs only the areas that its files can affect. Pushes to
+  # main and staging run everything. The cross-area paths below are files that
+  # the other area's tests read (SKY-570). An unknown path runs both areas.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - name: List the changed files
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > changed.txt
+          cat changed.txt
+      - name: Select the areas to run
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          backend=false
+          frontend=false
+          if [[ "$EVENT_NAME" != pull_request ]]; then
+            backend=true
+            frontend=true
+          # The pull request files API returns at most 3000 files.
+          elif (( $(wc -l < changed.txt) >= 3000 )); then
+            backend=true
+            frontend=true
+          else
+            while IFS= read -r path; do
+              case "$path" in
+                .github/workflows/ci.yml | .dagger/* | dagger.toml | dagger.lock | i18n/* | scripts/*)
+                  backend=true; frontend=true ;;
+                backend/core/api/routers/agent_settings.py | backend/core/i18n_locales/* | \
+                backend/core/service_gateway/optimization/unified/tests/metric_model_parity.json)
+                  backend=true; frontend=true ;;
+                frontend/src/features/docs/content/* | frontend/src/features/billing/lib/*)
+                  backend=true; frontend=true ;;
+                backend/* | deploy/* | infra/* | data/*)
+                  backend=true ;;
+                frontend/*)
+                  frontend=true ;;
+                docs/* | .github/* | LICENSE)
+                  ;;
+                */*)
+                  backend=true; frontend=true ;;
+                *.md)
+                  ;;
+                *)
+                  backend=true; frontend=true ;;
+              esac
+            done < changed.txt
+          fi
+          echo "backend=$backend frontend=$frontend"
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+
   backend-core:
     name: backend · core tests (${{ matrix.shard }}/6)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -48,6 +115,8 @@ jobs:
 
   backend-gates:
     name: backend · ruff + gates
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +132,8 @@ jobs:
 
   backend-shard-coverage:
     name: backend · shard coverage
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +156,7 @@ jobs:
   backend:
     # Keep the /4 names for required checks; shard coverage uses six shards.
     name: backend · ruff + core tests (${{ matrix.shard }}/4)
-    needs: [backend-core, backend-gates, backend-shard-coverage]
+    needs: [changes, backend-core, backend-gates, backend-shard-coverage]
     if: always()
     runs-on: ubuntu-latest
     strategy:
@@ -94,11 +165,24 @@ jobs:
         shard: [0, 1, 2, 3]
     steps:
       - name: Require core shards and gates
+        id: gate
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          BACKEND_CHANGED: ${{ needs.changes.outputs.backend }}
           CORE_RESULT: ${{ needs.backend-core.result }}
           GATES_RESULT: ${{ needs.backend-gates.result }}
           COVERAGE_RESULT: ${{ needs.backend-shard-coverage.result }}
         run: |
+          if [[ "$CHANGES_RESULT" != success ]]; then
+            echo "::error::changes completed with $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$BACKEND_CHANGED" != true ]]; then
+            echo "No backend change in this pull request. The backend jobs did not run."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
           failed=0
           if [[ "$CORE_RESULT" != success ]]; then
             echo "::error::backend-core completed with $CORE_RESULT"
@@ -114,14 +198,17 @@ jobs:
           fi
           exit "$failed"
       - uses: actions/download-artifact@v4
+        if: steps.gate.outputs.run == 'true'
         with:
           pattern: dispatched-*
           path: artifacts/dispatched
       - uses: actions/download-artifact@v4
+        if: steps.gate.outputs.run == 'true'
         with:
           name: collected
           path: artifacts/collected
       - name: Verify dispatched shard coverage
+        if: steps.gate.outputs.run == 'true'
         run: |
           python3 - <<'PY'
           import os
@@ -159,9 +246,12 @@ jobs:
   # an optional SDK skip there. This job installs the provider extras and runs
   # the sandbox tests with them. The tests use fake clients only: no secrets,
   # no provider network calls. uv declares prime and e2b as conflicting extras,
-  # so prime gets its own variant.
+  # so prime gets its own variant. The steps, not the job, check for a backend
+  # change: a skipped matrix job reports one unexpanded name, and the required
+  # (main) and (prime) checks would wait forever.
   backend-sandbox-providers:
     name: backend · sandbox provider extras (${{ matrix.variant }})
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -178,17 +268,21 @@ jobs:
             installed: prime
     steps:
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.backend == 'true'
       # Same uv and Python as the Dagger backend image (uv 0.9.13, Python 3.12).
       - name: Install uv
+        if: needs.changes.outputs.backend == 'true'
         uses: astral-sh/setup-uv@v5
         with:
           version: "0.9.13"
           python-version: "3.12"
           enable-cache: true
       - name: Install the backend with the provider extras
+        if: needs.changes.outputs.backend == 'true'
         working-directory: backend
         run: uv sync --frozen --extra dev ${{ matrix.extras }}
       - name: Sandbox and provider tests
+        if: needs.changes.outputs.backend == 'true'
         working-directory: backend
         env:
           INSTALLED: ${{ matrix.installed }}
@@ -211,6 +305,8 @@ jobs:
   # image that way and import the modules that actually pull the runtime deps.
   docker-pip-path:
     name: docker · pip path
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -274,6 +370,8 @@ jobs:
 
   frontend-typecheck:
     name: frontend · typecheck
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -286,6 +384,8 @@ jobs:
 
   frontend-lint:
     name: frontend · lint
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -298,6 +398,8 @@ jobs:
 
   frontend-unit:
     name: frontend · unit
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -310,16 +412,26 @@ jobs:
 
   frontend:
     name: frontend · typecheck + lint + unit
-    needs: [frontend-typecheck, frontend-lint, frontend-unit]
+    needs: [changes, frontend-typecheck, frontend-lint, frontend-unit]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require all frontend checks
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FRONTEND_CHANGED: ${{ needs.changes.outputs.frontend }}
           TYPECHECK_RESULT: ${{ needs.frontend-typecheck.result }}
           LINT_RESULT: ${{ needs.frontend-lint.result }}
           UNIT_RESULT: ${{ needs.frontend-unit.result }}
         run: |
+          if [[ "$CHANGES_RESULT" != success ]]; then
+            echo "::error::changes completed with $CHANGES_RESULT"
+            exit 1
+          fi
+          if [[ "$FRONTEND_CHANGED" != true ]]; then
+            echo "No frontend change in this pull request. The frontend jobs did not run."
+            exit 0
+          fi
           failed=0
           if [[ "$TYPECHECK_RESULT" != success ]]; then
             echo "::error::frontend-typecheck completed with $TYPECHECK_RESULT"
