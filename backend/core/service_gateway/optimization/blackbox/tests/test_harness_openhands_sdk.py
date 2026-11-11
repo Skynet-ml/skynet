@@ -304,6 +304,51 @@ def test_supported_effort_passes_to_the_sdk_unchanged(effort: str) -> None:
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == effort
 
 
+def test_spec_declares_the_levels_the_launch_accepts() -> None:
+    """Submit and the launch check one constant, so both refuse the same levels."""
+    assert SPEC.supported_efforts == EFFORTS == ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+@pytest.mark.parametrize("effort", ["minimal", "xhigh", "max"])
+def test_runner_sends_the_effort_in_the_extra_body_for_gpt5_ids(tmp_path: Path, effort: str) -> None:
+    """The runner puts the effort in LiteLLM's extra body too, so a ``gpt-5`` id cannot lose it.
+
+    Args:
+        tmp_path: Test directory.
+        effort: A level that LiteLLM's GPT-5 config can drop.
+    """
+    launch = SPEC.launch("gpt-5.1", _GATEWAY, reasoning_effort=effort)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix the bug.\n")
+    record = tmp_path / "record.json"
+
+    result = _run_runner(
+        tmp_path, launch.files, **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    llm = json.loads(record.read_text())["llm"]
+    assert llm["reasoning_effort"] == effort
+    assert llm["litellm_extra_body"] == {"reasoning_effort": effort}
+
+
+def test_runner_sends_no_effort_without_a_choice(tmp_path: Path) -> None:
+    """Without a chosen effort the runner sets neither field, so the SDK keeps its default."""
+    launch = SPEC.launch("gpt-5.1", _GATEWAY)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix the bug.\n")
+    record = tmp_path / "record.json"
+
+    result = _run_runner(
+        tmp_path, launch.files, **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    llm = json.loads(record.read_text())["llm"]
+    assert "reasoning_effort" not in llm
+    assert "litellm_extra_body" not in llm
+
+
 @pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH", "High", " high", "off"])
 def test_unsupported_effort_is_refused(effort: str) -> None:
     """A level the SDK does not support stops the launch instead of a silent drop or remap."""
@@ -423,6 +468,7 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
         "usage_id": "agent",
         "api_mode": "chat",
         "reasoning_effort": "high",
+        "litellm_extra_body": {"reasoning_effort": "high"},
     }
     assert seen["env"] == {
         "LLM_API_KEY": _GATEWAY.api_key,

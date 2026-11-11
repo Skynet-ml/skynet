@@ -8,7 +8,7 @@ from .....models.blackbox import BLACKBOX_HARNESS_PRIME
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
 from .base import _GUARD_PI_ARG, _PROMPT_ARG, PROVIDER, GatewayConfig, HarnessLaunch, _base_env
-from .pi import _pi_models_json
+from .pi import PI_EFFORTS, _pi_models_json
 
 # Prime Agent is a Pi fork that ships as a versioned npm tarball on its own
 # release CDN (``<base>/latest.json`` names the current one), not on npm.
@@ -83,5 +83,6 @@ SPEC = register(
         version=PRIME_AGENT_VERSION,
         output_format="pi",
         position=40,
+        supported_efforts=PI_EFFORTS,
     )
 )

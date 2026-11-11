@@ -257,25 +257,30 @@ def test_version_probe_needs_no_workspace_file_and_never_downloads() -> None:
 
 @pytest.mark.parametrize(
     ("effort", "level"),
-    [
-        ("none", "MINIMAL"),
-        ("minimal", "MINIMAL"),
-        ("low", "LOW"),
-        ("medium", "MEDIUM"),
-        ("high", "HIGH"),
-        ("xhigh", "EXTRA_HIGH"),
-        ("max", "EXTRA_HIGH"),
-        ("HIGH", "HIGH"),
-    ],
+    [("minimal", "MINIMAL"), ("low", "LOW"), ("medium", "MEDIUM"), ("high", "HIGH"), ("xhigh", "EXTRA_HIGH")],
 )
-def test_reasoning_effort_maps_to_a_gemini_thinking_level(effort: str, level: str) -> None:
-    """Each Skynet effort maps to the nearest Gemini thinking level."""
+def test_supported_effort_maps_to_its_own_gemini_thinking_level(effort: str, level: str) -> None:
+    """Each declared level maps to a distinct ``ThinkingLevel`` member of google-antigravity 0.1.20."""
+    assert effort in SPEC.supported_efforts
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_THINKING_LEVEL] == level
 
 
-def test_unknown_effort_keeps_the_sdk_default() -> None:
-    """An effort the SDK has no level for sets no thinking level."""
-    assert ENV_THINKING_LEVEL not in SPEC.launch("m", _GATEWAY, reasoning_effort="turbo").env
+def test_spec_declares_one_level_per_gemini_thinking_level() -> None:
+    """The spec offers five levels, so no two Skynet levels share one Gemini level."""
+    assert SPEC.supported_efforts == ("minimal", "low", "medium", "high", "xhigh")
+
+
+@pytest.mark.parametrize("effort", ["none", "max", "HIGH", "turbo"])
+def test_unsupported_effort_is_refused_at_launch(effort: str) -> None:
+    """A level with no Gemini thinking level stops the launch instead of a silent remap or drop."""
+    with pytest.raises(ServiceError, match="does not support the effort level"):
+        SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_keeps_the_sdk_default(effort: str | None) -> None:
+    """No effort sets no thinking level, so the SDK keeps its own default."""
+    assert ENV_THINKING_LEVEL not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
 
 
 @pytest.mark.parametrize(
