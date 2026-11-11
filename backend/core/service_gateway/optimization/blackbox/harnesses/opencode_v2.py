@@ -13,6 +13,7 @@ run's relay rewrite reaches the gateway URL.
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_OPENCODE_V2
@@ -147,13 +148,22 @@ def _opencode_v2_install() -> str:
     )
 
 
-def _opencode_v2_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _opencode_v2_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for OpenCode V2 (``opencode2``, pinned to :data:`OPENCODE_V2_VERSION`).
 
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for OpenCode's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so OpenCode never holds the real url or a secret (SKY-618).
 
     Returns:
         The launch.
@@ -178,6 +188,16 @@ def _opencode_v2_launch(model: str, gateway: GatewayConfig, *, reasoning_effort:
         },
         "model": f"{PROVIDER}/{model}",
     }
+    if mcp_servers:
+        # V2 2.2.7 reads servers from ``mcp.servers`` (packages/schema/src/config/mcp.ts),
+        # not V1's flat ``mcp``. The relay needs no sign-in, so ``oauth: false``
+        # stops V2 from starting an OAuth flow when a server answers 401.
+        config["mcp"] = {
+            "servers": {
+                name: {"type": "remote", "url": f"{gateway.url}/mcp/{quote(name, safe='')}", "oauth": False}
+                for name in mcp_servers
+            }
+        }
     # ``--standalone`` runs a private server for this run instead of a shared
     # background service; ``--auto`` approves tool permissions with no prompt.
     run_command = (

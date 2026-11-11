@@ -24,6 +24,7 @@ from core.models.blackbox import (
 
 from ..harness import (
     ANSWER_FILE,
+    MCP_HARNESSES,
     PRIME_AGENT_IMAGE_KERNEL,
     PRIME_AGENT_TARBALL,
     PRIME_AGENT_VERSION,
@@ -551,11 +552,66 @@ def test_launch_payload_names_the_parser_for_every_built_in_harness(harness: str
     assert set(payload) == {"instructions_file", "run_command", "install_command", "files", "env", "output_format"}
 
 
-@pytest.mark.parametrize("harness", [spec_id for spec_id in REGISTRY if spec_id != BLACKBOX_HARNESS_CODEX])
+@pytest.mark.parametrize("harness", [spec_id for spec_id in REGISTRY if spec_id not in MCP_HARNESSES])
 def test_a_proposer_mcp_file_stops_every_other_harness_by_name(harness: str) -> None:
-    """Only Codex loads the [proposer] MCP servers, so any other harness stops before a model call (SKY-610)."""
+    """Only the MCP harnesses load the [proposer] MCP servers, so any other harness stops before a model call."""
     with pytest.raises(ServiceError, match=f"The {harness} proposer harness cannot load the \\[proposer\\] mcp"):
         build_launch(_target(harness), _GATEWAY, protected=True, mcp_servers=("search",))
+
+
+def test_the_mcp_harness_list_names_codex_opencode_opencode_v2_and_qwen_code() -> None:
+    """Name exactly the harnesses that write the relay urls into their config (SKY-618)."""
+    assert MCP_HARNESSES == ("codex", "opencode", "opencode_v2", "qwen_code")
+
+
+@pytest.mark.parametrize("harness", MCP_HARNESSES)
+def test_an_unprotected_mcp_harness_cannot_load_proposer_mcp_servers(harness: str) -> None:
+    """Without the box's proxy no request carries the relay token, so the launch stops.
+
+    Args:
+        harness: An MCP harness id.
+    """
+    with pytest.raises(ServiceError, match=f"The {harness} proposer harness"):
+        build_launch(_target(harness), _GATEWAY, mcp_servers=("search",))
+
+
+def test_opencode_lists_each_proposer_mcp_server_at_the_gateway_relay_path() -> None:
+    """Give each [proposer] server one remote entry with only a gateway relay url (SKY-618)."""
+    launch = build_launch(
+        _target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY, protected=True, mcp_servers=("search", "my tools")
+    )
+    config = json.loads(launch.files["opencode.json"])
+
+    assert config["mcp"] == {
+        "search": {"type": "remote", "url": "https://gw.example/v1/mcp/search", "enabled": True, "oauth": False},
+        "my tools": {"type": "remote", "url": "https://gw.example/v1/mcp/my%20tools", "enabled": True, "oauth": False},
+    }
+    assert _GATEWAY.api_key not in launch.files["opencode.json"]
+
+
+def test_opencode_without_proposer_mcp_servers_lists_none() -> None:
+    """Leave MCP out of the config when the proposer's file lists no server."""
+    assert "mcp" not in json.loads(build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY).files["opencode.json"])
+
+
+def test_protected_opencode_points_its_mcp_servers_at_the_box_proxy(tmp_path: Path) -> None:
+    """The relay rewrite maps each server's url to the proxy's ``/v1/mcp/<name>`` path (SKY-618)."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY, protected=True, mcp_servers=("search",))
+    (tmp_path / "opencode.json").write_text(launch.files["opencode.json"])
+    subprocess.run(
+        _with_relay_config("true", launch.files, _GATEWAY),
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
+            "APP_BUDGET_RELAY_URL": "http://127.0.0.1:3210/v1",
+        },
+        timeout=10,
+        check=True,
+    )
+
+    config = json.loads((tmp_path / "opencode.json").read_text())
+    assert config["mcp"]["search"]["url"] == "http://127.0.0.1:3210/v1/mcp/search"
 
 
 def test_a_proposer_mcp_file_stops_a_custom_or_host_harness_by_name() -> None:
@@ -568,12 +624,6 @@ def test_a_proposer_mcp_file_stops_a_custom_or_host_harness_by_name() -> None:
         build_launch(
             _target(BLACKBOX_HARNESS_CODEX), _GATEWAY, protected=True, host_cli="claude", mcp_servers=("search",)
         )
-
-
-def test_an_unprotected_codex_cannot_load_proposer_mcp_servers() -> None:
-    """Without the box's proxy no request carries the relay token, so the launch stops."""
-    with pytest.raises(ServiceError, match="The codex proposer harness"):
-        build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, mcp_servers=("search",))
 
 
 def test_protected_codex_points_its_mcp_servers_at_the_box_proxy(tmp_path: Path) -> None:
@@ -595,4 +645,4 @@ def test_protected_codex_points_its_mcp_servers_at_the_box_proxy(tmp_path: Path)
     )
 
     config = tomllib.loads(config_path.read_text())
-    assert config["mcp_servers"] == {"search": {"url": "http://127.0.0.1:3210/v1/mcp/search"}}
+    assert config["mcp_servers"]["search"]["url"] == "http://127.0.0.1:3210/v1/mcp/search"
