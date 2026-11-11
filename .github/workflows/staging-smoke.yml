@@ -100,7 +100,7 @@ jobs:
         run: |
           prs='[]'
           if [ -n "$SHA" ]; then
-            prs=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+            prs=$(gh api "repos/$REPO/commits/$SHA/pulls?per_page=100" \
               --jq "[.[] | select(.merged_at != null and .base.ref == \"staging\" and .merge_commit_sha == \"$SHA\")]")
           fi
           count=$(jq 'length' <<<"$prs")
@@ -134,6 +134,7 @@ jobs:
           import json
           import os
           import re
+          import urllib.error
           import urllib.request
 
           def gql(query, variables):
@@ -143,8 +144,22 @@ jobs:
                   headers={"Content-Type": "application/json",
                            "Authorization": os.environ["LINEAR_API_KEY"]},
               )
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  return json.load(resp).get("data") or {}
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      payload = json.load(resp)
+              except (urllib.error.URLError, ValueError) as exc:
+                  print(f"::warning::Linear API request failed: {exc}")
+                  return {}
+              for err in payload.get("errors") or []:
+                  print(f"::warning::Linear API error: {err.get('message')}")
+              return payload.get("data") or {}
+
+          # A Linear failure must not fail the job (the PR comment is the main
+          # report), but the log and the run summary must show it.
+          def warn(message):
+              print(f"::warning::{message}")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write(message + "\n")
 
           team = os.environ["LINEAR_TEAM_KEY"]
           pattern = re.compile(rf"\b{re.escape(team)}-\d+\b", re.IGNORECASE)
@@ -157,19 +172,24 @@ jobs:
           issue = gql("query($id: String!) { issue(id: $id) { id team { states { nodes { id name type } } } } }",
                       {"id": key}).get("issue")
           if not issue:
-              print(f"::warning::Linear issue {key} not found.")
+              warn(f"Linear reopen failed: issue {key} not found.")
               raise SystemExit(0)
           states = issue["team"]["states"]["nodes"]
           todo = next((s for s in states if s["name"] == "Todo"), None) \
               or next((s for s in states if s["type"] == "unstarted"), None)
+          moved = False
           if todo:
-              gql("mutation($id: String!, $s: String!) { issueUpdate(id: $id, input: {stateId: $s}) { success } }",
-                  {"id": issue["id"], "s": todo["id"]})
-          gql("mutation($id: String!, $b: String!) { commentCreate(input: {issueId: $id, body: $b}) { success } }",
-              {"id": issue["id"],
-               "b": f"{os.environ['REPORT']} after the merge. Nothing was reverted automatically; "
-                    f"the orchestrator opens a revert PR by hand. Run: {os.environ['RUN_URL']}"})
-          print(f"Reopened {key}.")
+              moved = (gql("mutation($id: String!, $s: String!) { issueUpdate(id: $id, input: {stateId: $s}) { success } }",
+                           {"id": issue["id"], "s": todo["id"]}).get("issueUpdate") or {}).get("success") is True
+          commented = (gql("mutation($id: String!, $b: String!) { commentCreate(input: {issueId: $id, body: $b}) { success } }",
+                           {"id": issue["id"],
+                            "b": f"{os.environ['REPORT']} after the merge. Nothing was reverted automatically; "
+                                 f"the orchestrator opens a revert PR by hand. Run: {os.environ['RUN_URL']}"})
+                       .get("commentCreate") or {}).get("success") is True
+          if moved and commented:
+              print(f"Reopened {key}.")
+          else:
+              warn(f"Linear reopen failed for {key}: moved to Todo={moved}, comment added={commented}.")
           PY
 
       - name: Fail the run
