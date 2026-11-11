@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} ليس {expected}. يتصل Skynet بـ gitlab.com وBitbucket Cloud فقط، وليس بالخوادم المُدارة ذاتيًا. استخدم عنوان المستودع على {expected}، أو انقل المستودع إلى {expected}.",
     "connectors.not_connected": "اربط حساب {provider} أولاً.",
     "connectors.not_found": "لم يتم العثور على هذا العنصر في {provider}، أو لا يملك حسابك إذن الوصول إليه.",
+    "connectors.rate_limited": "تم بلوغ حد الطلبات لدى {provider}. حاول مرة أخرى لاحقًا.",
     "connectors.oauth_failed": "لم تكتمل عملية تسجيل الدخول عبر {provider}. حاول مرة أخرى.",
     "connectors.oauth_not_configured": "تسجيل الدخول عبر {provider} غير مُفعّل في هذا النشر. الصق بيانات الاعتماد بدلاً من ذلك.",
     "connectors.oauth_state_invalid": "رابط تسجيل الدخول غير صالح أو منتهي الصلاحية. ابدأ من جديد.",

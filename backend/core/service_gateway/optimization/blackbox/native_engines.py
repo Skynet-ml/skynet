@@ -2359,9 +2359,14 @@ class BestValsetVersion:
     server's aggregate log, so this is the only record of what GEPA had found.
     """
 
-    def __init__(self) -> None:
-        """Start with nothing recorded."""
+    def __init__(self, server: EvalServer | None = None) -> None:
+        """Start with nothing recorded.
+
+        Args:
+            server: Evaluation server that receives each new best as an aggregate checkpoint.
+        """
         self.best: tuple[str, float] | None = None
+        self.server = server
 
     def on_valset_evaluated(self, event: dict[str, Any]) -> None:
         """Keep ``event``'s version when it covers the whole validation set and beats the best so far.
@@ -2377,6 +2382,10 @@ class BestValsetVersion:
             return
         if self.best is None or score > self.best[1]:
             self.best = (next(iter(event["candidate"].values()), ""), score)
+            # SKY-529: the runner keeps an interrupted run's incumbent only when
+            # the server logged that aggregate, and GEPA's per-case calls log none.
+            if self.server is not None:
+                self.server.log_progress(score, self.best[0])
 
 
 class GepaRepoEngine:
@@ -2414,6 +2423,7 @@ class GepaRepoEngine:
         self.max_token_cost = config.max_token_cost
         self.stop_at_score = config.stop_at_score
         self.run_dir = Path(config.run_dir or "gepa-repo-run").resolve()
+        self.tracker = BestValsetVersion()
 
     def run(self, task: Task, server: EvalServer) -> Result:
         """Run GEPA until its evaluation or proposer budget runs out.
@@ -2434,7 +2444,7 @@ class GepaRepoEngine:
         self.proposer.background = task.background
         gepa_dir = self.run_dir / "gepa"
         gepa_dir.mkdir(parents=True, exist_ok=True)
-        tracker = BestValsetVersion()
+        tracker = self.tracker = BestValsetVersion(server)
         crashed: set[str] = set()
 
         def _key(candidate: Any) -> str:
@@ -2531,6 +2541,20 @@ class GepaRepoEngine:
         return Result(
             best_candidate=fallback[0], best_score=fallback[1], total_evals=server.budget.used, metadata=metadata
         )
+
+    def incumbent(self, server: EvalServer) -> tuple[str, float] | None:
+        """Return the best version GEPA scored on every case so far.
+
+        The parent's budget stop unwinds ``optimize_anything`` without a
+        result, so the valset tracker is GEPA's only record of its best version.
+
+        Args:
+            server: Evaluation server whose aggregate checkpoints back the fallback.
+
+        Returns:
+            ``(patch, score)`` or ``None`` before any version was fully scored.
+        """
+        return self.tracker.best or best_aggregate_candidate(server)
 
     def process_result(self, result: Result, output_dir: str | Path) -> None:
         """Write the best patch and run metadata beside the evaluator artifacts.

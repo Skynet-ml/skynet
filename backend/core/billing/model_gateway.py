@@ -764,6 +764,18 @@ class ModelGateway:
             **({"allowed_hosts": sorted(allowed_hosts)} if allowed_hosts else {}),
         }
 
+    def detach_sandbox(self) -> SandboxControl | None:
+        """Take the bound sandbox broker out of this gateway, so ``close`` does not stop its boxes.
+
+        The caller then owns the broker and must close it, which stops the
+        boxes and settles their usage.
+
+        Returns:
+            The bound broker, or ``None`` when no broker is bound.
+        """
+        broker, self._sandbox = self._sandbox, None
+        return broker
+
     def fund_parent_sandbox(self, allowed_hosts: tuple[str, ...]) -> None:
         """Count one more parent-owned box reaching ``allowed_hosts`` in this run's recovery bound.
 

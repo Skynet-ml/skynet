@@ -362,6 +362,6 @@ SPEC = register(
         version=DEERFLOW_REF,
         output_format="pi",
         protected_env=_PROTECTED_ENV,
-        position=60,
+        position=68,
     )
 )

@@ -25,7 +25,7 @@ from typing import Any, ClassVar
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
-from ..errors import RunTimeoutError, SandboxFatalError, SandboxInfraError
+from ..errors import SandboxFatalError, SandboxInfraError
 from ..resources import ResourceMode, SandboxSpec
 from ..telemetry import current_output_sink
 from ..timeouts import Phase, PhaseTimeouts
@@ -69,6 +69,8 @@ _TIMEOUT_GRACE_SEC = 30.0
 _CANCEL_GRACE_SEC = 0.5
 # Modal's wait() returns -1 instead of raising when its exec deadline passes.
 _MODAL_TIMEOUT_EXIT_CODE = -1
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 
 _NOT_FOUND_ERRORS: tuple[type[BaseException], ...] = tuple(
     error for error in (SandboxFilesystemNotFoundError, FileNotFoundError) if error is not None
@@ -229,11 +231,11 @@ class ModalEnvironment(SandboxEnvironment):
             sudo: Ignored: Modal runs commands as root.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, the result has exit code 124 and ``timed_out`` set.
 
         Raises:
             RuntimeError: The sandbox is not running.
-            RunTimeoutError: The command ran past the time limit.
             SandboxInfraError: The sandbox died with exit 137, likely out of memory.
         """
         sandbox = self._require_running()
@@ -247,11 +249,11 @@ class ModalEnvironment(SandboxEnvironment):
             # from the builtin TimeoutError, so it needs its own check.
             timed_out = isinstance(exc, _EXEC_TIMEOUT_ERRORS) or (isinstance(exc, TimeoutError) and deadline.expired())
             if limit is not None and timed_out:
-                raise RunTimeoutError(limit) from None
+                return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
             await self._raise_if_out_of_memory(exc)
             raise
         if limit is not None and exit_code == _MODAL_TIMEOUT_EXIT_CODE:
-            raise RunTimeoutError(limit)
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, stdout=stdout, stderr=stderr, timed_out=True)
         return ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:

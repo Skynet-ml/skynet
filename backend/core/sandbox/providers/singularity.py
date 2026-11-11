@@ -119,6 +119,8 @@ async def _cli(argv: Sequence[str], seconds: float) -> _CliResult:
 
     Raises:
         SandboxInfraError: The CLI is missing or did not finish in time.
+        asyncio.CancelledError: The task was cancelled. The first cancel is
+            raised after the CLI ends.
     """
     try:
         process = await asyncio.create_subprocess_exec(
@@ -474,6 +476,7 @@ class SingularityEnvironment(SandboxEnvironment):
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the stop.
+                The first cancel is raised after the stop ends.
         """
         if self._staging is None or self._stopped:
             return
@@ -484,7 +487,7 @@ class SingularityEnvironment(SandboxEnvironment):
             try:
                 await asyncio.wait({teardown})
             except asyncio.CancelledError as error:
-                cancelled = error
+                cancelled = cancelled or error
         if cancelled is not None:
             raise cancelled
         teardown.result()

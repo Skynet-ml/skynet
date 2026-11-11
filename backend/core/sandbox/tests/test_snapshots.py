@@ -17,10 +17,16 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 from vercel.sandbox import SandboxApiError, SnapshotSource
 
-from core.billing.budgets import BudgetService
+from core.billing.budget_amounts import cent_units
+from core.billing.budgets import BudgetError, BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
-from core.billing.vercel_usage import VercelSnapshotReservation
+from core.billing.vercel_usage import (
+    SessionNotStoppedError,
+    VercelSnapshotReservation,
+    vercel_charge_policy,
+    vercel_snapshot_actual_usd,
+)
 from core.config import app_env, settings
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError
 from core.sandbox.providers.vercel import VercelEnvironment
@@ -478,6 +484,93 @@ async def test_setup_box_becomes_a_snapshot_with_the_run_expiry() -> None:
     assert log[-1] == "settle"
 
 
+async def _snapshotted_env_whose_settle_raises(log: list[str], error: Exception) -> VercelEnvironment:
+    """Make a box that took its snapshot and whose usage settle raises.
+
+    Args:
+        log: The shared call log.
+        error: The error that the usage settle raises.
+
+    Returns:
+        The provider, ready to stop.
+    """
+    client = FakeClient(log)
+    env = _snapshotting_env(log, client)
+    await env.start()
+
+    async def snapshot(*, expiration: Any = None) -> Any:
+        """Return a created snapshot.
+
+        Args:
+            expiration: Unused.
+
+        Returns:
+            The snapshot handle.
+        """
+        return SimpleNamespace(id="snap-1", status="created", expires_at=1_000)
+
+    def settle() -> None:
+        """Raise the settle error.
+
+        Raises:
+            Exception: Always, the given error.
+        """
+        raise error
+
+    client.boxes[env.name].current_session.snapshot = snapshot
+    await env.snapshot(run_deadline=DEADLINE, now=NOW)
+    env._usage.settle = settle
+    return env
+
+
+async def test_snapshotted_box_with_an_unstopped_receipt_closes_quietly(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that the expected pending receipt of a snapshot builder raises nothing and logs no warning.
+
+    The snapshot call stops the builder session, but Vercel's receipt can
+    still show it running for a short time after the stop. The reconciler
+    settles the hold later.
+    """
+    env = await _snapshotted_env_whose_settle_raises([], SessionNotStoppedError("The receipt is not stopped."))
+    with caplog.at_level(logging.INFO):
+        await env.stop()
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO and "settles after its receipt is final" in record.getMessage()
+    ]
+
+
+async def test_snapshotted_box_still_raises_a_usage_anomaly(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that a pending usage anomaly of a snapshot builder, not a late receipt, still warns and raises."""
+    anomaly = UsagePendingError("Cloud sandbox transfer exceeded the admitted network allowance.")
+    env = await _snapshotted_env_whose_settle_raises([], anomaly)
+    with pytest.raises(UsagePendingError) as raised:
+        await env.stop()
+    assert raised.value is anomaly
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+async def test_snapshotted_box_still_raises_a_budget_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that a budget settle failure of a snapshot builder still warns and raises unchanged."""
+    error = BudgetError("The budget is closed.")
+    env = await _snapshotted_env_whose_settle_raises([], error)
+    with pytest.raises(BudgetError) as raised:
+        await env.stop()
+    assert raised.value is error
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+async def test_snapshotted_box_wraps_an_unexpected_settle_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Check that an unexpected settle failure of a snapshot builder warns and raises a pending usage error."""
+    error = RuntimeError("database down")
+    env = await _snapshotted_env_whose_settle_raises([], error)
+    with pytest.raises(UsagePendingError) as raised:
+        await env.stop()
+    assert raised.value.__cause__ is error
+    assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
 async def test_provider_refuses_to_snapshot_a_box_with_env() -> None:
     """Check that a spec with env values makes no hold and no snapshot call.
 
@@ -727,6 +820,118 @@ async def test_deleted_snapshot_is_metered_as_sandbox_cost(database: Engine) -> 
     assert budget.billed_cents > 0
 
 
+class VercelLikeSnapshotHandle(FakeSnapshotHandle):
+    """Act like Vercel: the delete leaves ``updated_at`` at the creation time."""
+
+    def __init__(self, snapshot_id: str, size_bytes: int) -> None:
+        """Make a snapshot created one day ago.
+
+        Args:
+            snapshot_id: The snapshot id.
+            size_bytes: The stored size.
+        """
+        super().__init__(snapshot_id, size_bytes)
+        self.created_at = self.updated_at = int(time.time() * 1000) - 86_400_000
+        self.expires_at = self.created_at + 3 * 86_400_000
+
+    async def delete(self) -> None:
+        """Delete the snapshot without a change to its timestamps."""
+        self.status = "deleted"
+
+
+def _storage_units(reservation: VercelSnapshotReservation, size_bytes: int, stored_ms: int) -> int:
+    """Price stored snapshot bytes for a stored time at the admitted quote.
+
+    Args:
+        reservation: The snapshot hold with its admitted quote.
+        size_bytes: The stored size.
+        stored_ms: The stored time.
+
+    Returns:
+        The charge in budget units.
+    """
+    price = reservation.quote.price_snapshot
+    usd = vercel_snapshot_actual_usd(
+        {"id": "snap-1", "status": "deleted", "size_bytes": size_bytes, "created_at": 0, "updated_at": stored_ms},
+        snapshot_id="snap-1",
+        price_snapshot=price,
+    )
+    return cent_units(vercel_charge_policy(price).convert(usd).total)
+
+
+async def test_snapshot_storage_is_priced_to_our_delete_time(database: Engine) -> None:
+    """Check that a snapshot is billed for its stored day when Vercel keeps ``updated_at`` at creation."""
+    runtime = _runtime(database)
+    reservation = VercelSnapshotReservation(
+        runtime, {"session_id": "session-1", "retention_ms": 3 * 86_400_000}, operation_key="op-1:snapshot"
+    )
+    reservation.bind("snap-1")
+    client = SnapshotClient([], VercelLikeSnapshotHandle("snap-1", 10_000_000_000))
+    client.boxes["builder"] = FakeBox("builder", FakeSession())
+    built = BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", reservation=reservation)
+    await VercelEnvironment.delete_snapshot(built, client=client)
+    operation = _operation(database)
+    assert operation.state == "settled"
+    one_day = _storage_units(reservation, 10_000_000_000, 86_400_000)
+    assert one_day > 0
+    assert one_day <= operation.actual_units <= _storage_units(reservation, 10_000_000_000, 86_460_000)
+    assert runtime.service.get(runtime.budget_id, "alice").billed_cents > 0
+
+
+class FlakySettleReservation(VercelSnapshotReservation):
+    """Fail the first settle after the delete reached Vercel, then settle normally."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Make the hold with no settle call yet.
+
+        Args:
+            *args: The ``VercelSnapshotReservation`` arguments.
+            **kwargs: The ``VercelSnapshotReservation`` keyword arguments.
+        """
+        super().__init__(*args, **kwargs)
+        self.settle_calls = 0
+
+    def settle(self, snapshot: Any) -> None:
+        """Raise like a database outage on the first call, then settle.
+
+        Args:
+            snapshot: The provider state of the snapshot.
+
+        Raises:
+            RuntimeError: On the first call.
+        """
+        self.settle_calls += 1
+        if self.settle_calls == 1:
+            self.pending(snapshot)
+            raise RuntimeError("database down")
+        super().settle(snapshot)
+
+
+async def test_snapshot_delete_retry_prices_storage_to_the_retry_time(database: Engine) -> None:
+    """Check that a retry after a delete that reached Vercel still bills the stored day.
+
+    The first settle fails after the delete, so the retry finds the snapshot
+    already deleted with ``updated_at`` at the creation time.
+    """
+    runtime = _runtime(database)
+    reservation = FlakySettleReservation(
+        runtime, {"session_id": "session-1", "retention_ms": 3 * 86_400_000}, operation_key="op-1:snapshot"
+    )
+    reservation.bind("snap-1")
+    client = SnapshotClient([], VercelLikeSnapshotHandle("snap-1", 10_000_000_000))
+    client.boxes["builder"] = FakeBox("builder", FakeSession())
+    built = BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", reservation=reservation)
+    with pytest.raises(RuntimeError):
+        await VercelEnvironment.delete_snapshot(built, client=client)
+    await VercelEnvironment.delete_snapshot(built, client=client)
+    operation = _operation(database)
+    assert reservation.settle_calls == 2
+    assert operation.state == "settled"
+    one_day = _storage_units(reservation, 10_000_000_000, 86_400_000)
+    assert one_day > 0
+    assert one_day <= operation.actual_units <= _storage_units(reservation, 10_000_000_000, 86_460_000)
+
+
 async def test_missing_builder_record_is_normal_after_the_delete(
     database: Engine, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -823,3 +1028,166 @@ async def test_two_pods_build_one_snapshot_under_the_advisory_lock() -> None:
         assert {built.snapshot_id for built in results} == {"snap-1"}
     finally:
         engine.dispose()
+
+
+async def test_release_deletes_the_key_once_and_close_skips_it() -> None:
+    """Check that release deletes only its key's snapshot, a second release is a no-op, and close skips it."""
+    provider = Provider()
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    await cache.get_or_build(_key(), provider.build)
+    await cache.get_or_build(_key(install_command="uv sync"), provider.build)
+    await cache.release(_key())
+    assert provider.deletes == ["snap-1"]
+    await cache.release(_key())
+    assert provider.deletes == ["snap-1"]
+    await cache.close()
+    assert provider.deletes == ["snap-1", "snap-2"]
+
+
+async def test_failed_release_is_retried_by_close_and_deleted_once() -> None:
+    """Check that a failed release raises, close deletes it once, and nothing deletes it twice."""
+    provider = Provider()
+    calls: list[str] = []
+
+    async def flaky_delete(built: BuiltSnapshot) -> None:
+        """Fail the first delete, then delete.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            raise RuntimeError("provider error")
+        await provider.delete(built)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=flaky_delete)
+    await cache.get_or_build(_key(), provider.build)
+    with pytest.raises(RuntimeError):
+        await cache.release(_key())
+    await cache.close()
+    await cache.close()
+    await cache.release(_key())
+    assert calls == ["snap-1", "snap-1"]
+    assert provider.deletes == ["snap-1"]
+
+
+async def test_release_of_an_evicted_and_rebuilt_key_deletes_both_snapshots() -> None:
+    """Check that release finds the evicted snapshot of its key by its recorded id."""
+    provider = Provider()
+    clock = FakeClock()
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
+    await cache.get_or_build(_key(), provider.build)
+    clock.now = 1_000.0
+    assert await cache.evict_idle(600.0) == [_key()]
+    await cache.get_or_build(_key(), provider.build)
+    await cache.release(_key())
+    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
+
+
+async def test_release_of_a_borrowed_snapshot_only_drops_it() -> None:
+    """Check that a release never deletes a snapshot that another pod built."""
+    provider = Provider()
+    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    await owner.get_or_build(_key(), provider.build)
+    await borrower.get_or_build(_key(), provider.build)
+    await borrower.release(_key())
+    assert provider.deletes == []
+    await owner.release(_key())
+    assert provider.deletes == ["snap-1"]
+
+
+async def test_release_deletes_a_snapshot_whose_builder_is_the_provider_box() -> None:
+    """Check that release finds a snapshot by its key when the provider names the builder after its own box."""
+    deleted: list[tuple[str, object]] = []
+    hold = object()
+
+    async def delete(built: BuiltSnapshot) -> None:
+        """Record the delete and the hold it settles.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        deleted.append((built.snapshot_id, built.reservation))
+
+    async def build(_name: str) -> BuiltSnapshot:
+        """Return a snapshot named after the provider box, as the Vercel provider does.
+
+        Args:
+            _name: The cache's builder name, which the provider ignores.
+
+        Returns:
+            The snapshot.
+        """
+        return BuiltSnapshot(snapshot_id="snap-1", builder_name="skynet-0123456789abcdef", reservation=hold)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=delete)
+    await cache.get_or_build(_key(), build)
+    await cache.release(_key())
+    assert deleted == [("snap-1", hold)]
+    await cache.close()
+    assert deleted == [("snap-1", hold)]
+
+
+async def test_close_waits_for_a_release_delete_that_fails_and_deletes_it() -> None:
+    """Check that a close during a release's failing delete still deletes the snapshot."""
+    provider = Provider()
+    calls: list[str] = []
+    started = asyncio.Event()
+    go_on = asyncio.Event()
+
+    async def slow_flaky_delete(built: BuiltSnapshot) -> None:
+        """Wait, then fail the first delete; delete on later calls.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            started.set()
+            await go_on.wait()
+            raise RuntimeError("provider error")
+        await provider.delete(built)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=slow_flaky_delete)
+    await cache.get_or_build(_key(), provider.build)
+    release = asyncio.create_task(cache.release(_key()))
+    await started.wait()
+    close = asyncio.create_task(cache.close())
+    await asyncio.sleep(0)
+    assert not close.done()
+    go_on.set()
+    with pytest.raises(RuntimeError):
+        await release
+    await close
+    assert calls == ["snap-1", "snap-1"]
+    assert provider.deletes == ["snap-1"]
+
+
+async def test_cancelled_delete_is_kept_for_the_next_close() -> None:
+    """Check that a close cancelled during a delete keeps the snapshot for the next close."""
+    provider = Provider()
+    calls: list[str] = []
+    started = asyncio.Event()
+
+    async def hanging_delete(built: BuiltSnapshot) -> None:
+        """Hang on the first delete; delete on later calls.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            started.set()
+            await asyncio.Event().wait()
+        await provider.delete(built)
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=hanging_delete)
+    await cache.get_or_build(_key(), provider.build)
+    close = asyncio.create_task(cache.close())
+    await started.wait()
+    close.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close
+    await cache.close()
+    assert provider.deletes == ["snap-1"]

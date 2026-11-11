@@ -18,7 +18,7 @@ from ..config import settings
 from .base import Credential, Entry, range_header
 from .github import REPO_NAME, clean_file_path
 from .github_publish import HardeningSummary, PublishedChange, RepoPublishError, hardening_line
-from .github_repo import COMMIT_LIMIT, RepoFetchError, commit_summary
+from .github_repo import COMMIT_LIMIT, RepoFetchError, RepoRateLimitError, commit_summary, rate_limit_message
 from .gitlab import display_file, has_dot_segment, matches_search, repo_path, search_words
 from .oauth import OAuthApp
 from .oauth import oauth_available as _oauth_available
@@ -527,11 +527,14 @@ def resolve_commit(token: str, repository: str, branch: str | None) -> str:
         The 40-character commit hash.
 
     Raises:
+        RepoRateLimitError: When Bitbucket's rate limit stops the lookup.
         RepoFetchError: When Bitbucket refuses the lookup.
     """
     try:
         return _commit(token, repository, branch or "")
     except DomainError as error:
+        if error.code == "connectors.rate_limited":
+            raise RepoRateLimitError(rate_limit_message("Bitbucket", not token)) from error
         raise RepoFetchError(f"Bitbucket could not find {repository} at '{branch or 'its main branch'}'.") from error
 
 

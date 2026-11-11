@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} n'est pas {expected}. Skynet se connecte uniquement à gitlab.com et à Bitbucket Cloud, pas aux serveurs autogérés. Utilisez l'adresse du dépôt sur {expected}, ou déplacez le dépôt vers {expected}.",
     "connectors.not_connected": "Connectez d'abord votre compte {provider}.",
     "connectors.not_found": "Cet élément est introuvable sur {provider}, ou votre compte n'y a pas accès.",
+    "connectors.rate_limited": "La limite de requêtes de {provider} est atteinte. Réessayez plus tard.",
     "connectors.oauth_failed": "La connexion avec {provider} n'a pas abouti. Réessayez.",
     "connectors.oauth_not_configured": "La connexion avec {provider} n'est pas configurée sur ce déploiement. Collez plutôt vos identifiants.",
     "connectors.oauth_state_invalid": "Le lien de connexion n'est pas valide ou a expiré. Recommencez.",
