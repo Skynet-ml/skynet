@@ -63,10 +63,12 @@ _PROTECTED_ENV = {
 # goes inline on the command line, not as a launch file: the protected relay
 # rewrite needs every launch file to carry the gateway URL.
 # Fabric's state, Codex's home and the logs go to a fresh directory outside
-# the workspace, so they never show up in the scored workspace.
+# the workspace, so they never show up in the scored workspace. The script
+# removes it on exit: one box runs many proposer turns.
 _FABRIC_RUN_SCRIPT = """\
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -77,38 +79,41 @@ def main():
     config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     prompt = Path(os.environ["APP_PROMPT_FILE"]).read_text(encoding="utf-8")
     state = Path(tempfile.mkdtemp(prefix="app-fabric-"))
-    config["environment"]["workspace"] = os.getcwd()
-    config["environment"]["artifacts"] = str(state / "artifacts")
-    config["runtime"]["artifacts"] = str(state / "artifacts")
-    spec = {
-        "config": config,
-        "config_base_dir": str(state),
-        "logs_dir": str(state / "logs"),
-        "request": {"input": prompt},
-    }
-    spec_path = state / "spec.json"
-    result_path = state / "result.json"
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
-    command = [
-        sys.executable, "-I", "-m", "nemo_fabric.integrations.harbor.runner",
-        "--spec", str(spec_path), "--result", str(result_path),
-    ]
-    code = subprocess.run(command, stdout=sys.stderr).returncode
     try:
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        print(f"fabric: the runner wrote no result (exit {code})", file=sys.stderr)
-        return code or 1
-    failure = result.get("runner_error") or result.get("error")
-    if failure or result.get("status") != "succeeded":
-        message = failure.get("message") if isinstance(failure, dict) else failure or result.get("status")
-        print(f"fabric: {message}", file=sys.stderr)
-        return code or 1
-    output = result.get("output")
-    response = output.get("response") if isinstance(output, dict) else output
-    if response is not None:
-        print(response if isinstance(response, str) else json.dumps(response))
-    return 0
+        config["environment"]["workspace"] = os.getcwd()
+        config["environment"]["artifacts"] = str(state / "artifacts")
+        config["runtime"]["artifacts"] = str(state / "artifacts")
+        spec = {
+            "config": config,
+            "config_base_dir": str(state),
+            "logs_dir": str(state / "logs"),
+            "request": {"input": prompt},
+        }
+        spec_path = state / "spec.json"
+        result_path = state / "result.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        command = [
+            sys.executable, "-I", "-m", "nemo_fabric.integrations.harbor.runner",
+            "--spec", str(spec_path), "--result", str(result_path),
+        ]
+        code = subprocess.run(command, stdout=sys.stderr).returncode
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            print(f"fabric: the runner wrote no result (exit {code})", file=sys.stderr)
+            return code or 1
+        failure = result.get("runner_error") or result.get("error")
+        if failure or result.get("status") != "succeeded":
+            message = failure.get("message") if isinstance(failure, dict) else failure or result.get("status")
+            print(f"fabric: {message}", file=sys.stderr)
+            return code or 1
+        output = result.get("output")
+        response = output.get("response") if isinstance(output, dict) else output
+        if response is not None:
+            print(response if isinstance(response, str) else json.dumps(response))
+        return 0
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
 
 
 sys.exit(main())

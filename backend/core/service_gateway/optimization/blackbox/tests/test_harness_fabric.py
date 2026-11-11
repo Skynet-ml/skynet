@@ -135,7 +135,8 @@ def _run(tmp_path: Path, *, protected: bool, result: dict) -> tuple[subprocess.C
     """Install the stand-in Fabric, then run the built command in a scratch workspace.
 
     Args:
-        tmp_path: Scratch directory for the workspace, the fakes and their logs.
+        tmp_path: Scratch directory for the workspace, the fakes, their logs and
+            the run's ``TMPDIR`` (``tmp_path / "tmp"``).
         protected: Build the protected launch, with the sandbox-local relay set.
         result: The result file the fake runner writes.
 
@@ -152,12 +153,15 @@ def _run(tmp_path: Path, *, protected: bool, result: dict) -> tuple[subprocess.C
     (workspace / "task").mkdir(parents=True)
     (workspace / "task" / "PROMPT.md").write_text("Fix `solution.py` and say $(echo done).")
     runner_log = tmp_path / "runner.json"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
     env = {
         **env,
         **launch.env,
         "OPENAI_API_KEY": "leaked-provider-key",
         "FAKE_RUNNER_LOG": str(runner_log),
         "FAKE_RESULT": json.dumps(result),
+        "TMPDIR": str(tmp_dir),
     }
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
@@ -321,6 +325,16 @@ def test_string_error_fails_the_run_with_that_string(tmp_path: Path) -> None:
     assert finished.returncode == 1
     assert finished.stdout == ""
     assert "fabric: model route refused" in finished.stderr
+
+
+@pytest.mark.parametrize("result", [_RECORDED_RESULT, _RECORDED_FAILURE], ids=["succeeded", "runner_error"])
+def test_run_removes_its_state_directory(tmp_path: Path, result: dict) -> None:
+    """Leave no ``app-fabric-*`` folder behind, so repeated proposer turns do not fill the box."""
+    finished, seen, _ = _run(tmp_path, protected=False, result=result)
+
+    assert seen["spec"]["config_base_dir"].startswith(str(tmp_path / "tmp"))
+    assert finished.returncode == (0 if result is _RECORDED_RESULT else 1), finished.stderr
+    assert list((tmp_path / "tmp").glob("app-fabric-*")) == []
 
 
 @pytest.mark.skipif(
