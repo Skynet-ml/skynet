@@ -38,11 +38,14 @@ Place = Literal["local", "cloud"]
 # grants the proposer's box its hosts and refuses any other (SKY-384). The run
 # and metric boxes reach ``[services.<name>]`` and the servers of their own MCP
 # file only through the stage relay, which checks the role and fills each
-# secret by host (SKY-385).
+# secret by host (SKY-385). The scorer opens each ``[target.<name>]`` stage in
+# its own offline box from its entry, timeout and vCPUs, and the judges read
+# its rules (SKY-599).
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
 _PROPOSER_NETWORK = frozenset({"proposer.network"})
 _STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
-_ENFORCED_EVERYWHERE = _METRIC_HIDING | _PROPOSER_NETWORK | _STAGE_SERVICES
+_TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "target.illegal"})
+_ENFORCED_EVERYWHERE = _METRIC_HIDING | _PROPOSER_NETWORK | _STAGE_SERVICES | _TARGET_STAGES
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
 _UNENFORCED_CODE: dict[Place, I18nKey] = {
@@ -310,8 +313,8 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     (``services = []``) means "none", which differs from the default an absent key
     gives, and a written default (``exploits = ".optimize/exploits"``) still
     asks for a folder to be hidden. ``[proposer] illegal`` is not listed: the
-    judges enforce it in every place. Every ``[run]`` key and the ``[metric]``
-    role keys are listed. ``ENFORCED`` decides which of them still stop the
+    judges enforce it in every place. Every ``[run]`` and ``[target.<name>]``
+    key and the ``[metric]`` role keys are listed. ``ENFORCED`` decides which of them still stop the
     run: a key whose runtime does not exist yet stops here instead of failing
     later in the sandbox.
 
@@ -326,7 +329,16 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     document: dict[str, Any] = tomllib.loads(raw.decode("utf-8"))
     proposer, metric, run = document.get("proposer", {}), document.get("metric", {}), document.get("run", {})
     keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("mcp", "network", "services") if key in proposer]
-    keys += [("target", f"[target.{name}]") for name in targets]
+    stages = document.get("target", {})
+    target_keys = ("entry", "timeout", "vcpus", "illegal", "mcp", "network", "services")
+    # A stage box is offline except for the relay, so ``network = []`` asks
+    # for what the box already gives; only a host list stops the run.
+    keys += [
+        (f"target.{key}", f"[target.{name}] {key}")
+        for name in targets
+        for key in target_keys
+        if key in stages[name] and not (key == "network" and stages[name][key] == [])
+    ]
     keys += [("services", f"[services.{name}]") for name in services]
     keys += [(f"run.{key}", f"[run] {key}") for key in ("entry", "timeout", "mcp", "services", "illegal") if key in run]
     metric_keys = ("files", "exploits", "reference", "mcp", "services", "illegal")

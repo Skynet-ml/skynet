@@ -135,8 +135,16 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
     [
         (b'[proposer]\nmcp = ".mcp.json"\n', "[proposer] mcp"),
         (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
-        (b'[target.planner]\nentry = "agents/planner.py:plan"\n', "[target.planner]"),
-        (b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n', "[target.planner]"),
+        (b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n', "[target.planner] mcp"),
+        (
+            b'[services.maps]\nurl = "https://api.example.com"\n'
+            b'[target.planner]\nentry = "agents/planner.py:plan"\nservices = ["maps"]\n',
+            "[target.planner] services",
+        ),
+        (
+            b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n',
+            "[target.planner] network",
+        ),
         (b"[proposer]\nservices = []\n", "[proposer] services"),
         (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
         (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
@@ -175,6 +183,22 @@ def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert key not in [failure.key for failure in failures]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'[target.planner]\nentry = "agents/planner.py:plan"\n',
+        b'[target.planner]\nentry = ["node", "planner.js"]\ntimeout = 30\nvcpus = 4\nillegal = "rules/run.md"\n',
+        b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = []\n',
+    ],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_target_stages_pass_in_every_place(tmp_path: Path, raw: bytes, place: str) -> None:
+    """The scorer opens each stage offline from its entry, timeout and vCPUs, and the judges read its rules (SKY-599)."""
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
+
+    assert failures == []
 
 
 def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
