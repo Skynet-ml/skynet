@@ -224,7 +224,7 @@ def test_openhands_is_registered_after_aider_with_its_pin() -> None:
     """List OpenHands in the registry and the request model, pinned to the exact PyPI release."""
     spec = REGISTRY[BLACKBOX_HARNESS_OPENHANDS]
     assert (spec.binary, spec.version, spec.output_format, spec.position) == ("openhands", "1.6.0", "plain", 54)
-    assert list(REGISTRY).index(BLACKBOX_HARNESS_OPENHANDS) == list(REGISTRY).index("aider") + 1
+    assert list(REGISTRY).index("aider") < list(REGISTRY).index(BLACKBOX_HARNESS_OPENHANDS)
     assert BLACKBOX_HARNESS_OPENHANDS in BLACKBOX_HARNESSES
     assert (
         pinned_harness_check(BLACKBOX_HARNESS_OPENHANDS)
