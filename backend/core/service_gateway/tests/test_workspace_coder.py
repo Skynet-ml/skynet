@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import tarfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import dspy
@@ -30,8 +33,9 @@ from core.service_gateway.agents.generalist import (
     tools_for,
 )
 from core.service_gateway.agents.workspace_coder import CODING_AGENT_TOOL, coder_tools, open_repo
+from core.service_gateway.optimization.blackbox import repo_constraints
 
-from .test_pi_react import _simulated_pi
+from .test_pi_react import _PI_BASH, _simulated_pi
 
 
 @pytest.fixture(autouse=True)
@@ -326,6 +330,7 @@ async def test_setup_agent_resumes_from_the_coding_agents_result(monkeypatch: py
                 {
                     "run_code": "ignored for a repository run",
                     "metric_code": _SCORER,
+                    "optimize_toml": "",
                     "summary": "Runs the tests and scores their time.",
                     "open_questions": ["Which test counts as the main one?"],
                 },
@@ -464,3 +469,339 @@ def test_coding_agent_reports_the_rate_limit_not_a_private_repository(monkeypatc
     assert reason == "GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit."
     assert linked_browser is None
     assert linked_reason == "GitHub's rate limit is reached. Try again later."
+
+
+def _schema_bullets() -> dict[str, str]:
+    """Split the prompt's optimize.toml schema block into its bullets.
+
+    Returns:
+        Each bullet's text by the table it starts with, such as ``[run]``; ``top`` for the top-level keys.
+    """
+    prompt = workspace_coder.CODER_PROMPT
+    block = prompt[prompt.index("Use\n  only this schema.") : prompt.index("The errors you must avoid most")]
+    bullets: dict[str, str] = {}
+    for bullet in block.split("\n  - ")[1:]:
+        text = " ".join(bullet.split())
+        name = "top" if text.startswith("Top level") else text[2 : text.index("``", 2)]
+        bullets[name] = text
+    return bullets
+
+
+def test_coder_prompt_names_every_optimize_toml_section_and_key() -> None:
+    """Each schema bullet lists the keys the parser accepts for its table (SKY-184)."""
+    bullets = _schema_bullets()
+
+    for section, keys in repo_constraints._SECTIONS.items():
+        role_keys = repo_constraints._ROLE_KEYS if section == "proposer" else set()
+        for key in keys - role_keys:
+            assert f"``{key}``" in bullets[f"[{section}]"], (section, key)
+    for key in repo_constraints._ROLE_KEYS:
+        assert f"``{key}``" in bullets["[proposer]"], key
+    for key in repo_constraints._TARGET_KEYS - repo_constraints._ROLE_KEYS:
+        assert f"``{key}``" in bullets["[target.<name>]"], key
+    assert "the role keys" in bullets["[target.<name>]"]
+    assert "``url``" in bullets["[services.<name>]"]
+    assert "``headers``" in bullets["[services.<name>]"]
+    assert "``version = 1``" in bullets["top"]
+    assert "``instructions" in bullets["top"]
+    assert len(bullets) == len(repo_constraints._SECTIONS) + len(repo_constraints._NAMED_SECTIONS) + 1
+
+
+def test_coder_prompt_example_is_a_valid_optimize_toml() -> None:
+    """The example in the prompt passes the parser, so the agent never copies a broken file (SKY-184)."""
+    constraints = repo_constraints.parse_constraints(workspace_coder.OPTIMIZE_TOML_EXAMPLE.encode())
+
+    assert workspace_coder.OPTIMIZE_TOML_EXAMPLE in workspace_coder.CODER_PROMPT
+    assert constraints.run_entry == ("pytest", "-q", "--junitxml=out.xml")
+    assert constraints.editable_paths == ("src",)
+
+
+def test_coder_prompt_quotes_the_parser_errors() -> None:
+    """The prompt names the errors the parser gives most, so the agent avoids them (SKY-184)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "is not a supported setting" in prompt
+    assert "[run] entry is missing" in prompt
+    assert "share one box" in prompt
+    assert "must be a host name such as api.example.com, not a URL" in prompt
+
+
+def _run_coder(toml_text: str, context: dict[str, Any]) -> dict[str, Any]:
+    """Run the coding agent once with a scripted answer that writes ``toml_text``.
+
+    Args:
+        toml_text: The optimize.toml the agent returns.
+        context: The run's setup.
+
+    Returns:
+        The hand-off result.
+    """
+    lm = _ScriptedLM(
+        [
+            (
+                "submit",
+                {
+                    "run_code": "",
+                    "metric_code": _SCORER,
+                    "optimize_toml": toml_text,
+                    "summary": "Runs the tests.",
+                    "open_questions": [],
+                },
+            )
+        ]
+    )
+    return workspace_coder.run_coding_agent(context, "Score the tests.", lm=lm, emit=lambda _e: None, github_token=None)
+
+
+def test_coding_agent_returns_optimize_toml_as_a_file() -> None:
+    """The agent's optimize.toml goes into the wizard_state patch, beside metric.py (SKY-184)."""
+    toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+
+    assert result["wizard_state"] == {"metric_code": _SCORER, "optimize_toml": toml_text}
+    assert "optimize_toml_error" not in result
+
+
+def test_coding_agent_reports_the_parser_error_of_its_optimize_toml() -> None:
+    """A file the parser refuses still reaches the draft, with the error and its place for the setup agent."""
+    toml_text = "[run]\ntimeout = 30\n"
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+
+    assert result["wizard_state"]["optimize_toml"] == toml_text
+    error = result["optimize_toml_error"]
+    assert (error["section"], error["key"]) == ("run", "entry")
+    assert "[run] entry is missing" in error["message"]
+
+
+def test_coding_agent_leaves_an_unchanged_optimize_toml_out_of_the_patch() -> None:
+    """The agent gets the current optimize.toml and an unchanged file is no write."""
+    toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo", "optimize_toml": toml_text})
+
+    assert "optimize_toml" in workspace_coder.CONTEXT_FIELDS
+    assert result["wizard_state"] == {"metric_code": _SCORER}
+
+
+def test_coding_agent_writes_no_optimize_toml_for_a_dspy_program() -> None:
+    """Only a repository run has an optimize.toml, so another run's file stays out of the patch."""
+    result = _run_coder(workspace_coder.OPTIMIZE_TOML_EXAMPLE, {"artifact_kind": "dspy_program"})
+
+    assert result["wizard_state"] == {"metric_code": _SCORER}
+    assert "optimize_toml_error" not in result
+
+
+def test_coder_prompt_marks_the_example_paths_as_placeholders() -> None:
+    """The agent replaces the example's paths with ones it confirmed, not docs/intent.md as is (SKY-184)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "The paths in this example, such as docs/intent.md and docs/rules.md, are placeholders" in prompt
+
+
+class _FakeBox:
+    """Stands in for :class:`PiSandbox`: records what goes in, and gives back what Pi wrote."""
+
+    builtin_tools = ("read", "bash")
+    made: list[_FakeBox] = []
+    written: dict[str, str | None] = {}
+
+    def __init__(self, settings_: Any, budget: Any, *, files: dict[str, str], read_back: Any, **_: Any) -> None:
+        """Record the box's files.
+
+        Args:
+            settings_: Ignored.
+            budget: The box's budget.
+            files: The files uploaded to the box.
+            read_back: The paths read after the turn.
+            **_: Other box settings, ignored.
+        """
+        self.budget = budget
+        self.files = dict(files)
+        self.read_back = tuple(read_back)
+        self.read_back_files: dict[str, str | None] = {}
+        self.closed = False
+        _FakeBox.made.append(self)
+
+    async def aclose(self) -> None:
+        """Close the box."""
+        self.closed = True
+
+
+async def _pi_in_box(*, handlers: Any, sandbox: Any, **kwargs: Any) -> None:
+    """Run the simulated Pi with its own tools listed, then leave the box's edits for read-back.
+
+    Args:
+        handlers: The turn's handlers.
+        sandbox: The box.
+        **kwargs: The other turn arguments.
+    """
+    complete = handlers.complete
+
+    async def with_pi_tools(body: dict[str, Any]) -> AsyncIterator[str]:
+        """Add Pi's own tool to the request, as Pi does in a box."""
+        async for chunk in complete({**body, "tools": [*body["tools"], {"type": "function", "function": _PI_BASH}]}):
+            yield chunk
+
+    handlers.complete = with_pi_tools
+    await _simulated_pi(handlers=handlers, **kwargs)
+    sandbox.read_back_files = {path: _FakeBox.written.get(path) for path in sandbox.read_back}
+
+
+def _in_a_box(monkeypatch: pytest.MonkeyPatch, written: dict[str, str | None], repo: dict[str, str]) -> None:
+    """Make the coding agent work in a fake box over a fake repository.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+        written: The files Pi leaves in the box.
+        repo: The repository's text files, under ``repo/``.
+    """
+    _FakeBox.made = []
+    _FakeBox.written = written
+    monkeypatch.setattr(workspace_coder, "sandbox_ready", lambda: True)
+    monkeypatch.setattr(workspace_coder, "repo_files", lambda _context, _token: dict(repo))
+    monkeypatch.setattr(workspace_coder, "PiSandbox", _FakeBox)
+    monkeypatch.setattr(pi_react, "run_pi_turn", _pi_in_box)
+
+
+def _submit_only(**fields: Any) -> _ScriptedLM:
+    """Script one ``submit`` call with the coder's outputs.
+
+    Args:
+        **fields: Output values that differ from the empty defaults.
+
+    Returns:
+        The LM.
+    """
+    outputs = {"run_code": "", "metric_code": "", "optimize_toml": "", "summary": "Done.", "open_questions": []}
+    return _ScriptedLM([("submit", {**outputs, **fields})])
+
+
+def test_coding_agent_edits_the_repository_in_a_box_and_its_files_come_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In a box the agent gets Pi's tools over the checkout; the files it edits become the patch (SKY-318)."""
+    new_toml = workspace_coder.OPTIMIZE_TOML_EXAMPLE
+    _in_a_box(
+        monkeypatch,
+        {"metric.py": _SCORER, "repo/optimize.toml": new_toml},
+        {"repo/src/app.py": "print('hi')\n", "repo/optimize.toml": "version = 1\n"},
+    )
+    lm = _submit_only()
+    context = {"artifact_kind": "repo", "repository": "acme/shop", "metric_code": "old = 1\n"}
+
+    result = workspace_coder.run_coding_agent(
+        context, "Score the tests.", lm=lm, emit=lambda _e: None, github_token=None
+    )
+
+    (box,) = _FakeBox.made
+    assert box.files == {
+        "repo/src/app.py": "print('hi')\n",
+        "repo/optimize.toml": "version = 1\n",
+        "metric.py": "old = 1\n",
+    }
+    assert box.read_back == ("metric.py", "repo/optimize.toml")
+    assert box.budget is None
+    assert box.closed
+    assert result["wizard_state"] == {"metric_code": _SCORER, "optimize_toml": new_toml}
+    tools = {tool["function"]["name"] for tool in lm.requests[0]["tools"]}
+    assert tools == {"submit", "bash"}
+    assert "repo/" in lm.requests[0]["messages"][1]["content"]
+
+
+def test_coding_agent_in_a_box_keeps_a_returned_file_that_it_did_not_edit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unchanged box file leaves the field the agent returned; a non-repository run gets run.py and metric.py."""
+    _in_a_box(monkeypatch, {"run.py": "", "metric.py": "m = 1\n"}, {})
+    lm = _submit_only(run_code="run = 2\n", metric_code="m = 3\n")
+    context = {"artifact_kind": "dspy_program", "metric_code": "m = 1\n"}
+
+    result = workspace_coder.run_coding_agent(context, "Write it.", lm=lm, emit=lambda _e: None, github_token=None)
+
+    (box,) = _FakeBox.made
+    assert box.files == {"run.py": "", "metric.py": "m = 1\n"}
+    assert result["wizard_state"] == {"run_code": "run = 2\n", "metric_code": "m = 3\n"}
+
+
+def test_coding_agent_falls_back_to_read_only_tools_when_the_repository_does_not_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No checkout means no box: the agent keeps the read-only repository path."""
+    _in_a_box(monkeypatch, {}, {})
+    monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
+    lm = _submit_only(metric_code=_SCORER)
+
+    result = workspace_coder.run_coding_agent(
+        {"artifact_kind": "repo", "repository": "acme/shop", "repo_provider": "gitlab"},
+        "Score it.",
+        lm=lm,
+        emit=lambda _e: None,
+        github_token=None,
+    )
+
+    assert _FakeBox.made == []
+    assert result["wizard_state"] == {"metric_code": _SCORER}
+    assert result["repository_access"]
+
+
+def test_only_a_local_install_opens_a_box_for_the_coding_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hosted box bills, and the setup chat has no budget yet, so only the free local box opens."""
+    monkeypatch.setattr(settings, "local_mode", False)
+
+    assert workspace_coder.sandbox_ready() is False
+
+
+def _tgz(path: Path, files: dict[str, bytes]) -> Path:
+    """Pack files into a gzip tar, as ``fetch_snapshot`` does.
+
+    Args:
+        path: The archive to write.
+        files: Archive names and their bytes.
+
+    Returns:
+        The archive.
+    """
+    with tarfile.open(path, "w:gz") as packed:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            packed.addfile(info, io.BytesIO(data))
+    return path
+
+
+def test_repo_files_uploads_the_text_files_of_the_default_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The checkout goes to the box as text under repo/; binary and oversized files stay out."""
+    seen: dict[str, Any] = {}
+
+    def resolve_commit(provider: str, token: str | None, repository: str, branch: str | None) -> str:
+        """Pin the default branch."""
+        seen["pin"] = (provider, token, repository, branch)
+        return "c" * 40
+
+    def fetch_snapshot(repository: str, commit: str, token: str | None, workdir: Path, *, provider: str) -> Any:
+        """Pack a small repository."""
+        seen["fetch"] = (repository, commit, token, provider)
+        big = b"x" * (workspace_coder.MAX_REPO_FILE_BYTES + 1)
+        files = {"src/app.py": b"print(1)\n", "logo.png": b"\x89PNG\x00\x01", "data/big.txt": big}
+        return type("Snapshot", (), {"archive": _tgz(workdir / "tree.tgz", files)})()
+
+    monkeypatch.setattr(workspace_coder.repo_hosts, "resolve_commit", resolve_commit)
+    monkeypatch.setattr(workspace_coder, "fetch_snapshot", fetch_snapshot)
+
+    files = workspace_coder.repo_files({"repository": "acme/shop"}, lambda: "gh-token")
+
+    assert files == {"repo/src/app.py": "print(1)\n"}
+    assert seen == {
+        "pin": ("github", "gh-token", "acme/shop", None),
+        "fetch": ("acme/shop", "c" * 40, "gh-token", "github"),
+    }
+
+
+def test_repo_files_is_empty_when_the_host_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refused clone leaves the agent on the read-only path, not a failed turn."""
+
+    def refuse(*_args: Any) -> str:
+        """Refuse the lookup."""
+        raise RuntimeError("no access")
+
+    monkeypatch.setattr(workspace_coder.repo_hosts, "resolve_commit", refuse)
+
+    assert workspace_coder.repo_files({"repository": "acme/shop"}, None) == {}

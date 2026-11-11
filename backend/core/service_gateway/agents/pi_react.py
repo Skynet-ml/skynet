@@ -24,6 +24,9 @@ Pi owns the loop; this module keeps the program's contract:
   (SKY-245) answers in DSPy's ``[[ ## tool_calls ## ]]`` text protocol. The
   relay renders that protocol with the same adapter, parses the reply with
   it and hands Pi the calls as one native tool-call chunk.
+* **Sandbox (SKY-318).** A turn in a :class:`~.pi_bridge.PiSandbox` turns on
+  Pi's own tools there. Pi lists them in its first request; the relay adds
+  them to the model's roster as Pi describes them, and Pi runs them itself.
 
 The setup agent and the workspace coding agent run here.
 """
@@ -33,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from typing import Any
 
 import anyio
@@ -45,7 +48,7 @@ from dspy.utils.exceptions import AdapterParseError, format_error_for_lm
 
 from ..optimization.retrying_react import PARSE_RETRY_ATTEMPTS
 from .agent_program import SUBMIT_TOOL, AgentProgram, AppendOnlyChatAdapter
-from .pi_bridge import PiEventTranslator, ToolOutcome, run_pi_turn, turn_stopped
+from .pi_bridge import PiEventTranslator, PiSandbox, ToolOutcome, run_pi_turn, turn_stopped
 from .steering import STEER_APPLIED_EVENT, SteerInbox, claim_delivery
 
 logger = logging.getLogger(__name__)
@@ -204,6 +207,29 @@ def stop_chunk() -> str:
     )
 
 
+def _stub_tool(spec: dict[str, Any]) -> dspy.Tool:
+    """Describe one of Pi's own tools to the text protocol; Pi runs it, never the relay.
+
+    Args:
+        spec: Pi's ``{name, description, parameters}`` for the tool.
+
+    Returns:
+        A tool that renders like the program's own and fails when called.
+    """
+
+    def run_in_pi(**_: Any) -> None:
+        """Refuse the call: only Pi runs its own tools."""
+        raise RuntimeError(f"{spec['name']} runs in Pi")
+
+    parameters = spec.get("parameters") or {}
+    return dspy.Tool(
+        run_in_pi,
+        name=spec["name"],
+        desc=spec.get("description") or "",
+        args=dict(parameters.get("properties") or {}),
+    )
+
+
 class AgentReplyFormatError(RuntimeError):
     """A model without native tool calls did not answer in the text protocol."""
 
@@ -220,6 +246,7 @@ class ReactOnPi:
         translator: PiEventTranslator,
         output_field: str,
         steer_inbox: SteerInbox | None = None,
+        own_tools: Iterable[str] = (),
     ) -> None:
         """Render the turn's prompt prefix and bind the program's tools.
 
@@ -231,6 +258,8 @@ class ReactOnPi:
                 back the reply it streamed.
             output_field: The ``submit`` argument that holds the reply.
             steer_inbox: The turn's steer inbox, or ``None``.
+            own_tools: Pi's own tools that are on for the turn, which the
+                model gets beside the program's.
         """
         self._react = react
         self._lm = lm
@@ -239,13 +268,10 @@ class ReactOnPi:
         self._inbox = steer_inbox
         self._adapter = AppendOnlyChatAdapter()
         self._native = bool(getattr(lm, "supports_function_calling", False))
-        self._lm_kwargs: dict[str, Any] = {"parallel_tool_calls": False} if self._native else {}
-        signature = _without_text_reasoning(react.react.signature)
-        call_inputs = {**inputs, "tools": list(react.tools.values())}
-        self._signature = self._adapter._call_preprocess(lm, self._lm_kwargs, signature, call_inputs)
-        self._prefix = self._adapter.format(self._signature, [], call_inputs)
-        # The text protocol ends the prompt with the format reminder, which must stay last.
-        self._reminder = None if self._native else self._prefix.pop()
+        self._inputs = inputs
+        self._own_tools = tuple(own_tools)
+        self._program_tool_names = set(react.tools)
+        self._render([])
         self._steers: list[tuple[int, dict[str, Any]]] = []
         self._calls = 0
         self._forcing = False
@@ -254,6 +280,44 @@ class ReactOnPi:
         self._lock = asyncio.Lock()
         self.reply: str | None = None
         self.outputs: dict[str, Any] | None = None
+
+    def _render(self, pi_specs: list[dict[str, Any]]) -> None:
+        """Render the prompt prefix and the LM tool kwargs for the program's tools and Pi's own.
+
+        Args:
+            pi_specs: Pi's ``{name, description, parameters}`` for each own
+                tool that is on.
+        """
+        self._lm_kwargs: dict[str, Any] = {"parallel_tool_calls": False} if self._native else {}
+        signature = _without_text_reasoning(self._react.react.signature)
+        tools = list(self._react.tools.values())
+        if not self._native:
+            tools += [_stub_tool(spec) for spec in pi_specs]
+        call_inputs = {**self._inputs, "tools": tools}
+        self._signature = self._adapter._call_preprocess(self._lm, self._lm_kwargs, signature, call_inputs)
+        self._prefix = self._adapter.format(self._signature, [], call_inputs)
+        if self._native and pi_specs:
+            # Pi's own schema, required keys included, beats a DSPy rendering of it.
+            self._lm_kwargs["tools"] = [
+                *self._lm_kwargs.get("tools", []),
+                *({"type": "function", "function": spec} for spec in pi_specs),
+            ]
+        # The text protocol ends the prompt with the format reminder, which must stay last.
+        self._reminder = None if self._native else self._prefix.pop()
+
+    def _add_own_tools(self, body: dict[str, Any]) -> None:
+        """Add Pi's own tools from its first request to the model's roster.
+
+        Args:
+            body: Pi's chat-completions request.
+        """
+        specs = [
+            tool.get("function") or {}
+            for tool in body.get("tools") or []
+            if (tool.get("function") or {}).get("name") in self._own_tools
+        ]
+        if specs:
+            self._render(specs)
 
     def tool_specs(self) -> list[dict[str, Any]]:
         """Return the program's tools as the model sees them.
@@ -269,6 +333,7 @@ class ReactOnPi:
             }
             for spec in self._lm_kwargs.get("tools")
             or [tool.format_as_litellm_function_call() for tool in self._react.tools.values()]
+            if spec["function"]["name"] in self._program_tool_names
         ]
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> ToolOutcome:
@@ -395,6 +460,8 @@ class ReactOnPi:
             OpenAI stream chunks as JSON strings.
         """
         self._calls += 1
+        if self._calls == 1 and self._own_tools:
+            self._add_own_tools(body)
         raw = body.get("messages") or []
         first_user = next((i for i, message in enumerate(raw) if message.get("role") == "user"), len(raw))
         tail = [kept for message in raw[first_user + 1 :] if (kept := _wire_message(message))]
@@ -590,6 +657,7 @@ async def run_react_program_on_pi(
     *,
     input_field: str,
     binary: str,
+    sandbox: PiSandbox | None = None,
 ) -> dict[str, Any] | str:
     """Run a program with several outputs on Pi, with nothing streamed to the user.
 
@@ -599,6 +667,8 @@ async def run_react_program_on_pi(
         lm: The turn's language model.
         input_field: The input that Pi sends as its first user message.
         binary: The ``pi`` executable.
+        sandbox: The box Pi runs in with its own tools on; ``None`` runs
+            Pi here with the program's tools only.
 
     Returns:
         The accepted ``submit`` outputs, from a forced ``submit`` when the
@@ -614,6 +684,7 @@ async def run_react_program_on_pi(
         binary=binary,
         pending_skip=frozenset(),
         steer_inbox=None,
+        sandbox=sandbox,
     )
     if handlers.outputs is not None:
         return handlers.outputs
@@ -631,6 +702,7 @@ async def _run_program(
     binary: str,
     pending_skip: frozenset[str],
     steer_inbox: SteerInbox | None,
+    sandbox: PiSandbox | None = None,
 ) -> tuple[ReactOnPi, PiEventTranslator]:
     """Drive one program turn on Pi.
 
@@ -644,14 +716,27 @@ async def _run_program(
         binary: The ``pi`` executable.
         pending_skip: Tools that get no ``tool_pending`` row.
         steer_inbox: The turn's steer inbox, or ``None``.
+        sandbox: The box Pi runs in with its own tools on, or ``None``.
 
     Returns:
         The turn's handlers and translator, after Pi stops.
     """
     translator = PiEventTranslator(emit, reply_tool=SUBMIT_TOOL, reply_arg=output_field, pending_skip=pending_skip)
-    handlers = ReactOnPi(react, inputs, lm, translator=translator, output_field=output_field, steer_inbox=steer_inbox)
+    handlers = ReactOnPi(
+        react,
+        inputs,
+        lm,
+        translator=translator,
+        output_field=output_field,
+        steer_inbox=steer_inbox,
+        own_tools=sandbox.builtin_tools if sandbox is not None else (),
+    )
     await run_pi_turn(
-        binary=binary, handlers=handlers, translator=translator, prompt=str(inputs.get(input_field) or "")
+        binary=binary,
+        handlers=handlers,
+        translator=translator,
+        prompt=str(inputs.get(input_field) or ""),
+        sandbox=sandbox,
     )
     # A single output is the final text itself; with several, plain text would
     # leave the other fields empty.

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from ...billing.budgets import BudgetError, BudgetService
 from ...config import settings
-from ...local.cli_catalog import CLI_MODELS, parse_subscription_model_id
+from ...local.cli_catalog import current_cli_slug, parse_subscription_model_id
 from ...models.blackbox import BlackboxScorer
 from ...models.hardening import (
     ACTIVE_STATUSES,
@@ -87,7 +87,7 @@ def _require_model(model: str, *, role: str | None = None) -> None:
     subscription = parse_subscription_model_id(model) if settings.local_mode else None
     if subscription is not None:
         cli, slug = subscription
-        if slug not in CLI_MODELS[cli]:
+        if current_cli_slug(cli, slug) is None:
             raise DomainError("billing.subscription_unmapped_model", status=422, provider=cli)
         return
     require_known_model(model, role=role)

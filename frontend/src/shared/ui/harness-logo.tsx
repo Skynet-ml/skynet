@@ -1,15 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { Codex, OpenCode } from "@lobehub/icons";
+import { Antigravity, Cline, Codex, Goose, HermesAgent, OpenCode, OpenHands } from "@lobehub/icons";
 import type { BlackboxHarness } from "@/shared/types/api";
 
 /**
  * Brand mark for an agent harness, in the same colored-tile style as
  * `ProviderLogo`. Pi has no mark in @lobehub/icons, so it gets a drawn π tile, and
  * Prime Agent carries Prime Intellect's own mark inline for the same reason; a
- * harness without a mark (custom) renders nothing. `dir="ltr"` keeps the mark
- * upright under RTL.
+ * harness without a free, correct mark (custom, aider, eve, deerflow, code_puppy)
+ * renders nothing. `dir="ltr"` keeps the mark upright under RTL.
  */
 export function HarnessLogo({ harness, size = 20 }: { harness: BlackboxHarness; size?: number }) {
   const mark = renderMark(harness, size);
@@ -42,7 +42,19 @@ function renderMark(harness: BlackboxHarness, size: number): React.ReactNode {
         />
       );
     case "opencode":
+    case "opencode_v2":
       return <OpenCode.Avatar size={size} iconClassName={GLYPH_CLASS} iconStyle={glyphStyle} />;
+    case "openhands":
+    case "openhands_sdk":
+      return <OpenHands.Avatar size={size} iconClassName={GLYPH_CLASS} iconStyle={glyphStyle} />;
+    case "antigravity_sdk":
+      return <Antigravity.Avatar size={size} iconClassName={GLYPH_CLASS} iconStyle={glyphStyle} />;
+    case "goose":
+      return <Goose.Avatar size={size} iconClassName={GLYPH_CLASS} iconStyle={glyphStyle} />;
+    case "hermes":
+      return <HermesAgent.Avatar size={size} iconClassName={GLYPH_CLASS} iconStyle={glyphStyle} />;
+    case "cline":
+      return <Cline.Avatar size={size} iconClassName={GLYPH_CLASS} iconStyle={glyphStyle} />;
     case "prime":
       return <PrimeIntellectMark size={size} />;
     default:

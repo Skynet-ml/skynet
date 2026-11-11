@@ -496,7 +496,13 @@ def _catalog_with(*values: str, default: str | None = None) -> SimpleNamespace:
     """Build a stand-in model catalog carrying just the given model ids."""
     return SimpleNamespace(
         models=[
-            SimpleNamespace(value=v, is_default=v == default, reasoning_efforts=None, reasoning_default_enabled=None)
+            SimpleNamespace(
+                value=v,
+                is_default=v == default,
+                supports_thinking=True,
+                reasoning_efforts=None,
+                reasoning_default_enabled=None,
+            )
             for v in values
         ]
     )

@@ -1094,3 +1094,120 @@ async def test_native_model_does_not_take_the_text_path() -> None:
     assert _merge(chunks)["tool_calls"][0]["function"]["name"] == "_lookup"
     assert lm.requests[0]["tools"]
     assert "[[ ## tool_calls ## ]]" not in json.dumps(lm.requests[0]["messages"][-1])
+
+
+_PI_READ = {
+    "name": "read",
+    "description": "Read a file in the working folder.",
+    "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "offset": {"type": "number"}},
+        "required": ["path"],
+    },
+}
+_PI_BASH = {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+}
+_PI_WEB = {"name": "web_fetch", "description": "Fetch a URL.", "parameters": {"type": "object", "properties": {}}}
+
+
+def _pi_body(handlers: ReactOnPi) -> dict[str, Any]:
+    """Build Pi's first request in a sandbox: Pi's own tools beside the bridge tools.
+
+    Args:
+        handlers: The turn's handlers.
+
+    Returns:
+        The chat-completions request.
+    """
+    specs = [*handlers.tool_specs(), _PI_READ, _PI_BASH, _PI_WEB]
+    return {"messages": [], "tools": [{"type": "function", "function": spec} for spec in specs]}
+
+
+def _own_tool_handlers(lm: dspy.BaseLM, own_tools: tuple[str, ...]) -> ReactOnPi:
+    """Build handlers whose turn runs with some of Pi's own tools on.
+
+    Args:
+        lm: The turn's LM.
+        own_tools: Pi's own tools of the turn.
+
+    Returns:
+        The handlers.
+    """
+    translator = PiEventTranslator(lambda _e: None, reply_tool="submit", reply_arg=_REPLY, pending_skip=frozenset())
+    return ReactOnPi(
+        _program(), {"user_message": "hi"}, lm, translator=translator, output_field=_REPLY, own_tools=own_tools
+    )
+
+
+async def test_native_model_sees_pis_own_tools_as_pi_describes_them() -> None:
+    """In a sandbox the model gets Pi's own tools, unchanged, beside the program's; the bridge never lists them."""
+    lm = _ScriptedLM([("bash", {"command": "ls"})])
+    handlers = _own_tool_handlers(lm, ("read", "bash"))
+
+    chunks = [json.loads(chunk) async for chunk in handlers.complete(_pi_body(handlers))]
+
+    assert _merge(chunks)["tool_calls"][0]["function"]["name"] == "bash"
+    sent = {tool["function"]["name"]: tool["function"] for tool in lm.requests[0]["tools"]}
+    assert set(sent) == {"_lookup", "_explode", "_as_dict", "submit", "read", "bash"}
+    assert sent["read"] == _PI_READ
+    assert {spec["name"] for spec in handlers.tool_specs()} == {"_lookup", "_explode", "_as_dict", "submit"}
+
+
+async def test_text_model_is_told_about_pis_own_tools() -> None:
+    """A CLI model reads Pi's own tools in its prompt, and its call to one reaches Pi as a native call."""
+    lm = _TextLM([_text_calls(("bash", {"command": "pytest -q"}))])
+    handlers = _own_tool_handlers(lm, ("read", "bash"))
+
+    chunks = [json.loads(chunk) async for chunk in handlers.complete(_pi_body(handlers))]
+
+    (call,) = _merge(chunks)["tool_calls"]
+    assert call["function"]["name"] == "bash"
+    assert json.loads(call["function"]["arguments"]) == {"command": "pytest -q"}
+    prompt = json.dumps(lm.requests[0]["messages"])
+    assert "Run a shell command." in prompt
+    assert "Read a file in the working folder." in prompt
+    assert "Fetch a URL." not in prompt
+    assert "tools" not in lm.requests[0]
+
+
+async def test_without_a_sandbox_the_model_never_sees_pis_tools() -> None:
+    """A turn with no own tools keeps the program's roster, whatever Pi lists."""
+    lm = _ScriptedLM([("_lookup", {"name": "a"})])
+    handlers = _own_tool_handlers(lm, ())
+
+    [chunk async for chunk in handlers.complete(_pi_body(handlers))]
+
+    assert {tool["function"]["name"] for tool in lm.requests[0]["tools"]} == {
+        "_lookup",
+        "_explode",
+        "_as_dict",
+        "submit",
+    }
+
+
+async def test_program_turn_in_a_sandbox_runs_pi_there_with_its_own_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sandbox reaches Pi, and the program turn turns on the sandbox's own tools."""
+    seen: dict[str, Any] = {}
+
+    async def pi_in_box(*, handlers: ReactOnPi, sandbox: Any = None, **kwargs: Any) -> None:
+        """Record the sandbox and the handlers' own tools, then run the simulated turn."""
+        seen["sandbox"] = sandbox
+        seen["own_tools"] = handlers._own_tools
+        await _simulated_pi(handlers=handlers, **kwargs)
+
+    class _Box:
+        builtin_tools = ("read", "bash")
+
+    monkeypatch.setattr(pi_react, "run_pi_turn", pi_in_box)
+    box = _Box()
+    lm = _ScriptedLM([("submit", {"summary": "done", "run_code": "x = 1"})])
+
+    outputs = await pi_react.run_react_program_on_pi(
+        _coder_program(), {"request": "write it"}, lm, input_field="request", binary="pi", sandbox=box
+    )
+
+    assert outputs == {"summary": "done", "run_code": "x = 1"}
+    assert seen == {"sandbox": box, "own_tools": ("read", "bash")}

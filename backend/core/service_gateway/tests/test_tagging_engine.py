@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import pytest
 
 from ...api.errors import DomainError
+from ...local.managed_models import HOSTED_INFERENCE_KEY
+from ...models import ModelConfig
 from .. import tagging
 from ..tagging import (
     MAX_EXAMPLES,
@@ -584,6 +586,26 @@ def test_local_mode_keeps_a_byok_tagging_model(monkeypatch: pytest.MonkeyPatch) 
         {"model": "openai/gpt-4o-mini", "modelParams": {"token_source": "byok", "byok_provider": "openai"}}
     )
     assert (config.name, config.token_source, config.byok_provider) == ("openai/gpt-4o-mini", "byok", "openai")
+
+
+def test_local_mode_runs_an_interview_on_the_linked_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept the hosted-inference config a linked Mac sends without an OpenRouter key.
+
+    Args:
+        monkeypatch: Turns local mode on and captures the built config.
+    """
+    monkeypatch.setattr(tagging.settings, "local_mode", True)
+    built: list[ModelConfig] = []
+    monkeypatch.setattr(tagging, "build_language_model", lambda config, **_: built.append(config) or SimpleNamespace())
+    hosted = ModelConfig(
+        name="openrouter/openai/gpt-5-mini",
+        token_source="managed",
+        base_url="http://127.0.0.1:1/v1",
+        extra={"api_key": "synthetic-scoped-token", HOSTED_INFERENCE_KEY: True},
+    )
+    tagging._build_assist_lm(model_config=hosted)
+    assert built
+    assert built[0].extra.get(HOSTED_INFERENCE_KEY) is True
 
 
 def test_local_mode_refuses_a_subscription_tagging_run(monkeypatch: pytest.MonkeyPatch) -> None:
