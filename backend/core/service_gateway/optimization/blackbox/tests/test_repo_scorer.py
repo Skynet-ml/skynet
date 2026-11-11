@@ -972,6 +972,67 @@ def test_stage_failures_reach_the_scorer_as_stage_errors(tmp_path: Path, name: s
     assert runtime.closed == len(STAGES)
 
 
+def test_each_stage_call_is_recorded_with_its_status_and_no_secret(tmp_path: Path) -> None:
+    """A good and a failed stage call each write one ``stage`` run call (E28)."""
+    code = (
+        "import os\n"
+        "from skynet import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    for name in ('double', 'broken'):\n"
+        "        try:\n"
+        "            call(name, {'v': 2, 'key': os.environ.get('JUDGE_KEY', 'stage-secret-value')})\n"
+        "        except StageError:\n"
+        "            pass\n"
+        "    return 1.0, 'ok'\n"
+    )
+    sink = _CallSink()
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        secrets={"JUDGE_KEY": "stage-secret-value"},
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+    try:
+        scorer.score("")
+    finally:
+        scorer.close()
+
+    calls = {call["target"]: (call, secrets) for _, call, secrets in sink.calls if call["kind"] == "stage"}
+    assert set(calls) == {"double", "broken"}
+    good, secrets = calls["double"]
+    assert (good["candidate_id"], good["status"], good["failure_reason"]) == ("cand-1", "ok", None)
+    assert '"v": 2' in good["request"]
+    assert '"output"' in good["response"]
+    assert "stage-secret-value" in secrets
+    broken = calls["broken"][0]
+    assert broken["status"] == "failed"
+    assert "stage broke" in broken["failure_reason"]
+
+
+def test_a_frame_for_an_unknown_stage_is_recorded_as_refused() -> None:
+    """A raw call frame that names no stage of the run is refused, recorded and answered (E28)."""
+    sink = _CallSink()
+    workspace = _Workspace()
+    relay = _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+    identity = "c" * 32
+    relay.output("stdout", relay._prefix + json.dumps({"id": identity, "stage": "nope", "input": 1}) + "\n")
+    relay._refusals.shutdown(wait=True)
+    relay.close()
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["target"], call["status"]) == ("stage", "nope", "refused")
+    assert "Unknown stage 'nope'" in call["failure_reason"]
+    assert workspace.writes == [(f"calls/000001/stages/{identity}.json", '{"error": "Unknown stage \'nope\'."}')]
+
+
 def test_a_box_that_fails_to_open_leaves_none_open(tmp_path: Path) -> None:
     """When one stage box cannot open, the open ones close and the version gets no score."""
     runtime = RecordingRuntime(fail_on="shout")
@@ -2815,10 +2876,10 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
     assert not any(answer["key_in_env"] for answer in (posted, redirected, streamed))
     assert "judge-secret-value" not in result["feedback"]
     assert sorted(echo.paths) == ["/echo", "/echo/events", "/echo/redirect"]
-    assert (
-        sorted((call["role"], call["kind"], call["candidate_id"]) for _, call, _ in sink.calls)
-        == [("target.lookup", "mcp", "cand-1")] * 3
-    )
+    assert sorted((call["role"], call["kind"], call["candidate_id"]) for _, call, _ in sink.calls) == [
+        *[("metric", "stage", "cand-1")] * 3,
+        *[("target.lookup", "mcp", "cand-1")] * 3,
+    ]
 
 
 def test_a_budget_stop_in_a_stages_mcp_call_stops_the_evaluation(
