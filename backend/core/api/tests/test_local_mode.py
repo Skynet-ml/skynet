@@ -331,7 +331,7 @@ def test_local_subscription_run_creates_an_uncapped_budget(monkeypatch: pytest.M
 
 
 def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run the repository gate refuses gets a 409 that lists each coded failure (SKY-372).
+    """A run the repository gate refuses gets a 409 that lists each failure (SKY-372, SKY-646).
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the failed setup check.
@@ -369,8 +369,31 @@ def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) 
     assert body["params"]["failures"] == [
         {"key": "repo_gate.unknown_connector", "params": {"service": "jira", "known": "github, linear"}},
         {"key": "repo_gate.unenforced_local", "params": {"key": "proposer.network"}},
+        {"key": "workflow.validation_failed", "params": {"error": "Traceback: raw internal text"}},
     ]
-    assert "Traceback" not in resp.text
+    assert store.created_ids() == []
+
+
+def test_uncoded_setup_failure_is_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A setup failure without a catalog code still names its cause in the 409 (SKY-646).
+
+    Args:
+        monkeypatch: Pytest fixture used to set local mode and the failed setup check.
+    """
+    client, store = _local_submit_client(monkeypatch, local_mode=True)
+    checks = [WizardPreflightCheck(key="setup", status="failed", message="Auto needs at least 6 scorer runs.")]
+    monkeypatch.setattr(
+        _sub_mod,
+        "run_preflight",
+        lambda *args, **kwargs: SimpleNamespace(pending_reason=None, status="failed", checks=checks),
+    )
+
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["params"]["failures"] == [
+        {"key": "workflow.validation_failed", "params": {"error": "Auto needs at least 6 scorer runs."}}
+    ]
     assert store.created_ids() == []
 
 
