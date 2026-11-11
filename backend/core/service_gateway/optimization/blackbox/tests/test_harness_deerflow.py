@@ -6,8 +6,10 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import venv
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from ..agent_eval import candidate_files
 from ..harness import GatewayConfig, build_launch, pinned_harness_check
 from ..harness_bridge import parse_pi_output, workspace_files
 from ..harnesses import REGISTRY
-from ..harnesses.base import _version_check
+from ..harnesses.base import _temp_root, _version_check
 from ..harnesses.deerflow import (
     CONFIG_FILE,
     DEERFLOW_PACKAGE,
@@ -141,7 +143,7 @@ def test_launch_runs_the_runner_on_the_gateway_only() -> None:
     launch = build_launch(_target(), _GATEWAY)
     assert launch.parse_output is parse_pi_output
     assert launch.run_command == (
-        'export DEERFLOW_DATA_DIR="$(mktemp -d)" && trap \'rm -rf "$DEERFLOW_DATA_DIR"\' EXIT && '
+        f"{_temp_root('DEERFLOW_DATA_DIR', 'deerflow')} && "
         'DEER_FLOW_PROJECT_ROOT="$DEERFLOW_DATA_DIR/project" '
         f'DEER_FLOW_HOME="$DEERFLOW_DATA_DIR/home" "$HOME/.app/deerflow/venv/bin/python" {RUNNER_FILE}'
     )
@@ -714,3 +716,72 @@ def test_version_probe_accepts_only_the_pinned_commit(tmp_path: Path, marker: st
         check=False,
     )
     assert completed.returncode == code
+
+
+def test_next_run_removes_the_data_dir_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the data folder that a SIGKILL left behind when the next run starts (SKY-594).
+
+    The bridge kills a timed-out run's process group with SIGKILL, so the EXIT
+    trap does not run and the folder stays until the next run sweeps it.
+
+    Args:
+        tmp_path: Scratch home, workspaces and temp directory.
+    """
+    launch = build_launch(_target(), _GATEWAY)
+    runner = tmp_path / "home" / ".app" / "deerflow" / "venv" / "bin" / "python"
+    runner.parent.mkdir(parents=True)
+    # Stands in for the venv Python: it logs the data folder, then waits.
+    runner.write_text('#!/bin/sh\nprintf \'%s\\n\' "$DEERFLOW_DATA_DIR" > "$FAKE_LOG"\nsleep "$FAKE_SLEEP"\n')
+    runner.chmod(0o755)
+    (tmp_path / "tmp").mkdir()
+
+    def start(tag: str, sleep: int) -> tuple[subprocess.Popen[bytes], Path]:
+        """Start one run in its own process group and workspace.
+
+        Args:
+            tag: Name of the run's workspace and log.
+            sleep: Seconds the fake runner waits.
+
+        Returns:
+            The running shell and its log.
+        """
+        log = tmp_path / f"{tag}.log"
+        env = {
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HOME": str(tmp_path / "home"),
+            "TMPDIR": str(tmp_path / "tmp"),
+            "FAKE_LOG": str(log),
+            "FAKE_SLEEP": str(sleep),
+        }
+        workspace = tmp_path / tag
+        workspace.mkdir()
+        process = subprocess.Popen(["bash", "-c", launch.run_command], cwd=workspace, env=env, start_new_session=True)
+        return process, log
+
+    def data_dir(log: Path) -> Path:
+        """Wait until the fake runner logs its data folder.
+
+        Args:
+            log: The run's log.
+
+        Returns:
+            The run's data folder.
+        """
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if log.exists() and log.read_text().strip():
+                return Path(log.read_text().strip())
+            time.sleep(0.05)
+        raise AssertionError("the fake runner never started")
+
+    killed, killed_log = start("killed", 30)
+    killed_dir = data_dir(killed_log)
+    os.killpg(killed.pid, signal.SIGKILL)
+    killed.wait(timeout=10)
+    assert killed_dir.is_dir()
+
+    after, after_log = start("after", 0)
+    assert after.wait(timeout=10) == 0
+
+    assert not killed_dir.exists()
+    assert not data_dir(after_log).exists()
