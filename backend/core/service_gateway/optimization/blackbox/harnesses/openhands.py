@@ -69,16 +69,20 @@ _WRAPPER = '#!/bin/sh\\nexec "%s/bin/python" -P -m openhands.core.main "$@"\\n'
 # ``temperature=0.0`` and ``top_p=1.0``: Anthropic Opus 4.1 and later reject
 # the two together, and OpenAI reasoning models reject ``temperature=0``.
 # ``None`` overrides them, and LiteLLM drops a ``None`` parameter, so the
-# gateway gets neither. LiteLLM drops ``reasoning_effort`` for a model name it
-# does not know, so ``allowed_openai_params`` forces it through. OpenHands
+# gateway gets neither. The effort goes in ``extra_body``, which LiteLLM
+# hands to the OpenAI client as is: as a top-level ``reasoning_effort``,
+# LiteLLM 1.80.10 drops it for a model name it does not know, and refuses
+# ``xhigh`` for most ``gpt-5`` ids. The agent passes its own ``extra_body``
+# on each call, and OpenHands removes that one for a model that is not
+# ``litellm_proxy/``, so the one from ``completion_kwargs`` stays. OpenHands
 # also adds ``thinking`` for a model whose name is ``gemini-2.5-pro`` (a
 # 128-token budget, with ``allowed_openai_params`` set to ``["thinking"]``,
 # because the harness never sets ``LLM_REASONING_EFFORT``) or contains
 # ``claude-opus-4-1`` (always disabled). With ``LLM_DROP_PARAMS=false``,
 # LiteLLM 1.80.10 refuses that ``thinking`` on the ``openai/`` route, so every
 # such run fails. ``None`` removes it. ``allowed_openai_params=None`` also
-# removes the OpenHands ``["thinking"]``: with no effort, LiteLLM would
-# otherwise pass ``thinking=None`` to the OpenAI client, which rejects it.
+# removes the OpenHands ``["thinking"]``: LiteLLM would otherwise pass
+# ``thinking=None`` to the OpenAI client, which rejects it.
 _DEFAULTS_OFF = {"temperature": None, "top_p": None, "thinking": None, "allowed_openai_params": None}
 # LiteLLM reads these keys for its other providers. A protected run blanks
 # them, so an inherited key never gives OpenHands a route around the gateway.
@@ -138,10 +142,10 @@ def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]
 
     OpenHands parses the value with ``ast.literal_eval``. It always unsets
     ``temperature``, ``top_p``, ``thinking`` and ``allowed_openai_params``.
-    It adds the user's effort unchanged, as the Codex, OpenCode and Aider
-    harnesses do, so the gateway gets the same ``reasoning_effort`` from
-    every harness. ``LLM_DROP_PARAMS=false`` makes a level that
-    LiteLLM refuses fail the call rather than vanish.
+    It adds the user's effort unchanged in ``extra_body``, as the Codex,
+    OpenCode and Aider harnesses pass it unchanged, so the gateway gets the
+    same ``reasoning_effort`` from every harness. LiteLLM does not check or
+    drop a value in ``extra_body``.
 
     Args:
         reasoning_effort: The user's effort for the model, or ``None`` for the model default.
@@ -151,8 +155,7 @@ def _openhands_completion_kwargs(reasoning_effort: str | None) -> dict[str, str]
     """
     kwargs: dict[str, object] = dict(_DEFAULTS_OFF)
     if reasoning_effort:
-        kwargs["reasoning_effort"] = reasoning_effort
-        kwargs["allowed_openai_params"] = ["reasoning_effort"]
+        kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
     return {"LLM_COMPLETION_KWARGS": repr(kwargs)}
 
 
@@ -242,9 +245,10 @@ def _openhands_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
             # the bridge returns has no agent message or final answer.
             "LOG_ALL_EVENTS": "true",
             # OpenHands defaults to ``drop_params=True``, so LiteLLM would
-            # silently drop an effort that it knows a model does not take,
-            # such as ``xhigh`` for ``gpt-5.1``. The call fails instead, and
-            # the run ends in a state that is not ``finished``.
+            # silently drop a parameter that it knows a model does not take.
+            # The call fails instead, and the run ends in a state that is not
+            # ``finished``. The effort is in ``extra_body``, which LiteLLM
+            # never drops.
             "LLM_DROP_PARAMS": "false",
             **_openhands_completion_kwargs(reasoning_effort),
         }

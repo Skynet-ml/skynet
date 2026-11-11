@@ -306,23 +306,23 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
 
 @pytest.mark.parametrize("effort", [None, "", "none", "minimal", "low", "medium", "high", "xhigh"])
 def test_completion_kwargs_unset_sampling_and_pass_the_effort_unchanged(effort: str | None) -> None:
-    """Always unset ``temperature`` and ``top_p``, and force the user's effort through unchanged when there is one.
+    """Always unset ``temperature`` and ``top_p``, and send the user's effort unchanged in ``extra_body``.
 
     OpenHands drops ``LLM_REASONING_EFFORT`` for models outside its own list,
     and sends ``temperature=0.0`` with ``top_p=1.0`` to them, which Anthropic
     Opus 4.1+ and OpenAI reasoning models reject. So the launch must not rely
     on ``LLM_REASONING_EFFORT``, and must unset both even with no effort.
-    LiteLLM drops the effort for a model name it does not know unless
-    ``allowed_openai_params`` names it, and ``LLM_DROP_PARAMS=false`` turns a
-    refused level into a failed call rather than a silent drop.
+    As a top-level parameter, LiteLLM 1.80.10 drops the effort for a model
+    name it does not know and refuses ``xhigh`` for most ``gpt-5`` ids. It
+    passes ``extra_body`` to the OpenAI client without a check, so the effort
+    is never top level and ``allowed_openai_params`` stays unset.
     """
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
     assert "LLM_REASONING_EFFORT" not in launch.env
     assert launch.env["LLM_DROP_PARAMS"] == "false"
     expected: dict[str, object] = {"temperature": None, "top_p": None, "thinking": None, "allowed_openai_params": None}
     if effort:
-        expected["reasoning_effort"] = effort
-        expected["allowed_openai_params"] = ["reasoning_effort"]
+        expected["extra_body"] = {"reasoning_effort": effort}
     assert ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]) == expected
 
 
@@ -372,7 +372,7 @@ def test_completion_kwargs_remove_the_thinking_openhands_adds(model: str, effort
     openhands_kwargs.update(ast.literal_eval(launch.env["LLM_COMPLETION_KWARGS"]))
 
     sent = {key: value for key, value in openhands_kwargs.items() if value is not None}
-    assert sent == ({"reasoning_effort": effort, "allowed_openai_params": ["reasoning_effort"]} if effort else {})
+    assert sent == ({"extra_body": {"reasoning_effort": effort}} if effort else {})
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
