@@ -177,6 +177,12 @@ def test_record_call_rejects_an_unknown_kind(store: PostgresRunCallStore) -> Non
         store.record_call("job-1", _call(kind="shell"), [])
 
 
+def test_record_call_stores_an_egress_call(store: PostgresRunCallStore) -> None:
+    """A sandbox egress proxy request is a known call kind (SKY-634)."""
+    store.record_call("job-1", _call(kind="egress", target="pypi.org"), [])
+    assert [c["kind"] for c in store.list_calls("job-1", "cand-1")] == ["egress"]
+
+
 def test_list_calls_returns_calls_in_write_order_after_the_cursor(store: PostgresRunCallStore) -> None:
     """Calls come back oldest first; ``since`` skips held calls and ``limit`` caps the page."""
     seqs = [store.record_call("job-1", _call(target=f"t{i}"), []) for i in range(5)]

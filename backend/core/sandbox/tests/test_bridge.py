@@ -196,6 +196,20 @@ def test_async_docker_runtime_is_free_and_unfunded() -> None:
     assert runtime._options == {"docker_bin": "dk", "image": _LOCAL_IMAGE}
 
 
+def test_async_docker_runtime_passes_the_run_recorder_to_its_boxes() -> None:
+    """Give each Docker box the run's recorder, so it writes its egress requests (SKY-634)."""
+    local = _settings(local_mode=True, local_sandbox_image=_LOCAL_IMAGE, docker_bin="dk")
+    recorder = object()
+    runtime = bridge.protected_runtime(local, image=_LOCAL_IMAGE, budget=_BUDGET, recorder=recorder)
+    assert runtime._options == {"docker_bin": "dk", "image": _LOCAL_IMAGE, "recorder": recorder}
+
+
+def test_async_vercel_runtime_takes_no_recorder() -> None:
+    """Pass no recorder to a provider that has no egress proxy to read."""
+    runtime = bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET, recorder=object())
+    assert runtime._options == {"budget": _BUDGET}
+
+
 @pytest.mark.parametrize(
     ("values", "policy"),
     [

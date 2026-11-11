@@ -27,10 +27,23 @@ from .metering import USAGE_ADAPTERS
 _LABELS = {"vercel": "Vercel Sandbox", "docker": "Local Docker"}
 
 
+# These providers run an egress proxy whose request log each box writes into
+# the run record. Vercel enforces the allowlist at its edge and exposes no log.
+_EGRESS_RECORDING_PROVIDERS = frozenset({"docker", "podman"})
+
+
 class ProtectedBridgeRuntime(AsyncBridgeRuntime):
     """Open protected boxes of one async provider through the sync bridge."""
 
-    def __init__(self, provider: str, *, budget: Any, image: str | None = None, docker_bin: str | None = None) -> None:
+    def __init__(
+        self,
+        provider: str,
+        *,
+        budget: Any,
+        image: str | None = None,
+        docker_bin: str | None = None,
+        recorder: Any = None,
+    ) -> None:
         """Bind the runtime to a provider and the run's budget.
 
         Args:
@@ -39,6 +52,8 @@ class ProtectedBridgeRuntime(AsyncBridgeRuntime):
                 settles each box against it.
             image: The default image of a provider that takes one (Docker).
             docker_bin: The Docker CLI path of the Docker provider.
+            recorder: The run's call recorder. A provider with an egress proxy
+                writes each proxy request into it; other providers ignore it.
 
         Raises:
             SandboxFatalError: The provider is unknown, missing from this
@@ -52,6 +67,8 @@ class ProtectedBridgeRuntime(AsyncBridgeRuntime):
         self.billable = self._capabilities.billable
         if self.billable:
             self._options["budget"] = budget
+        if recorder is not None and provider in _EGRESS_RECORDING_PROVIDERS:
+            self._options["recorder"] = recorder
 
 
 def default_provider(settings: Settings) -> str:
@@ -146,8 +163,8 @@ def protected_runtime(
         settings: Trusted deployment configuration.
         image: The immutable image of every box.
         budget: The run's budget runtime.
-        recorder: Unused. The async providers record no egress proxy
-            requests; callers still pass the run's call recorder.
+        recorder: The run's call recorder. Docker and Podman boxes write
+            each egress proxy request into it (SKY-634).
         provider: The run's chosen provider; the deployment default when None.
 
     Returns:
@@ -160,5 +177,7 @@ def protected_runtime(
         raise SandboxFatalError(f"Sandbox provider {provider!r} is not offered on this deployment.")
     name = provider or default_provider(settings)
     if name == "docker":
-        return ProtectedBridgeRuntime("docker", budget=budget, image=image, docker_bin=settings.docker_bin)
-    return ProtectedBridgeRuntime(name, budget=budget)
+        return ProtectedBridgeRuntime(
+            "docker", budget=budget, image=image, docker_bin=settings.docker_bin, recorder=recorder
+        )
+    return ProtectedBridgeRuntime(name, budget=budget, recorder=recorder)

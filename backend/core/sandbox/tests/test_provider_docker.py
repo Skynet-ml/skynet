@@ -20,6 +20,8 @@ from collections.abc import Iterator, Sequence
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
@@ -35,6 +37,9 @@ from core.sandbox.providers.docker import (
 )
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+from core.storage.models import Base
+from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
+from core.worker.scoped_relay import CallRecorder
 
 BASE_IMAGE = "ubuntu:24.04"
 PROXY_IMAGE_REPOSITORY = "skynet-local-sandbox"
@@ -341,6 +346,129 @@ async def test_allowlist_start_opens_the_proxy_first(fake_docker: _FakeDocker) -
     for run in (proxy_run, box_run):
         assert run[run.index("--pull") + 1] == "never"
     assert box_run[box_run.index("--network") + 1] == f"{env.container_name}-net"
+
+
+def _proxy_line(host: str, started_at: str, **fields: Any) -> str:
+    """Return one request line as the egress proxy prints it.
+
+    Args:
+        host: The requested host.
+        started_at: The request's UTC start time.
+        **fields: The other fields of the line.
+
+    Returns:
+        The JSON line.
+    """
+    return json.dumps({"event": "skynet-egress-call", "host": host, "started_at": started_at, **fields})
+
+
+def _run_record() -> tuple[PostgresRunCallStore, CallRecorder]:
+    """Return a run-call store on a fresh in-memory schema and a run recorder that writes to it.
+
+    Returns:
+        The store and the recorder of run ``job-1``.
+    """
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    store = PostgresRunCallStore(engine)
+    return store, CallRecorder(store, "job-1", "cand-1", "solver")
+
+
+_BOX_VALUE = "route-value-for-tests"
+_PROXY_LOG = "\n".join(
+    [
+        docker_provider.READY_MARKER,
+        _proxy_line(
+            "pypi.org",
+            "2026-11-11T10:00:02.000+00:00",
+            port=443,
+            status="ok",
+            code=200,
+            reason=None,
+            bytes_sent=10,
+            bytes_received=20,
+            duration_ms=5,
+        ),
+        "not a call line",
+        _proxy_line(
+            f"{_BOX_VALUE}.example.com",
+            "2026-11-11T10:00:01.000+00:00",
+            port=443,
+            status="refused",
+            code=403,
+            reason="host or port is not allowed",
+            bytes_sent=0,
+            bytes_received=0,
+            duration_ms=1,
+        ),
+    ]
+).encode()
+
+
+def test_call_event_matches_the_proxy() -> None:
+    """Read the same event name that the proxy prints."""
+    proxy = importlib.import_module("core.service_gateway.optimization.blackbox.docker_egress_proxy")
+    assert proxy.CALL_EVENT == docker_provider.CALL_EVENT
+
+
+async def test_stop_records_each_proxy_request_in_start_order(fake_docker: _FakeDocker) -> None:
+    """Write one masked egress row for each proxy request before the proxy goes away (SKY-634)."""
+    fake_docker.answers["logs"] = _CliResult(0, _PROXY_LOG, b"")
+    store, recorder = _run_record()
+    spec = _spec(network_disabled=False, allowed_hosts=("pypi.org",), env={"APP_API_KEY": _BOX_VALUE, "FLAG": "1"})
+    env = DockerEnvironment(spec, recorder=recorder)
+    await env.start()
+    await env.stop()
+
+    calls = store.list_calls("job-1", "cand-1")
+    assert [(call["kind"], call["status"]) for call in calls] == [("egress", "refused"), ("egress", "ok")]
+    refused, ok = calls
+    assert refused["target"] == f"{SECRET_MASK}.example.com"
+    assert refused["failure_reason"] == "host or port is not allowed"
+    assert ok["target"] == "pypi.org"
+    assert ok["started_at"].startswith("2026-11-11T10:00:02")
+    assert ok["duration_ms"] == 5
+    assert ok["failure_reason"] is None
+    # A short env value such as "1" is not a secret, so the byte counts stay readable.
+    assert json.loads(ok["request"]) == {"port": 443, "bytes_sent": 10}
+    assert json.loads(ok["response"]) == {"code": 200, "bytes_received": 20}
+    proxy = f"{env.container_name}-egress"
+    assert fake_docker.calls.index(["logs", proxy], 4) < fake_docker.calls.index(["rm", "-f", proxy])
+
+
+async def test_a_proxy_restart_records_the_old_proxy_requests(fake_docker: _FakeDocker) -> None:
+    """Write the old proxy's requests before a new allowlist replaces it."""
+    fake_docker.answers["logs"] = _CliResult(0, _PROXY_LOG, b"")
+    store, recorder = _run_record()
+    env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("pypi.org",)), recorder=recorder)
+    await env.start()
+    fake_docker.answers["inspect"] = _CliResult(0, json.dumps({f"{env.container_name}-net": {}}).encode(), b"")
+    await env.set_network_policy(NetworkPolicy(allowed_hosts=("b.example.com",)))
+    assert [call["target"] for call in store.list_calls("job-1", "cand-1")] == [
+        f"{_BOX_VALUE}.example.com",
+        "pypi.org",
+    ]
+
+
+async def test_an_unreadable_proxy_log_records_nothing(fake_docker: _FakeDocker) -> None:
+    """Skip the record, and still remove the proxy, when its log cannot be read."""
+    fake_docker.answers["logs"] = _CliResult(0, docker_provider.READY_MARKER.encode(), b"")
+    store, recorder = _run_record()
+    env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("pypi.org",)), recorder=recorder)
+    await env.start()
+    fake_docker.answers["logs"] = _CliResult(1, b"", b"No such container")
+    await env.stop()
+    assert store.list_calls("job-1", "cand-1") == []
+    assert ["rm", "-f", f"{env.container_name}-egress"] in fake_docker.calls
+
+
+async def test_an_offline_box_reads_no_proxy_log(fake_docker: _FakeDocker) -> None:
+    """Read no log for a box that never had a proxy."""
+    _, recorder = _run_record()
+    env = DockerEnvironment(_spec(), recorder=recorder)
+    await env.start()
+    await env.stop()
+    assert not any(call[0] == "logs" for call in fake_docker.calls)
 
 
 async def test_offline_box_never_pulls_its_image(fake_docker: _FakeDocker) -> None:
