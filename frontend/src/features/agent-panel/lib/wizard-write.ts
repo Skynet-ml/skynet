@@ -44,6 +44,7 @@ export function rolesFields(
 export const CODE_FIELD_FILES: Readonly<Record<string, string>> = {
   run_code: "run.py",
   metric_code: "metric.py",
+  optimize_toml: "optimize.toml",
 };
 
 // Notes for later screens are the agent's own memory, not a setup answer.

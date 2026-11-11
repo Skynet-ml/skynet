@@ -154,6 +154,9 @@ import { tableRows } from "./use-inputs-data";
 import { useModelCallHolds, useModelCatalog } from "./use-submit-wizard-data";
 import { useWizardPreflight } from "./use-wizard-preflight";
 
+// A repository run's optimize.toml; the coding agent writes it into the draft (SKY-184).
+const OPTIMIZE_TOML = "optimize.toml";
+
 export type SubmitPhase = "idle" | "sending" | "splash" | "done";
 
 /** The shell's view of the wizard: the shared context plus what only the frame draws. */
@@ -1169,6 +1172,10 @@ export function WizardV2Provider({
           if (typeof shared.metric_code === "string")
             patchWorkspace({ metricCode: shared.metric_code });
           break;
+        case "optimize_toml":
+          if (typeof shared.optimize_toml === "string")
+            setWorkspaceFile(OPTIMIZE_TOML, shared.optimize_toml);
+          break;
         case "staged_dataset_id": {
           const stagedId = shared.staged_dataset_id;
           if (typeof stagedId !== "string" || stagedId === state.inputs.stagedDatasetId) break;
@@ -1228,6 +1235,7 @@ export function WizardV2Provider({
       optimizer_choice: optimizer.choice,
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
+      optimize_toml: task.repo ? workspace.files[OPTIMIZE_TOML] || undefined : undefined,
       dataset_columns: inputs.columns.length > 0 ? inputs.columns : undefined,
       input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
       expected_field: inputs.expectedField ?? undefined,

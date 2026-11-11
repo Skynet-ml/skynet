@@ -182,6 +182,7 @@ export function IdeWorkspace({
   strip,
   sidePanel,
   guided,
+  openRequest,
 }: {
   runCode: string;
   metricCode: string;
@@ -205,6 +206,8 @@ export function IdeWorkspace({
   /** The end-side region: the setup agent's chat. */
   sidePanel?: ReactNode;
   guided: boolean;
+  /** Open this file, at this line, once the workbench is up; a new object opens it again. */
+  openRequest?: { path: string; line?: number } | null;
 }) {
   const [host, setHost] = useState<HTMLDivElement | null>(null);
   const [workbench, setWorkbench] = useState<IdeWorkbench | null>(null);
@@ -311,6 +314,10 @@ export function IdeWorkspace({
   }, [workbench, repo]);
 
   useEffect(() => () => workbench?.setRepo(null), [workbench]);
+
+  useEffect(() => {
+    if (workbench && openRequest) void workbench.openFile(openRequest.path, openRequest.line);
+  }, [workbench, openRequest]);
 
   const lockedKey = (lockedFiles ?? []).join("\n");
   useEffect(() => {
