@@ -13,10 +13,12 @@ pre-session synthetic-dataset route.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -848,3 +850,54 @@ def test_synthesize_maps_engine_failure_to_502(monkeypatch) -> None:
     resp = client.post(f"/tagging-sessions/{session_id}/assist/synthesize", json={"brief": "Reviews", "rows": 5})
     assert resp.status_code == 502
     assert resp.json()["code"] == "tagger.assist.llm_failed"
+
+
+def test_predict_stream_does_not_block_the_event_loop_on_a_cold_catalog(monkeypatch) -> None:
+    """A cold catalog build runs off the loop, so the loop can still run while it waits (SKY-603)."""
+    release = threading.Event()
+    builds: list[bool] = []
+
+    def held_build() -> model_catalog.ModelCatalogResponse:
+        """Hold the build until the event loop releases it.
+
+        Returns:
+            A catalog with the session's model.
+        """
+        builds.append(release.wait(2))
+        model = model_catalog.CatalogModel(value="openai/gpt-test", label="gpt-test", provider="openai", available=True)
+        return model_catalog.ModelCatalogResponse(providers=[], models=[model])
+
+    async def fake_stream(config, instructions, rows, usage_sink=None, model_config=None):
+        """Finish at once with no predictions."""
+        yield {"event": "predict_done", "data": {"predictions": {}, "cents": 0}}
+
+    monkeypatch.setattr(tagging, "predict_rows_stream", fake_stream)
+    client, _ = _client(_ALICE)
+    body = {**_SESSION_BODY, "assist": {**_SESSION_BODY["assist"], "model": "openai/gpt-test"}}
+    created = client.post("/tagging-sessions", json=body)
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    monkeypatch.setattr(model_catalog, "_cached_response", None)
+    monkeypatch.setattr(model_catalog, "_refresh_in_flight", False)
+    monkeypatch.setattr(model_catalog, "_refresh_thread", None)
+    monkeypatch.setattr(model_catalog, "get_catalog", held_build)
+
+    async def post_and_release() -> httpx.Response:
+        """Send the request, then release the build from the event loop.
+
+        Returns:
+            The route's response.
+        """
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            request = asyncio.create_task(
+                http.post(f"/tagging-sessions/{session_id}/assist/predict/stream", json={"row_ids": ["2"]})
+            )
+            await asyncio.sleep(0.05)
+            release.set()
+            return await request
+
+    resp = asyncio.run(post_and_release())
+
+    assert resp.status_code == 200, resp.text
+    assert builds == [True]

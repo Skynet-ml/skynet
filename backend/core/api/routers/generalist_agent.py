@@ -978,14 +978,20 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
         wizard_state: WizardState = {**req.wizard_state}  # type: ignore[typeddict-item]
         picked = await asyncio.to_thread(engine_agent_model, job_store, current_user.username, req.model)
+        # A cold model catalog builds on the calling thread, so the catalog
+        # reads below run off the event loop (SKY-603).
         model_config = await asyncio.to_thread(
             route_local_byok_model, picked, job_store=job_store, username=current_user.username
-        ) or route_agent_model(picked)
+        ) or await asyncio.to_thread(route_agent_model, picked)
         # A CLI takes its own effort ladder, not the catalog's, and with no
         # pick it runs its own default. The CLI dispatcher drops a level or
         # fast mode the model does not take.
         on_cli = model_config.token_source == "subscription"
-        effort = req.reasoning_effort if on_cli else effective_reasoning_effort(model_config.name, req.reasoning_effort)
+        effort = (
+            req.reasoning_effort
+            if on_cli
+            else await asyncio.to_thread(effective_reasoning_effort, model_config.name, req.reasoning_effort)
+        )
         if effort:
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
         model_config = await asyncio.to_thread(with_fast_mode, model_config, req.fast_mode)
