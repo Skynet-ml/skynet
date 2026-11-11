@@ -33,11 +33,12 @@ KIMI_CODE_BASE_URL_FILE = ".app/kimi_code/base_url"
 # Kimi Code's effort names in 2.5.3: LATEST_OPUS_THINKING_EFFORTS in
 # agent-core-v2's Anthropic adapter, which the Gemini adapter also maps. ``off``
 # is not a Skynet level. The effort goes in ``$KIMI_CODE_HOME/config.toml`` as
-# ``[thinking] effort``, not in ``KIMI_MODEL_THINKING_EFFORT``: that env name
-# sets ``thinking.forcedEffort``, which resolveForcedThinkingEffort applies only
-# to a provider type with ``thinkingDriven`` (the ``kimi`` definitions), so an
-# ``openai`` provider drops it. ``thinking.effort`` is the new session's level
-# (resolveThinkingEffortForModel). The ``openai`` provider has no
+# ``[thinking] effort``, the new session's level (resolveThinkingEffortForModel).
+# ``KIMI_MODEL_THINKING_EFFORT`` would also reach ``thinking.effort``
+# (applyEnvModelConfig copies it there), but the same env name also sets
+# ``thinking.forcedEffort`` (thinkingEnvBindings). The config file sets only
+# ``thinking.effort``, so the run uses one path with one meaning, and the env
+# name stays blank. The ``openai`` provider has no
 # ``strictThinkingValidation``, so the level is not clamped, and the env model's
 # default capabilities include ``thinking``, so the OpenAI adapter's
 # resolveThinkingEffort sends any level other than ``on`` and ``off`` unchanged
@@ -52,8 +53,11 @@ KIMI_CODE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # ``content.part`` event come only from model steps, and hook results are
 # ``context.append_message`` records. The script prints the answer as one Pi
 # ``message_end`` line with the tokens summed from every ``usage.record`` in
-# every journal, then one Pi ``tool_execution_start`` line for each main agent
-# ``tool.call`` event, so the bridge's cost and tool-call stops read them.
+# every journal, then one Pi ``tool_execution_start`` line for each ``tool.call``
+# event in every journal, so the bridge's cost and tool-call stops count the
+# same agents. Each journal holds only its own agent's records, so no call
+# counts twice. The id carries the journal's folder, because the bridge drops
+# a repeated id and two agents can reuse one provider call id.
 # The bridge's usage has only input and output tokens, so cache reads and
 # writes count as full input: the count can be high, never low, and a token
 # limit stops a run early rather than late. It runs
@@ -84,7 +88,7 @@ def count(value):
 
 
 steps = {}
-calls = []
+calls = {}
 used = {"input": 0, "output": 0}
 for root, dirs, names in os.walk(sys.argv[1]):
     dirs.sort()
@@ -97,21 +101,21 @@ for root, dirs, names in os.walk(sys.argv[1]):
             used["input"] += sum(count(usage.get(key)) for key in ("inputOther", "inputCacheRead", "inputCacheCreation"))
             used["output"] += count(usage.get("output"))
         event = record.get("event") if record.get("type") == "context.append_loop_event" else None
-        if not main or not isinstance(event, dict):
+        if not isinstance(event, dict):
             continue
+        call_id = event.get("toolCallId") if event.get("type") == "tool.call" else None
+        if isinstance(call_id, str):
+            calls[os.path.relpath(root, sys.argv[1]) + ":" + call_id] = None
         part = event.get("part")
-        if event.get("type") == "content.part" and isinstance(part, dict) and part.get("type") == "text":
+        if main and event.get("type") == "content.part" and isinstance(part, dict) and part.get("type") == "text":
             text = part.get("text")
             if isinstance(text, str):
                 steps.setdefault(str(event.get("stepUuid")), []).append(text)
-        call_id = event.get("toolCallId") if event.get("type") == "tool.call" else None
-        if isinstance(call_id, str) and call_id not in calls:
-            calls.append(call_id)
 answers = ["".join(parts).strip() for parts in steps.values()]
 text = next((answer for answer in reversed(answers) if answer), "")
 content = [{"type": "text", "text": text}] if text else []
 lines = [json.dumps({"type": "message_end", "message": {"role": "assistant", "content": content, "usage": used}})]
-lines += [json.dumps({"type": "tool_execution_start", "toolCallId": call_id}) for call_id in calls[:10000]]
+lines += [json.dumps({"type": "tool_execution_start", "toolCallId": call_id}) for call_id in list(calls)[:10000]]
 sys.stdout.write("\\n".join(lines) + "\\n")
 """
 # Kimi Code 2.5.3 print mode sends a prompt whose trimmed text starts with
@@ -275,7 +279,9 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         'export KIMI_CODE_HOME="$_kc_dir/home"; '
         f"{_effort_config(reasoning_effort)}"
         f'KIMI_MODEL_BASE_URL="$(cat {KIMI_CODE_BASE_URL_FILE})" || exit 1; export KIMI_MODEL_BASE_URL; '
-        f'_kc_prompt="$(cat "${ENV_PROMPT_FILE}")"; '
+        # Command substitution drops trailing newlines, so the sentinel ``x``
+        # keeps them and the next step removes only it.
+        f'_kc_prompt="$(cat "${ENV_PROMPT_FILE}" && printf x)"; _kc_prompt="${{_kc_prompt%x}}"; '
         f"python3 -I -c '{_PLAIN_PROMPT_CHECK}' \"${ENV_PROMPT_FILE}\" || "
         '_kc_prompt="Task request:\n$_kc_prompt"; '
         'kimi --prompt "$_kc_prompt" --output-format stream-json < /dev/null > /dev/null; '

@@ -315,7 +315,11 @@ def test_run_points_kimi_code_at_the_gateway_and_returns_answer_usage_and_tool_c
     assert parse_output("pi", result.stdout) == (_ANSWER, _USAGE)
     events = [json.loads(line) for line in result.stdout.splitlines()]
     assert events[0]["type"] == "message_end"
-    assert [call for event in events for call in tool_call_ids("pi", event)] == ["call_1", "call_2"]
+    assert [call for event in events for call in tool_call_ids("pi", event)] == [
+        "ws1/sess1/agents/main:call_1",
+        "ws1/sess1/agents/main:call_2",
+        "ws1/sess1/agents/sub1:sub_call",
+    ]
 
 
 def test_run_keeps_the_kimi_code_exit_status(tmp_path: Path) -> None:
@@ -346,7 +350,7 @@ def test_goal_command_prompt_is_framed_so_it_reaches_the_model(tmp_path: Path, p
     assert f"ARGS [--prompt] [Task request:\n{prompt}] [--output-format] [stream-json]\n" in calls
 
 
-@pytest.mark.parametrize("prompt", ["/goals ship it", "/help", "Use /goal later.", "!ls"])
+@pytest.mark.parametrize("prompt", ["/goals ship it", "/help", "Use /goal later.", "!ls", "Fix it.\n\n", "x\n"])
 def test_other_prompts_reach_kimi_code_unchanged(tmp_path: Path, prompt: str) -> None:
     """Leave every prompt that the ``/goal`` parser does not take byte-identical."""
     result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, prompt=prompt)
@@ -436,6 +440,30 @@ def test_hook_results_never_replace_the_answer(tmp_path: Path) -> None:
     }
 
     assert _parse_main_journal(tmp_path, [_text("s1", "The answer."), hook]) == "The answer."
+
+
+def test_tool_calls_count_every_agent_like_the_token_usage(tmp_path: Path) -> None:
+    """Count the tool calls of every agent journal, once each, and keep a call id that two agents share."""
+    sessions = tmp_path / "sessions"
+    agents = sessions / "ws1" / "sess1" / "agents"
+    call = {"type": "tool.call", "stepUuid": "s1", "toolCallId": "call_1", "name": "Read"}
+    for agent, records in {
+        "main": [_loop_event(call), _loop_event(call), _text("s1", "Done.")],
+        "sub1": [{"type": "context.append_loop_event", "agentId": "sub1", "event": call}],
+    }.items():
+        (agents / agent).mkdir(parents=True)
+        (agents / agent / "wire.jsonl").write_text("".join(json.dumps(record) + "\n" for record in records))
+    result = subprocess.run(
+        ["python3", "-I", "-c", KIMI_CODE_TO_PI, str(sessions)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert parse_pi_output(result.stdout)[0] == "Done."
+    assert len({call for event in events for call in tool_call_ids("pi", event)}) == 2
 
 
 def test_no_journal_gives_no_answer(tmp_path: Path) -> None:
