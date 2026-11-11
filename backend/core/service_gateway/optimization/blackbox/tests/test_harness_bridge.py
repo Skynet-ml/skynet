@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -133,26 +134,59 @@ def test_run_session_reports_timeouts_and_budget_overruns(tmp_path: Path) -> Non
     assert outcome.duration_seconds < 4
 
 
-def test_stop_group_reads_the_tree_before_it_signals(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Read the descendants first, then signal the group and each descendant."""
-    sent: list[tuple[str, int, int]] = []
+def _record_signals(monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[int, int, int]]) -> list[tuple]:
+    """Fake the process table and record each signal ``_stop_group`` sends.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        table: ``(parent, group, start)`` for each fake pid.
+
+    Returns:
+        The list that collects ``("group", pgid, signum)`` and ``("pid", pid, signum)`` entries.
+    """
+    sent: list[tuple] = []
     monkeypatch.setattr(harness_bridge.os, "killpg", lambda pid, signum: sent.append(("group", pid, signum)))
     monkeypatch.setattr(harness_bridge.os, "kill", lambda pid, signum: sent.append(("pid", pid, signum)))
-    monkeypatch.setattr(
-        harness_bridge, "_descendant_pids", lambda root: sent.append(("tree", root, 0)) or [root + 1, root + 2]
+    monkeypatch.setattr(harness_bridge, "_proc_stats", lambda: dict(table))
+    return sent
+
+
+def test_stop_group_signals_the_group_once_and_each_detached_descendant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signal the shell's group once, then only the descendants that left it, never a group member twice."""
+    sent = _record_signals(
+        monkeypatch,
+        {
+            100: (1, 100, 7),  # the harness shell
+            101: (100, 100, 8),  # a group member, reached by killpg
+            102: (101, 102, 9),  # a detached tool command
+            103: (100, 103, 9),  # an orphaned background job the shell adopted
+            104: (102, 102, 9),  # a child in the tool command's group
+            200: (1, 200, 3),  # an unrelated process
+        },
     )
 
-    shell = subprocess.Popen(["true"])
-    shell.wait()
-    harness_bridge._stop_group(shell, signal.SIGKILL)
+    harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGTERM, 7)  # type: ignore[arg-type]
 
-    pid = shell.pid
-    assert sent == [
-        ("tree", pid, 0),
-        ("group", pid, signal.SIGKILL),
-        ("pid", pid + 1, signal.SIGKILL),
-        ("pid", pid + 2, signal.SIGKILL),
-    ]
+    assert sent[0] == ("group", 100, signal.SIGTERM)
+    assert sorted(sent[1:]) == [("pid", pid, signal.SIGTERM) for pid in (102, 103, 104)]
+
+
+def test_stop_group_leaves_a_process_that_reused_the_shell_pid_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send nothing when the reaped shell's pid now belongs to a process with another start time."""
+    sent = _record_signals(monkeypatch, {100: (1, 100, 50), 101: (100, 101, 51)})
+
+    harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
+
+    assert sent == []
+
+
+def test_stop_group_signals_the_group_when_the_reaped_pid_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signal only the group when the shell is gone and nothing took its pid, as members can still hold the pipe."""
+    sent = _record_signals(monkeypatch, {101: (1, 100, 8)})
+
+    harness_bridge._stop_group(SimpleNamespace(pid=100), signal.SIGKILL, 7)  # type: ignore[arg-type]
+
+    assert sent == [("group", 100, signal.SIGKILL)]
 
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the descendant sweep reads /proc")
@@ -165,6 +199,7 @@ def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> Non
         start_new_session=True,
         text=True,
     )
+    root_start = harness_bridge._start_time(process.pid)
     deadline = time.monotonic() + 10
     while not (pid_file.exists() and pid_file.read_text().strip()):
         assert time.monotonic() < deadline
@@ -173,7 +208,7 @@ def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> Non
     try:
         assert os.getsid(job) != process.pid
 
-        harness_bridge._stop_group(process, signal.SIGKILL)
+        harness_bridge._stop_group(process, signal.SIGKILL, root_start)
         process.wait(timeout=10)
 
         deadline = time.monotonic() + 10
@@ -184,6 +219,40 @@ def test_stop_group_kills_a_descendant_in_its_own_session(tmp_path: Path) -> Non
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(job, signal.SIGKILL)
+
+
+# PR_SET_CHILD_SUBREAPER is a Linux prctl, so macOS has no way to keep an
+# orphan in the harness tree; the bridge starts the shell plainly there.
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_CHILD_SUBREAPER is Linux-only")
+def test_timeout_kills_a_background_job_that_a_finished_tool_command_left(tmp_path: Path) -> None:
+    """Kill an orphaned ``sleep`` whose detached parent already exited, the way ``sleep 300 &`` in an eve tool does."""
+    pid_file = tmp_path / "job.pid"
+    tool = (
+        "import os, subprocess; os.setsid(); "
+        "job = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"open({str(pid_file)!r}, 'w').write(str(job.pid))"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(tool)}; sleep 60"
+    job = None
+    try:
+        outcome = run_session(
+            {"run_command": command, "output_format": "plain"},
+            workspace=tmp_path / "work",
+            prompt="x",
+            model="m",
+            session_dir=tmp_path / "session",
+            timeout_seconds=2,
+        )
+        assert outcome.timed_out
+        job = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while _alive(job):
+            assert time.monotonic() < deadline, "the orphaned background job outlived the harness"
+            time.sleep(0.05)
+    finally:
+        if job is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(job, signal.SIGKILL)
 
 
 def _alive(pid: int) -> bool:

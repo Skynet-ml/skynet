@@ -407,6 +407,15 @@ _GUARD_MAX_LINK_DEPTH = 40
 _GUARD_DEADLINE_SECONDS = 5.0
 # Options of these commands that name the folder the command works in.
 _GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
+# On Linux the harness shell starts through this program, which marks it a
+# child subreaper (PR_SET_CHILD_SUBREAPER, 36) and then execs the shell with
+# the same pid. A background job that outlives its parent, for example
+# ``sleep 300 &`` in a detached eve tool command, then moves to the shell, not
+# to init, so the stop sweep still finds it in the tree.
+_SUBREAPER_EXEC = (
+    "import ctypes, os, sys; ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0); "
+    "os.execv(sys.argv[1], sys.argv[1:])"
+)
 # One check function shared by the Pi extension, the OpenCode plugin and the
 # eve sandbox. It asks this module for the verdict, so the matching lives in
 # one place.
@@ -1087,6 +1096,7 @@ class _Monitor:
     price: dict[str, float] | None
     max_cost_usd: float | None
     max_tool_calls: int | None = None
+    root_start: int | None = None
     chunks: list[str] = field(default_factory=list)
     budget_exceeded: bool = False
     tool_calls: int = 0
@@ -1114,7 +1124,7 @@ class _Monitor:
             _, usage = parse_output(self.output_format, "".join(self.chunks))
             if cost_usd(usage, self.price) > self.max_cost_usd:
                 self.budget_exceeded = True
-                _stop_group(self.process, signal.SIGTERM)
+                _stop_group(self.process, signal.SIGTERM, self.root_start)
 
     def _count_tool_calls(self, line: str) -> None:
         """Count the tool calls one output line starts and stop the harness past the cap.
@@ -1131,20 +1141,26 @@ class _Monitor:
                 self.tool_calls += 1
         if self.max_tool_calls is not None and self.tool_calls > self.max_tool_calls and not self.tool_cap_reached:
             self.tool_cap_reached = True
-            _stop_group(self.process, signal.SIGTERM)
+            _stop_group(self.process, signal.SIGTERM, self.root_start)
 
 
-def _stop_group(process: subprocess.Popen[str], signum: int) -> None:
-    """Signal the harness shell and every child it spawned.
+def _stop_group(process: subprocess.Popen[str], signum: int, root_start: int | None) -> None:
+    """Signal the harness shell and every child it spawned, once each.
 
     Args:
         process: The shell running the harness command, started in its own session.
-        signum: Signal to deliver to the process group and to every descendant.
+        signum: Signal to deliver to the process group and to every descendant outside it.
+        root_start: Start time of the shell from ``/proc``, or ``None`` where ``/proc`` is absent.
     """
+    stats = _proc_stats() if root_start is not None else None
+    if stats is not None and process.pid in stats and stats[process.pid][2] != root_start:
+        # The shell was reaped and an unrelated process took its pid. That
+        # process can lead its own group, so neither the group nor the tree is ours.
+        return
     # eve's sandbox starts each tool command detached, in its own session and
     # group, so the group signal misses it. The tree is read first: once a
     # parent dies, its children move to init and leave the tree.
-    descendants = _descendant_pids(process.pid)
+    descendants = _detached_descendants(stats, process.pid) if stats and process.pid in stats else []
     # Signalling only the shell would leave a child holding the stdout pipe open.
     with contextlib.suppress(ProcessLookupError):
         os.killpg(process.pid, signum)
@@ -1153,36 +1169,78 @@ def _stop_group(process: subprocess.Popen[str], signum: int) -> None:
             os.kill(pid, signum)
 
 
-def _descendant_pids(root: int) -> list[int]:
-    """List the live descendants of a process.
+def _stat_fields(pid: int | str) -> list[str]:
+    """Read the ``/proc/<pid>/stat`` fields that follow the command name.
 
     Args:
-        root: Pid of the harness shell.
+        pid: Process id.
 
     Returns:
-        The pids under ``root`` at any depth, or an empty list where ``/proc`` is absent (macOS).
+        Fields 3 onward: state, parent pid, process group, and so on; the start time is index 19.
     """
-    children: dict[int, list[int]] = {}
+    # The command name in field 2 can hold spaces and parentheses, so the
+    # fields are read after its closing parenthesis.
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+
+
+def _start_time(pid: int) -> int | None:
+    """Return the start time of a process, which tells it apart from a later process with the same pid.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        The start time in clock ticks after boot, or ``None`` where ``/proc`` is absent (macOS).
+    """
+    try:
+        return int(_stat_fields(pid)[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _proc_stats() -> dict[int, tuple[int, int, int]] | None:
+    """Read the parent pid, process group and start time of every process.
+
+    Returns:
+        ``(parent, group, start)`` for each pid, or ``None`` where ``/proc`` is absent (macOS).
+    """
     try:
         entries = list(Path("/proc").iterdir())
     except FileNotFoundError:
-        return []
+        return None
+    stats: dict[int, tuple[int, int, int]] = {}
     for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
-            # The command name in field 2 can hold spaces and parentheses, so
-            # the parent pid is read after its closing parenthesis.
-            parent = int(entry.joinpath("stat").read_text().rsplit(")", 1)[1].split()[1])
+            fields = _stat_fields(entry.name)
+            stats[int(entry.name)] = (int(fields[1]), int(fields[2]), int(fields[19]))
         except (OSError, IndexError, ValueError):
             continue
-        children.setdefault(parent, []).append(int(entry.name))
+    return stats
+
+
+def _detached_descendants(stats: dict[int, tuple[int, int, int]], root: int) -> list[int]:
+    """List the descendants of a process that left its process group.
+
+    Args:
+        stats: The process table from ``_proc_stats``.
+        root: Pid of the harness shell, which leads its own group.
+
+    Returns:
+        The pids under ``root`` at any depth whose group is not ``root``'s;
+        ``killpg`` already reaches the others.
+    """
+    children: dict[int, list[int]] = {}
+    for pid, (parent, _, _) in stats.items():
+        children.setdefault(parent, []).append(pid)
     found: list[int] = []
     pending = [root]
     while pending:
         for child in children.get(pending.pop(), []):
-            found.append(child)
             pending.append(child)
+            if stats[child][1] != root:
+                found.append(child)
     return found
 
 
@@ -1252,11 +1310,14 @@ def run_session(
     ):
         env[f"APP_{name}"] = env[_LEGACY_PREFIX + name] = value
     shell = shutil.which("bash") or "/bin/sh"
+    command = [shell, "-c", _with_key(proposer["run_command"], api_key)]
+    if sys.platform == "linux" and sys.executable:
+        command = [sys.executable, "-I", "-c", _SUBREAPER_EXEC, *command]
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
     with stderr_file.open("w", encoding="utf-8") as stderr:
         process = subprocess.Popen(
-            [shell, "-c", _with_key(proposer["run_command"], api_key)],
+            command,
             cwd=workspace,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -1273,6 +1334,7 @@ def run_session(
             proposer.get("price"),
             max_cost_usd,
             int(max_tool_calls) if max_tool_calls else None,
+            _start_time(process.pid),
         )
         reader = threading.Thread(target=monitor.pump, daemon=True)
         reader.start()
@@ -1281,13 +1343,13 @@ def run_session(
             process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _stop_group(process, signal.SIGKILL)
+            _stop_group(process, signal.SIGKILL, monitor.root_start)
             process.wait()
         # A child forked while the first signal landed can outlive the shell and
         # keep the pipe open, so keep sweeping the group until the reader sees EOF.
         deadline = time.monotonic() + 5.0
         while (timed_out or monitor.stopped) and reader.is_alive() and time.monotonic() < deadline:
-            _stop_group(process, signal.SIGKILL)
+            _stop_group(process, signal.SIGKILL, monitor.root_start)
             reader.join(timeout=0.2)
         reader.join(timeout=30)
     stdout = "".join(monitor.chunks)

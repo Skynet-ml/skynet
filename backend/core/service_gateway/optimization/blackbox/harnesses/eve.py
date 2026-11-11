@@ -245,13 +245,16 @@ async function stopServer(child) {
 # of the commands it starts. ``with_legacy_env`` also copies APP_API_KEY to
 # SKYNET_API_KEY, so the provider removes that legacy twin too. The box
 # process can also hold the tool relay, package relay, candidate and host
-# agent tokens, so the provider removes them and their SKYNET_ twins. eve's
+# agent tokens, the task key and the ShinkaEvolve route keys, so the provider
+# removes them and their SKYNET_ twins. eve's
 # contract says ``bash -lc``, but a login shell reads /etc/profile, which
 # resets PATH and drops the Node 24 directory that the launch adds. The
 # image's ENV PATH already holds the venv, so ``bash -c`` keeps the server
 # PATH and every image tool. Each command starts detached, in its own session
 # and process group, so an abort or ``kill()`` stops the whole group. The
-# bridge's stop sweep finds these groups through the process tree.
+# bridge's stop sweep finds these groups through the process tree; on Linux
+# the bridge makes the harness shell a child subreaper, so a background job
+# that a finished command left behind stays in that tree.
 EVE_SANDBOX = r"""import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
@@ -271,10 +274,15 @@ const DROPPED_ENV = [
   "SKYNET_PACKAGE_RELAY_TOKEN",
   "APP_TOOL_RELAY_TOKEN",
   "SKYNET_TOOL_RELAY_TOKEN",
+  "APP_TASK_API_KEY",
+  "SKYNET_TASK_API_KEY",
   "EVE_PROJECT_DIR",
   "EVE_RUNNER_TOKEN",
   "EVE_WORKSPACE",
 ];
+// APP_SHINKA_KEY_<n>, APP_SHINKA_META_KEY, APP_SHINKA_NOVELTY_KEY and
+// APP_SHINKA_EMBED_KEY, and their SKYNET_ twins.
+const DROPPED_ENV_PATTERN = /^(APP|SKYNET)_SHINKA_\w*KEY/;
 let guardModule;
 
 async function guard(tool, input) {
@@ -310,7 +318,7 @@ function workspaceRoot() {
 function connect(root) {
   const base = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !DROPPED_ENV.includes(key)) base[key] = value;
+    if (value !== undefined && !DROPPED_ENV.includes(key) && !DROPPED_ENV_PATTERN.test(key)) base[key] = value;
   }
   return {
     workspaceRoot: root,
