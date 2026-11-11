@@ -39,7 +39,6 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
-import functools
 import json
 import logging
 import math
@@ -50,7 +49,7 @@ import shutil
 import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -405,11 +404,12 @@ def _session_sync(
             session_client.close()
 
 
-async def _abandon(worker: asyncio.Future[Any], stop: threading.Event) -> None:
+async def _abandon(job: Future[Any], worker: asyncio.Future[Any], stop: threading.Event) -> None:
     """Stop an exec session thread and wait a bounded time for it to end.
 
     Args:
-        worker: The thread's future.
+        job: The session's pool job.
+        worker: The loop's future for ``job``.
         stop: The session's stop flag.
 
     Raises:
@@ -417,6 +417,11 @@ async def _abandon(worker: asyncio.Future[Any], stop: threading.Event) -> None:
     """
     stop.set()
     worker.add_done_callback(_consume)
+    # A job that still waits for a pool thread never starts, so drop it now.
+    # ``worker.cancel()`` would also mark a running job done at once and skip
+    # the wait for its thread.
+    if job.cancel():
+        return
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _GROUP_KILL_SECONDS
     cancelled: asyncio.CancelledError | None = None
@@ -694,20 +699,18 @@ class GKEEnvironment(SandboxEnvironment):
         loop = asyncio.get_running_loop()
         connected = asyncio.Event()
         stop = threading.Event()
-        worker = loop.run_in_executor(
-            _SESSION_POOL,
-            functools.partial(
-                _session_sync,
-                self._client,
-                self._namespace,
-                name,
-                argv,
-                stdin,
-                on_chunk or (lambda _name, _data: None),
-                stop,
-                lambda: loop.call_soon_threadsafe(connected.set),
-            ),
+        job = _SESSION_POOL.submit(
+            _session_sync,
+            self._client,
+            self._namespace,
+            name,
+            argv,
+            stdin,
+            on_chunk or (lambda _name, _data: None),
+            stop,
+            lambda: loop.call_soon_threadsafe(connected.set),
         )
+        worker = asyncio.wrap_future(job)
         connecting = asyncio.ensure_future(connected.wait())
         started = loop.time()
         connect_limit = _CONNECT_SECONDS if seconds is None else min(seconds, _CONNECT_SECONDS)
@@ -715,20 +718,27 @@ class GKEEnvironment(SandboxEnvironment):
             done, _ = await asyncio.wait(
                 {worker, connecting}, timeout=connect_limit, return_when=asyncio.FIRST_COMPLETED
             )
-            if not done:
-                await _abandon(worker, stop)
+            if not done and not connected.is_set():
+                await _abandon(job, worker, stop)
+                # The connect can end just as the limit runs out. Then the
+                # command started, and the stop flag closed its session.
+                if connected.is_set():
+                    raise SandboxInfraError(
+                        f"The exec session in the GKE sandbox {name} connected only after its "
+                        f"{connect_limit:g}s limit, so it was closed."
+                    )
                 raise _ConnectTimeoutError(
                     f"The exec session in the GKE sandbox {name} did not connect in {connect_limit:g}s."
                 )
             remaining = None if seconds is None else max(0.0, seconds - (loop.time() - started))
             done, _ = await asyncio.wait({worker}, timeout=remaining)
         except asyncio.CancelledError:
-            await _abandon(worker, stop)
+            await _abandon(job, worker, stop)
             raise
         finally:
             connecting.cancel()
         if not done:
-            await _abandon(worker, stop)
+            await _abandon(job, worker, stop)
             raise TimeoutError
         return worker.result()
 
@@ -747,6 +757,7 @@ class GKEEnvironment(SandboxEnvironment):
             The exit code, stdout and stderr.
 
         Raises:
+            SandboxFatalError: The cluster refused the login or RBAC for exec.
             SandboxInfraError: The session failed or did not finish in time.
         """
         chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
@@ -818,6 +829,7 @@ class GKEEnvironment(SandboxEnvironment):
             The exit code, the captured output and whether the timeout fired.
 
         Raises:
+            SandboxFatalError: The cluster refused the login or RBAC for exec.
             SandboxInfraError: The command ran past its kill deadline, the pod
                 could not record the command's process group, or the session
                 failed. A timeout, a cancel or an error kills the command's

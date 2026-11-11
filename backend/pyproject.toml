@@ -190,8 +190,8 @@ smol = [
     "smolmachines>=1.20.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')",
 ]
 gke = [
-    # GKE sandbox provider (SKY-459). Imported lazily by
-    # core.sandbox.providers.gke; the factory refuses it in production.
+    # GKE sandbox provider (SKY-459). Optional import in
+    # core.sandbox.providers.gke; the factory loads it lazily.
     "kubernetes>=32.0.0",
 ]
 

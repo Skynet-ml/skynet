@@ -18,6 +18,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -748,6 +749,57 @@ async def test_a_hung_connect_during_start_stops_the_exec_polls(
         await env.stop()
     assert len(threads) == 1
     assert threads[0].startswith("skynet-gke-exec")
+
+
+async def test_a_queued_session_gives_up_at_once_when_the_pool_is_full(
+    cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drop a session that still waits for a pool thread, with no wait for its thread."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 0.2)
+    monkeypatch.setattr(gke, "_GROUP_KILL_SECONDS", 5.0)
+    release = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=1)
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "_SESSION_POOL", pool)
+        blocker = pool.submit(release.wait, 10)
+        try:
+            started = time.monotonic()
+            with pytest.raises(SandboxInfraError, match="did not connect"):
+                await env._call(env._name, ["true"])
+            assert time.monotonic() - started < 2
+        finally:
+            release.set()
+            blocker.result(5)
+            pool.shutdown()
+
+
+async def test_a_connect_at_the_limit_is_not_reported_as_a_command_that_did_not_start(
+    cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Say the session connected late when the connect ends just after the limit."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 0.2)
+    monkeypatch.setattr(gke, "_GROUP_KILL_SECONDS", 5.0)
+
+    def late_stream(method: Any, name: str, namespace: str, **kwargs: Any) -> FakeSession:
+        """Connect just after the connect limit runs out.
+
+        Args:
+            method: The bound exec call.
+            name: The pod name.
+            namespace: The namespace.
+            **kwargs: The exec options.
+
+        Returns:
+            The running session.
+        """
+        time.sleep(0.4)
+        return fake_stream(method, name, namespace, **kwargs)
+
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "k8s_stream", late_stream)
+        with pytest.raises(SandboxInfraError, match="connected only after") as raised:
+            await env._call(env._name, ["true"])
+        assert not isinstance(raised.value, gke._ConnectTimeoutError)
 
 
 def test_the_websocket_connect_obeys_the_scope_timeout() -> None:
