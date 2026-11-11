@@ -59,7 +59,7 @@ says otherwise.
 | System prompt (harness) | 35 KB | 35 KB | Claude Code rules | Keep | Not user-controlled | 0 |
 | Loaded tool schemas (desktop built-ins) | 195 KB | about 119 KB at best (76 KB less, request-record sizes; see §2) | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
 | Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 14–18k |
-| Global user instruction file | 17.9 KB | 1.0 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.4 KB workflow table; Skynet-only rules | 4.7k, every repo |
+| Global user instruction file | 17.9 KB | 1.0 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.1 KB workflow table; Skynet-only rules | 4.7k, every repo |
 | Shared conventions file (also read by Codex) | 21.7 KB | 16.5 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.4k, every repo |
 | CLI design rules file | 2.1 KB | 0 (on demand) | CLI design rules | Removed from start (applied) | Needed only when you design a CLI | 0.6k, every repo (applied) |
 | Tool hint files | 1.8 KB | 0 KB | RTK and AXI tool hints | Removed (applied) | Claude uses plain `gh` | about 0.5k, every repo (applied) |
@@ -124,7 +124,7 @@ keeps more recent context after each compaction.
    5.5k tokens per PR task. See §7.
 5. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
 6. **Remove MCP servers with long instructions that Skynet does not use.**
-   About 1.1k tokens (part of win 2 when those servers go).
+   About 1.1k tokens. This adds to the win 2 saving when those servers go.
 7. **Compress the memory tree** on old nodes. Not estimated.
 8. **Repo trims in this PR.** About 0.16k tokens (repo `CLAUDE.md` and the two
    skill descriptions). Small on purpose.
@@ -162,9 +162,9 @@ How to turn them off:
   connect, so they add no tool names. They still add about 220 entries to
   the skill listing. Turn them off in the app's plugin settings. I did not
   confirm the exact switch.
-- **User-scope MCP servers:** use `/mcp` in a terminal `claude` session in
-  the Skynet folder to disable them for this project, or move them from user
-  scope to the projects that use them.
+- **User-scope MCP servers:** run `/mcp` in a terminal `claude` session in
+  the Skynet folder. Disable them there for this project. You can also move
+  them from user scope to the projects that use them.
 
 ### Desktop-app tool schemas
 
@@ -202,7 +202,7 @@ Gilad can get. They stay out of this public repo because they quote private
 files.
 
 - **Global user instruction file (17.9 KB → 1.0 KB).** Most of its text
-  repeats the shared conventions file word for word. A 6.4 KB workflow table
+  repeats the shared conventions file word for word. A 6.1 KB workflow table
   repeats the skill listing. The Skynet-only rules already exist in the repo
   `AGENTS.md` and skills. An install script writes some blocks, so change the
   script too, or the blocks come back.
