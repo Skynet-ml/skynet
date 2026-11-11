@@ -300,12 +300,16 @@ def test_chat_outside_the_wizard_opens_the_setup_in_the_same_chat() -> None:
 
 
 def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
-    """A tagging request opens the tagger setup with this chat beside it (SKY-631)."""
+    """A tagging request opens the tagger setup, with this chat only outside a setup (SKY-631)."""
     prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
     assert "call ``open_page`` with ``path`` ``/tagger?dataset=<id>``" in prompt
     assert "``/tagger?new=1``" in prompt
-    assert "The tagger opens with this same chat beside it" in prompt
-    assert "stays saved as a draft" in prompt
+    # Only outside a setup does the chat stay; the setup ends its own chat
+    # when the wizard closes, so the prompt must not promise the same chat there.
+    assert "Outside a setup, the tagger opens with this same chat beside it" in prompt
+    assert "the tagger opens with a new chat" in prompt
+    assert "this setup chat stays in the history as a draft" in prompt
+    assert "The tagger opens with this same chat" not in prompt
     # The rule holds whether or not a wizard screen is on view, so it sits
     # before that section of the prompt, not inside it.
     assert prompt.index("Starting tagging:") < prompt.index("The wizard screen on view:")

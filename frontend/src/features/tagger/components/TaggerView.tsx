@@ -69,7 +69,7 @@ export function TaggerView({ initialSession }: { initialSession?: TaggerSessionD
     setSeenLink(deepLink);
     setStartingNew((current) => startingNewAfterLink(current, seenLink, deepLink));
   }
-  // Only this leaf reads the URL, so the chooser still prerenders around it.
+  // useSearchParams needs a Suspense boundary, so only this leaf reads the URL.
   const deepLinkReader = initialSession ? null : (
     <Suspense fallback={null}>
       <TaggerDeepLink onChange={setDeepLink} />
