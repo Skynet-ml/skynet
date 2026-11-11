@@ -2964,6 +2964,7 @@
   "submit.dataset.library_search_empty": "搵唔到相符嘅資料集",
   "submit.metric_calls": "指標調用預算",
   "submit.model_config.thinking_always_on": "呢個模型一直開住",
+  "submit.model_config.thinking_harness_on": "呢個編程代理唔可以熄咗思考",
   "submit.modelpicker.zdr_unavailable": "喺你嘅零保留私隱設定下可能用唔到",
   "submit.module.carousel_aria": "模組選項",
   "submit.module.choose": "使用 {p1}",

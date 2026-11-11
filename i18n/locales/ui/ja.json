@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "複数のモジュールを1つのグラフに接続します。",
   "submit.metric_calls": "メトリック呼び出し上限",
   "submit.model_config.thinking_always_on": "このモデルでは常にオン",
+  "submit.model_config.thinking_harness_on": "このコーディングエージェントでは思考をオフにできません",
   "submit.module.carousel_aria": "モジュールのオプション",
   "submit.module.choose": "{p1} を使用",
   "submit.module.tagline.cot": "段階的に思考してから回答",

@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "Collega più moduli in un unico grafo.",
   "submit.metric_calls": "Budget di chiamate metriche",
   "submit.model_config.thinking_always_on": "Sempre attivo per questo modello",
+  "submit.model_config.thinking_harness_on": "Questo agente di programmazione non può disattivare il ragionamento",
   "submit.module.carousel_aria": "Opzioni modulo",
   "submit.module.choose": "Usa {p1}",
   "submit.module.tagline.cot": "Ragiona passo dopo passo prima di rispondere",

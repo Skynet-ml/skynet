@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "여러 모듈을 하나의 그래프로 연결합니다.",
   "submit.metric_calls": "메트릭 호출 예산",
   "submit.model_config.thinking_always_on": "이 모델은 항상 켜져 있음",
+  "submit.model_config.thinking_harness_on": "이 코딩 에이전트는 사고를 끌 수 없음",
   "submit.module.carousel_aria": "모듈 옵션",
   "submit.module.choose": "{p1} 사용",
   "submit.module.tagline.cot": "답변 전 단계별로 생각합니다",

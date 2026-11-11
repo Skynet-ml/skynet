@@ -2380,6 +2380,7 @@
   "submit.dataset.library_search_empty": "לא נמצאו דאטאסטים תואמים",
   "submit.metric_calls": "תקציב קריאות מדד",
   "submit.model_config.thinking_always_on": "תמיד פעיל במודל הזה",
+  "submit.model_config.thinking_harness_on": "סוכן הקוד הזה לא מאפשר לכבות את Thinking",
   "submit.modelpicker.zdr_unavailable": "כנראה לא זמין תחת הגדרת הפרטיות „אפס שמירה” שלך",
   "submit.module.carousel_aria": "אפשרויות {term.module}",
   "submit.module.choose": "בחירה ב-{p1}",

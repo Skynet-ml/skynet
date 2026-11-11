@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "Mehrere Module zu einem Graphen verknüpfen.",
   "submit.metric_calls": "Budget für Metrik-Aufrufe",
   "submit.model_config.thinking_always_on": "Bei diesem Modell immer aktiv",
+  "submit.model_config.thinking_harness_on": "Dieser Coding-Agent kann Thinking nicht ausschalten",
   "submit.module.carousel_aria": "Moduloptionen",
   "submit.module.choose": "{p1} verwenden",
   "submit.module.tagline.cot": "Denkt schrittweise nach, bevor geantwortet wird",

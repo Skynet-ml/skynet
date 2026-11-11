@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "اتصال چند ماژول به یکدیگر در قالب یک گراف.",
   "submit.metric_calls": "بودجه فراخوانی سنجه",
   "submit.model_config.thinking_always_on": "برای این مدل همیشه روشن است",
+  "submit.model_config.thinking_harness_on": "این عامل برنامه‌نویس نمی‌تواند تفکر را خاموش کند",
   "submit.module.carousel_aria": "گزینه‌های ماژول",
   "submit.module.choose": "استفاده از {p1}",
   "submit.module.tagline.cot": "قبل از پاسخ‌گویی، گام‌به‌گام فکر می‌کند",

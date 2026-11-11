@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "Об'єднати кілька модулів в один граф.",
   "submit.metric_calls": "Бюджет викликів метрики",
   "submit.model_config.thinking_always_on": "Для цієї моделі завжди ввімкнено",
+  "submit.model_config.thinking_harness_on": "Цей агент-програміст не може вимкнути міркування",
   "submit.module.carousel_aria": "Параметри модулів",
   "submit.module.choose": "Використати {p1}",
   "submit.module.tagline.cot": "Міркує покроково перед тим, як відповісти",

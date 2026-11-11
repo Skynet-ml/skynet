@@ -18,6 +18,7 @@ import {
 import { TOUCH_FIELD } from "@/shared/ui/touch";
 import {
   BLACKBOX_HARNESSES,
+  effortHarness,
   harnessEfforts,
   harnessLabel,
   keepHarnessEffort,
@@ -100,10 +101,16 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
   const updateProposer = (patch: Partial<typeof proposer>) =>
     patchOptimizer({ proposer: { ...proposer, ...patch } });
   // The proposer harness runs the reflection model, so it limits the effort.
-  // A host CLI runs instead of the harness and takes every level.
-  const effortHarness = nativeProposer && !proposer.host_cli ? proposer.harness : null;
-  const fitHarness = (config: ModelConfig, harness = effortHarness) =>
-    harness ? keepHarnessEffort(config, harness) : config;
+  const limitingHarness = effortHarness(proposer, nativeProposer);
+  const fitHarness = (config: ModelConfig) =>
+    limitingHarness ? keepHarnessEffort(config, limitingHarness) : config;
+  // A harness, host CLI or engine change can leave a stored effort the new
+  // harness refuses; trim it here so every path that changes them is covered.
+  React.useEffect(() => {
+    if (!reflectionModel || !limitingHarness) return;
+    const fitted = keepHarnessEffort(reflectionModel, limitingHarness);
+    if (fitted !== reflectionModel) patchOptimizer({ reflectionModel: fitted });
+  }, [limitingHarness, reflectionModel, patchOptimizer]);
 
   return (
     <StepCard
@@ -181,7 +188,7 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
                 }),
               label: reflectionLabel,
               modelDefaultsOnly: nativeProposer,
-              harnessEfforts: effortHarness ? harnessEfforts(effortHarness) : null,
+              harnessEfforts: limitingHarness ? harnessEfforts(limitingHarness) : null,
             })
           }
           onRemove={
@@ -284,13 +291,7 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
                 value={proposer.harness}
                 onValueChange={(value) => {
                   const harness = value as BlackboxHarness;
-                  patchOptimizer({
-                    proposer: { ...proposer, harness },
-                    reflectionModel:
-                      reflectionModel && !proposer.host_cli
-                        ? fitHarness(reflectionModel, harness)
-                        : reflectionModel,
-                  });
+                  patchOptimizer({ proposer: { ...proposer, harness } });
                 }}
               >
                 <SelectTrigger id="v2-proposer-harness" className={cn("w-full", TOUCH_FIELD)}>

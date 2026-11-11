@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "Объединение нескольких модулей в один граф.",
   "submit.metric_calls": "Бюджет вызовов метрики",
   "submit.model_config.thinking_always_on": "Для этой модели всегда включено",
+  "submit.model_config.thinking_harness_on": "Этот агент-программист не может отключить рассуждение",
   "submit.module.carousel_aria": "Варианты модулей",
   "submit.module.choose": "Использовать {p1}",
   "submit.module.tagline.cot": "Рассуждает шаг за шагом перед ответом",

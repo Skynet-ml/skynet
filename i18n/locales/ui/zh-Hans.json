@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "将多个模块连接成一个工作流图。",
   "submit.metric_calls": "指标调用预算",
   "submit.model_config.thinking_always_on": "此模型始终开启",
+  "submit.model_config.thinking_harness_on": "此编程智能体无法关闭思考",
   "submit.module.carousel_aria": "模块选项",
   "submit.module.choose": "使用 {p1}",
   "submit.module.tagline.cot": "回答前逐步思考",

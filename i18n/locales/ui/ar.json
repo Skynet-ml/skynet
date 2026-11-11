@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "ربط وحدات متعددة في مخطط واحد.",
   "submit.metric_calls": "ميزانية استدعاءات المقاييس",
   "submit.model_config.thinking_always_on": "مفعّل دائمًا لهذا النموذج",
+  "submit.model_config.thinking_harness_on": "لا يستطيع وكيل البرمجة هذا إيقاف التفكير",
   "submit.module.carousel_aria": "خيارات الوحدة",
   "submit.module.choose": "استخدام {p1}",
   "submit.module.tagline.cot": "يفكر خطوة بخطوة قبل الإجابة",

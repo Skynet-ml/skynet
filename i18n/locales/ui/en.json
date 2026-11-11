@@ -2147,6 +2147,7 @@
   "submit.module.tagline.cot": "Thinks step by step before answering",
   "submit.metric_calls": "Metric-call budget",
   "submit.model_config.thinking_always_on": "Always on for this model",
+  "submit.model_config.thinking_harness_on": "This coding agent cannot turn thinking off",
   "submit.module.tagline.flex": "Writes and runs its own Python",
   "submit.module.tagline.predict": "One call to the model, one answer",
   "submit.module.tagline.react": "Calls tools in a loop until it answers",

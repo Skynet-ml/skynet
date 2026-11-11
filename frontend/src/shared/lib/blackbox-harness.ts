@@ -43,6 +43,18 @@ export function harnessEfforts(harness: BlackboxHarness): readonly string[] | nu
 }
 
 /**
+ * The harness that limits the reflection model's effort: the proposer harness
+ * when a native engine runs it, `null` for a host CLI (it takes every level)
+ * or an engine without a native proposer.
+ */
+export function effortHarness(
+  proposer: { harness: BlackboxHarness; host_cli?: string | null },
+  nativeProposer: boolean,
+): BlackboxHarness | null {
+  return nativeProposer && !proposer.host_cli ? proposer.harness : null;
+}
+
+/**
  * The config without a reasoning effort the harness refuses, so the run keeps
  * the harness default instead of failing at submit.
  */

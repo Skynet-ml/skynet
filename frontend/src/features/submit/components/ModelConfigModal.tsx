@@ -628,6 +628,14 @@ export function ModelConfigModal({
                             {msg("submit.model_config.thinking_always_on")}
                           </p>
                         )}
+                        {!thinkingMandatory &&
+                          thinkingDefaultOn &&
+                          harnessRefusesOff &&
+                          mode !== "subscription" && (
+                            <p className="text-xs text-muted-foreground">
+                              {msg("submit.model_config.thinking_harness_on")}
+                            </p>
+                          )}
                         {thinkingEnabled && effortLadder.length > 0 && (
                           <ReasoningEffortControl
                             cli={usesEffortSlider(mode, thinkingDefaultOn)}

@@ -17,9 +17,8 @@ registerHooks({
   },
 });
 
-const { BLACKBOX_HARNESSES, harnessEfforts, harnessLabel, keepHarnessEffort } = await import(
-  "../blackbox-harness.ts"
-);
+const { BLACKBOX_HARNESSES, effortHarness, harnessEfforts, harnessLabel, keepHarnessEffort } =
+  await import("../blackbox-harness.ts");
 
 const REPO = new URL("../../../../../", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, REPO), "utf8");
@@ -74,6 +73,7 @@ test("each harness offers exactly the effort levels its backend module declares"
     const expected = declared
       ? (backendLevels(source, declared) ?? backendLevels(pi, declared))
       : null;
+    if (declared) assert.notEqual(expected, null, `${harness}: cannot read ${declared}`);
     assert.deepEqual(harnessEfforts(harness), expected, harness);
   }
 });
@@ -89,4 +89,30 @@ test("a harness change drops only an effort the new harness refuses", () => {
     name: "m",
     extra: { economy_mode: true },
   });
+});
+
+test("only a native engine's harness without a host CLI limits the effort", () => {
+  const v2 = { harness: "opencode_v2" as const };
+  assert.equal(effortHarness(v2, true), "opencode_v2");
+  assert.equal(effortHarness({ ...v2, host_cli: "codex" }, true), null);
+  assert.equal(effortHarness({ ...v2, host_cli: null }, true), "opencode_v2");
+  assert.equal(effortHarness(v2, false), null);
+});
+
+test("leaving a host CLI or returning to a native engine trims a refused effort", () => {
+  const max = { name: "m", extra: { reasoning_effort: "max" } };
+  const fit = (
+    proposer: { harness: "opencode_v2"; host_cli?: "codex" | null },
+    native: boolean,
+  ) => {
+    const harness = effortHarness(proposer, native);
+    return harness ? keepHarnessEffort(max, harness) : max;
+  };
+  assert.equal(fit({ harness: "opencode_v2", host_cli: "codex" }, true), max);
+  assert.deepEqual(fit({ harness: "opencode_v2", host_cli: null }, true), {
+    name: "m",
+    extra: undefined,
+  });
+  assert.equal(fit({ harness: "opencode_v2" }, false), max);
+  assert.deepEqual(fit({ harness: "opencode_v2" }, true), { name: "m", extra: undefined });
 });

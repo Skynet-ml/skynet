@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "कई मॉड्यूल को एक ग्राफ़ में जोड़ें।",
   "submit.metric_calls": "मीट्रिक-कॉल बजट",
   "submit.model_config.thinking_always_on": "इस मॉडल के लिए हमेशा चालू",
+  "submit.model_config.thinking_harness_on": "यह कोडिंग एजेंट थिंकिंग बंद नहीं कर सकता",
   "submit.module.carousel_aria": "मॉड्यूल विकल्प",
   "submit.module.choose": "{p1} का उपयोग करें",
   "submit.module.tagline.cot": "उत्तर देने से पहले चरण-दर-चरण विचार करता है",

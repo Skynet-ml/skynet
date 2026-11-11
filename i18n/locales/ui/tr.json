@@ -1479,6 +1479,7 @@
   "submit.composition.workflow_desc": "Birden çok modülü tek bir grafikte birleştirin.",
   "submit.metric_calls": "Metrik çağrısı bütçesi",
   "submit.model_config.thinking_always_on": "Bu modelde her zaman açık",
+  "submit.model_config.thinking_harness_on": "Bu kodlama ajanı düşünmeyi kapatamaz",
   "submit.module.carousel_aria": "Modül seçenekleri",
   "submit.module.choose": "{p1} kullan",
   "submit.module.tagline.cot": "Yanıtlamadan önce adım adım düşünür",
