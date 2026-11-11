@@ -70,8 +70,14 @@ _ENV = {
 # workspace config, so an inherited one could add a provider. An empty
 # object, not an empty string, because V2 parses any set content as JSON.
 # An inherited ``OPENCODE_CONFIG_DIR`` would move the global config dir, and
-# an inherited true project-disable flag would skip the workspace config. V2
-# treats an empty value as unset for all three (cli/src/server-process.ts).
+# an inherited true project-disable flag would skip the workspace config.
+# ``run --standalone --format json`` takes the CLI path (cli/src/index.ts:145)
+# and the ``serve --stdio`` server path (cli/src/server-process.ts:39,123-125,
+# server/src/routes.ts:135). Those paths read the dir with a truthy check and
+# the flags with ``truthy()``, so an empty value acts as unset. The ``??``
+# readers (util/src/global.ts:79, tui/src/mini/theme.ts:324) would keep an
+# empty dir, but this run never reaches them: both paths replace the default
+# Global layer, and only the interactive TUI loads the mini theme.
 _PROTECTED_ENV = {
     "OPENCODE_CONFIG": "",
     "OPENCODE_CONFIG_CONTENT": "{}",
