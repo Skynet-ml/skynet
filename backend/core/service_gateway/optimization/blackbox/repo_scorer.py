@@ -156,7 +156,7 @@ _TARGET_ROLE = "target."
 # still has to kill what the entry left and write its output.
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
-_RUN_FAILED = "Run failed: "
+RUN_FAILED = "Run failed: "
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -402,11 +402,11 @@ class RepoScorer:
             if self._run_entry is not None:
                 ran = self._run_candidate(session, root, checkout.path, call, case, env, secrets)
                 if ran.get("error"):
-                    error = _scrub(_RUN_FAILED + redact(f"{ran['error']}", secrets), root, self._hidden)
-                    error = error[len(_RUN_FAILED) :]
+                    error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), root, self._hidden)
+                    error = error[len(RUN_FAILED) :]
                     return {
                         "score": 0.0,
-                        "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
+                        "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
                     }
                 document["output"] = ran.get("output")
                 # The version's code could rewrite the runner, swap the calls
@@ -1913,7 +1913,7 @@ def _scrub(text: str, root: str | None, hidden: tuple[str, ...] | list[str] = ()
         The text with repository-relative paths and without the metric's frames.
     """
     text = text if text.endswith("\n") else f"{text}\n"
-    if text.startswith(_RUN_FAILED):
+    if text.startswith(RUN_FAILED):
         text = _TRACEBACK.sub(lambda match: _repo_frame(match.group(0), root, hidden), text)
     else:
         text = _TRACEBACK.sub("", text)

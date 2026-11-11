@@ -1001,3 +1001,60 @@ def test_preflight_noop_when_sample_empty_or_no_output_fields() -> None:
     preflight_metric_check(always_zero, [], ["answer"])
     preflight_metric_check(always_zero, _gold_examples(), [])
     preflight_metric_check(None, _gold_examples(), ["answer"])
+
+
+def _qa_examples(count: int) -> list[dspy.Example]:
+    """Build ``count`` question/answer examples with ``question`` as input.
+
+    Args:
+        count: How many examples to build.
+
+    Returns:
+        The examples.
+    """
+    return [dspy.Example(question=str(i), answer=str(i)).with_inputs("question") for i in range(count)]
+
+
+def _exact_match(example: Any, prediction: Any, trace: Any = None) -> float:
+    """Score 1.0 when the prediction's answer equals the example's answer."""
+    return float(prediction.answer == example.answer)
+
+
+def test_evaluate_on_test_raises_when_every_example_fails() -> None:
+    """A program that raises on every example fails the run with the cause, not a 0 score (SKY-221)."""
+
+    def program(question: str) -> dspy.Prediction:
+        """Fail like a program with a bad secret."""
+        raise ConnectionError("egress blocked")
+
+    with pytest.raises(ServiceError, match=r"Every example failed \(3 of 3\).*ConnectionError: egress blocked"):
+        evaluate_on_test(program, _qa_examples(3), _exact_match, collect_per_example=True)
+
+
+def test_evaluate_on_test_raises_when_the_metric_crashes_on_every_example() -> None:
+    """A metric that crashes on every example also fails the run with the cause (SKY-221)."""
+
+    def metric(example: Any, prediction: Any, trace: Any = None) -> float:
+        """Crash like a metric that reads a missing field."""
+        raise KeyError("label")
+
+    with pytest.raises(ServiceError, match=r"Every example failed \(2 of 2\).*KeyError"):
+        evaluate_on_test(lambda question: dspy.Prediction(answer=question), _qa_examples(2), metric)
+
+
+def test_evaluate_on_test_scores_and_logs_the_count_when_some_examples_fail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Some failed examples keep today's behavior: a score, plus a logged failure count (SKY-221)."""
+
+    def program(question: str) -> dspy.Prediction:
+        """Fail on the first example only."""
+        if question == "0":
+            raise ConnectionError("egress blocked")
+        return dspy.Prediction(answer=question)
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.optimizers"):
+        score = evaluate_on_test(program, _qa_examples(4), _exact_match)
+
+    assert score == pytest.approx(75.0)
+    assert any("1 of 4 example(s) failed" in record.getMessage() for record in caplog.records)

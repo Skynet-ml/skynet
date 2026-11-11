@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import replace
@@ -1746,18 +1747,12 @@ def test_a_crashed_version_is_never_chosen_even_when_every_valid_score_is_deeply
     assert UNSCORED not in [value for _, metrics in events for value in metrics.values()]
 
 
-@pytest.mark.parametrize("crashing", [{"winner"}, {"winner", "hello world"}])
-def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
-    fake_lm: FakeReflectionLM,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    crashing: set[str],
-) -> None:
-    """A winner the metric crashes on in the final run gets no score, never 0, and the seed stays.
+def _crash_metric_on(monkeypatch: pytest.MonkeyPatch, crashing: set[str]) -> None:
+    """Make the metric crash on ``crashing`` and make the search return "winner".
 
-    The seed stays even when the metric crashes on it too, so the crashed
-    winner never becomes the next run's starting point.
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        crashing: The versions the metric crashes on.
     """
     real_build_scorer = service_mod.build_scorer
 
@@ -1800,6 +1795,16 @@ def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
         ),
     )
 
+
+def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A winner the metric crashes on in the final run gets no score, never 0, and the seed stays."""
+    _crash_metric_on(monkeypatch, {"winner"})
+
     with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
         response = run_blackbox_optimization(_payload(), artifact_id="job-final-crash", gepa_log_dir_path=str(tmp_path))
 
@@ -1811,7 +1816,85 @@ def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
     assert response.regression_guard_applied is True
     assert response.best_candidate == "hello world"
     assert response.best_score == response.baseline_score
-    assert (response.best_score is None) == ("hello world" in crashing)
+    assert response.best_score is not None
+
+
+def test_a_run_fails_when_the_metric_crashes_on_the_winner_and_the_seed(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kept seed has no valid case either, so the run fails with the cause (SKY-221)."""
+    _crash_metric_on(monkeypatch, {"winner", "hello world"})
+
+    with pytest.raises(ServiceError, match=r"starting point failed on every case .*KeyError: 'answer'"):
+        run_blackbox_optimization(_payload(), artifact_id="job-final-crash", gepa_log_dir_path=str(tmp_path))
+
+
+_RUN_FAILS_CODE = """
+def score(candidate, case=None):
+    if case is None or case["i"] % FAILED_EVERY == 0:
+        return 0.0, {"feedback": "Run failed: Traceback (most recent call last):\\n  File \\"entry.py\\"\\nConnectionError: egress blocked"}
+    return 0.5, {"feedback": "ok"}
+"""
+
+
+def _winner_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the search return "winner" without scoring anything.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(best_candidate="winner", best_score=1.0, total_evals=0),
+            [],
+        ),
+    )
+
+
+def test_a_run_where_every_case_fails_ends_as_failed_with_the_cause(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run entry that crashes on every case fails the run and names the cause (SKY-221)."""
+    _winner_strategy(monkeypatch)
+    code = _RUN_FAILS_CODE.replace("FAILED_EVERY", "1")
+
+    with pytest.raises(ServiceError, match=r"failed on every case .*ConnectionError: egress blocked"):
+        run_blackbox_optimization(
+            _payload(scorer={"kind": "python", "metric_code": code}),
+            artifact_id="job-all-fail",
+            gepa_log_dir_path=str(tmp_path),
+        )
+
+
+def test_a_run_where_some_cases_fail_succeeds_and_logs_the_count(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Some failed cases keep today's behavior: the run succeeds and logs the failure count (SKY-221)."""
+    _winner_strategy(monkeypatch)
+    code = _RUN_FAILS_CODE.replace("FAILED_EVERY", "2")
+    # Enough cases that the held-out split, fixed by the seed, has both kinds.
+    cases = [{"target": "aeiou", "i": i} for i in range(40)]
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
+        response = run_blackbox_optimization(
+            _payload(scorer={"kind": "python", "metric_code": code}, cases=cases),
+            artifact_id="job-some-fail",
+            gepa_log_dir_path=str(tmp_path),
+        )
+
+    assert response.best_score is not None
+    counts = [
+        (int(match[1]), int(match[2]))
+        for record in caplog.records
+        if (match := re.search(r"optimized version failed on (\d+) of (\d+) run\(s\)", record.getMessage()))
+    ]
+    assert counts
+    assert all(0 < failed < runs for failed, runs in counts)
 
 
 def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest.LogCaptureFixture) -> None:

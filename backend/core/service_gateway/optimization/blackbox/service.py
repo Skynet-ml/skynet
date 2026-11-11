@@ -19,6 +19,7 @@ import json
 import logging
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -112,7 +113,7 @@ from .protocol import (
     is_metric_error,
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
-from .repo_scorer import REPO_SCORER_URL, SETUP_ALLOWANCE_SECONDS
+from .repo_scorer import REPO_SCORER_URL, RUN_FAILED, SETUP_ALLOWANCE_SECONDS
 from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime, sandbox_runtime_from_settings
 from .scorer import JobScorer, RemoteScorer, build_scorer
@@ -516,6 +517,36 @@ class FinalRun:
     # Per case, the trusted observation of the run stage (time, model calls,
     # service cost); ``None`` where the scorer does not measure one.
     observations: list[dict[str, Any] | None] = field(default_factory=list)
+    # Error text of each run that failed: a metric error, or the version's
+    # own run crashed ("Run failed: ..."), which scores 0 (SKY-221).
+    failures: list[str] = field(default_factory=list)
+
+
+def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
+    """Fail the run when the reported version failed on every case (SKY-221).
+
+    A version that failed everywhere has no real score, so the run must not
+    end as a success. Some failed cases keep the run and its score.
+
+    Args:
+        final: The version's final run, if it had one.
+        label: What the version is, for the error message.
+
+    Raises:
+        ServiceError: When every run of ``final`` failed; names the most common cause.
+    """
+    if final is None or not final.runs:
+        return
+    if len(final.failures) < final.runs:
+        if final.failures:
+            logger.warning("%s failed on %d of %d run(s)", label, len(final.failures), final.runs)
+        return
+    lines = [failure.removeprefix(RUN_FAILED).strip().splitlines() or [""] for failure in final.failures]
+    cause, count = Counter(text[-1].strip()[:500] for text in lines).most_common(1)[0]
+    raise ServiceError(
+        f"The {label} failed on every case ({final.runs} of {final.runs}), so the run has no valid score. "
+        f"Most common cause ({count} of {final.runs}): {cause or METRIC_ERROR}"
+    )
 
 
 def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNamedScore]:
@@ -651,6 +682,12 @@ def _final_run(
         cases=[(score, feedback) for (score, _, _), feedback in zip(scored, feedbacks, strict=True)] if cases else [],
         runs=len(scored),
         observations=[observation for _, _, observation in scored] if cases else [],
+        failures=errors
+        + [
+            feedback
+            for (score, _, _), feedback in zip(scored, feedbacks, strict=True)
+            if score is not None and feedback.startswith(RUN_FAILED)
+        ],
     )
 
 
@@ -1353,6 +1390,10 @@ def _run_job(
                 )
         except BudgetReached as exc:
             stop = exc
+        else:
+            _raise_if_every_run_failed(
+                best_run, "optimized version" if best_candidate != seed_candidate else "starting point"
+            )
     distinct_runs = {id(run): run for run in (baseline_val, best_val, baseline_run, best_run) if run is not None}
     final_scorer_runs = sum(run.runs for run in distinct_runs.values())
     baseline = baseline_run.score if baseline_run else None
