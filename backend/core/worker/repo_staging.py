@@ -24,8 +24,8 @@ from sqlalchemy.orm import Session
 
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
 from ..api.routers.package_registry import package_registry_for
-from ..billing.host_agent import _proposer_model_extra
-from ..billing.model_gateway import MCP_RELAY_ROUTE_KEY, ROUTE_KEY
+from ..billing.host_agent import HOST_AGENT_TOKEN_KEY, _proposer_model_extra
+from ..billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from ..billing.operation_pricing import ChargePolicy
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
@@ -867,8 +867,8 @@ def bind_repo_scorer(
             allowed_hosts=staged.secret_allowed_hosts,
             budget=getattr(gateway, "runtime", None),
             services=staged.services,
-            # Box code can put the proposer's model route token into a call (SKY-640).
-            record_secrets=(str(proposer_route.get("token") or ""),),
+            # Box code can put any token it holds into a call (SKY-640).
+            record_secrets=lambda: _box_route_tokens(proposer_route),
         )
         # Beside the proposer's model route, as the host proposer's token is:
         # the guest's harness launch reads only that route.
@@ -877,6 +877,29 @@ def bind_repo_scorer(
             "servers": [server.name for server in proposer.mcp_servers],
             "services": list(proposer.services),
         }
+
+
+def _box_route_tokens(route: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return every token the proposer box reads from its model route.
+
+    The worker attaches the host agent token after the relay is made, so
+    the relay calls this for each record, not once.
+
+    Args:
+        route: The proposer's model route, which later steps change in place.
+
+    Returns:
+        The model, host agent, embedding and MCP relay tokens that are set.
+    """
+    embedding = route.get(EMBEDDING_ROUTE_KEY)
+    mcp = route.get(MCP_RELAY_ROUTE_KEY)
+    tokens = (
+        route.get("token"),
+        route.get(HOST_AGENT_TOKEN_KEY),
+        embedding.get("token") if isinstance(embedding, dict) else None,
+        mcp.get("token") if isinstance(mcp, dict) else None,
+    )
+    return tuple(str(token) for token in tokens if token)
 
 
 def _repo_model_gateway(scorer_spec: dict[str, Any]) -> ScorerGateway | None:

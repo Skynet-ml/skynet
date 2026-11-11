@@ -295,7 +295,7 @@ class McpRelay:
         allowed_hosts: Mapping[str, Collection[str]] | None = None,
         budget: Any = None,
         services: Mapping[str, ServiceSpec] | None = None,
-        record_secrets: Collection[str] = (),
+        record_secrets: Callable[[], Collection[str]] = tuple,
     ) -> None:
         """Bind the relay to one role and the run's secrets.
 
@@ -308,8 +308,9 @@ class McpRelay:
             allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
             budget: The run budget, which meters a call with a Skynet key.
             services: The file's ``[services]`` tables.
-            record_secrets: More values each call record must mask, such as
-                the role box's model route token.
+            record_secrets: Returns more values each call record must mask,
+                such as the role box's route tokens. Each call reads it again,
+                because a token can join the route after the relay is made.
         """
         self._label = label
         self._services = dict(services or {})
@@ -319,7 +320,7 @@ class McpRelay:
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
         self._budget = budget
-        self._record_secrets = tuple(record_secrets)
+        self._record_secrets = record_secrets
         self._streams_lock = threading.Lock()
         self._open_streams = 0
 
@@ -359,7 +360,7 @@ class McpRelay:
                     status="refused",
                     failure_reason=str(error),
                     # The name comes from box code and can be any value it holds (SKY-640).
-                    secrets=self._record_secrets,
+                    secrets=self._record_secrets(),
                 )
             return _mcp_error(403, str(error))
         # Only a GET listener streams, and it takes its place before the request goes out.
@@ -452,7 +453,7 @@ class McpRelay:
                 target=name,
                 status="refused",
                 failure_reason=message,
-                secrets=self._record_secrets,
+                secrets=self._record_secrets(),
             )
         return _mcp_error(status, message)
 
@@ -575,7 +576,7 @@ class McpRelay:
                 kind=kind,
                 target=_tool_target(name, url, _json_object(body)) if kind == "mcp" else "",
                 # Box code can put its model route token into a tool call or a request body (SKY-640).
-                record_secrets=self._record_secrets,
+                record_secrets=self._record_secrets(),
             )
         except _AnswerTooLargeError:
             return _mcp_error(502, f"{label} answered with more than 4 MiB.")

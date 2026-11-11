@@ -488,7 +488,7 @@ def test_the_proposer_route_token_leaks_into_no_mcp_or_service_record(
             services=("echo",),
         ),
         services={"echo": ServiceSpec(url=f"http://svc.example.test:{port}/api")},
-        record_secrets=(_ROUTE_TOKEN,),
+        record_secrets=lambda: (_ROUTE_TOKEN,),
     )
     name = _ROUTE_TOKEN if outcome == "refused" else ("search" if kind == "mcp" else "echo")
     params = {"name": "lookup", "arguments": {"key": _ROUTE_TOKEN}}
