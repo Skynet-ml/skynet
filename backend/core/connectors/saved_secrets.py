@@ -2,13 +2,15 @@
 
 Repository runs read them as environment variables inside the sandbox. Values
 are Fernet-encrypted under the shared vault key before they reach the
-database; listing returns names only, and decryption happens solely in the
-trusted parent when a run needs the value.
+database; listing returns names and hosts only, and decryption happens solely in the
+trusted parent when a run needs the value. Each secret also keeps the hosts
+the user approved for it, and a run may send it to those hosts only (SKY-641).
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -17,7 +19,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from ..api.errors import DomainError
-from ..models.blackbox import REPO_SECRET_NAME_PATTERN
+from ..models.blackbox import REPO_SECRET_HOST_PATTERN, REPO_SECRET_NAME_PATTERN
 from ..storage.models import UserSecretModel
 from .vault import vault_cipher
 
@@ -32,6 +34,7 @@ class SavedSecretView:
 
     id: str
     name: str
+    allowed_hosts: tuple[str, ...]
     created_at: datetime
     updated_at: datetime
 
@@ -45,7 +48,33 @@ def _view(row: UserSecretModel) -> SavedSecretView:
     Returns:
         The masked view.
     """
-    return SavedSecretView(id=row.id, name=row.name, created_at=row.created_at, updated_at=row.updated_at)
+    return SavedSecretView(
+        id=row.id,
+        name=row.name,
+        allowed_hosts=tuple(row.allowed_hosts or ()),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def clean_allowed_hosts(hosts: Sequence[str]) -> list[str]:
+    """Normalize the hosts a saved secret may go to, as a run's ``allowed_hosts`` does.
+
+    Args:
+        hosts: Exact hosts or ``*.suffix`` patterns, as given.
+
+    Returns:
+        The lower-case hosts without a trailing dot, in order, without repeats.
+
+    Raises:
+        ValueError: When an entry is not an exact host or ``*.`` and a suffix
+            of two or more labels.
+    """
+    cleaned = [host.strip().rstrip(".").lower() for host in hosts]
+    for host in cleaned:
+        if len(host) > 253 or not REPO_SECRET_HOST_PATTERN.match(host):
+            raise ValueError(f"Allowed host '{host}' must be a host such as api.example.com, or *.example.com.")
+    return list(dict.fromkeys(cleaned))
 
 
 class SavedSecretStore:
@@ -77,13 +106,15 @@ class SavedSecretStore:
             )
             return [_view(row) for row in rows]
 
-    def save(self, username: str, name: str, value: str) -> SavedSecretView:
-        """Create the named secret, or replace its value when it exists.
+    def save(self, username: str, name: str, value: str, allowed_hosts: Sequence[str] = ()) -> SavedSecretView:
+        """Create the named secret, or replace its value and hosts when it exists.
 
         Args:
             username: Owner of the secret.
             name: Environment variable name.
             value: Plaintext value; encrypted before it is stored.
+            allowed_hosts: The hosts the user approved for the secret,
+                already cleaned by :func:`clean_allowed_hosts`.
 
         Returns:
             The masked view of the saved secret.
@@ -112,6 +143,7 @@ class SavedSecretStore:
                 session.add(row)
             else:
                 row.secret_ciphertext = ciphertext
+            row.allowed_hosts = list(allowed_hosts)
             row.updated_at = now
             session.commit()
             session.refresh(row)
@@ -136,12 +168,13 @@ class SavedSecretStore:
             session.commit()
             return bool(deleted)
 
-    def resolve(self, username: str, secret_id: str) -> str:
+    def resolve(self, username: str, secret_id: str, hosts: Collection[str] = ()) -> str:
         """Decrypt one saved secret for use inside a run.
 
         Args:
             username: Owner the secret must belong to.
             secret_id: Identifier of the secret.
+            hosts: The hosts the run asks to send the secret to.
 
         Returns:
             The plaintext value.
@@ -149,6 +182,8 @@ class SavedSecretStore:
         Raises:
             DomainError: 404 when the user has no such secret; 409 when the
                 stored value no longer decrypts under the current vault key.
+            ValueError: When the run asks for a host the user did not approve
+                for the secret.
         """
         with Session(self._engine) as session:
             row = (
@@ -158,6 +193,14 @@ class SavedSecretStore:
             )
             if row is None:
                 raise DomainError("secrets.not_found", status=404)
+            # The run payload names these hosts, and an agent can write the
+            # optimize.toml they came from; only the user's stored list counts.
+            refused = sorted(set(hosts) - set(row.allowed_hosts or ()))
+            if refused:
+                raise ValueError(
+                    f"The saved secret '{row.name}' may not go to {', '.join(refused)}. "
+                    "Save it again in Settings with that host."
+                )
             ciphertext = row.secret_ciphertext
         try:
             return vault_cipher().decrypt(ciphertext).decode("utf-8")

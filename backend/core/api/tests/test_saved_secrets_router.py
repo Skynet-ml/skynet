@@ -7,11 +7,16 @@ replace-by-name, and the decrypt path a repository run uses.
 
 from __future__ import annotations
 
+import runpy
+from pathlib import Path
+
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from ...connectors.saved_secrets import SavedSecretStore
@@ -104,8 +109,57 @@ def test_invalid_names_are_rejected(name: str) -> None:
     assert client.put("/secrets", json={"name": name, "value": "v"}).status_code == 422
 
 
+def test_save_stores_the_approved_hosts_and_returns_them_without_the_value() -> None:
+    """The hosts are cleaned and stored, and a new save replaces them (SKY-641)."""
+    store = _MemStore()
+    client = _client(store, _ALICE)
+    body = {"name": "MAPS_KEY", "value": "maps-value", "allowed_hosts": [" Maps.GoogleAPIs.com. ", "*.example.com"]}
+    saved = client.put("/secrets", json=body)
+    assert saved.status_code == 200
+    assert saved.json()["allowed_hosts"] == ["maps.googleapis.com", "*.example.com"]
+    listed = client.get("/secrets")
+    assert listed.json()["secrets"][0]["allowed_hosts"] == ["maps.googleapis.com", "*.example.com"]
+    assert "maps-value" not in listed.text
+    replaced = client.put("/secrets", json={"name": "MAPS_KEY", "value": "v2", "allowed_hosts": ["api.example.org"]})
+    assert replaced.json()["allowed_hosts"] == ["api.example.org"]
+
+
+def test_save_without_hosts_approves_no_host() -> None:
+    """A secret saved with no host, as every secret before SKY-641, lists an empty host list."""
+    client = _client(_MemStore(), _ALICE)
+    assert client.put("/secrets", json={"name": "TOKEN", "value": "v"}).json()["allowed_hosts"] == []
+
+
+@pytest.mark.parametrize("host", ["*", "*.com", "http://api.example.com", "api.example.com/path", "bad host"])
+def test_save_refuses_a_bad_host(host: str) -> None:
+    """An approved host must be an exact host or ``*.suffix``, and the error does not echo the value."""
+    client = _client(_MemStore(), _ALICE)
+    response = client.put("/secrets", json={"name": "TOKEN", "value": "v-sentinel", "allowed_hosts": [host]})
+    assert response.status_code == 422
+
+
 def test_store_rejects_bad_names_outside_the_router() -> None:
     """The store enforces the name rule itself, not only the request model."""
     with pytest.raises(DomainError) as caught:
         SavedSecretStore(_MemStore().engine).save("alice", "bad-name", "v")
     assert caught.value.code == "secrets.invalid_name"
+
+
+def test_migration_gives_existing_secrets_no_host() -> None:
+    """The SKY-641 migration adds an empty host list, so an old secret goes to no host until saved again."""
+    store = _MemStore()
+    secret_id = _client(store, _ALICE).put("/secrets", json={"name": "MAPS_KEY", "value": "v"}).json()["id"]
+    with store.engine.begin() as connection:
+        connection.execute(text("ALTER TABLE user_secrets DROP COLUMN allowed_hosts"))
+    migration = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "alembic/versions/c4d1e8a2f6b3_add_user_secrets_allowed_hosts.py")
+    )
+    for _ in range(2):
+        with store.engine.begin() as connection, Operations.context(MigrationContext.configure(connection)):
+            migration["upgrade"]()
+
+    assert _client(store, _ALICE).get("/secrets").json()["secrets"][0]["allowed_hosts"] == []
+    secrets = SavedSecretStore(store.engine)
+    assert secrets.resolve("alice", secret_id) == "v"
+    with pytest.raises(ValueError, match="may not go to"):
+        secrets.resolve("alice", secret_id, ["maps.googleapis.com"])

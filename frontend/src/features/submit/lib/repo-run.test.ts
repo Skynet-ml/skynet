@@ -313,6 +313,83 @@ test("a repository run sends each secret with its allowed hosts as a list", () =
   ]);
 });
 
+const SERVICES_TOML = [
+  "[services.geocode]",
+  'url = "https://Maps.GoogleApis.com/maps/api/geocode/json"',
+  'query = { key = "${MAPS_KEY}" }',
+  "",
+  "[services.search]",
+  'url = "https://api.search.example/v1"',
+  "",
+  "[services.search.headers]",
+  'X-Api-Key = "${SEARCH_KEY}"',
+  "",
+  "[metric]",
+  'note = "${NOT_A_SERVICE}"',
+].join("\n");
+
+test("a repository run sends the saved secrets its services name, by id, to their host only", () => {
+  const state = repoState();
+  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.task.repo = { ...state.task.repo!, secrets: [{ name: "SEARCH_KEY", value: "typed", allowedHosts: "api.search.example" }] };
+  const savedSecrets = [
+    { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["maps.googleapis.com"] },
+    { id: "sec-search", name: "SEARCH_KEY", allowed_hosts: ["api.search.example"] },
+    { id: "sec-other", name: "NOT_A_SERVICE", allowed_hosts: ["maps.googleapis.com"] },
+    { id: "sec-unused", name: "UNUSED_KEY", allowed_hosts: ["maps.googleapis.com"] },
+  ];
+  const request = repoRunRequest(state, { ...options, savedSecrets });
+  assert.ok(request);
+  // The typed SEARCH_KEY wins over the saved one; only service secrets go, never a value.
+  assert.deepEqual((request.target as { repo: { secrets?: unknown } }).repo.secrets, [
+    { name: "SEARCH_KEY", value: "typed", allowed_hosts: ["api.search.example"] },
+    { name: "MAPS_KEY", saved_secret_id: "sec-maps", allowed_hosts: ["maps.googleapis.com"] },
+  ]);
+});
+
+test("a saved secret goes only to a host its owner approved, never to the host an edited toml names", () => {
+  const state = repoState();
+  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.task.repo = { ...state.task.repo!, secrets: [] };
+  const savedSecrets = [
+    // Approved for another host: an agent pointed the toml elsewhere.
+    { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["attacker.example.net"] },
+    // Saved before SKY-641: no approved host, so it goes nowhere.
+    { id: "sec-search", name: "SEARCH_KEY", allowed_hosts: [] },
+  ];
+  const request = repoRunRequest(state, { ...options, savedSecrets });
+  assert.ok(request);
+  assert.equal("secrets" in (request.target as { repo: object }).repo, false);
+  // A secret with no host list at all is treated the same way.
+  const legacy = repoRunRequest(state, { ...options, savedSecrets: [{ id: "sec-maps", name: "MAPS_KEY" }] });
+  assert.equal("secrets" in (legacy!.target as { repo: object }).repo, false);
+});
+
+test("a saved secret approved for a *.suffix goes to a host under it with that approved entry", () => {
+  const state = repoState();
+  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.task.repo = { ...state.task.repo!, secrets: [] };
+  const savedSecrets = [
+    { id: "sec-maps", name: "MAPS_KEY", allowed_hosts: ["*.googleapis.com"] },
+    // "*.h.example" covers only hosts under "h.example", not "api.search.example".
+    { id: "sec-search", name: "SEARCH_KEY", allowed_hosts: ["*.h.example"] },
+  ];
+  const request = repoRunRequest(state, { ...options, savedSecrets });
+  assert.ok(request);
+  assert.deepEqual((request.target as { repo: { secrets?: unknown } }).repo.secrets, [
+    { name: "MAPS_KEY", saved_secret_id: "sec-maps", allowed_hosts: ["*.googleapis.com"] },
+  ]);
+});
+
+test("a repository run with no saved secret for its services sends only the typed ones", () => {
+  const state = repoState();
+  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.task.repo = { ...state.task.repo!, secrets: [] };
+  const request = repoRunRequest(state, { ...options, savedSecrets: [{ id: "x", name: "UNUSED_KEY" }] });
+  assert.ok(request);
+  assert.equal("secrets" in (request.target as { repo: object }).repo, false);
+});
+
 test("a repository run with no secrets sends no secrets key", () => {
   const state = repoState();
   state.task.repo = { ...state.task.repo!, secrets: [] };

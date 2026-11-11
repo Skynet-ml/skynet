@@ -17,6 +17,94 @@ export interface RepoRunOptions {
   username: string;
   tokenSource: "managed" | "byok" | "subscription";
   maxCostCents: number | null;
+  /** The secrets saved on the account of the run's server, with their approved hosts; never values. */
+  savedSecrets?: ReadonlyArray<{ id: string; name: string; allowed_hosts?: string[] }>;
+}
+
+const OPTIMIZE_TOML = "optimize.toml";
+const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+/**
+ * The `${NAME}` secrets that optimize.toml's `[services.<name>]` entries send,
+ * each with the one host it goes to (E52, E53). A secret that two services use
+ * goes to the last one's host, as on the server.
+ *
+ * Args:
+ *   toml: The optimize.toml text.
+ *
+ * Returns:
+ *   Each secret name mapped to its host; a service with no valid url adds none.
+ */
+export function serviceSecretHosts(toml: string): Map<string, string> {
+  const services = new Map<string, { url: string | null; names: string[] }>();
+  let current: { url: string | null; names: string[] } | null = null;
+  let own = false;
+  for (const line of toml.split("\n")) {
+    if (line.trim().startsWith("#")) continue;
+    const header = /^\s*\[([^[\]]+)\]\s*(?:#.*)?$/.exec(line);
+    if (header) {
+      const parts = (header[1] ?? "").split(".").map((part) => part.trim().replace(/^"(.*)"$/, "$1"));
+      const [table, service] = parts;
+      current = null;
+      if (table === "services" && service) {
+        current = services.get(service) ?? { url: null, names: [] };
+        services.set(service, current);
+        own = parts.length === 2;
+      }
+      continue;
+    }
+    if (!current) continue;
+    const url = own ? /^\s*url\s*=\s*["']([^"']+)["']/.exec(line) : null;
+    if (url?.[1]) current.url = url[1];
+    for (const match of line.matchAll(PLACEHOLDER)) if (match[1]) current.names.push(match[1]);
+  }
+  const hosts = new Map<string, string>();
+  for (const { url, names } of services.values()) {
+    let host = "";
+    try {
+      host = url ? new URL(url).hostname.replace(/\.$/, "").toLowerCase() : "";
+    } catch {
+      host = "";
+    }
+    if (host) for (const name of names) hosts.set(name, host);
+  }
+  return hosts;
+}
+
+/**
+ * The saved secrets a run sends by id, so a secret saved once (in the chat
+ * card or in Settings) serves every run whose optimize.toml names it (SKY-641).
+ * A secret the user typed for this run wins over a saved one.
+ *
+ * An agent can edit optimize.toml, so its host is only a request. A saved
+ * secret goes only when a host the user approved for it covers that host, and
+ * the server checks the same list again. A secret with no approved host (saved
+ * before SKY-641) is never sent.
+ *
+ * Args:
+ *   toml: The optimize.toml text.
+ *   saved: The account's saved secrets; names, ids and approved hosts only.
+ *   typed: The names of the secrets typed for this run.
+ *
+ * Returns:
+ *   One request entry per service secret whose saved secret approves its host,
+ *   carrying the approved host entry that covers it.
+ */
+export function savedServiceSecrets(
+  toml: string,
+  saved: ReadonlyArray<{ id: string; name: string; allowed_hosts?: string[] }>,
+  typed: ReadonlySet<string>,
+): Array<{ name: string; saved_secret_id: string; allowed_hosts: string[] }> {
+  const byName = new Map(saved.map((secret) => [secret.name, secret]));
+  return [...serviceSecretHosts(toml)].flatMap(([name, host]) => {
+    const secret = byName.get(name);
+    if (!secret || typed.has(name)) return [];
+    const approved = secret.allowed_hosts ?? [];
+    const match =
+      approved.find((entry) => entry === host) ??
+      approved.find((entry) => entry.startsWith("*.") && host.endsWith(entry.slice(1)));
+    return match ? [{ name, saved_secret_id: secret.id, allowed_hosts: [match] }] : [];
+  });
 }
 
 const hasModel = (config: ModelConfig | null): config is ModelConfig =>
@@ -133,7 +221,7 @@ function withByokProvider(metric: ModelConfig, reflection: ModelConfig): ModelCo
 /** The repository run request, or null while the wizard cannot run it yet. */
 export function repoRunRequest(
   state: WizardV2State,
-  { username, tokenSource, maxCostCents }: RepoRunOptions,
+  { username, tokenSource, maxCostCents, savedSecrets = [] }: RepoRunOptions,
 ): BlackboxRunRequest | null {
   const { task, inputs, optimizer, workspace, meta } = state;
   const repo = task.repo;
@@ -145,6 +233,11 @@ export function repoRunRequest(
   const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
   const secrets = repo.secrets ?? [];
+  const fromAccount = savedServiceSecrets(
+    workspace.files[OPTIMIZE_TOML] ?? "",
+    savedSecrets,
+    new Set(secrets.map((secret) => secret.name.trim())),
+  );
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -178,12 +271,15 @@ export function repoRunRequest(
         commit: repo.commit.trim() || null,
         editable_paths: editablePaths,
         ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
-        ...(secrets.length > 0 && {
-          secrets: secrets.map((secret) => ({
-            name: secret.name.trim(),
-            value: secret.value,
-            allowed_hosts: parseAllowedHosts(secret.allowedHosts),
-          })),
+        ...(secrets.length + fromAccount.length > 0 && {
+          secrets: [
+            ...secrets.map((secret) => ({
+              name: secret.name.trim(),
+              value: secret.value,
+              allowed_hosts: parseAllowedHosts(secret.allowedHosts),
+            })),
+            ...fromAccount,
+          ],
         }),
       },
       setup_command: repo.setupCommand.trim() || null,

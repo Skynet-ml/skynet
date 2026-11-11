@@ -76,6 +76,7 @@ const GROUPS: ReadonlyArray<{ labelKey: MessageKey; tools: readonly string[] }> 
     tools: [
       "update_wizard_state",
       "ask_user",
+      "request_secret",
       "remember_for_later",
       "continue_to_next_screen",
       "go_back_to_screen",
@@ -113,6 +114,7 @@ const GROUPS: ReadonlyArray<{ labelKey: MessageKey; tools: readonly string[] }> 
 // The chat rows use past-tense status titles for these; the list names the ability.
 const LABELS: Record<string, MessageKey> = {
   ask_user: "agent.tools.label.ask_user",
+  request_secret: "agent.tools.label.request_secret",
   remember_for_later: "agent.tools.label.remember",
   continue_to_next_screen: "agent.tools.label.next_screen",
   go_back_to_screen: "agent.tools.label.back_screen",

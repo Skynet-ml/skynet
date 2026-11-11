@@ -26,6 +26,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     false,
+    text,
     true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -1001,6 +1002,12 @@ class UserSecretModel(Base):
     username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # The hosts the user approved for this secret (SKY-641). A run may send it
+    # only to these, so an edited optimize.toml cannot redirect it. Empty
+    # (every secret saved before SKY-641) means no host.
+    allowed_hosts: Mapped[list[str]] = mapped_column(
+        JSON_STORE, nullable=False, default=list, server_default=text("'[]'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

@@ -333,7 +333,8 @@ def test_settings_tools_are_on_the_generalist_roster() -> None:
     """Every settings tool is offered, with the right approval class."""
     assert set(_ALWAYS_TOOLS) >= _SETTINGS_TOOLS
     assert "change_setting" in _DESTRUCTIVE_TOOLS
-    assert {"change_protected_setting"} == _ALWAYS_CONFIRM_TOOLS
+    # request_secret (SKY-641) also asks in every trust mode: its card is where the user types the value.
+    assert {"change_protected_setting", "request_secret"} == _ALWAYS_CONFIRM_TOOLS
 
 
 def test_router_tags_every_route_for_the_agent() -> None:

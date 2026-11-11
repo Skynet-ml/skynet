@@ -42,7 +42,7 @@ import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
 import { ExpandToggleButton } from "@/shared/ui/expand-toggle-button";
 import { WalletTab, UsageTab, ByokKeysSection } from "@/features/billing";
-import { ConnectorsTab } from "@/features/connectors";
+import { ConnectorsTab, SavedSecretsSection } from "@/features/connectors";
 import { LocalCliUsagePanel } from "@/features/local-usage";
 import { AdminDashboard } from "@/features/dashboard";
 import { ExperienceLevelControl } from "@/features/experience";
@@ -1262,8 +1262,9 @@ export function SettingsModal() {
               <TabsContent value="providers">
                 <ByokKeysSection />
               </TabsContent>
-              <TabsContent value="connectors">
+              <TabsContent value="connectors" className="space-y-6">
                 <ConnectorsTab />
+                <SavedSecretsSection />
               </TabsContent>
               <TabsContent value="api">
                 <ApiTab />
