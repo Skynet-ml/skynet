@@ -22,20 +22,30 @@ QWEN_CODE_PACKAGE = "@qwen-code/qwen-code"
 # The gateway URL lives in this file rather than on the command line, so a
 # protected run's relay rewrite of generated files reaches it.
 QWEN_CODE_BASE_URL_FILE = ".app/qwen/base_url"
+# Qwen Code 0.27.2 loads a key from a workspace ``.env`` or ``.qwen/.env`` file
+# when the process env holds no value or an empty one, so an empty value would
+# let the candidate repo refill it. A non-empty value that no provider accepts
+# keeps the key out of reach.
+_PROTECTED_KEY_VALUE = "skynet-protected-unset"
 # Qwen Code reads these keys for its other auth types and providers. A
-# protected run blanks them, so an inherited key never gives Qwen Code a route
-# around the gateway.
+# protected run overrides them, so an inherited or workspace key never gives
+# Qwen Code a route around the gateway.
 _PROTECTED_ENV = {
-    "QWEN_API_KEY": "",
-    "DASHSCOPE_API_KEY": "",
-    "ANTHROPIC_API_KEY": "",
-    "ANTHROPIC_AUTH_TOKEN": "",
-    "GEMINI_API_KEY": "",
-    "GOOGLE_API_KEY": "",
-    "OPENROUTER_API_KEY": "",
-    # With QWEN_OAUTH set, Qwen Code 0.27.2 picks its own OAuth sign-in when
-    # no auth type is given (``getAuthTypeFromEnv``).
+    "QWEN_API_KEY": _PROTECTED_KEY_VALUE,
+    # Also the fallback key of the web search providers.
+    "DASHSCOPE_API_KEY": _PROTECTED_KEY_VALUE,
+    "ANTHROPIC_API_KEY": _PROTECTED_KEY_VALUE,
+    "ANTHROPIC_AUTH_TOKEN": _PROTECTED_KEY_VALUE,
+    "GEMINI_API_KEY": _PROTECTED_KEY_VALUE,
+    "GOOGLE_API_KEY": _PROTECTED_KEY_VALUE,
+    "OPENROUTER_API_KEY": _PROTECTED_KEY_VALUE,
+    # Any non-empty QWEN_OAUTH selects the OAuth sign-in in
+    # ``getAuthTypeFromEnv``, so this key stays empty. A workspace refill has
+    # no effect on the run: ``--auth-type openai`` wins over the env.
     "QWEN_OAUTH": "",
+    # A non-empty ENABLE_WEB_SEARCH wins over the workspace
+    # ``tools.webSearch.enabled`` setting.
+    "ENABLE_WEB_SEARCH": "false",
 }
 
 
@@ -62,12 +72,21 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     # The token goes in OPENAI_API_KEY, never ``--openai-api-key``, so it stays
     # out of the process arguments. The inline OPENAI_BASE_URL replaces any
     # inherited one, so model calls reach only the gateway or its relay.
+    # Workspace settings can turn on web tools and MCP servers, which call
+    # outside the gateway. ``--exclude-tools`` adds to the deny list after the
+    # settings, and the tool scheduler denies listed tools also under
+    # ``--yolo``. ``--allowed-mcp-server-names`` replaces the settings allow
+    # list with a name no server has, and ``--disable-mcp-server '*'`` marks
+    # every server disabled, so discovery starts none.
     run_command = (
         'export QWEN_HOME="$(mktemp -d)" && '
         "trap 'rm -rf \"$QWEN_HOME\"' EXIT && "
         f'OPENAI_BASE_URL="$(cat {QWEN_CODE_BASE_URL_FILE})" '
         f'OPENAI_API_KEY="${ENV_API_KEY}" OPENAI_MODEL="${ENV_MODEL}" '
-        f'qwen --yolo --auth-type openai --model "${ENV_MODEL}" --prompt {_PROMPT_ARG} < /dev/null'
+        f'qwen --yolo --auth-type openai --model "${ENV_MODEL}" '
+        "--exclude-tools web_fetch,web_search "
+        "--allowed-mcp-server-names skynet-no-mcp --disable-mcp-server '*' "
+        f"--prompt {_PROMPT_ARG} < /dev/null"
     )
     env = _base_env(model, gateway)
     env.update(

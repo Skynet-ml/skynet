@@ -15,12 +15,16 @@ from core.models.blackbox import BLACKBOX_HARNESS_QWEN_CODE, BLACKBOX_HARNESSES,
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
-from ..harnesses.qwen_code import _PROTECTED_ENV, QWEN_CODE_BASE_URL_FILE
+from ..harnesses.qwen_code import _PROTECTED_ENV, _PROTECTED_KEY_VALUE, QWEN_CODE_BASE_URL_FILE
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
 _PROVIDER_KEYS = ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")
 _PROMPT = "Fix `solution.py` and say $(echo done)."
+# The flags that keep web tools and every MCP server off in every run.
+_NO_WEB_NO_MCP_ARGS = (
+    "[--exclude-tools] [web_fetch,web_search] [--allowed-mcp-server-names] [skynet-no-mcp] [--disable-mcp-server] [*]"
+)
 # Synthetic one-shot transcript in the shape of ``qwen --prompt`` text output.
 _RECORDED_STDOUT = "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.\n"
 # Stand-in for the qwen binary: it records each call and prints a fixed answer.
@@ -149,7 +153,9 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert "--openai-base-url" not in launch.run_command
     assert (
         f'OPENAI_BASE_URL="$(cat {QWEN_CODE_BASE_URL_FILE})" OPENAI_API_KEY="$APP_API_KEY" OPENAI_MODEL="$APP_MODEL" '
-        'qwen --yolo --auth-type openai --model "$APP_MODEL" --prompt "$(cat "$APP_PROMPT_FILE")" < /dev/null'
+        'qwen --yolo --auth-type openai --model "$APP_MODEL" '
+        "--exclude-tools web_fetch,web_search --allowed-mcp-server-names skynet-no-mcp --disable-mcp-server '*' "
+        '--prompt "$(cat "$APP_PROMPT_FILE")" < /dev/null'
     ) in launch.run_command
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert launch.env["APP_GATEWAY_URL"] == _GATEWAY.url
@@ -168,16 +174,30 @@ def test_reasoning_effort_does_not_change_the_launch(effort: str | None) -> None
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
-    """Use the offline version probe, blank other provider keys and OAuth, and keep the gateway key."""
+    """Use the offline version probe, override other provider keys, blank OAuth, turn off web search, keep the gateway key.
+
+    The provider keys get a non-empty value because Qwen Code 0.27.2 refills
+    an empty or missing key from a workspace ``.env`` file.
+    """
     launch = build_launch(_target(), _GATEWAY, protected=True)
+    provider_keys = {
+        "QWEN_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
+    }
 
     assert launch.install_command == pinned_harness_check(BLACKBOX_HARNESS_QWEN_CODE)
-    assert {"QWEN_API_KEY", "DASHSCOPE_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "QWEN_OAUTH"} <= set(
-        _PROTECTED_ENV
-    )
-    for name, value in _PROTECTED_ENV.items():
-        assert value == ""
-        assert launch.env[name] == ""
+    assert set(_PROTECTED_ENV) == provider_keys | {"QWEN_OAUTH", "ENABLE_WEB_SEARCH"}
+    assert _PROTECTED_KEY_VALUE
+    for name in provider_keys:
+        assert launch.env[name] == _PROTECTED_KEY_VALUE
+    assert launch.env["QWEN_OAUTH"] == ""
+    assert launch.env["ENABLE_WEB_SEARCH"] == "false"
+    assert "ENABLE_WEB_SEARCH" not in build_launch(_target(), _GATEWAY).env
     assert launch.env["QWEN_TELEMETRY_ENABLED"] == "false"
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert "OPENAI_API_KEY" not in launch.env
@@ -189,12 +209,14 @@ def test_protected_run_points_qwen_at_the_relay_and_returns_its_answer(tmp_path:
 
     assert code == 0
     (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
-    assert run == (f"ARGS [--yolo] [--auth-type] [openai] [--model] [target-model] [--prompt] [{_PROMPT}]")
+    assert run == (
+        f"ARGS [--yolo] [--auth-type] [openai] [--model] [target-model] {_NO_WEB_NO_MCP_ARGS} [--prompt] [{_PROMPT}]"
+    )
     assert _logged(calls, "OPENAI_BASE_URL") == _RELAY
     assert _GATEWAY.url not in calls
     assert _logged(calls, "OPENAI_API_KEY") == "gateway-token"
     assert _logged(calls, "OPENAI_MODEL") == "target-model"
-    assert _logged(calls, "DASHSCOPE_API_KEY") == ""
+    assert _logged(calls, "DASHSCOPE_API_KEY") == _PROTECTED_KEY_VALUE
     home = Path(_logged(calls, "QWEN_HOME"))
     assert _logged(calls, "HOME_DIR") == "yes"
     assert not home.exists()
@@ -206,11 +228,13 @@ def test_protected_run_points_qwen_at_the_relay_and_returns_its_answer(tmp_path:
 
 
 def test_open_run_reads_the_gateway_url_from_the_generated_file(tmp_path: Path) -> None:
-    """Without a relay, point qwen at the gateway URL the launch wrote, over an inherited base URL and key."""
+    """Without a relay, point qwen at the written gateway URL over inherited ones, and keep web tools and MCP off."""
     _, calls, _, _ = _run_with_fake_qwen(tmp_path, protected=False)
 
     assert _logged(calls, "OPENAI_BASE_URL") == _GATEWAY.url
     assert _logged(calls, "OPENAI_API_KEY") == "gateway-token"
+    (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
+    assert _NO_WEB_NO_MCP_ARGS in run
 
 
 @pytest.mark.parametrize("fake_exit", [0, 3])
