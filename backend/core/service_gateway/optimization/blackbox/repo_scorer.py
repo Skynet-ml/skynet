@@ -88,7 +88,7 @@ from .sandbox_contract import SandboxRuntime, SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
 
 if TYPE_CHECKING:
-    from ....worker.scoped_relay import CallRecorder
+    from ....worker.scoped_relay import CallRecorder, CallStart
 
 logger = logging.getLogger(__name__)
 
@@ -1165,6 +1165,8 @@ class _StageRelay:
         self._allowed = tuple(allowed)
         self._mcp = mcp or RoleEnvironment()
         self._secrets = dict(secrets or {})
+        # Values stage code can print or echo: the run's secrets and its box's model route key.
+        self._stage_secrets = [*self._secrets.values(), self._env.get(ENV_API_KEY, "")]
         self._bindings = dict(bindings or {})
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
@@ -1294,7 +1296,7 @@ class _StageRelay:
                     continue
                 pool = self._pools.get(name) if isinstance(name, str) else None
                 if pool is None:
-                    self._refusals.submit(self._answer, identity, {"error": f"Unknown stage {name!r}."})
+                    self._refusals.submit(self._refuse_stage, name, identity, frame.get("input"))
                 else:
                     pool.submit(self._call, name, identity, frame.get("input"))
 
@@ -1655,6 +1657,7 @@ class _StageRelay:
             identity: The call's id, also its folder and answer name.
             value: The JSON input.
         """
+        started = self._recorder.start() if self._recorder is not None else None
         try:
             response = self._run(name, identity, value)
         except BudgetReached as error:
@@ -1668,7 +1671,56 @@ class _StageRelay:
         except Exception as error:
             logger.warning("Stage %s call failed in the parent: %s", name, error)
             response = {"error": f"Stage {name!r} could not run."}
+        self._record_stage(started, name, value, response)
         self._answer(identity, response)
+
+    def _refuse_stage(self, name: Any, identity: str, value: Any) -> None:
+        """Record a call to a stage this run does not have, then answer the scorer with the refusal.
+
+        Args:
+            name: The stage the frame names; the record's target.
+            identity: The call's id, also its answer name.
+            value: The JSON input.
+        """
+        response = {"error": f"Unknown stage {name!r}."}
+        started = self._recorder.start() if self._recorder is not None else None
+        self._record_stage(started, str(name), value, response, status="refused")
+        self._answer(identity, response)
+
+    def _record_stage(
+        self,
+        started: CallStart | None,
+        name: str,
+        value: Any,
+        response: Mapping[str, Any],
+        *,
+        status: str | None = None,
+    ) -> None:
+        """Write one stage call into the run record (E28).
+
+        Args:
+            started: When the call started; None when nothing records.
+            name: The stage.
+            value: The JSON input.
+            response: The answer the scorer gets.
+            status: The status to record; None derives it from the answer.
+        """
+        if self._recorder is None or started is None:
+            return
+        control = response.get("control")
+        reason = response.get("error") or (control.get("message") if isinstance(control, Mapping) else None)
+        if status is None:
+            status = "ok" if "output" in response else "refused" if control else "failed"
+        self._recorder.record(
+            started,
+            kind="stage",
+            target=name,
+            status=status,
+            request=json.dumps(value, default=str),
+            response=json.dumps(response, default=str),
+            failure_reason=None if status == "ok" else str(reason or "The stage gave no answer."),
+            secrets=self._stage_secrets,
+        )
 
     def _run(self, name: str, identity: str, value: Any) -> dict[str, Any]:
         """Run one stage call in the stage's box.
@@ -1716,7 +1768,8 @@ class _StageRelay:
         if result.timed_out:
             return {"error": f"Stage {name!r} passed its {stage.timeout:g}s timeout."}
         if not result.ok:
-            tail = (result.stderr or result.stdout).strip()[-_STAGE_ERROR_CHARS:]
+            # Masked before the cut, so a secret across the cut leaves no part of itself.
+            tail = redact((result.stderr or result.stdout).strip(), self._stage_secrets)[-_STAGE_ERROR_CHARS:]
             return {"error": f"Stage {name!r} failed (exit {result.exit_code}): {tail}"}
         text = box.read_file(f"{folder}/{runner.OUTPUT_FILE}")
         try:

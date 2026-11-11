@@ -24,6 +24,8 @@ from ..billing.usage_tags import LANE_KEY
 from .models import RunCallModel, RunCandidateModel
 
 BODY_CAP_BYTES = 64 * 1024
+# A failure reason can carry a whole stage error or exception text; every polling page reads it.
+FAILURE_REASON_CAP_BYTES = 4 * 1024
 SECRET_MASK = "[REDACTED]"
 CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host"})
 CANDIDATE_STATES = frozenset({"running", "done", "failed"})
@@ -180,7 +182,11 @@ class PostgresRunCallStore:
             "started_at": _parse_timestamp(call.get("started_at")),
             "duration_ms": call.get("duration_ms"),
             "status": str(call.get("status") or "")[:16],
-            "failure_reason": None if failure_reason is None else strip_secrets(str(failure_reason), secrets),
+            "failure_reason": (
+                None
+                if failure_reason is None
+                else cut_body(strip_secrets(str(failure_reason), secrets), FAILURE_REASON_CAP_BYTES)[0]
+            ),
             "cost_usd": call.get("cost_usd"),
             "request": request,
             "request_bytes": request_bytes,

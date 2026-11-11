@@ -22,6 +22,8 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import SecretStr
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from core.billing.budgets import BudgetError, BudgetInsufficientError
 from core.billing.model_gateway import ModelGateway
@@ -35,9 +37,12 @@ from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
+from core.storage.models import Base
+from core.storage.run_call_store import FAILURE_REASON_CAP_BYTES, SECRET_MASK, PostgresRunCallStore
 from core.worker.scoped_relay import CallRecorder
 
 from .. import repo_scorer, runner
+from ..harness import ENV_API_KEY, ENV_MODEL
 from ..remote_evaluator import RemoteEvaluatorClient
 from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
 from ..repo_scorer import (
@@ -970,6 +975,224 @@ def test_stage_failures_reach_the_scorer_as_stage_errors(tmp_path: Path, name: s
     finally:
         scorer.close()
     assert runtime.closed == len(STAGES)
+
+
+def test_each_stage_call_is_recorded_with_its_status_and_no_secret(tmp_path: Path) -> None:
+    """A good and a failed stage call each write one ``stage`` run call (E28)."""
+    code = (
+        "import os\n"
+        "from skynet import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    for name in ('double', 'broken'):\n"
+        "        try:\n"
+        "            call(name, {'v': 2, 'key': os.environ.get('JUDGE_KEY', 'stage-secret-value')})\n"
+        "        except StageError:\n"
+        "            pass\n"
+        "    return 1.0, 'ok'\n"
+    )
+    sink = _CallSink()
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        secrets={"JUDGE_KEY": "stage-secret-value"},
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+    try:
+        scorer.score("")
+    finally:
+        scorer.close()
+
+    calls = {call["target"]: (call, secrets) for _, call, secrets in sink.calls if call["kind"] == "stage"}
+    assert set(calls) == {"double", "broken"}
+    good, secrets = calls["double"]
+    assert (good["candidate_id"], good["status"], good["failure_reason"]) == ("cand-1", "ok", None)
+    assert '"v": 2' in good["request"]
+    assert '"output"' in good["response"]
+    assert "stage-secret-value" in secrets
+    broken = calls["broken"][0]
+    assert broken["status"] == "failed"
+    assert "stage broke" in broken["failure_reason"]
+
+
+_GATEWAY_KEY = 'gw-key\\"route-token'
+
+
+def _run_call_store() -> PostgresRunCallStore:
+    """Return the real run call store over a fresh in-memory SQLite schema.
+
+    Returns:
+        The store.
+    """
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return PostgresRunCallStore(engine)
+
+
+def _recording_stage_relay(sink: _CallSink | PostgresRunCallStore, workspace: _Workspace) -> _StageRelay:
+    """Build a relay with no stage boxes, the model route env of a stage box, and a recorder.
+
+    Args:
+        sink: Keeps each recorded call.
+        workspace: Takes the answers.
+
+    Returns:
+        The relay.
+    """
+    return _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={ENV_API_KEY: _GATEWAY_KEY, ENV_MODEL: "fixture/text"},
+        workspace=workspace,  # type: ignore[arg-type]
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"output": {"k": _GATEWAY_KEY}},
+        {"error": f"Stage 'leak' raised RuntimeError: {_GATEWAY_KEY}"},
+    ],
+)
+def test_a_stage_that_echoes_the_model_route_key_leaks_it_into_no_record(
+    monkeypatch: pytest.MonkeyPatch, answer: dict[str, Any]
+) -> None:
+    """The stage box's model route key is masked, raw and JSON-escaped, in the answer and the error (E28)."""
+    store = _run_call_store()
+    relay = _recording_stage_relay(store, _Workspace())
+    monkeypatch.setattr(relay, "_run", lambda name, identity, value: answer)
+    relay._call("leak", "d" * 32, {"echo": _GATEWAY_KEY})
+    relay.close()
+
+    [stored] = store.list_calls("opt-1", "cand-1")
+    escaped = json.dumps(_GATEWAY_KEY)[1:-1]
+    for field in ("request", "response", "failure_reason"):
+        assert _GATEWAY_KEY not in (stored[field] or "")
+        assert escaped not in (stored[field] or "")
+    assert SECRET_MASK in stored["request"]
+    assert SECRET_MASK in (stored["response"] if "output" in answer else stored["failure_reason"])
+
+
+def test_a_very_long_stage_error_is_stored_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage error of megabytes is stored cut to the failure reason cap, so polling pages stay small."""
+    store = _run_call_store()
+    relay = _recording_stage_relay(store, _Workspace())
+    monkeypatch.setattr(relay, "_run", lambda name, identity, value: {"error": "x" * 2_000_000})
+    relay._call("broken", "f" * 32, 1)
+    relay.close()
+
+    [stored] = store.list_calls("opt-1", "cand-1")
+    assert stored["status"] == "failed"
+    assert 0 < len(stored["failure_reason"].encode()) <= FAILURE_REASON_CAP_BYTES
+
+
+def test_a_very_long_unknown_stage_name_is_stored_cut() -> None:
+    """A raw frame with a huge unknown stage name stores a cut target and a cut failure reason."""
+    store = _run_call_store()
+    relay = _recording_stage_relay(store, _Workspace())
+    name = "n" * 2_000_000
+    relay.output("stdout", relay._prefix + json.dumps({"id": "a" * 32, "stage": name, "input": 1}) + "\n")
+    relay._refusals.shutdown(wait=True)
+    relay.close()
+
+    [stored] = store.list_calls("opt-1", "cand-1")
+    assert stored["status"] == "refused"
+    assert len(stored["target"]) <= 512
+    assert 0 < len(stored["failure_reason"].encode()) <= FAILURE_REASON_CAP_BYTES
+
+
+def test_a_secret_across_the_stage_error_cut_leaves_no_part_of_itself(tmp_path: Path) -> None:
+    """The stage's output is masked before its last characters are kept, so no partial secret is left."""
+    secret = "stage-secret-value-0123456789"
+    failing = TargetStage(
+        entry=("python3", "-c", f"import sys; sys.stderr.write({secret!r} + 'B' * 490); sys.exit(1)"), timeout=30
+    )
+    code = (
+        "from skynet import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        "        call('failing', 1)\n"
+        "    except StageError as error:\n"
+        "        return 0.0, str(error)\n"
+        "    return 1.0, 'no error'\n"
+    )
+    sink = _CallSink()
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"failing": failing},
+        secrets={"JUDGE_KEY": secret},
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+    try:
+        feedback = scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+
+    [(_, call, _)] = [entry for entry in sink.calls if entry[1]["kind"] == "stage"]
+    for text in (call["failure_reason"], call["response"], feedback):
+        assert "0123456789" not in text
+        assert "[secret]" in text
+
+
+def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage call the budget stops is recorded as refused, with the stop message as its reason (E28)."""
+
+    def stop(name: str, identity: str, value: Any) -> dict[str, Any]:
+        """Stop the call as the run budget does.
+
+        Args:
+            name: The stage.
+            identity: The call's id.
+            value: The JSON input.
+
+        Raises:
+            BudgetReached: Always.
+        """
+        raise BudgetReached("spent")
+
+    sink = _CallSink()
+    workspace = _Workspace()
+    relay = _recording_stage_relay(sink, workspace)
+    monkeypatch.setattr(relay, "_run", stop)
+    relay._call("double", "e" * 32, {"v": 1})
+    relay.close()
+
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["target"], call["status"], call["failure_reason"]) == (
+        "stage",
+        "double",
+        "refused",
+        "spent",
+    )
+    assert json.loads(workspace.writes[0][1]) == {"control": {"code": "budget_reached", "message": "spent"}}
+
+
+def test_a_frame_for_an_unknown_stage_is_recorded_as_refused() -> None:
+    """A raw call frame that names no stage of the run is refused, recorded and answered (E28)."""
+    sink = _CallSink()
+    workspace = _Workspace()
+    relay = _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+    identity = "c" * 32
+    relay.output("stdout", relay._prefix + json.dumps({"id": identity, "stage": "nope", "input": 1}) + "\n")
+    relay._refusals.shutdown(wait=True)
+    relay.close()
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["target"], call["status"]) == ("stage", "nope", "refused")
+    assert "Unknown stage 'nope'" in call["failure_reason"]
+    assert workspace.writes == [(f"calls/000001/stages/{identity}.json", '{"error": "Unknown stage \'nope\'."}')]
 
 
 def test_a_box_that_fails_to_open_leaves_none_open(tmp_path: Path) -> None:
@@ -2815,10 +3038,10 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
     assert not any(answer["key_in_env"] for answer in (posted, redirected, streamed))
     assert "judge-secret-value" not in result["feedback"]
     assert sorted(echo.paths) == ["/echo", "/echo/events", "/echo/redirect"]
-    assert (
-        sorted((call["role"], call["kind"], call["candidate_id"]) for _, call, _ in sink.calls)
-        == [("target.lookup", "mcp", "cand-1")] * 3
-    )
+    assert sorted((call["role"], call["kind"], call["candidate_id"]) for _, call, _ in sink.calls) == [
+        *[("metric", "stage", "cand-1")] * 3,
+        *[("target.lookup", "mcp", "cand-1")] * 3,
+    ]
 
 
 def test_a_budget_stop_in_a_stages_mcp_call_stops_the_evaluation(
