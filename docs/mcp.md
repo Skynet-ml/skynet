@@ -70,7 +70,8 @@ knows what to fix and what to do next:
 | Engine | `repo_draft_set_engine` (one engine id from the start answer) | Yes |
 | Budget | `repo_draft_set_budget` (scorer runs, iterations, stop score) | No |
 | Review | `repo_draft_review` | Yes |
-| Submit | `repo_draft_submit` | Yes |
+| Setup check | `repo_draft_preflight` (paid; it runs the setup check of the run once) | No |
+| Submit | `repo_draft_submit` (optional `hardening_job_id`) | Yes |
 
 `repo_draft_review` gives the minimum spending limit, a suggested limit and
 the amount the account can spend now (`spendable_cents`). The agent must show
@@ -79,7 +80,17 @@ the price to the user.
 agrees to `max_cost_cents`. A limit below the minimum is refused.
 
 A retry with the same arguments does not start a second run. The default
-idempotency key comes from the draft and its contents.
+idempotency key comes from the draft, its contents, `max_cost_cents` and
+`hardening_job_id`.
+
+`repo_draft_preflight` also needs `confirm=true` and `max_cost_cents`. It
+runs the setup check of `/wizard/preflight` under the budget that the
+submit uses. A submit with the same arguments reuses the check and does not
+pay for it again.
+
+`hardening_job_id` attaches a metric-hardening job of the account to the
+run. The run's PR ships the job's exploit suite. Start the job with the
+`platform_*` hardening tools.
 
 A draft expires 7 days after its last change, and the tools refuse it. Each
 `repo_draft_start` removes expired drafts and the oldest drafts above 20.
@@ -95,7 +106,10 @@ feedback. A bare number on any path, an error path too, stops the whole run. A s
 also works, but the step adds a note when the draft has data: every case gets
 the same score.
 
-After the submit, use `get_run`, `list_runs` and `stop_run` to follow the run.
+After the submit, use `get_run`, `get_run_progress`, `list_runs` and
+`stop_run` to follow the run. `get_run_progress` returns the progress events
+after `since`, `next_since` for the next call, the best score and the
+candidate count.
 
 ## Platform tools
 

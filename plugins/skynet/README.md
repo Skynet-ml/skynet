@@ -28,8 +28,10 @@ Unused budget goes back to your balance when the run ends.
 | `repo_draft_start` | Write | Starts a repository run draft with the objective, and lists the engines. |
 | `repo_draft_set_repository`, `repo_draft_set_data`, `repo_draft_set_scorer`, `repo_draft_set_models`, `repo_draft_set_engine`, `repo_draft_set_budget` | Write | Each saves one part of the draft: the repository and editable paths, the cases, the scorer, the models, the engine and the search length. Each reports what to fix and the next tool. |
 | `repo_draft_review` | Read | Checks the whole draft. Suggests a spending limit and shows the spendable balance. Spends nothing. |
-| `repo_draft_submit` | Write | Starts the run under a new budget of `max_cost_cents`, after you agree to it. |
+| `repo_draft_preflight` | Write | Runs the setup check of the run once, under the budget the submit uses, after you agree to `max_cost_cents`. The submit does not pay for the check again. |
+| `repo_draft_submit` | Write | Starts the run under a new budget of `max_cost_cents`, after you agree to it. An optional `hardening_job_id` ships the exploit suite of a metric-hardening job. |
 | `get_run` | Read | Returns a run's status, budget and, when it is finished, its result. |
+| `get_run_progress` | Read | Returns a run's progress events after `since`, the next cursor, the best score and the candidate count. |
 | `list_runs` | Read | Lists your runs, newest first. |
 | `stop_run` | Write | Stops a run. Spend stops and the unused budget is released. |
 

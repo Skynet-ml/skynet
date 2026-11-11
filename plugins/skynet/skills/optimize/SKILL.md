@@ -21,8 +21,10 @@ The tools:
 | `repo_draft_set_engine` | Sets the optimization engine. | Free |
 | `repo_draft_set_budget` | Sets how many scorer runs the search can use. Optional. | Free |
 | `repo_draft_review` | Checks the whole draft and returns the smallest and the suggested `max_cost_cents`, models without a price, and the spendable balance. | Free |
-| `repo_draft_submit` | Starts the run under a new budget of `max_cost_cents`. | Spends up to `max_cost_cents` from the user's balance |
+| `repo_draft_preflight` | Runs the setup check of the run once, under the budget the submit uses. A submit with the same arguments does not pay for it again. Optional. | Spends from `max_cost_cents` |
+| `repo_draft_submit` | Starts the run under a new budget of `max_cost_cents`. An optional `hardening_job_id` ships the exploit suite of a metric-hardening job. | Spends up to `max_cost_cents` from the user's balance |
 | `get_run` | Returns the status, the budget and, for a finished run, the result. | Free |
+| `get_run_progress` | Returns the progress events after `since`, `next_since`, the best score and the candidate count. | Free |
 | `list_runs` | Lists the user's runs, newest first. Use it to find a run after an unclear submit result. | Free |
 
 `check_run` and `start_run` refuse every call. Do not use them.
