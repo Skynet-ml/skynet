@@ -41,6 +41,7 @@ import shlex
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
@@ -68,6 +69,7 @@ try:
         ClientError,
         NoCredentialsError,
         NoRegionError,
+        ParamValidationError,
         PartialCredentialsError,
         ProfileNotFound,
         WaiterError,
@@ -79,9 +81,21 @@ except ImportError:
     ClientError = None
     NoCredentialsError = None
     NoRegionError = None
+    ParamValidationError = None
     PartialCredentialsError = None
     ProfileNotFound = None
     WaiterError = None
+
+# Without botocore the names above are None, and isinstance takes no None entry.
+_FATAL_BOTO_ERRORS = tuple(
+    kind for kind in (NoCredentialsError, PartialCredentialsError, NoRegionError, ProfileNotFound) if kind is not None
+)
+# These botocore errors fail before the request is sent, so no instance launched.
+_PRE_SEND_ERRORS = tuple(
+    kind
+    for kind in (NoCredentialsError, PartialCredentialsError, ProfileNotFound, ParamValidationError)
+    if kind is not None
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +175,8 @@ class _LaunchState:
     # and write the fields below, so they change only under this lock.
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     call_done: bool = False
+    # The ``time.monotonic`` time when ``run_instances`` failed with an unknown outcome.
+    call_ended: float | None = None
     nothing_launched: bool = False
     terminated: bool = False
 
@@ -678,12 +694,14 @@ class EC2Environment(SandboxEnvironment):
         A launch whose call is still open stays: its worker thread
         terminates the instance when the call returns. A launch with a known
         instance id ends by that id. Only a launch with an unknown outcome
-        needs the lookup by its launch tag.
+        needs the lookup by its launch tag. EC2 lookups are eventually
+        consistent, so a launch that the lookup does not find stays until
+        the spec lifetime passes. The instance shuts itself down then.
 
         Raises:
             SandboxError: The lookup or the terminate failed; the launches stay for a retry.
         """
-        unknown: list[str] = []
+        unknown: list[tuple[str, _LaunchState]] = []
         for launch_id, state in list(self._lost_launches.items()):
             with state.lock:
                 if not state.call_done:
@@ -695,14 +713,14 @@ class EC2Environment(SandboxEnvironment):
                 await _terminate(self._client, state.instance_id)
                 self._lost_launches.pop(launch_id, None)
             else:
-                unknown.append(launch_id)
-        if not unknown:
-            return
-        ids = await _aws("describe_instances", _tagged_instances, self._client, _LAUNCH_TAG, sorted(unknown))
-        if ids:
-            await _aws("terminate_instances", self._client.terminate_instances, InstanceIds=ids)
-        for launch_id in unknown:
-            self._lost_launches.pop(launch_id, None)
+                unknown.append((launch_id, state))
+        for launch_id, state in unknown:
+            ids = await _aws("describe_instances", _tagged_instances, self._client, _LAUNCH_TAG, [launch_id])
+            if ids:
+                await _aws("terminate_instances", self._client.terminate_instances, InstanceIds=ids)
+            ended = state.call_ended if state.call_ended is not None else time.monotonic()
+            if ids or time.monotonic() - ended >= self.spec.lifetime_seconds:
+                self._lost_launches.pop(launch_id, None)
 
     async def _wait_for_ssh(self, host: str, state: _LaunchState, deadline: float) -> None:
         """Probe SSH with ``true`` until it answers or the start deadline passes.
@@ -1054,9 +1072,8 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
     if WaiterError is not None and isinstance(error, WaiterError):
         return SandboxInfraError(f"EC2 {action} ended before the instance ran.")
     if BotoCoreError is not None and isinstance(error, BotoCoreError):
-        fatal = (NoCredentialsError, PartialCredentialsError, NoRegionError, ProfileNotFound)
         message = f"EC2 {action} failed: {type(error).__name__}."
-        return SandboxFatalError(message) if isinstance(error, fatal) else SandboxTransientError(message)
+        return SandboxFatalError(message) if isinstance(error, _FATAL_BOTO_ERRORS) else SandboxTransientError(message)
     return None
 
 
@@ -1064,7 +1081,9 @@ def _run_instances(client: Any, state: _LaunchState, kwargs: dict[str, Any]) -> 
     """Call ``run_instances`` in a worker thread, and terminate the instance there when the launch ended meanwhile.
 
     A cancel or a loop shutdown cannot stop the thread, so the thread itself
-    terminates the instance. This needs no running event loop.
+    terminates the instance. When the call fails with an unknown outcome
+    after a cancel, the thread finds the instance by its launch tag. This
+    needs no running event loop.
 
     Args:
         client: The EC2 client.
@@ -1080,6 +1099,10 @@ def _run_instances(client: Any, state: _LaunchState, kwargs: dict[str, Any]) -> 
         with state.lock:
             state.call_done = True
             state.nothing_launched = _nothing_launched(error)
+            state.call_ended = time.monotonic()
+            abandoned = state.cancelled and not state.nothing_launched
+        if abandoned:
+            _terminate_tagged_launch(client, state)
         raise
     instance_id = response["Instances"][0]["InstanceId"]
     with state.lock:
@@ -1104,11 +1127,38 @@ def _run_instances(client: Any, state: _LaunchState, kwargs: dict[str, Any]) -> 
     return response
 
 
+def _terminate_tagged_launch(client: Any, state: _LaunchState) -> None:
+    """Find the instance of an ended launch by its launch tag in the worker thread, and terminate it.
+
+    An instance that the lookup does not find yet stays in the lost
+    launches, so a later stop looks again.
+
+    Args:
+        client: The EC2 client.
+        state: The state of the launch.
+    """
+    failure: BaseException | None = None
+    try:
+        ids = _tagged_instances(client, _LAUNCH_TAG, [state.launch_id])
+        if not ids:
+            return
+        client.terminate_instances(InstanceIds=ids)
+    except Exception as error:
+        failure = _aws_error(error, "terminate by launch tag") or error
+    if failure is not None:
+        # The log keeps no AWS response text. Stop looks for the launch again.
+        logger.error("Could not terminate an ec2 instance after an ended launch: %s", _safe_text(failure))
+        return
+    with state.lock:
+        state.terminated = True
+
+
 def _nothing_launched(error: Exception) -> bool:
     """Tell if a failed ``run_instances`` call surely launched no instance.
 
-    Only a 4xx EC2 response proves it. A 5xx response, a response with no
-    status or a botocore error with no response leaves the outcome unknown.
+    A 4xx EC2 response proves it, and so does a botocore error that fails
+    before the request is sent. A 5xx response, a response with no status
+    or another botocore error leaves the outcome unknown.
 
     Args:
         error: The error of the call.
@@ -1116,6 +1166,8 @@ def _nothing_launched(error: Exception) -> bool:
     Returns:
         True when no instance launched.
     """
+    if isinstance(error, _PRE_SEND_ERRORS):
+        return True
     if ClientError is None or not isinstance(error, ClientError):
         return False
     response = error.response if isinstance(error.response, Mapping) else {}

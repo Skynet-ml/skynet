@@ -22,12 +22,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError, NoCredentialsError, ReadTimeoutError, WaiterError
+from botocore.exceptions import (
+    ClientError,
+    NoCredentialsError,
+    ParamValidationError,
+    PartialCredentialsError,
+    ProfileNotFound,
+    ReadTimeoutError,
+    WaiterError,
+)
 
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, SandboxEnvironment
 from core.sandbox.errors import (
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -142,6 +151,8 @@ class FakeEC2:
         self.describe_gate: threading.Event | None = None
         self.terminate_gate: threading.Event | None = None
         self.described = threading.Event()
+        # Raised by run_instances after it launched the instance, as a lost response does.
+        self.error_after_launch: Exception | None = None
 
     def _fail(self, name: str) -> None:
         """Raise the queued error of one operation.
@@ -178,6 +189,9 @@ class FakeEC2:
         (self.state / "hosts").mkdir(exist_ok=True)
         (self.state / "hosts" / host).touch()
         (self.state / "root" / host).mkdir(parents=True)
+        error, self.error_after_launch = self.error_after_launch, None
+        if error is not None:
+            raise error
         return {"Instances": [{"InstanceId": instance_id}]}
 
     def get_waiter(self, name: str) -> FakeWaiter:
@@ -921,6 +935,9 @@ async def test_the_lost_launch_sweep_touches_only_its_own_instance(
         await env.stop()
     assert len(env._lost_launches) == 1
     await env.stop()
+    assert len(env._lost_launches) == 1
+    next(iter(env._lost_launches.values())).call_ended -= env.spec.lifetime_seconds
+    await env.stop()
     assert env._lost_launches == {}
     assert fake_ec2.live() == [other._instance_id]
     await other.stop()
@@ -953,13 +970,83 @@ async def test_a_stop_during_an_open_lost_launch_still_terminates_its_instance(
 
 async def test_a_run_instances_error_with_a_4xx_response_records_no_lost_launch(fake_ec2: FakeEC2) -> None:
     """Forget the launch when EC2 answers run_instances with a 4xx error, because no instance launched."""
-    fake_ec2.errors["run_instances"] = _client_error("InsufficientInstanceCapacity", 400)
+    fake_ec2.errors["run_instances"] = _client_error("InvalidParameterValue", 400)
     env = EC2Environment(_spec())
-    with pytest.raises(SandboxTransientError):
+    with pytest.raises(SandboxRejectedError):
         await env.start()
     assert env._lost_launches == {}
     await env.stop()
     assert "describe_instances" not in fake_ec2.ops()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        NoCredentialsError(),
+        PartialCredentialsError(provider="env", cred_var="AWS_SECRET_ACCESS_KEY"),
+        ProfileNotFound(profile="missing"),
+        ParamValidationError(report="bad parameter"),
+    ],
+)
+async def test_an_error_before_any_request_records_no_lost_launch(fake_ec2: FakeEC2, error: Exception) -> None:
+    """Forget the launch when botocore fails before it sends the request, and let stop pass with the same error."""
+    fake_ec2.errors["run_instances"] = error
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxError):
+        await env.start()
+    assert env._lost_launches == {}
+    # The same error stays, so a tag lookup in stop would fail too.
+    fake_ec2.errors["describe_instances"] = error
+    await env.stop()
+    assert "describe_instances" not in fake_ec2.ops()
+
+
+def test_the_error_checks_work_without_botocore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Classify errors without a TypeError when the optional botocore import left every name None."""
+    for name in ("ClientError", "BotoCoreError", "WaiterError", "NoCredentialsError", "ParamValidationError"):
+        monkeypatch.setattr(ec2_provider, name, None)
+    monkeypatch.setattr(ec2_provider, "_FATAL_BOTO_ERRORS", ())
+    monkeypatch.setattr(ec2_provider, "_PRE_SEND_ERRORS", ())
+    assert ec2_provider._nothing_launched(RuntimeError("x")) is False
+    assert ec2_provider._aws_error(RuntimeError("x"), "run_instances") is None
+
+
+async def test_a_cancelled_launch_with_an_unknown_outcome_terminates_by_tag_in_its_thread(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Find and terminate the instance by its launch tag when run_instances fails after a cancel."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_ec2.run_gate = threading.Event()
+    fake_ec2.error_after_launch = ReadTimeoutError(endpoint_url="https://ec2.example")
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "run_instances" in fake_ec2.ops())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    fake_ec2.run_gate.set()
+    await _until(lambda: fake_ec2.instances != {} and fake_ec2.live() == [])
+    assert fake_ec2.ops().count("describe_instances") == 1
+    await env.stop()
+    assert env._lost_launches == {}
+    assert fake_ec2.ops().count("describe_instances") == 1
+
+
+async def test_an_unknown_launch_that_the_lookup_misses_stays_until_the_lifetime_passes(fake_ec2: FakeEC2) -> None:
+    """Look for an unknown launch at each stop, and give up after the spec lifetime, when the instance ended itself."""
+    fake_ec2.errors["run_instances"] = _client_error("Weird", None)
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxInfraError):
+        await env.start()
+    await env.stop()
+    await env.stop()
+    assert len(env._lost_launches) == 1
+    assert fake_ec2.ops().count("describe_instances") == 2
+    state = next(iter(env._lost_launches.values()))
+    state.call_ended -= env.spec.lifetime_seconds
+    await env.stop()
+    assert env._lost_launches == {}
+    assert fake_ec2.ops().count("describe_instances") == 3
 
 
 async def test_a_failed_lost_launch_lookup_still_terminates_the_running_instance(fake_ec2: FakeEC2) -> None:
@@ -977,6 +1064,7 @@ async def test_a_failed_lost_launch_lookup_still_terminates_the_running_instance
     assert instance_id not in fake_ec2.live()
     assert env._instance_id is None
     assert len(env._lost_launches) == 1
+    next(iter(env._lost_launches.values())).call_ended -= env.spec.lifetime_seconds
     await env.stop()
     assert env._lost_launches == {}
     assert fake_ec2.live() == []
