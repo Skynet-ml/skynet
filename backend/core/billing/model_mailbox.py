@@ -104,8 +104,11 @@ class ModelMailbox:
                 response = failure(402, "budget_insufficient", str(error))
             except ProviderFailedError as error:
                 response = failure(502, "provider_failed", str(error))
-            except (BudgetError, UsagePendingError):
+            except BudgetError:
                 response = failure(424, "usage_pending", "Previous model usage is awaiting confirmation.")
+            except UsagePendingError as error:
+                # The runtime names whose usage is pending: this call's, or earlier work that blocks admission.
+                response = failure(424, "usage_pending", str(error))
             except (UnpricedOperationError, ValueError, TypeError) as error:
                 response = failure(422, "unpriced_operation", str(error))
             except BaseException as error:
