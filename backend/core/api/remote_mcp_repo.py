@@ -679,7 +679,8 @@ def _ready_request(
     """Check a whole draft and its limit, and build the run request and its keys.
 
     Without a key, the key is the draft id plus a fingerprint of the draft,
-    so the preflight and the submit of one draft share it.
+    the limit and the hardening job, so the preflight and the submit of one
+    draft share it when they send the same arguments.
 
     Args:
         spec: The whole draft.
@@ -719,7 +720,12 @@ def _ready_request(
     request = build_request(spec)
     request.max_cost_cents = max_cost_cents
     request.hardening_job_id = hardening_job_id
-    key = idempotency_key or f"mcp-draft-{draft_id}-{json_fingerprint(spec)[:16]}"
+    # The limit and the hardening job are in the key: a changed limit gets its own
+    # budget instead of the old one, and a changed job starts its own run.
+    fingerprint = json_fingerprint(
+        {"spec": spec, "max_cost_cents": max_cost_cents, "hardening_job_id": hardening_job_id}
+    )
+    key = idempotency_key or f"mcp-draft-{draft_id}-{fingerprint[:16]}"
     replay_keys = resolve_submission_replay_keys(
         request, username=user.username, workflow=_BLACKBOX_WORKFLOW, supplied_key=key
     )
@@ -824,9 +830,9 @@ def submit_draft(
 ) -> dict[str, Any]:
     """Start the draft's run under a new execution budget of ``max_cost_cents``.
 
-    Without a key, the key is the draft id plus a fingerprint of the draft.
-    A retry of the same submit returns the first run, and a changed draft
-    starts a new one.
+    Without a key, the key is the draft id plus a fingerprint of the draft,
+    the limit and the hardening job. A retry of the same submit returns the
+    first run, and a change to any of them starts a new one.
 
     Args:
         spec: The whole draft.

@@ -249,13 +249,15 @@ def get_run_progress(
         if len(page) < _CANDIDATE_PAGE:
             break
     status = str(job_data.get("status") or "pending")
+    events = job_store.get_progress_events(optimization_id, since=offset)
     return {
         "optimization_id": optimization_id,
         "status": status,
         "terminal": status in _TERMINAL_STATUSES,
         "progress_offset": offset,
-        "next_since": count,
-        "progress_events": job_store.get_progress_events(optimization_id, since=offset),
+        # Not ``count``: events that arrive after the count read are already in ``events``.
+        "next_since": offset + len(events),
+        "progress_events": events,
         "best_score": metrics.get("best_score"),
         "candidate_count": candidates,
     }

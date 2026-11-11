@@ -669,6 +669,19 @@ def test_get_run_progress_resends_the_stream_after_a_reset(
     assert body["candidate_count"] == 0
 
 
+def test_get_run_progress_counts_events_that_arrive_during_the_read(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Set next_since after the events it returns, so a new event is not sent twice (SKY-600)."""
+    client, store, _calls = harness
+    _progress_store(store, monkeypatch, events=7, candidates=0)
+    store.get_progress_count = lambda optimization_id: 5
+    monkeypatch.setattr(settings, "progress_events_per_job_cap", 100)
+    body = _payload(_call(client, "get_run_progress", {"optimization_id": "opt-1", "since": 3}, token=READ_TOKEN))
+    assert [event["index"] for event in body["progress_events"]] == [3, 4, 5, 6]
+    assert body["next_since"] == 7
+
+
 def test_get_run_progress_refuses_another_accounts_run(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer not_found for a run the account neither owns nor was granted."""
     client, store, calls = harness

@@ -26,7 +26,7 @@ from ...billing.budgets import BudgetConflictError
 from ...config import settings
 from ...models.hardening import HardeningJobModel
 from ...storage.models import Base, McpRunDraftModel, UserModel
-from .. import remote_mcp_repo
+from .. import remote_mcp_repo, submission_idempotency
 from ..errors import DomainError
 from ..remote_mcp import mount_remote_mcp
 from ..remote_mcp_repo import register_repo_tools
@@ -379,15 +379,30 @@ def _hardening_job(engine: Any, username: str) -> str:
         return row.id
 
 
-def test_submit_sends_an_owned_hardening_job(harness: Any) -> None:
-    """Put the account's own hardening job on the run request (SKY-600)."""
+def test_submit_sends_an_owned_hardening_job(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start a new run when only the hardening job changes, and replay a repeat (SKY-600)."""
     client, engine, calls = harness
+    runs: dict[str, str] = {}
+
+    def submit(request: Any, *, service: Any, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
+        """Replay a known job key as ``submit_repo_payload`` does, or record a new run."""
+        job_key = submission_idempotency.resolve_submission_replay_keys(
+            request, username=current_user.username, workflow="anything", supplied_key=idempotency_key
+        ).job
+        if job_key not in runs:
+            calls["submits"].append({"key": idempotency_key, "hardening_job_id": request.hardening_job_id})
+            runs[job_key] = f"opt-{len(runs) + 1}"
+        return SimpleNamespace(model_dump=lambda mode: {"optimization_id": runs[job_key]})
+
+    monkeypatch.setattr(remote_mcp_repo, "submit_repo_payload", submit)
     job_id = _hardening_job(engine, USER)
     draft_id = _complete_draft(client)
-    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True, "hardening_job_id": job_id}
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}
     assert _payload(_call(client, "repo_draft_submit", arguments))["optimization_id"] == "opt-1"
-    _payload(_call(client, "repo_draft_submit", {**arguments, "hardening_job_id": None}))
-    assert [call["hardening_job_id"] for call in calls["submits"]] == [job_id, None]
+    hardened = {**arguments, "hardening_job_id": job_id}
+    assert _payload(_call(client, "repo_draft_submit", hardened))["optimization_id"] == "opt-2"
+    assert _payload(_call(client, "repo_draft_submit", hardened))["optimization_id"] == "opt-2"
+    assert [call["hardening_job_id"] for call in calls["submits"]] == [None, job_id]
 
 
 def test_submit_refuses_a_hardening_job_of_another_account(harness: Any) -> None:
@@ -510,6 +525,18 @@ def test_preflight_checks_under_the_budget_the_submit_reuses(preflight: Any) -> 
     assert set(record["keys"]) == {key}
     assert len(record["creates"]) == 1
     assert len(record["checks"]) == 2
+
+
+def test_preflight_with_a_higher_limit_uses_a_new_budget(preflight: Any) -> None:
+    """Check under a new budget of the new limit when the user agrees to more (SKY-600)."""
+    client, _engine, record = preflight
+    draft_id = _complete_draft(client)
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}
+    _payload(_call(client, "repo_draft_preflight", arguments))
+    _payload(_call(client, "repo_draft_preflight", {**arguments, "max_cost_cents": 1000}))
+    assert [total for _user, total, _key, _uncapped in record["creates"]] == [500, 1000]
+    assert len(set(record["keys"])) == 2
+    assert record["checks"][1][0].payload["max_cost_cents"] == 1000
 
 
 def test_preflight_names_the_next_tool_for_each_status(preflight: Any) -> None:
