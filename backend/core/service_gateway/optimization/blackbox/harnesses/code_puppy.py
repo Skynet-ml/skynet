@@ -120,8 +120,8 @@ _RANDOM_KEY_ENV = (
     f'export "$_cp_key=${ENV_API_KEY}"'
 )
 # Code Puppy's effort names (model_utils._OPENAI_REASONING_EFFORT_ORDER in
-# 0.0.967). Each passes unchanged; the launch refuses any other effort, so a run
-# never gets an effort the user did not pick.
+# 0.0.967). Each passes unchanged. Submit refuses any other effort through the
+# spec, and the launch refuses it again as a backstop.
 CODE_PUPPY_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # ``uv tool install`` and the uv installer both put their binaries here.
 _CODE_PUPPY_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
@@ -303,5 +303,6 @@ SPEC = register(
         output_format="pi",
         protected_env=_PROTECTED_ENV,
         position=90,
+        supported_efforts=CODE_PUPPY_EFFORTS,
     )
 )
