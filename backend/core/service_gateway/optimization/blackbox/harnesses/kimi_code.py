@@ -31,21 +31,29 @@ KIMI_CODE_SHA256 = "7c6a44fb54265f9b0d10c35e32c538678a655598f49eba434780c60077fa
 # lives in this file and not in the env. It holds no key.
 KIMI_CODE_BASE_URL_FILE = ".app/kimi_code/base_url"
 # Kimi Code's effort names in 2.5.3: LATEST_OPUS_THINKING_EFFORTS in
-# agent-core-v2's Anthropic adapter, which the Gemini adapter also maps. For an
-# ``openai`` provider, resolveThinkingEffort sends any name other than ``on``
-# and ``off`` unchanged as ``reasoning_effort``. ``off`` is not a Skynet level.
+# agent-core-v2's Anthropic adapter, which the Gemini adapter also maps. ``off``
+# is not a Skynet level. The effort goes in ``$KIMI_CODE_HOME/config.toml`` as
+# ``[thinking] effort``, not in ``KIMI_MODEL_THINKING_EFFORT``: that env name
+# sets ``thinking.forcedEffort``, which resolveForcedThinkingEffort applies only
+# to a provider type with ``thinkingDriven`` (the ``kimi`` definitions), so an
+# ``openai`` provider drops it. ``thinking.effort`` is the new session's level
+# (resolveThinkingEffortForModel). The ``openai`` provider has no
+# ``strictThinkingValidation``, so the level is not clamped, and the env model's
+# default capabilities include ``thinking``, so the OpenAI adapter's
+# resolveThinkingEffort sends any level other than ``on`` and ``off`` unchanged
+# as ``reasoning_effort``.
 KIMI_CODE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Kimi Code prints its stream-json lines on stdout, but they hold no token
-# usage. Its stdout goes to a file, and this script prints the answer as one Pi
-# ``message_end`` line with the tokens summed from every ``usage.record`` in the
-# session journals (``wire.jsonl``, one for each agent), then one Pi
-# ``tool_execution_start`` line for each tool call id in the stream, so the
-# bridge's cost and tool-call stops read them. An answer's content may be a
-# string or a list of text parts. Kimi Code's PromptJsonWriter also prints each
-# hook result as a ``role: "assistant"`` line, and its only mark is the
-# ``"<hook event> hook[ blocked]"`` title and a blank line before the body, so
-# lines with one of the 2.5.3 HOOK_EVENT_TYPES titles and no ``tool_calls`` are
-# not answers. Without this, a Stop hook line after the answer replaces it.
+# usage, and its PromptJsonWriter prints each hook result as a
+# ``role: "assistant"`` line with nothing that marks it as a hook. So the run
+# drops stdout, and this script reads the session journals (``wire.jsonl``, one
+# for each agent) instead. The answer is the text of the last model step in the
+# main agent's journal: its ``context.append_loop_event`` records with a
+# ``content.part`` event come only from model steps, and hook results are
+# ``context.append_message`` records. The script prints the answer as one Pi
+# ``message_end`` line with the tokens summed from every ``usage.record`` in
+# every journal, then one Pi ``tool_execution_start`` line for each main agent
+# ``tool.call`` event, so the bridge's cost and tool-call stops read them.
 # The bridge's usage has only input and output tokens, so cache reads and
 # writes count as full input: the count can be high, never low, and a token
 # limit stops a run early rather than late. It runs
@@ -71,77 +79,54 @@ def records(path):
             yield record
 
 
-HOOK_TITLES = {
-    event + suffix
-    for event in (
-        "PreToolUse",
-        "PostToolUse",
-        "PostToolUseFailure",
-        "PermissionRequest",
-        "PermissionResult",
-        "UserPromptSubmit",
-        "UserPromptQueued",
-        "TurnStarted",
-        "Stop",
-        "StopFailure",
-        "Interrupt",
-        "SessionStart",
-        "SessionEnd",
-        "SessionHeartbeat",
-        "SubagentStart",
-        "SubagentStop",
-        "TaskStarted",
-        "PreCompact",
-        "PostCompact",
-        "Notification",
-    )
-    for suffix in (" hook", " hook blocked")
-}
-
-
-def is_hook(record):
-    content = record.get("content")
-    if "tool_calls" in record or not isinstance(content, str):
-        return False
-    title, blank, _body = content.partition("\\n\\n")
-    return bool(blank) and title in HOOK_TITLES
-
-
 def count(value):
     return value if type(value) is int and value >= 0 else 0
 
 
-def answer(content):
-    if isinstance(content, list):
-        parts = [part.get("text") for part in content if isinstance(part, dict) and part.get("type") == "text"]
-        content = "\\n".join(part for part in parts if isinstance(part, str) and part)
-    return content.strip() if isinstance(content, str) else ""
-
-
-text = ""
+steps = {}
 calls = []
-for record in records(sys.argv[1]):
-    if record.get("role") != "assistant" or is_hook(record):
-        continue
-    text = answer(record.get("content")) or text
-    for call in record.get("tool_calls") or []:
-        call_id = call.get("id") if isinstance(call, dict) else None
-        if isinstance(call_id, str) and call_id not in calls:
-            calls.append(call_id)
 used = {"input": 0, "output": 0}
-for root, _dirs, names in os.walk(sys.argv[2]):
+for root, dirs, names in os.walk(sys.argv[1]):
+    dirs.sort()
     if "wire.jsonl" not in names:
         continue
+    main = os.path.basename(root) == "main" and os.path.basename(os.path.dirname(root)) == "agents"
     for record in records(os.path.join(root, "wire.jsonl")):
         usage = record.get("usage") if record.get("type") == "usage.record" else None
         if isinstance(usage, dict):
             used["input"] += sum(count(usage.get(key)) for key in ("inputOther", "inputCacheRead", "inputCacheCreation"))
             used["output"] += count(usage.get("output"))
+        event = record.get("event") if record.get("type") == "context.append_loop_event" else None
+        if not main or not isinstance(event, dict):
+            continue
+        part = event.get("part")
+        if event.get("type") == "content.part" and isinstance(part, dict) and part.get("type") == "text":
+            text = part.get("text")
+            if isinstance(text, str):
+                steps.setdefault(str(event.get("stepUuid")), []).append(text)
+        call_id = event.get("toolCallId") if event.get("type") == "tool.call" else None
+        if isinstance(call_id, str) and call_id not in calls:
+            calls.append(call_id)
+answers = ["".join(parts).strip() for parts in steps.values()]
+text = next((answer for answer in reversed(answers) if answer), "")
 content = [{"type": "text", "text": text}] if text else []
 lines = [json.dumps({"type": "message_end", "message": {"role": "assistant", "content": content, "usage": used}})]
 lines += [json.dumps({"type": "tool_execution_start", "toolCallId": call_id}) for call_id in calls[:10000]]
 sys.stdout.write("\\n".join(lines) + "\\n")
 """
+# Kimi Code 2.5.3 print mode sends a prompt whose trimmed text starts with
+# ``/goal`` and a space (or ends there) to its headless goal parser
+# (parseHeadlessGoalCreate, GOAL_PREFIX), not to the model. It has no option to
+# turn that off, so, like Harbor does for Code Puppy, the run frames such a
+# prompt and leaves every other prompt byte-identical. JavaScript's ``trim()``
+# also strips Unicode whitespace and U+FEFF, so the check runs in Python. It
+# exits 0 only for a prompt the goal parser does not take, so a failed check
+# frames the prompt.
+_PLAIN_PROMPT_CHECK = (
+    "import re, sys; "
+    'text = open(sys.argv[1], encoding="utf-8", errors="replace").read(); '
+    'sys.exit(bool(re.match(r"[\\s\\ufeff]*/goal(?:[\\s\\ufeff]|$)", text)))'
+)
 # Kimi Code reads these for its native providers and services. Every launch
 # blanks them, so an inherited key or URL never gives it a route around the
 # gateway. Kimi Code treats an empty value as unset.
@@ -226,26 +211,29 @@ def _kimi_code_install() -> str:
     )
 
 
-def _effort_env(reasoning_effort: str | None) -> dict[str, str]:
-    """Return the ``KIMI_MODEL_THINKING_EFFORT`` setting, or nothing to keep it blank for Kimi Code's default.
+def _effort_config(reasoning_effort: str | None) -> str:
+    """Return a command that writes the effort into Kimi Code's ``config.toml``, or nothing for its default.
 
     Args:
         reasoning_effort: The user's effort for the model, or ``None``.
 
     Returns:
-        The env entry, or an empty dict.
+        The shell command, or an empty string. It exits non-zero when the write fails.
 
     Raises:
         ServiceError: When the effort is not in :data:`KIMI_CODE_EFFORTS`.
     """
     if not reasoning_effort:
-        return {}
+        return ""
     if reasoning_effort not in KIMI_CODE_EFFORTS:
         raise ServiceError(
             f"The Kimi Code harness does not support the effort '{reasoning_effort}'. "
             f"Pick one of: {', '.join(KIMI_CODE_EFFORTS)}."
         )
-    return {"KIMI_MODEL_THINKING_EFFORT": reasoning_effort}
+    return (
+        'mkdir -p "$KIMI_CODE_HOME" && '
+        f"printf '%s\\n' '[thinking]' 'effort = \"{reasoning_effort}\"' > \"$KIMI_CODE_HOME/config.toml\" || exit 1; "
+    )
 
 
 def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
@@ -253,9 +241,9 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
 
     Each run gets a fresh ``KIMI_CODE_HOME`` outside the workspace, so the
     session journals never land in the version patch, and an EXIT trap removes
-    it. :data:`KIMI_CODE_TO_PI` turns the stream and the journals into Pi lines
-    for the bridge's Pi parser. The run keeps Kimi Code's exit status. When
-    the parse step fails after Kimi Code succeeds, the run exits 1.
+    it. :data:`KIMI_CODE_TO_PI` turns the journals into Pi lines for the
+    bridge's Pi parser. The run keeps Kimi Code's exit status. When the parse
+    step fails after Kimi Code succeeds, the run exits 1.
 
     Args:
         model: Target model id.
@@ -276,22 +264,23 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         "KIMI_MODEL_NAME": model,
         "KIMI_MODEL_PROVIDER_TYPE": "openai",
         "KIMI_MODEL_API_KEY": gateway.api_key,
-        **_effort_env(reasoning_effort),
     }
     # Kimi Code 2.5.3 takes the prompt only as the ``--prompt`` value: print
-    # mode has no prompt-file option, does not read stdin, and sends the value
-    # unchanged as the user message. So, unlike Pi's ``@file``, the prompt is
-    # one argv string, and Linux refuses a single argument over 128 KiB
-    # (MAX_ARG_STRLEN) with E2BIG before Kimi Code starts.
+    # mode has no prompt-file option and does not read stdin. So, unlike Pi's
+    # ``@file``, the prompt is one argv string, and Linux refuses a single
+    # argument over 128 KiB (MAX_ARG_STRLEN) with E2BIG before Kimi Code starts.
     run_command = (
         '_kc_dir="$(mktemp -d)" || exit 1; '
         """trap 'rm -rf "$_kc_dir"' EXIT; """
         'export KIMI_CODE_HOME="$_kc_dir/home"; '
+        f"{_effort_config(reasoning_effort)}"
         f'KIMI_MODEL_BASE_URL="$(cat {KIMI_CODE_BASE_URL_FILE})" || exit 1; export KIMI_MODEL_BASE_URL; '
-        f'kimi --prompt "$(cat "${ENV_PROMPT_FILE}")" --output-format stream-json '
-        '< /dev/null > "$_kc_dir/stream.jsonl"; '
+        f'_kc_prompt="$(cat "${ENV_PROMPT_FILE}")"; '
+        f"python3 -I -c '{_PLAIN_PROMPT_CHECK}' \"${ENV_PROMPT_FILE}\" || "
+        '_kc_prompt="Task request:\n$_kc_prompt"; '
+        'kimi --prompt "$_kc_prompt" --output-format stream-json < /dev/null > /dev/null; '
         "_kc_status=$?; "
-        f'python3 -I -c \'{KIMI_CODE_TO_PI}\' "$_kc_dir/stream.jsonl" "$KIMI_CODE_HOME/sessions" '
+        f"python3 -I -c '{KIMI_CODE_TO_PI}' \"$KIMI_CODE_HOME/sessions\" "
         '|| [ "$_kc_status" -ne 0 ] || _kc_status=1; '
         "exit $_kc_status"
     )

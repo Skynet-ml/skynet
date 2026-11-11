@@ -71,11 +71,11 @@ _MODEL_ENV = (
     "KIMI_MODEL_THINKING_KEEP",
     "KIMI_MODEL_TOP_P",
 )
-# Stand-in for Kimi Code 2.5.3: it records its call and env, prints the
-# stream-json lines on stdout (two assistant steps with tool calls, a tool
-# result, a meta line, then the final answer), writes one ``wire.jsonl`` for
-# the main agent and one for a subagent under ``KIMI_CODE_HOME``, prints a Stop
-# hook result line after the answer as Kimi Code does, makes one
+# Stand-in for Kimi Code 2.5.3: it records its call, env and
+# ``config.toml``, writes one ``wire.jsonl`` for the main agent (three model
+# steps with tool calls and a two-part final answer, then a Stop hook result
+# message) and one for a subagent under ``KIMI_CODE_HOME``, prints stream-json
+# lines with a hook result line after the answer as Kimi Code does, makes one
 # code change when the workspace has ``main.py``, and exits with FAKE_STATUS.
 _FAKE_KIMI = (
     """#!/bin/sh
@@ -87,22 +87,32 @@ _FAKE_KIMI = (
     KIMI_CODE_HOME KIMI_DISABLE_TELEMETRY KIMI_CODE_NO_AUTO_UPDATE OPENAI_API_KEY; do
     eval "printf '%s=%s\\n' $v \\"\\${$v-<unset>}\\""
   done
+  printf 'CONFIG:'; cat "$KIMI_CODE_HOME/config.toml" 2>/dev/null || printf ' none\\n'
 } >> "$FAKE_LOG"
 if [ -f main.py ]; then echo 'print(2)' > main.py; fi
 s="$KIMI_CODE_HOME/sessions/ws1/sess1/agents"
 mkdir -p "$s/main" "$s/sub1"
 printf '%s\\n' \\
+  '{"type":"turn.prompt","turnId":0}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"s1"}}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"s1","part":{"type":"think","think":"plan"}}}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"s1","part":{"type":"text","text":"Let me look."}}}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.call","stepUuid":"s1","toolCallId":"call_1","name":"Read"}}' \\
   '{"type":"usage.record","agentId":"main","model":"m","usage":{"inputOther":100,"output":20,"inputCacheRead":10,"inputCacheCreation":5}}' \\
-  '{"type":"turn.begin"}' \\
   'not json' \\
-  '{"type":"usage.record","agentId":"main","model":"m","usage":{"inputOther":40,"output":7}}' > "$s/main/wire.jsonl"
-printf '%s\\n' '{"type":"usage.record","agentId":"sub1","model":"m","usage":{"inputOther":3,"output":2}}' > "$s/sub1/wire.jsonl"
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"s2"}}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.call","stepUuid":"s2","toolCallId":"call_2","name":"Edit"}}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"s3"}}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"s3","part":{"type":"text","text":"I fixed main.py.\\n\\n"}}}' \\
+  '{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"s3","part":{"type":"text","text":"The answer is 42."}}}' \\
+  '{"type":"usage.record","agentId":"main","model":"m","usage":{"inputOther":40,"output":7}}' \\
+  '{"type":"context.append_message","agentId":"main","message":{"role":"assistant","content":[{"type":"text","text":"A Stop hook failed to execute."}],"origin":{"kind":"hook_result","event":"Stop"}}}' \\
+  > "$s/main/wire.jsonl"
 printf '%s\\n' \\
-  '{"role":"meta","type":"system.version","content":"2.5.3"}' \\
-  '{"role":"assistant","content":"Let me look.","tool_calls":[{"type":"function","id":"call_1","function":{"name":"Read","arguments":"{}"}}]}' \\
-  '{"role":"tool","tool_call_id":"call_1","content":"print(1)"}' \\
-  '{"role":"assistant","tool_calls":[{"type":"function","id":"call_2","function":{"name":"Edit","arguments":"{}"}}]}' \\
-  '{"role":"tool","tool_call_id":"call_2","content":"ok"}' \\
+  '{"type":"context.append_loop_event","agentId":"sub1","event":{"type":"content.part","stepUuid":"x1","part":{"type":"text","text":"Subagent text."}}}' \\
+  '{"type":"context.append_loop_event","agentId":"sub1","event":{"type":"tool.call","stepUuid":"x1","toolCallId":"sub_call","name":"Grep"}}' \\
+  '{"type":"usage.record","agentId":"sub1","model":"m","usage":{"inputOther":3,"output":2}}' > "$s/sub1/wire.jsonl"
+printf '%s\\n' \\
   '{"role":"assistant","content":"I fixed main.py.\\n\\nThe answer is 42."}' \\
   '{"role":"assistant","content":"Stop hook\\n\\nAll checks passed."}'
 exit "${FAKE_STATUS:-0}"
@@ -130,6 +140,7 @@ def _run_with_fake_kimi(
     workspace: Path | None = None,
     parser_fails: bool = False,
     inherited: dict[str, str] | None = None,
+    prompt: str = "Fix `main.py` and say $(echo done).",
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Kimi Code command in a scratch workspace against a fake ``kimi`` binary.
 
@@ -141,6 +152,7 @@ def _run_with_fake_kimi(
         workspace: An existing checkout to run in; a fresh folder when ``None``.
         parser_fails: Put a ``python3`` on PATH that fails, so the usage parse step fails.
         inherited: Sandbox env that the launch env overrides, as the bridge applies it.
+        prompt: The task prompt the bridge writes.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -155,7 +167,7 @@ def _run_with_fake_kimi(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     (workspace / "task").mkdir(parents=True)
-    (workspace / "task" / "PROMPT.md").write_text("Fix `main.py` and say $(echo done).")
+    (workspace / "task" / "PROMPT.md").write_text(prompt, encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "kimi"
@@ -180,7 +192,7 @@ def _run_with_fake_kimi(
     result = subprocess.run(
         launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False
     )
-    return result, log.read_text(), workspace
+    return result, log.read_text(encoding="utf-8"), workspace
 
 
 def test_kimi_code_is_registered_before_code_puppy_with_its_pin() -> None:
@@ -209,7 +221,8 @@ def test_open_launch_installs_the_checked_tarball_and_sends_model_calls_only_to_
     assert launch.files == {KIMI_CODE_BASE_URL_FILE: _GATEWAY.url}
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
-    assert 'kimi --prompt "$(cat "$APP_PROMPT_FILE")" --output-format stream-json < /dev/null' in launch.run_command
+    assert 'kimi --prompt "$_kc_prompt" --output-format stream-json < /dev/null > /dev/null' in launch.run_command
+    assert "config.toml" not in launch.run_command
     assert launch.env["KIMI_MODEL_NAME"] == "target-model"
     assert launch.env["KIMI_MODEL_API_KEY"] == _GATEWAY.api_key
     assert launch.env["KIMI_MODEL_PROVIDER_TYPE"] == "openai"
@@ -232,21 +245,27 @@ def test_protected_launch_checks_the_pin_offline() -> None:
 
 
 @pytest.mark.parametrize("effort", KIMI_CODE_EFFORTS)
-def test_supported_effort_goes_to_kimi_code_unchanged(tmp_path: Path, effort: str) -> None:
-    """Pass each Kimi Code effort name unchanged as ``KIMI_MODEL_THINKING_EFFORT``."""
-    assert build_launch(_target(), _GATEWAY, reasoning_effort=effort).env["KIMI_MODEL_THINKING_EFFORT"] == effort
+def test_supported_effort_goes_to_kimi_code_config_unchanged(tmp_path: Path, effort: str) -> None:
+    """Write each effort name unchanged as ``[thinking] effort``, which an ``openai`` provider sends as reasoning_effort.
+
+    ``KIMI_MODEL_THINKING_EFFORT`` stays blank: it sets ``thinking.forcedEffort``,
+    which Kimi Code 2.5.3 ignores for an ``openai`` provider.
+    """
+    assert build_launch(_target(), _GATEWAY, reasoning_effort=effort).env["KIMI_MODEL_THINKING_EFFORT"] == ""
     result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, reasoning_effort=effort)
 
     assert result.returncode == 0, result.stderr
-    assert f"KIMI_MODEL_THINKING_EFFORT={effort}\n" in calls
+    assert f'CONFIG:[thinking]\neffort = "{effort}"\n' in calls
+    assert "KIMI_MODEL_THINKING_EFFORT=\n" in calls
 
 
 @pytest.mark.parametrize("effort", [None, ""])
 def test_no_effort_keeps_the_kimi_code_default(tmp_path: Path, effort: str | None) -> None:
-    """Keep ``KIMI_MODEL_THINKING_EFFORT`` blank, which Kimi Code reads as unset, when the user picks no effort."""
+    """Write no ``config.toml`` and keep ``KIMI_MODEL_THINKING_EFFORT`` blank when the user picks no effort."""
     result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, reasoning_effort=effort)
 
     assert result.returncode == 0, result.stderr
+    assert "CONFIG: none\n" in calls
     assert "KIMI_MODEL_THINKING_EFFORT=\n" in calls
 
 
@@ -260,7 +279,8 @@ def test_inherited_model_env_cannot_change_the_model(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "inherited" not in calls
-    assert "KIMI_MODEL_THINKING_EFFORT=high\n" in calls
+    assert "KIMI_MODEL_THINKING_EFFORT=\n" in calls
+    assert 'CONFIG:[thinking]\neffort = "high"\n' in calls
     assert "KIMI_MODEL_CAPABILITIES=\n" in calls
     assert "KIMI_MODEL_MAX_CONTEXT_SIZE=\n" in calls
     assert f"KIMI_MODEL_BASE_URL={_GATEWAY.url}\n" in calls
@@ -291,6 +311,7 @@ def test_run_points_kimi_code_at_the_gateway_and_returns_answer_usage_and_tool_c
     assert not Path(home).resolve().is_relative_to(workspace.resolve())
     assert not Path(home).exists(), "the run removes its temporary Kimi Code home"
     assert "Let me look." not in result.stdout
+    assert "Stop hook" not in result.stdout
     assert parse_output("pi", result.stdout) == (_ANSWER, _USAGE)
     events = [json.loads(line) for line in result.stdout.splitlines()]
     assert events[0]["type"] == "message_end"
@@ -314,58 +335,120 @@ def test_failed_parse_keeps_a_kimi_code_failure_and_fails_a_success(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("content", "expected"),
-    [
-        ("  The answer.  ", "The answer."),
-        (
-            [{"type": "text", "text": "One."}, {"type": "think", "think": "x"}, {"type": "text", "text": "Two."}],
-            "One.\nTwo.",
-        ),
-        ([{"type": "think", "think": "only thinking"}], "Earlier."),
-    ],
+    "prompt",
+    ["/goal ship it", "  /goal ship it", "/goal", "﻿/goal ship it", " /goal\tship it", "\n/goal\nship it"],
 )
-def test_answer_content_may_be_a_string_or_a_list_of_text_parts(tmp_path: Path, content: object, expected: str) -> None:
-    """Read the answer from string content and from joined text parts, and keep the last answer when a step has none."""
-    stream = tmp_path / "stream.jsonl"
-    lines = [{"role": "assistant", "content": "Earlier."}, {"role": "assistant", "content": content}]
-    stream.write_text("".join(json.dumps(line) + "\n" for line in lines))
+def test_goal_command_prompt_is_framed_so_it_reaches_the_model(tmp_path: Path, prompt: str) -> None:
+    """Frame a prompt that Kimi Code's headless ``/goal`` parser would take, so the model gets it as a task."""
+    result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, prompt=prompt)
 
+    assert result.returncode == 0, result.stderr
+    assert f"ARGS [--prompt] [Task request:\n{prompt}] [--output-format] [stream-json]\n" in calls
+
+
+@pytest.mark.parametrize("prompt", ["/goals ship it", "/help", "Use /goal later.", "!ls"])
+def test_other_prompts_reach_kimi_code_unchanged(tmp_path: Path, prompt: str) -> None:
+    """Leave every prompt that the ``/goal`` parser does not take byte-identical."""
+    result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, prompt=prompt)
+
+    assert result.returncode == 0, result.stderr
+    assert f"ARGS [--prompt] [{prompt}] [--output-format] [stream-json]\n" in calls
+
+
+def _loop_event(event: dict[str, object]) -> dict[str, object]:
+    """Wrap a loop event as a Kimi Code 2.5.3 ``wire.jsonl`` record.
+
+    Args:
+        event: The loop event.
+
+    Returns:
+        The journal record.
+    """
+    return {"type": "context.append_loop_event", "agentId": "main", "event": event}
+
+
+def _text(step: str, text: str) -> dict[str, object]:
+    """Build a journal record for one text part of a model step.
+
+    Args:
+        step: The step uuid.
+        text: The text.
+
+    Returns:
+        The journal record.
+    """
+    return _loop_event({"type": "content.part", "stepUuid": step, "part": {"type": "text", "text": text}})
+
+
+def _parse_main_journal(tmp_path: Path, records: list[dict[str, object]]) -> str | None:
+    """Write a main agent journal and return the answer :data:`KIMI_CODE_TO_PI` reads from it.
+
+    Args:
+        tmp_path: Test folder.
+        records: The journal records.
+
+    Returns:
+        The answer the Pi parser reads.
+    """
+    sessions = tmp_path / "sessions"
+    journal = sessions / "ws1" / "sess1" / "agents" / "main" / "wire.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("".join(json.dumps(record) + "\n" for record in records))
     result = subprocess.run(
-        ["python3", "-I", "-c", KIMI_CODE_TO_PI, str(stream), str(tmp_path / "sessions")],
+        ["python3", "-I", "-c", KIMI_CODE_TO_PI, str(sessions)],
         capture_output=True,
         text=True,
         timeout=10,
         check=True,
     )
-
-    assert parse_pi_output(result.stdout)[0] == expected
+    return parse_pi_output(result.stdout)[0]
 
 
 @pytest.mark.parametrize(
     ("last", "expected"),
     [
-        ({"role": "assistant", "content": "Stop hook\n\nAll checks passed."}, "The answer."),
-        ({"role": "assistant", "content": "PostToolUse hook blocked\n\nNo."}, "The answer."),
-        ({"role": "assistant", "content": "Stop hook\n\nA Stop hook failed to execute."}, "The answer."),
-        ({"role": "assistant", "content": "Stop hook passed."}, "Stop hook passed."),
-        ({"role": "assistant", "content": "My hook\n\nDone."}, "My hook\n\nDone."),
+        ([_text("s2", "  One. "), _text("s2", "Two.  ")], "One. Two."),
+        (
+            [_loop_event({"type": "content.part", "stepUuid": "s2", "part": {"type": "think", "think": "x"}})],
+            "Earlier.",
+        ),
+        ([_loop_event({"type": "tool.call", "stepUuid": "s2", "toolCallId": "c1", "name": "Read"})], "Earlier."),
+        ([_text("s2", "   ")], "Earlier."),
     ],
 )
-def test_hook_result_lines_never_replace_the_answer(tmp_path: Path, last: dict[str, str], expected: str) -> None:
-    """Skip Kimi Code's hook result lines (a hook event title and a blank line), and keep other answers."""
-    stream = tmp_path / "stream.jsonl"
-    lines = [{"role": "assistant", "content": "The answer."}, last]
-    stream.write_text("".join(json.dumps(line) + "\n" for line in lines))
+def test_answer_is_the_text_of_the_last_model_step_with_text(
+    tmp_path: Path, last: list[dict[str, object]], expected: str
+) -> None:
+    """Join the text parts of the last model step that has text, and keep an earlier answer otherwise."""
+    assert _parse_main_journal(tmp_path, [_text("s1", "Earlier."), *last]) == expected
 
+
+def test_hook_results_never_replace_the_answer(tmp_path: Path) -> None:
+    """Read the answer only from model step text, so a hook result message after it never replaces it."""
+    hook = {
+        "type": "context.append_message",
+        "agentId": "main",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Stop hook\n\nAll checks passed."}],
+            "origin": {"kind": "hook_result", "event": "Stop", "blocked": True},
+        },
+    }
+
+    assert _parse_main_journal(tmp_path, [_text("s1", "The answer."), hook]) == "The answer."
+
+
+def test_no_journal_gives_no_answer(tmp_path: Path) -> None:
+    """Print an empty answer with zero usage when Kimi Code wrote no journal."""
     result = subprocess.run(
-        ["python3", "-I", "-c", KIMI_CODE_TO_PI, str(stream), str(tmp_path / "sessions")],
+        ["python3", "-I", "-c", KIMI_CODE_TO_PI, str(tmp_path / "sessions")],
         capture_output=True,
         text=True,
         timeout=10,
         check=True,
     )
 
-    assert parse_pi_output(result.stdout)[0] == expected
+    assert parse_pi_output(result.stdout) == (None, {"input_tokens": 0, "output_tokens": 0})
 
 
 def _shipped_tree(tmp_path: Path) -> Path:
