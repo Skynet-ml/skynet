@@ -85,11 +85,12 @@ def _run_with_fake_cline(tmp_path: Path, *, protected: bool) -> tuple[str, str, 
     return result.stdout, log.read_text(), workspace
 
 
-def test_cline_is_registered_after_the_other_built_ins_with_its_pin() -> None:
+def test_cline_is_registered_between_goose_and_code_puppy_with_its_pin() -> None:
     """List Cline in the registry and the request model, pinned to the exact npm release."""
     spec = REGISTRY[BLACKBOX_HARNESS_CLINE]
     assert (spec.binary, spec.version, spec.output_format) == ("cline", "3.0.74", "plain")
-    assert list(REGISTRY)[-1] == BLACKBOX_HARNESS_CLINE
+    order = list(REGISTRY)
+    assert order.index("goose") < order.index(BLACKBOX_HARNESS_CLINE) < order.index("code_puppy")
     assert BLACKBOX_HARNESS_CLINE in BLACKBOX_HARNESSES
     assert (
         pinned_harness_check(BLACKBOX_HARNESS_CLINE) == "cline --version 2>/dev/null | grep -Eq '(^| )3[.]0[.]74( |$)'"
