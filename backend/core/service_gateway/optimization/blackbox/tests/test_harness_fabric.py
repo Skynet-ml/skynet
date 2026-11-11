@@ -510,7 +510,7 @@ def test_protected_run_points_codex_at_the_relay_and_returns_the_response(tmp_pa
 
 
 def test_protected_run_gives_codex_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
-    """With proposer MCP servers, Codex gets each one at the relay, marked required, with no token in the file."""
+    """With proposer MCP servers, Codex gets each one at the relay, required with a 60 s startup, and no token in the file."""
     finished, seen, workspace = _run(
         tmp_path, protected=True, result=_RECORDED_RESULT, mcp_servers=("search", "my tools")
     )
@@ -526,6 +526,8 @@ def test_protected_run_gives_codex_only_the_proposer_mcp_servers_at_the_relay(tm
     overrides = config["harness"]["settings"]["config_overrides"]
     assert overrides["mcp_servers.search.required"] is True
     assert overrides["mcp_servers.my tools.required"] is True
+    assert overrides["mcp_servers.search.startup_timeout_sec"] == 60
+    assert overrides["mcp_servers.my tools.startup_timeout_sec"] == 60
     written = (workspace / FABRIC_CONFIG_FILE).read_text()
     assert _GATEWAY.url not in written
     assert _GATEWAY.api_key not in written

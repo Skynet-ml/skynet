@@ -19,6 +19,7 @@ from .....models.blackbox import BLACKBOX_HARNESS_FABRIC
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
 from .base import ENV_API_KEY, PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .codex import _MCP_STARTUP_TIMEOUT_SEC
 
 FABRIC_VERSION = "0.5.0"
 # The runtime ships abi3 manylinux wheels for Python >= 3.11. The ``harness``
@@ -303,11 +304,13 @@ def _fabric_config(
     if mcp_servers:
         # Fabric's McpServerConfig has no ``required`` field, so it goes in as a
         # Codex override: Codex then fails the thread start when a server does not
-        # start, instead of a run that silently has no proposer tools.
-        settings["config_overrides"] = {
-            **settings["config_overrides"],
-            **{f"mcp_servers.{name}.required": True for name in mcp_servers},
-        }
+        # start, instead of a run that silently has no proposer tools. The relay
+        # adds a hop, so each server gets the codex harness's longer startup time.
+        mcp_overrides: dict[str, object] = {}
+        for name in mcp_servers:
+            mcp_overrides[f"mcp_servers.{name}.required"] = True
+            mcp_overrides[f"mcp_servers.{name}.startup_timeout_sec"] = _MCP_STARTUP_TIMEOUT_SEC
+        settings["config_overrides"] = {**settings["config_overrides"], **mcp_overrides}
     config: dict[str, object] = {
         "metadata": {"name": "skynet-fabric"},
         "harness": {"adapter_id": FABRIC_ADAPTER, "resolution": "preinstalled", "settings": settings},
