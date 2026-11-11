@@ -2805,6 +2805,35 @@ def test_a_relayed_call_that_echoes_the_model_route_key_leaks_it_into_no_record(
     assert SECRET_MASK in stored["request"]
 
 
+@pytest.mark.parametrize("kind", ["host", "mcp"])
+def test_a_frame_that_names_the_model_route_key_as_its_server_leaks_it_into_no_record(kind: str) -> None:
+    """A refused frame that names the box's model route key stores it masked in its target and reason (SKY-637)."""
+    store = _run_call_store()
+    recorder = CallRecorder(store, "opt-1", "cand-1", "")
+    workspace = _Workspace()
+    route = {ENV_API_KEY: _GATEWAY_KEY, ENV_MODEL: "fixture/text"}
+    frame = {"id": "e" * 32, "path": "", "method": "GET", "headers": [], "body": ""}
+    if kind == "mcp":
+        relay = _mcp_relay(workspace, "run", _mcp_role(1), recorder=recorder, env=route)
+        frame["mcp"] = _GATEWAY_KEY
+    else:
+        relay = _service_relay(workspace, role="metric", allowed=(), services={}, recorder=recorder, env=route)
+        frame["service"] = _GATEWAY_KEY
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while not workspace.writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    relay.close()
+
+    [stored] = store.list_calls("opt-1", "cand-1")
+    assert (stored["kind"], stored["status"]) == (kind, "refused")
+    escaped = json.dumps(_GATEWAY_KEY)[1:-1]
+    for field in ("target", "failure_reason"):
+        assert _GATEWAY_KEY not in stored[field]
+        assert escaped not in stored[field]
+    assert stored["target"] == SECRET_MASK
+
+
 def test_two_mcp_servers_on_one_host_each_get_their_own_record_target(echo: _Echo) -> None:
     """Each record names its server and tool, so two servers on one host never share a target (E28, E49)."""
     sink = _CallSink()
