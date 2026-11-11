@@ -47,6 +47,7 @@ from ..billing.byok_vault import byok_provider_for_litellm
 from ..billing.host_agent import (
     attach_host_agent_token,
     bind_host_agent,
+    check_host_agent,
     failure_message,
     host_agent_failure,
     host_proposer,
@@ -1050,23 +1051,16 @@ class BackgroundWorker:
                         )
                     except DomainError as error:
                         raise domain_service_error(error) from error
-                    host = host_proposer(payload_dict)
-                    if host is not None:
-                        # The CLI and permission come from the stored run settings,
-                        # never from the guest, and only this run's proposer gets the token.
-                        host_token = bind_host_agent(
-                            budget_gateway,
-                            settings,
-                            cli=host[0],
-                            permission=host[1],
-                            reasoning_effort=host_reasoning_effort(payload_dict),
-                        )
-                        attach_host_agent_token(payload_dict, host_token)
                     # The wizard leaves the ceiling unset for a budget without a
                     # limit, while the guest's proposer still plans its spend
                     # against one, so the parent hands it the ledger's allowance.
                     if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and payload_dict.get("max_cost_cents") is None:
                         payload_dict["max_cost_cents"] = budget_gateway.cost_ceiling_cents()
+                    host = host_proposer(payload_dict)
+                    # The bind waits for the staged hidden paths, but a host proposer
+                    # it would refuse must fail before setup and the scorer cost money.
+                    if host is not None:
+                        check_host_agent(settings, cli=host[0], permission=host[1])
                     if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and is_repo_payload(payload_dict):
                         with self._renewing_lease(worker_id):
                             # Staging empties the secret list, so read the gate's inputs first.
@@ -1115,6 +1109,19 @@ class BackgroundWorker:
                             # which now holds what staging recorded.
                             if recorded is not None:
                                 checkpoint_tracker["payload"] = dict(recorded)
+                    if host is not None:
+                        # The CLI and permission come from the stored run settings,
+                        # never from the guest, and only this run's proposer gets the token.
+                        # After staging, which works out the hidden paths the CLI must refuse.
+                        host_token = bind_host_agent(
+                            budget_gateway,
+                            settings,
+                            cli=host[0],
+                            permission=host[1],
+                            reasoning_effort=host_reasoning_effort(payload_dict),
+                            hidden_paths=staged_repository.hidden_paths if staged_repository is not None else (),
+                        )
+                        attach_host_agent_token(payload_dict, host_token)
                 if is_unified:
                     strip_unified_model_aliases(payload_dict)
                 if has_exposed_execution_credentials(

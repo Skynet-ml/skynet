@@ -444,6 +444,7 @@ def test_repository_tree_and_rules_reach_every_repository_engine(
         "editable_paths": ["src"],
         "readonly_paths": ["vendor/lib"],
         "constrained": True,
+        "hidden_hashes": {},
     }
     assert session.files["repo_tree.py"] == Path(repo_tree.__file__).read_text()
 
@@ -493,6 +494,66 @@ def test_the_proposer_box_reaches_only_its_staged_hosts(
     assert runtime.spec.allowed_hosts == expected
     assert runtime.spec.network_disabled is (not expected)
     assert "raw.githubusercontent.com" not in runtime.spec.allowed_hosts
+
+
+# Names no shipped source file holds, so a scan of the box's files finds only a leak.
+_HIDDEN_NAMES = ["zq_hidden.toml", "eval/zq_scorer.py", "zq_exploits"]
+
+
+def _assert_no_hidden_name(files: dict[str, str]) -> None:
+    """Assert that no file the agent can read names a hidden path (E61).
+
+    Args:
+        files: File paths mapped to their contents.
+    """
+    for path, content in files.items():
+        for name in _HIDDEN_NAMES:
+            assert name not in path
+            assert name not in content, f"{path} names {name}"
+
+
+@pytest.mark.parametrize("staged", [True, False])
+def test_the_proposer_gets_hidden_path_hashes_and_never_their_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged: bool
+) -> None:
+    """The guest guard refuses the staged hidden paths from hashes alone; no box file names them (E61, E62, SKY-395).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture, working folder and home folder.
+        staged: Whether staging recorded hidden paths.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = ""
+    ctx = _context(tmp_path, FakeRuntime(session))
+    repo: dict[str, Any] = {"chunks": [], "editable_paths": ["."], "readonly_paths": []}
+    if staged:
+        repo["hidden_hashes"] = harness_bridge.hidden_hashes(_HIDDEN_NAMES)
+    ctx.native_options = replace(ctx.native_options, repo=repo)
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    proposer = json.loads(session.files["native_input.json"])["proposer"]
+    assert proposer["hidden_hashes"] == (harness_bridge.hidden_hashes(_HIDDEN_NAMES) if staged else {})
+    _assert_no_hidden_name(session.files)
+    # The guest writes its proposer block to proposer.json, which any harness with a shell can read.
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    monkeypatch.chdir(guest)
+    monkeypatch.setenv("HOME", str(guest / "home"))
+    monkeypatch.setenv(harness_bridge.CONFIG_ENV, "")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    native_runner._install_proposer(proposer)
+    if not staged:
+        return
+    guard_env = harness_bridge.install_guard(guest / "session", guest / "work", proposer["hidden_hashes"])
+    box_files = [guest / "proposer.json", *(path for path in (guest / "session").rglob("*") if path.is_file())]
+    _assert_no_hidden_name({str(path): path.read_text(encoding="utf-8") for path in box_files})
+    _assert_no_hidden_name(guard_env)
+    policy = json.loads((guest / "session" / harness_bridge.GUARD_DIR / "policy.json").read_text())
+    assert harness_bridge.guard_check(policy, "read", {"file_path": "eval/zq_scorer.py"}) == "scoring"
+    assert harness_bridge.guard_check(policy, "bash", {"command": "cat zq_exploits/a.py"}) == "scoring"
+    assert harness_bridge.guard_check(policy, "read", {"file_path": "src/app.py"}) is None
 
 
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])
@@ -1297,7 +1358,7 @@ def test_shinka_novelty_hands_the_judge_and_embeddings_their_own_tokens(
 def test_shinka_ships_a_repository_checkout_with_its_bundle_helpers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Ship the repository tree and the bundle and tree helpers the runner loads beside itself.
+    """Ship the repository tree, its hidden path hashes, and the bundle and tree helpers the runner loads beside itself.
 
     Args:
         tmp_path: Artifact destination.
@@ -1311,7 +1372,12 @@ def test_shinka_ships_a_repository_checkout_with_its_bundle_helpers(
     ctx = _context(tmp_path, FakeRuntime(session))
     ctx.native_options = replace(
         ctx.native_options,
-        repo={"chunks": [str(chunk)], "editable_paths": ["src"], "readonly_paths": ["vendor"]},
+        repo={
+            "chunks": [str(chunk)],
+            "editable_paths": ["src"],
+            "readonly_paths": ["vendor"],
+            "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN_NAMES),
+        },
         shinka_models=({"model": "m", "url": "https://gateway.example/v1", "token": "t"},),
     )
     run_native_engine("shinka_evolve", Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
@@ -1322,7 +1388,13 @@ def test_shinka_ships_a_repository_checkout_with_its_bundle_helpers(
         "editable_paths": ["src"],
         "readonly_paths": ["vendor"],
         "constrained": False,
+        # The bundle arms its open and edit guard from these hashes (E62, SKY-395).
+        "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN_NAMES),
     }
+    assert harness_bridge.hashed_kind(payload["repo"]["hidden_hashes"], "eval/zq_scorer.py") == "scoring"
+    assert harness_bridge.hashed_kind(payload["repo"]["hidden_hashes"], "zq_exploits/a.py") == "scoring"
+    assert harness_bridge.hashed_kind(payload["repo"]["hidden_hashes"], "src/a.py") is None
+    _assert_no_hidden_name(session.files)
     assert {"shinka_runner.py", "shinka_bundle.py", "repo_tree.py"} <= set(session.files)
 
 

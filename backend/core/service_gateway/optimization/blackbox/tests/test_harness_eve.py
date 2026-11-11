@@ -25,6 +25,7 @@ from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harnes
 from ..harness_bridge import (
     GUARD_REFUSAL,
     _Monitor,
+    hidden_hashes,
     install_guard,
     parse_output,
     parse_pi_output,
@@ -725,7 +726,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     tools_bin.mkdir()
     (workspace / "optimize.toml").write_text("hidden = true\n")
     (workspace / "main.py").write_text("print(1)\n")
-    guard_env = install_guard(tmp_path / "session", workspace, ["optimize.toml"])
+    guard_env = install_guard(tmp_path / "session", workspace, hidden_hashes(["optimize.toml"]))
 
     completed = subprocess.run(
         [_NODE, "--input-type=module", "-e", _SANDBOX_DRIVER, str((project / "sandbox.mjs").as_uri())],

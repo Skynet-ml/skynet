@@ -19,6 +19,7 @@ import ctypes
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -28,7 +29,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -490,6 +491,48 @@ def _path_hash(path: str) -> str:
     return hashlib.sha256(path.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
+def hidden_hashes(hidden_paths: Iterable[str], fold_case: bool = False) -> dict[str, str]:
+    """Hash the hidden paths for a guard, so the guard never holds their names (E61).
+
+    Args:
+        hidden_paths: Repository-relative hidden files and directories.
+        fold_case: Whether the workspace's file system ignores case, so that
+            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+
+    Returns:
+        Path hashes mapped to their kind.
+    """
+    hashes = {}
+    for path in hidden_paths:
+        normalized = os.path.normpath(str(path).strip().strip("/"))
+        if normalized in ("", ".") or normalized.startswith(".."):
+            continue
+        key = normalized.replace(os.sep, "/")
+        hashes[_path_hash(key.casefold() if fold_case else key)] = hidden_kind(normalized)
+    return hashes
+
+
+def hashed_kind(hashes: Mapping[str, str], path: str) -> str | None:
+    """Return the kind of the hidden path that is ``path`` or holds it, from the hash table only.
+
+    Args:
+        hashes: Hashes from :func:`hidden_hashes`, without case folding.
+        path: Repository-relative path.
+
+    Returns:
+        The hidden kind, or ``None`` when no hidden path covers ``path``.
+    """
+    normalized = posixpath.normpath(path.strip().strip("/"))
+    if normalized in ("", ".") or normalized.startswith(".."):
+        return None
+    parts = normalized.split("/")
+    for end in range(1, len(parts) + 1):
+        kind = hashes.get(_path_hash("/".join(parts[:end])))
+        if kind:
+            return kind
+    return None
+
+
 def guard_policy(
     workspace: Path, hidden_paths: list[str], log: Path, fold_case: bool = False, home: Path | None = None
 ) -> dict[str, Any]:
@@ -511,17 +554,28 @@ def guard_policy(
         The policy: workspace, home folder, path hashes mapped to their
         kind, case folding, and log file.
     """
-    hashes = {}
-    for path in hidden_paths:
-        normalized = os.path.normpath(str(path).strip().strip("/"))
-        if normalized in ("", ".") or normalized.startswith(".."):
-            continue
-        key = normalized.replace(os.sep, "/")
-        hashes[_path_hash(key.casefold() if fold_case else key)] = hidden_kind(normalized)
+    return _hashed_policy(workspace, hidden_hashes(hidden_paths, fold_case), log, fold_case, home)
+
+
+def _hashed_policy(
+    workspace: Path, hashes: Mapping[str, str], log: Path, fold_case: bool, home: Path | None
+) -> dict[str, Any]:
+    """Build the refusal policy of one session from path hashes.
+
+    Args:
+        workspace: Directory the agent works in.
+        hashes: Hashes from :func:`hidden_hashes`.
+        log: File each refusal is appended to.
+        fold_case: Whether ``hashes`` were made with case folding.
+        home: The agent's home folder; the default is this process's home folder.
+
+    Returns:
+        The policy that :func:`guard_check` reads.
+    """
     return {
         "workspace": str(workspace),
         "home": str(home if home is not None else Path.home()),
-        "hashes": hashes,
+        "hashes": dict(hashes),
         "fold_case": fold_case,
         "log": str(log),
     }
@@ -969,14 +1023,17 @@ def codex_hooks(policy_file: Path, digest: str) -> dict[str, Any]:
 
 
 def install_guard(
-    session_dir: Path, workspace: Path, hidden_paths: list[str], home: Path | None = None
+    session_dir: Path, workspace: Path, hashes: Mapping[str, str], home: Path | None = None
 ) -> dict[str, str]:
     """Write the refusal hooks of every harness for one session.
+
+    The guest gets only the hashes, so no file or variable the agent can read
+    names a hidden path (E61).
 
     Args:
         session_dir: Private directory of the session.
         workspace: Directory the agent works in.
-        hidden_paths: Repository-relative hidden files and directories.
+        hashes: Hidden path hashes from :func:`hidden_hashes`, made by the parent without case folding.
         home: The agent's home folder; the default is this process's home folder.
 
     Returns:
@@ -987,7 +1044,7 @@ def install_guard(
     log = guard_dir / "refusals.jsonl"
     log.write_text("", encoding="utf-8")
     policy_file = guard_dir / "policy.json"
-    digest = write_guard_policy(policy_file, guard_policy(workspace, hidden_paths, log, home=home))
+    digest = write_guard_policy(policy_file, _hashed_policy(workspace, hashes, log, False, home))
     python, bridge, _, _, policy, _ = guard_command("check", policy_file, digest)
     check = _GUARD_JS_CHECK.format(
         refusal=json.dumps(GUARD_REFUSAL),
@@ -1330,8 +1387,8 @@ def run_session(
             ``output_format``, ``instructions_file`` and optional ``price``
             and ``max_tool_calls`` (stop the harness once it starts more
             tool calls than this; its workspace edits so far stand), and
-            ``hidden_paths`` (repository-relative scoring-side paths every
-            tool call that names one is refused).
+            ``hidden_hashes`` (the parent's :func:`hidden_hashes` of the
+            scoring-side paths; every tool call that names one is refused).
         workspace: Directory the agent works in (the upstream work dir).
         prompt: Task prompt for this session.
         model: Model identifier the harness should route to.
@@ -1366,10 +1423,10 @@ def run_session(
         **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
         **(extra_env or {}),
     }
-    hidden_paths = list(proposer.get("hidden_paths") or [])
-    if hidden_paths:
+    hashes = dict(proposer.get("hidden_hashes") or {})
+    if hashes:
         home = Path(env["HOME"]) if env.get("HOME") else None
-        env.update(install_guard(session_dir, workspace, hidden_paths, home))
+        env.update(install_guard(session_dir, workspace, hashes, home))
     for name, value in (
         ("MODEL", model),
         ("PROMPT_FILE", str(prompt_file)),
@@ -1429,7 +1486,7 @@ def run_session(
     (session_dir / f"run-{attempt}.stdout").write_text(stdout, encoding="utf-8")
     output_format = proposer.get("output_format", "plain")
     text, usage = parse_output(output_format, stdout)
-    refusals = read_refusals(session_dir) if hidden_paths else []
+    refusals = read_refusals(session_dir) if hashes else []
     if output_format == "host_agent":
         refusals += parse_host_agent_refusals(stdout)
     return SessionOutcome(

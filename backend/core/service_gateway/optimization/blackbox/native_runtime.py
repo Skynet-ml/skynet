@@ -1191,6 +1191,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 "ralph": proposer.ralph,
                 "max_no_eval_seconds": proposer.max_no_eval_seconds,
                 "max_tool_calls": proposer.max_tool_calls,
+                # The guest's tool guard refuses each scoring-side path these hash (E62); no name enters the box (E61).
+                "hidden_hashes": dict((options.repo or {}).get("hidden_hashes") or {}),
             },
             "task": native_task_payload(engine_id, task),
         }
@@ -1225,6 +1227,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 "editable_paths": list(options.repo["editable_paths"]),
                 "readonly_paths": list(options.repo["readonly_paths"]),
                 "constrained": bool(options.repo.get("constrained")),
+                # The Shinka bundle refuses the model's opens and edits of these (E62).
+                "hidden_hashes": dict(options.repo.get("hidden_hashes") or {}),
             }
         document_text = json.dumps(payload, default=side_info_json_default)
         assert_metric_absent(document_text, task)

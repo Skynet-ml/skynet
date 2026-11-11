@@ -402,7 +402,7 @@ def _hidden_bundle(tmp_path: Path) -> tuple[RepoBundle, list[dict[str, str]]]:
     repo = {
         "chunks": _chunks(tmp_path, files),
         "editable_paths": ["src", ".optimize", "optimize.toml"],
-        "hidden_paths": _HIDDEN,
+        "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN),
     }
     return RepoBundle.prepare(repo, "", tmp_path / "checkout", on_refusal=refusals.append), refusals
 

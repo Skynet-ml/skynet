@@ -1553,6 +1553,23 @@ def _reply(status: int, document: dict[str, Any]) -> ModelHTTPResult:
     return ModelHTTPResult(status, "application/json", json.dumps(document).encode())
 
 
+def check_host_agent(settings: Settings, *, cli: str, permission: str) -> None:
+    """Refuse a host proposer this worker cannot run, before the run does paid work.
+
+    Args:
+        settings: Local-mode settings.
+        cli: The proposer's host CLI from the run settings.
+        permission: The proposer's host permission from the run settings.
+
+    Raises:
+        ValueError: Outside local mode, or for an unknown CLI or permission.
+    """
+    if not settings.local_mode:
+        raise ValueError("Host agents are available only in local mode.")
+    if cli not in HOST_CLIS or permission not in HOST_PERMISSIONS:
+        raise ValueError(f"Unknown host proposer {cli!r} with permission {permission!r}.")
+
+
 def bind_host_agent(
     gateway: ModelGateway,
     settings: Settings,
@@ -1585,10 +1602,7 @@ def bind_host_agent(
     Raises:
         ValueError: Outside local mode, or for an unknown CLI or permission.
     """
-    if not settings.local_mode:
-        raise ValueError("Host agents are available only in local mode.")
-    if cli not in HOST_CLIS or permission not in HOST_PERMISSIONS:
-        raise ValueError(f"Unknown host proposer {cli!r} with permission {permission!r}.")
+    check_host_agent(settings, cli=cli, permission=permission)
     trusted_cli = cast(CliProvider, cli)
     trusted_permission = cast(HostPermission, permission)
     token = secrets.token_urlsafe(32)

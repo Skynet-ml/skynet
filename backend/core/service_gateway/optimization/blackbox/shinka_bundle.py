@@ -361,7 +361,7 @@ class RepoBundle:
         editable_paths: Sequence[str],
         readonly_paths: Sequence[str],
         on_block: Callable[[str], None] | None = None,
-        hidden_paths: Sequence[str] = (),
+        hidden_hashes: Mapping[str, str] | None = None,
         on_refusal: Callable[[dict[str, str]], None] | None = None,
     ) -> None:
         """Bind to a checkout whose ``HEAD`` is the run's starting commit.
@@ -372,13 +372,14 @@ class RepoBundle:
             readonly_paths: Submodules and Git LFS files, which stay as fetched.
             on_block: Under a constraints file, receives each path-rule
                 refusal's reason, and the model reads only the illegal-action message.
-            hidden_paths: Scoring-side files and folders the model may not
-                open, list or edit.
+            hidden_hashes: The parent's ``harness_bridge.hidden_hashes`` of the
+                scoring-side files and folders the model may not open, list or
+                edit. The sandbox never gets their names (E61).
             on_refusal: Receives each hidden-path refusal as ``{"tool", "kind"}``.
         """
         self.checkout = checkout
         self.on_block = on_block
-        self.hidden_paths = [str(path).strip("/") for path in hidden_paths if str(path).strip("/")]
+        self.hidden_hashes = dict(hidden_hashes or {})
         self.on_refusal = on_refusal
         self.editable_paths = [str(path) for path in editable_paths]
         self.readonly_paths = [str(path) for path in readonly_paths]
@@ -404,7 +405,7 @@ class RepoBundle:
             seed_patch: Starting version as a patch against the fetched commit, or empty.
             destination: Folder the checkout goes in.
             on_block: Receives each path-rule block's reason when ``repo`` is constrained.
-            on_refusal: Receives each refusal of a path in ``repo``'s ``hidden_paths``.
+            on_refusal: Receives each refusal of a path in ``repo``'s ``hidden_hashes``.
 
         Returns:
             The bundle rules bound to the new checkout.
@@ -419,7 +420,7 @@ class RepoBundle:
             repo["editable_paths"],
             repo.get("readonly_paths") or (),
             on_block=on_block if repo.get("constrained") else None,
-            hidden_paths=repo.get("hidden_paths") or (),
+            hidden_hashes=repo.get("hidden_hashes") or {},
             on_refusal=on_refusal,
         )
 
@@ -462,11 +463,11 @@ class RepoBundle:
         Returns:
             The refusal text, or ``None`` when the path is not hidden.
         """
-        normalized = path.strip().strip("/")
-        if not _covers_exact(self.hidden_paths, normalized):
+        kind = harness_bridge.hashed_kind(self.hidden_hashes, path)
+        if kind is None:
             return None
         if self.on_refusal is not None:
-            self.on_refusal({"tool": tool, "kind": harness_bridge.hidden_kind(normalized)})
+            self.on_refusal({"tool": tool, "kind": kind})
         return harness_bridge.GUARD_REFUSAL
 
     def refusal(self, path: str, problem: str) -> str:
@@ -505,7 +506,7 @@ class RepoBundle:
                 if size <= MAX_FILE_BYTES
                 and (size == 0 or path in text)
                 and self.rule_problem(path) is None
-                and not _covers_exact(self.hidden_paths, path)
+                and harness_bridge.hashed_kind(self.hidden_hashes, path) is None
             )
         return self._paths
 
@@ -852,19 +853,6 @@ def _covers(roots: Sequence[str], path: str) -> bool:
         Whether a root covers the path.
     """
     return any(root == "." or path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
-
-
-def _covers_exact(roots: Sequence[str], path: str) -> bool:
-    """Report whether a path is one of ``roots`` or lies below one, with no whole-tree root.
-
-    Args:
-        roots: Repository-relative hidden files or folders.
-        path: Repository-relative path.
-
-    Returns:
-        Whether a root covers the path.
-    """
-    return any(path == root or path.startswith(root + "/") for root in roots)
 
 
 def _run_git(checkout: Path, *arguments: str) -> str:
