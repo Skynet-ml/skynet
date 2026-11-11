@@ -294,7 +294,7 @@ def test_mini_swe_agent_is_registered_after_aider_with_its_pin() -> None:
     assert (spec.version, spec.output_format, spec.position) == ("2.4.6", "plain", 52)
     order = list(REGISTRY)
     assert order.index(BLACKBOX_HARNESS_MINI_SWE_AGENT) == order.index("aider") + 1
-    assert order.index(BLACKBOX_HARNESS_MINI_SWE_AGENT) == order.index("antigravity_sdk") - 1
+    assert order.index(BLACKBOX_HARNESS_MINI_SWE_AGENT) == order.index("openhands_sdk") - 1
     assert BLACKBOX_HARNESS_MINI_SWE_AGENT in BLACKBOX_HARNESSES
     assert pinned_harness_check(BLACKBOX_HARNESS_MINI_SWE_AGENT) == (
         '"$(uv tool dir 2>/dev/null)/mini-swe-agent/bin/python" -I -c '
