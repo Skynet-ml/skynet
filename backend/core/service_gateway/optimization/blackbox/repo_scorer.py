@@ -107,6 +107,11 @@ _ISOLATED = "-I -B -u"
 # that an earlier call's version code planted there cannot patch the clock that
 # times the [run] entry; the entry's own python still loads them (SKY-642).
 _NO_SITE = "-S"
+# The supervisor starts with the image's root-owned base interpreter, not a
+# PATH lookup: /app/.venv/bin is group-writable for the box user, so a version
+# could replace its python3 for the next case. A host without this path (local
+# tests) falls back to PATH (SKY-642).
+_BASE_PYTHON = "/usr/local/bin/python3"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # A stage box's relay answers, relative to the box; one folder for every call,
@@ -559,7 +564,10 @@ class RepoScorer:
                 result = session.run(
                     f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
                     f" -exec rm -rf {{}} +; rm -rf {shlex.quote(done)} {shlex.quote(done + '.part')}"
-                    f"; cd {shlex.quote(path)} && python3 {_ISOLATED} {_NO_SITE}"
+                    f'; p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                    # exec leaves no shell parent that the entry could trace
+                    # to fake the supervisor's exit code.
+                    f'; cd {shlex.quote(path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
                     f" {shlex.quote(f'{root}/{RUNNER_PATH}')} {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,

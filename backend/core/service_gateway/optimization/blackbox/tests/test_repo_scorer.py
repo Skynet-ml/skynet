@@ -8,6 +8,7 @@ import itertools
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -3899,7 +3900,9 @@ def test_a_runner_that_a_metric_step_rewrote_never_times_the_next_case(tmp_path:
         scorer.close()
 
 
-def test_a_pth_that_a_version_plants_in_site_packages_cannot_slow_the_supervisor_clock(tmp_path: Path) -> None:
+def test_a_pth_that_a_version_plants_in_site_packages_cannot_slow_the_supervisor_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The supervisor starts without site-packages, so a planted .pth cannot change the next case's time (SKY-642)."""
     venv = tmp_path / "venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, timeout=120)
@@ -3917,6 +3920,9 @@ def test_a_pth_that_a_version_plants_in_site_packages_cannot_slow_the_supervisor
     ).stdout.strip()
     folder = Path(purelib).resolve()
     assert folder.is_relative_to(tmp_path.resolve()), folder
+    # The venv's python stands in for the box's base interpreter, so without
+    # -S the supervisor would load this site-packages.
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(venv / "bin" / "python3"))
     scorer = _probed(tmp_path, "src/cand.py:slows_the_clock", code=_TIMED_METRIC, env=env)
     try:
         for _ in range(2):
@@ -3925,6 +3931,64 @@ def test_a_pth_that_a_version_plants_in_site_packages_cannot_slow_the_supervisor
         assert (folder / "skynet_clock.pth").is_file()
     finally:
         scorer.close()
+
+
+def _forged_python3(folder: Path, marker: Path) -> None:
+    """Write a ``python3`` that forges a fast supervisor result and runs every other command for real.
+
+    Args:
+        folder: A new folder under the test's tmp_path that goes first on PATH.
+        marker: A file under the test's tmp_path that the forged supervisor creates.
+    """
+    folder.mkdir()
+    script = folder / "python3"
+    forged = json.dumps({"output": "forged", "error": None, "stopped": True, "elapsed_s": 0.0})
+    script.write_text(
+        "#!/bin/sh\n"
+        f'case " $* " in *" {runner.CANDIDATE_FLAG} "*)\n'
+        f"  touch {shlex.quote(str(marker))}\n"
+        "  for last; do :; done\n"
+        f'  echo {shlex.quote(forged)} > "$last/{runner.OUTPUT_FILE}"\n'
+        "  exit 0;;\n"
+        "esac\n"
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
+    )
+    script.chmod(0o755)
+
+
+def test_a_python3_that_a_version_puts_on_path_never_runs_the_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supervisor starts with the base interpreter, so a forged python3 on PATH cannot fake the time (SKY-642)."""
+    marker = tmp_path / "forged-supervisor-ran"
+    _forged_python3(tmp_path / "forged-bin", marker)
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", sys.executable)
+    env = {"PATH": os.pathsep.join([str(tmp_path / "forged-bin"), "/usr/bin", "/bin"])}
+    scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=_TIMED_METRIC, env=env)
+    try:
+        seen = json.loads(scorer.score("", {"input": 0.4})["feedback"])
+    finally:
+        scorer.close()
+    assert not marker.exists()
+    assert seen["output"] == {"elapsed_s": 0.0}
+    assert seen["elapsed_s"] >= 0.4
+
+
+def test_without_the_base_interpreter_the_supervisor_uses_python3_from_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host without the image's base interpreter falls back to python3 on PATH (SKY-642)."""
+    marker = tmp_path / "forged-supervisor-ran"
+    _forged_python3(tmp_path / "forged-bin", marker)
+    monkeypatch.setattr(repo_scorer, "_BASE_PYTHON", str(tmp_path / "missing" / "python3"))
+    env = {"PATH": os.pathsep.join([str(tmp_path / "forged-bin"), "/usr/bin", "/bin"])}
+    scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=_TIMED_METRIC, env=env)
+    try:
+        seen = json.loads(scorer.score("", {"input": 0.4})["feedback"])
+    finally:
+        scorer.close()
+    assert marker.exists()
+    assert seen["elapsed_s"] == 0.0
 
 
 @pytest.mark.parametrize("entry", ["src/cand.py:kills_its_supervisor", "src/cand.py:blocks_the_output_file"])

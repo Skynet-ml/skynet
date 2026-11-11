@@ -171,9 +171,15 @@ candidate's code runs in other processes, so it cannot patch this clock or
 change the time. A time that the candidate puts in its `output` is not
 trusted. Use `elapsed_s`.
 
-The supervisor starts without site-packages (`python3 -I -S`), and Skynet
-writes the runner again before each case. So version code from an earlier
-case cannot change the supervisor. Skynet trusts the supervisor's result
+The supervisor starts with the image's root-owned base interpreter
+(`/usr/local/bin/python3`), not with `python3` from `PATH`. The box user can
+write to `/app/.venv/bin`, so a `python3` there is not trusted. The
+supervisor also starts without site-packages (`-I -S`), and Skynet writes the
+runner again before each case. The shell that starts the supervisor replaces
+itself with it (`exec`), so no shell of Skynet's waits for its exit code.
+These steps keep version code from an earlier case out of the supervisor's
+files, interpreter and imports. They do not isolate the cases fully; see the
+residual risk below. Skynet trusts the supervisor's result
 only when the supervisor exits cleanly, so an entry that writes a false
 result and then kills the supervisor gets no score. On Linux the supervisor
 sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
@@ -188,6 +194,16 @@ Residual risk:
   versions, so it can slow their timed entries and make their times longer.
   The supervisor's clock stays correct, but the entry is slower. SKY-398
   (in progress) covers the root fix.
+- The box's command wrapper (`timeout` and the outer shell that records the
+  exit code) runs as the same user as the version's code. Where the box
+  allows same-user `ptrace` of that wrapper, version code could change the
+  exit code that Skynet reads. All cases of a version share one box user, so
+  only SKY-398 (in progress) gives each case full isolation.
+- Cached state that one case leaves in `$HOME` or `/tmp` (for example a
+  download, a model file or a warm cache) can make later cases faster. So
+  the measured times of later cases can be shorter than a cold run.
+- Where the image has no `/usr/local/bin/python3` (for example a local test
+  host), the supervisor falls back to `python3` from `PATH`.
 
 A timeout or other `[run]` failure scores 0, and the metric does not run.
 
