@@ -304,6 +304,14 @@ def test_probe_rejects_a_venv_with_another_litellm_or_swe_rex() -> None:
     assert "--version" not in _PROBE
 
 
+def test_launch_removes_patch_and_state_left_by_an_earlier_run() -> None:
+    """Remove SWE-agent's fixed patch and state files before ``sweagent run`` starts."""
+    command = build_launch(_target(), _GATEWAY).run_command
+
+    cleanup = command.index("rm -f /root/model.patch /root/state.json")
+    assert cleanup < command.index('"$h/venv/bin/sweagent" run')
+
+
 def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     """Write the gateway URL to a launch file and keep the key out of files and argv."""
     launch = build_launch(_target(), _GATEWAY)

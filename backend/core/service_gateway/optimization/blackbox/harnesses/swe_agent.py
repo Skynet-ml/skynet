@@ -138,8 +138,11 @@ def _swe_agent_install() -> str:
 def _effort_flags(reasoning_effort: str | None) -> str:
     """Return the ``sweagent run`` flags for the user's effort.
 
-    LiteLLM 1.103.1 passes every Skynet effort level unchanged for an
-    ``openai/`` model, so the level goes into ``completion_kwargs`` as is.
+    The level goes into ``completion_kwargs`` as is. LiteLLM 1.103.1 sends
+    it unchanged for an ``openai/`` model id that it does not know. For a known
+    id it refuses an unsupported level with ``UnsupportedParamsError`` (for
+    example ``gpt-5`` with ``xhigh``, or ``gpt-4o`` with any level), because
+    SWE-agent does not set ``drop_params``. It never remaps or drops a level.
     SWE-agent's default temperature 0 is rejected by OpenAI reasoning models,
     so an active effort also sets temperature 1, as Harbor does.
 
@@ -181,6 +184,9 @@ def _swe_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         f'h={_HOME} && d="$(mktemp -d)" && '
         "trap 'rm -rf \"$d\"' EXIT && "
         f"{{ {_SNAPSHOT_WORKSPACE}; }} && "
+        # SWE-agent reads these fixed paths again when a submission fails, so a
+        # copy from an earlier run in a reused sandbox must not stand in.
+        "{ rm -f /root/model.patch /root/state.json 2>/dev/null || :; } && "
         f'{{ if [ -f AGENTS.md ]; then cat AGENTS.md; echo; fi; cat "${ENV_PROMPT_FILE}"; }} > "$d/problem.md" && '
         ': > "$d/empty.env" && '
         "{ status=0; "
