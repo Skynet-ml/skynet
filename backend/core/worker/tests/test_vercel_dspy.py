@@ -525,7 +525,18 @@ class StoppedSession(FakeSession):
         self.elapsed = elapsed
 
     def run(self, command: str, **kwargs: Any) -> CommandResult:
-        """Answer the probe, then raise the error frame the parent sends for a stopped session."""
+        """Answer the probe, then raise the error frame the parent sends for a stopped session.
+
+        Args:
+            command: The probe or the optimizer command.
+            **kwargs: The run options, which this fake ignores.
+
+        Returns:
+            The probe answer. The optimizer command never returns.
+
+        Raises:
+            ServiceError: The guest-side error for the stopped session.
+        """
         if command == vercel_dspy.PROTOCOL_PROBE:
             return CommandResult(0, stdout=f"{SANDBOX_PROTOCOL}\n")
         self.clock[0] += self.elapsed
@@ -554,7 +565,7 @@ def stopped_box_event(monkeypatch: pytest.MonkeyPatch, *, lifetime: float, elaps
     """
     clock = [1000.0]
     session = StoppedSession(clock, elapsed)
-    monkeypatch.setattr(vercel_dspy, "time", SimpleNamespace(monotonic=lambda: clock[0]), raising=False)
+    monkeypatch.setattr(vercel_dspy, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
     events: queue.Queue = queue.Queue()
     vercel_dspy.run_vercel_dspy(
@@ -585,7 +596,7 @@ def test_a_guest_box_that_stops_at_its_deadline_is_an_infrastructure_interruptio
     assert event["type"] == "error"
     assert event["failure_kind"] == INFRASTRUCTURE_INTERRUPTION
     assert event["error_type"] == "InfrastructureInterruptionError"
-    assert "deadline" in event["error"]
+    assert event["error"] == vercel_dspy.DEADLINE_MESSAGE.format(lifetime=180)
 
 
 def test_a_guest_box_that_stops_before_its_deadline_keeps_the_failure(monkeypatch: pytest.MonkeyPatch) -> None:

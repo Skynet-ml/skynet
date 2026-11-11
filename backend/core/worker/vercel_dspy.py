@@ -40,7 +40,7 @@ PROTOCOL_PROBE = (
 _PROBE_TIMEOUT_SECONDS = 120.0
 _MISSING_CORE_MODULE = re.compile(r"(?:ModuleNotFoundError|ImportError): .*\bcore\.")
 _DIAGNOSTIC_LINES = 40
-DEADLINE_MESSAGE = "The run reached its deadline: the cloud sandbox lifetime of {lifetime:.0f} s ended."
+DEADLINE_MESSAGE = "The cloud sandbox reached its time limit of {lifetime:.0f} s."
 
 
 def _save_checkpoint(directory: Path, event: dict[str, Any]) -> None:
@@ -166,7 +166,11 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         lifetime = float(descriptor["lifetime_seconds"])
         # Read before the open, so the provider's lifetime clock never starts
         # earlier than this one and a stop at the real lifetime end always
-        # counts as the deadline (SKY-586).
+        # counts as the time limit (SKY-586). A clock read after the open
+        # could start later than the box and miss it. The cost: a real failure
+        # that comes less than the open duration (checkpoint reads, budget
+        # reservation, create retries up to the provider's create timeout)
+        # before the lifetime end also counts as the time limit.
         opened_at = time.monotonic()
         nonce = secrets.token_hex(24)
         checkpoint_root = Path(guest_payload["_gepa_log_dir"]) if guest_payload.get("_gepa_log_dir") else None
