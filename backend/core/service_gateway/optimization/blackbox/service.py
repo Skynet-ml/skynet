@@ -518,18 +518,18 @@ class FinalRun:
     # Per case, the trusted observation of the run stage (time, model calls,
     # service cost); ``None`` where the scorer does not measure one.
     observations: list[dict[str, Any] | None] = field(default_factory=list)
-    # Error text of each run that failed: a metric error, or the version's
-    # own run crashed ("Run failed: ..."), which scores 0 (SKY-221).
+    # Error text of each run that failed: a metric error, or, on a repository
+    # run, the version's own run crashed ("Run failed: ..."), which scores 0 (SKY-221).
     failures: list[str] = field(default_factory=list)
 
 
 def _raise_if_every_run_failed(final: FinalRun | None, label: str) -> None:
     """Fail the run when a version failed on every case of its final run (SKY-221).
 
-    The run checks the starting point before the search and the reported
-    version after it. A version that failed everywhere has no real score, so
-    the run must not go on or end as a success. A valid 0.0 score is not a
-    failure, and some failed cases keep the run and its score.
+    The run checks the reported version after the search. A version that
+    failed everywhere has no real score, so the run must not end as a success.
+    A valid 0.0 score is not a failure, and some failed cases keep the run and
+    its score; the response reports their count.
 
     Args:
         final: The version's final run, if it had one.
@@ -591,6 +591,7 @@ def _final_run(
     phase: str,
     concurrency: int = 1,
     case_offset: int = 0,
+    repo_scorer: bool = False,
 ) -> FinalRun:
     """Score ``candidate`` afresh on every case, or once without cases, outside the budget.
 
@@ -608,6 +609,8 @@ def _final_run(
             sandbox per case, so this is the number of sandboxes in flight).
         case_offset: Added to each case's index in the run records, so the
             held-out pass does not overwrite the selection pass's records.
+        repo_scorer: Whether ``scorer`` is the repository scorer, the only
+            scorer whose ``run_failed`` status counts as a failed case.
 
     Returns:
         The mean score, the feedback and named scores, and each case's result.
@@ -690,7 +693,7 @@ def _final_run(
             # Pending rule-judge notes can come before the failure text.
             feedback.rpartition(RUN_FAILED)[2]
             for (score, side_info, _), feedback in zip(scored, feedbacks, strict=True)
-            if score is not None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
+            if repo_scorer and score is not None and side_info.get(STATUS_KEY) == RUN_FAILED_STATUS
         ],
     )
 
@@ -968,7 +971,8 @@ def run_blackbox_optimization(
     Raises:
         ServiceError: When the scorer cannot be built, the job has an agent
             target this deployment cannot run, the scorer fails on the
-            starting point, or no engine produced a version for a seedless job.
+            starting point, no engine produced a version for a seedless job, or
+            the reported version failed on every final case.
     """
     started = time.perf_counter()
     validate_blackbox_payload(
@@ -1003,6 +1007,7 @@ def run_blackbox_optimization(
         agent_run_sink=agent_run_sink,
         target_route=target_route,
         repo_snapshot=repo_snapshot,
+        repo_scorer=payload.target.kind == BLACKBOX_TARGET_REPO,
     )
 
 
@@ -1018,6 +1023,7 @@ def run_job(
     agent_run_sink: AgentRunSink | None = None,
     target_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
+    repo_scorer: bool = False,
 ) -> BlackboxRunResponse:
     """Run a job over an already-built scorer and close the scorer afterwards.
 
@@ -1032,6 +1038,8 @@ def run_job(
         agent_run_sink: Receives each sandboxed agent run's record and live transcript, if any.
         target_route: Opaque parent route for the optimized task model.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
+        repo_scorer: Whether ``base_scorer`` is the repository scorer, whose
+            ``run_failed`` status marks a case where the version's run crashed.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
@@ -1052,6 +1060,7 @@ def run_job(
             agent_run_sink=agent_run_sink,
             target_route=target_route,
             repo_snapshot=repo_snapshot,
+            repo_scorer=repo_scorer,
         )
     except BudgetReached as exc:
         exc.evidence.setdefault("candidate_origin", None)
@@ -1124,6 +1133,7 @@ def _run_job(
     agent_run_sink: AgentRunSink | None,
     target_route: dict[str, str] | None = None,
     repo_snapshot: dict[str, Any] | None = None,
+    repo_scorer: bool = False,
 ) -> BlackboxRunResponse:
     """Run the job over an already-built scorer; see :func:`run_job`.
 
@@ -1143,9 +1153,13 @@ def _run_job(
         agent_run_sink: Receives each sandboxed agent run's record and live transcript, if any.
         target_route: Opaque parent route for the optimized task model.
         repo_snapshot: A repository run's packed tree, as uploaded into this box.
+        repo_scorer: Whether ``base_scorer`` is the repository scorer; see :func:`run_job`.
 
     Returns:
         The best version with the final run's baseline and optimized scores.
+
+    Raises:
+        ServiceError: When the reported version failed on every final case.
     """
     scorer: ScorerFn = base_scorer
     target = job.target
@@ -1292,21 +1306,6 @@ def _run_job(
         iterations,
     )
     selection_scope = "validation" if splits.val else "training"
-    select_on = selection_cases(splits)
-    baseline_val: FinalRun | None = None
-    if seed_candidate is not None:
-        # SKY-221: the starting point's final-run pass runs before the search,
-        # so a run whose entry fails on every case stops before it spends the
-        # search budget. The final run reuses this pass; it costs nothing extra.
-        baseline_val = _final_run(
-            scorer,
-            seed_candidate,
-            select_on,
-            label="starting point",
-            phase=PHASE_BASELINE,
-            concurrency=concurrency,
-        )
-        _raise_if_every_run_failed(baseline_val, "starting point")
     stop: BudgetReached | None = None
     try:
         with dspy.context(callbacks=callbacks):
@@ -1339,14 +1338,26 @@ def _run_job(
     logger.info("optimization finished after %d scorer run(s): best score %s", server.used, server.best_score)
     if progress_callback is not None:
         progress_callback(PROGRESS_EVALUATION_STARTED, {})
+    select_on = selection_cases(splits)
     report_on = report_cases(splits)
     reuse_selection = report_on == select_on
+    baseline_val: FinalRun | None = None
     best_val: FinalRun | None = None
     baseline_run: FinalRun | None = None
     best_run: FinalRun | None = None
     regression_guard_applied = False
     if stop is None:
         try:
+            if seed_candidate is not None:
+                baseline_val = _final_run(
+                    scorer,
+                    seed_candidate,
+                    select_on,
+                    label="starting point",
+                    phase=PHASE_BASELINE,
+                    concurrency=concurrency,
+                    repo_scorer=repo_scorer,
+                )
             best_val = (
                 baseline_val
                 if baseline_val is not None and best_candidate == seed_candidate
@@ -1357,6 +1368,7 @@ def _run_job(
                     label="optimized version",
                     phase=PHASE_FINAL,
                     concurrency=concurrency,
+                    repo_scorer=repo_scorer,
                 )
             )
             if baseline_val is not None and best_val.score is None:
@@ -1382,6 +1394,7 @@ def _run_job(
                         phase=PHASE_BASELINE,
                         concurrency=concurrency,
                         case_offset=len(select_on),
+                        repo_scorer=repo_scorer,
                     )
                 best_run = (
                     baseline_run
@@ -1394,6 +1407,7 @@ def _run_job(
                         phase=PHASE_FINAL,
                         concurrency=concurrency,
                         case_offset=len(select_on),
+                        repo_scorer=repo_scorer,
                     )
                 )
         except BudgetReached as exc:
@@ -1476,6 +1490,8 @@ def _run_job(
             "optimizer_best_score": optimizer_best_score,
             "selection_scope": selection_scope,
             **finite_json(result.metadata),
+            # SKY-221: how many of the reported version's final cases failed.
+            "failed_cases": len(best_run.failures) if best_run else None,
         },
         split_counts=counts,
         baseline_val_score=baseline_val.score if baseline_val else None,

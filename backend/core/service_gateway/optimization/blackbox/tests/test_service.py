@@ -36,6 +36,7 @@ from core.models.blackbox import (
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_HARNESSES,
     BlackboxRunRequest,
+    BlackboxRunResponse,
 )
 from core.models.results import ModelTokenUsage
 from core.models.unified import UnifiedCase, UnifiedRunRequest
@@ -1440,12 +1441,9 @@ def test_final_run_rescores_both_versions_outside_the_budget(
     assert response.final_scorer_runs == 2 * held_out
     assert len(calls) == response.total_scorer_runs + response.final_scorer_runs
     test_ids = {case["i"] for case in splits.test}
-    # SKY-221: the starting point's validation pass runs before the search.
-    seed_calls = calls[: len(splits.val)]
-    assert [candidate for candidate, _ in seed_calls] == ["hello world"] * len(splits.val)
-    search_calls = calls[len(splits.val) : len(splits.val) + response.total_scorer_runs]
+    search_calls = calls[: response.total_scorer_runs]
     assert all(case is None or case["i"] not in test_ids for _, case in search_calls)
-    final_calls = seed_calls + calls[len(splits.val) + response.total_scorer_runs :]
+    final_calls = calls[-response.final_scorer_runs :]
     assert sorted(candidate for candidate, _ in final_calls) == ["aeiou"] * held_out + ["hello world"] * held_out
     assert response.baseline_score == pytest.approx(3 / 11)
     assert response.best_score == 1.0
@@ -1509,8 +1507,7 @@ def test_budget_stop_preserves_only_evaluated_incumbent_and_skips_final_test(fak
     monkeypatch.setattr(service_mod, "run_strategy", strategy)
     with pytest.raises(BudgetReached) as caught:
         run_blackbox_optimization(_payload(), artifact_id="budget-fixture", gepa_log_dir_path=str(tmp_path))
-    # SKY-221: only the starting point's pass, which runs before the search.
-    assert final_runs == [PHASE_BASELINE]
+    assert final_runs == []
     if evaluated:
         response = caught.value.result
         assert response.best_candidate == "tested candidate"
@@ -1534,14 +1531,9 @@ def test_budget_stop_during_the_final_run_keeps_the_winner_unscored(fake_lm, tmp
         tmp_path: Private optimizer workspace.
         monkeypatch: Dependency replacement fixture.
     """
-    real_final_run = service_mod._final_run
-    calls: list[str] = []
 
-    def final_run(*args, **kwargs):
-        """Score the starting point before the search, then stop before any later final score."""
-        calls.append(kwargs["phase"])
-        if len(calls) == 1:
-            return real_final_run(*args, **kwargs)
+    def final_run(*_args, **_kwargs):
+        """Stop before returning any final score."""
         raise BudgetReached()
 
     monkeypatch.setattr(service_mod, "_final_run", final_run)
@@ -1911,73 +1903,103 @@ def _failure_counts(caplog: pytest.LogCaptureFixture, label: str) -> list[tuple[
     ]
 
 
-def test_a_run_where_every_case_of_the_start_fails_stops_before_the_search(
+def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id: str) -> BlackboxRunResponse:
+    """Run ``payload`` with its python scorer in the place of the repository scorer.
+
+    A real repository run needs a repository box and a native proposer. Here
+    the python scorer stands in for the repository scorer's reply, so the run
+    honors its ``run_failed`` status the way it honors the repository scorer's.
+
+    Args:
+        payload: The job; its python scorer returns what the repository scorer would.
+        tmp_path: Private optimizer workspace.
+        artifact_id: Job id.
+
+    Returns:
+        The run's response.
+    """
+    return service_mod.run_job(
+        service_mod.job_spec_from_payload(payload),
+        service_mod.build_scorer(payload.scorer, job_id=artifact_id),
+        service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
+        artifact_id=artifact_id,
+        started=time.perf_counter(),
+        progress_callback=None,
+        gepa_log_dir_path=str(tmp_path),
+        repo_scorer=True,
+    )
+
+
+def test_a_repository_run_where_every_case_fails_ends_as_failed(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A run entry that crashes on every case fails the run before any search, with the cause (SKY-221)."""
+    """A run entry that crashes on every case fails the run after the search, with the cause (SKY-221).
+
+    The search still runs: it could fix a starting point that crashes.
+    """
     calls = _winner_strategy(monkeypatch)
 
-    with pytest.raises(ServiceError, match=r"starting point failed on every case .*ConnectionError: egress blocked"):
-        run_blackbox_optimization(
+    with pytest.raises(ServiceError, match=r"failed on every case .*ConnectionError: egress blocked"):
+        _run_as_repository(
             _payload(scorer={"kind": "python", "metric_code": _run_fails_code({"hello world", "winner"})}),
-            artifact_id="job-all-fail",
-            gepa_log_dir_path=str(tmp_path),
+            tmp_path,
+            "job-all-fail",
         )
 
-    assert calls == []
+    assert calls == ["search"]
 
 
-def test_a_run_where_some_cases_of_the_start_fail_runs_the_search(
+def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
     fake_lm: FakeReflectionLM,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Some failed cases keep today's behavior: the search runs and the log shows the count (SKY-221)."""
+    """Some failed cases keep the run and its score; the response and the log give the count (SKY-221)."""
     calls = _winner_strategy(monkeypatch)
     code = _run_fails_code({"hello world", "winner"}, every=2)
 
     with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
-        response = run_blackbox_optimization(
-            _payload(scorer={"kind": "python", "metric_code": code}, cases=_MANY_CASES),
-            artifact_id="job-some-fail",
-            gepa_log_dir_path=str(tmp_path),
+        response = _run_as_repository(
+            _payload(scorer={"kind": "python", "metric_code": code}, cases=_MANY_CASES), tmp_path, "job-some-fail"
         )
 
+    report_on = service_mod.report_cases(service_mod.legacy_case_splits(list(_MANY_CASES), 1))
+    failed = sum(1 for case in report_on if case["i"] % 2 == 0)
     assert calls == ["search"]
     assert response.best_score is not None
-    for label in ("starting point", "optimized version"):
-        counts = _failure_counts(caplog, label)
-        assert counts
-        assert all(0 < failed < runs for failed, runs in counts)
+    assert 0 < failed < len(report_on)
+    assert response.details["failed_cases"] == failed
+    assert _failure_counts(caplog, "optimized version") == [(failed, len(report_on))]
 
 
-def test_a_run_where_every_case_scores_a_valid_zero_runs_the_search(
+def test_a_run_where_every_case_scores_a_valid_zero_succeeds(
     fake_lm: FakeReflectionLM,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A valid 0.0 on every case is a score, not a failure, so the run goes on (SKY-221)."""
+    """A valid 0.0 on every case is a score, not a failure, so the run succeeds (SKY-221)."""
     calls = _winner_strategy(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
-        response = run_blackbox_optimization(
+        response = _run_as_repository(
             _payload(scorer={"kind": "python", "metric_code": _run_fails_code(set(), valid_score=0.0)}),
-            artifact_id="job-zero",
-            gepa_log_dir_path=str(tmp_path),
+            tmp_path,
+            "job-zero",
         )
 
     assert calls == ["search"]
     assert response.baseline_score == 0.0
     assert response.best_score == 0.0
-    assert _failure_counts(caplog, "starting point") == []
+    assert response.details["failed_cases"] == 0
+    assert _failure_counts(caplog, "optimized version") == []
 
 
-def test_a_run_fails_when_the_winner_fails_on_every_final_case(
+def test_a_repository_run_fails_when_the_winner_fails_on_every_final_case(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The final-run check still fails a winner whose run crashes on every case (SKY-221).
+    """The final-run check fails a winner whose run crashes on every case (SKY-221).
 
     The seed scores a valid 0.0, so the regression guard keeps the winner.
     """
@@ -1985,13 +2007,56 @@ def test_a_run_fails_when_the_winner_fails_on_every_final_case(
     code = _run_fails_code({"winner"}, valid_score=0.0)
 
     with pytest.raises(ServiceError, match=r"optimized version failed on every case .*ConnectionError: egress blocked"):
-        run_blackbox_optimization(
-            _payload(scorer={"kind": "python", "metric_code": code}),
-            artifact_id="job-winner-fail",
-            gepa_log_dir_path=str(tmp_path),
-        )
+        _run_as_repository(_payload(scorer={"kind": "python", "metric_code": code}), tmp_path, "job-winner-fail")
 
     assert calls == ["search"]
+
+
+def test_a_user_scorer_status_never_fails_a_run(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user's own scorer that returns ``status: run_failed`` keeps its valid scores (SKY-221).
+
+    Only the repository scorer sets that status, so a user's key cannot fail the run.
+    """
+    calls = _winner_strategy(monkeypatch)
+
+    response = run_blackbox_optimization(
+        _payload(scorer={"kind": "python", "metric_code": _run_fails_code({"hello world", "winner"})}),
+        artifact_id="job-user-status",
+        gepa_log_dir_path=str(tmp_path),
+    )
+
+    assert calls == ["search"]
+    assert response.baseline_score == 0.0
+    assert response.best_score == 0.0
+    assert response.details["failed_cases"] == 0
+
+
+def test_a_repository_metric_status_never_marks_a_failed_run(tmp_path: Path) -> None:
+    """The repository scorer drops a metric's own ``status: run_failed``, so the case keeps its score (SKY-221)."""
+    code = "def score(repo_path, case=None):\n    return {'score': 0.5, 'feedback': 'ok', 'status': 'run_failed'}\n"
+    scorer = _probed(tmp_path, None, code=code)
+
+    def relayed(candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score one case the way ``RemoteScorer`` reads the repository scorer's reply."""
+        return scorer_mod.normalize_score(json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body))
+
+    try:
+        scorer.prepare()
+        run = service_mod._final_run(
+            relayed,
+            "",
+            [{"input": 1}, {"input": 2}],
+            label="starting point",
+            phase=PHASE_BASELINE,
+            repo_scorer=True,
+        )
+    finally:
+        scorer.close()
+
+    assert run.score == 0.5
+    assert run.failures == []
 
 
 class _PendingNote:
@@ -2022,7 +2087,13 @@ def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(tmp_path
     try:
         scorer.prepare()
         run = service_mod._final_run(
-            relayed, "", [{"input": 1}, {"input": 2}], label="starting point", phase=PHASE_BASELINE, concurrency=1
+            relayed,
+            "",
+            [{"input": 1}, {"input": 2}],
+            label="starting point",
+            phase=PHASE_BASELINE,
+            concurrency=1,
+            repo_scorer=True,
         )
     finally:
         scorer.close()

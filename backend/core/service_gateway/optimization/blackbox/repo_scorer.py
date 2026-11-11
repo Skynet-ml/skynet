@@ -496,6 +496,10 @@ class RepoScorer:
         if not stopped:
             raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
         side_info = fold_case_scores(output.get("side_info") or {})
+        # SKY-221: only a crashed [run] entry above sets this status, so the
+        # metric's own ``status`` key cannot mark a scored case as a failure.
+        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
+            del side_info[STATUS_KEY]
         return {**side_info, "score": score}
 
     def _run_candidate(
