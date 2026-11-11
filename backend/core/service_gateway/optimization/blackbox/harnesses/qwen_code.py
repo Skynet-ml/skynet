@@ -34,34 +34,33 @@ QWEN_CODE_BASE_URL_FILE = ".app/qwen/base_url"
 # system scope, which merges last. Its ``model.name`` and ``model.baseUrl`` win
 # over any workspace value, and with no ``--model`` Qwen Code picks the entry
 # whose id and base URL both match them (``resolveCliGenerationConfig``). Only
-# an entry at the gateway URL can match, whatever its provider key. Qwen Code
-# fills the ``${...}`` values from the process env, so the base URL stays the
-# one the run reads from the base URL file.
+# an entry at the gateway URL can match, whatever its provider key. The file
+# holds the gateway URL as text, like the base URL file, so a protected run's
+# relay rewrite reaches it and both base URLs stay the same.
 QWEN_CODE_SETTINGS_FILE = ".app/qwen/settings.json"
 # Qwen Code's own ``model.reasoningEffort`` values (``normalizeReasoningEffort``
 # plus ``none``); Skynet sends no effort for any other name.
 _QWEN_CODE_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 
 
-def _qwen_code_settings(reasoning_effort: str | None) -> str:
+def _qwen_code_settings(base_url: str, reasoning_effort: str | None) -> str:
     """Build the fixed system settings file that pins the model provider to the gateway.
 
     Args:
+        base_url: The gateway base URL.
         reasoning_effort: The user's effort for the model, or ``None`` for Qwen Code's default.
 
     Returns:
         The settings JSON. It names the key's env variable and holds no key.
     """
-    model: dict[str, str] = {"name": f"${{{ENV_MODEL}}}", "baseUrl": "${OPENAI_BASE_URL}"}
+    model: dict[str, str] = {"name": f"${{{ENV_MODEL}}}", "baseUrl": base_url}
     if reasoning_effort in _QWEN_CODE_EFFORTS:
         model["reasoningEffort"] = reasoning_effort
     # ``$version`` 4 is the current settings schema, so Qwen Code does not
     # write a migrated copy back to the file.
     settings = {
         "$version": 4,
-        "modelProviders": {
-            "openai": [{"id": f"${{{ENV_MODEL}}}", "baseUrl": "${OPENAI_BASE_URL}", "envKey": "OPENAI_API_KEY"}]
-        },
+        "modelProviders": {"openai": [{"id": f"${{{ENV_MODEL}}}", "baseUrl": base_url, "envKey": "OPENAI_API_KEY"}]},
         "providerProtocol": {"openai": "openai"},
         "model": model,
     }
@@ -156,7 +155,7 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         install_command=_npm_install("qwen", QWEN_CODE_PACKAGE, QWEN_CODE_VERSION),
         files={
             QWEN_CODE_BASE_URL_FILE: gateway.url,
-            QWEN_CODE_SETTINGS_FILE: _qwen_code_settings(reasoning_effort),
+            QWEN_CODE_SETTINGS_FILE: _qwen_code_settings(gateway.url, reasoning_effort),
         },
         run_command=run_command,
         env=env,

@@ -27,7 +27,7 @@ _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
 _PROVIDER_KEYS = ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")
 # The system settings pin of the model and its base URL, filled from the env.
-_MODEL_PIN = {"name": "${APP_MODEL}", "baseUrl": "${OPENAI_BASE_URL}"}
+_MODEL_PIN = {"name": "${APP_MODEL}", "baseUrl": _GATEWAY.url}
 _PROMPT = "Fix `solution.py` and say $(echo done)."
 # The flags that keep web tools and every MCP server off in every run.
 _NO_WEB_NO_MCP_ARGS = (
@@ -184,7 +184,9 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.instructions_file == "AGENTS.md"
     assert set(launch.files) == {QWEN_CODE_BASE_URL_FILE, QWEN_CODE_SETTINGS_FILE}
     assert launch.files[QWEN_CODE_BASE_URL_FILE] == _GATEWAY.url
-    assert _GATEWAY.url not in launch.files[QWEN_CODE_SETTINGS_FILE]
+    settings = json.loads(launch.files[QWEN_CODE_SETTINGS_FILE])
+    assert settings["model"]["baseUrl"] == _GATEWAY.url
+    assert settings["modelProviders"]["openai"][0]["baseUrl"] == _GATEWAY.url
     assert _GATEWAY.api_key not in launch.files[QWEN_CODE_SETTINGS_FILE]
     assert (
         f'cp {QWEN_CODE_SETTINGS_FILE} "$QWEN_HOME/system-settings.json" && '
@@ -314,7 +316,7 @@ def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_pa
 
 
 def test_hostile_workspace_settings_cannot_move_the_model_provider(tmp_path: Path) -> None:
-    """Load a fixed system settings copy from the temp folder that pins the model and its base URL to the gateway env.
+    """Load a fixed system settings copy from the temp folder that pins the model and its base URL to the relay.
 
     The workspace ``.qwen/settings.json`` names the target model under an
     integer-like provider key, which JS puts before ``openai``. The fake binary
@@ -341,13 +343,12 @@ def test_hostile_workspace_settings_cannot_move_the_model_provider(tmp_path: Pat
     settings_text = (tmp_path / "calls.log.settings").read_text()
     assert "evil" not in settings_text
     assert _GATEWAY.api_key not in settings_text
+    assert _GATEWAY.url not in settings_text
     assert json.loads(settings_text) == {
         "$version": 4,
-        "modelProviders": {
-            "openai": [{"id": "${APP_MODEL}", "baseUrl": "${OPENAI_BASE_URL}", "envKey": "OPENAI_API_KEY"}]
-        },
+        "modelProviders": {"openai": [{"id": "${APP_MODEL}", "baseUrl": _RELAY, "envKey": "OPENAI_API_KEY"}]},
         "providerProtocol": {"openai": "openai"},
-        "model": {**_MODEL_PIN, "reasoningEffort": "high"},
+        "model": {"name": "${APP_MODEL}", "baseUrl": _RELAY, "reasoningEffort": "high"},
     }
 
 
@@ -437,7 +438,9 @@ def test_numeric_provider_key_cannot_send_the_gateway_token_to_another_host() ->
     Without the ``model.baseUrl`` pin, the same rule picks the hostile entry,
     so the check catches the leak.
     """
-    system = json.loads(build_launch(_target(), _GATEWAY, protected=True).files[QWEN_CODE_SETTINGS_FILE])
+    # A protected run rewrites the gateway URL in the file to the relay URL.
+    system_text = build_launch(_target(), _GATEWAY, protected=True).files[QWEN_CODE_SETTINGS_FILE]
+    system = json.loads(system_text.replace(_GATEWAY.url, _RELAY))
     env = {"APP_MODEL": "target-model", "OPENAI_BASE_URL": _RELAY, "OPENAI_API_KEY": "gateway-token"}
 
     picked = _picked_provider(json.loads(_HOSTILE_SETTINGS), system, env)
