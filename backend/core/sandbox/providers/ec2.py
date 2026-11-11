@@ -94,7 +94,7 @@ DEFAULT_SSH_CONNECT_TIMEOUT_SEC = 300.0
 # One attempt for every AWS call (SKY-406 D3, D10). "standard" is the only
 # mode that reads total_max_attempts.
 NO_RETRY = {"total_max_attempts": 1, "mode": "standard"}
-_RUNNING_WAITER = {"Delay": 5, "MaxAttempts": 120}
+_RUNNING_WAITER_DELAY_SEC = 5
 _SWEEP_STATES = ["pending", "running", "stopping", "stopped"]
 _GONE_CODES = frozenset({"InvalidInstanceID.NotFound", "InvalidInstanceID.Malformed"})
 _AUTH_CODES = frozenset(
@@ -123,6 +123,10 @@ _TRANSIENT_CODES = frozenset(
 _CODE_CHARS = re.compile(r"[^A-Za-z0-9.]")
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SSH_PROBE_TIMEOUT_SEC = 10.0
+# ssh ends a session after this many silent seconds times the count, so a
+# lost instance cannot hold a command open forever.
+_SSH_ALIVE_INTERVAL_SEC = 15
+_SSH_ALIVE_COUNT = 4
 _SSH_PROBE_INTERVAL_SEC = 5.0
 _TIMEOUT_EXIT_CODE = 124
 # The seconds between TERM and KILL when the remote timeout ends a command.
@@ -147,6 +151,7 @@ class _LaunchState:
 
     instance_id: str | None = None
     cancelled: bool = False
+    known_hosts: str | None = None
 
 
 class EC2Environment(SandboxEnvironment):
@@ -305,6 +310,8 @@ class EC2Environment(SandboxEnvironment):
         ``_CANCEL_GRACE_SEC``, also through repeat cancels, then passes the
         cancel on with the terminate still running in the background.
 
+        The sandbox keeps the instance until the terminate succeeds, so a
+        second stop tries again after a failed or unfinished terminate.
         With no instance, stop only removes a temporary known hosts file.
 
         Raises:
@@ -315,7 +322,6 @@ class EC2Environment(SandboxEnvironment):
         if instance_id is None:
             self._remove_known_hosts()
             return
-        self._clear()
         terminate = asyncio.ensure_future(_terminate(self._client, instance_id))
         try:
             await asyncio.shield(terminate)
@@ -328,7 +334,10 @@ class EC2Environment(SandboxEnvironment):
                     "Could not terminate an ec2 instance during a cancelled stop: %s",
                     _safe_text(terminate.exception()),
                 )
+            elif not terminate.cancelled():
+                self._clear()
             raise
+        self._clear()
 
     async def exec(
         self,
@@ -373,8 +382,9 @@ class EC2Environment(SandboxEnvironment):
         reader = _READ_STDIN_SCRIPT
         if limit is not None:
             # Killing the local ssh does not end the remote command, so the
-            # instance ends it at the same limit.
-            seconds = max(1, math.ceil(limit))
+            # instance ends it too. The extra second lets the local limit
+            # fire first, so a timeout always reports timed_out=True.
+            seconds = math.ceil(limit) + 1
             reader = f"timeout -k {_REMOTE_KILL_AFTER_SEC} {seconds} bash -lc {shlex.quote(reader)}"
         reader = wrap_script(reader, env={}, cwd=None, sudo=sudo)
         try:
@@ -394,12 +404,15 @@ class EC2Environment(SandboxEnvironment):
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write UTF-8 text files on the instance and create their parent directories.
 
+        Each file write has the run phase time limit, as ``exec`` has.
+
         Args:
             files: Maps each absolute sandbox path to its text content.
 
         Raises:
             RuntimeError: The instance is not running, or a directory or a
                 file could not be written.
+            SandboxInfraError: A file write ran past the time limit.
         """
         self._require_running()
         parents = sorted({str(PurePosixPath(path).parent) for path in files} - {"", ".", "/"})
@@ -407,11 +420,15 @@ class EC2Environment(SandboxEnvironment):
             made = await self.exec("mkdir -p " + " ".join(shlex.quote(parent) for parent in parents), sudo=True)
             if not made.ok:
                 raise RuntimeError(f"The ec2 sandbox could not create the upload directories: {made.stderr}")
+        limit = self._default_timeout
         for path, text in files.items():
             script = wrap_script(f"cat > {shlex.quote(path)}", env={}, cwd=None, sudo=True)
-            code, _, err = await _run_process(
-                self._ssh_argv(script, stdin=True, limit=None), text.encode("utf-8"), None
-            )
+            try:
+                code, _, err = await _run_process(
+                    self._ssh_argv(script, stdin=True, limit=limit), text.encode("utf-8"), limit
+                )
+            except TimeoutError:
+                raise SandboxInfraError(f"The ec2 sandbox timed out writing {path}.") from None
             if code != 0:
                 raise RuntimeError(f"The ec2 sandbox could not write {path}: {err.decode('utf-8', errors='replace')}")
 
@@ -426,7 +443,8 @@ class EC2Environment(SandboxEnvironment):
 
         Raises:
             RuntimeError: The instance is not running.
-            SandboxInfraError: SSH could not reach the instance, or the read failed.
+            SandboxInfraError: SSH could not reach the instance, or the read
+                failed or ran past the run phase time limit.
         """
         self._require_running()
         # A lost connection must not read as a missing file, so the probe
@@ -437,7 +455,11 @@ class EC2Environment(SandboxEnvironment):
         if not probe.ok:
             return None
         script = wrap_script(f"cat {shlex.quote(path)}", env={}, cwd=None, sudo=True)
-        code, out, err = await _run_process(self._ssh_argv(script, stdin=False, limit=None), None, None)
+        limit = self._default_timeout
+        try:
+            code, out, err = await _run_process(self._ssh_argv(script, stdin=False, limit=limit), None, limit)
+        except TimeoutError:
+            raise SandboxInfraError(f"The ec2 sandbox timed out reading {path}.") from None
         if code != 0:
             raise SandboxInfraError(f"The ec2 sandbox could not read {path}: {err.decode('utf-8', errors='replace')}")
         return out.decode("utf-8")
@@ -507,18 +529,27 @@ class EC2Environment(SandboxEnvironment):
         response = await _aws("run_instances", client.run_instances, **kwargs)
         instance_id = response["Instances"][0]["InstanceId"]
         state.instance_id = instance_id
+        loop = asyncio.get_running_loop()
+        # The start phase time limit bounds the running wait and the SSH wait together.
+        deadline = loop.time() + self._connect_timeout
         try:
             _raise_if_cancelled(state)
             waiter = client.get_waiter("instance_running")
-            await _aws("instance_running wait", waiter.wait, InstanceIds=[instance_id], WaiterConfig=_RUNNING_WAITER)
+            attempts = max(1, math.ceil(self._connect_timeout / _RUNNING_WAITER_DELAY_SEC))
+            config = {"Delay": _RUNNING_WAITER_DELAY_SEC, "MaxAttempts": attempts}
+            await _aws("instance_running wait", waiter.wait, InstanceIds=[instance_id], WaiterConfig=config)
             _raise_if_cancelled(state)
             described = await _aws("describe_instances", client.describe_instances, InstanceIds=[instance_id])
             host = instance_host(described["Reservations"][0]["Instances"][0], use_public_ip=self._use_public_ip)
             if host is None:
                 raise SandboxInfraError(f"The ec2 instance {instance_id} has no IP address.")
-            await self._wait_for_ssh(host, state)
+            await self._wait_for_ssh(host, state, deadline)
             _raise_if_cancelled(state)
         except BaseException:
+            if state.cancelled and state.known_hosts not in (None, self._temp_known_hosts):
+                # The start removed this file already, and a late probe with
+                # accept-new could write it again.
+                _remove_file(state.known_hosts)
             # A failed launch must not leave a paid instance behind.
             await _terminate_bounded(client, instance_id)
             raise
@@ -592,22 +623,23 @@ class EC2Environment(SandboxEnvironment):
         images = self._client.describe_images(ImageIds=[self._ami_id]).get("Images") or []
         return (images[0].get("RootDeviceName") if images else None) or DEFAULT_ROOT_DEVICE
 
-    async def _wait_for_ssh(self, host: str, state: _LaunchState) -> None:
-        """Probe SSH with ``true`` until it answers or the connect timeout passes.
+    async def _wait_for_ssh(self, host: str, state: _LaunchState, deadline: float) -> None:
+        """Probe SSH with ``true`` until it answers or the start deadline passes.
 
         This is a readiness wait for a new host, not a retry of an AWS call.
 
         Args:
             host: The SSH host of the new instance.
             state: The state of the launch; a cancelled launch stops probing.
+            deadline: The event loop time when the start phase ends.
 
         Raises:
             StartTimeoutError: SSH did not answer in time.
             asyncio.CancelledError: The start was cancelled during the wait.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._connect_timeout
         argv = self._ssh_argv(wrap_script("true", env={}, cwd=None, sudo=False), stdin=False, limit=None, host=host)
+        state.known_hosts = self._temp_known_hosts
         last = b""
         while True:
             _raise_if_cancelled(state)
@@ -650,6 +682,10 @@ class EC2Environment(SandboxEnvironment):
             f"StrictHostKeyChecking={self._strict_host_key_checking}",
             "-o",
             f"UserKnownHostsFile={self._known_hosts()}",
+            "-o",
+            f"ServerAliveInterval={_SSH_ALIVE_INTERVAL_SEC}",
+            "-o",
+            f"ServerAliveCountMax={_SSH_ALIVE_COUNT}",
         ]
         if not stdin:
             argv.append("-n")
@@ -967,6 +1003,16 @@ def _safe_text(error: BaseException | None) -> str:
     if isinstance(error, SandboxError):
         return str(error)
     return type(error).__name__
+
+
+def _remove_file(path: str) -> None:
+    """Remove a file, and ignore a file that is gone or cannot be removed.
+
+    Args:
+        path: The file path.
+    """
+    with contextlib.suppress(OSError):
+        Path(path).unlink(missing_ok=True)
 
 
 async def _terminate(client: Any, instance_id: str) -> None:

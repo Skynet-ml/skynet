@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import stat
 import sys
 import tempfile
@@ -139,6 +140,7 @@ class FakeEC2:
         self.wait_gate: threading.Event | None = None
         self.run_gate: threading.Event | None = None
         self.describe_gate: threading.Event | None = None
+        self.terminate_gate: threading.Event | None = None
         self.described = threading.Event()
 
     def _fail(self, name: str) -> None:
@@ -267,6 +269,8 @@ class FakeEC2:
             ClientError: An id is not known.
         """
         self.calls.append(("terminate_instances", {"InstanceIds": InstanceIds}))
+        if self.terminate_gate is not None:
+            self.terminate_gate.wait(timeout=5)
         self._fail("terminate_instances")
         for instance_id in InstanceIds:
             if instance_id not in self.instances:
@@ -599,9 +603,9 @@ async def test_exec_ends_the_remote_command_at_the_limit(fake_ec2: FakeEC2) -> N
         limited_root = _ssh_calls(fake_ec2)[-1][-1]
         await env.exec("true")
         plain = _ssh_calls(fake_ec2)[-1][-1]
-    assert "timeout -k 5 3 bash -lc" in limited
+    assert "timeout -k 5 4 bash -lc" in limited
     assert "sudo -n bash -lc" in limited_root
-    assert "timeout -k 5 3 bash -lc" in limited_root
+    assert "timeout -k 5 4 bash -lc" in limited_root
     assert "timeout" not in plain
 
 
@@ -736,6 +740,142 @@ async def test_a_start_cancelled_during_run_instances_terminates_without_waiting
     assert _ssh_calls(fake_ec2) == []
     assert fake_ec2.live() == []
     assert env._instance_id is None
+
+
+async def test_a_launch_that_returns_in_the_grace_time_is_terminated_twice(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminate from the launch and from the cancelled start when run_instances returns in the grace time."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.5)
+    fake_ec2.run_gate = threading.Event()
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "run_instances" in fake_ec2.ops())
+    task.cancel()
+    threading.Timer(0.05, fake_ec2.run_gate.set).start()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    instance_id = next(iter(fake_ec2.instances))
+    terminated = [i for name, kwargs in fake_ec2.calls if name == "terminate_instances" for i in kwargs["InstanceIds"]]
+    assert terminated == [instance_id, instance_id]
+    assert "wait" not in fake_ec2.ops()
+    assert fake_ec2.live() == []
+    assert not ec2_provider._LATE_TERMINATES
+
+
+async def test_a_cancelled_start_passes_the_cancel_on_within_twice_the_grace_time(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass the cancel on after at most two grace times while run_instances and terminate both hang."""
+    grace = 0.2
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", grace)
+    fake_ec2.run_gate = threading.Event()
+    fake_ec2.terminate_gate = threading.Event()
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "run_instances" in fake_ec2.ops())
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    task.cancel()
+    threading.Timer(grace / 2, fake_ec2.run_gate.set).start()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    elapsed = loop.time() - began
+    assert elapsed < 2 * grace + 0.15
+    assert fake_ec2.live() != []
+    fake_ec2.terminate_gate.set()
+    await _until(lambda: fake_ec2.live() == [] and not ec2_provider._LATE_TERMINATES)
+
+
+async def test_a_late_probe_cannot_leave_the_known_hosts_file_behind(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Remove the known hosts file again when the launch ends after a cancel during the SSH wait."""
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    monkeypatch.setattr(ec2_provider, "_SSH_PROBE_INTERVAL_SEC", 0.3)
+    (fake_ec2.state / "ssh_down").touch()
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: len(_ssh_calls(fake_ec2)) == 1)
+    path = next(arg for arg in _ssh_calls(fake_ec2)[0] if arg.startswith("UserKnownHostsFile="))
+    path = path.split("=", 1)[1]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert list(temp.glob("skynet-ec2-*")) == []
+    # ssh with accept-new writes the file again when a late probe connects.
+    os.close(os.open(path, os.O_CREAT | os.O_WRONLY))
+    await _until(lambda: not list(temp.glob("skynet-ec2-*")))
+    await _until(lambda: not ec2_provider._LATE_TERMINATES)
+    assert fake_ec2.live() == []
+
+
+async def test_a_failed_stop_keeps_the_instance_for_a_retry(fake_ec2: FakeEC2) -> None:
+    """Keep the instance id after a failed terminate, so a second stop terminates it."""
+    env = EC2Environment(_spec())
+    await env.start()
+    instance_id = env._instance_id
+    fake_ec2.errors["terminate_instances"] = _client_error("InternalError", 500)
+    with pytest.raises(SandboxTransientError):
+        await env.stop()
+    assert env._instance_id == instance_id
+    assert fake_ec2.live() == [instance_id]
+    await env.stop()
+    assert env._instance_id is None
+    assert fake_ec2.live() == []
+
+
+async def test_the_start_time_limit_bounds_the_running_wait(fake_ec2: FakeEC2) -> None:
+    """Size the running waiter from the start phase time limit, not a fixed ten minutes."""
+    env = EC2Environment(_spec())
+    env._connect_timeout = 12
+    await env.start()
+    await env.stop()
+    config = next(kwargs for name, kwargs in fake_ec2.calls if name == "wait")["WaiterConfig"]
+    assert config == {"Delay": 5, "MaxAttempts": 3}
+
+
+async def test_transfers_have_the_run_time_limit_and_keepalive(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give file writes and reads the run phase limit and SSH keepalive, and map a timeout to SandboxInfraError."""
+    real = ec2_provider._run_process
+    limits: list[float | None] = []
+
+    async def slow_cat(argv: list[str], data: bytes | None, limit: float | None) -> tuple[int, bytes, bytes]:
+        """Time out each file transfer, and run every other command.
+
+        Args:
+            argv: The ssh argv.
+            data: The stdin bytes.
+            limit: The time limit.
+
+        Returns:
+            The result of the real process.
+
+        Raises:
+            TimeoutError: The command is a file transfer.
+        """
+        if "cat > b.txt" in argv[-1] or "cat a.txt" in argv[-1]:
+            limits.append(limit)
+            raise TimeoutError
+        return await real(argv, data, limit)
+
+    async with EC2Environment(_spec()) as env:
+        env._default_timeout = 7.0
+        await env.upload_files({"a.txt": "x"})
+        monkeypatch.setattr(ec2_provider, "_run_process", slow_cat)
+        with pytest.raises(SandboxInfraError, match="timed out writing"):
+            await env.upload_files({"b.txt": "x"})
+        with pytest.raises(SandboxInfraError, match="timed out reading"):
+            await env.download_file("a.txt")
+    assert limits == [7.0, 7.0]
+    argv = _ssh_calls(fake_ec2)[-1]
+    assert "ServerAliveInterval=15" in argv
+    assert "ServerAliveCountMax=4" in argv
 
 
 async def test_a_late_launch_never_touches_a_newer_start(fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch) -> None:
