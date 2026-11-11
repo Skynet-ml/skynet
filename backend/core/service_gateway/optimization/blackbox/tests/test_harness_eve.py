@@ -651,6 +651,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
         env={
             "PATH": os.environ.get("PATH", os.defpath),
             "APP_API_KEY": "secret-key",
+            "SKYNET_API_KEY": "secret-key",
             "EVE_RUNNER_TOKEN": "runner-token",
             "EVE_PROJECT_DIR": str(project),
             "EVE_WORKSPACE": str(workspace),
@@ -663,7 +664,7 @@ def test_sandbox_hides_the_server_secrets_and_asks_the_guard_for_every_tool(tmp_
     )
     result = json.loads(completed.stdout)
     names = {line.split("=", 1)[0] for line in result["env"].splitlines()}
-    assert not names & {"APP_API_KEY", "EVE_RUNNER_TOKEN", "EVE_PROJECT_DIR", "EVE_WORKSPACE"}
+    assert not names & {"APP_API_KEY", "SKYNET_API_KEY", "EVE_RUNNER_TOKEN", "EVE_PROJECT_DIR", "EVE_WORKSPACE"}
     assert "PATH" in names
     for key in ("readRefused", "bashRefused", "writeRefused", "removeRefused"):
         assert result[key] == GUARD_REFUSAL, key

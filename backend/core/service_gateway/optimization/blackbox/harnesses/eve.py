@@ -206,7 +206,8 @@ async function stopServer(child) {
 # check first, so a call that names a hidden path fails. The eve server must
 # keep APP_API_KEY (agent.ts reads it) and EVE_RUNNER_TOKEN (the channel reads
 # it), so the provider removes them, with the project paths, only from the env
-# of the commands it starts.
+# of the commands it starts. ``with_legacy_env`` also copies APP_API_KEY to
+# SKYNET_API_KEY, so the provider removes that legacy twin too.
 EVE_SANDBOX = r"""import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
@@ -215,7 +216,13 @@ import { pathToFileURL } from "node:url";
 import { defineSandbox } from "eve/sandbox";
 import { defineSandboxProvider, SANDBOX_AGENT_ENV } from "eve/sandbox/provider";
 
-const DROPPED_ENV = ["APP_API_KEY", "EVE_PROJECT_DIR", "EVE_RUNNER_TOKEN", "EVE_WORKSPACE"];
+const DROPPED_ENV = [
+  "APP_API_KEY",
+  "SKYNET_API_KEY",
+  "EVE_PROJECT_DIR",
+  "EVE_RUNNER_TOKEN",
+  "EVE_WORKSPACE",
+];
 let guardModule;
 
 async function guard(tool, input) {
