@@ -185,7 +185,11 @@ _TARGET_ROLE = "target."
 # still has to kill the entry's process group and write its output.
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
-_RUN_FAILED = "Run failed: "
+RUN_FAILED = "Run failed: "
+# SKY-221: the side info ``status`` of a case whose entry failed. The final run
+# reads it, not the feedback, because pending rule-judge notes go in front of
+# the feedback.
+RUN_FAILED_STATUS = "run_failed"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -433,11 +437,12 @@ class RepoScorer:
                 finally:
                     opened.close()
                 if ran is not None and ran.get("error"):
-                    error = _scrub(_RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
-                    error = error[len(_RUN_FAILED) :]
+                    error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
+                    error = error[len(RUN_FAILED) :]
                     return {
                         "score": 0.0,
-                        "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
+                        "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
+                        STATUS_KEY: RUN_FAILED_STATUS,
                     }
                 metric = metric_box.result()
                 try:
@@ -540,6 +545,10 @@ class RepoScorer:
             # The error text would echo the value, which the metric's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
         side_info = fold_case_scores(output.get("side_info") or {})
+        # SKY-221: only a crashed [run] entry above sets this status, so the
+        # metric's own ``status`` key cannot mark a scored case as a failure.
+        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
+            del side_info[STATUS_KEY]
         return {**side_info, "score": score}
 
     def _run_candidate(
@@ -1974,7 +1983,7 @@ def _scrub(text: str, root: str | None, hidden: tuple[str, ...] | list[str] = ()
         The text with repository-relative paths and without the metric's frames.
     """
     text = text if text.endswith("\n") else f"{text}\n"
-    if text.startswith(_RUN_FAILED):
+    if text.startswith(RUN_FAILED):
         text = _TRACEBACK.sub(lambda match: _repo_frame(match.group(0), root, hidden), text)
     else:
         text = _TRACEBACK.sub("", text)
