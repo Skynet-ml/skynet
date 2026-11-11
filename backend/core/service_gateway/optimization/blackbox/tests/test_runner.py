@@ -894,7 +894,98 @@ def test_stage_mode_serves_the_stage_relay_and_takes_a_free_port_when_its_port_i
     assert url.hostname == "127.0.0.1"
     assert url.port not in (None, port)
     assert url.path == "/mcp/search"
-    assert env["SKYNET_MCP_CONFIG"] == str((tree / ".mcp.json").resolve())
+    assert env["SKYNET_MCP_CONFIG"] == str((call_dir / runner.STAGE_MCP_FILE).resolve())
+    assert json.loads((call_dir / runner.STAGE_MCP_FILE).read_text()) == {
+        "mcpServers": {"search": {"type": "http", "url": env["SKYNET_MCP_SEARCH_URL"]}}
+    }
+
+
+def _wait_for(check: Any, what: str) -> None:
+    """Poll ``check`` until it is true, for up to 20 s.
+
+    Args:
+        check: Returns true when the wait is over.
+        what: Names the wait in the failure.
+    """
+    deadline = time.monotonic() + 20
+    while not check():
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.05)
+
+
+def _listening(port: int) -> bool:
+    """Return whether a loopback server accepts on ``port``.
+
+    Args:
+        port: The port to try.
+
+    Returns:
+        True when a connection opens.
+    """
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+    except OSError:
+        return False
+    return True
+
+
+def test_a_call_without_the_relay_port_keeps_its_mcp_file_after_the_port_holder_ends(tmp_path: Path) -> None:
+    """A parallel call's MCP file names its own proxy, so it still works when the call on ``RELAY_PORT`` exits."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    tree, first = _stage_call(tmp_path, port)
+    second = tmp_path / "calls" / "two"
+    second.mkdir()
+    for name in (runner.INPUT_FILE, runner.STAGE_RELAY_FILE):
+        (second / name).write_text((first / name).read_text())
+    (tmp_path / "relay").mkdir()
+    holder = "import os, time\nwhile not os.path.exists('first.done'):\n    time.sleep(0.05)\n"
+    client = (
+        "import json, os, time, urllib.request\n"
+        "open('second.ready', 'w').close()\n"
+        "while not os.path.exists('second.go'):\n"
+        "    time.sleep(0.05)\n"
+        "url = json.load(open(os.environ['SKYNET_MCP_CONFIG']))['mcpServers']['search']['url']\n"
+        "opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+        "with opener.open(urllib.request.Request(url, data=b'{}', method='POST'), timeout=20) as response:\n"
+        "    print(json.dumps({'url': url, 'body': response.read().decode()}))\n"
+    )
+    script = str(Path(runner.__file__))
+    holding = subprocess.Popen(
+        [sys.executable, script, runner.STAGE_COMMAND_FLAG, str(first), sys.executable, "-c", holder], cwd=tree
+    )
+    _wait_for(lambda: _listening(port), "the first call's proxy")
+    calling = subprocess.Popen(
+        [sys.executable, script, runner.STAGE_COMMAND_FLAG, str(second), sys.executable, "-c", client],
+        cwd=tree,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for((tree / "second.ready").exists, "the second call")
+        (tree / "first.done").touch()
+        assert holding.wait(timeout=20) == 0
+        _wait_for(lambda: not _listening(port), "the first call's proxy to stop")
+        (tree / "second.go").touch()
+        assert calling.stdout is not None
+        # Each frame starts on a new line, so a blank line can come first.
+        line = next(line for line in calling.stdout if "APP_STAGE_test:" in line)
+        frame = json.loads(line[line.index("APP_STAGE_test:") + len("APP_STAGE_test:") :])
+        assert frame["mcp"] == "search"
+        answer = {"status": 200, "headers": [], "body": base64.b64encode(b'{"ok": true}').decode()}
+        (tmp_path / "relay" / f"{frame['id']}.json").write_text(json.dumps(answer))
+        assert calling.wait(timeout=20) == 0
+    finally:
+        for process in (holding, calling):
+            process.kill()
+            process.wait()
+    written = json.loads((second / runner.OUTPUT_FILE).read_text())
+    assert written["body"] == '{"ok": true}'
+    assert urllib.parse.urlsplit(written["url"]).port != port
+    assert json.loads((second / runner.STAGE_MCP_FILE).read_text()) == {
+        "mcpServers": {"search": {"type": "http", "url": written["url"]}}
+    }
 
 
 def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exit_code(tmp_path: Path) -> None:

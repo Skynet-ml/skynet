@@ -467,7 +467,7 @@ class RepoScorer:
             # or the next checkout; a new box is the only sure stop (E38).
             self._workspace.close()
         _raise_control(output)
-        _raise_control({"control": relay.control if relay is not None else None})
+        _raise_control({"control": relay.first_control() if relay is not None else None})
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
             raise RepoScoreError("The scorer raised an error, so the version has no score.")
@@ -1158,6 +1158,19 @@ class _StageRelay:
             "mcp_file": self._mcp.mcp,
             "port": runner.RELAY_PORT,
         }
+
+    def first_control(self) -> dict[str, str] | None:
+        """Return this relay's first budget stop, or else the first one a stage's own relay kept.
+
+        A stage's MCP stream can end in a budget stop after its call returned,
+        so the evaluation reads the stage relays too when it ends.
+
+        Returns:
+            The control answer, or ``None`` when no relayed call hit a stop.
+        """
+        with self._answer_lock:
+            control = self.control
+        return control or next((relay.control for relay in self._stage_relays.values() if relay.control), None)
 
     def output(self, stream: str, data: str, *, source: str = "") -> None:
         """Take the scorer's output as it streams and hand each call frame to its stage's pool.

@@ -108,6 +108,8 @@ STAGE_FLAG = "--stage"
 STAGE_COMMAND_FLAG = "--stage-command"
 # A stage call's relay config, next to its input; only a stage whose own MCP file holds a server gets one.
 STAGE_RELAY_FILE = "relay.json"
+# A call that does not hold RELAY_PORT gets this copy of the stage's MCP file, with its own proxy's urls.
+STAGE_MCP_FILE = "mcp.json"
 # The metric reaches each listed service at this variable's loopback address (E45).
 SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
 # Each server of the role's own MCP file is at this variable's loopback address (E49).
@@ -1650,9 +1652,11 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
     """Start the stage's loopback relay when the parent wrote a relay config for this call.
 
     Parallel calls to one stage share its box, and only one of them can hold
-    ``RELAY_PORT``; the others serve their variables on a free port. Every
-    proxy in the box sends its frames to the same parent relay, and each
-    answer file carries its own request's id, so no call gets another's answer.
+    ``RELAY_PORT``; the others serve on a free port, and their MCP variable
+    names a copy of the stage's MCP file with that port. The stage's own file
+    names ``RELAY_PORT``, whose proxy stops when its call ends. Every proxy in
+    the box sends its frames to the same parent relay, and each answer file
+    carries its own request's id, so no call gets another's answer.
 
     Args:
         call_dir: The call's folder in the stage box.
@@ -1670,7 +1674,13 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
     try:
         return _relay_env(client, config)
     except OSError:
-        return _relay_env(client, {**config, "port": 0})
+        env = _relay_env(client, {**config, "port": 0})
+    if MCP_CONFIG_ENV in env:
+        servers = {str(name): {"type": "http", "url": env[mcp_env_name(str(name))]} for name in config["mcp"]}
+        copy = call_dir / STAGE_MCP_FILE
+        copy.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        env[MCP_CONFIG_ENV] = str(copy.resolve())
+    return env
 
 
 if __name__ == "__main__":
