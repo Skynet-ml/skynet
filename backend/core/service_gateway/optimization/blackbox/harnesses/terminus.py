@@ -53,7 +53,7 @@ ENV_REASONING_EFFORT = "TERMINUS_REASONING_EFFORT"
 # The levels ``Terminus2`` accepts and LiteLLM 1.93.0 sends unchanged as
 # ``reasoning_effort`` on an ``openai/`` route; Harbor's extra ``default`` is
 # not a Skynet effort.
-_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # Empty values override any key the host shell leaks into the box, so LiteLLM
 # cannot fall back to a direct provider route.
 _NO_DIRECT_KEYS = {
@@ -343,5 +343,6 @@ SPEC = register(
         output_format="pi",
         protected_env=_PROTECTED_ENV,
         position=63,
+        supported_efforts=_EFFORTS,
     )
 )

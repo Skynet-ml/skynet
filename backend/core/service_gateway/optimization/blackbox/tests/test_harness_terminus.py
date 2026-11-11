@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from core.api.model_catalog import REASONING_EFFORTS
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_TARGET_AGENT, BlackboxTarget
 
@@ -252,6 +253,11 @@ def test_unsupported_effort_stops_the_launch(effort: str) -> None:
     """An effort Terminus 2 does not accept is refused, not dropped or remapped."""
     with pytest.raises(ServiceError, match="reasoning effort"):
         SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
+
+
+def test_spec_declares_every_skynet_effort_for_the_submit_check() -> None:
+    """Submit offers and accepts exactly the levels the launch passes unchanged (SKY-585)."""
+    assert SPEC.supported_efforts == REASONING_EFFORTS
 
 
 @pytest.mark.parametrize(
