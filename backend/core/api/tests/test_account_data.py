@@ -551,6 +551,33 @@ def test_repeat_deletion_of_one_email_keeps_each_closed_wallet(full_schema_engin
         assert len({wallet.username for wallet in wallets}) == 2
 
 
+def test_migration_frees_the_local_ids_of_wallets_closed_before_the_fix(full_schema_engine: Engine) -> None:
+    """A wallet closed before SKY-602 gives up the email's local id, so the account can sign up again."""
+    old_tombstone = _anonymized_username(_EMAIL)
+    with Session(full_schema_engine) as session:
+        session.add_all(
+            [
+                BillingCustomerModel(username=old_tombstone, stripe_customer_id=local_customer_id(_EMAIL)),
+                BillingCustomerModel(username=f"{old_tombstone}-real", stripe_customer_id="cus_kept"),
+                BillingCustomerModel(username=_OTHER, stripe_customer_id=local_customer_id(_OTHER)),
+            ]
+        )
+        session.commit()
+    migration = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "alembic/versions/71fa5f622536_free_local_ids_of_closed_wallets.py")
+    )
+    for _ in range(2):
+        with full_schema_engine.begin() as connection, Operations.context(MigrationContext.configure(connection)):
+            migration["upgrade"]()
+
+    _sign_up_with_local_wallet(full_schema_engine, 70)
+    with Session(full_schema_engine) as session:
+        assert session.get(BillingCustomerModel, old_tombstone).stripe_customer_id == local_customer_id(old_tombstone)
+        assert session.get(BillingCustomerModel, f"{old_tombstone}-real").stripe_customer_id == "cus_kept"
+        assert session.get(BillingCustomerModel, _OTHER).stripe_customer_id == local_customer_id(_OTHER)
+        assert session.get(BillingCustomerModel, _EMAIL).stripe_customer_id == local_customer_id(_EMAIL)
+
+
 def test_deletion_keeps_a_real_stripe_customer_id(full_schema_engine: Engine) -> None:
     """A closed wallet keeps its real Stripe customer id, so a later webhook still finds it."""
     with Session(full_schema_engine) as session:
