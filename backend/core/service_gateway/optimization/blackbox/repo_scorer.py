@@ -1717,8 +1717,9 @@ class _StageRelay:
             request=json.dumps(value, default=str),
             response=json.dumps(response, default=str),
             failure_reason=None if status == "ok" else str(reason or "The stage gave no answer."),
-            # The stage's input and answer come from code that can read the run's secrets.
-            secrets=list(self._secrets.values()),
+            # The stage's input and answer come from code that can read the run's
+            # secrets and its box's model route key, the same key the gateway masks.
+            secrets=[*self._secrets.values(), self._env.get(ENV_API_KEY, "")],
         )
 
     def _run(self, name: str, identity: str, value: Any) -> dict[str, Any]:

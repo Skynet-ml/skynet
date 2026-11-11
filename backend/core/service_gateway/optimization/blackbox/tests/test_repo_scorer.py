@@ -35,9 +35,11 @@ from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
+from core.storage.run_call_store import strip_secrets
 from core.worker.scoped_relay import CallRecorder
 
 from .. import repo_scorer, runner
+from ..harness import ENV_API_KEY, ENV_MODEL
 from ..remote_evaluator import RemoteEvaluatorClient
 from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
 from ..repo_scorer import (
@@ -1008,6 +1010,88 @@ def test_each_stage_call_is_recorded_with_its_status_and_no_secret(tmp_path: Pat
     broken = calls["broken"][0]
     assert broken["status"] == "failed"
     assert "stage broke" in broken["failure_reason"]
+
+
+_GATEWAY_KEY = 'gw-key\\"route-token'
+
+
+def _recording_stage_relay(sink: _CallSink, workspace: _Workspace) -> _StageRelay:
+    """Build a relay with no stage boxes, the model route env of a stage box, and a recorder.
+
+    Args:
+        sink: Keeps each recorded call.
+        workspace: Takes the answers.
+
+    Returns:
+        The relay.
+    """
+    return _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={ENV_API_KEY: _GATEWAY_KEY, ENV_MODEL: "fixture/text"},
+        workspace=workspace,  # type: ignore[arg-type]
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"output": {"k": _GATEWAY_KEY}},
+        {"error": f"Stage 'leak' raised RuntimeError: {_GATEWAY_KEY}"},
+    ],
+)
+def test_a_stage_that_echoes_the_model_route_key_leaks_it_into_no_record(
+    monkeypatch: pytest.MonkeyPatch, answer: dict[str, Any]
+) -> None:
+    """The stage box's model route key is masked, raw and JSON-escaped, in the answer and the error (E28)."""
+    sink = _CallSink()
+    relay = _recording_stage_relay(sink, _Workspace())
+    monkeypatch.setattr(relay, "_run", lambda name, identity, value: answer)
+    relay._call("leak", "d" * 32, {"echo": _GATEWAY_KEY})
+    relay.close()
+
+    [(_, call, secrets)] = sink.calls
+    escaped = json.dumps(_GATEWAY_KEY)[1:-1]
+    for field in ("request", "response", "failure_reason"):
+        stored = strip_secrets(call[field] or "", secrets)
+        assert _GATEWAY_KEY not in stored
+        assert escaped not in stored
+
+
+def test_a_budget_stop_in_a_stage_call_is_recorded_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage call the budget stops is recorded as refused, with the stop message as its reason (E28)."""
+
+    def stop(name: str, identity: str, value: Any) -> dict[str, Any]:
+        """Stop the call as the run budget does.
+
+        Args:
+            name: The stage.
+            identity: The call's id.
+            value: The JSON input.
+
+        Raises:
+            BudgetReached: Always.
+        """
+        raise BudgetReached("spent")
+
+    sink = _CallSink()
+    workspace = _Workspace()
+    relay = _recording_stage_relay(sink, workspace)
+    monkeypatch.setattr(relay, "_run", stop)
+    relay._call("double", "e" * 32, {"v": 1})
+    relay.close()
+
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["target"], call["status"], call["failure_reason"]) == (
+        "stage",
+        "double",
+        "refused",
+        "spent",
+    )
+    assert json.loads(workspace.writes[0][1]) == {"control": {"code": "budget_reached", "message": "spent"}}
 
 
 def test_a_frame_for_an_unknown_stage_is_recorded_as_refused() -> None:
