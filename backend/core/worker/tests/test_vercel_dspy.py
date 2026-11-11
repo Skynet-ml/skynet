@@ -518,6 +518,18 @@ def test_a_guest_box_that_stops_at_its_deadline_is_an_infrastructure_interruptio
     assert event["error"] == vercel_dspy.DEADLINE_MESSAGE.format(lifetime=180)
 
 
+def test_a_guest_box_that_stops_exactly_at_its_deadline_is_an_infrastructure_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session stop when the elapsed time equals the guest box lifetime is the run deadline."""
+    event = stopped_box_event(monkeypatch, lifetime=180, elapsed=180)
+
+    assert event["type"] == "error"
+    assert event["failure_kind"] == INFRASTRUCTURE_INTERRUPTION
+    assert event["error_type"] == "InfrastructureInterruptionError"
+    assert event["error"] == vercel_dspy.DEADLINE_MESSAGE.format(lifetime=180)
+
+
 def test_a_guest_box_that_stops_before_its_deadline_keeps_the_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A session stop before the guest box lifetime ends is not the deadline and stays a failure."""
     event = stopped_box_event(monkeypatch, lifetime=180, elapsed=120)
