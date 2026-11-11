@@ -19,6 +19,7 @@ from ..harness import (
     _CATALOG,
     _PARSER_NAMES,
     _PINNED_HARNESSES,
+    MCP_HARNESSES,
     GatewayConfig,
     build_launch,
     launch_payload,
@@ -401,3 +402,20 @@ def test_unknown_harness_still_raises() -> None:
     target = BlackboxTarget.model_construct(kind=BLACKBOX_TARGET_AGENT, harness="nope", model="acme/agent-1")
     with pytest.raises(ServiceError, match="Unknown harness 'nope'"):
         build_launch(target, _GATEWAYS["gw"])
+
+
+@pytest.mark.parametrize("harness", MCP_HARNESSES)
+def test_every_mcp_harness_writes_one_relay_url_for_each_proposer_server(harness: str) -> None:
+    """Write each server's gateway relay url once into the generated config, and no MCP url without servers (SKY-618).
+
+    Args:
+        harness: An MCP harness id.
+    """
+    target = BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=harness, model="target-model")
+    gateway = _GATEWAYS["gw"]
+    files = "".join(build_launch(target, gateway, protected=True, mcp_servers=("search", "lint")).files.values())
+
+    for name in ("search", "lint"):
+        assert files.count(f"{gateway.url}/mcp/{name}") == 1
+    assert gateway.api_key not in files
+    assert "/mcp/" not in "".join(build_launch(target, gateway, protected=True).files.values())

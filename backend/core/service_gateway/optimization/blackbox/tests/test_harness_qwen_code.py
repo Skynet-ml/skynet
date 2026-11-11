@@ -148,6 +148,7 @@ def _fake_qwen_run(
     reasoning_effort: str | None = None,
     workspace_files: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[list[str], Path, dict[str, str], Path]:
     """Set up the built qwen command in a scratch workspace against a fake ``qwen`` binary.
 
@@ -165,11 +166,14 @@ def _fake_qwen_run(
         reasoning_effort: The effort to build the launch with.
         workspace_files: Extra files the candidate repo puts in the workspace.
         extra_env: Env values for the fake binary.
+        mcp_servers: The ``[proposer]`` MCP server names to build the launch with.
 
     Returns:
         The command arguments, the workspace, the env and the call log path.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort)
+    launch = build_launch(
+        _target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort, mcp_servers=mcp_servers
+    )
     workspace = tmp_path / "work"
     for name, content in {**(workspace_files or {}), **launch.files}.items():
         path = workspace / name
@@ -208,6 +212,7 @@ def _run_with_fake_qwen(
     fake_exit: int = 0,
     reasoning_effort: str | None = None,
     workspace_files: dict[str, str] | None = None,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[str, str, Path, int]:
     """Run the built qwen command once in a scratch workspace against a fake ``qwen`` binary; see :func:`_fake_qwen_run`.
 
@@ -217,6 +222,7 @@ def _run_with_fake_qwen(
         fake_exit: Exit status the fake binary returns.
         reasoning_effort: The effort to build the launch with.
         workspace_files: Extra files the candidate repo puts in the workspace.
+        mcp_servers: The ``[proposer]`` MCP server names to build the launch with.
 
     Returns:
         The command's stdout, the fake binary's call log, the workspace, and
@@ -228,6 +234,7 @@ def _run_with_fake_qwen(
         fake_exit=fake_exit,
         reasoning_effort=reasoning_effort,
         workspace_files=workspace_files,
+        mcp_servers=mcp_servers,
     )
     result = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False)
     return result.stdout, log.read_text(), workspace, result.returncode
@@ -809,3 +816,40 @@ def test_empty_stash_folder_from_a_killed_run_does_not_stop_the_next_run(tmp_pat
     assert result.returncode == 0
     assert log.exists()
     assert not (workspace / _STASH_DIR).exists()
+
+
+def test_protected_run_loads_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give each [proposer] server one system ``httpUrl`` at the relay and allow only those names (SKY-618)."""
+    _, calls, _, code = _run_with_fake_qwen(tmp_path, protected=True, mcp_servers=("search", "my tools"))
+
+    assert code == 0
+    (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
+    assert "[--allowed-mcp-server-names] [search,my tools] [--prompt]" in run
+    assert "--disable-mcp-server" not in run
+    assert "skynet-no-mcp" not in run
+    settings = json.loads((tmp_path / "calls.log.settings").read_text())
+    assert settings["mcpServers"] == {
+        "search": {"httpUrl": f"{_RELAY}/mcp/search"},
+        "my tools": {"httpUrl": f"{_RELAY}/mcp/my%20tools"},
+    }
+    assert _GATEWAY.url not in json.dumps(settings)
+    assert _GATEWAY.api_key not in json.dumps(settings)
+
+
+def test_launch_without_proposer_mcp_servers_keeps_every_mcp_server_off() -> None:
+    """Leave the settings and the MCP flags as before when the proposer's file lists no server."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+
+    assert "mcpServers" not in json.loads(launch.files[QWEN_CODE_SETTINGS_FILE])
+    assert "--allowed-mcp-server-names skynet-no-mcp --disable-mcp-server '*'" in launch.run_command
+
+
+@pytest.mark.parametrize("name", ["a,b", " search", "search "])
+def test_a_server_name_the_allow_list_flag_would_change_is_refused(name: str) -> None:
+    """Refuse a name that Qwen Code would split or trim, so its tools never drop out of the run silently.
+
+    Args:
+        name: A server name with a comma or an edge space.
+    """
+    with pytest.raises(ServiceError, match="cannot load a \\[proposer\\] mcp server whose name"):
+        build_launch(_target(), _GATEWAY, protected=True, mcp_servers=(name,))

@@ -2500,7 +2500,7 @@ def test_a_codex_proposer_loads_the_routed_proposer_mcp_servers(
     proposer = json.loads(session.files["native_input.json"])["proposer"]
     config = tomllib.loads(next(text for path, text in proposer["files"].items() if path.endswith("config.toml")))
     # The run command swaps the gateway url for the box proxy's url before Codex starts.
-    assert config["mcp_servers"] == {"search": {"url": "https://gateway.example/v1/mcp/search"}}
+    assert config["mcp_servers"]["search"]["url"] == "https://gateway.example/v1/mcp/search"
     assert "APP_BUDGET_RELAY_URL" in proposer["run_command"]
     assert "mcp-relay-token" not in session.files["native_input.json"]
     assert session.calls[-1][1]["env"][MCP_TOKEN_ENV] == "mcp-relay-token"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 from .....models.blackbox import BLACKBOX_HARNESS_OPENCODE
 from ..harness_bridge import parse_opencode_output
@@ -29,13 +30,22 @@ _PROTECTED_ENV = {
 }
 
 
-def _opencode_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _opencode_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for OpenCode (``opencode-ai``).
 
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for OpenCode's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so OpenCode never holds the real url or a secret (SKY-618).
 
     Returns:
         The launch.
@@ -57,6 +67,18 @@ def _opencode_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
         },
         "model": f"{PROVIDER}/{model}",
     }
+    if mcp_servers:
+        # The relay needs no sign-in, so ``oauth: false`` stops OpenCode from
+        # starting an OAuth flow when a server answers 401.
+        config["mcp"] = {
+            name: {
+                "type": "remote",
+                "url": f"{gateway.url}/mcp/{quote(name, safe='')}",
+                "enabled": True,
+                "oauth": False,
+            }
+            for name in mcp_servers
+        }
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_npm_install("opencode", "opencode-ai", OPENCODE_VERSION),

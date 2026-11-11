@@ -21,7 +21,15 @@ from typing import Any
 
 from ....config import settings, with_legacy_env
 from ....exceptions import ServiceError
-from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_CUSTOM, BLACKBOX_HARNESS_PI, BlackboxTarget
+from ....models.blackbox import (
+    BLACKBOX_HARNESS_CODEX,
+    BLACKBOX_HARNESS_CUSTOM,
+    BLACKBOX_HARNESS_OPENCODE,
+    BLACKBOX_HARNESS_OPENCODE_V2,
+    BLACKBOX_HARNESS_PI,
+    BLACKBOX_HARNESS_QWEN_CODE,
+    BlackboxTarget,
+)
 from ....worker import host_agent_shim
 from .harness_bridge import PARSERS, parse_host_agent_output, parse_pi_output, parse_plain_output
 from .harnesses import REGISTRY, HarnessSpec
@@ -78,6 +86,16 @@ _PARSER_NAMES = {parser: name for name, parser in PARSERS.items()}
 # The LiteLLM-style routing prefix; the gateway fronts OpenRouter itself and
 # rejects model ids that still carry it.
 _OPENROUTER_PREFIX = "openrouter/"
+
+# The catalog harnesses that load the [proposer] MCP servers from the relay
+# urls in their generated config. Any other harness would run without the
+# tools the file lists, so its launch stops (SKY-610, SKY-618).
+MCP_HARNESSES = (
+    BLACKBOX_HARNESS_CODEX,
+    BLACKBOX_HARNESS_OPENCODE,
+    BLACKBOX_HARNESS_OPENCODE_V2,
+    BLACKBOX_HARNESS_QWEN_CODE,
+)
 
 
 class _RegistryView(Mapping[str, Any]):
@@ -323,13 +341,14 @@ def build_launch(
     """
     model = str(target.model).removeprefix(_OPENROUTER_PREFIX)
     if mcp_servers:
-        # Only Codex loads the relay's servers yet, and only behind the box's
-        # proxy; any other harness would run without the tools the file lists (SKY-610).
+        # Only the box's proxy adds the relay token, so even an MCP harness
+        # needs a protected run.
         name = f"host CLI {host_cli}" if host_cli is not None else target.harness
-        if host_cli is not None or target.harness != BLACKBOX_HARNESS_CODEX or not protected:
+        if host_cli is not None or target.harness not in MCP_HARNESSES or not protected:
             raise ServiceError(
                 f"The {name} proposer harness cannot load the [proposer] mcp servers yet. "
-                f"Use the {BLACKBOX_HARNESS_CODEX} harness, or remove [proposer] mcp from optimize.toml."
+                f"Use one of these harnesses: {', '.join(MCP_HARNESSES)}, "
+                "or remove [proposer] mcp from optimize.toml."
             )
     if host_cli is not None:
         return host_cli_launch(model, gateway, host_cli, host_agent_token)

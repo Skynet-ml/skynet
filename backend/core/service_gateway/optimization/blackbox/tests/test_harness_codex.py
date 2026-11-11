@@ -56,12 +56,15 @@ def test_spec_declares_the_codex_efforts_for_the_submit_check() -> None:
 
 
 def test_codex_lists_each_proposer_mcp_server_at_the_gateway_relay_path() -> None:
-    """Give each [proposer] server only a gateway relay url: no real url, header or key (SKY-610)."""
+    """Give each [proposer] server only a gateway relay url: no real url, header or key (SKY-610).
+
+    Each server is required, so ``codex exec`` fails when it does not start (SKY-618).
+    """
     config = tomllib.loads(SPEC.launch("m", _GATEWAY, mcp_servers=("search", "my tools")).files[_CONFIG])
 
     assert config["mcp_servers"] == {
-        "search": {"url": "https://gw.example/v1/mcp/search"},
-        "my tools": {"url": "https://gw.example/v1/mcp/my%20tools"},
+        "search": {"url": "https://gw.example/v1/mcp/search", "required": True, "startup_timeout_sec": 60},
+        "my tools": {"url": "https://gw.example/v1/mcp/my%20tools", "required": True, "startup_timeout_sec": 60},
     }
 
 

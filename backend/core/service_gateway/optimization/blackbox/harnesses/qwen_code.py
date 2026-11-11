@@ -14,6 +14,8 @@ fixed system settings file that pins the model provider to the gateway.
 from __future__ import annotations
 
 import json
+import shlex
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_QWEN_CODE
@@ -91,12 +93,13 @@ _STASH_MARK = "# Skynet Qwen Code stash"
 QWEN_CODE_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
-def _qwen_code_settings(base_url: str, reasoning_effort: str | None) -> str:
+def _qwen_code_settings(base_url: str, reasoning_effort: str | None, mcp_servers: tuple[str, ...] = ()) -> str:
     """Build the fixed system settings file that pins the model provider to the gateway.
 
     Args:
         base_url: The gateway base URL.
         reasoning_effort: The user's effort for the model, or ``None`` for Qwen Code's default.
+        mcp_servers: The ``[proposer]`` MCP server names, each at the gateway's ``/mcp/<name>`` url.
 
     Returns:
         The settings JSON. It names the key's env variable and holds no key.
@@ -122,6 +125,11 @@ def _qwen_code_settings(base_url: str, reasoning_effort: str | None) -> str:
         "modelFallbacks": "",
         "agents": {"builtin": {"exploreModel": "inherit"}},
     }
+    if mcp_servers:
+        # System scope outranks a workspace ``.mcp.json`` entry of the same
+        # name (packages/cli/src/config/mcpServers.ts), so the repo cannot
+        # point a relay name at another url.
+        settings["mcpServers"] = {name: {"httpUrl": f"{base_url}/mcp/{quote(name, safe='')}"} for name in mcp_servers}
     return json.dumps(settings, indent=2)
 
 
@@ -152,7 +160,13 @@ _PROTECTED_ENV = {
 }
 
 
-def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _qwen_code_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for Qwen Code (``qwen``, pinned to :data:`QWEN_CODE_VERSION`).
 
     Each run gets a fresh ``QWEN_HOME`` outside the workspace, so the settings,
@@ -170,12 +184,16 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for
             Qwen Code's default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url, which the box's proxy relays with its own token,
+            so Qwen Code never holds the real url or a secret (SKY-618).
 
     Returns:
         The launch.
 
     Raises:
-        ServiceError: When ``reasoning_effort`` is not a level Qwen Code supports.
+        ServiceError: When ``reasoning_effort`` is not a level Qwen Code supports,
+            or when a server name cannot pass through ``--allowed-mcp-server-names``.
     """
     if reasoning_effort and reasoning_effort not in QWEN_CODE_EFFORTS:
         raise ServiceError(
@@ -195,7 +213,21 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     # settings, and the tool scheduler denies listed tools also under
     # ``--yolo``. ``--allowed-mcp-server-names`` replaces the settings allow
     # list with a name no server has, and ``--disable-mcp-server '*'`` marks
-    # every server disabled, so discovery starts none.
+    # every server disabled, so discovery starts none. With [proposer] MCP
+    # servers the allow list holds only their names, so discovery starts only
+    # the relay entries of the system settings.
+    if any("," in name or name != name.strip() for name in mcp_servers):
+        # Qwen Code splits the flag value at commas and trims each part, so
+        # such a name would drop out of the allow list and its tools with it.
+        raise ServiceError(
+            "The Qwen Code harness cannot load a [proposer] mcp server whose name has a comma "
+            "or starts or ends with a space. Rename the server in optimize.toml."
+        )
+    mcp_flags = (
+        f"--allowed-mcp-server-names {shlex.quote(','.join(mcp_servers))}"
+        if mcp_servers
+        else "--allowed-mcp-server-names skynet-no-mcp --disable-mcp-server '*'"
+    )
     files = " ".join(_WORKSPACE_QWEN_FILES)
     # The stash goes only after every file is back, so a failed move (``.qwen``
     # is now a file, a full disk) never loses the originals.
@@ -234,7 +266,7 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         f'OPENAI_API_KEY="${ENV_API_KEY}" OPENAI_MODEL="${ENV_MODEL}" '
         "qwen --yolo --auth-type openai "
         "--exclude-tools web_fetch,web_search "
-        "--allowed-mcp-server-names skynet-no-mcp --disable-mcp-server '*' "
+        f"{mcp_flags} "
         f"--prompt {_PROMPT_ARG} < /dev/null"
     )
     env = _base_env(model, gateway)
@@ -257,7 +289,7 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         install_command=_npm_install("qwen", QWEN_CODE_PACKAGE, QWEN_CODE_VERSION),
         files={
             QWEN_CODE_BASE_URL_FILE: gateway.url,
-            QWEN_CODE_SETTINGS_FILE: _qwen_code_settings(gateway.url, reasoning_effort),
+            QWEN_CODE_SETTINGS_FILE: _qwen_code_settings(gateway.url, reasoning_effort, mcp_servers),
         },
         run_command=run_command,
         env=env,

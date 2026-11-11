@@ -26,6 +26,9 @@ CODEX_VERSION = "0.153.0"
 # left out: ``reasoning_effort_for_request`` in codex-rs/core/src/client.rs
 # swaps them for another level or for ``disabled``.
 CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# Codex 0.153.0 waits 30 s for an MCP server to start and list its tools. The
+# relay adds a hop to the parent, so each server gets more time.
+_MCP_STARTUP_TIMEOUT_SEC = 60
 
 
 def _codex_launch(
@@ -78,7 +81,14 @@ def _codex_launch(
     )
     for name in mcp_servers:
         url = f"{gateway.url}/mcp/{quote(name, safe='')}"
-        config_toml += f"\n[mcp_servers.{json.dumps(name)}]\nurl = {json.dumps(url)}\n"
+        # ``required`` makes ``codex exec`` exit with an error when the server
+        # does not start, so a run never goes on without the server's tools.
+        config_toml += (
+            f"\n[mcp_servers.{json.dumps(name)}]\n"
+            f"url = {json.dumps(url)}\n"
+            "required = true\n"
+            f"startup_timeout_sec = {_MCP_STARTUP_TIMEOUT_SEC}\n"
+        )
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_npm_install("codex", "@openai/codex", CODEX_VERSION),

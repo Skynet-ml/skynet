@@ -394,3 +394,22 @@ def test_recorded_output_parses_to_the_answer_and_usage() -> None:
     )
     assert parse_opencode_output("") == (None, {})
     assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "opencode"
+
+
+def test_opencode2_lists_each_proposer_mcp_server_at_the_gateway_relay_path() -> None:
+    """Give each [proposer] server one ``mcp.servers`` remote entry with only a gateway relay url (SKY-618)."""
+    launch = build_launch(_target(), _GATEWAY, protected=True, mcp_servers=("search", "my tools"))
+    config = json.loads(launch.files["opencode.json"])
+
+    assert config["mcp"] == {
+        "servers": {
+            "search": {"type": "remote", "url": "https://gw.example/v1/mcp/search", "oauth": False},
+            "my tools": {"type": "remote", "url": "https://gw.example/v1/mcp/my%20tools", "oauth": False},
+        }
+    }
+    assert _GATEWAY.api_key not in launch.files["opencode.json"]
+
+
+def test_opencode2_without_proposer_mcp_servers_lists_none() -> None:
+    """Leave MCP out of the config when the proposer's file lists no server."""
+    assert "mcp" not in json.loads(build_launch(_target(), _GATEWAY, protected=True).files["opencode.json"])
