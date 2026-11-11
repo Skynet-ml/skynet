@@ -40,7 +40,7 @@ from typing import Any
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
-from ..errors import RunTimeoutError, SandboxError, SandboxFatalError, SandboxInfraError, StartTimeoutError
+from ..errors import SandboxError, SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..resources import ResourceMode, SandboxSpec
 from ..telemetry import current_output_sink
 from ..timeouts import Phase, PhaseTimeouts
@@ -57,7 +57,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 APP_NAME = "skynet"
-DEFAULT_IMAGE = "python:3.12-slim"
+DEFAULT_IMAGE = "python:3.12.15-slim"
 STOP_TIMEOUT = 60.0
 # Harbor waits this long for a cancelled create, so a box made during the
 # request still has a handle to terminate.
@@ -66,6 +66,8 @@ CREATE_GRACE = 30.0
 # hung SDK call.
 EXEC_GRACE = 30.0
 OUTPUT_BUFFER_BYTES = 64 * 1024 * 1024
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 
 SAIL_CAPABILITIES = EnvironmentCapabilities(
     name="sail",
@@ -385,11 +387,12 @@ class SailEnvironment(SandboxEnvironment):
             sudo: Run the command as root.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, the result has exit code 124, ``timed_out`` set and
+            the output that Sail kept.
 
         Raises:
             SandboxInfraError: The Sailbox is not running, or the SDK call failed.
-            RunTimeoutError: The command ran past the time limit.
         """
         sailbox = self._require_sailbox()
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
@@ -404,11 +407,9 @@ class SailEnvironment(SandboxEnvironment):
                         output_buffer_bytes=OUTPUT_BUFFER_BYTES,
                     )
         except TimeoutError:
-            raise RunTimeoutError(limit) from None
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
         if result.timed_out:
-            # Without a limit, Sail ended the command at its own default
-            # limit, which the provider does not know; 0 marks it as unknown.
-            raise RunTimeoutError(limit if limit is not None else 0)
+            return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, stdout=result.stdout, stderr=result.stderr, timed_out=True)
         if result.stdout_truncated or result.stderr_truncated:
             logger.warning("Sail kept only the last %d MiB of a command output stream.", OUTPUT_BUFFER_BYTES >> 20)
         sink = on_output or current_output_sink()

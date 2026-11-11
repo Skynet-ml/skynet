@@ -75,7 +75,7 @@ import types
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -249,6 +249,44 @@ class StageClient:
         Returns:
             The parent's answer.
         """
+        return next(self.answers(message))
+
+    def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        """Send one framed request, then yield its answer and each streamed part after it.
+
+        An MCP event stream's answer has ``"more": true``; its parts follow in
+        ``<id>.1.json``, ``<id>.2.json`` and on, until a part has ``"more": false``.
+        Closing the generator before that part tells the parent to stop the stream.
+
+        Args:
+            message: The request, without its id.
+
+        Yields:
+            The parent's answer, then each part.
+        """
+        identity = self._send(message)
+        response = self._wait(self._responses / f"{identity}.json")
+        part = 0
+        try:
+            yield response
+            while response.get("more"):
+                part += 1
+                response = self._wait(self._responses / f"{identity}.{part}.json")
+                yield response
+        except GeneratorExit:
+            if response.get("more"):
+                self._send({"stop": identity})
+            raise
+
+    def _send(self, message: dict[str, Any]) -> str:
+        """Write one framed message to the parent's relay.
+
+        Args:
+            message: The message, without its id.
+
+        Returns:
+            The message's new id.
+        """
         identity = os.urandom(16).hex()
         frame = self._prefix + json.dumps({"id": identity, **message})
         # The real stdout: a scorer that redirects sys.stdout must still reach the relay.
@@ -257,7 +295,17 @@ class StageClient:
             # The leading newline ends any partial line the scorer printed before this call.
             stream.write("\n" + frame + "\n")
             stream.flush()
-        path = self._responses / f"{identity}.json"
+        return identity
+
+    def _wait(self, path: Path) -> dict[str, Any]:
+        """Wait for the parent to write one answer file, then read and remove it.
+
+        Args:
+            path: The answer file.
+
+        Returns:
+            The answer, or ``{}`` when it is not an object.
+        """
         while True:
             try:
                 response = json.loads(path.read_text(encoding="utf-8"))
@@ -355,7 +403,7 @@ def start_service_proxy(
             except ValueError:
                 self.send_error(400, "Malformed request body")
                 return
-            response = client.exchange(
+            answers = client.answers(
                 {
                     kind: urllib.parse.unquote(name),
                     "path": path,
@@ -364,6 +412,7 @@ def start_service_proxy(
                     "body": base64.b64encode(body).decode("ascii"),
                 }
             )
+            response = next(answers)
             if "error" in response:
                 payload = str(response["error"]).encode("utf-8")
                 headers = [("Content-Type", "text/plain; charset=utf-8")]
@@ -374,10 +423,26 @@ def start_service_proxy(
             self.send_response_only(int(response.get("status") or 502))
             for key, value in headers:
                 self.send_header(key, value)
-            self.send_header("Content-Length", str(len(payload)))
+            if not response.get("more"):
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(payload)
+                return
+            # An event stream has no length: its body ends when this connection closes.
+            self.close_connection = True
+            self.send_header("Connection", "close")
             self.end_headers()
-            if self.command != "HEAD":
+            try:
                 self.wfile.write(payload)
+                self.wfile.flush()
+                for part in answers:
+                    self.wfile.write(base64.b64decode(str(part.get("body") or "")))
+                    self.wfile.flush()
+            except OSError:
+                # The client left: closing the answers tells the parent to stop the stream.
+                answers.close()
+                return
 
         # http.server dispatches on these exact names.
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = relay  # noqa: N815

@@ -11,7 +11,7 @@ import pytest
 from ...api.errors import DomainError
 from .. import bitbucket, transport
 from ..github_publish import RepoPublishError
-from ..github_repo import RepoFetchError
+from ..github_repo import RepoFetchError, RepoRateLimitError
 from ..vault import ConnectorSecret
 
 SHA = "b" * 40
@@ -159,6 +159,20 @@ def test_commit_of_an_unknown_ref_is_not_found(monkeypatch: pytest.MonkeyPatch) 
     assert caught.value.code == "connectors.not_found"
     with pytest.raises(RepoFetchError):
         bitbucket.resolve_commit("bbtok", "team/bot", "gone/branch")
+
+
+def test_resolve_commit_reports_the_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 429 is a rate-limit error; only a read without a token advises to connect Bitbucket."""
+    _serve(monkeypatch, lambda r: httpx.Response(429, json={}))
+    with pytest.raises(RepoRateLimitError) as anonymous:
+        bitbucket.resolve_commit(None, "team/bot", "dev")
+    with pytest.raises(RepoRateLimitError) as linked:
+        bitbucket.resolve_commit("bbtok", "team/bot", "dev")
+
+    assert str(anonymous.value) == (
+        "Bitbucket's rate limit is reached. Try again later. Connect Bitbucket to raise the limit."
+    )
+    assert str(linked.value) == "Bitbucket's rate limit is reached. Try again later."
 
 
 def test_file_at_reads_a_slashed_branch_at_its_hash(monkeypatch: pytest.MonkeyPatch) -> None:

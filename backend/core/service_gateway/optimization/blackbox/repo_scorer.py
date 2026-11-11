@@ -50,7 +50,7 @@ import re
 import shlex
 import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -66,6 +66,7 @@ from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.usage_tags import LANE_KEY, current_tags
+from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
@@ -96,6 +97,9 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 _ISOLATED = "-I -B -u"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
+# The exit code of a stage box from the stage snapshot that has no tree, so
+# the scorer can tell a bad snapshot from a version that does not apply.
+_NO_STAGE_TREE_EXIT = 97
 # Unpacking the tree and applying the version in a stage box; the box's hold
 # covers this on top of the scorer's own timeout.
 _STAGE_LAYOUT_SECONDS = 600.0
@@ -109,6 +113,9 @@ _STAGE_ERROR_CHARS = 500
 _SERVICE_TIMEOUT_SECONDS = 120.0
 # The answer is written into the scorer box, base64-encoded.
 _SERVICE_BODY_BYTES = 4 * 1024 * 1024
+# An MCP event stream can stay open for the whole run, so streams get their own threads, apart
+# from the call pool; this caps how many one relay keeps open at a time.
+_MCP_STREAMS = 4
 # The answer's headers travel to relay_request with its body, so the
 # redaction covers both; httpx header lines never hold this separator.
 _HEAD_END = b"\r\n\r\n"
@@ -145,12 +152,41 @@ class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
 
 
+class _StageSnapshotError(RepoScoreError):
+    """Stage boxes from the stage snapshot did not open or did not hold the tree."""
+
+
 class _AnswerTooLargeError(Exception):
     """A service answered with more than the relay passes on."""
 
 
 class _UnreachableError(Exception):
     """A service's host resolves to an address the relay must not reach."""
+
+
+def _streamed(stack: contextlib.ExitStack, head: bytes, chunks: Iterator[bytes]) -> Generator[bytes, None, None]:
+    """Yield an MCP event stream's header lines, then its body as it arrives, and close its connection at the end.
+
+    Args:
+        stack: The open client, response and transport of the stream.
+        head: The header lines and the blank line after them.
+        chunks: The response body.
+
+    Yields:
+        The head first, then each body chunk.
+
+    Raises:
+        _AnswerTooLargeError: When the body passes 4 MiB in all.
+    """
+    with stack:
+        yield head
+        size = 0
+        for chunk in chunks:
+            size += len(chunk)
+            # The whole stream counts: a long-lived stream holds a pool worker and the run record keeps its body.
+            if size > _SERVICE_BODY_BYTES:
+                raise _AnswerTooLargeError
+            yield chunk
 
 
 def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
@@ -282,6 +318,14 @@ class RepoScorer:
         self._root_session: SandboxSession | None = None
         self._calls = 0
         self._lock = threading.Lock()
+        # The stage tree's own snapshot, built from ``stage_archive`` only: a
+        # snapshot of the scorer box would carry the metric into candidate code.
+        self._stage_snapshot_key = snapshot_cache_key(
+            image_digest="", setup_command="", install_command="", lock_files={"stage-tree": uuid.uuid4().hex}
+        )
+        self._stage_snapshot_id: str | None = None
+        self._stage_snapshot_done = False
+        self._stage_snapshot_lock = threading.Lock()
 
     def score(self, patch: str, case: Any = None) -> dict[str, Any]:
         """Check out one version and score it.
@@ -553,7 +597,9 @@ class RepoScorer:
         Every box opens before the scorer's first sample, or none stays open
         (E29, E32). Each box has its own hold, keyed to this evaluation and
         its stage (E31), and every box closes when the evaluation ends, also
-        on a failure.
+        on a failure. When the boxes from the stage snapshot do not open or
+        do not hold the tree, the scorer drops the snapshot and tries once more
+        with unpacked boxes. A version that does not apply keeps the snapshot.
 
         Args:
             patch: The version being scored.
@@ -574,6 +620,42 @@ class RepoScorer:
             with self._service_relay(_METRIC_ROLE, response_dir) as relay:
                 yield relay
             return
+        snapshot_id = self._stage_snapshot()
+        try:
+            relay = self._open_stages(patch, response_dir, snapshot_id)
+        except _StageSnapshotError:
+            # A bad snapshot would fail every later candidate, so this scorer
+            # drops it and unpacks the tree in each stage box from now on.
+            logger.warning("Stage boxes from the stage snapshot failed; stage boxes unpack the tree")
+            with self._stage_snapshot_lock:
+                bad, self._stage_snapshot_id = self._stage_snapshot_id, None
+                if bad is not None:
+                    self._release_stage_snapshot()
+            relay = self._open_stages(patch, response_dir, None)
+        try:
+            yield relay
+        finally:
+            relay.close()
+
+    def _open_stages(self, patch: str, response_dir: str, snapshot_id: str | None) -> _StageRelay:
+        """Open one evaluation's stage boxes and lay the version out in each.
+
+        Args:
+            patch: The version being scored.
+            response_dir: The call's answer folder, relative to the scorer box.
+            snapshot_id: The stage snapshot the boxes start from, or ``None``
+                to unpack the tree in each box.
+
+        Returns:
+            The relay over the open boxes; the caller closes it.
+
+        Raises:
+            _StageSnapshotError: When a box from the stage snapshot cannot open
+                for a reason other than the budget, or holds no tree.
+            RepoScoreError: When an unpacked stage box cannot open for a reason
+                other than the budget, or a box cannot lay out the version.
+            BudgetReached: And the other budget errors, from a stage box.
+        """
         evaluation_id = uuid.uuid4().hex
         specs = {
             name: stage_spec(
@@ -582,6 +664,7 @@ class RepoScorer:
                 evaluation_id=evaluation_id,
                 lifetime_seconds=self._timeout_seconds + _STAGE_LAYOUT_SECONDS,
                 tags={},
+                snapshot_id=snapshot_id,
             )
             for name, stage in self._stages.items()
         }
@@ -591,23 +674,27 @@ class RepoScorer:
             raise
         except Exception as error:
             logger.warning("Stage boxes did not open: %s", error)
-            raise RepoScoreError("The stage boxes could not open, so the version has no score.") from None
+            failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
+            raise failure("The stage boxes could not open, so the version has no score.") from None
         relay = self._relay(boxes, response_dir)
         try:
             kept = drop_paths(patch, self._hidden)
             try:
                 with ThreadPoolExecutor(max_workers=len(boxes), thread_name_prefix="stage-layout") as pool:
-                    laid_out = list(pool.map(lambda box: self._lay_out(box, kept), boxes.values()))
-            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+                    laid_out = list(
+                        pool.map(lambda box: self._lay_out(box, kept, restored=snapshot_id is not None), boxes.values())
+                    )
+            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError, _StageSnapshotError):
                 raise
             except Exception as error:
                 logger.warning("Stage box layout failed: %s", error)
                 laid_out = [False]
             if not all(laid_out):
                 raise RepoScoreError("A stage box could not lay out the version, so it has no score.")
-            yield relay
-        finally:
+        except BaseException:
             relay.close()
+            raise
+        return relay
 
     @contextlib.contextmanager
     def _service_relay(self, role: str, response_dir: str) -> Iterator[_StageRelay | None]:
@@ -674,7 +761,51 @@ class RepoScorer:
         """
         return self._mcp_roles.get(role) or RoleEnvironment()
 
-    def _lay_out(self, box: SandboxSession, patch: str) -> bool:
+    def _stage_snapshot(self) -> str | None:
+        """Return the stage tree's after-setup snapshot, built once for this scorer.
+
+        A builder box gets only the stage archive and the runner, never the
+        scorer's tree, so the snapshot holds no metric file. Each stage box
+        then starts from it and only applies the version.
+
+        Returns:
+            The snapshot id, or ``None`` when the runtime has no snapshots or
+            the build failed; stage boxes then unpack the tree themselves.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the builder box.
+        """
+        take = getattr(self._stage_runtime, "snapshot", None)
+        if take is None or not getattr(self._stage_runtime, "supports_snapshots", False) or not self._stages:
+            return None
+        with self._stage_snapshot_lock:
+            if self._stage_snapshot_done:
+                return self._stage_snapshot_id
+            name, stage = next(iter(self._stages.items()))
+            spec = stage_spec(
+                name,
+                stage,
+                evaluation_id=f"snapshot-{uuid.uuid4().hex}",
+                lifetime_seconds=_STAGE_LAYOUT_SECONDS,
+                tags={},
+            )
+            try:
+                box = self._stage_runtime.open(spec)
+                try:
+                    if self._lay_out(box, "", restored=False):
+                        self._stage_snapshot_id = take(box, self._stage_snapshot_key)
+                finally:
+                    box.close()
+            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+                raise
+            except Exception as error:
+                # Only the type: the provider's text can name the snapshot.
+                logger.warning("The stage snapshot failed (%s); stage boxes unpack the tree", type(error).__name__)
+                self._stage_snapshot_id = None
+            self._stage_snapshot_done = True
+            return self._stage_snapshot_id
+
+    def _lay_out(self, box: SandboxSession, patch: str, *, restored: bool = False) -> bool:
         """Unpack the tree without the hidden metric into one stage box and apply the version.
 
         Stage boxes get no setup command, so the tree runs with the image's
@@ -683,24 +814,35 @@ class RepoScorer:
         Args:
             box: One open stage box.
             patch: The version, hidden paths already dropped.
+            restored: The box started from the stage snapshot, which holds the
+                tree and the runner, so only the version is written.
 
         Returns:
             Whether the tree and the version are in place.
+
+        Raises:
+            _StageSnapshotError: When a box from the stage snapshot holds no tree.
         """
         parts = []
-        for index, chunk in enumerate(archive_chunks(self._stage_archive)):
-            name = f"{STAGE_DIR}/tree.{index:04d}.b64"
-            box.write_files({name: chunk})
-            parts.append(name)
-        box.write_files(
-            {f"{STAGE_DIR}/{RUNNER_PATH.rsplit('/', 1)[1]}": RUNNER_SOURCE, f"{STAGE_DIR}/version.patch": patch}
-        )
-        files = " ".join(shlex.quote(part) for part in parts)
+        if not restored:
+            for index, chunk in enumerate(archive_chunks(self._stage_archive)):
+                name = f"{STAGE_DIR}/tree.{index:04d}.b64"
+                box.write_files({name: chunk})
+                parts.append(name)
+            box.write_files({f"{STAGE_DIR}/{RUNNER_PATH.rsplit('/', 1)[1]}": RUNNER_SOURCE})
+        box.write_files({f"{STAGE_DIR}/version.patch": patch})
+        if restored:
+            unpack = f"test -d {_STAGE_TREE} || exit {_NO_STAGE_TREE_EXIT};"
+        else:
+            files = " ".join(shlex.quote(part) for part in parts)
+            unpack = f"mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
         result = box.run(
-            f"set -e; mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
+            f"set -e; {unpack}"
             f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
             timeout_seconds=_STAGE_LAYOUT_SECONDS,
         )
+        if restored and result.exit_code == _NO_STAGE_TREE_EXIT:
+            raise _StageSnapshotError("A stage box from the stage snapshot has no tree, so the version has no score.")
         if not result.ok:
             logger.warning(
                 "Stage box layout failed (exit %s): %s", result.exit_code, (result.stderr or result.stdout)[-2_000:]
@@ -771,8 +913,35 @@ class RepoScorer:
         return self._root
 
     def close(self) -> None:
-        """Destroy the workspace box."""
+        """Destroy the workspace box and delete this scorer's snapshots.
+
+        Raises:
+            BudgetReached: And the other budget errors, from a snapshot delete.
+        """
         self._workspace.close()
+        self._workspace.release_snapshot()
+        with self._stage_snapshot_lock:
+            self._stage_snapshot_id = None
+            self._release_stage_snapshot()
+
+    def _release_stage_snapshot(self) -> None:
+        """Delete the stage snapshot; the caller holds ``_stage_snapshot_lock``.
+
+        The key is this scorer's own, so no other box needs the snapshot. A
+        budget error is raised; any other failure is left for the run end.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the snapshot delete.
+        """
+        release = getattr(self._stage_runtime, "release_snapshot", None)
+        if release is None:
+            return
+        try:
+            release(self._stage_snapshot_key)
+        except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+            raise
+        except Exception as error:
+            logger.warning("The stage snapshot was not deleted (%s); the run end retries it", type(error).__name__)
 
 
 def _control_answer(error: BaseException) -> dict[str, Any] | None:
@@ -822,7 +991,8 @@ class _StageRelay:
 
     Calls to one stage run in parallel, each in its own process and folder,
     up to ``max_concurrency`` at a time (E34). Service requests run in their
-    own pool with the same limit.
+    own pool with the same limit. An MCP GET event stream passes on in its own
+    thread, up to ``_MCP_STREAMS`` at a time, so it never holds that pool.
     """
 
     def __init__(
@@ -907,6 +1077,11 @@ class _StageRelay:
             else None
         )
         self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
+        self._stream_pool = ThreadPoolExecutor(max_workers=_MCP_STREAMS, thread_name_prefix="stage-mcp-stream")
+        self._streams_lock = threading.Lock()
+        self._open_streams: set[str] = set()
+        # The streams whose box-side reader left; each stops at its next event.
+        self._abandoned: set[str] = set()
         self._pending = ""
         self._seen: set[str] = set()
         self._lock = threading.Lock()
@@ -969,7 +1144,7 @@ class _StageRelay:
                 try:
                     frame = json.loads(line[start + len(self._prefix) :])
                     identity = frame["id"]
-                    kind = next((key for key in ("service", "mcp") if key in frame), "stage")
+                    kind = next((key for key in ("service", "mcp", "stop") if key in frame), "stage")
                     name = frame[kind]
                 except (ValueError, KeyError, TypeError):
                     continue
@@ -981,6 +1156,11 @@ class _StageRelay:
                 ):
                     continue
                 self._seen.add(identity)
+                if kind == "stop":
+                    with self._streams_lock:
+                        if isinstance(name, str) and name in self._open_streams:
+                            self._abandoned.add(name)
+                    continue
                 if kind != "stage":
                     refusal = self._refusal(name) if kind == "service" else self._mcp_refusal(name)
                     if refusal is None:
@@ -1055,6 +1235,19 @@ class _StageRelay:
             frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
         """
         label = f"MCP server {name!r}"
+        # Only a GET listener streams. Its place is taken before the request goes out, so a
+        # refused listener never reaches the server; a POST answer ends after its result.
+        listener = frame.get("method") == "GET"
+        if listener:
+            with self._streams_lock:
+                opened = len(self._open_streams) < _MCP_STREAMS
+                if opened:
+                    self._open_streams.add(identity)
+            if not opened:
+                self._answer(
+                    identity, {"status": 503, "error": f"{label} has {_MCP_STREAMS} event streams open already."}
+                )
+                return
         try:
             url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
             response = self._request(url, headers, label, frame, kind="mcp", server=name)
@@ -1064,7 +1257,69 @@ class _StageRelay:
                 # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
                 logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
                 response = {"status": 502, "error": f"{label} could not be reached."}
-        self._answer(identity, response)
+        stream = response.pop("stream", None)
+        if stream is None:
+            if listener:
+                with self._streams_lock:
+                    self._open_streams.discard(identity)
+                    self._abandoned.discard(identity)
+            self._answer(identity, response)
+            return
+        submitted = False
+        try:
+            if self._answer(identity, response):
+                self._stream_pool.submit(self._stream_parts, name, identity, stream)
+                submitted = True
+        except RuntimeError:
+            pass  # The relay closed between the answer and the submit.
+        finally:
+            # A failed answer (a ServiceError from the box, say) must still free the place, or
+            # four such failures refuse every later listener until the relay closes.
+            if not submitted:
+                self._end_stream(identity, stream)
+
+    def _end_stream(self, identity: str, stream: Generator[bytes, None, None]) -> None:
+        """Close an MCP event stream and free its place.
+
+        Args:
+            identity: The request's id.
+            stream: The masked body.
+        """
+        stream.close()
+        with self._streams_lock:
+            self._open_streams.discard(identity)
+            self._abandoned.discard(identity)
+
+    def _stream_parts(self, name: str, identity: str, stream: Generator[bytes, None, None]) -> None:
+        """Write each masked part of an MCP event stream as its own answer, then an end part.
+
+        Part ``n`` goes to ``<identity>.<n>.json`` with ``"more": true``; the
+        last part has ``"more": false``, and an ``error`` when the stream broke.
+        The stream stops with no last part when the box's reader left.
+
+        Args:
+            name: The MCP server.
+            identity: The request's id.
+            stream: The masked body after the first answer.
+        """
+        part = 0
+        ending: dict[str, Any] = {"more": False}
+        try:
+            for chunk in stream:
+                part += 1
+                if identity in self._abandoned or not self._answer(
+                    f"{identity}.{part}", {"body": base64.b64encode(chunk).decode("ascii"), "more": True}
+                ):
+                    return
+        except _AnswerTooLargeError:
+            ending["error"] = f"MCP server {name!r} answered with more than 4 MiB."
+        except Exception as error:
+            # Only the type, as in _mcp_call.
+            logger.warning("MCP server %s stream failed in the parent: %s", name, type(error).__name__)
+            ending["error"] = f"MCP server {name!r} stream broke."
+        finally:
+            self._end_stream(identity, stream)
+        self._answer(f"{identity}.{part + 1}", ending)
 
     def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
         """Send one service request and write the response for the scorer.
@@ -1160,7 +1415,7 @@ class _StageRelay:
         record_target = _tool_target(server, origin, _json_object(body)) if server else ""
         status: list[int] = []
 
-        def send(address: str, filled: dict[str, str], content: bytes) -> bytes:
+        def send(address: str, filled: dict[str, str], content: bytes) -> bytes | Generator[bytes, None, None]:
             """Send the filled request once and return its header lines and body together.
 
             Args:
@@ -1169,7 +1424,8 @@ class _StageRelay:
                 content: The guest's body.
 
             Returns:
-                The answer's header lines, a blank line, then its body.
+                The answer's header lines, a blank line, then its body; for an
+                MCP event stream, an iterator that yields them as they arrive.
 
             Raises:
                 _UnreachableError: When the host resolves to a private, loopback
@@ -1182,27 +1438,40 @@ class _StageRelay:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
             transport = _PinnedTransport(origin, pinned)
-            try:
-                with (
+            with contextlib.ExitStack() as stack:
+                stack.callback(transport.close)
+                client = stack.enter_context(
                     httpx.Client(
                         transport=transport, follow_redirects=False, trust_env=False, timeout=_SERVICE_TIMEOUT_SECONDS
-                    ) as client,
-                    client.stream(method, address, headers=[*guest, *filled.items()], content=content) as response,
-                ):
-                    answer = bytearray()
-                    for chunk in response.iter_bytes():
-                        answer.extend(chunk)
-                        if len(answer) > _SERVICE_BODY_BYTES:
-                            raise _AnswerTooLargeError
-                    status.append(response.status_code)
-                    head = b"".join(
+                    )
+                )
+                response = stack.enter_context(
+                    client.stream(method, address, headers=[*guest, *filled.items()], content=content)
+                )
+                head = (
+                    b"".join(
                         key + b": " + value + b"\r\n"
                         for key, value in response.headers.raw
                         if key.decode("latin-1").lower() not in _DECODED_HEADERS
                     )
-                    return head + _HEAD_END[2:] + bytes(answer)
-            finally:
-                transport.close()
+                    + _HEAD_END[2:]
+                )
+                if (
+                    kind == "mcp"
+                    and method == "GET"
+                    and response.headers.get("content-type", "").lower().startswith("text/event-stream")
+                ):
+                    # A GET event stream may stay open for the whole run, so its events pass on as they come;
+                    # a POST event stream ends after its result, so it is read whole like any other answer.
+                    status.append(response.status_code)
+                    return _streamed(stack.pop_all(), head, response.iter_bytes())
+                answer = bytearray()
+                for chunk in response.iter_bytes():
+                    answer.extend(chunk)
+                    if len(answer) > _SERVICE_BODY_BYTES:
+                        raise _AnswerTooLargeError
+                status.append(response.status_code)
+                return head + bytes(answer)
 
         try:
             answer = relay_request(
@@ -1227,11 +1496,29 @@ class _StageRelay:
         except ValueError as error:
             # relay_request names the secret and the host, never a value.
             return {"status": 403, "error": f"{label} was refused: {error}"}
-        head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
+        if isinstance(answer, bytes):
+            head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
+            more: dict[str, Any] = {}
+        else:
+            # The masker may hold the head back with the first event; read on until the head is whole.
+            buffered = b"\r\n"
+            try:
+                for chunk in answer:
+                    buffered += chunk
+                    if _HEAD_END in buffered:
+                        break
+            except _AnswerTooLargeError:
+                return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
+            except BaseException:
+                answer.close()
+                raise
+            head, _, content = buffered.partition(_HEAD_END)
+            more = {"more": True, "stream": answer}
         return {
             "status": status[0],
             "headers": [list(line.decode("latin-1").split(": ", 1)) for line in head.split(b"\r\n") if b": " in line],
             "body": base64.b64encode(content).decode("ascii"),
+            **more,
         }
 
     def _call(self, name: str, identity: str, value: Any) -> None:
@@ -1309,29 +1596,33 @@ class _StageRelay:
             return {"error": f"Stage {name!r} returned output that is not JSON."}
         return {"output": output}
 
-    def _answer(self, identity: str, response: Mapping[str, Any]) -> None:
+    def _answer(self, identity: str, response: Mapping[str, Any]) -> bool:
         """Write one answer where the scorer's ``call`` waits for it.
 
         Args:
             identity: The call's id.
             response: ``{"output"}``, ``{"error"}``, ``{"control"}``, or a
                 service's ``{"status", ...}``.
+
+        Returns:
+            False when the relay is closed and wrote nothing, so a stream stops.
         """
         with self._answer_lock:
             if self._closed:
-                return
+                return False
             changes = self._workspace.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
             if changes is None:
                 # The scorer may wait until its own timeout; either way the version gets no score.
                 self.unchecked = True
             else:
                 self.changes.extend(changes)
+            return True
 
     def close(self) -> None:
         """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
         with self._answer_lock:
             self._closed = True
-        for pool in (*self._pools.values(), self._refusals, self._service_pool):
+        for pool in (*self._pools.values(), self._refusals, self._service_pool, self._stream_pool):
             pool.shutdown(wait=False, cancel_futures=True)
         for box in self._boxes.values():
             with contextlib.suppress(Exception):

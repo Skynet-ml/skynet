@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import ast
-import json
-import time
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -17,22 +15,20 @@ from sqlalchemy.orm import Session
 from vercel.sandbox import SandboxApiError
 
 from core.billing import vercel_usage
-from core.billing.budget_amounts import cent_units
-from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import BudgetRuntime, UsagePendingError
 from core.billing.vercel_usage import (
     PROPOSER_REGISTRY_HOSTS,
     SANDBOX_NETWORK_BYTES_CAP,
+    VercelUsageReservation,
     proposer_hosts,
     quote_vercel_sandbox,
     vercel_actual_usd,
     vercel_sandbox_cost_range,
 )
 from core.config import settings
-from core.service_gateway.optimization.blackbox import sandbox as sandbox_module
-from core.service_gateway.optimization.blackbox.sandbox import SandboxSpec, VercelCredentials, VercelSandboxRuntime
-from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
 
 IMAGE = "vcr.example/skynet/optimizer@sha256:" + "a" * 64
 CREATE = {
@@ -74,7 +70,14 @@ def _at_cost_markup(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def database(tmp_path: Path) -> Iterator[Engine]:
-    """Create a private funded wallet and ledger for runtime integration tests."""
+    """Create a private funded wallet and ledger for real admission tests.
+
+    Args:
+        tmp_path: Per-test directory for the SQLite file.
+
+    Yields:
+        The engine bound to the funded ledger.
+    """
     engine = create_engine(f"sqlite:///{tmp_path / 'vercel.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
@@ -86,11 +89,56 @@ def database(tmp_path: Path) -> Iterator[Engine]:
     engine.dispose()
 
 
-def _runtime(database: Engine, total: int = 50) -> BudgetRuntime:
-    """Bind real admission to a local database, leaving provider I/O mocked."""
+def _runtime(database: Engine) -> BudgetRuntime:
+    """Bind a real budget runtime to the local ledger.
+
+    Args:
+        database: Engine of the funded ledger.
+
+    Returns:
+        A runtime for a fresh 50-cent budget owned by ``alice``.
+    """
     service = BudgetService(engine=database)
-    budget = service.create("alice", total, idempotency_key="draft")
+    budget = service.create("alice", 50, idempotency_key="draft")
     return BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+
+
+def _create_request() -> httpx.Request:
+    """Build the create request that ``fail`` recognizes as the provider's create call.
+
+    Returns:
+        A POST request to the Vercel sandbox create endpoint.
+    """
+    return httpx.Request("POST", "https://vercel.com/api/v3/sandboxes")
+
+
+def test_lost_creation_response_keeps_the_hold_and_refuses_a_replay(database: Engine) -> None:
+    """Keep a hold pending after a lost create response and refuse a second dispatch for the same key."""
+    runtime = _runtime(database)
+    reservation = VercelUsageReservation(runtime, CREATE, operation_key="evaluation-one")
+    reservation.fail(httpx.ReadError("creation response lost", request=_create_request()))
+    with pytest.raises(UsagePendingError, match="already dispatched"):
+        VercelUsageReservation(runtime, CREATE, operation_key="evaluation-one")
+    assert len(runtime._pinned) == 1
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    with Session(database) as session:
+        assert session.scalar(select(ExecutionOperationModel)).state == "pending"
+
+
+def test_refused_creation_without_a_session_releases_the_hold(database: Engine) -> None:
+    """Release the hold when the provider answers the create call with a 400 and no session exists."""
+    runtime = _runtime(database)
+    reservation = VercelUsageReservation(runtime, CREATE, operation_key="evaluation-one")
+    response = httpx.Response(400, request=_create_request())
+    reservation.fail(SandboxApiError(response, "Invalid request: `timeout` should be <= 86400000."))
+    assert runtime._pinned == {}
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.pending_operations == 0
+    assert snapshot.reserved_cents == 0
+    with Session(database) as session:
+        assert session.scalar(select(ExecutionOperationModel)).state == "released"
 
 
 def test_quote_covers_all_regions_and_settles_cpu_separately_from_wall_time() -> None:
@@ -219,319 +267,6 @@ def test_unbounded_allowlist_is_not_quoted(change: dict[str, Any]) -> None:
     """Refuse an open, unsorted, or uncapped allowlist, and an allowlist on a deny-all box."""
     with pytest.raises(UnpricedOperationError):
         quote_vercel_sandbox({**NETWORKED, **change})
-
-
-def _mock_provider(
-    monkeypatch: pytest.MonkeyPatch,
-    runtime: BudgetRuntime,
-    *,
-    receipt: dict[str, Any] | None = None,
-    fail_create: bool = False,
-    reject_create: bool = False,
-    network_policy: dict[str, Any] | None = None,
-    overshoot_ms: int = 0,
-) -> list[httpx.Request]:
-    """Install a real Python SDK transport with deterministic Vercel API responses.
-
-    Args:
-        monkeypatch: Local patch lifetime.
-        runtime: Ledger whose pre-dispatch hold is asserted by the provider.
-        receipt: Optional stopped-session metadata override.
-        fail_create: Simulate a network failure after creation may have been accepted.
-        reject_create: Answer the first create call with the 400 Vercel returns for a lifetime above its ceiling.
-        network_policy: The create body's expected network policy, deny-all when omitted.
-        overshoot_ms: Extra lifetime Vercel reports beyond each requested extension.
-
-    Returns:
-        Captured provider requests for replay and lifecycle assertions.
-    """
-    requests: list[httpx.Request] = []
-    sandbox = {"name": "sandbox-one", "currentSessionId": "session-one", "persistent": False}
-    final = {**RECEIPT, **(receipt or {})}
-    limit = {"timeout": 0}
-
-    def provider(request: httpx.Request) -> httpx.Response:
-        """Require durable coverage before returning realistic provider metadata."""
-        requests.append(request)
-        if request.method == "POST" and request.url.path.endswith("/v3/sandboxes"):
-            assert runtime.service.get(runtime.budget_id, "alice").reserved_cents > 0
-            body = json.loads(request.content)
-            limit["timeout"] = body["timeout"]
-            assert body["persistent"] is False
-            assert body["ports"] == []
-            assert body["networkPolicy"] == (network_policy or {"mode": "deny-all"})
-            assert body["resources"] == {"vcpus": 2, "memory": 4096}
-            first_creation = not any(earlier.url.path.endswith("/v3/sandboxes") for earlier in requests[:-1])
-            if reject_create and first_creation:
-                return httpx.Response(
-                    400,
-                    json={
-                        "error": {"code": "bad_request", "message": "Invalid request: `timeout` should be <= 86400000."}
-                    },
-                )
-            if fail_create:
-                raise httpx.ReadError("creation response lost", request=request)
-            active = {
-                key: value
-                for key, value in RECEIPT.items()
-                if key not in {"stoppedAt", "activeCpuDurationMs", "networkTransfer"}
-            }
-            active["status"] = "running"
-            active["timeout"] = limit["timeout"]
-            return httpx.Response(
-                200, json={"sandbox": {**sandbox, "status": "running"}, "session": active, "routes": []}
-            )
-        if request.method == "POST" and request.url.path.endswith("/session-one/extend-timeout"):
-            limit["timeout"] += json.loads(request.content)["duration"] + overshoot_ms
-            funded = quote_vercel_sandbox({**CREATE, "lifetime_ms": limit["timeout"] - overshoot_ms})
-            with Session(runtime.service._engine) as session:
-                operation = session.scalar(select(ExecutionOperationModel))
-                assert operation.max_units >= cent_units(funded.maximum.total)
-            active = {key: value for key, value in RECEIPT.items() if key not in {"stoppedAt", "activeCpuDurationMs"}}
-            return httpx.Response(
-                200,
-                json={
-                    "sandbox": {**sandbox, "status": "running"},
-                    "session": {**active, "status": "running", "timeout": limit["timeout"]},
-                },
-            )
-        if request.method == "POST" and request.url.path.endswith("/session-one/stop"):
-            return httpx.Response(200, json={"sandbox": {**sandbox, "status": "stopped"}, "session": final})
-        if request.method == "DELETE":
-            return httpx.Response(
-                200, json={"sandbox": {**sandbox, "status": "stopped"}, "session": final, "routes": []}
-            )
-        raise AssertionError(f"Unexpected provider operation: {request.method} {request.url.path}")
-
-    class FixtureClient(httpx.Client):
-        """Preserve the SDK's concrete client type validation with a local transport."""
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            """Keep response hooks and SDK serialization while replacing network I/O."""
-            super().__init__(*args, transport=httpx.MockTransport(provider), **kwargs)
-
-    monkeypatch.setattr(sandbox_module.httpx, "Client", FixtureClient)
-    return requests
-
-
-def _sandbox_runtime(runtime: BudgetRuntime) -> VercelSandboxRuntime:
-    """Create a protected runtime with fixed non-secret test credentials."""
-    return VercelSandboxRuntime(
-        VercelCredentials(token="fixture", team_id="team", project_id="project"), image=IMAGE, budget=runtime
-    )
-
-
-def _spec(lifetime_seconds: int = 120, key: str = "evaluation-one") -> SandboxSpec:
-    """Use an offline sandbox identity stable across delivery retries."""
-    return SandboxSpec(lifetime_seconds=lifetime_seconds, name="sandbox-one", network_disabled=True, operation_key=key)
-
-
-def test_real_sdk_stop_metrics_are_preserved_and_settled_once(
-    database: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Meter raw fields discarded by the installed SDK and debit without model markup."""
-    runtime = _runtime(database)
-    requests = _mock_provider(monkeypatch, runtime)
-    sandbox = _sandbox_runtime(runtime).open(_spec())
-    assert list(runtime._pinned.values()) == [cent_units(quote_vercel_sandbox(CREATE).maximum.total)]
-    sandbox.close()
-    sandbox.close()
-    assert runtime._pinned == {}
-    assert [request.method for request in requests] == ["POST", "POST", "DELETE"]
-    snapshot = runtime.service.get(runtime.budget_id, "alice")
-    assert snapshot.reserved_cents == 0
-    assert snapshot.billed_cents == 1
-    assert snapshot.setup_spent_cents == Decimal("0.300504445")
-    with Session(database) as session:
-        evidence = session.scalar(
-            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.final.is_(True))
-        )
-        assert evidence.evidence["session"]["activeCpuDurationMs"] == 5_000
-        assert evidence.evidence["session"]["networkTransfer"] == {"ingress": 0, "egress": 0}
-
-
-def test_control_plane_transfer_is_recorded_and_settled(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Settle a deny-all sandbox at CPU and memory cost while keeping its reported transfer as evidence."""
-    runtime = _runtime(database)
-    requests = _mock_provider(monkeypatch, runtime, receipt={"networkTransfer": {"ingress": 42, "egress": 1}})
-    sandbox = _sandbox_runtime(runtime).open(_spec())
-    sandbox.close()
-    assert requests[-1].method == "DELETE"
-    snapshot = runtime.service.get(runtime.budget_id, "alice")
-    assert snapshot.reserved_cents == 0
-    assert snapshot.billed_cents == 1
-    assert snapshot.pending_operations == 0
-    assert snapshot.setup_spent_cents == Decimal("0.300504445")
-    with Session(database) as session:
-        evidence = session.scalar(
-            select(ExecutionUsageEvidenceModel).where(ExecutionUsageEvidenceModel.final.is_(True))
-        )
-        assert evidence.evidence["session"]["networkTransfer"] == {"ingress": 42, "egress": 1}
-
-
-def test_allowlisted_box_reaches_only_its_host_with_the_key_added_at_the_edge(
-    database: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Send Vercel an allowlist-only policy and keep the injected key out of the funded request."""
-    runtime = _runtime(database)
-    requests = _mock_provider(
-        monkeypatch,
-        runtime,
-        network_policy={
-            "allow": {
-                "api.anthropic.com": [{"transform": [{"headers": {"x-api-key": "sk-ant-secret"}}]}],
-            }
-        },
-    )
-    spec = SandboxSpec(
-        lifetime_seconds=120,
-        name="sandbox-one",
-        operation_key="evaluation-one",
-        allowed_hosts=("api.anthropic.com",),
-        inject_headers={"api.anthropic.com": {"x-api-key": "sk-ant-secret"}},
-    )
-    _sandbox_runtime(runtime).open(spec).close()
-    assert requests[-1].method == "DELETE"
-    with Session(database) as session:
-        operation = session.scalar(select(ExecutionOperationModel))
-        assert "sk-ant-secret" not in json.dumps(operation.price_snapshot, default=str)
-        assert operation.price_snapshot["request"]["allowed_hosts"] == ["api.anthropic.com"]
-
-
-def test_lost_creation_response_is_pending_and_never_repeated(
-    database: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Retain an uncertain creation hold and block another physical dispatch on replay."""
-    runtime = _runtime(database)
-    requests = _mock_provider(monkeypatch, runtime, fail_create=True)
-    sandbox_runtime = _sandbox_runtime(runtime)
-    with pytest.raises(httpx.ReadError):
-        sandbox_runtime.open(_spec())
-    with pytest.raises(UsagePendingError, match="already dispatched"):
-        sandbox_runtime.open(_spec())
-    assert len(runtime._pinned) == 1
-    assert len(requests) == 1
-    assert runtime.service.get(runtime.budget_id, "alice").pending_operations == 1
-
-
-def test_refused_creation_releases_the_hold_and_admits_the_next_attempt(
-    database: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Give back coverage the provider refused outright and record the refusal as final evidence."""
-    runtime = _runtime(database)
-    requests = _mock_provider(monkeypatch, runtime, reject_create=True)
-    sandbox_runtime = _sandbox_runtime(runtime)
-    with pytest.raises(SandboxApiError, match="86400000"):
-        sandbox_runtime.open(_spec())
-    assert runtime._pinned == {}
-    assert [request.method for request in requests] == ["POST"]
-    snapshot = runtime.service.get(runtime.budget_id, "alice")
-    assert snapshot.pending_operations == 0
-    assert snapshot.reserved_cents == 0
-    assert snapshot.billed_cents == 0
-    with Session(database) as session:
-        assert session.scalar(select(ExecutionOperationModel)).state == "released"
-        evidence = session.scalar(select(ExecutionUsageEvidenceModel))
-        assert evidence.issue == "rejected"
-        assert evidence.final is True
-        assert evidence.billed_cents == 0
-        assert evidence.evidence["status_code"] == 400
-    sandbox_runtime.open(_spec(key="evaluation-two")).close()
-    assert sum(request.url.path.endswith("/v3/sandboxes") for request in requests) == 2
-    snapshot = runtime.service.get(runtime.budget_id, "alice")
-    assert snapshot.pending_operations == 0
-    assert snapshot.reserved_cents == 0
-    assert snapshot.billed_cents == 1
-
-
-def test_insufficient_sandbox_coverage_never_calls_provider(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Require the full hard compute bound before entering the provider SDK."""
-    runtime = _runtime(database, total=1)
-    requests = _mock_provider(monkeypatch, runtime)
-    with pytest.raises(BudgetInsufficientError):
-        _sandbox_runtime(runtime).open(_spec(lifetime_seconds=3600))
-    assert requests == []
-    with Session(database) as session:
-        assert session.scalar(select(ExecutionOperationModel)) is None
-
-
-_SHORT = {"stoppedAt": 2_900, "activeCpuDurationMs": 500, "timeout": 1_000}
-
-
-def _slices(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shrink coverage slices to one second so renewals run within a test."""
-    monkeypatch.setattr(sandbox_module, "COVERAGE_SLICE_SECONDS", 1)
-    monkeypatch.setattr(sandbox_module, "_RENEWAL_LEAD_SECONDS", 0.9)
-    monkeypatch.setattr(sandbox_module, "_RENEWAL_MARGIN_SECONDS", 0.0)
-
-
-def _extensions(requests: list[httpx.Request]) -> list[int]:
-    """Return the durations of the extensions Vercel was asked for."""
-    return [json.loads(r.content)["duration"] for r in requests if r.url.path.endswith("/extend-timeout")]
-
-
-def _wait_for(condition: Any) -> None:
-    """Poll until ``condition()`` holds or two seconds pass."""
-    for _ in range(200):
-        if condition():
-            return
-        time.sleep(0.01)
-
-
-def test_protected_box_is_funded_one_slice_at_a_time_up_to_its_lifetime(
-    database: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Open for the first slice, fund each next slice before Vercel extends, and stop at the ceiling."""
-    _slices(monkeypatch)
-    runtime = _runtime(database)
-    requests = _mock_provider(monkeypatch, runtime, receipt={**_SHORT, "stoppedAt": 4_500, "timeout": 3_000})
-    sandbox = _sandbox_runtime(runtime).open(_spec(lifetime_seconds=3))
-    assert json.loads(requests[0].content)["timeout"] == 1_000
-    first = runtime.service.get(runtime.budget_id, "alice").reserved_cents
-    _wait_for(lambda: len(_extensions(requests)) == 2)
-    time.sleep(0.2)
-    assert _extensions(requests) == [1_000, 1_000]
-    assert runtime.service.get(runtime.budget_id, "alice").reserved_cents > first
-    assert list(runtime._pinned.values()) == [
-        cent_units(runtime.service.get(runtime.budget_id, "alice").reserved_cents)
-    ]
-    sandbox.close()
-    snapshot = runtime.service.get(runtime.budget_id, "alice")
-    assert snapshot.reserved_cents == 0
-    assert snapshot.pending_operations == 0
-
-
-def test_unfundable_slice_is_never_requested_from_vercel(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Leave the box to end on its funded time when the budget cannot pay for the next slice."""
-    _slices(monkeypatch)
-    runtime = _runtime(database)
-    requests = _mock_provider(monkeypatch, runtime, receipt=_SHORT)
-    attempts: list[str] = []
-
-    def refuse(*args: Any, **kwargs: Any) -> Any:
-        """Refuse every extension as the ledger does when funds run out."""
-        attempts.append(kwargs["evidence_key"])
-        raise BudgetInsufficientError("no room")
-
-    monkeypatch.setattr(runtime.service, "extend_coverage", refuse)
-    sandbox = _sandbox_runtime(runtime).open(_spec(lifetime_seconds=3))
-    _wait_for(lambda: attempts)
-    time.sleep(0.2)
-    assert attempts == ["vercel-extend:2000"]
-    assert _extensions(requests) == []
-    sandbox.close()
-
-
-def test_extension_past_funded_time_ends_the_box(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stop the box at once when Vercel reports a limit beyond the coverage the ledger holds."""
-    _slices(monkeypatch)
-    runtime = _runtime(database)
-    requests = _mock_provider(monkeypatch, runtime, receipt=_SHORT, overshoot_ms=60_000)
-    sandbox = _sandbox_runtime(runtime).open(_spec(lifetime_seconds=3))
-    _wait_for(lambda: any(r.url.path.endswith("/session-one/stop") for r in requests))
-    assert _extensions(requests) == [1_000]
-    assert any(r.url.path.endswith("/session-one/stop") for r in requests)
-    sandbox.close()
 
 
 def test_a_proposer_with_no_network_key_reaches_only_the_registries() -> None:

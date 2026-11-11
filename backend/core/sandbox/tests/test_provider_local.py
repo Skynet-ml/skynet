@@ -152,15 +152,14 @@ async def test_exec_before_start_raises() -> None:
         await LocalEnvironment(_SPEC).exec("true")
 
 
-async def test_timeout_kills_the_process_group_and_raises_run_timeout() -> None:
-    """Kill the shell and its grandchild on timeout, then raise the run-timeout error."""
+async def test_timeout_kills_the_process_group_and_returns_a_timed_out_result() -> None:
+    """Kill the shell and its grandchild on timeout, then return exit code 124 and timed_out."""
     async with LocalEnvironment(_SPEC) as box:
         task = asyncio.create_task(box.exec("sleep 60 & echo $! > child.pid; wait", timeout_sec=1.0))
         child = await _read_pid(box, "child.pid")
         assert _alive(child)
-        with pytest.raises(RunTimeoutError) as caught:
-            await task
-        assert caught.value.seconds == 1.0
+        result = await task
+        assert (result.exit_code, result.timed_out) == (124, True)
         assert await _wait_until_gone(child)
 
 
@@ -168,10 +167,20 @@ async def test_run_phase_timeout_is_the_default_limit() -> None:
     """Use the run phase of the phase timeouts when the call gives no limit."""
     timeouts = PhaseTimeouts(start=10, setup=10, run=0.5, score=10, multiplier=2.0)
     async with LocalEnvironment(_SPEC, timeouts=timeouts) as box:
-        with pytest.raises(RunTimeoutError) as caught:
-            await box.exec("sleep 30")
-        assert caught.value.seconds == 1.0
+        started = time.monotonic()
+        result = await box.exec("sleep 30")
+        assert (result.exit_code, result.timed_out) == (124, True)
+        assert 0.9 < time.monotonic() - started < 10
         assert (await box.exec("true", timeout_sec=30)).ok
+
+
+async def test_timeout_keeps_the_partial_output() -> None:
+    """Return the output that the command wrote before the time limit."""
+    async with LocalEnvironment(_SPEC) as box:
+        result = await box.exec("echo before; echo oops >&2; sleep 30", timeout_sec=0.5)
+    assert (result.exit_code, result.timed_out, result.ok) == (124, True, False)
+    assert result.stdout == "before\n"
+    assert result.stderr == "oops\n"
 
 
 async def test_cancelled_exec_kills_the_process_group_and_stop_removes_the_dir() -> None:
@@ -219,6 +228,34 @@ async def test_stop_finishes_the_removal_when_it_is_cancelled(monkeypatch: pytes
     assert root is not None
     monkeypatch.setattr(local.shutil, "rmtree", _slow_rmtree)
     task = asyncio.create_task(box.stop())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not root.exists()
+
+
+async def test_stop_finishes_the_removal_after_two_cancels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the directory before a stop that is cancelled twice passes the cancel on."""
+    real_rmtree = local.shutil.rmtree
+
+    def _slow_rmtree(path: Path) -> None:
+        """Remove the tree after a delay, so both cancels land mid-removal.
+
+        Args:
+            path: The directory to remove.
+        """
+        time.sleep(0.3)
+        real_rmtree(path)
+
+    box = LocalEnvironment(_SPEC)
+    await box.start()
+    root = box.path
+    assert root is not None
+    monkeypatch.setattr(local.shutil, "rmtree", _slow_rmtree)
+    task = asyncio.create_task(box.stop())
+    await asyncio.sleep(0.05)
+    task.cancel()
     await asyncio.sleep(0.05)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -287,7 +324,7 @@ async def test_stop_during_spawn_kills_the_new_command(monkeypatch: pytest.Monke
 
 
 async def test_timeout_returns_while_a_new_session_grandchild_holds_the_pipes() -> None:
-    """Raise the run timeout on time when a grandchild left the group but keeps stdout open."""
+    """Return the timed-out result on time when a grandchild left the group but keeps stdout open."""
     command = (
         "python3 -c 'import os, time; os.setsid(); "
         'open("gc.pid", "w").write(str(os.getpid())); time.sleep(60)\' & wait'
@@ -295,8 +332,8 @@ async def test_timeout_returns_while_a_new_session_grandchild_holds_the_pipes() 
     async with LocalEnvironment(_SPEC) as box:
         started = time.monotonic()
         try:
-            with pytest.raises(RunTimeoutError):
-                await asyncio.wait_for(box.exec(command, timeout_sec=0.5), 5)
+            result = await asyncio.wait_for(box.exec(command, timeout_sec=0.5), 5)
+            assert (result.exit_code, result.timed_out) == (124, True)
             assert time.monotonic() - started < 3
         finally:
             text = await box.download_file("gc.pid")

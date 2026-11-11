@@ -19,7 +19,7 @@ from ..config import settings
 from .base import Credential, Entry, range_header
 from .github import clean_file_path
 from .github_publish import HardeningSummary, PublishedChange, RepoPublishError, hardening_line
-from .github_repo import COMMIT_LIMIT, RepoFetchError, commit_summary
+from .github_repo import COMMIT_LIMIT, RepoFetchError, RepoRateLimitError, commit_summary, rate_limit_message
 from .oauth import OAuthApp
 from .oauth import oauth_available as _oauth_available
 from .transport import download, get_json, label, request
@@ -644,6 +644,7 @@ def resolve_commit(token: str, repository: str, branch: str | None) -> str:
         The 40-character commit id.
 
     Raises:
+        RepoRateLimitError: When GitLab's rate limit stops the lookup.
         RepoFetchError: When GitLab refuses the lookup.
     """
     try:
@@ -651,6 +652,8 @@ def resolve_commit(token: str, repository: str, branch: str | None) -> str:
         url = f"{_project_url(repository)}/repository/commits/{quote(ref, safe='')}"
         return str(get_json(url, provider=PROVIDER, headers=_headers(token))["id"])
     except DomainError as error:
+        if error.code == "connectors.rate_limited":
+            raise RepoRateLimitError(rate_limit_message("GitLab", not token)) from error
         raise RepoFetchError(f"GitLab could not find {repository} at '{branch or 'its default branch'}'.") from error
 
 

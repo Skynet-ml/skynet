@@ -1644,6 +1644,7 @@ class _Echo:
         """Start the server on a free port."""
         self.paths: list[str] = []
         self.location = "/leak"
+        self.release = threading.Event()
         echo = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -1669,6 +1670,38 @@ class _Echo:
                         self.wfile.write(part)
                         self.wfile.flush()
                         time.sleep(0.05)
+                    return
+                if self.path.endswith("/result"):
+                    # The MCP SDK answers a POST tool call with an event stream that ends after its result.
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    self.wfile.write(b'event: message\ndata: {"result": {}}\n\n')
+                    return
+                if self.path.endswith("/events") or self.path.endswith("/large"):
+                    # No Content-Length: an event stream ends when the connection closes.
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    if self.path.endswith("/large"):
+                        for _ in range(5):
+                            self.wfile.write(b"data: " + b"x" * (1024 * 1024) + b"\n\n")
+                        return
+                    half = len(token) // 2
+                    parts = (b'data: {"seen": "' + token[:half].encode(), token[half:].encode() + b'"}\n\n')
+                    for part in parts:
+                        self.wfile.write(part)
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                    echo.release.wait(10)
+                    self.wfile.write(b"data: last\n\n")
+                    return
+                if self.path.endswith("/big"):
+                    payload = b"x" * (4 * 1024 * 1024 + 1)
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
                     return
                 if self.path.endswith("/base64"):
                     key = base64.b64encode(token.encode()).decode()
@@ -1856,6 +1889,7 @@ def _mcp_relay(
     services: Mapping[str, ServiceSpec] | None = None,
     secret: str = "judge-secret-value",
     recorder: CallRecorder | None = None,
+    max_concurrency: int = 2,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the role's MCP servers.
 
@@ -1866,6 +1900,7 @@ def _mcp_relay(
         services: The run's services, which the role also lists.
         secret: The value of ``JUDGE_KEY``.
         recorder: Writes each relayed call into the run record.
+        max_concurrency: The size of the service and MCP call pool.
 
     Returns:
         The relay.
@@ -1874,7 +1909,7 @@ def _mcp_relay(
         {},
         {},
         response_dir="calls/000001/stages",
-        max_concurrency=2,
+        max_concurrency=max_concurrency,
         env={},
         workspace=workspace,  # type: ignore[arg-type]
         services=services,
@@ -1952,6 +1987,237 @@ def test_an_mcp_server_gets_the_key_and_the_box_gets_only_the_redacted_form(echo
     assert ["X-Echo", "[REDACTED]"] in answer["headers"]
     assert "judge-secret-value" not in json.dumps(answer)
     assert echo.paths == ["/echo"]
+
+
+def _mcp_stream(relay: _StageRelay, workspace: _Workspace, echo: _Echo, first: int = 2) -> list[dict[str, Any]]:
+    """Send one MCP GET frame, wait for its first answers, release the echo's last event, then read to the end.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+        echo: The upstream, which holds its last event until released.
+        first: How many answers must arrive before the release.
+
+    Returns:
+        The answer and each part, in the order they were written.
+    """
+    frame = {"id": "e" * 32, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while len(workspace.writes) < first and time.monotonic() < deadline:
+        time.sleep(0.01)
+    early = len(workspace.writes)
+    echo.release.set()
+    while not (workspace.writes and json.loads(workspace.writes[-1][1]).get("more") is False):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    relay.close()
+    assert early >= first
+    return [json.loads(text) for _, text in workspace.writes]
+
+
+def test_an_mcp_event_stream_passes_each_event_on_and_hides_a_key_cut_across_chunks(echo: _Echo) -> None:
+    """A GET event stream reaches the box event by event, before it ends, and the key split in two never shows."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"))
+
+    answers = _mcp_stream(relay, workspace, echo)
+
+    paths = [path for path, _ in workspace.writes]
+    assert paths == [f"calls/000001/stages/{'e' * 32}.json"] + [
+        f"calls/000001/stages/{'e' * 32}.{part}.json" for part in range(1, len(paths))
+    ]
+    assert answers[0]["status"] == 200
+    assert ["Content-Type", "text/event-stream"] in answers[0]["headers"]
+    assert all(answer["more"] for answer in answers[:-1])
+    assert answers[-1] == {"more": False}
+    body = b"".join(base64.b64decode(answer.get("body") or "") for answer in answers)
+    assert body == b'data: {"seen": "[REDACTED]"}\n\ndata: last\n\n'
+    assert "judge-secret-value" not in json.dumps(answers)
+
+
+@pytest.mark.parametrize(("endpoint", "streamed"), [("big", False), ("large", True)])
+def test_an_mcp_answer_over_4_mib_is_refused(echo: _Echo, endpoint: str, streamed: bool) -> None:
+    """The 4 MiB cap holds for an MCP answer, and for an event stream in all; the stream then ends with the error."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, endpoint))
+    if not streamed:
+        answer = _mcp_answer(relay, workspace, "search")
+        assert answer == {"status": 502, "error": "MCP server 'search' answered with more than 4 MiB."}
+        return
+    answers = _mcp_stream(relay, workspace, echo, first=1)
+    assert answers[0]["status"] == 200
+    assert answers[-1] == {"more": False, "error": "MCP server 'search' answered with more than 4 MiB."}
+    assert sum(len(base64.b64decode(answer.get("body") or "")) for answer in answers) <= 4 * 1024 * 1024
+
+
+def _open_stream(relay: _StageRelay, workspace: _Workspace) -> None:
+    """Send one MCP GET frame and wait until its answer and first part arrive, while the echo holds its last event.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+    """
+    frame = {"id": "e" * 32, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while len(workspace.writes) < 2:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_an_open_mcp_event_stream_leaves_the_call_pool_free(echo: _Echo) -> None:
+    """With one call worker, an MCP POST gets its answer while a GET event stream stays open."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"), max_concurrency=1)
+    _open_stream(relay, workspace)
+    frame = {
+        "id": "f" * 32,
+        "mcp": "search",
+        "path": "echo",
+        "method": "POST",
+        "headers": [],
+        "body": base64.b64encode(b"{}").decode(),
+    }
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    answer_path = f"calls/000001/stages/{'f' * 32}.json"
+    deadline = time.monotonic() + 10
+    while answer_path not in [path for path, _ in workspace.writes]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert not echo.release.is_set()
+    echo.release.set()
+    while json.loads(workspace.writes[-1][1]).get("more") is not False:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    relay.close()
+    answer = json.loads(dict(workspace.writes)[answer_path])
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+
+
+def test_full_mcp_listeners_never_cost_a_tool_call_its_result(echo: _Echo) -> None:
+    """With every stream place held by GET listeners, a POST event stream still gets its result.
+
+    A further GET listener gets a 503 and never reaches the server, so no refused request runs upstream.
+    """
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"), max_concurrency=repo_scorer._MCP_STREAMS + 1)
+    listeners = [f"{index:032x}" for index in range(repo_scorer._MCP_STREAMS + 1)]
+    deadline = time.monotonic() + 10
+    for identity in listeners[:-1]:
+        frame = {"id": identity, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+        relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    while not all(f"calls/000001/stages/{identity}.json" in dict(workspace.writes) for identity in listeners[:-1]):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    frames = [
+        {"id": listeners[-1], "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""},
+        {
+            "id": "f" * 32,
+            "mcp": "search",
+            "path": "result",
+            "method": "POST",
+            "headers": [],
+            "body": base64.b64encode(b'{"method": "tools/call"}').decode(),
+        },
+    ]
+    for frame in frames:
+        relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    answers = [f"calls/000001/stages/{frame['id']}.json" for frame in frames]
+    while not all(path in dict(workspace.writes) for path in answers):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    refused, result = (json.loads(dict(workspace.writes)[path]) for path in answers)
+    echo.release.set()
+    relay.close()
+    assert refused == {"status": 503, "error": "MCP server 'search' has 4 event streams open already."}
+    assert result["status"] == 200
+    assert "more" not in result
+    assert base64.b64decode(result["body"]) == b'event: message\ndata: {"result": {}}\n\n'
+    assert echo.paths.count("/events") == repo_scorer._MCP_STREAMS
+    assert echo.paths.count("/events/result") == 1
+
+
+def test_an_mcp_event_stream_stops_when_the_box_side_leaves(echo: _Echo) -> None:
+    """A stop frame from the box ends the parent's stream at its next event, with no more parts and no end part."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"))
+    _open_stream(relay, workspace)
+    time.sleep(0.2)
+    written = len(workspace.writes)
+    relay.output("stdout", relay._prefix + json.dumps({"id": "a" * 32, "stop": "e" * 32}) + "\n")
+    echo.release.set()
+    deadline = time.monotonic() + 10
+    while relay._open_streams:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    relay.close()
+    assert len(workspace.writes) == written
+    assert all(json.loads(text).get("more") is not False for _, text in workspace.writes)
+    assert not relay._abandoned
+
+
+@pytest.mark.parametrize("endpoint", ["events", "large", "big"])
+def test_an_mcp_listener_frees_its_stream_place_when_it_ends(echo: _Echo, endpoint: str) -> None:
+    """A GET listener frees its place on a normal end, on the 4 MiB cap mid-stream, and on the cap before the head."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, endpoint))
+    if endpoint == "big":
+        assert _mcp_answer(relay, workspace, "search")["status"] == 502
+    else:
+        assert _mcp_stream(relay, workspace, echo, first=1)[-1]["more"] is False
+    assert not relay._open_streams
+    assert not relay._abandoned
+
+
+def test_an_mcp_listener_frees_its_stream_place_when_the_answer_fails(
+    echo: _Echo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A box error while the listener's first answer is written still frees its place for later listeners."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"))
+    tried = threading.Event()
+
+    def fail(path: str, text: str) -> tuple[str, ...] | None:
+        """Fail like a box whose write broke.
+
+        Args:
+            path: Where the answer goes.
+            text: The answer.
+
+        Raises:
+            ServiceError: Always.
+        """
+        tried.set()
+        raise ServiceError("The box could not write the answer.")
+
+    monkeypatch.setattr(workspace, "answer", fail)
+    frame = {"id": "e" * 32, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    assert tried.wait(10)
+    deadline = time.monotonic() + 2
+    while relay._open_streams and time.monotonic() < deadline:
+        time.sleep(0.01)
+    echo.release.set()
+    relay.close()
+    assert not relay._open_streams
+
+
+@pytest.mark.parametrize("path", ["//evil.example.test/x", "http://evil.example.test/x", "@evil.example.test/x"])
+def test_an_mcp_path_that_names_another_host_stays_on_the_declared_host(echo: _Echo, path: str) -> None:
+    """A guest path is joined under the declared url, so a path that names another host still goes to the judge.
+
+    The 400 "path outside its url" check in ``_request`` stays as a second guard; this join leaves no path that reaches it.
+    """
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+
+    answer = _mcp_answer(relay, workspace, "search", path=path)
+
+    assert answer["status"] == 200
+    assert echo.paths == ["/echo/" + path.lstrip("/")]
+    assert "judge-secret-value" not in json.dumps(answer)
 
 
 class _CallSink:
