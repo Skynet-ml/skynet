@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import configparser
 import io
 import json
 import os
@@ -78,6 +79,8 @@ def _run_with_fake_code_puppy(
     fail: bool = False,
     reasoning_effort: str | None = None,
     workspace: Path | None = None,
+    gateway: GatewayConfig = _GATEWAY,
+    repo_env: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Code Puppy command in a scratch workspace against a fake ``code-puppy`` binary.
 
@@ -88,11 +91,13 @@ def _run_with_fake_code_puppy(
         fail: Make the fake skip the usage file, as Code Puppy does after a model error.
         reasoning_effort: The user's effort for the model.
         workspace: An existing checkout to run in; a fresh folder when ``None``.
+        gateway: Gateway URL and token for the launch.
+        repo_env: Text of a ``.env`` file the candidate repo ships, or ``None`` for no file.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort)
+    launch = build_launch(_target(), gateway, protected=protected, reasoning_effort=reasoning_effort)
     if workspace is None:
         workspace = tmp_path / "work"
     else:
@@ -102,6 +107,8 @@ def _run_with_fake_code_puppy(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     (workspace / "task").mkdir(parents=True)
+    if repo_env is not None:
+        (workspace / ".env").write_text(repo_env)
     (workspace / "task" / "PROMPT.md").write_text(prompt)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -159,9 +166,10 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
     assert (
-        'CODE_PUPPY_API_KEY="$APP_API_KEY" code-puppy --disable-ask-user-question '
-        '--usage-file "$_cp_dir/usage.json" --model app --prompt "$_cp_prompt" < /dev/null'
+        'code-puppy --disable-ask-user-question --usage-file "$_cp_dir/usage.json" '
+        '--model app --prompt "$_cp_prompt" < /dev/null'
     ) in launch.run_command
+    assert "CODE_PUPPY_API_KEY=" not in launch.run_command
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert {name: launch.env[name] for name in _PROVIDER_KEYS} == dict.fromkeys(_PROVIDER_KEYS, "")
     assert "CODE_PUPPY_API_KEY" not in launch.env
@@ -194,7 +202,7 @@ def test_reasoning_effort_goes_to_the_config_only_when_code_puppy_knows_it(
         assert "reasoning_effort" not in cfg
         assert "setting_choices" not in model_entry
     else:
-        assert cfg.endswith(f"{line}\n")
+        assert f"\n{line}\n" in cfg
         assert model_entry["setting_choices"] == {"reasoning_effort": [effort]}
 
 
@@ -221,7 +229,7 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
         f"ARGS [--disable-ask-user-question] [--usage-file] [{usage_arg}] [--model] [app] "
         "[--prompt] [Fix `solution.py` and say $(echo done).]"
     )
-    assert "CODE_PUPPY_API_KEY=gateway-token" in calls
+    assert "code_puppy_api_key = gateway-token\n" in calls
     for name in _PROVIDER_KEYS:
         assert f"{name}=\n" in calls
     assert "NO_VERSION_UPDATE=1" in calls
@@ -234,6 +242,33 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
         "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.",
         {},
     )
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_gateway_token_is_read_from_the_config_so_a_repo_env_file_cannot_replace_it(
+    tmp_path: Path, protected: bool
+) -> None:
+    """Put the gateway token in puppy.cfg, which Code Puppy reads before the environment, and keep ``%`` intact.
+
+    Code Puppy 0.0.967 copies ``CODE_PUPPY_API_KEY`` from the workspace ``.env``
+    into its environment at startup, so the token must not come from the environment.
+    """
+    token = "tok%en-100%"
+    repo_env = "CODE_PUPPY_API_KEY=repo-key\nOPENAI_API_KEY=repo-key\n"
+
+    result, calls, workspace = _run_with_fake_code_puppy(
+        tmp_path, protected=protected, gateway=GatewayConfig(url=_GATEWAY.url, api_key=token), repo_env=repo_env
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "CODE_PUPPY_API_KEY=\n" in calls
+    cfg = configparser.ConfigParser()
+    cfg.read_string(calls.split("CFG_BEGIN\n", 1)[1].split("CFG_END\n", 1)[0])
+    assert cfg.get("puppy", "code_puppy_api_key") == token
+    assert (workspace / ".env").read_text() == repo_env
+    for path in workspace.rglob("*"):
+        if path.is_file():
+            assert token not in path.read_text()
 
 
 def test_open_run_keeps_the_gateway_url(tmp_path: Path) -> None:

@@ -6,7 +6,9 @@ first-run prompts, the ``extra_models.json`` custom OpenAI endpoint that reads
 its key from ``CODE_PUPPY_API_KEY``, the ``--prompt`` headless run, the guard
 for a prompt that starts with ``!`` or ``/``, and the usage-file check that
 turns a swallowed model error into a failed run. Skynet pins the release and
-always routes the custom endpoint to the model gateway. Harbor passes
+always routes the custom endpoint to the model gateway, and writes the gateway
+token to ``puppy.cfg`` instead of the environment (see :data:`_KEY_CFG_LINE`).
+Harbor passes
 ``--yolo true``, but the pinned CLI has no such argument and exits on it, so
 ``puppy.cfg`` sets ``yolo_mode = true`` instead.
 """
@@ -45,6 +47,12 @@ _XDG_DIRS = {
 _USAGE_FILE = '"$_cp_dir/usage.json"'
 # Code Puppy resolves a ``$NAME`` api_key of a custom endpoint from this variable.
 _CUSTOM_API_KEY_ENV = "CODE_PUPPY_API_KEY"
+# At startup Code Puppy 0.0.967 copies every model's ``$NAME`` api_key from
+# ``./.env`` into the environment over the inherited value, so a candidate repo's
+# ``.env`` could replace the gateway token. Its key lookup reads ``puppy.cfg``
+# (the lowercase name) before the environment, and puppy.cfg lives outside the
+# workspace, so the token goes there. configparser interpolation reads ``%%`` as ``%``.
+_KEY_CFG_LINE = f"printf '{_CUSTOM_API_KEY_ENV.lower()} = %s\\n' \"$(printf '%s' \"${ENV_API_KEY}\" | sed 's/%/%%/g')\""
 # Code Puppy's effort names, written to puppy.cfg; anything else gets no setting.
 _CODE_PUPPY_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 # ``uv tool install`` and the uv installer both put their binaries here.
@@ -160,9 +168,10 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
         f"export {xdg_exports}; "
         'mkdir -p "$XDG_CONFIG_HOME/code_puppy" "$XDG_DATA_HOME/code_puppy" && '
         f'cp {CODE_PUPPY_MODELS_FILE} "$XDG_DATA_HOME/code_puppy/extra_models.json" && '
-        f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" || exit 1; "
+        f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" && "
+        f'{_KEY_CFG_LINE} >> "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" || exit 1; '
         f"{_FRAMED_PROMPT}"
-        f'{_CUSTOM_API_KEY_ENV}="${ENV_API_KEY}" code-puppy --disable-ask-user-question '
+        "code-puppy --disable-ask-user-question "
         f'--usage-file {_USAGE_FILE} --model {PROVIDER} --prompt "$_cp_prompt" < /dev/null; '
         "_cp_status=$?; "
         f"if [ ! -s {_USAGE_FILE} ]; then "
