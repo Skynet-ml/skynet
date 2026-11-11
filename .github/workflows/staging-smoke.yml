@@ -1,13 +1,14 @@
 # Gate 5 of the merge policy in AGENTS.md: after a push to staging is live,
-# smoke-test staging. If the smoke test fails and the commit is the squash
-# merge of a PR labeled `backend` (an auto-merged PR), revert that one commit
-# on staging, comment on the PR, and reopen its Linear issue with the
-# failure. UI PRs were approved by the user, so they are reported, never
-# reverted automatically. This workflow never touches main.
+# smoke-test staging. Every PR merges on the gates with no human approval, so
+# any PR can break staging. This workflow never reverts anything. If the smoke
+# test fails and exactly one merged PR has the tested commit as its merge
+# commit, comment on that PR and reopen its Linear issue with the failure.
+# The orchestrator then opens a revert PR by hand. Otherwise (no PR, many
+# PRs, a `batch/` merge or a manual run), it reports on the run summary only.
 #
 # It runs after "staging deploy" succeeds, which already waits until staging
-# serves the pushed commit. When that deploy check fails, nothing is
-# reverted: staging may simply not have come up, so look at the deploy first.
+# serves the pushed commit. When that deploy check fails, this workflow does
+# not run: staging may simply not have come up, so look at the deploy first.
 #
 # Configuration (Settings > Secrets and variables > Actions):
 #   vars.STAGING_APP_URL     shared with staging-deploy.yml
@@ -27,16 +28,14 @@ concurrency:
   group: staging-smoke
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   smoke:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions: {}
     env:
       APP_URL: ${{ vars.STAGING_APP_URL || 'https://staging.skynetml.com' }}
       API_URL: ${{ vars.STAGING_API_URL || 'https://api-staging.skynetml.com' }}
@@ -48,10 +47,10 @@ jobs:
         id: checks
         run: |
           failures=()
-          # Each check gets three tries so one slow request is not a revert.
+          # Each check gets three tries so one slow request is not a failure.
           check() {
             local name=$1 url=$2 filter=$3 body
-            for attempt in 1 2 3; do
+            for _ in 1 2 3; do
               if body=$(curl -sS -f -L --max-time 20 "$url" 2>/dev/null) \
                 && { [ -z "$filter" ] || jq -e "$filter" <<<"$body" >/dev/null 2>&1; }; then
                 echo "ok   $name"
@@ -78,75 +77,55 @@ jobs:
             echo "### $report" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  revert:
+  report:
     needs: smoke
     if: needs.smoke.outputs.failed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      # Empty on a manual run: the tested commit is unknown, so no PR is found.
+      SHA: ${{ github.event.workflow_run.head_sha }}
       REPORT: ${{ needs.smoke.outputs.report }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       LINEAR_TEAM_KEY: ${{ vars.LINEAR_TEAM_KEY }}
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: staging
-          fetch-depth: 50
-          # The staging ruleset lets only this deploy key push past its gates.
-          ssh-key: ${{ secrets.STAGING_PUSH_KEY }}
-
-      - name: Find the PR behind the failing commit
+      - name: Find the PR whose merge was tested
         id: pr
         run: |
-          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" \
-            --jq '[.[] | select(.merged_at != null and .base.ref == "staging")][0]')
-          if [ -z "$pr" ] || [ "$pr" = "null" ]; then pr='{}'; fi
-          number=$(jq -r '.number // empty' <<<"$pr")
-          backend=$(jq -r '[.labels[]?.name] | index("backend") != null' <<<"$pr")
-          parents=$(git rev-list --parents -n 1 "$SHA" | wc -w)
-          {
-            echo "number=$number"
-            echo "title=$(jq -r '.title // empty' <<<"$pr")"
-            echo "branch=$(jq -r '.head.ref // empty' <<<"$pr")"
-            # A squash merge has exactly one parent; anything else is not one PR's commit.
-            if [ -n "$number" ] && [ "$backend" = "true" ] && [ "$parents" -eq 2 ]; then
-              echo "revert=true"
-            else
-              echo "revert=false"
-            fi
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Revert the squash commit on staging
-        id: revert
-        if: steps.pr.outputs.revert == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git revert --no-edit "$SHA"
-          git commit --amend -m "revert: #${{ steps.pr.outputs.number }} failed the staging smoke test" \
-            -m "Reverts $SHA automatically. $REPORT. $RUN_URL"
-          git push origin HEAD:staging
+          prs='[]'
+          if [ -n "$SHA" ]; then
+            prs=$(gh api "repos/$REPO/commits/$SHA/pulls?per_page=100" \
+              --jq "[.[] | select(.merged_at != null and .base.ref == \"staging\" and .merge_commit_sha == \"$SHA\")]")
+          fi
+          count=$(jq 'length' <<<"$prs")
+          branch=$(jq -r '.[0].head.ref // empty' <<<"$prs")
+          # A batch merge holds many PRs, so the failing one is unknown.
+          if [ "$count" -eq 1 ] && [[ "$branch" != batch/* ]]; then
+            {
+              echo "number=$(jq -r '.[0].number' <<<"$prs")"
+              echo "title=$(jq -r '.[0].title // empty' <<<"$prs")"
+              echo "branch=$branch"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "No single merged PR has ${SHA:-the tested commit} as its merge commit ($count found, head \`${branch:-none}\`). Find the failing PR by hand. Run: $RUN_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Comment on the PR
-        if: always() && steps.pr.outputs.number != ''
+        if: steps.pr.outputs.number != ''
         env:
-          REVERTED: ${{ steps.revert.outcome == 'success' }}
           NUMBER: ${{ steps.pr.outputs.number }}
         run: |
-          if [ "$REVERTED" = "true" ]; then
-            action="It was reverted on staging automatically. Fix it on a new branch and open a new PR."
-          else
-            action="It was not reverted automatically (not an auto-merged backend PR, or the revert conflicted); a person needs to look."
-          fi
           gh pr comment "$NUMBER" --repo "$REPO" \
-            --body "**$REPORT** after this PR landed on staging ($SHA). $action Run: $RUN_URL"
+            --body "**$REPORT** after this PR landed on staging ($SHA). Nothing was reverted automatically. The orchestrator opens a revert PR by hand. Run: $RUN_URL"
 
       - name: Reopen the Linear issue
-        if: steps.revert.outcome == 'success' && env.LINEAR_API_KEY != '' && env.LINEAR_TEAM_KEY != ''
+        if: steps.pr.outputs.number != '' && env.LINEAR_API_KEY != '' && env.LINEAR_TEAM_KEY != ''
         env:
           PR_TITLE: ${{ steps.pr.outputs.title }}
           PR_BRANCH: ${{ steps.pr.outputs.branch }}
@@ -155,6 +134,7 @@ jobs:
           import json
           import os
           import re
+          import urllib.error
           import urllib.request
 
           def gql(query, variables):
@@ -164,8 +144,22 @@ jobs:
                   headers={"Content-Type": "application/json",
                            "Authorization": os.environ["LINEAR_API_KEY"]},
               )
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  return json.load(resp).get("data") or {}
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      payload = json.load(resp)
+              except (urllib.error.URLError, ValueError) as exc:
+                  print(f"::warning::Linear API request failed: {exc}")
+                  return {}
+              for err in payload.get("errors") or []:
+                  print(f"::warning::Linear API error: {err.get('message')}")
+              return payload.get("data") or {}
+
+          # A Linear failure must not fail the job (the PR comment is the main
+          # report), but the log and the run summary must show it.
+          def warn(message):
+              print(f"::warning::{message}")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write(message + "\n")
 
           team = os.environ["LINEAR_TEAM_KEY"]
           pattern = re.compile(rf"\b{re.escape(team)}-\d+\b", re.IGNORECASE)
@@ -178,19 +172,24 @@ jobs:
           issue = gql("query($id: String!) { issue(id: $id) { id team { states { nodes { id name type } } } } }",
                       {"id": key}).get("issue")
           if not issue:
-              print(f"::warning::Linear issue {key} not found.")
+              warn(f"Linear reopen failed: issue {key} not found.")
               raise SystemExit(0)
           states = issue["team"]["states"]["nodes"]
           todo = next((s for s in states if s["name"] == "Todo"), None) \
               or next((s for s in states if s["type"] == "unstarted"), None)
+          moved = False
           if todo:
-              gql("mutation($id: String!, $s: String!) { issueUpdate(id: $id, input: {stateId: $s}) { success } }",
-                  {"id": issue["id"], "s": todo["id"]})
-          gql("mutation($id: String!, $b: String!) { commentCreate(input: {issueId: $id, body: $b}) { success } }",
-              {"id": issue["id"],
-               "b": f"{os.environ['REPORT']} after the merge; the commit was reverted on staging. "
-                    f"Run: {os.environ['RUN_URL']}"})
-          print(f"Reopened {key}.")
+              moved = (gql("mutation($id: String!, $s: String!) { issueUpdate(id: $id, input: {stateId: $s}) { success } }",
+                           {"id": issue["id"], "s": todo["id"]}).get("issueUpdate") or {}).get("success") is True
+          commented = (gql("mutation($id: String!, $b: String!) { commentCreate(input: {issueId: $id, body: $b}) { success } }",
+                           {"id": issue["id"],
+                            "b": f"{os.environ['REPORT']} after the merge. Nothing was reverted automatically; "
+                                 f"the orchestrator opens a revert PR by hand. Run: {os.environ['RUN_URL']}"})
+                       .get("commentCreate") or {}).get("success") is True
+          if moved and commented:
+              print(f"Reopened {key}.")
+          else:
+              warn(f"Linear reopen failed for {key}: moved to Todo={moved}, comment added={commented}.")
           PY
 
       - name: Fail the run
