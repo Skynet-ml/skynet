@@ -49,6 +49,7 @@ _BUILT_INS = (
     "prime",
     "aider",
     "mini_swe_agent",
+    "swe_agent",
     "openhands",
     "openhands_sdk",
     "qwen_code",
@@ -290,6 +291,12 @@ def test_registry_keeps_the_catalog_order() -> None:
             """ 'import importlib.metadata as m; l = m.version("litellm"); """
             """print(m.version("mini-swe-agent") if l == "1.103.1" else "litellm " + l)'""",
             "2.4.6",
+        ),
+        "swe_agent": (
+            '"$HOME/.local/share/swe-agent/venv/bin/python" -I -c \'import importlib.metadata as m;'
+            """ d = (m.version("litellm"), m.version("swe-rex")); print(m.version("sweagent")"""
+            """ if d == ("1.103.1", "1.4.0") else "litellm %s swe-rex %s" % d)'""",
+            "1.1.0",
         ),
         "openhands": ("openhands", "1.6.0"),
         "openhands_sdk": (
