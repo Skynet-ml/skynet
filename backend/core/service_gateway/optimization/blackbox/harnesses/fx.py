@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_FX
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
@@ -77,8 +78,6 @@ if result is not None:
     print(json.dumps({"type": "message_end", "message": {"role": "assistant", "content": content, "usage": usage}}))
 """
 _FX_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
-# fx's own ``effort`` values; Skynet sends no effort for any other name.
-_FX_EFFORTS = frozenset({"auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"})
 # fx reads these to reach the Vercel AI Gateway directly. A protected run
 # blanks them, so an inherited key never gives fx a route around the gateway.
 _PROTECTED_ENV = {
@@ -127,7 +126,18 @@ def _fx_settings(gateway: GatewayConfig, reasoning_effort: str | None) -> dict[s
 
     Returns:
         The settings content.
+
+    Raises:
+        ServiceError: When an effort is set. fx 0.0.16 sends no effort through
+            a custom ``openai-chat-completions`` provider: the provider's model
+            metadata cannot list effort levels, so fx drops a saved ``effort``,
+            and its chat-completions request check rejects a reasoning option.
     """
+    if reasoning_effort:
+        raise ServiceError(
+            f"The fx harness does not support the reasoning effort '{reasoning_effort}'. "
+            "fx cannot send an effort through the Skynet gateway; choose no effort."
+        )
     settings: dict[str, object] = {
         "providers": {
             FX_PROVIDER: {
@@ -137,8 +147,6 @@ def _fx_settings(gateway: GatewayConfig, reasoning_effort: str | None) -> dict[s
             }
         }
     }
-    if reasoning_effort in _FX_EFFORTS:
-        settings["effort"] = reasoning_effort
     return settings
 
 
@@ -156,6 +164,9 @@ def _fx_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | No
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When an effort is set; see :func:`_fx_settings`.
     """
     env = _base_env(model, gateway)
     env.update({"FX_MODEL": model, "FX_PROVIDER": FX_PROVIDER, "FX_AUTO_UPGRADE": "0", "FX_SOUND": "0"})

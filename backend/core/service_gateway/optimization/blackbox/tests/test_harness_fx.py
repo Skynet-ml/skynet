@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_FX, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
@@ -283,14 +284,18 @@ def test_install_puts_a_verified_tarball_on_the_path(tmp_path: Path) -> None:
     assert (tmp_path / "home" / ".local" / "bin" / "fx").is_file()
 
 
-@pytest.mark.parametrize(
-    ("effort", "expected"),
-    [(None, None), ("none", "none"), ("minimal", "minimal"), ("high", "high"), ("max", "max"), ("turbo", None)],
-)
-def test_reasoning_effort_goes_into_the_settings(effort: str | None, expected: str | None) -> None:
-    """Write the user's effort as fx's ``effort`` setting, or leave fx's default for an unknown name."""
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_keeps_fx_default(effort: str | None) -> None:
+    """Write no ``effort`` setting when the user picks no effort, so fx uses its default."""
     settings = _settings(build_launch(_target(), _GATEWAY, reasoning_effort=effort).files)
-    assert settings.get("effort") == expected
+    assert "effort" not in settings
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max", "auto", "turbo"])
+def test_any_effort_is_refused_before_the_run(effort: str) -> None:
+    """Refuse every effort, because fx sends none through the gateway's custom provider."""
+    with pytest.raises(ServiceError, match=f"fx harness does not support the reasoning effort '{effort}'"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_direct_routes() -> None:
