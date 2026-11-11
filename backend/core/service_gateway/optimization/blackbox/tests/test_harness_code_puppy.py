@@ -8,8 +8,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -35,7 +37,9 @@ _ANSWER = "I read solution.py and fixed the off-by-one error.\n\nThe answer is 4
 # ``main.py``, copies its whole temporary folder to FAKE_SNAPSHOT when set,
 # and writes the usage file unless FAKE_FAIL is set (like a swallowed model
 # error). It resolves the model's ``$NAME`` api_key from the environment, as
-# Code Puppy does.
+# Code Puppy does. With $FAKE_KILL_SHELL set, it SIGKILLs the run's shell, as
+# the bridge does at a timeout, so the EXIT trap does not run. Code Puppy is
+# not the shell's last command, so its parent is that shell.
 _FAKE_CODE_PUPPY = """#!/bin/sh
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
@@ -52,6 +56,7 @@ _FAKE_CODE_PUPPY = """#!/bin/sh
   printf 'MODEL_URL=%s\\n' "$(grep -o '"url": "[^"]*"' "$XDG_DATA_HOME/code_puppy/extra_models.json")"
   printf 'CFG_BEGIN\\n'; cat "$XDG_CONFIG_HOME/code_puppy/puppy.cfg"; printf 'CFG_END\\n'
 } >> "$FAKE_LOG"
+if [ -n "$FAKE_KILL_SHELL" ]; then kill -KILL "$PPID"; exit 0; fi
 [ -s "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" ] || exit 3
 [ -s "$XDG_DATA_HOME/code_puppy/extra_models.json" ] || exit 4
 mkdir -p "$XDG_DATA_HOME/code_puppy/sessions" "$XDG_CACHE_HOME/code_puppy"
@@ -107,6 +112,8 @@ def _run_with_fake_code_puppy(
     repo_env: str | None = None,
     snapshot: Path | None = None,
     extra_bins: dict[str, str] | None = None,
+    temp: Path | None = None,
+    kill_shell: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Code Puppy command in a scratch workspace against a fake ``code-puppy`` binary.
 
@@ -121,6 +128,8 @@ def _run_with_fake_code_puppy(
         repo_env: Text of a ``.env`` file the candidate repo ships, or ``None`` for no file.
         snapshot: Where the fake copies the run's temporary folder, or ``None`` for no copy.
         extra_bins: Other fake binaries (name to script) that go in front of the system ``PATH``.
+        temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
+        kill_shell: Make the fake SIGKILL the run's shell after it logs.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -149,12 +158,18 @@ def _run_with_fake_code_puppy(
         extra.chmod(extra.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "calls.log"
     log.touch()
+    temp = temp or tmp_path / "tmp"
+    temp.mkdir(parents=True, exist_ok=True)
     env = {
         **launch.env,
-        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        # The venv's python3 goes on PATH so the run takes the locked, swept temp folder.
+        "PATH": f"{bin_dir}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(temp),
         "FAKE_LOG": str(log),
     }
+    if kill_shell:
+        env["FAKE_KILL_SHELL"] = "1"
     if fail:
         env["FAKE_FAIL"] = "1"
     if snapshot is not None:
@@ -397,8 +412,35 @@ def test_run_removes_its_temp_folder_and_keeps_the_exit_status(tmp_path: Path, f
     assert result.returncode == code, result.stderr
     cfg = next(line.removeprefix("CFG=") for line in calls.splitlines() if line.startswith("CFG="))
     temp_dir = Path(cfg).parents[2]
-    assert temp_dir.name
+    assert temp_dir.parent == tmp_path / "tmp"
+    assert temp_dir.name.startswith("app-code_puppy-")
     assert not temp_dir.exists()
+
+
+def test_next_run_removes_the_temp_folder_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the temp folder that a SIGKILL left behind when the next run starts (SKY-613).
+
+    The bridge kills a timed-out run with SIGKILL, so the EXIT trap does not
+    run and the folder stays until the next run sweeps it.
+    """
+    temp = tmp_path / "tmp"
+    (tmp_path / "killed").mkdir()
+    (tmp_path / "after").mkdir()
+    killed, killed_calls, _ = _run_with_fake_code_puppy(
+        tmp_path / "killed", protected=False, temp=temp, kill_shell=True
+    )
+    killed_dir = Path(
+        next(line.removeprefix("CFG=") for line in killed_calls.splitlines() if line.startswith("CFG="))
+    ).parents[2]
+    assert killed.returncode == -signal.SIGKILL
+    assert killed_dir.is_dir()
+
+    after, after_calls, _ = _run_with_fake_code_puppy(tmp_path / "after", protected=False, temp=temp)
+
+    assert after.returncode == 0, after.stderr
+    assert not killed_dir.exists()
+    after_cfg = next(line.removeprefix("CFG=") for line in after_calls.splitlines() if line.startswith("CFG="))
+    assert not Path(after_cfg).parents[2].exists()
 
 
 @pytest.mark.parametrize("protected", [False, True])

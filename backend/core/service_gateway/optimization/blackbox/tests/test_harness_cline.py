@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -39,10 +42,14 @@ log="$FAKE_LOG"
   printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
   printf 'ANTHROPIC_API_KEY=%s\\n' "$ANTHROPIC_API_KEY"
   printf 'CLINE_DATA_DIR=%s\\n' "$CLINE_DATA_DIR"
+  if [ -f "$CLINE_DATA_DIR/globalState.json" ]; then printf 'STATE=%s\\n' "$(cat "$CLINE_DATA_DIR/globalState.json")"; fi
 } >> "$log"
 if [ "$1" = "auth" ]; then echo "saved"; exit 0; fi
+[ -z "$FAKE_SLEEP" ] || sleep "$FAKE_SLEEP"
 printf '%s' "$FAKE_ANSWER"
+exit "${FAKE_EXIT:-0}"
 """
+_PATH = f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}"
 
 
 def _target() -> BlackboxTarget:
@@ -54,18 +61,25 @@ def _target() -> BlackboxTarget:
     return BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=BLACKBOX_HARNESS_CLINE, model="target-model")
 
 
-def _run_with_fake_cline(tmp_path: Path, *, protected: bool) -> tuple[str, str, Path]:
-    """Run the built Cline command in a scratch workspace against a fake ``cline`` binary.
+def _start_fake_cline(
+    tmp_path: Path, tag: str, *, protected: bool = False, fake_exit: int = 0, sleep: int = 0
+) -> tuple[subprocess.Popen[str], Path, Path]:
+    """Start the built Cline command in its own process group against a fake ``cline`` binary.
+
+    Every run shares one fake binary and one ``TMPDIR``, as runs in one box do.
 
     Args:
-        tmp_path: Scratch directory for the workspace, the fake binary and its log.
+        tmp_path: Scratch directory for the workspaces, the fake binary, the logs and ``TMPDIR``.
+        tag: Name of this run's workspace and call log.
         protected: Build the protected launch, with the sandbox-local relay set.
+        fake_exit: Exit status the fake binary returns.
+        sleep: Seconds the fake binary waits before it answers.
 
     Returns:
-        The command's stdout, the fake binary's call log, and the workspace.
+        The running shell, its call log, and its workspace.
     """
     launch = build_launch(_target(), _GATEWAY, protected=protected)
-    workspace = tmp_path / "work"
+    workspace = tmp_path / f"work-{tag}"
     for name, content in launch.files.items():
         path = workspace / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,24 +87,64 @@ def _run_with_fake_cline(tmp_path: Path, *, protected: bool) -> tuple[str, str, 
     (workspace / "task").mkdir(parents=True)
     (workspace / "task" / "PROMPT.md").write_text("Fix `solution.py` and say $(echo done).")
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     fake = bin_dir / "cline"
     fake.write_text(_FAKE_CLINE)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-    log = tmp_path / "calls.log"
+    (tmp_path / "tmp").mkdir(exist_ok=True)
+    log = tmp_path / f"calls-{tag}.log"
     env = {
         **launch.env,
-        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        "PATH": f"{bin_dir}{os.pathsep}{_PATH}",
         "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(tmp_path / "tmp"),
         "FAKE_LOG": str(log),
         "FAKE_ANSWER": _RECORDED_STDOUT,
+        "FAKE_EXIT": str(fake_exit),
+        "FAKE_SLEEP": str(sleep or ""),
     }
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
-    result = subprocess.run(
-        launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=True
+    # The sandbox runs the command with bash, not /bin/sh.
+    process = subprocess.Popen(
+        [shutil.which("bash") or "/bin/sh", "-c", launch.run_command],
+        cwd=workspace,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
-    return result.stdout, log.read_text(), workspace
+    return process, log, workspace
+
+
+def _run_with_fake_cline(tmp_path: Path, *, protected: bool, fake_exit: int = 0) -> tuple[str, str, Path, int]:
+    """Run the built Cline command in a scratch workspace against a fake ``cline`` binary.
+
+    Args:
+        tmp_path: Scratch directory for the workspace, the fake binary and its log.
+        protected: Build the protected launch, with the sandbox-local relay set.
+        fake_exit: Exit status the fake binary returns.
+
+    Returns:
+        The command's stdout, the fake binary's call log, the workspace, and
+        the command's exit status.
+    """
+    process, log, workspace = _start_fake_cline(tmp_path, "run", protected=protected, fake_exit=fake_exit)
+    stdout, _ = process.communicate(timeout=10)
+    return stdout, log.read_text(), workspace, process.returncode
+
+
+def _data_dir(calls: str) -> Path:
+    """Return the Cline data directory the fake binary logged.
+
+    Args:
+        calls: The fake binary's call log.
+
+    Returns:
+        The run's data directory.
+    """
+    return Path(next(line for line in calls.splitlines() if line.startswith("CLINE_DATA_DIR=")).split("=", 1)[1])
 
 
 def test_cline_is_registered_between_goose_and_code_puppy_with_its_pin() -> None:
@@ -181,8 +235,9 @@ def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() ->
 
 def test_protected_run_points_cline_at_the_relay_and_returns_its_answer(tmp_path: Path) -> None:
     """Run the protected command against a fake Cline: the relay URL, gateway token and answer come through."""
-    stdout, calls, workspace = _run_with_fake_cline(tmp_path, protected=True)
+    stdout, calls, workspace, code = _run_with_fake_cline(tmp_path, protected=True)
 
+    assert code == 0
     auth, run = [line for line in calls.splitlines() if line.startswith("ARGS")]
     assert f"[--baseurl] [{_RELAY}]" in auth
     assert _GATEWAY.url not in calls
@@ -191,12 +246,11 @@ def test_protected_run_points_cline_at_the_relay_and_returns_its_answer(tmp_path
     assert run.endswith("[Fix `solution.py` and say $(echo done).]")
     assert "OPENAI_API_KEY=gateway-token" in calls
     assert "ANTHROPIC_API_KEY=\n" in calls
-    data_dir = Path(next(line for line in calls.splitlines() if line.startswith("CLINE_DATA_DIR=")).split("=", 1)[1])
+    data_dir = _data_dir(calls)
     assert not data_dir.is_relative_to(workspace.resolve())
     assert not data_dir.is_relative_to(workspace)
-    state = json.loads((data_dir / "globalState.json").read_text())
-    shutil.rmtree(data_dir)
-    assert state == {"welcomeViewCompleted": True, "isNewUser": False}
+    state = next(line for line in calls.splitlines() if line.startswith("STATE=")).split("=", 1)[1]
+    assert json.loads(state) == {"welcomeViewCompleted": True, "isNewUser": False}
     assert not list(workspace.rglob("globalState.json"))
     assert parse_output("plain", stdout) == (
         "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.",
@@ -206,9 +260,46 @@ def test_protected_run_points_cline_at_the_relay_and_returns_its_answer(tmp_path
 
 def test_open_run_reads_the_gateway_url_from_the_generated_file(tmp_path: Path) -> None:
     """Without a relay, seed Cline with the gateway URL the launch wrote."""
-    _, calls, _ = _run_with_fake_cline(tmp_path, protected=False)
+    _, calls, _, _ = _run_with_fake_cline(tmp_path, protected=False)
 
     assert f"[--baseurl] [{_GATEWAY.url}]" in calls
+
+
+@pytest.mark.parametrize("fake_exit", [0, 3])
+def test_run_removes_the_data_dir_and_keeps_the_exit_status(tmp_path: Path, fake_exit: int) -> None:
+    """Remove the data directory with the saved token after a good or failed run, and keep Cline's exit status (SKY-613)."""
+    stdout, calls, _, code = _run_with_fake_cline(tmp_path, protected=False, fake_exit=fake_exit)
+
+    assert code == fake_exit
+    assert stdout == _RECORDED_STDOUT
+    data_dir = _data_dir(calls)
+    assert data_dir.parent == tmp_path / "tmp"
+    assert data_dir.name.startswith("app-cline-")
+    assert not data_dir.exists()
+
+
+def test_next_run_removes_the_data_dir_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the data directory a SIGKILL left behind when the next run starts (SKY-613).
+
+    The bridge kills a timed-out run's process group with SIGKILL, so the EXIT
+    trap does not run and the folder stays until the next run sweeps it.
+    """
+    killed, killed_log, _ = _start_fake_cline(tmp_path, "killed", sleep=30)
+    deadline = time.monotonic() + 10
+    while "[--yolo]" not in (killed_log.read_text() if killed_log.exists() else ""):
+        assert time.monotonic() < deadline, "the fake cline never started"
+        time.sleep(0.05)
+    killed_dir = _data_dir(killed_log.read_text())
+    os.killpg(killed.pid, signal.SIGKILL)
+    killed.communicate(timeout=10)
+    assert killed_dir.is_dir()
+
+    after, after_log, _ = _start_fake_cline(tmp_path, "after")
+    after.communicate(timeout=10)
+
+    assert after.returncode == 0
+    assert not killed_dir.exists()
+    assert not _data_dir(after_log.read_text()).exists()
 
 
 def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_parser() -> None:
