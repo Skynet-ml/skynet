@@ -15,7 +15,7 @@ from core.models.blackbox import BLACKBOX_HARNESS_GOOSE, BLACKBOX_HARNESSES, BLA
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
-from ..harnesses.goose import GOOSE_BASE_URL_FILE, GOOSE_SHA256, GOOSE_VERSION
+from ..harnesses.goose import _PROTECTED_ENV, GOOSE_BASE_URL_FILE, GOOSE_SHA256, GOOSE_VERSION
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -107,8 +107,15 @@ def _run_with_fake_goose(
     }
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
+    # The sandbox runs the command with bash, not /bin/sh.
     result = subprocess.run(
-        launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False
+        [shutil.which("bash") or "/bin/sh", "-c", launch.run_command],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     return result.stdout, log.read_text(), workspace, result.returncode
 
@@ -275,16 +282,9 @@ def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers_and_
     launch = build_launch(_target(), _GATEWAY, protected=True)
 
     assert launch.install_command == pinned_harness_check(BLACKBOX_HARNESS_GOOSE)
-    for name in (
-        "ANTHROPIC_API_KEY",
-        "GOOGLE_API_KEY",
-        "GEMINI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "DATABRICKS_TOKEN",
-        "GROQ_API_KEY",
-        "XAI_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-    ):
+    blanked = [name for name, value in _PROTECTED_ENV.items() if value == ""]
+    assert {"MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "AZURE_OPENAI_API_KEY"} <= set(blanked)
+    for name in blanked:
         assert launch.env[name] == ""
     assert launch.env["GOOSE_TELEMETRY_OFF"] == "1"
     assert launch.env["GOOSE_TELEMETRY_ENABLED"] == "false"

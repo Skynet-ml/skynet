@@ -81,7 +81,7 @@ def _goose_install() -> str:
         f'case "$(uname -m)" in {arch_cases} *) echo "goose: unsupported architecture" >&2; exit 1;; esac; '
         'f="goose-$a-unknown-linux-musl.tar.gz"; d="$(mktemp -d)"; r=0; '
         f'curl -fsSL -o "$d/$f" "{_RELEASE_URL}/$f" && '
-        'echo "$s  $d/$f" | sha256sum -c - && '
+        'echo "$s  $d/$f" | sha256sum -c - >/dev/null && '
         'tar -xzf "$d/$f" -C "$d" && '
         f"mkdir -p {_LOCAL_BIN} && "
         f'install -m 755 "$d/goose" {_LOCAL_BIN}/goose || r=$?; '
