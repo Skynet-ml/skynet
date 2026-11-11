@@ -51,6 +51,7 @@ _BUILT_INS = (
     "goose",
     "deerflow",
     "cline",
+    "code_puppy",
 )
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
@@ -295,6 +296,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         ),
         "deerflow": (DEERFLOW_SPEC.binary, DEERFLOW_REF),
         "cline": ("cline", "3.0.74"),
+        "code_puppy": ("code-puppy", "0.0.967"),
     }
 
 
