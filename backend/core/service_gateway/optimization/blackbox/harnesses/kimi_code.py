@@ -277,9 +277,9 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     # mode has no prompt-file option and does not read stdin. So, unlike Pi's
     # ``@file``, the prompt is one argv string, and Linux refuses a single
     # argument over 128 KiB (MAX_ARG_STRLEN) with E2BIG before Kimi Code starts.
-    # The ``--prompt=`` form keeps the prompt in the option's argv item, so
-    # Kimi Code's Commander parser never reads a prompt that starts with ``-``
-    # as an option.
+    # Kimi Code's Commander 13.1.0 takes the next argument as the value of a
+    # required option, so ``--prompt "$p"`` and ``--prompt="$p"`` both pass a
+    # prompt that starts with ``-``. The ``=`` form makes the value binding explicit.
     run_command = (
         '_kc_dir="$(mktemp -d)" || exit 1; '
         """trap 'rm -rf "$_kc_dir"' EXIT; """
