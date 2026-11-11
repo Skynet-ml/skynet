@@ -110,9 +110,9 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   never merge, and never post `Approved for merge` or `Changes requested:`.
 - Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
   gates pass. UI PRs (`frontend/`) follow the same review loop. A UI PR is
-  done when three conditions are true. The Opus 5.5 review gate approves the
-  current head. CI passes. The acceptance checks pass, or an exemption
-  applies. Then the PR is ready for review and stays unmerged. Gilad approves
+  ready for review when three conditions are true. The Opus 5.5 review gate
+  approves the current head. CI passes. The acceptance checks pass, or an
+  exemption applies. The PR stays unmerged. Gilad approves
   it (in chat, on GitHub or with `Approved for merge` on the Linear issue),
   or tells the orchestrator to merge it. Other PRs wait for Gilad's approval.
   A change in `staging` is approved for production. The orchestrator promotes
