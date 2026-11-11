@@ -157,7 +157,8 @@ of an id with no secret changes nothing and exits 0.
 
 - A new staging account gets no credit. A new preview account gets
   `PREVIEW_GRANT_CENTS` (see `docs/agents/pr-previews.md`). Run checks
-  that need a paid run on the preview, or record the gap.
+  that need a paid run on the preview, or record the gap. Or, with Gilad's
+  approval in chat, fund the check account with "Grant test credit" below.
 - Never add funds except through "Grant test credit" below.
 - Staging keeps the setup intake for new accounts. Previews skip it.
 
@@ -222,8 +223,10 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
 - Exit code `0` prints `Granted $X to <id>` or, on a retry, `Already
   granted`. Exit code `2` prints `Grant refused: <reason>` and writes
   nothing. Report a refusal; do not work around it.
-- Exit code `1` prints `Grant failed: <error class>` and writes nothing. The
-  command hides the error text, because it can hold the email. Report it.
+- Exit code `1` prints `Grant failed: <error class>`. It usually writes
+  nothing. The command hides the error text, because it can hold the email.
+  Run the same command again with the same `--idempotency-key`; this is safe.
+  `Already granted` means the first run wrote the grant. Report the result.
 - Exit code `2` with usage text and no `Grant refused:` means a missing or
   bad argument. Fix the command line; nothing was written.
 - Record the grant (account id, dollars, key) in the PR test scope.

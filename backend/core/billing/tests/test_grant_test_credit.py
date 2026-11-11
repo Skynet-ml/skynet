@@ -29,6 +29,7 @@ from core.billing.service import (
     GrantResult,
     StripeBillingService,
     check_account_email,
+    local_customer_id,
 )
 from core.config import app_env, settings
 from core.storage.models import Base, BillingCustomerModel, UserModel, WalletLedgerModel
@@ -85,16 +86,22 @@ def pg_engine() -> Iterator[Engine]:
 
 @pytest.fixture(autouse=True)
 def test_database_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Accept the local test PostgreSQL host as the staging database host.
+    """Accept the local test PostgreSQL host and database as the staging database.
 
-    The grant refuses any PostgreSQL host but the staging RDS instance. Tests
-    that check that guard set the real label back.
+    The grant refuses any PostgreSQL host and database but the staging ones,
+    and refuses when a libpq override variable is set. Tests that check that
+    guard set the real values back.
 
     Args:
-        monkeypatch: Replaces the staging host label for this test.
+        monkeypatch: Replaces the staging host label and database name, and
+            clears the libpq override variables, for this test.
     """
-    host = make_url(PG_URL).host if PG_URL and PG_URL.startswith("postgresql") else None
+    pg_url = make_url(PG_URL) if PG_URL and PG_URL.startswith("postgresql") else None
+    host = pg_url.host if pg_url is not None else None
     monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", (host or "localhost").lower().split(".")[0])
+    monkeypatch.setattr(billing_service, "_STAGING_DB_NAME", pg_url.database if pg_url is not None else "skynet")
+    for name in billing_service._LIBPQ_OVERRIDE_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _postgres_engine() -> Iterator[Engine]:
@@ -368,7 +375,9 @@ def test_refuses_a_reason_longer_than_the_column(engine: Engine, staging: None) 
     ("url", "staging_database"),
     [
         (STAGING_RDS_URL, True),
-        ("postgresql://app@SKYNET-STAGING.abc123.us-east-2.rds.amazonaws.com/skynet_pr_107", True),
+        ("postgresql://app@SKYNET-STAGING.abc123.us-east-2.rds.amazonaws.com/skynet", True),
+        ("postgresql://app@skynet-staging.abc123.us-east-2.rds.amazonaws.com/skynet_pr_107", False),
+        ("postgresql://app@skynet-staging.abc123.us-east-2.rds.amazonaws.com", False),
         (PRODUCTION_RDS_URL, False),
         ("postgresql://app@skynet-staging-copy.abc123.us-east-2.rds.amazonaws.com/skynet", False),
         ("postgresql://app@localhost:5432/skynet", False),
@@ -376,12 +385,50 @@ def test_refuses_a_reason_longer_than_the_column(engine: Engine, staging: None) 
         ("sqlite:///:memory:", True),
         (f"{STAGING_RDS_URL}?host=skynet-production.abc123.us-east-2.rds.amazonaws.com", False),
         (f"{STAGING_RDS_URL}?hostaddr=10.0.0.5", False),
+        (f"{STAGING_RDS_URL}?service=prod", False),
     ],
 )
 def test_staging_database_host_check(monkeypatch: pytest.MonkeyPatch, url: str, staging_database: bool) -> None:
-    """Only the staging RDS host passes; production, copies, tunnels, socket URLs and query host overrides do not."""
+    """Only the staging RDS host and database pass; previews, production, copies, tunnels and overrides do not."""
     monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", "skynet-staging")
+    monkeypatch.setattr(billing_service, "_STAGING_DB_NAME", "skynet")
     assert billing_service._is_staging_database(make_url(url)) is staging_database
+
+
+@pytest.mark.parametrize("name", ["PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"])
+def test_staging_database_check_refuses_libpq_override_variables(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """A libpq variable that can pick another server refuses even the staging URL."""
+    monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", "skynet-staging")
+    monkeypatch.setattr(billing_service, "_STAGING_DB_NAME", "skynet")
+    monkeypatch.setenv(name, "10.0.0.5")
+    assert billing_service._is_staging_database(make_url(STAGING_RDS_URL)) is False
+
+
+def test_refuses_a_preview_database_on_the_staging_instance(staging: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PR preview database on the staging RDS instance is refused before any write."""
+    monkeypatch.setattr(billing_service, "_STAGING_DB_HOST_LABEL", "skynet-staging")
+    monkeypatch.setattr(billing_service, "_STAGING_DB_NAME", "skynet")
+    preview = create_engine(STAGING_RDS_URL.replace("/skynet", "/skynet_pr_107"))
+    with pytest.raises(GrantRefusedError, match="not the staging database"):
+        _grant(preview)
+    preview.dispose()
+
+
+def test_refuses_an_account_with_debt(engine: Engine, staging: None) -> None:
+    """A grant does not repay debt, so an account that owes money is refused and nothing is written."""
+    email = check_account_email(STAGING_ID)
+    _add_user(engine, email)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(
+                username=email, stripe_customer_id=local_customer_id(email), balance_cents=0, debt_cents=300
+            )
+        )
+        session.commit()
+    with pytest.raises(GrantRefusedError, match="debt"):
+        _grant(engine)
+    assert _balance(engine, email) == 0
+    assert _ledger(engine) == []
 
 
 def test_refuses_the_production_database_even_with_a_staging_environment(
@@ -560,6 +607,17 @@ def test_cli_grants_and_prints_dollars_without_the_email(
     assert "$7.25" in out
     assert "@" not in out
     assert _balance(engine, email) == 725
+
+
+def test_cli_prints_the_normalised_account_id_and_key(
+    engine: Engine, staging: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The success line shows the account id and key as the grant stored them, not the raw arguments."""
+    _add_user(engine, check_account_email(STAGING_ID))
+    monkeypatch.setattr("core.billing.grant_test_credit._engine", lambda: engine)
+    argv = ["--account-id", f" {STAGING_ID.upper()} ", "--dollars", "1", "--reason", "r", "--approval", "a"]
+    assert main([*argv, "--idempotency-key", " cli-2 "]) == 0
+    assert capsys.readouterr().out.strip() == f"Granted $1.00 to {STAGING_ID}. Balance: $1.00. Key: cli-2."
 
 
 def test_cli_reports_a_refusal_with_exit_code_2(

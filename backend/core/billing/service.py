@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -181,6 +182,12 @@ _TEST_GRANT_LOCK_ID = 742137000008
 # when ``APP_ENVIRONMENT`` is overridden. A tunnel to ``localhost`` is refused
 # too.
 _STAGING_DB_HOST_LABEL = "skynet-staging"
+# PR previews use ``skynet_pr_<n>`` databases on the same staging RDS instance
+# (infra/terraform/scripts/preview.sh), so the host alone cannot tell them
+# apart from staging. Only the staging database name passes.
+_STAGING_DB_NAME = "skynet"
+# libpq reads these to pick a server or service file that the URL does not show.
+_LIBPQ_OVERRIDE_ENV = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
 
 
 class GrantRefusedError(Exception):
@@ -230,19 +237,23 @@ def _is_staging_database(url: URL) -> bool:
     the production database.
 
     Args:
-        url: The engine URL. Only its backend, host and query are read.
+        url: The engine URL. Only its backend, host, database and query are read.
 
     Returns:
-        ``True`` for SQLite or a host whose first label is the staging RDS
-        identifier, with no ``host`` or ``hostaddr`` query key.
+        ``True`` for SQLite, or for a host whose first label is the staging RDS
+        identifier and the staging database name, with no ``host``,
+        ``hostaddr`` or ``service`` query key and no libpq override variable
+        in the environment.
     """
     if url.get_backend_name() == "sqlite":
         return True
-    # libpq lets a ``host`` or ``hostaddr`` query key override the URL host, so
-    # such a URL could reach another server while its host looks like staging.
-    if "host" in url.query or "hostaddr" in url.query:
+    # libpq lets these query keys and environment variables pick another
+    # server, so such a URL could reach it while its host looks like staging.
+    if any(key in url.query for key in ("host", "hostaddr", "service")):
         return False
-    return (url.host or "").lower().split(".")[0] == _STAGING_DB_HOST_LABEL
+    if any(os.environ.get(name) for name in _LIBPQ_OVERRIDE_ENV):
+        return False
+    return (url.host or "").lower().split(".")[0] == _STAGING_DB_HOST_LABEL and url.database == _STAGING_DB_NAME
 
 
 def _is_test_account(username: str, target: str) -> bool:
@@ -1610,8 +1621,8 @@ class StripeBillingService:
         log, so the account never sees it. The row's ``settlement_key``
         (``testgrant:<key>``) makes a retry a no-op. A grant row carries no
         payment intent and no ``topup`` kind, so revenue reports and refund
-        clawbacks never count it. Unlike a top-up, a grant does not repay
-        ``debt_cents``.
+        clawbacks never count it. A grant does not repay ``debt_cents``, so an
+        account with debt is refused.
 
         Args:
             username: Test-account email, as built by :func:`check_account_email`.
@@ -1626,7 +1637,8 @@ class StripeBillingService:
         Raises:
             GrantRefusedError: The environment, database, account, amount, text,
                 key or daily cap fails a guard, the key was used for a different
-                account or amount, or concurrent writes conflicted twice.
+                account or amount, the account has debt, or concurrent writes
+                conflicted twice.
                 Nothing is written.
         """
         target = _test_grant_target()
@@ -1683,7 +1695,8 @@ class StripeBillingService:
 
         Raises:
             GrantRefusedError: The account has no user row, the key was used for
-                a different account or amount, or the daily cap would pass.
+                a different account or amount, the account has debt, or the
+                daily cap would pass.
             IntegrityError: A concurrent writer inserted the same billing row or
                 key first; nothing from this attempt is kept.
         """
@@ -1706,6 +1719,10 @@ class StripeBillingService:
                     raise GrantRefusedError("idempotency key already used for a different account or amount")
                 balance = int(customer.balance_cents) if customer is not None else 0
                 return GrantResult(credited_cents=int(prior.delta_cents), balance_cents=balance, replayed=True)
+            # A top-up repays debt first, but a grant does not, so a grant to an
+            # account with debt would leave it spendable while it still owes.
+            if customer is not None and int(customer.debt_cents) > 0:
+                raise GrantRefusedError("the account has unpaid debt; a test grant does not repay debt")
             day_start = datetime.combine(now.date(), time.min, tzinfo=UTC)
             granted_today = int(
                 session.scalar(

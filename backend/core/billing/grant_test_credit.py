@@ -112,9 +112,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Grant failed: {type(error).__name__}", file=sys.stderr)
         return EXIT_FAILED
     verb = "Already granted" if result.replayed else "Granted"
+    # Print the values the grant used, which it strips and lowercases, so the
+    # log matches the ledger row and a rerun can copy the key exactly.
     print(
-        f"{verb} ${result.credited_cents / 100:.2f} to {args.account_id}. "
-        f"Balance: ${result.balance_cents / 100:.2f}. Key: {args.idempotency_key}."
+        f"{verb} ${result.credited_cents / 100:.2f} to {args.account_id.strip().lower()}. "
+        f"Balance: ${result.balance_cents / 100:.2f}. Key: {args.idempotency_key.strip()}."
     )
     return 0
 
