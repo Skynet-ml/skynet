@@ -44,6 +44,7 @@ _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
 _BUILT_INS = (
     *_PRE_REGISTRY,
     "aider",
+    "openhands",
     "openhands_sdk",
     "antigravity_sdk",
     "fx",
@@ -274,6 +275,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "opencode": ("opencode", "1.18.27"),
         "prime": ("prime-agent", "0.9.7"),
         "aider": ("aider", "0.86.2"),
+        "openhands": ("openhands", "1.6.0"),
         "openhands_sdk": (
             "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with openhands-sdk==1.61.0"
             " --with openhands-tools==1.61.0 --with fastapi==0.136.3 python -c"
