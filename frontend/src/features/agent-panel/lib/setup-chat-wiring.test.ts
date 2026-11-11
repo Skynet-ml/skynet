@@ -336,6 +336,32 @@ test("the agent's Back request stays hidden in a shared link and in the chat his
   assert.deepEqual(shown.map((m) => m.hidden === true), [true, false, true, false]);
 });
 
+test("Copy chat on a share page gets the wizard's kickoff and Back turns as hidden turns", () => {
+  const sharePage = "src/app/share/chat/[token]/page.tsx";
+  const tree = ts.createSourceFile(sharePage, source(sharePage), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let found: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "CopyChatMenu") {
+      for (const attr of node.attributes.properties) {
+        if (ts.isJsxAttribute(attr) && attr.name.getText(tree) === "messages" && attr.initializer
+          && ts.isJsxExpression(attr.initializer)) found = attr.initializer.expression;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.ok(found, "CopyChatMenu messages");
+  const chat = {
+    messages: [
+      { role: "user", content: SCREEN_KICKOFF },
+      { role: "user", content: backRequest("Change the metric") },
+      { role: "user", content: "typed" },
+    ],
+  };
+  const copied = new Function("hideKickoffs", "chat", `return ${found.getText(tree)}`)(hideKickoffs, chat);
+  assert.deepEqual(copied.map((m: { hidden?: boolean }) => m.hidden === true), [true, true, false]);
+});
+
 test("closing the setup stops its chat, even before the server gave it an id", () => {
   const log: unknown[][] = [];
   const end = expression(panel, "endSetupChat", {
