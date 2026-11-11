@@ -41,7 +41,7 @@ from core.storage.models import Base
 from core.storage.run_call_store import FAILURE_REASON_CAP_BYTES, SECRET_MASK, PostgresRunCallStore
 from core.worker.scoped_relay import CallRecorder
 
-from .. import repo_scorer, runner
+from .. import repo_scorer, runner, sandbox_runtime
 from ..harness import ENV_API_KEY, ENV_MODEL
 from ..remote_evaluator import RemoteEvaluatorClient
 from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
@@ -3517,6 +3517,15 @@ def plant_venv(value):
     with open(os.path.join(folder, "skynet_venv_forge.pth"), "w") as handle:
         handle.write("import skynet_venv_forge\\n")
     return value
+
+
+def edit_linked(value):
+    # The module sits behind a folder link in site-packages; only the scratch copy is edited.
+    if not os.path.realpath(value["target"]).startswith(value["allowed"] + os.sep):
+        return {"refused to edit": value["target"]}
+    with open(value["target"], "a") as handle:
+        handle.write("PLANTED = True\\n")
+    return value
 """
 
 _PROBE_METRIC = """
@@ -3710,6 +3719,74 @@ def test_a_pth_the_candidate_plants_in_the_box_venv_has_no_score(tmp_path: Path)
     finally:
         scorer.close()
     assert list(Path(allowed).glob("lib/python*/site-packages/skynet_venv_forge.pth"))
+
+
+def test_a_module_behind_a_folder_link_in_site_packages_is_checked(tmp_path: Path) -> None:
+    """An edit to a package that site-packages reaches through a folder link ends the box (SKY-398)."""
+    env = _writable_venv(tmp_path)
+    allowed = os.path.realpath(tmp_path)
+    linked = tmp_path / "linked_pkg"
+    linked.mkdir()
+    (linked / "__init__.py").write_text("")
+    (linked / "mod.py").write_text("X = 1\n")
+    (site,) = (tmp_path / "boxvenv").glob("lib/python*/site-packages")
+    (site / "linked_pkg").symlink_to(linked, target_is_directory=True)
+    case = {"input": {"allowed": allowed, "target": str(linked / "mod.py")}}
+    scorer = _probed(tmp_path, "src/cand.py:edit_linked", env=env)
+    try:
+        with pytest.raises(RepoScoreError, match="changed the Python packages"):
+            scorer.score("", case)
+    finally:
+        scorer.close()
+    assert "PLANTED" in (linked / "mod.py").read_text()
+
+
+def test_a_protected_box_whose_user_can_write_the_interpreter_scores_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A protected box must keep the checking interpreter read-only, or no version is scored (SKY-398)."""
+    env = _writable_venv(tmp_path)
+    base = os.path.realpath(getattr(sys, "_base_executable", sys.executable))
+    if not os.access(base, os.W_OK) and not os.access(Path(base).parent, os.W_OK):
+        pytest.skip("this host's interpreter is read-only")
+    monkeypatch.setattr(RepoWorkspace, "protected_runtime", property(lambda self: True))
+    scorer = _probed(tmp_path, "src/cand.py:echo", env=env)
+    try:
+        with pytest.raises(RepoScoreError, match="change the Python interpreter"):
+            scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+
+
+def test_the_python_package_stamp_is_taken_once_per_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Later steps check against the stamp the box's first step took, before any version code ran (SKY-398)."""
+    stamps: list[str] = []
+    real_run = sandbox_runtime.LocalSubprocessSession.run
+
+    def counted(self: Any, command: str, **kwargs: Any) -> CommandResult:
+        """Count the stamp commands, then run the command.
+
+        Args:
+            self: The session.
+            command: The shell command.
+            **kwargs: The run options.
+
+        Returns:
+            The command's result.
+        """
+        if command.endswith(" stamp"):
+            stamps.append(command)
+        return real_run(self, command, **kwargs)
+
+    monkeypatch.setattr(sandbox_runtime.LocalSubprocessSession, "run", counted)
+    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    scorer = _probed(tmp_path, "src/cand.py:echo", code=metric)
+    try:
+        for _ in range(2):
+            assert scorer.score("", {"input": 1})["score"] == 0.25
+    finally:
+        scorer.close()
+    assert len(stamps) == 1
 
 
 _GIT_PLANT = r"""

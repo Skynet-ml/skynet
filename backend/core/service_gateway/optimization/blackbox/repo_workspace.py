@@ -381,6 +381,11 @@ class RepoWorkspace:
         """Return the end of the setup command's output, once it has run."""
         return self._setup_log
 
+    @property
+    def protected_runtime(self) -> bool:
+        """Return True when the boxes are a security boundary, not temp folders on the worker host."""
+        return bool(getattr(self._runtime, "protected", False))
+
     def session(self, *, on_output: OutputSink | None = None) -> SandboxSession:
         """Return the open box, preparing it on first use.
 

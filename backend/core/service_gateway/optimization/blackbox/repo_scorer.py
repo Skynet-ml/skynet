@@ -107,15 +107,18 @@ _ISOLATED = "-I -B -u"
 # and the box's /app/.venv is writable on Vercel, so code the version plants
 # there would run in the metric step and in every later python3 -I check
 # (SKY-398). One script records, then checks, every folder on the box
-# python3's sys.path, sys.prefix and the PATH folders up to python3: a digest
-# of each entry's name, mode, inode, size, mtime and link target catches an
-# added, removed or replaced file, and a change time after the stamp catches
-# an edit whose mtime was set back (only root can set a change time back).
-# The check starts the stamped interpreter itself with -I -S, so nothing the
-# version planted runs in it. A folder named site-packages inside the
-# standard library is not on sys.path and is skipped.
+# python3's sys.path, sys.prefix, the PATH folders up to python3, and the
+# interpreter itself: its binary's folder, libpython and the standard
+# library. A digest of each entry's name, mode, inode, size, mtime and link
+# target catches an added, removed or replaced file, and a change time after
+# the stamp catches an edit whose mtime was set back (only root can set a
+# change time back). The walk follows folder links once each. A folder named
+# site-packages or dist-packages that is not on sys.path is skipped: the
+# hyphen makes it no importable package. The check starts the stamped
+# interpreter with -I -S, so it trusts only the binary, libpython and
+# standard library; the stamp lists any of them the box user can write.
 _PYTHON_GUARD = r"""
-import hashlib, json, os, stat, sys, time
+import hashlib, json, os, stat, sys, sysconfig, time
 
 def ident(path):
     try:
@@ -126,6 +129,7 @@ def ident(path):
 
 def entries(roots):
     tops = {root for root, _kind, _ident in roots}
+    seen = set()
     for root, kind, before in roots:
         if before is None:
             continue
@@ -138,7 +142,16 @@ def entries(roots):
             for name in names:
                 yield os.path.join(root, name)
             continue
-        for folder, dirs, files in os.walk(root):
+        for folder, dirs, files in os.walk(root, followlinks=True):
+            try:
+                info = os.stat(folder)
+            except OSError:
+                dirs[:] = []
+                continue
+            if (info.st_dev, info.st_ino) in seen:
+                dirs[:] = []
+                continue
+            seen.add((info.st_dev, info.st_ino))
             dirs[:] = sorted(
                 name for name in dirs
                 if name not in ("site-packages", "dist-packages") and os.path.join(folder, name) not in tops
@@ -163,6 +176,14 @@ def scan(roots, start):
     return sha.hexdigest(), changed
 
 if sys.argv[1] == "stamp":
+    python = os.path.realpath(sys.executable)
+    library = os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("LDLIBRARY") or "")
+    core = [[python, "flat"], [os.path.dirname(python), "flat"]]
+    if os.path.isfile(library):
+        core.append([os.path.realpath(library), "flat"])
+    for key in ("stdlib", "platstdlib"):
+        core.append([os.path.realpath(sysconfig.get_paths()[key]), "tree"])
+    trusted = [[path, kind, ident(path)] for path, kind in core]
     flats = [sys.prefix]
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         if folder:
@@ -172,9 +193,17 @@ if sys.argv[1] == "stamp":
     trees = [os.path.abspath(path) for path in sys.path if path]
     roots = [[path, "tree", ident(path)] for path in dict.fromkeys(trees)]
     roots += [[path, "flat", ident(path)] for path in dict.fromkeys(flats) if path not in trees]
+    known = {root[0] for root in roots}
+    roots += [root for root in trusted if root[0] not in known]
+    writable = []
+    if os.geteuid() != 0:
+        for path in entries(trusted):
+            if len(writable) < 5 and os.access(path, os.W_OK):
+                writable.append(path)
     start = time.time_ns()
     digest, _changed = scan(roots, None)
-    print(json.dumps({"python": os.path.realpath(sys.executable), "roots": roots, "start": start, "digest": digest}))
+    stamp = {"python": python, "roots": roots, "start": start, "digest": digest, "writable": writable}
+    print(json.dumps(stamp))
 else:
     stamp = json.loads(sys.argv[2])
     roots = stamp["roots"]
@@ -423,6 +452,8 @@ class RepoScorer:
         self._root: str | None = None
         self._root_session: SandboxSession | None = None
         self._calls = 0
+        # The box and its Python package stamp, taken before any version code ran in it (SKY-398).
+        self._python_stamp: tuple[SandboxSession, str] | None = None
         self._lock = threading.Lock()
         # The stage tree's own snapshot, built from ``stage_archive`` only: a
         # snapshot of the scorer box would carry the metric into candidate code.
@@ -528,7 +559,7 @@ class RepoScorer:
                 unstamped = self._workspace.stamp_before_run()
                 if unstamped:
                     raise RepoScoreError(unstamped)
-                packages = self._stamp_python(session, env)
+                packages = self._stamp_python(session, env, secrets)
                 # A sink makes the session stream stderr live, which is where log() events travel.
                 with sandbox_log.event_scope(source="scorer"):
                     result = session.run(
@@ -631,7 +662,7 @@ class RepoScorer:
             unstamped = self._workspace.stamp_before_run()
             if unstamped:
                 raise RepoScoreError(unstamped)
-            packages = self._stamp_python(session, env)
+            packages = self._stamp_python(session, env, secrets)
             calls = shlex.quote(CALLS_DIR)
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
@@ -665,29 +696,48 @@ class RepoScorer:
         _raise_control({"control": relay.control if relay is not None else None})
         return ran
 
-    def _stamp_python(self, session: SandboxSession, env: Mapping[str, str]) -> str:
-        """Record the box python3's package folders just before the version's code runs (SKY-398).
+    def _stamp_python(self, session: SandboxSession, env: Mapping[str, str], secrets: list[str]) -> str:
+        """Return the box python3's package stamp, taken once per box before any version code ran (SKY-398).
+
+        The first step in a new box takes it; every later step in that box
+        reuses it, so code a version ran in an earlier step cannot shape it.
 
         Args:
             session: The workspace's box.
-            env: The environment the next step runs with, so the same python3 is found.
+            env: The environment the steps run with, so the same python3 is found.
+            secrets: Values to keep out of the log.
 
         Returns:
             The stamp, as JSON, for :meth:`_check_python`.
 
         Raises:
-            RepoScoreError: When the folders could not be recorded.
+            RepoScoreError: When the folders could not be recorded, or a
+                protected box lets its user write the interpreter that checks them.
         """
+        if self._python_stamp is not None and self._python_stamp[0] is session:
+            return self._python_stamp[1]
         result = session.run(f"python3 {_ISOLATED} -c {shlex.quote(_PYTHON_GUARD)} stamp", env=env, timeout_seconds=60)
         try:
             stamp = json.loads(result.stdout) if result.ok else None
         except ValueError:
             stamp = None
         if not isinstance(stamp, dict) or not isinstance(stamp.get("python"), str):
-            logger.warning("The Python package stamp failed (exit %s): %s", result.exit_code, result.stderr[-2_000:])
+            logger.warning(
+                "The Python package stamp failed (exit %s): %s",
+                result.exit_code,
+                redact(result.stderr[-2_000:], secrets),
+            )
             self._workspace.close()
             raise RepoScoreError("The Python packages could not be checked before the version ran.")
-        return json.dumps(stamp)
+        if stamp.get("writable") and self._workspace.protected_runtime:
+            # The check runs this interpreter: one the version can rewrite could report no change.
+            logger.warning("The box user can write the Python interpreter: %s", redact(f"{stamp['writable']}", secrets))
+            self._workspace.close()
+            raise RepoScoreError(
+                "The scoring box lets its code change the Python interpreter, so no version is scored."
+            )
+        self._python_stamp = (session, json.dumps(stamp))
+        return self._python_stamp[1]
 
     def _check_python(self, session: SandboxSession, stamp: str, secrets: list[str]) -> None:
         """Refuse the version and end the box when its code changed the stamped package folders (SKY-398).
