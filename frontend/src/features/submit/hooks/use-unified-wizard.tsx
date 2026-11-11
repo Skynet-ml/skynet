@@ -31,13 +31,11 @@ import {
   getJob,
   getOptimizationPayload,
   getOptimizerCatalog,
-  getConnectors,
   getLatestHardeningJob,
   getStagedDataset,
   hostedRunsAvailable,
   isInsufficientFundsError,
   isStorageQuotaError,
-  REPO_HOST_NAMES,
   setupDraftApi,
   submitRepoRun,
   submitUnifiedRun,
@@ -764,25 +762,8 @@ export function WizardV2Provider({
     }
     submittingRef.current = true;
     setSubmitPhase("sending");
-    // The server stages the checkout through the user's link to the
-    // repository's host, and without one its setup check fails with a
-    // generic validation error. When the connector list cannot load, the
-    // server still decides.
-    const host = state.task.repo?.provider ?? "github";
-    const account = await getConnectors(runOn).then(
-      (res) => res.connectors.find((c) => c.provider === host),
-      () => undefined,
-    );
-    if (account && !(account.connected && account.status !== "invalid")) {
-      toast.error(
-        host === "github"
-          ? msg("submit.blackbox.repo.connect_hint")
-          : msg("submit.v2.repo.host.connect_hint", { host: REPO_HOST_NAMES[host] }),
-      );
-      submittingRef.current = false;
-      setSubmitPhase("idle");
-      return;
-    }
+    // No host-connection check here: a public repository needs none (SKY-568).
+    // For a private one, the server's setup check says to connect the host.
     try {
       const hardeningJobId = await finishedHardeningJobId(
         runOn,

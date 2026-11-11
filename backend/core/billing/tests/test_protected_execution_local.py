@@ -19,9 +19,9 @@ from core.billing.protected_execution import (
 )
 from core.config import Settings
 from core.i18n import t
+from core.sandbox.bridge import ProtectedBridgeRuntime
 from core.service_gateway.optimization.blackbox import agent_eval
 from core.service_gateway.optimization.blackbox import service as blackbox_service
-from core.service_gateway.optimization.blackbox.docker_sandbox import DockerSandboxRuntime
 from core.service_gateway.optimization.blackbox.sandbox import JOB_TAG
 
 _IMAGE = "sha256:" + "c" * 64
@@ -179,7 +179,8 @@ def test_bind_uses_docker_without_a_vercel_token_and_never_charges(local_setting
     assert gateway.bound == {"image": _IMAGE, "lifetime_seconds": identity["lifetime_seconds"]}
     assert gateway.parent_hosts == ("pypi.org",)
     runtime = gateway.broker._runtime
-    assert isinstance(runtime, DockerSandboxRuntime)
+    assert isinstance(runtime, ProtectedBridgeRuntime)
+    assert runtime.provider == "docker"
     assert runtime.protected
     assert gateway.broker._command_runner is not None
 
@@ -193,7 +194,7 @@ def test_bind_uses_docker_without_a_vercel_token_and_never_charges(local_setting
     assert run[run.index("--network") + 1] == "none"
     assert "skynet.job=job-9" in run
     assert f"{JOB_TAG}=job-9" in run
-    assert ["rm", "-f", "box" * 20] in calls
+    assert ["rm", "-f", run[run.index("--name") + 1]] in calls
 
 
 def test_hosted_bind_refuses_a_bare_pinned_image(monkeypatch: pytest.MonkeyPatch) -> None:

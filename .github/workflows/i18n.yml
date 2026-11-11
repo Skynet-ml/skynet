@@ -5,16 +5,19 @@ on:
     branches: [main, staging]
   pull_request:
 
+env:
+  # Keep the same value as DAGGER_VERSION in ci.yml.
+  DAGGER_VERSION: v1.0.0-beta.25
+
 jobs:
   check:
     name: Generated artefacts in sync with catalog
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          python-version: "3.12"
-      - name: Install jsonschema
-        run: pip install jsonschema
+          version: ${{ env.DAGGER_VERSION }}
       - name: Verify codegen drift, naming regex, schema
-        run: python scripts/generate_i18n.py --check
+        run: dagger check skynet-ci/locale-drift

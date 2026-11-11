@@ -16,7 +16,7 @@ import pytest
 from core.billing.operation_pricing import json_fingerprint
 from core.worker import repo_staging
 
-from .. import repo_serving
+from .. import repo_serving, repo_tree
 from ..repo_constraints import ConstraintsError
 from ..repo_serving import (
     INTERACTION_KIND,
@@ -605,14 +605,16 @@ def test_a_hidden_path_with_a_dot_slash_prefix_refuses_to_serve(
         pytest.fail("the snapshot must not be yielded")
 
 
-def test_hidden_paths_match_case_exactly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Paths compare case by case, like git and the Linux sandbox, so ``Scoring`` does not hide ``scoring``."""
+@pytest.mark.parametrize(("ignore_case", "served"), [(False, {"serve.py", "scoring/score.py"}), (True, {"serve.py"})])
+def test_hidden_paths_match_case_as_the_disk_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_case: bool, served: set[str]
+) -> None:
+    """``Scoring`` hides ``scoring`` only on a disk that ignores case, as macOS local mode does (SKY-446)."""
+    monkeypatch.setattr(repo_tree, "case_insensitive", lambda directory: ignore_case)
     files = {"optimize.toml": '[metric]\nfiles = ["Scoring"]\n', "scoring/score.py": "x = 1\n", "serve.py": _SERVE}
 
     with _stage(monkeypatch, files) as staged:
-        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
-
-    assert served == {"serve.py", "scoring/score.py"}
+        assert _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"])) == served
 
 
 def test_a_symlink_into_a_hidden_folder_carries_no_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

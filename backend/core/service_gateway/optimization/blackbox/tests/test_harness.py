@@ -147,6 +147,20 @@ def test_codex_launch_writes_a_gateway_config_toml() -> None:
     assert launch.parse_output is parse_codex_output
 
 
+def test_codex_launch_turns_off_tools_the_gateway_cannot_price() -> None:
+    """Codex config disables web search and multi-agent tools, so only function and custom tools reach the gateway."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, reasoning_effort="high")
+
+    config = tomllib.loads(launch.files[".app/codex/config.toml"])
+    assert config["web_search"] == "disabled"
+    assert config["features"]["multi_agent"] is False
+    assert config["model"] == "target-model"
+    assert config["model_reasoning_effort"] == "high"
+    assert config["model_providers"]["app"]["wire_api"] == "responses"
+    assert config["model_providers"]["app"]["supports_websockets"] is False
+    assert "-c 'web_search=\"disabled\"' -c features.multi_agent=false " in launch.run_command
+
+
 def test_opencode_launch_names_the_gateway_model() -> None:
     """OpenCode writes opencode.json and runs the skynet/<model> selection."""
     launch = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY)

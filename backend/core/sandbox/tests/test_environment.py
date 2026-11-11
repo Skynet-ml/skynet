@@ -406,6 +406,19 @@ async def test_healthcheck_counts_an_exec_error_as_a_failed_probe() -> None:
             await env.healthcheck(HealthcheckConfig(command="check", interval_sec=0, retries=2))
 
 
+async def test_healthcheck_counts_a_timed_out_probe_as_a_failed_probe() -> None:
+    """Count a timed-out probe result as one failed probe and report exit code 124."""
+    timed_out = ExecResult(124, stderr="slow\n", timed_out=True)
+    async with InMemorySandbox(_spec()) as env:
+        env.script("check", timed_out, ExecResult(0))
+        await env.healthcheck(HealthcheckConfig(command="check", interval_sec=0, retries=2))
+        assert env.commands == ["check", "check"]
+    async with InMemorySandbox(_spec()) as env:
+        env.script("check", timed_out, timed_out)
+        with pytest.raises(HealthcheckError, match=r"2 times.*exit code 124: slow"):
+            await env.healthcheck(HealthcheckConfig(command="check", interval_sec=0, retries=2))
+
+
 async def test_context_manager_stops_when_start_fails() -> None:
     """Stop the sandbox when start raises inside ``async with``."""
 

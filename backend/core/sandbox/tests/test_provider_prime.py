@@ -17,12 +17,10 @@ from typing import Any
 
 import pytest
 
-from core.config import settings
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -431,11 +429,6 @@ def test_factory_loads_prime_outside_production(monkeypatch: pytest.MonkeyPatch)
     assert factory.load_provider("prime") is PrimeEnvironment
 
 
-def test_the_default_sandbox_backend_stays_legacy() -> None:
-    """Keep the legacy backend as the default."""
-    assert type(settings).model_fields["sandbox_backend"].default == "legacy"
-
-
 def test_preflight_needs_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Name the extra when the SDK is not installed."""
     monkeypatch.setattr(prime, "AsyncSandboxClient", None)
@@ -531,7 +524,7 @@ def test_create_fields_defaults() -> None:
     """Use the default image, a short name and no secrets for a bare spec."""
     env = PrimeEnvironment(_spec(lifetime_seconds=1))
     fields = env._create_fields
-    assert fields["docker_image"] == prime.DEFAULT_IMAGE
+    assert fields["docker_image"] == prime.DEFAULT_IMAGE == "python:3.12.15-slim"
     assert fields["name"] == f"skynet-{env._box_tag[:12]}"
     assert fields["timeout_minutes"] == 1
     assert "secrets" not in fields
@@ -638,12 +631,12 @@ async def test_exec_before_start_is_an_infra_error() -> None:
         await PrimeEnvironment(_spec()).exec("true")
 
 
-async def test_a_timed_out_command_raises_run_timeout(fake_sdk: FakeCloud) -> None:
-    """Raise RunTimeoutError at the local time limit."""
+async def test_a_timed_out_command_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
+    """Return a timed-out result at the local time limit."""
     async with PrimeEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.05)
+        result = await env.exec("true", timeout_sec=0.05)
+        assert (result.exit_code, result.timed_out) == (124, True)
     assert fake_sdk.exec_calls[-1]["timeout"] == 1
 
 
@@ -651,16 +644,16 @@ async def test_the_run_timeout_is_the_default_limit(fake_sdk: FakeCloud) -> None
     """Use the run phase timeout when the call sets no limit."""
     async with PrimeEnvironment(_spec(), timeouts=_timeouts(run=0.05)) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true")
+        result = await env.exec("true")
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
-async def test_an_sdk_command_timeout_raises_run_timeout(fake_sdk: FakeCloud) -> None:
-    """Turn the SDK command timeout into RunTimeoutError."""
+async def test_an_sdk_command_timeout_returns_a_timed_out_result(fake_sdk: FakeCloud) -> None:
+    """Turn the SDK command timeout into a timed-out result."""
     async with PrimeEnvironment(_spec()) as env:
         fake_sdk.exec_error = FakeCommandTimeoutError("timed out")
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=5)
+        result = await env.exec("true", timeout_sec=5)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_exec_sends_output_after_the_command(fake_sdk: FakeCloud) -> None:

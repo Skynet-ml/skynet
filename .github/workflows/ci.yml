@@ -11,6 +11,7 @@ concurrency:
 
 env:
   CORE_SHARD_COUNT: 6
+  DAGGER_VERSION: v1.0.0-beta.25
 
 jobs:
   backend-core:
@@ -20,26 +21,23 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5]
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          python-version: "3.12"
-          enable-cache: true
-      - name: Install dependencies (runtime + dev)
-        run: uv sync --extra dev --frozen
+          version: ${{ env.DAGGER_VERSION }}
       # The credential-free `core/` tier runs without Postgres, an LLM, or a live
       # server; the `tests/` integration tier (DB + paid LLM) is a separate,
       # nightly concern and is intentionally not gated here.
       - name: Core test suite
-        env:
-          SKYNET_TEST_SHARD: ${{ matrix.shard }}/${{ env.CORE_SHARD_COUNT }}
-          SKYNET_TEST_DISPATCHED_OUT: dispatched-${{ matrix.shard }}.txt
-        run: uv run pytest core/ -q -n auto
+        run: dagger check skynet-ci/backend-core-${{ matrix.shard }}
+      # dagger check hides the pytest output. Print the pass and skip counts.
+      - name: Show test summary
+        run: dagger call skynet-ci summary --shard ${{ matrix.shard }}
+      # Same pipeline as the check, so the engine serves the file from cache.
+      - name: Export dispatched nodeids
+        run: dagger call skynet-ci dispatched --shard ${{ matrix.shard }} -o backend/dispatched-${{ matrix.shard }}.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -51,82 +49,31 @@ jobs:
   backend-gates:
     name: backend · ruff + gates
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: budget_test
-          POSTGRES_PASSWORD: budget_test
-          POSTGRES_DB: budget_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U budget_test -d budget_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          python-version: "3.12"
-          enable-cache: true
-      - name: Install dependencies (runtime + dev)
-        run: uv sync --extra dev --frozen
-      - name: Ruff lint
-        run: uv run ruff check .
-      - name: Image-key tests
-        run: bash ../infra/terraform/scripts/tests/test-image-key.sh
-      - name: Lane failure tests
-        run: bash ../infra/terraform/scripts/tests/test-lane-failures.sh
-      # requirements.txt is the pip install path's copy of uv.lock. When only
-      # one of the two moves, the pip-path image silently ships a different
-      # dependency set than CI ever tested — that drift is how starlette landed
-      # on a version the pinned instrumentator rejects, and how `stripe` went
-      # missing from the export entirely. Compare pins only, so the hand-written
-      # header block above the export is free to differ.
-      - name: Requirements sync
-        run: |
-          uv export --no-emit-project --no-hashes --no-header -o /tmp/req-expected.txt >/dev/null
-          if ! diff -u <(grep -vE '^\s*#|^\s*$' requirements.txt) \
-                       <(grep -vE '^\s*#|^\s*$' /tmp/req-expected.txt); then
-            echo "::error::requirements.txt is out of sync with uv.lock. Regenerate: uv export --no-emit-project --no-hashes --no-header -o requirements.txt (then restore the header block)"
-            exit 1
-          fi
-      - name: PostgreSQL budget concurrency and migration gates
-        env:
-          SKYNET_BUDGET_TEST_DB_URL: postgresql+psycopg2://budget_test:budget_test@127.0.0.1:5432/budget_test
-        run: uv run pytest core/billing/tests/test_budgets_postgres.py core/api/tests/test_run_sync_postgres.py -q
-      - name: Load-test SLO gate
-        run: uv run pytest tests/unit/test_load_test_slo.py -q
+          version: ${{ env.DAGGER_VERSION }}
+      # Ruff, the terraform script tests, the requirements.txt/uv.lock sync
+      # check, the PostgreSQL gates (Dagger runs postgres:16-alpine as a
+      # service) and the load-test SLO gate. See .dagger/modules/skynet-ci.
+      - name: Ruff, script tests, requirements sync, PostgreSQL and SLO gates
+        run: dagger check skynet-ci/backend-gates
 
   backend-shard-coverage:
     name: backend · shard coverage
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          python-version: "3.12"
-          enable-cache: true
-      - name: Install dependencies (runtime + dev)
-        run: uv sync --extra dev --frozen
+          version: ${{ env.DAGGER_VERSION }}
       - name: Collect full core suite
-        env:
-          SKYNET_TEST_COLLECTED_OUT: collected.txt
-        run: |
-          unset APP_TEST_SHARD SKYNET_TEST_SHARD
-          uv run pytest core/ --collect-only -q
-          test -s collected.txt
-          python3 -c 'from pathlib import Path; print("collected", len(Path("collected.txt").read_text().splitlines()), "core test nodeids")'
+        run: dagger check skynet-ci/backend-shard-coverage
+      - name: Export collected nodeids
+        run: dagger call skynet-ci collected -o backend/collected.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -208,6 +155,53 @@ jobs:
           print(f"six dispatched shards cover all {len(collected)} collected tests with no overlap")
           PY
 
+  # The core shards install only the dev extra, so provider tests that import
+  # an optional SDK skip there. This job installs the provider extras and runs
+  # the sandbox tests with them. The tests use fake clients only: no secrets,
+  # no provider network calls. uv declares prime and e2b as conflicting extras,
+  # so prime gets its own variant.
+  backend-sandbox-providers:
+    name: backend · sandbox provider extras (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: main
+            extras: --extra langsmith --extra e2b --extra daytona --extra modal --extra runloop --extra kernel --extra mosaic --extra sail --extra sbx --extra smol
+            installed: langsmith|e2b|daytona|modal|runloop|kernel|mosaic|sail|sbx|smol
+          - variant: prime
+            extras: --extra prime
+            installed: prime
+    steps:
+      - uses: actions/checkout@v4
+      # Same uv and Python as the Dagger backend image (uv 0.9.13, Python 3.12).
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.13"
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install the backend with the provider extras
+        working-directory: backend
+        run: uv sync --frozen --extra dev ${{ matrix.extras }}
+      - name: Sandbox and provider tests
+        working-directory: backend
+        env:
+          INSTALLED: ${{ matrix.installed }}
+        run: |
+          set -o pipefail
+          uv run --no-sync pytest core/sandbox/tests/ -q -rs -n auto | tee pytest.log
+          # A skip for a missing SDK of an extra this variant installed means
+          # the extra no longer covers the test's import.
+          if grep -E '^SKIPPED' pytest.log | grep -E 'extra is not installed|could not import' | grep -E "$INSTALLED"; then
+            echo "::error::provider tests skipped for an extra that this job installed"
+            exit 1
+          fi
+
   # Everything above installs through uv. The Dockerfile's other path
   # (PKG_MANAGER=pip) installs the compiled requirements.txt with --no-deps,
   # which means pip never re-resolves and never notices a package the file
@@ -281,58 +275,38 @@ jobs:
   frontend-typecheck:
     name: frontend · typecheck
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          # Node 22: the unit runner uses --experimental-strip-types (Node >= 22.6).
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
+          version: ${{ env.DAGGER_VERSION }}
       - name: Typecheck
-        run: npm run typecheck
+        run: dagger check skynet-ci/frontend-typecheck
 
   frontend-lint:
     name: frontend · lint
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
+          version: ${{ env.DAGGER_VERSION }}
       - name: Lint
-        run: npm run lint
+        run: dagger check skynet-ci/frontend-lint
 
   frontend-unit:
     name: frontend · unit
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          # Node 22: the unit runner uses --experimental-strip-types (Node >= 22.6).
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
+          version: ${{ env.DAGGER_VERSION }}
       - name: Unit tests
-        run: npm run test:unit
+        run: dagger check skynet-ci/frontend-unit
 
   frontend:
     name: frontend · typecheck + lint + unit

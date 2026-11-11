@@ -547,20 +547,83 @@ def test_github_picker_file_reads_text_and_flags_the_rest() -> None:
         assert response.json()["code"] == "connectors.invalid_ref"
 
 
+_GITHUB_READS: tuple[tuple[str, dict[str, str]], ...] = (
+    ("/connectors/github/branches", {"repo": "octo/app"}),
+    ("/connectors/github/tree", {"repo": "octo/app"}),
+    ("/connectors/github/commits", {"repo": "octo/app"}),
+    ("/connectors/github/file", {"repo": "octo/app", "ref": "abc123", "path": "src/app.py"}),
+)
+
+
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")
-def test_github_picker_needs_a_linked_account() -> None:
-    """Every picker route answers 409 before GitHub is linked."""
+def test_github_picker_repository_list_needs_a_linked_account() -> None:
+    """The repository list answers 409 before GitHub is linked: it lists the account's own repositories."""
     client, _ = _make_client()
-    for path, params in (
-        ("/connectors/github/repos", {}),
-        ("/connectors/github/branches", {"repo": "octo/app"}),
-        ("/connectors/github/tree", {"repo": "octo/app"}),
-        ("/connectors/github/commits", {"repo": "octo/app"}),
-        ("/connectors/github/file", {"repo": "octo/app", "path": "README.md"}),
+    response = client.get("/connectors/github/repos")
+    assert response.status_code == 409
+    assert response.json()["code"] == "connectors.not_connected"
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_reads_a_public_repository_without_a_link() -> None:
+    """Without a GitHub link, branches, commits, tree and file read anonymously (SKY-568)."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api) as api:
+        responses = [client.get(path, params=params) for path, params in _GITHUB_READS]
+    for response in responses:
+        assert response.status_code == 200, response.text
+    assert api.call_count > 0
+    for call in api.call_args_list:
+        assert "Authorization" not in call.kwargs["headers"]
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_reads_with_the_token_when_linked() -> None:
+    """A linked caller's reads still carry its token."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api) as api:
+        client.put("/connectors/github/credentials", json={"fields": {"token": "ghp_secret"}})
+        api.reset_mock()
+        responses = [client.get(path, params=params) for path, params in _GITHUB_READS]
+    for response in responses:
+        assert response.status_code == 200, response.text
+    assert api.call_count > 0
+    for call in api.call_args_list:
+        assert call.kwargs["headers"]["Authorization"] == "Bearer ghp_secret"
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_anonymous_read_of_a_missing_repository_is_not_found() -> None:
+    """An anonymous read of a private or missing repository answers GitHub's 404 as not found."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api):
+        response = client.get("/connectors/github/branches", params={"repo": "nobody/missing"})
+    assert response.status_code == 404
+    assert response.json()["code"] == "connectors.not_found"
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_expired_link_asks_for_a_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An expired GitHub link answers 409 expired instead of reading anonymously."""
+    monkeypatch.setattr(settings, "github_oauth_client_id", "gh-client")
+    client, store = _make_client()
+    ConnectorVault(store.engine).save(
+        "alice",
+        "github",
+        access_token="old",
+        auth_method="oauth",
+        account_label="octo",
+        refresh_token="rt",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    with (
+        patch("core.connectors.oauth.httpx.post", return_value=_response(400, {"error": "bad_refresh_token"})),
+        patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api) as api,
     ):
-        response = client.get(path, params=params)
-        assert response.status_code == 409
-        assert response.json()["code"] == "connectors.not_connected"
+        response = client.get("/connectors/github/tree", params={"repo": "octo/app"})
+    assert response.status_code == 409
+    assert response.json()["code"] == "connectors.expired"
+    api.assert_not_called()
 
 
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")

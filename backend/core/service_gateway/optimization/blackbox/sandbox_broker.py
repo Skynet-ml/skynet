@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import uuid
@@ -13,6 +14,8 @@ from typing import Any, Protocol
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, quote_vercel_sandbox
 from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
+from ....sandbox.snapshots import SnapshotCache
+from ....sandbox.sync_bridge import run as bridge_run
 from .sandbox_contract import (
     CommandResult,
     OutputSink,
@@ -21,6 +24,8 @@ from .sandbox_contract import (
     SandboxSpec,
 )
 from .sandbox_runtime import write_codex_requirements
+
+logger = logging.getLogger(__name__)
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 
@@ -184,6 +189,38 @@ class ParentSandboxSession:
             return self._command_runner(self._session, command, **options)
         return self._session.run(command, **options)
 
+    def snapshot(self, cache: SnapshotCache, cache_key: str) -> str | None:
+        """Save the box in a snapshot cache, when its runtime can save boxes.
+
+        Args:
+            cache: The run's snapshot cache.
+            cache_key: Names the box's setup.
+
+        Returns:
+            The snapshot id, or ``None`` when the box cannot be saved.
+
+        Raises:
+            ServiceError: When the provider refuses the snapshot.
+        """
+        take = getattr(self._session, "snapshot", None)
+        if take is None:
+            return None
+        return take(cache, cache_key)
+
+    def start_services(self, base_dir: str) -> None:
+        """Start the box's compose services, with the repository folder as their base.
+
+        Args:
+            base_dir: The absolute folder of the repository in the box.
+
+        Raises:
+            ServiceError: When the runtime cannot start compose services.
+        """
+        start = getattr(self._session, "start_services", None)
+        if start is None:
+            raise ServiceError("This sandbox runtime cannot start the repository's compose services.")
+        start(base_dir)
+
     def disable_network(self) -> None:
         """Switch the box to deny-all networking and confirm the provider applied it.
 
@@ -238,6 +275,46 @@ class _ParentSandboxRuntime:
             raise ServiceError("The parent's box cannot reach hosts this run was not funded for.")
         return self._broker._open_parent(spec)
 
+    @property
+    def max_lifetime_seconds(self) -> float:
+        """Return the longest lifetime a box opened here may ask for, the profile maximum.
+
+        A per-run deadline caps only guest boxes (SKY-572), so it does not lower this.
+        """
+        return self._broker._maximum
+
+    @property
+    def supports_snapshots(self) -> bool:
+        """Return whether the run has a snapshot cache before its deadline, so ``snapshot`` can save a box."""
+        return self._broker._snapshots_live()
+
+    def snapshot(self, session: SandboxSession, cache_key: str) -> str | None:
+        """Save a box this runtime opened as an after-setup snapshot of the run.
+
+        Args:
+            session: A box from this runtime's ``open``, after its setup.
+            cache_key: Names the box's setup, so one setup gets one snapshot.
+
+        Returns:
+            The snapshot id, or ``None`` when the run has no snapshots, so the
+            caller keeps its box as it is.
+
+        Raises:
+            ServiceError: When the provider refuses the snapshot.
+        """
+        return self._broker._snapshot_parent(session, cache_key)
+
+    def release_snapshot(self, cache_key: str) -> None:
+        """Delete the run's snapshots for a key whose only user ended.
+
+        Args:
+            cache_key: The key that ``snapshot`` saved the box under.
+
+        Raises:
+            Exception: The provider's delete failed; the run end tries it again.
+        """
+        self._broker._release_snapshot(cache_key)
+
 
 class SandboxBroker:
     """Expose only owned guest operations while retaining credentials and billing."""
@@ -248,10 +325,12 @@ class SandboxBroker:
         *,
         image: str,
         max_lifetime_seconds: float,
+        guest_lifetime_seconds: float | None = None,
         vcpus: int = 2,
         tags: Mapping[str, str] | None = None,
         command_runner: SandboxCommandRunner | None = None,
         parent_command_runner: SandboxCommandRunner | None = None,
+        snapshots: SnapshotCache | None = None,
     ) -> None:
         """Bind one parent-owned runtime and deployment-selected resource profile.
 
@@ -259,16 +338,25 @@ class SandboxBroker:
             runtime: Metered Vercel runtime (or free local Docker runtime) held only in the trusted parent.
             image: Deployment-selected immutable prebuilt image digest.
             max_lifetime_seconds: Largest session the parent will authorize.
+            guest_lifetime_seconds: Largest session a guest-opened box gets, such
+                as a per-run deadline; ``max_lifetime_seconds`` when None. It
+                never exceeds ``max_lifetime_seconds``.
             vcpus: Fixed allocation selected by the parent.
             tags: Parent-owned job identity used by cleanup and reconciliation.
             command_runner: Optional model mailbox command wrapper.
             parent_command_runner: Mailbox wrapper for the parent's own boxes.
                 Those boxes run untrusted repository code, so this one may
                 serve only model routes; without it they get no model access.
+            snapshots: The run's one snapshot cache for parent boxes; ``None``
+                when the provider has no snapshots. ``close`` deletes its
+                snapshots.
         """
         self._runtime = runtime
         self._image = image
         self._maximum = _duration(max_lifetime_seconds, VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS)
+        self._guest_maximum = (
+            self._maximum if guest_lifetime_seconds is None else _duration(guest_lifetime_seconds, self._maximum)
+        )
         # A local Docker box is free and its image is a bare local id, which
         # the Vercel price check would refuse.
         if getattr(runtime, "billable", True):
@@ -286,6 +374,8 @@ class SandboxBroker:
         self._tags = dict(tags or {})
         self._command_runner = command_runner
         self._parent_command_runner = parent_command_runner
+        self._snapshots = snapshots
+        self._snapshots_expired = False
         self._sessions: dict[str, _OwnedSession] = {}
         # Kept apart from ``_sessions`` so no guest handle can ever address them.
         self._parent_sessions: list[ParentSandboxSession] = []
@@ -327,7 +417,7 @@ class SandboxBroker:
         spec = payload.get("spec")
         if not isinstance(request_id, str) or not request_id or len(request_id) > 100 or not isinstance(spec, dict):
             raise ServiceError("Sandbox creation requires a stable request identity and spec.")
-        lifetime = _duration(spec.get("lifetime_seconds"), self._maximum)
+        lifetime = _duration(spec.get("lifetime_seconds"), self._guest_maximum)
         if (spec.get("image") is not None and spec.get("image") != self._image) or spec.get(
             "vcpus", self._vcpus
         ) != self._vcpus:
@@ -448,6 +538,8 @@ class SandboxBroker:
                     network_disabled=not hosts,
                     allowed_hosts=hosts,
                     operation_key=spec.operation_key,
+                    services=spec.services,
+                    snapshot_id=spec.snapshot_id if self._snapshots_live() else None,
                 )
             ),
             self._parent_command_runner,
@@ -461,6 +553,64 @@ class SandboxBroker:
             session.close()
             raise ServiceError("The sandbox broker closed during creation.")
         return session
+
+    def _snapshot_parent(self, session: SandboxSession, cache_key: str) -> str | None:
+        """Save one parent box in the run's snapshot cache.
+
+        Args:
+            session: The parent box after its setup.
+            cache_key: Names the box's setup.
+
+        Returns:
+            The snapshot id, or ``None`` when the run or the box has no snapshots.
+
+        Raises:
+            ServiceError: When the provider refuses the snapshot.
+        """
+        take = getattr(session, "snapshot", None)
+        if take is None or not self._snapshots_live():
+            return None
+        return take(self._snapshots, cache_key)
+
+    def _snapshots_live(self) -> bool:
+        """Return whether boxes may still save or start from the run's snapshots.
+
+        After the run deadline the cache closes and deletes its snapshots, so
+        their storage holds settle. A box that asked for a snapshot then opens
+        empty, and its caller's tree check sends it back to a normal setup.
+        Only the first call after the deadline closes the cache, so a failed
+        delete does not slow every later box; the run end tries it again.
+
+        Returns:
+            ``False`` when the run has no snapshot cache or its deadline passed.
+        """
+        if self._snapshots is None or self._snapshots_expired:
+            return False
+        if not self._snapshots.past_deadline():
+            return True
+        with self._lock:
+            if self._snapshots_expired:
+                return False
+            self._snapshots_expired = True
+        try:
+            bridge_run(self._snapshots.close)
+        except Exception as error:
+            logger.warning(
+                "The expired setup snapshots were not deleted (%s); the run end retries it", type(error).__name__
+            )
+        return False
+
+    def _release_snapshot(self, cache_key: str) -> None:
+        """Delete the run's snapshots for one key, when the run has a snapshot cache.
+
+        Args:
+            cache_key: Names the setup whose snapshots end.
+
+        Raises:
+            Exception: The provider's delete failed; the run end tries it again.
+        """
+        if self._snapshots is not None:
+            bridge_run(self._snapshots.release, cache_key)
 
     def _forget_parent(self, session: ParentSandboxSession) -> None:
         """Drop a closed parent box so a long run does not keep one per stage and evaluation.
@@ -548,6 +698,13 @@ class SandboxBroker:
         for session in owned:
             try:
                 session.close()
+            except BaseException as error:
+                failure = failure or error
+        # After the boxes: a snapshot's builder box must be stopped before
+        # its delete destroys it.
+        if self._snapshots is not None:
+            try:
+                bridge_run(self._snapshots.close)
             except BaseException as error:
                 failure = failure or error
         if failure is not None:

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import re
+import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,10 +18,14 @@ import pytest
 from vercel.sandbox import SandboxApiError
 from vercel.sandbox._internal.recovery import execute_with_sandbox_recovery
 
+from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.model_mailbox import ModelMailbox
 from core.billing.signals import BudgetReached
+from core.sandbox import sync_bridge
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import NetworkPolicy
 from core.sandbox.errors import SandboxInfraError
+from core.sandbox.pacing import SYSTEM_CLOCK
 from core.sandbox.providers import vercel
 from core.sandbox.providers.vercel import VercelEnvironment, box_name, policy_confirmed
 from core.sandbox.resources import ResourceRequest, SandboxSpec
@@ -68,7 +76,7 @@ class FakeFs:
 
     def __init__(self) -> None:
         """Start with no files."""
-        self.files: dict[str, str] = {}
+        self.files: dict[str, str | bytes] = {}
         self.dirs: list[str] = []
         self.stopped = False
 
@@ -94,18 +102,20 @@ class FakeFs:
         self._check()
         return path in self.files
 
-    async def read_text(self, path: str, *, cwd: str) -> str:
-        """Read one file.
+    async def read_text(self, path: str, *, cwd: str, errors: str = "strict") -> str:
+        """Read one file; a file stored as bytes is decoded as UTF-8.
 
         Args:
             path: The file path.
             cwd: The working directory.
+            errors: The decoding error policy.
 
         Returns:
             The file text.
         """
         self._check()
-        return self.files[path]
+        value = self.files[path]
+        return value.decode(errors=errors) if isinstance(value, bytes) else value
 
     async def write_text(self, path: str, text: str, *, cwd: str) -> None:
         """Write one file.
@@ -198,6 +208,7 @@ class FakeSession:
         self.next_readback = readback
         self.log: list[str] | None = None
         self.box: FakeBox | None = None
+        self.tail_reads = 0
 
     @property
     def fs(self) -> FakeFs:
@@ -225,6 +236,31 @@ class FakeSession:
         if self.stops:
             raise _gone()
         return await self.box.create_process(command, args, **kwargs)
+
+    async def run_process(self, command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Answer the output tail read: one base64 line for each ``start path`` pair.
+
+        Args:
+            command: The program.
+            args: The shell flags, the script, ``$0``, then the pairs.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+
+        Raises:
+            SandboxApiError: The session stopped.
+        """
+        if self.stops:
+            raise _gone()
+        self.tail_reads += 1
+        pairs = args[5:]
+        lines = []
+        for start, path in zip(pairs[::2], pairs[1::2], strict=True):
+            value = self.fs.files.get(path, "")
+            data = (value if isinstance(value, bytes) else value.encode())[int(start) - 1 :]
+            lines.append(base64.b64encode(data).decode())
+        return SimpleNamespace(returncode=0, stdout="".join(f"{line}\n" for line in lines), stderr="")
 
     async def extend_execution_time_limit(self, duration: timedelta) -> FakeSession:
         """Record one extension.
@@ -667,6 +703,40 @@ async def test_running_command_makes_no_status_reads(client: FakeClient, log: li
     call = box.create_calls[0]
     assert call["kill_after"] == 60
     assert "timeout --signal=KILL 30s" in call["args"][-1]
+    await env.stop()
+
+
+async def test_a_planted_shell_profile_never_runs_in_a_box_command(client: FakeClient, log: list[str]) -> None:
+    """Check that the outer and inner bash both skip the profile and rc files (E38)."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    call = client.boxes[env.name].create_calls[0]
+    assert call["command"] == "bash"
+    assert call["args"][:3] == ["--noprofile", "--norc", "-c"]
+    assert call["args"][-1].startswith("bash --noprofile --norc -c ")
+    await env.stop()
+
+
+async def test_sudo_reaches_the_provider_and_defaults_to_false(client: FakeClient, log: list[str]) -> None:
+    """Check that a caller's ``sudo=True`` reaches the SDK and the default stays ``False``."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello")
+    await env.exec("echo hello", sudo=True)
+    calls = client.boxes[env.name].create_calls
+    assert [call["sudo"] for call in calls] == [False, True]
+    await env.stop()
+
+
+async def test_kill_timer_is_capped_while_the_command_keeps_its_timeout(client: FakeClient, log: list[str]) -> None:
+    """Check that a timeout above the cap gives an 18 000 s kill timer and the full command timeout."""
+    env = make_env(client, log)
+    await env.start()
+    await env.exec("echo hello", timeout_sec=20_000)
+    call = client.boxes[env.name].create_calls[0]
+    assert call["kill_after"] == vercel.KILL_AFTER_MAX == 18_000
+    assert "timeout --signal=KILL 20000s" in call["args"][-1]
     await env.stop()
 
 
@@ -1424,14 +1494,18 @@ def _service_scripts(box: FakeBox, marker: str) -> list[str]:
     return found
 
 
-async def test_services_start_in_order_after_the_create(client: FakeClient, log: list[str]) -> None:
-    """Check that each service launches in start order after the create, and the phase is timed."""
-    env = make_env(client, log, services=SERVICES, resources=ResourceRequest(cpus=2))
+async def test_services_start_only_when_asked_in_the_base_folder(client: FakeClient, log: list[str]) -> None:
+    """Check that the create starts no service, and the start launches each in order in the base folder."""
+    services = (*SERVICES, ComposeService(name="api", command="python -m api", working_dir="srv"))
+    env = make_env(client, log, services=services, resources=ResourceRequest(cpus=4))
     await env.start()
     box = client.boxes[env.name]
-    assert _service_scripts(box, "setsid") == ["db", "cache"]
+    assert box.create_calls == []
+    await env.start_services("/repo")
+    assert _service_scripts(box, "setsid") == ["db", "cache", "api"]
+    assert [call["cwd"] for call in box.create_calls] == ["/repo", "/repo", "/repo/srv"]
     # Each launch is one timed run inside the services phase.
-    assert [record.phase for record in env.timings.records] == ["create", "run", "run", "services"]
+    assert [record.phase for record in env.timings.records] == ["create", "run", "run", "run", "services"]
     await env.stop()
 
 
@@ -1464,10 +1538,12 @@ def test_services_too_large_fail_before_any_create(client: FakeClient, log: list
 
 
 async def test_services_start_again_on_a_box_from_a_snapshot(client: FakeClient, log: list[str]) -> None:
-    """Check that a trial box from a snapshot starts its own services."""
+    """Check that a trial box from a snapshot starts no service at create, and its own services when asked."""
     env = make_env(client, log, services=SERVICES)
     env.snapshot_id = "snap-1"
     await env.start()
+    assert _service_scripts(client.boxes[env.name], "setsid") == []
+    await env.start_services("/repo")
     assert _service_scripts(client.boxes[env.name], "setsid") == ["db", "cache"]
     await env.stop()
 
@@ -1476,6 +1552,7 @@ async def test_snapshot_stops_the_services_first(client: FakeClient, log: list[s
     """Check that the services stop in reverse order before the snapshot call."""
     env = make_env(client, log, protected=False, services=SERVICES)
     await env.start()
+    await env.start_services("/repo")
     box = client.boxes[env.name]
     session = box.current_session
     seen: list[list[str]] = []
@@ -1502,6 +1579,7 @@ async def test_cancel_in_the_service_stop_reserves_no_snapshot_hold(client: Fake
     """Check that the service stop runs before the hold, so a cancel there leaves no hold without pending."""
     env = make_env(client, log, services=SERVICES)
     await env.start()
+    await env.start_services("/repo")
     reserved: list[str] = []
 
     def factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FakeUsage:
@@ -1620,3 +1698,541 @@ async def test_delete_snapshot_bounds_a_hung_client_close(monkeypatch: pytest.Mo
     built = vercel.BuiltSnapshot(snapshot_id="snap-1", builder_name="builder")
     await asyncio.wait_for(VercelEnvironment.delete_snapshot(built), 5)
     assert builder.destroys == 1
+
+
+class GrowingProcess:
+    """Write output while it runs, like a guest that waits for the parent."""
+
+    def __init__(self, fs: FakeFs, script: str, run: Any) -> None:
+        """Keep the wrapper paths and the guest body.
+
+        Args:
+            fs: The box file system.
+            script: The wrapper script.
+            run: An async callable ``run(fs, out_path)`` that returns the exit code.
+        """
+        self.fs = fs
+        self.out, self.err, self.sentinel = _PATHS.search(script).groups()
+        self.run = run
+
+    async def wait(self) -> int:
+        """Run the guest body and record its exit code.
+
+        Returns:
+            The exit code.
+        """
+        code = await self.run(self.fs, self.out)
+        self.fs.files[self.sentinel] = f"{code}\n"
+        return code
+
+    async def terminate(self) -> None:
+        """Accept a terminate call."""
+
+    async def kill(self) -> None:
+        """Accept a kill call."""
+
+
+def _guest(box: FakeBox, run: Any) -> None:
+    """Make every new process on the box run ``run``.
+
+    Args:
+        box: The fake box.
+        run: The guest body, see :class:`GrowingProcess`.
+    """
+
+    async def create_process(command: str, args: list[str], **kwargs: Any) -> GrowingProcess:
+        """Start the growing process.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+        """
+        return GrowingProcess(box.fs, args[-1], run)
+
+    box.create_process = create_process
+
+
+async def test_sink_sees_output_while_the_command_runs(client: FakeClient, log: list[str]) -> None:
+    """Check that output reaches the sink before exit, as the model mailbox needs (SKY-529)."""
+    env = make_env(client, log)
+    await env.start()
+    seen = asyncio.Event()
+    chunks: list[tuple[str, str]] = []
+
+    def sink(stream: str, text: str) -> None:
+        """Record a chunk and mark the early frame.
+
+        Args:
+            stream: The stream name.
+            text: The new text.
+        """
+        chunks.append((stream, text))
+        if "early" in "".join(chunk for name, chunk in chunks if name == "stdout"):
+            seen.set()
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Write a frame, wait until the parent saw it, then finish.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "early\n"
+        await seen.wait()
+        fs.files[out] += "late\n"
+        return 0
+
+    _guest(client.boxes[env.name], run)
+    result = await asyncio.wait_for(env.exec("guest", on_output=sink), 5)
+    assert result.exit_code == 0
+    assert result.stdout == "early\nlate\n"
+    assert "".join(text for stream, text in chunks if stream == "stdout") == "early\nlate\n"
+    assert chunks[0] == ("stdout", "early\n")
+    await env.stop()
+
+
+async def test_streamed_output_is_never_repeated(client: FakeClient, log: list[str]) -> None:
+    """Check that a stale shorter read emits nothing and the sink total equals the file."""
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    chunks: list[tuple[str, str]] = []
+
+    async def until_read(count: int) -> None:
+        """Wait until the provider made ``count`` tail reads.
+
+        Args:
+            count: The read count.
+        """
+        for _ in range(100_000):
+            if session.tail_reads >= count:
+                return
+            await asyncio.sleep(0)
+        raise AssertionError("The provider stopped polling the output files.")
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Grow the file, show a stale shorter copy, then grow it again.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        err = out.removesuffix(".out") + ".err"
+        fs.files[out] = "abc"
+        fs.files[err] = "warn\n"
+        await until_read(session.tail_reads + 2)
+        fs.files[out] = "a"
+        await until_read(session.tail_reads + 2)
+        fs.files[out] = "abcdef"
+        await until_read(session.tail_reads + 2)
+        fs.files[out] = "abcdefgh"
+        return 0
+
+    _guest(client.boxes[env.name], run)
+    result = await asyncio.wait_for(env.exec("guest", on_output=lambda *chunk: chunks.append(chunk)), 5)
+    stdout = [text for stream, text in chunks if stream == "stdout"]
+    assert "".join(stdout) == result.stdout == "abcdefgh"
+    assert stdout[:2] == ["abc", "def"]
+    assert "".join(text for stream, text in chunks if stream == "stderr") == result.stderr == "warn\n"
+    await env.stop()
+
+
+async def test_no_tail_reads_without_a_sink(client: FakeClient, log: list[str]) -> None:
+    """Check that a command with no sink makes no output polls."""
+    env = make_env(client, log)
+    await env.start()
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Run long enough for several polls.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "quiet\n"
+        for _ in range(50):
+            await asyncio.sleep(0)
+        return 0
+
+    _guest(client.boxes[env.name], run)
+    result = await env.exec("guest")
+    assert result.stdout == "quiet\n"
+    assert client.boxes[env.name].current_session.tail_reads == 0
+    await env.stop()
+
+
+async def _until_read(session: FakeSession, count: int) -> None:
+    """Wait until the provider made ``count`` tail reads.
+
+    Args:
+        session: The fake session.
+        count: The read count.
+
+    Raises:
+        AssertionError: The provider stopped polling.
+    """
+    for _ in range(100_000):
+        if session.tail_reads >= count:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("The provider stopped polling the output files.")
+
+
+async def test_a_multibyte_char_split_across_polls_reaches_the_sink_once(client: FakeClient, log: list[str]) -> None:
+    """Check that a char split between polls arrives once, and a bad byte decodes the same in both reads."""
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    chunks: list[tuple[str, str]] = []
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Write the first byte of ``é``, then its second byte and an invalid byte after a poll.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = b"\xc3"
+        await _until_read(session, session.tail_reads + 2)
+        fs.files[out] = b"\xc3\xa9\xff"
+        await _until_read(session, session.tail_reads + 2)
+        return 0
+
+    _guest(client.boxes[env.name], run)
+    result = await asyncio.wait_for(env.exec("guest", on_output=lambda *chunk: chunks.append(chunk)), 5)
+    assert "".join(text for stream, text in chunks if stream == "stdout") == result.stdout == "\u00e9\ufffd"
+    await env.stop()
+
+
+async def test_a_failing_sink_aborts_the_command(client: FakeClient, log: list[str]) -> None:
+    """Check that a sink error stops the running command at once, not at its exit (SKY-529)."""
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+
+    async def create_process(command: str, args: list[str], **kwargs: Any) -> FakeProcess:
+        """Start a process that writes one line and then runs until it is stopped.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+        """
+        process = FakeProcess(box.fs, args[-1], [], block=True)
+        box.fs.files[process.out] = "bad frame\n"
+        box.processes.append(process)
+        return process
+
+    def sink(stream: str, text: str) -> None:
+        """Reject every chunk, like a model mailbox that reads a bad frame.
+
+        Args:
+            stream: The stream name.
+            text: The new text.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad frame")
+
+    box.create_process = create_process
+    with pytest.raises(ValueError, match="bad frame"):
+        await asyncio.wait_for(env.exec("guest", on_output=sink), 5)
+    assert box.processes[0].terminated == 1
+    await env.stop()
+
+
+async def test_a_poll_that_keeps_failing_logs_one_warning(
+    client: FakeClient, log: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Check that a tail script with a nonzero exit is a failure, and repeated failures warn once."""
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    chunks: list[tuple[str, str]] = []
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Answer every tail read like a box without ``base64``.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            A failed process with empty output.
+        """
+        session.tail_reads += 1
+        return SimpleNamespace(returncode=127, stdout="\n\n", stderr="base64: command not found")
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Write output and run for several polls.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "done\n"
+        await _until_read(session, 6)
+        return 0
+
+    session.run_process = run_process
+    _guest(client.boxes[env.name], run)
+    with caplog.at_level("DEBUG", logger=vercel.__name__):
+        result = await asyncio.wait_for(env.exec("guest", on_output=lambda *chunk: chunks.append(chunk)), 5)
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert [record.getMessage() for record in warnings] == ["A sandbox output poll failed (3 in a row)."]
+    assert chunks == [("stdout", "done\n")]
+    assert result.stdout == "done\n"
+    await env.stop()
+
+
+async def test_a_hung_poll_times_out_and_later_output_still_streams(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that a tail read that never returns counts as one failed poll, not a stuck poller (SKY-529)."""
+    monkeypatch.setattr(vercel, "OUTPUT_POLL_TIMEOUT", 0.05)
+    env = make_env(client, log)
+    await env.start()
+    session = client.boxes[env.name].current_session
+    answer = session.run_process
+    hang = asyncio.Event()
+    seen = asyncio.Event()
+    calls: list[dict[str, Any]] = []
+    chunks: list[tuple[str, str]] = []
+
+    async def run_process(command: str, args: list[str], **kwargs: Any) -> SimpleNamespace:
+        """Stall the first tail read like a stream with no timeout; answer the rest.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The completed process.
+        """
+        calls.append(kwargs)
+        if len(calls) == 1:
+            await hang.wait()
+        return await answer(command, args, **kwargs)
+
+    def sink(stream: str, text: str) -> None:
+        """Record a chunk and mark the first stdout text.
+
+        Args:
+            stream: The stream name.
+            text: The new text.
+        """
+        chunks.append((stream, text))
+        if stream == "stdout":
+            seen.set()
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Write a frame and finish only after the sink saw it.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        fs.files[out] = "frame\n"
+        await seen.wait()
+        return 0
+
+    session.run_process = run_process
+    _guest(client.boxes[env.name], run)
+    try:
+        result = await asyncio.wait_for(env.exec("guest", on_output=sink), 5)
+    finally:
+        hang.set()
+    assert result.stdout == "frame\n"
+    assert chunks == [("stdout", "frame\n")]
+    assert calls[0]["kill_after"] == vercel.OUTPUT_POLL_TIMEOUT
+    await env.stop()
+
+
+async def test_cancel_while_the_poller_runs_aborts_once_and_leaves_no_task(client: FakeClient, log: list[str]) -> None:
+    """Check that a cancel during a streamed exec terminates the command once and ends every helper task."""
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+    box.block = True
+    session = box.current_session
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(env.exec("sleep 100", on_output=lambda *chunk: None))
+    await _until_read(session, 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    leftover = {other for other in asyncio.all_tasks() - before if not other.done()}
+    assert leftover == set()
+    assert box.processes[0].terminated == 1
+    assert box.processes[0].killed == 0
+    await env.stop()
+
+
+async def test_a_sink_error_wins_over_the_kill_deadline(
+    client: FakeClient, log: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that the caller gets the sink error when the abort it started outlives the deadline."""
+    monkeypatch.setattr(vercel, "KILL_GRACE", 0.0)
+    monkeypatch.setattr(vercel, "POLL_SLACK", 0.0)
+    env = make_env(client, log)
+    await env.start()
+    box = client.boxes[env.name]
+
+    async def create_process(command: str, args: list[str], **kwargs: Any) -> FakeProcess:
+        """Start a process that writes a bad frame and ignores terminate until a kill.
+
+        Args:
+            command: The program.
+            args: The program arguments.
+            kwargs: The other SDK arguments.
+
+        Returns:
+            The fake process.
+        """
+        process = FakeProcess(box.fs, args[-1], [], block=True)
+        box.fs.files[process.out] = "bad frame\n"
+
+        async def slow_terminate() -> None:
+            """Count the call and return only after the kill, like a stalled HTTP call."""
+            process.terminated += 1
+            await process.released.wait()
+
+        process.terminate = slow_terminate
+        box.processes.append(process)
+        return process
+
+    def sink(stream: str, text: str) -> None:
+        """Reject every chunk, like a model mailbox that reads a bad frame.
+
+        Args:
+            stream: The stream name.
+            text: The new text.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("bad frame")
+
+    box.create_process = create_process
+    with pytest.raises(ValueError, match="bad frame"):
+        await asyncio.wait_for(env.exec("guest", timeout_sec=0.05, on_output=sink), 5)
+    assert box.processes[0].terminated == 1
+    assert box.processes[0].killed >= 1
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await env.stop()
+
+
+def test_tail_script_reads_bytes_after_each_offset(tmp_path: Path) -> None:
+    """Check the real tail script in a local shell: missing files and offsets past the end are empty."""
+    out = tmp_path / "out"
+    out.write_bytes("ab\u00e9cd".encode())
+    args = [
+        *vercel.SHELL_FLAGS,
+        vercel.TAIL_SCRIPT,
+        "tail",
+        "3",
+        str(out),
+        "1",
+        str(tmp_path / "missing"),
+        "99",
+        str(out),
+    ]
+    completed = subprocess.run(["bash", *args], capture_output=True, text=True, check=True)
+    lines = completed.stdout.split("\n")
+    assert [base64.b64decode(line) for line in lines[:3]] == ["\u00e9cd".encode(), b"", b""]
+
+
+def test_tail_script_reads_at_most_the_cap_per_poll(tmp_path: Path) -> None:
+    """Check that one poll of a large backlog reads only the capped bytes, so the offset moves in bounded steps."""
+    out = tmp_path / "out"
+    out.write_bytes(b"x" * (vercel.OUTPUT_POLL_MAX_BYTES + 5))
+    args = [*vercel.SHELL_FLAGS, vercel.TAIL_SCRIPT, "tail", "1", str(out)]
+    completed = subprocess.run(["bash", *args], capture_output=True, text=True, check=True)
+    assert len(base64.b64decode(completed.stdout.split("\n")[0])) == vercel.OUTPUT_POLL_MAX_BYTES
+    args[-2] = str(vercel.OUTPUT_POLL_MAX_BYTES + 1)
+    completed = subprocess.run(["bash", *args], capture_output=True, text=True, check=True)
+    assert base64.b64decode(completed.stdout.split("\n")[0]) == b"xxxxx"
+
+
+def test_model_mailbox_round_trip_through_the_vercel_provider(client: FakeClient, log: list[str]) -> None:
+    """Check that a guest model frame gets its response while the guest still runs (SKY-529)."""
+    env = make_env(client, log, protected=False, clock=SYSTEM_CLOCK)
+    session = sync_bridge.open_session(env)
+    calls: list[tuple[str, str, Any]] = []
+
+    def dispatch(token: str, path: str, body: Any, headers: dict[str, str]) -> ModelHTTPResult:
+        """Answer one model request.
+
+        Args:
+            token: The scoped token.
+            path: The model path.
+            body: The request body.
+            headers: The forwarded headers.
+
+        Returns:
+            The model response.
+        """
+        calls.append((token, path, body))
+        return ModelHTTPResult(200, "application/json", b'{"answer": 42}')
+
+    async def run(fs: FakeFs, out: str) -> int:
+        """Send one frame like the guest proxy and exit 0 only after its response arrives.
+
+        Args:
+            fs: The box file system.
+            out: The stdout path.
+
+        Returns:
+            The exit code.
+        """
+        config_path = next(path for path in fs.files if path.endswith("/config.json"))
+        config = json.loads(fs.files[config_path])
+        identity = "a" * 32
+        frame = {"id": identity, "path": "/v1/chat", "body": base64.b64encode(b'{"q": 1}').decode(), "headers": {}}
+        fs.files[out] = "before\n" + config["prefix"] + json.dumps(frame) + "\n"
+        response_path = f"{config['response_dir']}/{identity}.json"
+        for _ in range(500):
+            if response_path in fs.files:
+                document = json.loads(fs.files[response_path])
+                fs.files[out] += base64.b64decode(document["body"]).decode() + "\n"
+                return 0
+            await asyncio.sleep(0.01)
+        return 1
+
+    _guest(client.boxes[env.name], run)
+    try:
+        result = ModelMailbox(dispatch).run(session, "agent", timeout_seconds=30)
+    finally:
+        session.close()
+    assert result.exit_code == 0
+    assert result.stdout == 'before\n{"answer": 42}\n'
+    assert calls == [("", "/v1/chat", {"q": 1})]

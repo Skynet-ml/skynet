@@ -4,20 +4,15 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
-from ..service_gateway.optimization.blackbox.docker_sandbox import (
-    DockerSandboxRuntime,
-    docker_sandbox_unavailable_reason,
-)
-from ..service_gateway.optimization.blackbox.sandbox import (
-    JOB_TAG,
-    VercelCredentials,
-    VercelSandboxRuntime,
-    sandbox_unavailable_reason,
-)
+from ..sandbox.bridge import protected_runtime, protected_unavailable_reason
+from ..sandbox.factory import load_provider
+from ..sandbox.snapshots import SnapshotCache
 from ..service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
+from ..service_gateway.optimization.blackbox.sandbox_contract import JOB_TAG
 from ..storage.run_call_store import PostgresRunCallStore
 from ..worker.scoped_relay import CallRecorder
 from .model_gateway import ModelGateway
@@ -74,10 +69,8 @@ def protected_vercel_unavailable_reason(settings: Settings, workflow: str) -> st
         A configuration reason, or None when real setup verification may proceed.
         Local mode reports the local Docker daemon and image instead of Vercel.
     """
-    if settings.local_mode:
-        return docker_sandbox_unavailable_reason(settings)
-    reason = sandbox_unavailable_reason(settings)
-    if reason:
+    reason = protected_unavailable_reason(settings)
+    if reason or settings.local_mode:
         return reason
     if protected_image(settings, workflow) is None:
         return "This deployment needs a pinned sandbox image with the optimizer dependencies installed."
@@ -157,6 +150,7 @@ def bind_protected_sandbox(
     workflow: str,
     owner_id: str,
     lifetime_seconds: int | None = None,
+    guest_lifetime_seconds: int | None = None,
     parent_hosts: tuple[str, ...] = (),
     image: str | None = None,
 ) -> dict[str, Any]:
@@ -169,13 +163,17 @@ def bind_protected_sandbox(
         workflow: Execution family selecting its immutable prebuilt image.
         owner_id: Stable job or setup identity used for cleanup after interruption.
         lifetime_seconds: Optional shorter ceiling for one bounded interaction.
+        guest_lifetime_seconds: Optional shorter ceiling for the guest's boxes
+            alone, such as a per-run deadline; the parent's own boxes keep the
+            full lifetime.
         parent_hosts: Package registries the parent's own repository scoring
             box may reach during setup; empty when the run opens no such box.
         image: The immutable image the run is pinned to; the deployment's
             current image when None.
 
     Returns:
-        Non-secret deployment identity usable in setup evidence.
+        Non-secret deployment identity usable in setup evidence; its
+        ``lifetime_seconds`` is the guest's lifetime.
 
     Raises:
         UnpricedOperationError: When the protected runtime cannot be configured.
@@ -192,37 +190,32 @@ def bind_protected_sandbox(
     lifetime = min(
         lifetime_seconds or configured_lifetime, configured_lifetime, VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
     )
+    guest_lifetime = min(guest_lifetime_seconds or lifetime, lifetime)
     recorder = run_call_recorder(gateway, owner_id)
     gateway.recorder = recorder
-    runtime: DockerSandboxRuntime | VercelSandboxRuntime
-    if settings.local_mode:
-        runtime = DockerSandboxRuntime(
-            image,
-            docker_bin=settings.docker_bin,
-            budget=gateway.runtime,
-            recorder=recorder,
-        )
-    else:
-        assert settings.vercel_token is not None
-        runtime = VercelSandboxRuntime(
-            VercelCredentials(
-                token=settings.vercel_token.get_secret_value(),
-                team_id=str(settings.vercel_team_id),
-                project_id=str(settings.vercel_project_id),
-            ),
-            image=image,
-            budget=gateway.runtime,
-        )
+    runtime = protected_runtime(settings, image=image, budget=gateway.runtime, recorder=recorder)
     mailbox = ModelMailbox(gateway.dispatch_guest)
+    snapshots = None
+    if getattr(runtime, "supports_snapshots", False):
+        # The parent knows no run deadline, only the session ceiling. A box
+        # that opens from an expired snapshot fails, and the workspace then
+        # sets up a normal box again.
+        snapshots = SnapshotCache(
+            owner_id,
+            datetime.now(UTC) + timedelta(seconds=lifetime),
+            delete=load_provider(runtime.provider).delete_snapshot,
+        )
     broker = SandboxBroker(
         runtime,
         image=image,
         max_lifetime_seconds=lifetime,
+        guest_lifetime_seconds=guest_lifetime,
         tags={JOB_TAG: owner_id},
         command_runner=mailbox.run,
         parent_command_runner=ModelMailbox(gateway.dispatch_route).run,
+        snapshots=snapshots,
     )
-    gateway.bind_sandbox(broker, image=image, lifetime_seconds=lifetime)
+    gateway.bind_sandbox(broker, image=image, lifetime_seconds=guest_lifetime)
     if parent_hosts:
         gateway.fund_parent_sandbox(parent_hosts)
-    return {"image": image, "lifetime_seconds": lifetime}
+    return {"image": image, "lifetime_seconds": guest_lifetime}

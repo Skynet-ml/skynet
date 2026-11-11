@@ -146,6 +146,31 @@ def test_only_vercel_is_allowed_in_production() -> None:
     assert {name for name, entry in PROVIDERS.items() if entry.production_allowed} == {"vercel"}
 
 
+def test_registry_lists_every_provider() -> None:
+    """Keep the full provider list explicit, so an added or lost entry fails here."""
+    assert sorted(PROVIDERS) == [
+        "apple_container",
+        "daytona",
+        "docker",
+        "e2b",
+        "kata",
+        "kernel",
+        "langsmith",
+        "local",
+        "modal",
+        "mosaic",
+        "openshift",
+        "podman",
+        "prime",
+        "runloop",
+        "sail",
+        "sbx",
+        "singularity",
+        "smol",
+        "vercel",
+    ]
+
+
 def test_production_refuses_a_non_production_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """Refuse at create time a provider that is not allowed in production."""
     monkeypatch.setattr(factory.settings, "app_environment", "production")

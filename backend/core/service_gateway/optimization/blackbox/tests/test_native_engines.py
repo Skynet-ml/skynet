@@ -18,7 +18,7 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.eval_server import EvalServer
 from gepa.oa.task import Task
 
-from core.service_gateway.optimization.blackbox import native_engines, repo_tree
+from core.service_gateway.optimization.blackbox import native_engines, native_runner, repo_tree
 
 FAKE_HEADER = (
     f"#!{sys.executable}\n"
@@ -1023,3 +1023,38 @@ def test_proposer_refusals_reach_the_run_log_as_tool_and_kind_only(caplog: pytes
     ]
     assert all(event["source"] == "proposer" for event in refusals)
     assert {record.levelno for record in caplog.records} == {logging.WARNING}
+
+
+def test_every_native_engine_publishes_an_incumbent() -> None:
+    """The runner asks every engine for its incumbent when a budget stop or an error interrupts it."""
+    for engine in native_engines.ENGINES.values():
+        assert callable(getattr(engine, "incumbent", None)), engine.name
+
+
+@pytest.mark.parametrize(("stop_at_call", "expected"), [(2, None), (3, ("", 0.25))])
+def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
+    tmp_path: Path, fake_home: Path, stop_at_call: int, expected: tuple[str, float] | None
+) -> None:
+    """A parent budget stop mid-run leaves GEPA's best fully scored version, not an AttributeError (SKY-529)."""
+    task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
+    calls: list[str] = []
+
+    def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        """Score like the parent, then refuse the call the budget cannot cover."""
+        calls.append(candidate)
+        if len(calls) == stop_at_call:
+            raise native_runner.BudgetStopped("The approved budget has been reached.")
+        return 0.25, {"feedback": f"case {example['id']} needs better code"}
+
+    server = EvalServer(task, evaluate, BudgetTracker(max_evals=12))
+    server.start()
+    try:
+        _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('better\\n')\n")
+        engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, _repo_checkout(tmp_path, {"src/app.py": "x\n"})))
+        with pytest.raises(native_runner.BudgetStopped):
+            engine.run(task, server)
+        assert engine.incumbent(server) == expected
+        kept = native_runner._budget_incumbent(engine, task, server, tmp_path / "out")
+        assert ((kept["best_candidate"], kept["best_score"]) if kept else None) == expected
+    finally:
+        server.stop()

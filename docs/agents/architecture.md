@@ -102,7 +102,6 @@ Reference facts for coding agents. The always-on rules are in `AGENTS.md`.
 ├── scripts/                     i18n generation, sample data,
 │   └── agent/                   install (`just setup`) and health-report scripts
 ├── data/                        Repository datasets/fixtures
-├── submission-wizard-implementation-spec.md
 ├── Justfile                     Canonical local task shortcuts
 └── README.md                    Product setup and API usage
 ```

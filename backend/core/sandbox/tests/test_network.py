@@ -666,6 +666,13 @@ def test_merge_matches_hosts_without_case() -> None:
     assert merged.notices == (AllowlistNotice("api.example.com", NoticeKind.DUPLICATE),)
 
 
+@pytest.mark.parametrize("groups", [("api.x.com",), (["pypi.org"], "api.x.com")])
+def test_merge_rejects_a_bare_string(groups: tuple[object, ...]) -> None:
+    """Reject a bare string group, which would merge one host per character."""
+    with pytest.raises(TypeError, match=r"'api\.x\.com'"):
+        merge_allowlists(SETUP, *groups)
+
+
 def test_merge_keeps_credential_rules() -> None:
     """Carry the credential rules into the merged policy."""
     merged = merge_allowlists(RUN, ["pypi.org"])
