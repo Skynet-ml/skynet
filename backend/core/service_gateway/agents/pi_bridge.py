@@ -18,6 +18,11 @@ templates, context files and network features off, so it reaches nothing
 outside this server. :class:`PiEventTranslator` turns Pi's RPC events into the
 stream events the chat already reads, so the frontend does not change.
 
+A caller can instead give a turn its own sandbox (:class:`PiSandbox`,
+SKY-591). Pi then runs inside a network-off box from Skynet's sandbox runtime,
+with the caller's files and Pi's own tools on. The box reaches the bridge
+only through the model mailbox that protected runs already use.
+
 This module is agent-neutral. :mod:`.pi_react` adapts a ReAct program to it;
 later agents bring their own :class:`PiTurnHandlers`.
 """
@@ -30,22 +35,29 @@ import json
 import logging
 import os
 import secrets
+import shlex
 import shutil
 import socket
 import tempfile
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+import httpx
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.model_mailbox import ModelMailbox
+
+from ..optimization.blackbox.sandbox_contract import SandboxRuntime, SandboxSpec
 from .code import _NativeSubmitArgExtractor
 from .tool_pending import TOOL_PENDING_CLEAR_EVENT, TOOL_PENDING_EVENT
 
@@ -147,6 +159,8 @@ def pi_command(
     *,
     extensions: Iterable[str] = (TOOL_BRIDGE_EXTENSION,),
     skills: Iterable[str] = (),
+    tools: Iterable[str] | None = None,
+    addon_dir: str | None = None,
 ) -> list[str]:
     """Build the argv that starts Pi in RPC mode with only allow-listed add-ons.
 
@@ -154,15 +168,22 @@ def pi_command(
         binary: The ``pi`` executable.
         extensions: Allow-listed extension names to load.
         skills: Allow-listed skill names to load.
+        tools: Every tool Pi may offer, its own and the bridge's; ``None``
+            turns Pi's own tools off. Only a sandbox turn passes it.
+        addon_dir: Where the add-on files sit when Pi runs on another
+            machine; ``None`` uses this host's paths.
 
     Returns:
         The command line.
     """
-    argv = [binary, "--mode", "rpc", "--no-session", "-nbt", "-ne", "-ns", "-np", "-nc", "--no-themes", "--offline"]
+    # Pi's ``--tools`` allow-list also filters extension tools, so it must
+    # name the bridge's tools beside Pi's own.
+    tool_args = ["-nbt"] if tools is None else ["--tools", ",".join(tools)]
+    argv = [binary, "--mode", "rpc", "--no-session", *tool_args, "-ne", "-ns", "-np", "-nc", "--no-themes", "--offline"]
     for path in resolve_allowed(extensions, ALLOWED_EXTENSIONS, "extension"):
-        argv += ["-e", str(path)]
+        argv += ["-e", str(path) if addon_dir is None else f"{addon_dir}/{path.name}"]
     for path in resolve_allowed(skills, ALLOWED_SKILLS, "skill"):
-        argv += ["--skill", str(path)]
+        argv += ["--skill", str(path) if addon_dir is None else f"{addon_dir}/{path.name}"]
     return [*argv, "--provider", PI_PROVIDER, "--model", PI_MODEL]
 
 
@@ -694,6 +715,267 @@ async def _serve(app: _BridgeApp) -> AsyncIterator[str]:
                 sock.close()
 
 
+PI_BUILTIN_TOOLS = ("read", "bash", "edit", "write", "grep", "find", "ls")
+_BOX_DIR = ".pi-turn"
+_BOX_URL_SLOT = "__SKYNET_BRIDGE_URL__"
+# Waits in the box for each numbered command file and writes it to Pi's
+# stdin. ``exec`` has no stdin of its own, and a half-written file reads as
+# bad JSON and is read again, as in the guest model proxy. ``null`` closes
+# stdin, which is how Pi is asked to stop.
+_STDIN_FEEDER = """import json, pathlib, sys, time
+inbox, index = pathlib.Path(sys.argv[1]), 0
+while True:
+    try:
+        record = json.loads((inbox / f"{index}.json").read_text())
+    except (FileNotFoundError, ValueError):
+        time.sleep(0.1)
+        continue
+    if record is None:
+        break
+    print(json.dumps(record), flush=True)
+    index += 1
+"""
+_FILL_URL = (
+    "import os, pathlib; path = pathlib.Path(os.environ['PI_CODING_AGENT_DIR'], 'models.json');"
+    f" path.write_text(path.read_text().replace({_BOX_URL_SLOT!r}, os.environ[{_URL_ENV!r}]))"
+)
+# A sandbox stop runs over the network; give Pi time to see its stdin close.
+_SANDBOX_STOP_SECONDS = 15.0
+
+
+@dataclass
+class PiSandbox:
+    """Run a Pi turn in its own sandbox, with Pi's own tools on.
+
+    ``runtime`` is a protected runtime, for example ``protected_runtime(settings,
+    image=protected_image(settings, workflow), budget=budget)``, so the box's
+    usage is reserved and settled like every other sandbox.
+    """
+
+    runtime: SandboxRuntime
+    lifetime_seconds: float = 600.0
+    image: str | None = None
+    operation_key: str | None = None
+    tags: Mapping[str, str] = field(default_factory=dict)
+    # Text files to put in the box before Pi starts, for example a repository
+    # checkout. Paths are relative to the box's working directory, where Pi runs.
+    files: Mapping[str, str] = field(default_factory=dict)
+    read_back: tuple[str, ...] = ()
+    builtin_tools: tuple[str, ...] = PI_BUILTIN_TOOLS
+    # Filled after the turn: each ``read_back`` path's text, or ``None`` when absent.
+    read_back_files: dict[str, str | None] = field(default_factory=dict, init=False)
+
+
+class _SandboxPi:
+    """One Pi process in a sandbox, with the same interface as :class:`_PiProcess`."""
+
+    def __init__(self, session: Any) -> None:
+        """Bind to an open box.
+
+        Args:
+            session: The box's :class:`SandboxSession`.
+        """
+        self._session = session
+        self._loop = asyncio.get_running_loop()
+        self._records: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._stderr: list[str] = []
+        self._sent = 0
+        self._task: asyncio.Future[None] | None = None
+
+    def start(self, mailbox: ModelMailbox, command: str, env: dict[str, str], timeout: float) -> None:
+        """Start Pi in the box on a worker thread.
+
+        Args:
+            mailbox: Carries Pi's bridge calls out of the box.
+            command: The box shell command.
+            env: The command's environment.
+            timeout: The command's limit.
+        """
+        self._task = asyncio.ensure_future(asyncio.to_thread(self._run, mailbox, command, env, timeout))
+
+    def _run(self, mailbox: ModelMailbox, command: str, env: dict[str, str], timeout: float) -> None:
+        """Run Pi until it exits, then end the record stream.
+
+        Args:
+            mailbox: Carries Pi's bridge calls out of the box.
+            command: The box shell command.
+            env: The command's environment.
+            timeout: The command's limit.
+        """
+        try:
+            mailbox.run(self._session, command, env=env, timeout_seconds=timeout, on_output=self._output)
+        except Exception as error:
+            self._stderr.append(f"{type(error).__name__}: {error}")
+        finally:
+            self._loop.call_soon_threadsafe(self._records.put_nowait, None)
+
+    def _output(self, stream: str, text: str) -> None:
+        """Queue one stdout record, or keep one stderr line.
+
+        Args:
+            stream: ``"stdout"`` or ``"stderr"``.
+            text: One output line.
+        """
+        line = text.rstrip("\n").rstrip("\r")
+        if stream != "stdout":
+            self._stderr = [*self._stderr[-19:], line]
+            return
+        try:
+            record = json.loads(line)
+        except ValueError:
+            logger.debug("Pi wrote a non-JSON line: %r", line[:200])
+            return
+        if isinstance(record, dict):
+            self._loop.call_soon_threadsafe(self._records.put_nowait, record)
+
+    def stderr_tail(self) -> str:
+        """Return the last lines Pi wrote to stderr."""
+        return "\n".join(self._stderr)
+
+    async def send(self, command: dict[str, Any] | None) -> None:
+        """Write one RPC command, or ``None`` to close Pi's stdin.
+
+        Args:
+            command: The command record.
+        """
+        name = f"{_BOX_DIR}/in/{self._sent}.json"
+        self._sent += 1
+        await asyncio.to_thread(self._session.write_files, {name: json.dumps(command)})
+
+    async def records(self) -> AsyncIterator[dict[str, Any]]:
+        """Yield Pi's stdout records until Pi exits.
+
+        Yields:
+            Parsed records.
+        """
+        while (record := await self._records.get()) is not None:
+            yield record
+
+    async def stop(self) -> None:
+        """Close Pi's stdin and wait a while for it to exit; closing the box ends it anyway."""
+        if self._task is None or self._task.done():
+            return
+        with contextlib.suppress(Exception):
+            await self.send(None)
+        await asyncio.wait({self._task}, timeout=_SANDBOX_STOP_SECONDS)
+
+
+def _forward(base_url: str) -> tuple[Callable[..., ModelHTTPResult], httpx.Client]:
+    """Build the mailbox dispatch that sends the box's bridge calls to the loopback bridge.
+
+    Args:
+        base_url: The loopback bridge's base URL.
+
+    Returns:
+        The dispatch callback and the client to close after the turn.
+    """
+    client = httpx.Client(base_url=base_url, timeout=None)
+
+    def dispatch(token: str, path: str, body: Any, headers: Mapping[str, str]) -> ModelHTTPResult:
+        """Send one relayed request to the bridge.
+
+        Args:
+            token: The bearer token the box sent; the bridge checks it.
+            path: The request path.
+            body: The JSON body; the guest proxy sends ``{}`` for a GET.
+            headers: The relayed headers.
+
+        Returns:
+            The bridge's status, content type and body.
+        """
+        # The guest proxy relays the path but not the method; only /tools is a GET.
+        method, payload = ("GET", None) if path == "/tools" else ("POST", body)
+        response = client.request(method, path, json=payload, headers={"authorization": f"Bearer {token}"})
+        return ModelHTTPResult(
+            response.status_code, response.headers.get("content-type", "application/json"), response.content
+        )
+
+    return dispatch, client
+
+
+def _box_files(sandbox: PiSandbox, extensions: Iterable[str], skills: Iterable[str]) -> dict[str, str]:
+    """Collect the files a sandbox turn uploads before Pi starts.
+
+    Args:
+        sandbox: The caller's sandbox request.
+        extensions: Allow-listed extension names to load.
+        skills: Allow-listed skill names to load.
+
+    Returns:
+        Box path to text.
+    """
+    with tempfile.TemporaryDirectory(prefix="skynet-pi-") as tmp:
+        agent_dir = _write_agent_dir(Path(tmp), f"{_BOX_URL_SLOT}/v1")
+        agent = {f"{_BOX_DIR}/agent/{path.name}": path.read_text() for path in agent_dir.iterdir()}
+    addons = [
+        *resolve_allowed(extensions, ALLOWED_EXTENSIONS, "extension"),
+        *resolve_allowed(skills, ALLOWED_SKILLS, "skill"),
+    ]
+    return {
+        **sandbox.files,
+        **agent,
+        **{f"{_BOX_DIR}/addons/{path.name}": path.read_text() for path in addons},
+        f"{_BOX_DIR}/stdin.py": _STDIN_FEEDER,
+    }
+
+
+async def _run_in_sandbox(
+    sandbox: PiSandbox,
+    argv: list[str],
+    app: _BridgeApp,
+    token: str,
+    translator: PiEventTranslator,
+    prompt: str,
+    files: dict[str, str],
+) -> None:
+    """Open the turn's box, run Pi in it until it settles, read files back and close the box.
+
+    Args:
+        sandbox: The caller's sandbox request; ``read_back_files`` is filled.
+        argv: Pi's command line in the box.
+        app: The turn's endpoints.
+        token: The turn's bearer token.
+        translator: Receives every Pi event.
+        prompt: The starting user message.
+        files: The files to upload before Pi starts.
+    """
+    spec = SandboxSpec(
+        lifetime_seconds=sandbox.lifetime_seconds,
+        image=sandbox.image,
+        tags=sandbox.tags,
+        operation_key=sandbox.operation_key,
+        network_disabled=True,
+    )
+    started = time.monotonic()
+    session = await asyncio.to_thread(sandbox.runtime.open, spec)
+    logger.info("Opened a Pi sandbox in %.1f s", time.monotonic() - started)
+    try:
+        await asyncio.to_thread(session.write_files, files)
+        # The guest proxy's port is known only in the box, so the shell fills
+        # it into Pi's model config before Pi starts. Pi alone waits in the
+        # foreground; the feeder ends when it reads ``null``.
+        command = (
+            f'export {_URL_ENV}="${{APP_BUDGET_RELAY_URL%/v1}}" PI_CODING_AGENT_DIR="$PWD/{_BOX_DIR}/agent"'
+            f" && python3 -I -c {shlex.quote(_FILL_URL)}"
+            f" && exec {shlex.join(argv)} < <(python3 -I {_BOX_DIR}/stdin.py {_BOX_DIR}/in 2>/dev/null)"
+        )
+        env = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", _TOKEN_ENV: token}
+        async with _serve(app) as base_url:
+            dispatch, client = _forward(base_url)
+            pi = _SandboxPi(session)
+            try:
+                pi.start(ModelMailbox(dispatch), command, env, sandbox.lifetime_seconds)
+                try:
+                    await _drive(pi, app, translator, prompt)
+                finally:
+                    await pi.stop()
+            finally:
+                client.close()
+        sandbox.read_back_files = {path: await asyncio.to_thread(session.read_file, path) for path in sandbox.read_back}
+    finally:
+        await asyncio.to_thread(session.close)
+
+
 async def run_pi_turn(
     *,
     binary: str,
@@ -702,6 +984,7 @@ async def run_pi_turn(
     prompt: str,
     extensions: Iterable[str] = (TOOL_BRIDGE_EXTENSION,),
     skills: Iterable[str] = (),
+    sandbox: PiSandbox | None = None,
 ) -> None:
     """Run one agent turn on Pi and return when Pi settles.
 
@@ -713,6 +996,8 @@ async def run_pi_turn(
             may render the real prompt itself.
         extensions: Allow-listed extensions to load.
         skills: Allow-listed skills to load.
+        sandbox: Run Pi in its own box with its own tools on, or ``None``
+            to run it here with no tools of its own.
 
     Raises:
         PiBridgeError: When the ``pi`` executable is missing, Pi fails to
@@ -721,11 +1006,42 @@ async def run_pi_turn(
         Exception: The first exception a handler raised, as itself, so the
             caller's budget and gateway error handling still applies.
     """
-    if not pi_available(binary):
-        raise PiBridgeError(f"The Pi agent harness executable {binary!r} was not found; install Pi 0.87.1")
-    argv = pi_command(binary, extensions=extensions, skills=skills)
     token = secrets.token_urlsafe(32)
     app = _BridgeApp(handlers, token)
+    if sandbox is not None:
+        # The sandbox image puts the pinned ``pi`` on its PATH.
+        tools = [*sandbox.builtin_tools, *(spec["name"] for spec in handlers.tool_specs())]
+        argv = pi_command("pi", extensions=extensions, skills=skills, tools=tools, addon_dir=f"{_BOX_DIR}/addons")
+        files = _box_files(sandbox, extensions, skills)
+        await _run_in_sandbox(sandbox, argv, app, token, translator, prompt, files)
+    else:
+        await _run_here(
+            binary, app, token, translator, prompt, pi_command(binary, extensions=extensions, skills=skills)
+        )
+    if app.failure is not None:
+        raise app.failure
+    if translator.error:
+        raise PiBridgeError(translator.error)
+
+
+async def _run_here(
+    binary: str, app: _BridgeApp, token: str, translator: PiEventTranslator, prompt: str, argv: list[str]
+) -> None:
+    """Run Pi as a local process until it settles.
+
+    Args:
+        binary: The ``pi`` executable.
+        app: The turn's endpoints.
+        token: The turn's bearer token.
+        translator: Receives every Pi event.
+        prompt: The starting user message.
+        argv: Pi's command line.
+
+    Raises:
+        PiBridgeError: When the ``pi`` executable is missing.
+    """
+    if not pi_available(binary):
+        raise PiBridgeError(f"The Pi agent harness executable {binary!r} was not found; install Pi 0.87.1")
     with tempfile.TemporaryDirectory(prefix="skynet-pi-") as tmp:
         root = Path(tmp)
         async with _serve(app) as base_url:
@@ -735,13 +1051,9 @@ async def run_pi_turn(
                 await _drive(pi, app, translator, prompt)
             finally:
                 await pi.stop()
-    if app.failure is not None:
-        raise app.failure
-    if translator.error:
-        raise PiBridgeError(translator.error)
 
 
-async def _drive(pi: _PiProcess, app: _BridgeApp, translator: PiEventTranslator, prompt: str) -> None:
+async def _drive(pi: _PiProcess | _SandboxPi, app: _BridgeApp, translator: PiEventTranslator, prompt: str) -> None:
     """Send the prompt and feed Pi's events to the translator until Pi settles.
 
     Args:
@@ -783,9 +1095,11 @@ async def _drive(pi: _PiProcess, app: _BridgeApp, translator: PiEventTranslator,
 __all__ = [
     "ALLOWED_EXTENSIONS",
     "ALLOWED_SKILLS",
+    "PI_BUILTIN_TOOLS",
     "TOOL_BRIDGE_EXTENSION",
     "PiBridgeError",
     "PiEventTranslator",
+    "PiSandbox",
     "PiTurnHandlers",
     "ToolOutcome",
     "pi_available",
