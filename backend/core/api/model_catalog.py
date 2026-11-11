@@ -582,12 +582,13 @@ def is_effortless_model(name: str) -> bool:
         model has no usable effort control.
     """
     if _cached_response is None:
-        # Before the boot prewarm lands, build now: otherwise a stored
-        # effortless pick fails validation once with a 422.
-        try:
-            get_catalog_cached()
-        except Exception:
-            logger.warning("Model catalog build failed during the effort check", exc_info=True)
+        # Before the boot prewarm lands, wait for its build (or start one):
+        # otherwise a stored effortless pick fails validation once with a 422.
+        # Joining the shared refresh thread keeps it to one build at a time.
+        _kick_background_refresh()
+        refresh = _refresh_thread
+        if refresh is not None:
+            refresh.join()
     if name in _hidden_effortless_values:
         return True
     snapshot = _cached_response
@@ -1687,6 +1688,7 @@ _cached_response: ModelCatalogResponse | None = None
 _cached_at_monotonic: float = 0.0
 _cache_lock = Lock()
 _refresh_in_flight = False
+_refresh_thread: Thread | None = None
 
 
 def catalog_snapshot() -> ModelCatalogResponse | None:
@@ -1831,12 +1833,14 @@ def _refresh_catalog_in_background() -> None:
 
 def _kick_background_refresh() -> None:
     """Spawn the background refresh thread if one isn't already running."""
-    global _refresh_in_flight
+    global _refresh_in_flight, _refresh_thread
     with _cache_lock:
         if _refresh_in_flight:
             return
         _refresh_in_flight = True
-    Thread(target=_refresh_catalog_in_background, name="catalog-refresh", daemon=True).start()
+        # Set with the flag, so a caller that sees the flag can join this thread.
+        thread = _refresh_thread = Thread(target=_refresh_catalog_in_background, name="catalog-refresh", daemon=True)
+    thread.start()
 
 
 def with_zero_retention(catalog: ModelCatalogResponse) -> ModelCatalogResponse:

@@ -36,12 +36,12 @@ import {
 } from "@/features/notifications";
 import {
   getNotificationPreferences,
-  webPicked,
   getSlackConnection,
   startSlackOAuth,
   updateLocalMacosCells,
   updateLocalMacosHeld,
   updateNotificationPreferences,
+  webPicked,
   type LocalNotificationChannels,
   type SlackConnection,
   type NotificationChannel,
@@ -642,11 +642,14 @@ export function NotificationsTab() {
               {holdable.map((channel) => {
                 const ChannelIcon = CHANNEL_ICONS[channel];
                 const on = heldNow.includes(channel);
+                // Local runs never post to Slack, so holding Slack here would do nothing.
+                const slackLocked = channel === "slack" && localGrid;
                 return (
                   <DropdownMenuItem
                     key={channel}
                     role="menuitemcheckbox"
                     aria-checked={on}
+                    disabled={slackLocked}
                     // Picking several channels is the point; keep the menu open.
                     onSelect={(e) => {
                       e.preventDefault();
@@ -654,7 +657,14 @@ export function NotificationsTab() {
                     }}
                   >
                     <ChannelIcon className="size-4 text-muted-foreground" aria-hidden="true" />
-                    <span className="flex-1">{msg(CHANNEL_KEYS[channel])}</span>
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      {msg(CHANNEL_KEYS[channel])}
+                      {slackLocked && (
+                        <span className="max-w-56 text-pretty text-xs text-muted-foreground">
+                          {msg("notifications.slack.local_grid")}
+                        </span>
+                      )}
+                    </span>
                     <Check
                       className={cn("size-4 text-primary", on ? "opacity-100" : "opacity-0")}
                       aria-hidden="true"

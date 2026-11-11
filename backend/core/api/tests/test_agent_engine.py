@@ -29,12 +29,12 @@ from ...service_gateway import language_models
 from ...service_gateway.agents import code as code_agent_engine
 from ...service_gateway.language_models import build_language_model
 from ...storage.models import AgentEnginePreferenceModel, Base, UserModel
-from .. import agent_engine, model_fast_mode, model_router
+from .. import agent_engine, model_catalog, model_fast_mode, model_router
 from .. import auth as auth_mod
 from ..account_data_service import delete_account, export_account
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..model_catalog import CatalogModel
+from ..model_catalog import CatalogModel, ModelCatalogResponse
 from ..routers import code_agent as code_agent_mod
 from ..routers import generalist_agent as agent_mod
 from ..routers import tagger_assist as tagger_mod
@@ -208,13 +208,15 @@ def test_stored_engine_rows_are_ignored(local: list[CliStatus], stored: str) -> 
         "removed_managed",
     ],
 )
-def test_engine_fills_only_an_empty_pick(model: str | None, expected: str) -> None:
+def test_engine_fills_only_an_empty_pick(model: str | None, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fill an empty, retired or removed pick from the engine, and keep any explicit pick.
 
     Args:
         model: The request's model value.
         expected: The model the router receives.
+        monkeypatch: Swaps in an empty catalog, so the removal check builds none.
     """
+    monkeypatch.setattr(model_catalog, "_cached_response", ModelCatalogResponse(providers=[], models=[]))
     assert agent_engine.engine_agent_model(SimpleNamespace(engine=_engine()), _USER, model) == expected
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import patch
 
 import litellm
@@ -1047,6 +1048,42 @@ def test_a_stored_effortless_pick_validates_before_the_first_build(monkeypatch: 
 
     assert mc.is_effortless_model("openrouter/vendor/plain")
     mc.require_known_model("openrouter/vendor/plain")
+
+
+def test_a_cold_effort_check_during_the_prewarm_waits_for_its_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold check while the boot prewarm builds joins that build instead of starting a second one."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    started = threading.Event()
+    release = threading.Event()
+    builds: list[int] = []
+
+    def slow_build() -> ModelCatalogResponse:
+        """Count the build and hold it until the test releases it.
+
+        Returns:
+            A catalog with one model without an effort control.
+        """
+        builds.append(1)
+        started.set()
+        release.wait(5)
+        return ModelCatalogResponse(providers=[], models=[plain])
+
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+    monkeypatch.setattr(mc, "get_catalog", slow_build)
+    monkeypatch.setattr(mc, "zero_retention_models", set)
+
+    mc.prewarm_catalog()
+    assert started.wait(5)
+    answers: list[bool] = []
+    checker = threading.Thread(target=lambda: answers.append(mc.is_effortless_model("openrouter/vendor/plain")))
+    checker.start()
+    release.set()
+    checker.join(5)
+
+    assert answers == [True]
+    assert len(builds) == 1
 
 
 def test_the_strongest_model_follows_the_operator_then_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
