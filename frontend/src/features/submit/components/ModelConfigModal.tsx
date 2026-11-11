@@ -71,6 +71,11 @@ interface ModelConfigModalProps {
    * and a CLI plan exists only on this Mac.
    */
   remote?: boolean;
+  /**
+   * The effort levels the coding-agent harness that runs this model accepts.
+   * Unset when the model is not a proposer or its harness takes every level.
+   */
+  harnessEfforts?: readonly string[] | null;
 }
 
 const TOKEN_SOURCE_SEGMENTS: Array<{
@@ -163,6 +168,7 @@ export function ModelConfigModal({
   modelDefaultsOnly = false,
   byokOnlyLocally = false,
   remote = false,
+  harnessEfforts = null,
 }: ModelConfigModalProps) {
   const { keys } = useByokKeys();
   const { openTo } = useSettingsModal();
@@ -260,10 +266,16 @@ export function ModelConfigModal({
   // unset effort means "the provider's default", which is thinking for
   // default-on models (GPT-5, Claude Sonnet 5) and always for mandatory ones,
   // so switching those off must send "none" rather than drop the key.
-  const effortLadder = React.useMemo(
-    () => effortsFor(draft.name, detectionModels).filter((level) => level !== "none"),
-    [draft.name, detectionModels],
+  const ladderFor = React.useCallback(
+    (model: string) =>
+      effortsFor(model, detectionModels).filter(
+        (level) => level !== "none" && (!harnessEfforts || harnessEfforts.includes(level)),
+      ),
+    [detectionModels, harnessEfforts],
   );
+  const effortLadder = React.useMemo(() => ladderFor(draft.name), [ladderFor, draft.name]);
+  // A harness without "none" refuses the off level a default-on model stores.
+  const harnessRefusesOff = !!harnessEfforts && !harnessEfforts.includes("none");
   // Switching thinking on starts at the provider's own default when the
   // catalog knows it, else medium, else the middle of the ladder. A model
   // with no ladder takes any level as "on", and medium is OpenRouter's own.
@@ -514,9 +526,7 @@ export function ModelConfigModal({
                   // new model accepts: "off" becomes the default when the new
                   // model can't turn off (or is off anyway), and a level
                   // outside its ladder moves to its default level.
-                  const ladder = effortsFor(next, detectionModels).filter(
-                    (level) => level !== "none",
-                  );
+                  const ladder = ladderFor(next);
                   const { mandatory, defaultOn } = thinkingInfo(next);
                   let effort = (p.extra?.reasoning_effort as string | undefined) ?? null;
                   if (!modelSupportsThinking(next, detectionModels)) effort = null;
@@ -607,7 +617,9 @@ export function ModelConfigModal({
                             <Switch
                               checked={thinkingEnabled}
                               onCheckedChange={setThinking}
-                              disabled={thinkingMandatory}
+                              disabled={
+                                thinkingMandatory || (thinkingDefaultOn && harnessRefusesOff)
+                              }
                             />
                           )}
                         </div>

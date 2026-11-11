@@ -79,7 +79,7 @@ Estas configurações valem para AutoResearch, Meta-Harness e AutoSaddler.
 
 | Configuração                                   | Padrão | Intervalo                                                |
 | ---------------------------------------------- | ------ | -------------------------------------------------------- |
-| Agente de programação                          | Codex  | Pi, Codex, OpenCode, Prime Agent, Comando personalizado  |
+| Agente de programação                          | Codex  | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, Comando personalizado  |
 | Candidatos por iteração                        | 3      | 1 a 8. |
 | Máx. de chamadas de ferramentas por candidato  | 100    | 1 a 1000                                                 |
 

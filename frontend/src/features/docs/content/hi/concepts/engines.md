@@ -79,7 +79,7 @@
 
 | सेटिंग                          | डिफ़ॉल्ट | सीमा                                              |
 | ------------------------------- | ------- | ------------------------------------------------- |
-| कोडिंग एजेंट                    | Codex   | Pi, Codex, OpenCode, Prime Agent, कस्टम कमांड       |
+| कोडिंग एजेंट                    | Codex   | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, कस्टम कमांड       |
 | प्रति इटरेशन उम्मीदवार            | 3       | 1 से 8। |
 | प्रति उम्मीदवार अधिकतम टूल कॉल     | 100     | 1 से 1000                                         |
 

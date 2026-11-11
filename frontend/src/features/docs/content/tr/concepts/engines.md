@@ -79,7 +79,7 @@ Bu ayarlar AutoResearch, Meta-Harness ve AutoSaddler için geçerlidir.
 
 | Ayar                                   | Varsayılan | Aralık                                            |
 | -------------------------------------- | ---------- | ------------------------------------------------- |
-| Kodlama ajanı                          | Codex      | Pi, Codex, OpenCode, Prime Agent, Özel komut      |
+| Kodlama ajanı                          | Codex      | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, Özel komut      |
 | Yineleme başına aday                   | 3          | 1 ila 8. |
 | Aday başına en fazla araç çağrısı      | 100        | 1 ila 1000                                        |
 

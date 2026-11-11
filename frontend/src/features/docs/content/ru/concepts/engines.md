@@ -79,7 +79,7 @@ Auto — вариант по умолчанию для каждого запус
 
 | Настройка                              | По умолчанию | Диапазон                                         |
 | -------------------------------------- | ------------ | ------------------------------------------------ |
-| Агент-программист                      | Codex        | Pi, Codex, OpenCode, Prime Agent, Custom command |
+| Агент-программист                      | Codex        | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, Custom command |
 | Кандидатов за итерацию                 | 3            | От 1 до 8. |
 | Макс. вызовов инструментов на кандидата | 100         | От 1 до 1000                                     |
 

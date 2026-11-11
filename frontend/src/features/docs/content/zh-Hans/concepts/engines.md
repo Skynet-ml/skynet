@@ -79,7 +79,7 @@ Auto 是每次运行的默认选项。它分两个阶段工作：
 
 | 设置                     | 默认值 | 范围                                              |
 | ------------------------ | ------ | ------------------------------------------------- |
-| 编程智能体               | Codex  | Pi、Codex、OpenCode、Prime Agent、自定义命令      |
+| 编程智能体               | Codex  | Pi、Codex、OpenCode、OpenCode V2、Prime Agent、Aider、OpenHands、OpenHands SDK、Antigravity SDK、Goose、Hermes Agent、eve、DeerFlow、Cline、Code Puppy、自定义命令      |
 | 每轮候选数               | 3      | 1 到 8。 |
 | 每个候选的最大工具调用数 | 100    | 1 到 1000                                         |
 

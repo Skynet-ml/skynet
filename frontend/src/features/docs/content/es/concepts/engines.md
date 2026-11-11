@@ -79,7 +79,7 @@ Estos ajustes se aplican a AutoResearch, Meta-Harness y AutoSaddler.
 
 | Ajuste                                   | Valor predeterminado | Rango                                                     |
 | ---------------------------------------- | -------------------- | --------------------------------------------------------- |
-| Agente de código                         | Codex                | Pi, Codex, OpenCode, Prime Agent, comando personalizado   |
+| Agente de código                         | Codex                | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, comando personalizado   |
 | Candidatos por iteración                 | 3                    | De 1 a 8. |
 | Máximo de llamadas a herramientas por candidato | 100           | De 1 a 1000                                               |
 

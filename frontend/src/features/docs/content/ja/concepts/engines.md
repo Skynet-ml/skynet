@@ -79,7 +79,7 @@ Auto はすべての実行の既定の選択です。2 つのフェーズで動�
 
 | 設定                                 | 既定値 | 範囲                                                     |
 | ------------------------------------ | ------ | -------------------------------------------------------- |
-| コーディングエージェント             | Codex  | Pi、Codex、OpenCode、Prime Agent、カスタムコマンド       |
+| コーディングエージェント             | Codex  | Pi、Codex、OpenCode、OpenCode V2、Prime Agent、Aider、OpenHands、OpenHands SDK、Antigravity SDK、Goose、Hermes Agent、eve、DeerFlow、Cline、Code Puppy、カスタムコマンド       |
 | 反復ごとの候補数                     | 3      | 1〜8。 |
 | 候補あたりの最大ツール呼び出し数     | 100    | 1〜1000                                                  |
 
