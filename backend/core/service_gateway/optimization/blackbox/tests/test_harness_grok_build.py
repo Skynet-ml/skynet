@@ -135,6 +135,7 @@ def _run_with_fake_grok(
     gateway: GatewayConfig = _GATEWAY,
     temp: Path | None = None,
     kill_shell: bool = False,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], str, dict, Path]:
     """Run the built Grok command in a scratch workspace against a fake ``grok`` binary.
 
@@ -147,11 +148,12 @@ def _run_with_fake_grok(
         gateway: Gateway URL and key the launch writes into the config.
         temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
         kill_shell: Make the fake SIGKILL the run's shell after it logs.
+        mcp_servers: Proposer MCP server names for the launch.
 
     Returns:
         The finished command, the fake binary's call log, the config Grok saw, and the workspace.
     """
-    launch = build_launch(_target(), gateway, protected=protected)
+    launch = build_launch(_target(), gateway, protected=protected, mcp_servers=mcp_servers)
     workspace = tmp_path / "work"
     for name, content in launch.files.items():
         path = workspace / name
@@ -467,6 +469,27 @@ def test_protected_run_points_grok_at_the_relay_and_returns_its_answer(tmp_path:
         "I fixed the off-by-one error.\n\n42.",
         {"input_tokens": 125, "output_tokens": 40},
     )
+
+
+def test_protected_run_gives_grok_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """With proposer MCP servers, the config Grok reads lists each one at the relay, with no token in it."""
+    result, _, config, workspace = _run_with_fake_grok(tmp_path, protected=True, mcp_servers=("search", "my tools"))
+
+    assert result.returncode == 0, result.stderr
+    assert config["mcp_servers"] == {
+        "search": {"url": f"{_RELAY}/mcp/search"},
+        "my tools": {"url": f"{_RELAY}/mcp/my%20tools"},
+    }
+    written = (workspace / GROK_CONFIG_FILE).read_text(encoding="utf-8")
+    assert _GATEWAY.url not in written
+    assert _GATEWAY.api_key not in written
+
+
+def test_launch_without_proposer_mcp_servers_sets_no_mcp_table() -> None:
+    """No proposer MCP servers leaves the config without an ``mcp_servers`` table."""
+    config = tomllib.loads(build_launch(_target(), _GATEWAY, protected=True).files[GROK_CONFIG_FILE])
+
+    assert "mcp_servers" not in config
 
 
 def test_the_relay_rewrite_reaches_a_non_ascii_gateway_url(tmp_path: Path) -> None:

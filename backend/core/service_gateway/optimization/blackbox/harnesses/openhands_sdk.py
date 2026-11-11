@@ -6,7 +6,7 @@ Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/openhands_sdk.
 from __future__ import annotations
 
 import shlex
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_OPENHANDS_SDK
@@ -193,9 +193,9 @@ def _run(prompt, model, api_key):
     tools = [Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name), Tool(name=TaskTrackerTool.name)]
     # The candidate is the optimization target, so it goes in as raw system
     # prompt text. A trigger-less skill would land in <REPO_CONTEXT>, which the
-    # SDK marks untrusted and limits to style and convention guidance. No skills
-    # and no MCP servers.
-    agent = Agent(llm=llm, tools=tools, agent_context=AgentContext(system_message_suffix=_instructions()))
+    # SDK marks untrusted and limits to style and convention guidance. No skills,
+    # and only the [proposer] MCP servers.
+    agent = Agent(llm=llm, tools=tools,{mcp_config} agent_context=AgentContext(system_message_suffix=_instructions()))
     # The default visualizer prints rich text to stdout around the Pi event.
     conversation = Conversation(agent=agent, workspace=str(Path.cwd().resolve()), visualizer=None)
     conversation.send_message(prompt)
@@ -271,19 +271,25 @@ def _gateway_url(gateway: GatewayConfig) -> str:
     return url
 
 
-def _runner_script(gateway_url: str) -> str:
+def _runner_script(gateway_url: str, mcp_servers: tuple[str, ...] = ()) -> str:
     """Return the pinned uv script that runs the SDK against ``gateway_url``.
 
     The URL sits in the script text, not the env, so the protected relay
-    rewrite of generated files points it at the sandbox-local mailbox.
+    rewrite of generated files points it at the sandbox-local mailbox. The
+    MCP urls sit there too, for the same reason.
 
     Args:
         gateway_url: Validated gateway base URL.
+        mcp_servers: The ``[proposer]`` MCP server names.
 
     Returns:
         The script source.
     """
+    mcp_config = {
+        name: {"url": f"{gateway_url}/mcp/{quote(name, safe='')}", "transport": "http"} for name in mcp_servers
+    }
     return _RUNNER_SCRIPT.format(
+        mcp_config=f" mcp_config={mcp_config!r}," if mcp_config else "",
         dependencies="\n".join(f'#   "{pin}",' for pin in _SCRIPT_PINS),
         requires_python=_REQUIRES_PYTHON,
         gateway_url=gateway_url,
@@ -310,13 +316,23 @@ def _openhands_sdk_install() -> str:
     )
 
 
-def _openhands_sdk_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _openhands_sdk_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for the OpenHands SDK (``openhands-sdk`` with ``openhands-tools``).
 
     Args:
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; the SDK sends every model call there.
         reasoning_effort: The user's effort for the model, or ``None`` for the SDK default.
+        mcp_servers: The ``[proposer]`` MCP server names. Each gets the gateway's
+            ``/mcp/<name>`` url in the runner's ``Agent.mcp_config``, which the
+            box's proxy relays with its own token, so the SDK never holds the
+            real url or a secret (SKY-621).
 
     Returns:
         The launch.
@@ -337,7 +353,7 @@ def _openhands_sdk_launch(model: str, gateway: GatewayConfig, *, reasoning_effor
     return HarnessLaunch(
         instructions_file=INSTRUCTIONS_FILE,
         install_command=_openhands_sdk_install(),
-        files={RUNNER_FILE: _runner_script(_gateway_url(gateway))},
+        files={RUNNER_FILE: _runner_script(_gateway_url(gateway), mcp_servers)},
         run_command=f"{_UV_PATH} {_RUNNER}",
         env=env,
         parse_output=parse_pi_output,

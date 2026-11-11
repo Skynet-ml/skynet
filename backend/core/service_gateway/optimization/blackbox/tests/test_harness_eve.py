@@ -359,6 +359,40 @@ def test_protected_launch_checks_the_pin_relays_the_gateway_and_blocks_updates(t
     assert "OPENAI_BASE_URL" not in launch.env
 
 
+def test_protected_launch_gives_eve_only_the_proposer_mcp_connections_at_the_relay(tmp_path: Path) -> None:
+    """Each proposer MCP server becomes one eve connection at the relay; other files in the folder stay out."""
+    relay = "http://127.0.0.1:3210/v1"
+    launch = build_launch(_target(), _GATEWAY, protected=True, mcp_servers=("search", "code-tools"))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    _write_launch_files(launch.files, launch.instructions_file, workspace)
+    (workspace / ".app/eve/agent/connections/stray.ts").write_text("export default {};\n")
+    record = _run_with_fakes(launch.run_command, workspace, tmp_path, APP_BUDGET_RELAY_URL=relay)
+
+    assert sorted(path.name for path in (record / "agent/connections").iterdir()) == ["code-tools.ts", "search.ts"]
+    for name in ("search", "code-tools"):
+        connection = (record / f"agent/connections/{name}.ts").read_text()
+        assert 'import { defineMcpClientConnection } from "eve/connections";' in connection
+        assert f'url: "{relay}/mcp/{name}"' in connection
+        assert _GATEWAY.url not in connection
+        assert _GATEWAY.api_key not in connection
+
+
+def test_launch_without_proposer_mcp_servers_adds_no_connection() -> None:
+    """No proposer MCP servers means no connection file and no copy step."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+
+    assert set(launch.files) == {".app/eve/agent/agent.ts"}
+    assert "connections" not in launch.run_command
+
+
+@pytest.mark.parametrize("name", ["My-Tools", "my_tools", "1tools"])
+def test_mcp_server_name_that_eve_cannot_load_is_refused(name: str) -> None:
+    """A name eve rejects as a connection name stops the launch instead of a run without that server."""
+    with pytest.raises(ServiceError, match="eve harness cannot load the MCP server"):
+        build_launch(_target(), _GATEWAY, protected=True, mcp_servers=(name,))
+
+
 def test_pi_parser_reads_the_recorded_runner_sample() -> None:
     """Read the answer and usage from the runner's Pi-shaped lines and skip plain log lines."""
     expected = ("The answer is 42.", {"input_tokens": 1200, "output_tokens": 85})

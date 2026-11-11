@@ -111,7 +111,7 @@ class Agent:
             "model": target.name,
             "thinking": target.endpoint.options.thinking_level,
             "eval": self.config.eval_kwargs,
-            "mcp_servers": self.config.kwargs["mcp_servers"],
+            "mcp_servers": [vars(server) for server in self.config.kwargs["mcp_servers"]],
         }
         with open(os.environ["FAKE_SDK_RECORD"], "w") as handle:
             json.dump(record, handle)
@@ -147,6 +147,12 @@ class ModelTarget:
     def __init__(self, name, endpoint):
         self.name = name
         self.endpoint = endpoint
+""",
+    "google/antigravity/types.py": """
+class McpStreamableHttpServer:
+    def __init__(self, name, url):
+        self.name = name
+        self.url = url
 """,
     "google_antigravity-0.1.20.dist-info/METADATA": "Metadata-Version: 2.1\nName: google-antigravity\nVersion: 0.1.20\n",
 }
@@ -392,6 +398,53 @@ def test_runner_sends_the_turn_to_the_gateway_and_prints_a_pi_event(tmp_path: Pa
     }
     assert parse_pi_output(result.stdout) == ("answer to Fix the bug.", {"input_tokens": 11, "output_tokens": 7})
     assert (tmp_path / "ws" / ".app/antigravity/session").is_dir()
+
+
+def test_protected_runner_gives_the_agent_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """With proposer MCP servers, the relay rewrite points each server at the relay and no token is in the runner."""
+    target = BlackboxTarget.model_construct(
+        kind=BLACKBOX_TARGET_AGENT, harness=HARNESS_ID, model="m", run_command="true"
+    )
+    launch = build_launch(target, _GATEWAY, protected=True, mcp_servers=("search", "my_tools"))
+    workspace = tmp_path / "ws"
+    for name, content in launch.files.items():
+        path = workspace / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    subprocess.run(
+        launch.run_command.split(" && ", 1)[0],
+        shell=True,
+        cwd=workspace,
+        env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY},
+        timeout=10,
+        check=True,
+    )
+    runner = (workspace / RUNNER_FILE).read_text()
+    assert _GATEWAY.url not in runner
+    assert _GATEWAY.api_key not in runner
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix the bug.\n")
+    record = tmp_path / "record.json"
+
+    result = _run_runner(
+        tmp_path,
+        {RUNNER_FILE: runner},
+        **{**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_SDK_RECORD": str(record)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(record.read_text())["mcp_servers"] == [
+        {"name": "search", "url": f"{_RELAY}/mcp/search"},
+        {"name": "my_tools", "url": f"{_RELAY}/mcp/my_tools"},
+    ]
+
+
+def test_launch_without_proposer_mcp_servers_keeps_the_runner() -> None:
+    """No proposer MCP servers leaves the runner exactly as before, with an empty server list."""
+    runner = SPEC.launch("m", _GATEWAY, mcp_servers=()).files[RUNNER_FILE]
+    assert runner == SPEC.launch("m", _GATEWAY).files[RUNNER_FILE]
+    assert "        mcp_servers=[],\n" in runner
+    assert "McpStreamableHttpServer" not in runner
 
 
 def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:

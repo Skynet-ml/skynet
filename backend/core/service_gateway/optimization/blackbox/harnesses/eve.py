@@ -9,7 +9,9 @@ so the bridge's Pi parser reads the answer, the usage and the tool calls.
 from __future__ import annotations
 
 import json
+import re
 import shlex
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_EVE
@@ -26,6 +28,10 @@ ZOD_VERSION = "4.6.7"
 EVE_PROJECT_DIR = ".app/eve"
 EVE_INSTRUCTIONS_FILE = f"{EVE_PROJECT_DIR}/agent/instructions.md"
 _AGENT_FILE = f"{EVE_PROJECT_DIR}/agent/agent.ts"
+_CONNECTIONS_DIR = f"{EVE_PROJECT_DIR}/agent/connections"
+# eve 1.0.0-rc.6 names a connection after its file and rejects the build when
+# the name breaks this rule (``CONNECTION_SLUG_PATTERN`` in discover/grammar.js).
+_CONNECTION_NAME = re.compile(r"[a-z][a-z0-9-]{0,63}")
 # The sandbox image preinstalls eve and its peers here from
 # sandbox-runtime/package-lock.json, so a protected run with no registry route
 # can still build the project.
@@ -482,6 +488,29 @@ def _agent_source(model: str, gateway: GatewayConfig, reasoning: str | None = No
     )
 
 
+def _connection_source(name: str, gateway: GatewayConfig) -> str:
+    """Return the eve ``agent/connections/<name>.ts`` for one proposer MCP server.
+
+    The gateway URL is a literal so a protected run's relay rewrite finds it.
+    The relay needs no token, so the connection has no ``auth``.
+
+    Args:
+        name: Proposer MCP server name.
+        gateway: Gateway URL and key.
+
+    Returns:
+        The TypeScript source.
+    """
+    url = f"{gateway.url}/mcp/{quote(name, safe='')}"
+    return (
+        'import { defineMcpClientConnection } from "eve/connections";\n\n'
+        "export default defineMcpClientConnection({\n"
+        f"  url: {json.dumps(url)},\n"
+        f"  description: {json.dumps(f'Proposer MCP server {name}.')},\n"
+        "});\n"
+    )
+
+
 def _package_json() -> str:
     """Return the eve project's ``package.json`` with every dependency pinned exactly.
 
@@ -502,7 +531,13 @@ def _package_json() -> str:
     return json.dumps(package, indent=2)
 
 
-def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _eve_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for eve (npm ``eve``, pinned to :data:`EVE_VERSION`).
 
     The version under optimization becomes the agent's ``instructions.md``.
@@ -519,13 +554,24 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort, passed as eve's ``reasoning``
             level, or ``None`` for the model's default.
+        mcp_servers: Proposer MCP server names the agent may use, served by the
+            gateway (SKY-621). Each one becomes an eve connection file.
 
     Returns:
         The launch.
 
     Raises:
-        ServiceError: When eve has no level with the effort's name.
+        ServiceError: When eve has no level with the effort's name, or a
+            server name is not a legal eve connection name.
     """
+    for name in mcp_servers:
+        if not _CONNECTION_NAME.fullmatch(name):
+            raise ServiceError(
+                f"The eve harness cannot load the MCP server {name!r}: eve needs lowercase letters, "
+                "digits and dashes, starting with a letter."
+            )
+    connections = {f"{_CONNECTIONS_DIR}/{name}.ts": _connection_source(name, gateway) for name in mcp_servers}
+    files = {_AGENT_FILE: _agent_source(model, gateway, _reasoning_level(reasoning_effort)), **connections}
     env = _base_env(model, gateway)
     env.update(_ENV)
     # agent.ts is a launch file because a protected run's relay rewrite edits
@@ -535,7 +581,14 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
         f'export EVE_WORKSPACE="$PWD" && {_temp_root("EVE_DIR", "eve")} && '
         'mkdir -p "$EVE_DIR/agent/channels" "$EVE_DIR/agent/tools" && '
         f'cp {_AGENT_FILE} {EVE_INSTRUCTIONS_FILE} "$EVE_DIR/agent/" && '
-        f"printf '%s' {shlex.quote(EVE_SANDBOX)} > \"$EVE_DIR/agent/sandbox.ts\" && "
+        # Only the launch's own connection files, so no other file in the
+        # workspace folder can add a connection.
+        + (
+            f'mkdir "$EVE_DIR/agent/connections" && cp {" ".join(connections)} "$EVE_DIR/agent/connections/" && '
+            if connections
+            else ""
+        )
+        + f"printf '%s' {shlex.quote(EVE_SANDBOX)} > \"$EVE_DIR/agent/sandbox.ts\" && "
         f"printf '%s' {shlex.quote(EVE_CHANNEL)} > \"$EVE_DIR/agent/channels/eve.ts\" && "
         f"printf '%s' {shlex.quote(EVE_DISABLE_AGENT_TOOL)} > \"$EVE_DIR/agent/tools/agent.ts\" && "
         f"printf '%s' {shlex.quote(_package_json())} > \"$EVE_DIR/package.json\" && "
@@ -554,7 +607,7 @@ def _eve_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | N
     return HarnessLaunch(
         instructions_file=EVE_INSTRUCTIONS_FILE,
         install_command=_npm_install("eve", "eve", EVE_VERSION),
-        files={_AGENT_FILE: _agent_source(model, gateway, _reasoning_level(reasoning_effort))},
+        files=files,
         run_command=(
             f"{setup} && "
             f'(cd "$EVE_DIR" && {deps} && node_modules/.bin/eve build) >&2 && '

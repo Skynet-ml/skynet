@@ -78,6 +78,7 @@ class DeerFlowClient:
 
     def stream(self, message, recursion_limit):
         config = Path(os.environ["DEER_FLOW_PROJECT_ROOT"], "config.yaml").read_text()
+        extensions = Path(os.environ["DEER_FLOW_PROJECT_ROOT"], "extensions_config.json")
         record = {
             "kwargs": self.kwargs,
             "message": message,
@@ -86,6 +87,7 @@ class DeerFlowClient:
             "keys": {name: os.environ.get(name) for name in ("OPENAI_API_KEY", "EXA_API_KEY")},
             "roots": [os.environ["DEER_FLOW_PROJECT_ROOT"], os.environ.get("DEER_FLOW_HOME")],
             "config_paths": [os.environ.get(name) for name in ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_EXTENSIONS_CONFIG_PATH")],
+            "extensions": json.loads(extensions.read_text()) if extensions.exists() else None,
         }
         Path(os.environ["FAKE_DEERFLOW_RECORD"]).write_text(json.dumps(record))
         if os.environ.get("FAKE_DEERFLOW_EVENTS"):
@@ -272,19 +274,23 @@ def test_parser_reads_the_recorded_runner_output() -> None:
 
 
 def _run_fake_runner(
-    tmp_path: Path, instructions: str | None = None, **extra_env: str
+    tmp_path: Path, instructions: str | None = None, mcp_servers: tuple[str, ...] = (), **extra_env: str
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     """Run the shipped runner against a fake DeerFlow package.
 
     Args:
         tmp_path: Workspace and fake package root.
         instructions: Text for the workspace's instructions file, or ``None`` for no file.
+        mcp_servers: Proposer MCP server names; any name makes a protected launch
+            whose files get the relay rewrite before the runner starts.
         **extra_env: Extra environment for the runner, such as scripted events.
 
     Returns:
         The finished process, the workspace and the fake client's record file.
     """
-    launch = build_launch(_target(), _GATEWAY, reasoning_effort="none")
+    launch = build_launch(
+        _target(), _GATEWAY, reasoning_effort="none", protected=bool(mcp_servers), mcp_servers=mcp_servers
+    )
     fakes = tmp_path / "fakes"
     for name, source in _FAKE_DEERFLOW.items():
         (fakes / name).parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +303,15 @@ def _run_fake_runner(
     (workspace / "task" / "PROMPT.md").write_text("Fix the pager.\n")
     if instructions is not None:
         (workspace / INSTRUCTIONS_FILE).write_text(instructions)
+    if mcp_servers:
+        subprocess.run(
+            launch.run_command.split(" && ", 1)[0],
+            shell=True,
+            cwd=workspace,
+            env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY},
+            timeout=10,
+            check=True,
+        )
     record = tmp_path / "record.json"
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -338,6 +353,37 @@ def test_runner_drives_the_client_and_prints_one_pi_event(tmp_path: Path) -> Non
     assert seen["config"]["models"][0]["base_url"] == _GATEWAY.url
     mount = {"host_path": str(workspace.resolve()), "container_path": str(workspace.resolve()), "read_only": False}
     assert seen["config"]["sandbox"]["mounts"] == [mount]
+
+
+def test_protected_runner_gives_deerflow_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """With proposer MCP servers, DeerFlow's extensions file lists only them, at the relay, with no token.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    completed, workspace, record = _run_fake_runner(tmp_path, mcp_servers=("search", "my tools"))
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(record.read_text())["extensions"] == {
+        "mcpServers": {
+            "search": {"enabled": True, "type": "http", "url": f"{_RELAY}/mcp/search"},
+            "my tools": {"enabled": True, "type": "http", "url": f"{_RELAY}/mcp/my%20tools"},
+        }
+    }
+    runner = (workspace / RUNNER_FILE).read_text()
+    assert _GATEWAY.url not in runner
+    assert _GATEWAY.api_key not in runner
+
+
+def test_runner_without_proposer_mcp_servers_writes_no_extensions_file(tmp_path: Path) -> None:
+    """No proposer MCP servers means no extensions file, so DeerFlow loads no MCP server.
+
+    Args:
+        tmp_path: Workspace and fake package root.
+    """
+    completed, _, record = _run_fake_runner(tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(record.read_text())["extensions"] is None
+    assert "extensions_config.json" not in build_launch(_target(), _GATEWAY).files[RUNNER_FILE]
 
 
 @pytest.mark.parametrize(

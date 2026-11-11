@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import shlex
+from urllib.parse import quote
 
 from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_FABRIC
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
 from .base import ENV_API_KEY, PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _version_check
+from .codex import _MCP_STARTUP_TIMEOUT_SEC
 
 FABRIC_VERSION = "0.5.0"
 # The runtime ships abi3 manylinux wheels for Python >= 3.11. The ``harness``
@@ -262,7 +264,9 @@ def _fabric_install() -> str:
     )
 
 
-def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | None) -> str:
+def _fabric_config(
+    model: str, gateway: GatewayConfig, reasoning_effort: str | None, mcp_servers: tuple[str, ...] = ()
+) -> str:
     """Build the Fabric agent config that runs Codex against the gateway.
 
     The gateway URL lives in this file rather than on the command line, so a
@@ -272,6 +276,7 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Codex's default.
+        mcp_servers: Proposer MCP server names Codex may use, served by the gateway.
 
     Returns:
         The JSON text.
@@ -296,7 +301,17 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
         # nemo-fabric-adapters-codex 0.5.0 pins (openai-codex==0.144.4). Codex
         # 0.153.0 removed it, so recheck it on any FABRIC_VERSION bump.
         settings["config_overrides"] = {**_FABRIC_CODEX_OVERRIDES, **_FABRIC_EFFORT_OVERRIDES}
-    config = {
+    if mcp_servers:
+        # Fabric's McpServerConfig has no ``required`` field, so it goes in as a
+        # Codex override: Codex then fails the thread start when a server does not
+        # start, instead of a run that silently has no proposer tools. The relay
+        # adds a hop, so each server gets the codex harness's longer startup time.
+        mcp_overrides: dict[str, object] = {}
+        for name in mcp_servers:
+            mcp_overrides[f"mcp_servers.{name}.required"] = True
+            mcp_overrides[f"mcp_servers.{name}.startup_timeout_sec"] = _MCP_STARTUP_TIMEOUT_SEC
+        settings["config_overrides"] = {**settings["config_overrides"], **mcp_overrides}
+    config: dict[str, object] = {
         "metadata": {"name": "skynet-fabric"},
         "harness": {"adapter_id": FABRIC_ADAPTER, "resolution": "preinstalled", "settings": settings},
         "runtime": {"input_schema": "text", "output_schema": "message"},
@@ -305,10 +320,23 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
             "default": {"provider": PROVIDER, "model": model, "base_url": gateway.url, "api_key_env": FABRIC_KEY_ENV}
         },
     }
+    if mcp_servers:
+        config["mcp"] = {
+            "servers": {
+                name: {"transport": "streamable-http", "url": f"{gateway.url}/mcp/{quote(name, safe='')}"}
+                for name in mcp_servers
+            }
+        }
     return json.dumps(config, indent=2)
 
 
-def _fabric_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+def _fabric_launch(
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    reasoning_effort: str | None = None,
+    mcp_servers: tuple[str, ...] = (),
+) -> HarnessLaunch:
     """Build the launch for NeMo Fabric (:data:`FABRIC_PACKAGES`, pinned to :data:`FABRIC_VERSION`).
 
     The run script prints only the final response, so the bridge keeps the
@@ -318,6 +346,7 @@ def _fabric_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
         model: Target model id.
         gateway: Gateway URL and key.
         reasoning_effort: The user's effort for the model, or ``None`` for Codex's default.
+        mcp_servers: Proposer MCP server names Codex may use, served by the gateway (SKY-621).
 
     Returns:
         The launch.
@@ -328,7 +357,7 @@ def _fabric_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_fabric_install(),
-        files={FABRIC_CONFIG_FILE: _fabric_config(model, gateway, reasoning_effort)},
+        files={FABRIC_CONFIG_FILE: _fabric_config(model, gateway, reasoning_effort, mcp_servers)},
         run_command=(
             # ``&&`` and not ``;``: the protected relay rewrite goes in front with
             # ``&&``, and a failed rewrite must stop the run before Fabric starts.

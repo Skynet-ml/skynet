@@ -114,6 +114,7 @@ def _run_with_fake_code_puppy(
     extra_bins: dict[str, str] | None = None,
     temp: Path | None = None,
     kill_shell: bool = False,
+    mcp_servers: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Code Puppy command in a scratch workspace against a fake ``code-puppy`` binary.
 
@@ -130,11 +131,14 @@ def _run_with_fake_code_puppy(
         extra_bins: Other fake binaries (name to script) that go in front of the system ``PATH``.
         temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
         kill_shell: Make the fake SIGKILL the run's shell after it logs.
+        mcp_servers: Names of the proposer MCP servers for the launch.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
     """
-    launch = build_launch(_target(), gateway, protected=protected, reasoning_effort=reasoning_effort)
+    launch = build_launch(
+        _target(), gateway, protected=protected, reasoning_effort=reasoning_effort, mcp_servers=mcp_servers
+    )
     if workspace is None:
         workspace = tmp_path / "work"
     else:
@@ -350,6 +354,43 @@ def test_no_file_in_the_run_temp_folder_holds_the_token(tmp_path: Path, protecte
     assert {path.name for path in files} >= {"puppy.cfg", "extra_models.json"}
     for path in files:
         assert _GATEWAY.api_key.encode() not in path.read_bytes(), path
+
+
+def test_protected_run_gives_code_puppy_only_the_proposer_mcp_servers_at_the_relay(tmp_path: Path) -> None:
+    """Give Code Puppy each proposer MCP server at the relay, bound to start for its default agent, with no token."""
+    snapshot = tmp_path / "snapshot"
+
+    result, _, _ = _run_with_fake_code_puppy(
+        tmp_path, protected=True, snapshot=snapshot, mcp_servers=("search", "my tools")
+    )
+
+    assert result.returncode == 0, result.stderr
+    config = snapshot / "config" / "code_puppy"
+    assert json.loads((config / "mcp_servers.json").read_text()) == {
+        "mcp_servers": {
+            "search": {"type": "http", "url": f"{_RELAY}/mcp/search"},
+            "my tools": {"type": "http", "url": f"{_RELAY}/mcp/my%20tools"},
+        }
+    }
+    assert json.loads((config / "mcp_agent_bindings.json").read_text()) == {
+        "bindings": {"code-puppy": {"search": {"auto_start": True}, "my tools": {"auto_start": True}}}
+    }
+    for path in snapshot.rglob("*"):
+        if path.is_file():
+            assert _GATEWAY.api_key.encode() not in path.read_bytes(), path
+
+
+def test_launch_without_proposer_mcp_servers_adds_no_mcp_file(tmp_path: Path) -> None:
+    """Keep the launch unchanged and write no MCP file when the run has no proposer MCP servers."""
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+    snapshot = tmp_path / "snapshot"
+
+    result, _, _ = _run_with_fake_code_puppy(tmp_path, protected=True, snapshot=snapshot)
+
+    assert result.returncode == 0, result.stderr
+    assert list(launch.files) == [CODE_PUPPY_MODELS_FILE]
+    assert "mcp" not in launch.run_command
+    assert not list(snapshot.rglob("*mcp*"))
 
 
 def test_open_run_keeps_the_gateway_url(tmp_path: Path) -> None:
