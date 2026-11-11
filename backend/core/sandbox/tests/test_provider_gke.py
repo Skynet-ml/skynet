@@ -13,6 +13,7 @@ import asyncio
 import inspect
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -673,6 +674,180 @@ async def test_a_hung_connect_is_an_infra_error(cluster: FakeCluster, monkeypatc
             assert (await env.exec("echo still")).stdout.strip() == "still"
         finally:
             release.set()
+
+
+async def test_a_hung_connect_under_a_short_timeout_says_it_did_not_connect(
+    cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Report a connect hang as such, not as a command that ran past its timeout."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 5.0)
+    monkeypatch.setattr(gke, "_KILL_GRACE_SECONDS", 0)
+    monkeypatch.setattr(gke, "_GROUP_KILL_SECONDS", 0.2)
+    release = threading.Event()
+    hung: list[bool] = []
+
+    def hanging_stream(method: Any, name: str, namespace: str, **kwargs: Any) -> FakeSession:
+        """Block the first connect until the test releases it.
+
+        Args:
+            method: The bound exec call.
+            name: The pod name.
+            namespace: The namespace.
+            **kwargs: The exec options.
+
+        Returns:
+            The running session.
+        """
+        if not hung:
+            hung.append(True)
+            release.wait(10)
+        return fake_stream(method, name, namespace, **kwargs)
+
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "k8s_stream", hanging_stream)
+        try:
+            with pytest.raises(SandboxInfraError, match="did not connect in 1s") as raised:
+                await env.exec("true", timeout_sec=1)
+            assert "past its" not in str(raised.value)
+        finally:
+            release.set()
+
+
+async def test_a_hung_connect_during_start_stops_the_exec_polls(
+    cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail the start after one hung exec probe, on the provider's own session pool."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 0.2)
+    monkeypatch.setattr(gke, "_GROUP_KILL_SECONDS", 0.2)
+    release = threading.Event()
+    threads: list[str] = []
+
+    def hanging_stream(method: Any, name: str, namespace: str, **kwargs: Any) -> FakeSession:
+        """Block every connect until the test releases it.
+
+        Args:
+            method: The bound exec call.
+            name: The pod name.
+            namespace: The namespace.
+            **kwargs: The exec options.
+
+        Returns:
+            The running session.
+        """
+        threads.append(threading.current_thread().name)
+        release.wait(10)
+        return fake_stream(method, name, namespace, **kwargs)
+
+    monkeypatch.setattr(gke, "k8s_stream", hanging_stream)
+    env = GKEEnvironment(_spec())
+    try:
+        with pytest.raises(SandboxInfraError, match="did not connect"):
+            await env.start()
+    finally:
+        release.set()
+        await env.stop()
+    assert len(threads) == 1
+    assert threads[0].startswith("skynet-gke-exec")
+
+
+def test_the_websocket_connect_obeys_the_scope_timeout() -> None:
+    """End a connect to a server that never answers when the scope's timeout runs out."""
+    if gke.k8s_ws_client is None:
+        pytest.skip("The kubernetes package is not installed.")
+    assert gke.k8s_ws_client.WebSocket is gke._TimedWebSocket
+    configuration = pytest.importorskip("kubernetes").client.Configuration()
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        url = f"ws://127.0.0.1:{server.getsockname()[1]}/"
+        started = time.monotonic()
+        with gke._connect_timeout(0.3), pytest.raises(Exception, match="timed out"):
+            gke.k8s_ws_client.create_websocket(configuration, url)
+        assert time.monotonic() - started < 5
+    assert getattr(gke._connect_scope, "seconds", None) is None
+
+
+HANDSHAKE_403 = (
+    "Handshake status 403 Forbidden -+-+- {'audit-id': 'abc'} -+-+- "
+    "b'pods is forbidden: User \"robot@project.iam.gserviceaccount.com\" cannot create pods/exec'"
+)
+
+
+async def test_a_refused_exec_handshake_is_fatal(cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise SandboxFatalError for a 403 exec handshake, without its headers or body."""
+
+    def refused_stream(*args: Any, **kwargs: Any) -> FakeSession:
+        """Refuse the handshake as ``websocket_call`` reports it.
+
+        Args:
+            *args: The exec call and its target.
+            **kwargs: The exec options.
+
+        Raises:
+            FakeApiError: Always, with status 0.
+        """
+        raise FakeApiError(0, HANDSHAKE_403)
+
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "k8s_stream", refused_stream)
+        with pytest.raises(SandboxFatalError, match="RBAC") as raised:
+            await env.exec("true")
+    assert "403 Forbidden" in str(raised.value)
+    assert "-+-+-" not in str(raised.value)
+    assert "gserviceaccount" not in str(raised.value)
+
+
+async def test_a_refused_exec_handshake_fails_the_start(cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the start at the first refused exec probe instead of polling until the deadline."""
+    calls: list[bool] = []
+
+    def refused_stream(*args: Any, **kwargs: Any) -> FakeSession:
+        """Refuse the handshake as ``websocket_call`` reports it.
+
+        Args:
+            *args: The exec call and its target.
+            **kwargs: The exec options.
+
+        Raises:
+            FakeApiError: Always, with status 0.
+        """
+        calls.append(True)
+        raise FakeApiError(0, HANDSHAKE_403)
+
+    monkeypatch.setattr(gke, "k8s_stream", refused_stream)
+    with pytest.raises(SandboxFatalError):
+        async with GKEEnvironment(_spec()):
+            pass
+    assert len(calls) == 1
+    assert cluster.verbs()[-1] == "delete"
+
+
+def test_the_status_comes_from_the_wrapped_handshake_error() -> None:
+    """Read the status from the error that ``websocket_call`` wrapped."""
+
+    class BadStatusError(Exception):
+        """Stand in for websocket-client's ``WebSocketBadStatusException``."""
+
+        status_code = 401
+
+    try:
+        try:
+            raise BadStatusError("Handshake status 401 Unauthorized")
+        except BadStatusError as inner:
+            raise FakeApiError(0, f"wrapped {type(inner).__name__}") from None
+    except FakeApiError as error:
+        wrapped = error
+    assert wrapped.__context__ is not None
+    assert gke._status(wrapped) == 401
+    assert gke._status(FakeApiError(0, "Handshake status 401 Unauthorized")) == 401
+    assert gke._status(FakeApiError(0, "Connection refused")) is None
+    assert gke._status(FakeApiError(404, "Not Found")) == 404
+
+
+def test_describe_drops_the_handshake_headers_and_body() -> None:
+    """Keep only the status line of a refused handshake."""
+    assert gke._describe(FakeApiError(0, HANDSHAKE_403)) == "0 Handshake status 403 Forbidden"
+    assert gke._describe(ValueError(HANDSHAKE_403)) == "Handshake status 403 Forbidden"
 
 
 async def test_upload_refuses_an_empty_path(cluster: FakeCluster) -> None:

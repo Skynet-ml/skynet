@@ -26,6 +26,9 @@ Adapted from Harbor 0.25.0 (Apache-2.0), gke.py. Changes:
   character that two frames split.
 - A timeout or a cancel kills the command's process group in the pod.
   Closing the websocket alone does not stop the remote command.
+- Exec sessions run on a bounded pool of their own, and their websocket
+  connect has a socket timeout, so a hung cluster cannot fill the event
+  loop's default executor with threads that never end.
 
 Egress is open: the provider sets no NetworkPolicy, as in Harbor. Not for
 production; the factory refuses it there.
@@ -36,15 +39,18 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import functools
 import json
 import logging
 import math
 import os
+import re
 import shlex
 import shutil
 import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -80,10 +86,12 @@ try:
     from kubernetes import client as k8s_client
     from kubernetes import config as k8s_config
     from kubernetes.stream import stream as k8s_stream
+    from kubernetes.stream import ws_client as k8s_ws_client
 except ImportError:
     k8s_client = None
     k8s_config = None
     k8s_stream = None
+    k8s_ws_client = None
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +106,19 @@ _GCLOUD_BIN = "gcloud"
 _IDLE_COMMAND = ("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done")
 _CALL_SECONDS = 60.0
 # The client's websocket connect has no timeout (``_request_timeout`` does
-# not reach it), so the async side bounds the connect phase on its own.
+# not reach it). The async side bounds the connect phase, and
+# ``_TimedWebSocket`` gives the socket the same limit, so the thread ends too.
 _CONNECT_SECONDS = 30.0
 _UPDATE_SECONDS = 1.0
+# Each running exec holds one thread for its whole run. A session that waits
+# for a free thread counts against its connect limit.
+_SESSION_THREADS = 64
 _AUTH_STATUSES = frozenset({401, 403})
+# ``websocket_call`` wraps a refused handshake as ``ApiException(status=0)``;
+# the real status is only in the reason text.
+_HANDSHAKE_STATUS = re.compile(r"Handshake status (\d{3})\b")
+# websocket-client puts the response headers and body after this separator.
+_DETAIL_SEPARATOR = " -+-+- "
 _NOT_FOUND = 404
 # Like openshift's loader, but an empty pair ends the stream: a v4 exec
 # session never sends EOF on stdin. The command gets /dev/null as stdin, so
@@ -117,6 +134,55 @@ _WRITE_FILE_SCRIPT = (
 )
 
 ChunkSink = Callable[[str, bytes], None]
+
+_SESSION_POOL = ThreadPoolExecutor(max_workers=_SESSION_THREADS, thread_name_prefix="skynet-gke-exec")
+_connect_scope = threading.local()
+
+
+class _ConnectTimeoutError(SandboxInfraError):
+    """An exec websocket did not connect in time; the command did not start."""
+
+
+class _TimedWebSocket(k8s_ws_client.WebSocket if k8s_ws_client is not None else object):
+    """A websocket whose connect obeys the calling thread's ``_connect_scope`` limit."""
+
+    def connect(self, url: str, **options: Any) -> None:
+        """Connect with the scope's socket timeout, then restore the earlier timeout.
+
+        Args:
+            url: The websocket URL.
+            **options: The websocket-client connect options.
+        """
+        seconds = getattr(_connect_scope, "seconds", None)
+        if seconds is None:
+            super().connect(url, **options)
+            return
+        previous = self.sock_opt.timeout
+        super().connect(url, **{**options, "timeout": seconds})
+        self.settimeout(previous)
+
+
+# ``create_websocket`` builds its socket from this module name. A thread
+# that sets no ``_connect_scope`` limit sees no change.
+if k8s_ws_client is not None:
+    k8s_ws_client.WebSocket = _TimedWebSocket
+
+
+@contextlib.contextmanager
+def _connect_timeout(seconds: float) -> Iterator[None]:
+    """Give every exec websocket connect in this thread a socket timeout.
+
+    Args:
+        seconds: The timeout for the connect and the handshake.
+
+    Yields:
+        Nothing.
+    """
+    _connect_scope.seconds = seconds
+    try:
+        yield
+    finally:
+        _connect_scope.seconds = None
 
 
 def _kubeconfig_exists() -> bool:
@@ -141,9 +207,28 @@ def _describe(error: BaseException) -> str:
     """
     status = getattr(error, "status", None)
     reason = getattr(error, "reason", None)
-    if status is not None and reason:
-        return f"{status} {reason}"[:300]
-    return (str(error) or type(error).__name__)[:300]
+    text = f"{status} {reason}" if status is not None and reason else str(error) or type(error).__name__
+    return text.split(_DETAIL_SEPARATOR, 1)[0][:300]
+
+
+def _status(error: BaseException) -> int | None:
+    """Find the HTTP status of a client error, also for a refused exec handshake.
+
+    Args:
+        error: The error.
+
+    Returns:
+        The status, or ``None`` when the error carries none.
+    """
+    status = getattr(error, "status", None)
+    if status:
+        return status
+    for inner in (error.__cause__, error.__context__):
+        code = getattr(inner, "status_code", None) or getattr(inner, "status", None)
+        if isinstance(code, int) and code:
+            return code
+    match = _HANDSHAKE_STATUS.match(str(getattr(error, "reason", None) or error))
+    return int(match.group(1)) if match else None
 
 
 def _consume(future: asyncio.Future[Any]) -> None:
@@ -216,7 +301,7 @@ def _api_error(what: str, error: BaseException) -> SandboxFatalError | SandboxIn
     Returns:
         SandboxFatalError for a refused login or RBAC, else SandboxInfraError.
     """
-    if getattr(error, "status", None) in _AUTH_STATUSES:
+    if _status(error) in _AUTH_STATUSES:
         return SandboxFatalError(
             f"GKE refused to {what}: {_describe(error)}. Check the kubeconfig credentials and the namespace RBAC."
         )
@@ -264,24 +349,30 @@ def _session_sync(
         The command's exit code, or -1 when ``stop`` ended the session.
 
     Raises:
+        SandboxFatalError: The cluster refused the login or RBAC for exec.
         SandboxInfraError: The session failed or ended with no exit status.
     """
+    # A session that waited in the pool past its connect limit must not start
+    # its command after the caller gave up.
+    if stop.is_set():
+        return -1
     session_client = k8s_client.ApiClient(configuration=api_client.configuration)
     response = None
     try:
-        response = k8s_stream(
-            k8s_client.CoreV1Api(session_client).connect_get_namespaced_pod_exec,
-            name,
-            namespace,
-            container=CONTAINER_NAME,
-            command=list(argv),
-            stdin=stdin is not None,
-            stdout=True,
-            stderr=True,
-            tty=False,
-            binary=True,
-            _preload_content=False,
-        )
+        with _connect_timeout(_CONNECT_SECONDS):
+            response = k8s_stream(
+                k8s_client.CoreV1Api(session_client).connect_get_namespaced_pod_exec,
+                name,
+                namespace,
+                container=CONTAINER_NAME,
+                command=list(argv),
+                stdin=stdin is not None,
+                stdout=True,
+                stderr=True,
+                tty=False,
+                binary=True,
+                _preload_content=False,
+            )
         on_connect()
         if stdin:
             response.write_stdin(stdin)
@@ -300,6 +391,11 @@ def _session_sync(
     except SandboxInfraError:
         raise
     except Exception as error:
+        if _status(error) in _AUTH_STATUSES:
+            raise SandboxFatalError(
+                f"GKE refused an exec session in the pod {name}: {_describe(error)}. "
+                "Check the kubeconfig credentials and the namespace RBAC."
+            ) from error
         raise SandboxInfraError(f"The exec session in the GKE sandbox {name} failed: {_describe(error)}") from error
     finally:
         if response is not None:
@@ -554,9 +650,16 @@ class GKEEnvironment(SandboxEnvironment):
 
         Returns:
             True when ``true`` runs in the container.
+
+        Raises:
+            SandboxFatalError: The cluster refused the login or RBAC for exec.
+            SandboxInfraError: The exec websocket did not connect. Another poll
+                would only add one more hung thread.
         """
         try:
             code, _, _ = await self._call(name, ["true"])
+        except _ConnectTimeoutError:
+            raise
         except SandboxInfraError:
             return False
         return code == 0
@@ -584,13 +687,16 @@ class GKEEnvironment(SandboxEnvironment):
 
         Raises:
             TimeoutError: The command ran longer than ``seconds``. The session is closed.
-            SandboxInfraError: The session failed, or did not connect in ``_CONNECT_SECONDS``.
+            SandboxFatalError: The cluster refused the login or RBAC for exec.
+            SandboxInfraError: The session failed, or did not connect in time
+                (``_ConnectTimeoutError``; the command did not start).
         """
         loop = asyncio.get_running_loop()
         connected = asyncio.Event()
         stop = threading.Event()
-        worker = asyncio.ensure_future(
-            asyncio.to_thread(
+        worker = loop.run_in_executor(
+            _SESSION_POOL,
+            functools.partial(
                 _session_sync,
                 self._client,
                 self._namespace,
@@ -600,7 +706,7 @@ class GKEEnvironment(SandboxEnvironment):
                 on_chunk or (lambda _name, _data: None),
                 stop,
                 lambda: loop.call_soon_threadsafe(connected.set),
-            )
+            ),
         )
         connecting = asyncio.ensure_future(connected.wait())
         started = loop.time()
@@ -611,10 +717,8 @@ class GKEEnvironment(SandboxEnvironment):
             )
             if not done:
                 await _abandon(worker, stop)
-                if seconds is not None and seconds <= _CONNECT_SECONDS:
-                    raise TimeoutError
-                raise SandboxInfraError(
-                    f"The exec session in the GKE sandbox {name} did not connect in {_CONNECT_SECONDS}s."
+                raise _ConnectTimeoutError(
+                    f"The exec session in the GKE sandbox {name} did not connect in {connect_limit:g}s."
                 )
             remaining = None if seconds is None else max(0.0, seconds - (loop.time() - started))
             done, _ = await asyncio.wait({worker}, timeout=remaining)
