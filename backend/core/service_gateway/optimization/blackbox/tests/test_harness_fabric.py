@@ -301,6 +301,29 @@ def test_reasoning_effort_maps_to_the_codex_setting(effort: str | None, setting:
     assert config["harness"]["settings"].get("reasoning_effort") == setting
 
 
+@pytest.mark.parametrize("effort", ["none", "minimal", "high", "xhigh"])
+def test_reasoning_effort_turns_on_the_codex_reasoning_field_for_any_model(effort: str) -> None:
+    """Force Codex to send ``reasoning.effort`` for a model with no metadata, with no summary.
+
+    Codex 0.144.4 gives an unknown model ``supports_reasoning_summaries: false``
+    and then sends no ``reasoning`` field, so without these keys the effort drops.
+    """
+    config = json.loads(build_launch(_target(), _GATEWAY, reasoning_effort=effort).files[FABRIC_CONFIG_FILE])
+    overrides = config["harness"]["settings"]["config_overrides"]
+    assert overrides["model_supports_reasoning_summaries"] is True
+    assert overrides["model_reasoning_summary"] == "none"
+    assert overrides["web_search"] == "disabled"
+    assert overrides["model_providers.app.request_max_retries"] == 0
+
+
+def test_no_reasoning_effort_leaves_the_codex_reasoning_keys_unset() -> None:
+    """Keep Codex's own reasoning defaults when the user picks no effort."""
+    config = json.loads(build_launch(_target(), _GATEWAY, reasoning_effort=None).files[FABRIC_CONFIG_FILE])
+    overrides = config["harness"]["settings"]["config_overrides"]
+    assert "model_supports_reasoning_summaries" not in overrides
+    assert "model_reasoning_summary" not in overrides
+
+
 def test_spec_declares_the_six_codex_efforts_for_the_submit_check() -> None:
     """Declare exactly the Codex efforts on the spec, so submit refuses any other effort before paid work."""
     assert REGISTRY[BLACKBOX_HARNESS_FABRIC].supported_efforts == ("none", "minimal", "low", "medium", "high", "xhigh")

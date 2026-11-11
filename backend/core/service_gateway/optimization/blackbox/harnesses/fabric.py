@@ -84,6 +84,16 @@ _FABRIC_CODEX_OVERRIDES = {
     f"model_providers.{PROVIDER}.stream_max_retries": 0,
     f"model_providers.{PROVIDER}.supports_websockets": False,
 }
+# Codex 0.144.4 gives a model it has no metadata for (every non-OpenAI gateway
+# model) ``supports_reasoning_summaries: false``, and then sends no ``reasoning``
+# field, so the effort drops with no error. These keys turn that flag on and
+# keep the summary off, so Codex sends only ``reasoning.effort``. Source:
+# openai/codex rust-v0.144.4, models-manager/src/model_info.rs
+# (``with_config_overrides``) and core/src/client.rs (``build_reasoning``).
+_FABRIC_EFFORT_OVERRIDES = {
+    "model_supports_reasoning_summaries": True,
+    "model_reasoning_summary": "none",
+}
 _PROTECTED_ENV = {
     "OPENAI_API_KEY": "",
     "OTEL_SDK_DISABLED": "true",
@@ -282,6 +292,7 @@ def _fabric_config(model: str, gateway: GatewayConfig, reasoning_effort: str | N
                 f"Pick one of: {', '.join(FABRIC_EFFORTS)}."
             )
         settings["reasoning_effort"] = reasoning_effort
+        settings["config_overrides"] = {**_FABRIC_CODEX_OVERRIDES, **_FABRIC_EFFORT_OVERRIDES}
     config = {
         "metadata": {"name": "skynet-fabric"},
         "harness": {"adapter_id": FABRIC_ADAPTER, "resolution": "preinstalled", "settings": settings},
