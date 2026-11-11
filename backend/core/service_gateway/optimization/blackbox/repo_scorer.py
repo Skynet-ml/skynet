@@ -1143,10 +1143,10 @@ class _StageRelay:
         self.control: dict[str, str] | None = None
 
     def config(self, root: str) -> dict[str, Any]:
-        """Describe the relay to the runner in the scorer box.
+        """Describe the relay to the runner in the box this relay serves (the scorer's or a stage's).
 
         Args:
-            root: The scorer box's working directory.
+            root: That box's working directory.
 
         Returns:
             ``{"prefix", "response_dir", "names", "services", "mcp", "mcp_file", "port"}``
@@ -1671,7 +1671,7 @@ class _StageRelay:
         return {"output": output}
 
     def _answer(self, identity: str, response: Mapping[str, Any]) -> bool:
-        """Write one answer where the scorer's ``call`` waits for it.
+        """Write one answer where the waiting caller reads it: the scorer's ``call`` or a stage's MCP proxy.
 
         Args:
             identity: The call's id.

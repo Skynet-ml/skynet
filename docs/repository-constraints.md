@@ -156,6 +156,10 @@ stops the run.
 
 ## What fails the setup check
 
+- A `services` list in `[proposer]` or in a `[target.<name>]`, or a
+  `network` host list in a `[target.<name>]`. Runs cannot use these settings
+  yet. `network = []` in a stage passes, because a stage box is already
+  offline except for the relay.
 - A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
@@ -212,7 +216,8 @@ mcp = "eval/.mcp.json"
 ```
 
 - There are no default services. A role gets only the services that its own
-  `services` list names.
+  `services` list names. Only `[run]` and `[metric]` can have a `services`
+  list now. In `[proposer]` or a `[target.<name>]`, it fails the setup check.
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's
