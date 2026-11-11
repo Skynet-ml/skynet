@@ -1756,8 +1756,6 @@
   "settings.admin.storage.username_placeholder": "alice@example.com",
   "settings.admin.storage.username_required": "הזן/הזיני שם משתמש",
   "settings.admin.storage.view_list": "פתח/י את הרשימה",
-  "settings.agent.default_model.description": "שיחות וראיונות חדשים נפתחים עם המודל ורמת החשיבה האלה",
-  "settings.agent.default_model.label": "מודל ברירת מחדל",
   "settings.agent.settings_tool.confirm": "החלת שינויים",
   "settings.agent.settings_tool.description": "עדכון ההעדפות המקומיות של {term.appName}",
   "settings.agent.settings_tool.title": "שינוי הגדרות",

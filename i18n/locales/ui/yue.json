@@ -2514,8 +2514,6 @@
   "settings.admin.storage.username_placeholder": "alice@example.com",
   "settings.admin.storage.username_required": "請輸入用戶名稱",
   "settings.admin.storage.view_list": "打開清單",
-  "settings.agent.default_model.description": "新對話同面談會預設使用呢個模型同思考等級",
-  "settings.agent.default_model.label": "預設模型",
   "settings.agent.settings_tool.confirm": "套用變更",
   "settings.agent.settings_tool.description": "更新你嘅本機 {term.appName} 偏好設定",
   "settings.agent.settings_tool.title": "更改設定",

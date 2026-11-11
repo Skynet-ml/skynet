@@ -12,7 +12,14 @@ registerHooks({
   },
 });
 
-const { DEFAULT_PREFS, PREF_KEYS, parseAgentPreferencePatch, readPref } = await import("./prefs.ts");
+const {
+  DEFAULT_PREFS,
+  PREF_KEYS,
+  composerSeed,
+  parseAgentPreferencePatch,
+  readPref,
+  rememberComposerPick,
+} = await import("./prefs.ts");
 
 test("parseAgentPreferencePatch accepts the validated agent response envelope", () => {
   assert.deepEqual(
@@ -81,6 +88,30 @@ test("a saved DSPy default engine reads as Auto; a repository engine stays", () 
     assert.equal(readPref("optimizerEngine"), "shinka_evolve");
     store.set(PREF_KEYS.optimizerEngine, JSON.stringify("unknown_engine"));
     assert.equal(readPref("optimizerEngine"), "auto");
+  } finally {
+    delete g.window;
+  }
+});
+
+test("only the Mac app starts a conversation on the last sent composer pick", () => {
+  const store = new Map<string, string>();
+  const g = globalThis as { window?: unknown };
+  g.window = {
+    localStorage: {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => store.set(k, v),
+    },
+  };
+  try {
+    assert.deepEqual(composerSeed(true), { model: null, effort: null });
+    rememberComposerPick(false, "openai/gpt-web", "high");
+    assert.equal(store.size, 0);
+    rememberComposerPick(true, "subscription/claude/anthropic/claude-opus-4.7", "high");
+    assert.deepEqual(composerSeed(true), {
+      model: "subscription/claude/anthropic/claude-opus-4.7",
+      effort: "high",
+    });
+    assert.deepEqual(composerSeed(false), { model: null, effort: null });
   } finally {
     delete g.window;
   }

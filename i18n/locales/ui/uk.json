@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "Не вдалося завантажити метрики",
   "settings.admin.activity.retry": "Спробувати ще раз",
   "settings.admin.activity.title": "Перші успіхи та використання за тиждень",
-  "settings.agent.default_model.description": "Нові чати та інтерв'ю починаються з цієї моделі й рівня міркування",
-  "settings.agent.default_model.label": "Модель за замовчуванням",
   "settings.agent.trust.ask": "Спочатку запитувати",
   "settings.agent.trust.auto_safe": "Автоматично лише для безпечних дій",
   "settings.agent.trust.description": "Які дії агент може виконувати без запиту на підтвердження щоразу",

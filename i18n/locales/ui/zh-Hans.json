@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "无法加载指标",
   "settings.admin.activity.retry": "重试",
   "settings.admin.activity.title": "每周早期成果与使用情况",
-  "settings.agent.default_model.description": "新的对话和访谈将以此模型和思考级别开始",
-  "settings.agent.default_model.label": "默认模型",
   "settings.agent.trust.ask": "先询问",
   "settings.agent.trust.auto_safe": "仅对安全操作自动执行",
   "settings.agent.trust.description": "智能体无需每次请求批准即可执行的操作",

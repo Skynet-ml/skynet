@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "Die Kennzahlen konnten nicht geladen werden",
   "settings.admin.activity.retry": "Erneut versuchen",
   "settings.admin.activity.title": "Frühe Erfolge und Nutzung pro Woche",
-  "settings.agent.default_model.description": "Neue Chats und Interviews starten mit diesem Modell und dieser Denkstufe",
-  "settings.agent.default_model.label": "Standardmodell",
   "settings.agent.trust.ask": "Zuerst fragen",
   "settings.agent.trust.auto_safe": "Automatisch nur für sichere Aktionen",
   "settings.agent.trust.description": "Welche Aktionen der Agent ausführen darf, ohne jedes Mal um Freigabe zu bitten",

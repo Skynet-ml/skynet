@@ -1,5 +1,6 @@
 import { isLocalModelRefusal, localAgentEffort, localAgentModel } from "@/features/local-runtime";
-import { readPref } from "@/features/settings";
+import { composerSeed, rememberComposerPick } from "@/features/settings";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { ModelConfig } from "@/shared/types/api";
 import type {
   Annotation,
@@ -186,10 +187,12 @@ export function assistModelPatch(
 /**
  * The interview composer's effective model: an explicit per-session pick
  * (including ``null`` — the auto router) wins; a session that never picked
- * follows the app-wide composer default from settings.
+ * follows the composer seed (the Mac app's last pick, else the default).
  */
 export function interviewComposerModel(assist: Pick<AssistState, "interviewModel">): string | null {
-  return assist.interviewModel === undefined ? readPref("composerModel") : assist.interviewModel;
+  return assist.interviewModel === undefined
+    ? composerSeed(isLocalMode()).model
+    : assist.interviewModel;
 }
 
 /**
@@ -214,7 +217,20 @@ export function interviewRequestEffort(
 export function interviewComposerEffort(
   assist: Pick<AssistState, "interviewEffort">,
 ): string | null {
-  return assist.interviewEffort === undefined ? readPref("composerEffort") : assist.interviewEffort;
+  return assist.interviewEffort === undefined
+    ? composerSeed(isLocalMode()).effort
+    : assist.interviewEffort;
+}
+
+/** Keep the interview's composer pick as the next conversation's seed. */
+export function rememberInterviewPick(
+  assist: Pick<AssistState, "interviewModel" | "interviewEffort">,
+): void {
+  rememberComposerPick(
+    isLocalMode(),
+    interviewComposerModel(assist),
+    interviewComposerEffort(assist),
+  );
 }
 
 /** A fresh assist state for a session starting in the interview phase. */

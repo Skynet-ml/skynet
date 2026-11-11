@@ -1662,8 +1662,6 @@
   "settings.admin.storage.username_placeholder": "alice@example.com",
   "settings.admin.storage.username_required": "Enter a username",
   "settings.admin.storage.view_list": "Open the list",
-  "settings.agent.default_model.description": "New chats and interviews start with this model and thinking level",
-  "settings.agent.default_model.label": "Default model",
   "settings.agent.settings_tool.confirm": "Apply changes",
   "settings.agent.settings_tool.description": "Update your local {term.appName} preferences",
   "settings.agent.settings_tool.title": "Change settings",

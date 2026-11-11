@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "Impossible de charger les métriques",
   "settings.admin.activity.retry": "Réessayer",
   "settings.admin.activity.title": "Premiers succès et usage par semaine",
-  "settings.agent.default_model.description": "Les nouvelles conversations et interviews démarrent avec ce modèle et ce niveau de réflexion",
-  "settings.agent.default_model.label": "Modèle par défaut",
   "settings.agent.trust.ask": "Demander d'abord",
   "settings.agent.trust.auto_safe": "Automatique pour les actions sûres uniquement",
   "settings.agent.trust.description": "Quelles actions l'agent peut effectuer sans demander d'approbation à chaque fois",

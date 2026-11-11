@@ -8,10 +8,11 @@ import {
   localModelRefusalMessage,
   useLocalStatus,
 } from "@/features/local-runtime";
-import { readPref } from "@/features/settings";
+import { composerSeed, rememberComposerPick } from "@/features/settings";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { I18N_KEY } from "@/shared/lib/i18n";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import { webPicked } from "@/shared/lib/api";
 import { parseSourceKey, sourceKey, type ApiSource } from "@/shared/lib/api-route";
 import { liveEffort, sentFastMode } from "@/shared/lib/effort-slider";
@@ -293,9 +294,11 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     [steerQueues],
   );
 
-  // Seeded from the settings-modal default; the panel is client-only
-  // (ssr:false), so the localStorage read is hydration-safe.
-  const [model, setModelState] = React.useState<string | null>(() => readPref("composerModel"));
+  // The panel is client-only (ssr:false), so the localStorage read is
+  // hydration-safe.
+  const [model, setModelState] = React.useState<string | null>(
+    () => composerSeed(isLocalMode()).model,
+  );
   // Mirrored in a ref so the streaming closures (retry, regenerate) always
   // send the current choice without re-memoizing the run machinery.
   const modelRef = React.useRef<string | null>(model);
@@ -304,7 +307,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     setModelState(next);
   }, []);
   const [reasoningEffort, setReasoningEffortState] = React.useState<string | null>(() =>
-    liveEffort(readPref("composerEffort")),
+    liveEffort(composerSeed(isLocalMode()).effort),
   );
   const effortRef = React.useRef<string | null>(reasoningEffort);
   const setReasoningEffort = React.useCallback((next: string | null) => {
@@ -572,6 +575,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       // so a slow stream replaced by a fresh ``send`` (or by the unmount-time
       // abort) cannot leak state writes or window events into the live view.
       const hosted = source === "hosted";
+      rememberComposerPick(isLocalMode() && !hosted, modelRef.current, effortRef.current);
       void (hosted ? Promise.resolve(null) : localAgentModel(modelRef.current)).then((sentModel) =>
         streamGeneralistAgent(
           {

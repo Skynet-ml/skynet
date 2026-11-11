@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "Não foi possível carregar as métricas",
   "settings.admin.activity.retry": "Tentar novamente",
   "settings.admin.activity.title": "Primeiras conquistas e uso por semana",
-  "settings.agent.default_model.description": "Novos chats e entrevistas começam com este modelo e nível de raciocínio",
-  "settings.agent.default_model.label": "Modelo padrão",
   "settings.agent.trust.ask": "Perguntar primeiro",
   "settings.agent.trust.auto_safe": "Automático apenas para ações seguras",
   "settings.agent.trust.description": "Que ações o agente pode realizar sem pedir aprovação de cada vez",

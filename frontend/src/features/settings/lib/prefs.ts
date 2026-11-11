@@ -12,9 +12,9 @@ export interface UserPrefs {
   // AI co-tagging in the tagger: the master toggle (off = today's fully
   // manual tagger).
   taggerAssist: boolean;
-  // Seed for new conversations (agent panel, code interview, tagger
-  // interview): the composer-menu model id, or null for the catalog's
-  // default. Per-conversation picks override it.
+  // The Mac app's last composer pick that a message used (agent panel,
+  // tagger interview): a model id, or null for the catalog's default. New
+  // conversations start on it; see composerSeed.
   composerModel: string | null;
   // Companion thinking level for composerModel; null runs the model default.
   composerEffort: string | null;
@@ -135,4 +135,25 @@ export function writePref<K extends keyof UserPrefs>(key: K, value: UserPrefs[K]
   } catch {
     /* noop */
   }
+}
+
+/**
+ * The model and thinking level a new conversation starts on. The Mac app
+ * (`local`) keeps the last pick a message used. The web app always starts on
+ * the backend's best-value default, which moves with live prices.
+ */
+export function composerSeed(local: boolean): { model: string | null; effort: string | null } {
+  if (!local) return { model: null, effort: null };
+  return { model: readPref("composerModel"), effort: readPref("composerEffort") };
+}
+
+/** Keep a sent composer pick as the next seed; only the Mac app keeps one. */
+export function rememberComposerPick(
+  local: boolean,
+  model: string | null,
+  effort: string | null,
+): void {
+  if (!local) return;
+  writePref("composerModel", model);
+  writePref("composerEffort", effort);
 }

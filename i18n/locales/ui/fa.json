@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "بارگذاری معیارها ممکن نشد",
   "settings.admin.activity.retry": "تلاش دوباره",
   "settings.admin.activity.title": "دستاوردهای اولیه و میزان استفاده در هر هفته",
-  "settings.agent.default_model.description": "گفتگوها و مصاحبه‌های جدید با این مدل و سطح تفکر شروع می‌شوند",
-  "settings.agent.default_model.label": "مدل پیش‌فرض",
   "settings.agent.trust.ask": "ابتدا بپرس",
   "settings.agent.trust.auto_safe": "خودکار تنها برای عمل‌های ایمن",
   "settings.agent.trust.description": "اینکه عامل چه اقداماتی را می‌تواند بدون درخواست تأیید در هر بار انجام دهد",

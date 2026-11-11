@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "Metrikler yüklenemedi",
   "settings.admin.activity.retry": "Tekrar dene",
   "settings.admin.activity.title": "Haftalık ilk başarılar ve kullanım",
-  "settings.agent.default_model.description": "Yeni sohbetler ve görüşmeler bu model ve düşünme düzeyiyle başlar",
-  "settings.agent.default_model.label": "Varsayılan model",
   "settings.agent.trust.ask": "Önce sor",
   "settings.agent.trust.auto_safe": "Yalnızca güvenli işlemler için otomatik",
   "settings.agent.trust.description": "Aracının her seferinde onay istemeden hangi işlemleri yapabileceği",

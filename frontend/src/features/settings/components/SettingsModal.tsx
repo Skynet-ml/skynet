@@ -14,7 +14,6 @@ import { motion, useReducedMotion } from "framer-motion";
 import {
   BookOpen,
   Columns,
-  Cpu,
   Key,
   ArrowSquareOut,
   HardDrive,
@@ -77,7 +76,6 @@ import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatStorageSize } from "@/shared/lib/formatters";
-import { ComposerModelMenu } from "@/shared/ui/agent";
 import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { useLocale } from "@/shared/providers";
 import { docsPathForLocale } from "@/shared/lib/locale";
@@ -97,7 +95,6 @@ import {
   type StorageQuotaOverride,
 } from "@/shared/lib/api";
 
-import { useUserPrefs } from "../hooks/use-user-prefs";
 import { useSettingsModal } from "../hooks/use-settings-modal";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { AdminMetricsCard } from "./AdminMetricsCard";
@@ -114,7 +111,6 @@ import { linkedUsername, useLinkedAccount } from "@/shared/hooks/use-linked-acco
 import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
 import { AgentEngineSetting } from "./AgentEngineSetting";
-import { useLocalAgentMenuModels } from "@/features/local-runtime";
 
 function WizardTab() {
   return (
@@ -126,28 +122,9 @@ function WizardTab() {
 }
 
 function AgentTab() {
-  const { prefs, setPref } = useUserPrefs();
-  const localMenu = useLocalAgentMenuModels(prefs.composerModel);
-
   return (
     <div className="space-y-1">
       <AgentEngineSetting />
-
-      <SettingsRow
-        icon={Cpu}
-        label={msg("settings.agent.default_model.label")}
-        description={msg("settings.agent.default_model.description")}
-      >
-        <ComposerModelMenu
-          value={prefs.composerModel}
-          onChange={(v) => setPref("composerModel", v)}
-          effort={prefs.composerEffort}
-          onEffortChange={(v) => setPref("composerEffort", v)}
-          models={localMenu.models}
-          allModels={localMenu.allModels}
-          openRouterEngine={localMenu.openRouterEngine}
-        />
-      </SettingsRow>
     </div>
   );
 }

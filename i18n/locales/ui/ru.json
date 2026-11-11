@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "Не удалось загрузить метрики",
   "settings.admin.activity.retry": "Повторить",
   "settings.admin.activity.title": "Первые успехи и использование по неделям",
-  "settings.agent.default_model.description": "Новые чаты и интервью начинаются с этой модели и уровня размышления",
-  "settings.agent.default_model.label": "Модель по умолчанию",
   "settings.agent.trust.ask": "Спрашивать сначала",
   "settings.agent.trust.auto_safe": "Автоматически только для безопасных действий",
   "settings.agent.trust.description": "Какие действия агент может выполнять без запроса подтверждения каждый раз",

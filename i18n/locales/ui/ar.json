@@ -2938,8 +2938,6 @@
   "settings.admin.activity.load_failed": "تعذّر تحميل المقاييس",
   "settings.admin.activity.retry": "حاول مرة أخرى",
   "settings.admin.activity.title": "النتائج المبكرة والاستخدام أسبوعيًا",
-  "settings.agent.default_model.description": "المحادثات والمقابلات الجديدة تبدأ بهذا النموذج ومستوى التفكير",
-  "settings.agent.default_model.label": "النموذج الافتراضي",
   "settings.agent.trust.ask": "اسأل أولًا",
   "settings.agent.trust.auto_safe": "تلقائي للإجراءات الآمنة فقط",
   "settings.agent.trust.description": "الإجراءات التي يمكن للوكيل تنفيذها دون طلب الموافقة في كل مرة",
