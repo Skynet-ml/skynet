@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -74,6 +76,9 @@ _RECORDED_HISTORY = "\n".join(
 )
 # Stand-in for the Grok binary: it records its call and config, writes the
 # session history under its home, prints a fixed stream and exits as told.
+# With $FAKE_KILL_SHELL set, it SIGKILLs the run's shell, as the bridge does at
+# a timeout, so the EXIT trap does not run. Grok is not the shell's last
+# command, so its parent is that shell.
 _FAKE_GROK = """#!/bin/sh
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
@@ -83,6 +88,7 @@ _FAKE_GROK = """#!/bin/sh
   done
 } >> "$FAKE_LOG"
 cp "$HOME/.grok/config.toml" "$FAKE_CONFIG_COPY"
+if [ -n "$FAKE_KILL_SHELL" ]; then kill -KILL "$PPID"; exit 0; fi
 s="$HOME/.grok/sessions/workspace/$FAKE_SESSION"
 mkdir -p "$s" "$HOME/.grok/sessions/workspace/sub-agent"
 printf '%s\\n' "$FAKE_HISTORY" > "$s/chat_history.jsonl"
@@ -127,6 +133,8 @@ def _run_with_fake_grok(
     fake_exit: int = 0,
     prompt: str = _PROMPT,
     gateway: GatewayConfig = _GATEWAY,
+    temp: Path | None = None,
+    kill_shell: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], str, dict, Path]:
     """Run the built Grok command in a scratch workspace against a fake ``grok`` binary.
 
@@ -137,6 +145,8 @@ def _run_with_fake_grok(
         fake_exit: Exit status the fake binary returns.
         prompt: The task prompt the run reads from its prompt file.
         gateway: Gateway URL and key the launch writes into the config.
+        temp: The run's ``TMPDIR``, or ``None`` for ``tmp_path / "tmp"``.
+        kill_shell: Make the fake SIGKILL the run's shell after it logs.
 
     Returns:
         The finished command, the fake binary's call log, the config Grok saw, and the workspace.
@@ -156,10 +166,14 @@ def _run_with_fake_grok(
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "calls.log"
     config_copy = tmp_path / "seen.toml"
+    temp = temp or tmp_path / "tmp"
+    temp.mkdir(parents=True, exist_ok=True)
     env = {
         **launch.env,
-        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        # The venv's python3 goes on PATH so the run takes the locked, swept temp root.
+        "PATH": f"{bin_dir}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(temp),
         "XAI_API_KEY": "leaked-host-key",
         "FAKE_LOG": str(log),
         "FAKE_CONFIG_COPY": str(config_copy),
@@ -169,6 +183,8 @@ def _run_with_fake_grok(
         "FAKE_EXIT": str(fake_exit),
     }
     env.update(launch.env)
+    if kill_shell:
+        env["FAKE_KILL_SHELL"] = "1"
     if protected:
         env["APP_BUDGET_RELAY_URL"] = _RELAY
     shell = shutil.which("bash") or "/bin/sh"
@@ -504,6 +520,51 @@ def test_a_failed_grok_run_keeps_its_exit_status_and_usage(tmp_path: Path, stop_
     assert parse_output("pi", result.stdout) == (None, {"input_tokens": 125, "output_tokens": 40})
     grok_home = Path(next(line for line in calls.splitlines() if line.startswith("HOME=")).split("=", 1)[1])
     assert not grok_home.exists()
+
+
+def _grok_home(calls: str) -> Path:
+    """Return the Grok home the fake binary logged.
+
+    Args:
+        calls: The fake binary's call log.
+
+    Returns:
+        The run's Grok home.
+    """
+    return Path(next(line for line in calls.splitlines() if line.startswith("HOME=")).split("=", 1)[1])
+
+
+@pytest.mark.parametrize("fake_exit", [0, 3])
+def test_run_removes_its_home_from_the_box_temp_folder_on_exit(tmp_path: Path, fake_exit: int) -> None:
+    """Make the Grok home under ``TMPDIR`` with the harness prefix and remove it on a normal or an error exit."""
+    result, calls, _, _ = _run_with_fake_grok(tmp_path, protected=False, fake_exit=fake_exit)
+
+    assert result.returncode == fake_exit
+    grok_home = _grok_home(calls)
+    assert grok_home.parent == tmp_path / "tmp"
+    assert grok_home.name.startswith("app-grok_build-")
+    assert not grok_home.exists()
+
+
+def test_next_run_removes_the_home_of_a_run_killed_at_its_timeout(tmp_path: Path) -> None:
+    """Remove the Grok home that a SIGKILL left behind when the next run starts (SKY-615).
+
+    The bridge kills a timed-out run with SIGKILL, so the EXIT trap does not
+    run and the home stays until the next run sweeps it.
+    """
+    temp = tmp_path / "tmp"
+    (tmp_path / "killed").mkdir()
+    (tmp_path / "after").mkdir()
+    killed, killed_calls, _, _ = _run_with_fake_grok(tmp_path / "killed", protected=False, temp=temp, kill_shell=True)
+    killed_home = _grok_home(killed_calls)
+    assert killed.returncode == -signal.SIGKILL
+    assert killed_home.is_dir()
+
+    after, after_calls, _, _ = _run_with_fake_grok(tmp_path / "after", protected=False, temp=temp)
+
+    assert after.returncode == 0, after.stderr
+    assert not killed_home.exists()
+    assert not _grok_home(after_calls).exists()
 
 
 @pytest.mark.parametrize("stop_reason", ["cancelled", "max_tokens", "refusal", None])
