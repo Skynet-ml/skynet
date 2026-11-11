@@ -114,7 +114,7 @@ def test_removed_cli_model_runs_the_cli_default(slug: str, monkeypatch: pytest.M
     assert slug not in CLI_MODELS["claude"]
     default = next(iter(CLI_MODELS["claude"]))
     assert model_router.route_menu_model(f"subscription/claude/{slug}") == f"subscription/claude/{default}"
-    assert CliDispatcher(None, "claude", slug, "agent", SimpleNamespace(local_mode=True)).model == slug
+    assert CliDispatcher(None, "claude", slug, "agent", SimpleNamespace(local_mode=True)).model == default
     assert cli_model_arg("claude", slug) == CLI_MODELS["claude"][default]
 
 

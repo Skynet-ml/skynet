@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "Tarayıcı bildirimleri bu sunucuda henüz ayarlanmadı",
   "notifications.push.error": "Tarayıcı bildirimleri açılamadı",
   "notifications.slack.unavailable": "Slack bu sunucuda henüz ayarlanmadı",
+  "notifications.slack.local_grid": "Bu Mac'teki çalıştırmalar Slack'e mesaj göndermez. Slack uyarıları Web çalıştırmalarından gelir.",
   "notifications.slack.description": "Güncellemeleri Slack'te {term.appName} uygulamasından mesaj olarak alın",
   "notifications.slack.add": "Slack'e ekle",
   "notifications.slack.broken": "Slack, {term.appName}'den gelen mesajları kabul etmeyi bıraktı. Devam etmek için yeniden bağlanın.",

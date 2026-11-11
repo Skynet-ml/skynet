@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "اعلان‌های مرورگر هنوز روی این سرور راه‌اندازی نشده‌اند",
   "notifications.push.error": "روشن کردن اعلان‌های مرورگر ممکن نشد",
   "notifications.slack.unavailable": "Slack هنوز روی این سرور راه‌اندازی نشده است",
+  "notifications.slack.local_grid": "اجراهای روی این Mac به Slack پیام نمی‌فرستند. هشدارهای Slack از اجراهای وب می‌آیند.",
   "notifications.slack.description": "دریافت به‌روزرسانی‌ها به‌صورت پیام از برنامهٔ {term.appName} در Slack",
   "notifications.slack.add": "افزودن به Slack",
   "notifications.slack.broken": "Slack دیگر پیام‌های {term.appName} را نمی‌پذیرد. برای ادامه دوباره وصل شوید.",

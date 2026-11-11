@@ -85,13 +85,24 @@ export function cellShownOn(
 }
 
 /**
+ * Whether the grid's Slack cells take effect. Only the web account holds the
+ * Slack install, so a grid on the Mac's own side (Local picked, or no link)
+ * never posts to Slack.
+ */
+export function slackGridReady(slackConfigured: boolean, localGrid: boolean): boolean {
+  return slackConfigured && !localGrid;
+}
+
+/**
  * Use hosted Slack availability and local native delivery availability.
  */
 export function channelHeaderTip(
   channel: GridChannel,
   slackReady: boolean,
   local: LocalNotificationChannels | null,
+  localGrid = false,
 ): MessageKey[] {
+  if (channel === "slack" && localGrid) return ["notifications.slack.local_grid"];
   if (channel !== "macos") {
     return channelLive(channel, slackReady)
       ? [CHANNEL_KEYS[channel]]

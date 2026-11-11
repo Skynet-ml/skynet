@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "此服务器尚未设置浏览器通知",
   "notifications.push.error": "无法开启浏览器通知",
   "notifications.slack.unavailable": "此服务器尚未设置 Slack",
+  "notifications.slack.local_grid": "此 Mac 上的运行不会发送到 Slack。Slack 通知来自网页运行。",
   "notifications.slack.description": "在 Slack 中以 {term.appName} 应用消息的形式接收更新",
   "notifications.slack.add": "添加到 Slack",
   "notifications.slack.broken": "Slack 已停止接收 {term.appName} 的消息。请重新连接以继续。",

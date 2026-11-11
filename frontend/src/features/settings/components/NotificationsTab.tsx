@@ -27,6 +27,7 @@ import {
   requestNativePermission,
   slackCellAction,
   slackConfigured,
+  slackGridReady,
   slackReturnParam,
   subscribePush,
   toastPushResult,
@@ -35,6 +36,7 @@ import {
 } from "@/features/notifications";
 import {
   getNotificationPreferences,
+  webPicked,
   getSlackConnection,
   startSlackOAuth,
   updateLocalMacosCells,
@@ -135,17 +137,19 @@ function ChannelHeader({
   channel,
   slackReady,
   local,
+  localGrid,
 }: {
   channel: GridChannel;
   slackReady: boolean;
   local: LocalNotificationChannels | null;
+  localGrid: boolean;
 }) {
   const ChannelIcon = CHANNEL_ICONS[channel];
   const live =
     channel === "macos"
       ? localOffReason(channel, local) === null
       : channelLive(channel, slackReady);
-  const detail = channelHeaderTip(channel, slackReady, local)
+  const detail = channelHeaderTip(channel, slackReady, local, localGrid)
     .filter((key) => key !== CHANNEL_KEYS[channel])
     .map((key) => msg(key))
     .join(" ");
@@ -439,7 +443,9 @@ export function NotificationsTab() {
   };
 
   const disabled = signedOut || prefs === null;
-  const slackReady = slackConfigured(slack);
+  // The grid follows the Local/Web pick; only the web account's grid can reach Slack.
+  const localGrid = isLocalMode() && !webPicked();
+  const slackReady = slackGridReady(slackConfigured(slack), localGrid);
   const columns = local ? LOCAL_CHANNELS : CHANNELS;
   const cellProps = (event: NotificationEventType, channel: GridChannel): CellProps => ({
     event,
@@ -503,7 +509,12 @@ export function NotificationsTab() {
                     {columns.map((channel) => (
                       <TableHead key={channel} className="h-10 w-16">
                         <div className="flex justify-center">
-                          <ChannelHeader channel={channel} slackReady={slackReady} local={local} />
+                          <ChannelHeader
+                            channel={channel}
+                            slackReady={slackReady}
+                            local={local}
+                            localGrid={localGrid}
+                          />
                         </div>
                       </TableHead>
                     ))}

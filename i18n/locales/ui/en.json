@@ -1174,6 +1174,7 @@
   "notifications.push.unavailable": "Browser notifications aren't set up on this server yet",
   "notifications.push.error": "Couldn't turn on browser notifications",
   "notifications.slack.unavailable": "Slack isn't set up on this server yet",
+  "notifications.slack.local_grid": "Runs on this Mac don't post to Slack. Slack alerts come from Web runs.",
   "notifications.slack.description": "Get updates as messages from the {term.appName} app in Slack",
   "notifications.slack.add": "Add to Slack",
   "notifications.slack.broken": "Slack stopped accepting messages from {term.appName}. Reconnect to resume.",

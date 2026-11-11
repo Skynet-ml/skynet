@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "このサーバーではブラウザ通知がまだ設定されていません",
   "notifications.push.error": "ブラウザ通知をオンにできませんでした",
   "notifications.slack.unavailable": "このサーバーではまだ Slack が設定されていません",
+  "notifications.slack.local_grid": "この Mac での実行は Slack に投稿しません。Slack の通知はウェブでの実行から届きます。",
   "notifications.slack.description": "Slack の {term.appName} アプリからのメッセージで更新を受け取ります",
   "notifications.slack.add": "Slack に追加",
   "notifications.slack.broken": "Slack が {term.appName} からのメッセージを受け付けなくなりました。再接続して再開してください。",

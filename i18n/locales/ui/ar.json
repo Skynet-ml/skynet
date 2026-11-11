@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "إشعارات المتصفح غير مُعدّة على هذا الخادم بعد",
   "notifications.push.error": "تعذّر تفعيل إشعارات المتصفح",
   "notifications.slack.unavailable": "لم يُعدّ Slack على هذا الخادم بعد",
+  "notifications.slack.local_grid": "التشغيلات على جهاز Mac هذا لا ترسل إلى Slack. تأتي تنبيهات Slack من تشغيلات الويب.",
   "notifications.slack.description": "تلقَّ التحديثات كرسائل من تطبيق {term.appName} في Slack",
   "notifications.slack.add": "إضافة إلى Slack",
   "notifications.slack.broken": "توقف Slack عن قبول الرسائل من {term.appName}. أعد الاتصال للمتابعة.",

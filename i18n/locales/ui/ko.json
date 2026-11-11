@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "이 서버에는 아직 브라우저 알림이 설정되지 않았습니다",
   "notifications.push.error": "브라우저 알림을 켜지 못했습니다",
   "notifications.slack.unavailable": "이 서버에는 아직 Slack이 설정되지 않았습니다",
+  "notifications.slack.local_grid": "이 Mac에서 실행한 작업은 Slack에 게시하지 않습니다. Slack 알림은 웹 실행에서 옵니다.",
   "notifications.slack.description": "Slack에서 {term.appName} 앱 메시지로 업데이트 받기",
   "notifications.slack.add": "Slack에 추가",
   "notifications.slack.broken": "Slack이 {term.appName}의 메시지를 더 이상 받지 않습니다. 다시 연결해 재개하세요.",

@@ -1039,6 +1039,16 @@ def test_a_stored_pick_without_effort_control_still_validates(monkeypatch: pytes
     mc.require_known_model("openrouter/vendor/plain", role="judge")
 
 
+def test_a_stored_effortless_pick_validates_before_the_first_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a cold start the effort check builds the catalog, so the pick gets no 422."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "get_catalog", lambda: ModelCatalogResponse(providers=[], models=[plain]))
+
+    assert mc.is_effortless_model("openrouter/vendor/plain")
+    mc.require_known_model("openrouter/vendor/plain")
+
+
 def test_the_strongest_model_follows_the_operator_then_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator-set id wins; else the catalog's strongest model; else the best-value agent model."""
     best = CatalogModel(

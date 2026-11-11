@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "Les notifications du navigateur ne sont pas encore configurées sur ce serveur",
   "notifications.push.error": "Impossible d'activer les notifications du navigateur",
   "notifications.slack.unavailable": "Slack n'est pas encore configuré sur ce serveur",
+  "notifications.slack.local_grid": "Les exécutions sur ce Mac ne publient pas dans Slack. Les alertes Slack viennent des exécutions Web.",
   "notifications.slack.description": "Recevez les mises à jour sous forme de messages de l'app {term.appName} dans Slack",
   "notifications.slack.add": "Ajouter à Slack",
   "notifications.slack.broken": "Slack n'accepte plus les messages de {term.appName}. Reconnectez-vous pour reprendre.",

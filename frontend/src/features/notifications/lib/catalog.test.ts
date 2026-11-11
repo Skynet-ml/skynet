@@ -20,6 +20,7 @@ import {
   localOffReason,
   maybeLocalHost,
   mergeHead,
+  slackGridReady,
   type FactFormatters,
 } from "./catalog.ts";
 
@@ -232,4 +233,16 @@ test("a Mac app header uses hosted Slack status and local native availability", 
     "notifications.slack.unavailable",
   ]);
   assert.deepEqual(channelHeaderTip("macos", false, localState()), ["notifications.channel.macos"]);
+});
+
+test("a grid on the Mac's own side locks Slack and says why", () => {
+  assert.equal(slackGridReady(true, false), true);
+  assert.equal(slackGridReady(true, true), false);
+  assert.equal(slackGridReady(false, false), false);
+  const ready = slackGridReady(true, true);
+  assert.equal(cellEditable("finished", "slack", ready, localState()), false);
+  assert.deepEqual(channelHeaderTip("slack", ready, localState(), true), [
+    "notifications.slack.local_grid",
+  ]);
+  assert.deepEqual(channelHeaderTip("email", ready, localState(), true), ["notifications.channel.email"]);
 });

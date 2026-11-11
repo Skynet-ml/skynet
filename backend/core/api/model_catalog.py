@@ -581,6 +581,13 @@ def is_effortless_model(name: str) -> bool:
         ``True`` when the last catalog build listed or hid the id and the
         model has no usable effort control.
     """
+    if _cached_response is None:
+        # Before the boot prewarm lands, build now: otherwise a stored
+        # effortless pick fails validation once with a 422.
+        try:
+            get_catalog_cached()
+        except Exception:
+            logger.warning("Model catalog build failed during the effort check", exc_info=True)
     if name in _hidden_effortless_values:
         return True
     snapshot = _cached_response

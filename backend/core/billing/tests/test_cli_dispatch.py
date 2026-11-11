@@ -30,6 +30,7 @@ from core.billing.tests.test_cli_runners import (
     requests,
     waiting_for,
 )
+from core.local.cli_catalog import CLI_MODELS
 from core.local.cli_probe import read_cli_limits
 
 MODEL = "anthropic/claude-haiku-5.5"
@@ -322,6 +323,21 @@ def test_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
     first, *rest = calls(tmp_path, "claude")
     assert first["argv"][first["argv"].index("--effort") + 1] == "max"
     assert all("--effort" not in call["argv"] for call in rest)
+
+
+def test_removed_slug_runs_with_the_default_model_effort_and_usage(tmp_path: Path) -> None:
+    """Run a stored removed slug as the CLI default: its effort reaches the CLI and usage names the default."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    removed = "anthropic/claude-sonnet-4.5"
+    default = next(iter(CLI_MODELS["claude"]))
+    dispatcher = CliDispatcher(None, "claude", removed, "agent", local_settings(tmp_path, cli_fallback_order=""))
+    assert dispatcher.model == default
+    request = {**REQUEST, "model": removed, cli_dispatch.CLI_EFFORT_KEY: "xhigh"}
+    _, evidence = dispatcher._answer("/chat/completions", request)
+    dispatcher.dispatch("/chat/completions", request)
+    assert evidence["model"] == default
+    efforts = [call["argv"][call["argv"].index("--effort") + 1] for call in calls(tmp_path, "claude")]
+    assert efforts == ["xhigh", "xhigh"]
 
 
 @pytest.mark.parametrize(

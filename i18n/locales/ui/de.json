@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "Browser-Benachrichtigungen sind auf diesem Server noch nicht eingerichtet",
   "notifications.push.error": "Browser-Benachrichtigungen konnten nicht aktiviert werden",
   "notifications.slack.unavailable": "Slack ist auf diesem Server noch nicht eingerichtet",
+  "notifications.slack.local_grid": "Läufe auf diesem Mac senden nichts an Slack. Slack-Hinweise kommen von Web-Läufen.",
   "notifications.slack.description": "Updates als Nachrichten der {term.appName}-App in Slack erhalten",
   "notifications.slack.add": "Zu Slack hinzufügen",
   "notifications.slack.broken": "Slack nimmt keine Nachrichten von {term.appName} mehr an. Verbinden Sie neu, um fortzufahren.",

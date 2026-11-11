@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "इस सर्वर पर ब्राउज़र सूचनाएँ अभी सेट नहीं हैं",
   "notifications.push.error": "ब्राउज़र सूचनाएँ चालू नहीं हो सकीं",
   "notifications.slack.unavailable": "इस सर्वर पर Slack अभी सेट अप नहीं है",
+  "notifications.slack.local_grid": "इस Mac पर चलने वाले रन Slack पर संदेश नहीं भेजते। Slack अलर्ट वेब रन से आते हैं।",
   "notifications.slack.description": "Slack में {term.appName} ऐप से संदेशों के रूप में अपडेट पाएँ",
   "notifications.slack.add": "Slack में जोड़ें",
   "notifications.slack.broken": "Slack ने {term.appName} के संदेश लेना बंद कर दिया है। जारी रखने के लिए फिर से जोड़ें।",

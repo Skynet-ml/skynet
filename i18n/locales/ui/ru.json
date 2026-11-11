@@ -1238,6 +1238,7 @@
   "notifications.push.unavailable": "Уведомления браузера на этом сервере ещё не настроены",
   "notifications.push.error": "Не удалось включить уведомления браузера",
   "notifications.slack.unavailable": "Slack на этом сервере ещё не настроен",
+  "notifications.slack.local_grid": "Запуски на этом Mac не отправляют сообщения в Slack. Оповещения Slack приходят от запусков в вебе.",
   "notifications.slack.description": "Получайте обновления сообщениями от приложения {term.appName} в Slack",
   "notifications.slack.add": "Добавить в Slack",
   "notifications.slack.broken": "Slack перестал принимать сообщения от {term.appName}. Подключитесь заново, чтобы продолжить.",

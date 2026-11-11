@@ -2137,6 +2137,7 @@
   "notifications.push.unavailable": "呢部伺服器仲未設定瀏覽器通知",
   "notifications.push.error": "開唔到瀏覽器通知",
   "notifications.slack.unavailable": "呢部伺服器仲未設定 Slack",
+  "notifications.slack.local_grid": "喺呢部 Mac 上面嘅運行唔會發去 Slack。Slack 通知嚟自網頁運行。",
   "notifications.slack.description": "喺 Slack 收 {term.appName} app 傳嚟嘅更新訊息",
   "notifications.slack.add": "加到 Slack",
   "notifications.slack.broken": "Slack 唔再接收 {term.appName} 嘅訊息。重新連接先可以繼續。",

@@ -15,6 +15,7 @@ export {
   heldChannels,
   localOffChannels,
   localOffReason,
+  slackGridReady,
   type GridChannel,
 } from "./lib/catalog";
 export { useLocalNotificationChannels } from "./hooks/use-native-notifications";

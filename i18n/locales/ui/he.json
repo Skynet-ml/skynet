@@ -1171,6 +1171,7 @@
   "notifications.push.unavailable": "התראות דפדפן עדיין לא הוגדרו בשרת הזה",
   "notifications.push.error": "לא הצלחנו להפעיל התראות דפדפן",
   "notifications.slack.unavailable": "Slack עדיין לא הוגדר בשרת הזה",
+  "notifications.slack.local_grid": "הרצות ב-Mac הזה לא שולחות הודעות ל-Slack. התראות Slack מגיעות מהרצות ווב.",
   "notifications.slack.description": "קבלת עדכונים כהודעות מאפליקציית {term.appName} ב-Slack",
   "notifications.slack.add": "הוספה ל-Slack",
   "notifications.slack.broken": "Slack הפסיק לקבל הודעות מ-{term.appName}. יש להתחבר מחדש כדי להמשיך.",

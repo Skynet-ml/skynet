@@ -32,7 +32,7 @@ import httpx
 
 from .. import config
 from ..config import Settings
-from ..local.cli_catalog import CliProvider, RetiredEffort, cli_efforts, cli_fast, cli_model_arg
+from ..local.cli_catalog import CliProvider, RetiredEffort, cli_efforts, cli_fast, cli_model_arg, current_cli_slug
 from ..local.cli_probe import read_cli_limits, write_cli_limit
 from .cli_runners import RUNNERS, CliCompletion, CliRunError, SubscriptionRateLimitedError
 from .model_dispatch import ModelHTTPResult
@@ -599,13 +599,18 @@ class CliDispatcher:
         """
         if not settings.local_mode:
             raise UnpricedOperationError("Subscription models run only in local mode.")
+        internal = role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE)
         try:
-            cli_model_arg(cli, model, internal=role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE))
+            cli_model_arg(cli, model, internal=internal)
         except ValueError as error:
             raise UnpricedOperationError(str(error)) from error
         self.runtime = runtime
         self.cli = cli
-        self.model = model
+        self.guest_model = model
+        # A stored removed slug runs the CLI default, so its effort levels, fast
+        # mode and usage records follow that default. Side calls keep the fixed
+        # label model, which is a removed slug.
+        self.model = model if internal else current_cli_slug(cli, model) or model
         self.role = role
         self.settings = settings
         self.policy = ChargePolicy("subscription_model")
@@ -643,7 +648,7 @@ class CliDispatcher:
             return _error(
                 422, "subscription.unsupported_path", "Subscription models serve only chat completions and messages."
             )
-        if path not in (_CHAT_PATH, _MESSAGES_PATH) or request.get("model") != self.model:
+        if path not in (_CHAT_PATH, _MESSAGES_PATH) or request.get("model") not in (self.model, self.guest_model):
             raise UnpricedOperationError("This scoped route cannot dispatch a different model or API operation.")
         if self.runtime is None:
             return self._answer(path, request, stream)[0]
