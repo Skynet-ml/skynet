@@ -8,16 +8,14 @@
  * them before you rely on them.
  */
 
-import { APP_NAME } from "@/shared/lib/brand";
-
 export const LEGAL_CONFIG = {
-  serviceName: APP_NAME,
   websiteLabel: "skynetml.com",
   websiteUrl: "https://skynetml.com",
 
-  // Dates shown on both documents. Update lastUpdated whenever the text changes.
-  effectiveDate: "August 11, 2026",
-  lastUpdated: "November 7, 2026",
+  // Dates shown on both documents (ISO, formatted per UI locale). Update
+  // lastUpdated whenever the text changes.
+  effectiveDate: "2026-08-11",
+  lastUpdated: "2026-11-07",
 
   // The service is operated by an individual (sole proprietor); this legal name is
   // the operating party and, for the Privacy Policy, the data controller.
@@ -30,9 +28,12 @@ export const LEGAL_CONFIG = {
   privacyEmail: "privacy@skynetml.com",
   legalEmail: "legal@skynetml.com",
 
-  // Governing-law / venue clause.
-  governingLaw: "the State of New York, United States",
-  venue: "New York County, New York",
+  // The governing-law and venue clause (New York) is part of the translated
+  // text in the `legal.terms.governing_law_and_disputes.*` catalog keys.
+
+  // The sandbox subprocessor the Privacy Policy discloses. It stays out of the
+  // UI catalogs, which must not name the sandbox vendor (SKY-127).
+  sandboxVendor: "Vercel",
 
   // Public repository the hosted Service is built from (AGPL-3.0 section 13).
   sourceRepoUrl: "https://github.com/Skynet-ml/skynet",

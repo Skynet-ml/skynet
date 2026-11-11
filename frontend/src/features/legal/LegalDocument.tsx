@@ -1,8 +1,11 @@
 /**
  * Presentational renderer for the public Terms and Privacy documents.
  *
- * Server component. The legal copy stays in the document data files while this
- * renderer provides a standalone, English, print-friendly reading surface.
+ * Server component. The document data files hold catalog keys; this renderer
+ * resolves them in the UI language and provides a standalone, print-friendly
+ * reading surface in that language's direction. English is the source text;
+ * every other language shows a notice that the English version controls
+ * (SKY-629).
  */
 
 import Link from "next/link";
@@ -25,42 +28,40 @@ import {
   Users,
 } from "@/shared/ui/icons";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
-import { APP_NAME } from "@/shared/lib/brand";
+import { dirForLocale } from "@/shared/lib/locale";
+import { msg, type MessageKey } from "@/shared/lib/messages";
+import { getActiveIntlLocale, getActiveLocale } from "@/shared/lib/runtime-locale";
 import { LegalActionLink } from "./LegalActionLink";
-import { LEGAL_CONFIG } from "./legal-config";
+import { LEGAL_CONFIG, SOURCE_CODE_URL } from "./legal-config";
 import type { LegalBlock, LegalDocument as LegalDoc } from "./types";
 import styles from "./legal-document.module.css";
 
-const CHROME = {
-  homeAria: `${APP_NAME} home`,
-  contents: "On this page",
-  contentsAria: "Document sections",
-  lastUpdated: "Last updated",
-  effective: "Effective",
-  readingTime: "Reading time",
-  minutes: "min",
-  sections: "sections",
-  current: "Current document",
-  backToApp: `Return to ${APP_NAME}`,
-  questions: "Questions about this document?",
-  contactPrompt: `Contact us and we will help clarify how this document applies to ${APP_NAME}.`,
-  termsEyebrow: "Service agreement",
-  privacyEyebrow: "Data & privacy",
-} as const;
-
 type LegalDocumentKind = "terms" | "privacy";
 
-/** Turn a section heading into a stable URL-fragment id for in-page anchors. */
-function slugifyLegalHeading(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+// Values the catalog copy interpolates; the translations keep them verbatim.
+const LEGAL_PARAMS = {
+  websiteLabel: LEGAL_CONFIG.websiteLabel,
+  legalEntity: LEGAL_CONFIG.legalEntity,
+  contactEmail: LEGAL_CONFIG.contactEmail,
+  privacyEmail: LEGAL_CONFIG.privacyEmail,
+  sandboxVendor: LEGAL_CONFIG.sandboxVendor,
+  sourceCodeUrl: SOURCE_CODE_URL,
+};
+
+/** Resolve one legal catalog key in the active UI language. */
+function legalText(key: MessageKey): string {
+  return msg(key, LEGAL_PARAMS);
 }
 
-/** Select a semantic icon for a legal section from its heading. */
-function iconForSection(heading: string): Icon {
-  const value = heading.toLowerCase();
+/** Format an ISO `YYYY-MM-DD` config date in the active UI language. */
+function formatLegalDate(isoDate: string): string {
+  return new Intl.DateTimeFormat(getActiveIntlLocale(), { dateStyle: "long", timeZone: "UTC" }).format(
+    new Date(`${isoDate}T00:00:00Z`),
+  );
+}
+
+/** Select a semantic icon for a legal section from its English anchor id. */
+function iconForSection(value: string): Icon {
 
   if (value.includes("account") || value.includes("eligibility") || value.includes("children")) {
     return User;
@@ -68,7 +69,7 @@ function iconForSection(heading: string): Icon {
   if (value.includes("content") || value.includes("information") || value.includes("retention")) {
     return Database;
   }
-  if (value.includes("provider") || value.includes("ai output")) return Cpu;
+  if (value.includes("provider") || value.includes("ai-output")) return Cpu;
   if (value.includes("key")) return Key;
   if (value.includes("billing") || value.includes("credit") || value.includes("refund")) {
     return CreditCard;
@@ -87,12 +88,20 @@ function iconForSection(heading: string): Icon {
   return FileText;
 }
 
-/** Estimate the time needed to read the full legal document. */
+/**
+ * Estimate the time needed to read the full legal document.
+ *
+ * Counts words with `Intl.Segmenter`, because Chinese, Japanese and similar
+ * scripts do not separate words with spaces.
+ */
 function readingMinutes(document: LegalDoc): number {
-  const blocks = document.sections.flatMap((section) =>
-    section.blocks.flatMap((block) => (block.kind === "list" ? block.items : [block.text])),
+  const keys = document.sections.flatMap((section) =>
+    section.blocks.flatMap((block) => (block.kind === "list" ? block.items : [block.key])),
   );
-  const words = [document.intro, ...blocks].join(" ").trim().split(/\s+/).length;
+  const text = [document.intro, ...keys].map(legalText).join(" ");
+  const segmenter = new Intl.Segmenter(getActiveIntlLocale(), { granularity: "word" });
+  let words = 0;
+  for (const segment of segmenter.segment(text)) if (segment.isWordLike) words++;
   return Math.max(1, Math.ceil(words / 225));
 }
 
@@ -100,7 +109,7 @@ function readingMinutes(document: LegalDoc): number {
 function Block({ block }: { block: LegalBlock }) {
   if (block.kind === "subheading") {
     return (
-      <h3 className="pt-3 !text-lg font-semibold tracking-tight text-foreground">{block.text}</h3>
+      <h3 className="pt-3 !text-lg font-semibold tracking-tight text-foreground">{legalText(block.key)}</h3>
     );
   }
   if (block.kind === "list") {
@@ -109,36 +118,41 @@ function Block({ block }: { block: LegalBlock }) {
         {block.items.map((item, index) => (
           <li key={index} className="grid grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-3">
             <span aria-hidden="true" className="mt-[0.68rem] size-1.5 rounded-full bg-muted-foreground" />
-            <span>{item}</span>
+            <span>{legalText(item)}</span>
           </li>
         ))}
       </ul>
     );
   }
-  return <p className="text-base leading-7 text-foreground/75">{block.text}</p>;
+  return <p className="text-base leading-7 text-foreground/75">{legalText(block.key)}</p>;
 }
 
 /** Render a complete legal document with navigation and metadata. */
 export function LegalDocument({ document, kind }: { document: LegalDoc; kind: LegalDocumentKind }) {
-  const { title, intro, sections } = document;
+  const { sections } = document;
+  const locale = getActiveLocale();
+  // English (and its regional variants) is the source text; every other
+  // language is a translation that the English version controls.
+  const isTranslation = locale !== "en" && !locale.startsWith("en-");
   const isPrivacy = kind === "privacy";
   const DocumentIcon = isPrivacy ? ShieldCheck : Scroll;
-  const eyebrow = isPrivacy ? CHROME.privacyEyebrow : CHROME.termsEyebrow;
+  const eyebrow = msg(isPrivacy ? "legal.chrome.privacy_eyebrow" : "legal.chrome.terms_eyebrow");
   const contactEmail = isPrivacy ? LEGAL_CONFIG.privacyEmail : LEGAL_CONFIG.legalEmail;
   const minutes = readingMinutes(document);
+  const backToApp = msg("legal.chrome.back_to_app");
 
   return (
     <div
-      dir="ltr"
+      dir={dirForLocale(locale)}
       className="h-dvh scroll-smooth overflow-x-hidden overflow-y-auto bg-background motion-reduce:scroll-auto text-foreground print:h-auto print:overflow-visible"
     >
       <header className="sticky top-0 z-20 border-b border-border/60 bg-background/95 backdrop-blur-md print:static print:bg-white">
         <div className="mx-auto flex min-h-16 w-full max-w-[96rem] items-center justify-between gap-4 px-4 sm:px-8 lg:px-12 xl:px-16">
-          <LegalActionLink kind="home" href="/" label={CHROME.backToApp} />
+          <LegalActionLink kind="home" href="/" label={backToApp} />
 
           <Link
             href="/"
-            aria-label={CHROME.homeAria}
+            aria-label={msg("legal.chrome.home_aria")}
             className="flex min-h-[44px] items-center gap-3 rounded-lg px-1 text-foreground outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-primary/60"
           >
             <AnimatedWordmark
@@ -154,12 +168,17 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
       </header>
 
       <article className="mx-auto w-full max-w-[96rem] px-4 py-6 sm:px-8 sm:py-8 lg:px-12 lg:py-12 xl:px-16">
+        {isTranslation ? (
+          <p role="note" className="mb-4 text-sm leading-6 text-foreground/65">
+            {msg("legal.chrome.translation_notice")}
+          </p>
+        ) : null}
         <section
           aria-labelledby="legal-document-title"
           className="relative overflow-hidden rounded-[2rem] bg-primary-fill px-6 py-8 text-primary-foreground sm:px-10 sm:py-12 lg:px-14 lg:py-16 print:rounded-none print:border-b print:border-black/20 print:bg-white print:text-black print:shadow-none"
         >
           <DocumentIcon
-            className="pointer-events-none absolute -bottom-12 right-4 size-56 rotate-[-8deg] text-primary-foreground/[0.055] sm:right-10 sm:size-72 lg:-bottom-16 lg:right-16 lg:size-[22rem] print:hidden"
+            className="pointer-events-none absolute -bottom-12 end-4 size-56 rotate-[-8deg] text-primary-foreground/[0.055] sm:end-10 sm:size-72 lg:-bottom-16 lg:end-16 lg:size-[22rem] print:hidden"
             weight="thin"
             aria-hidden="true"
           />
@@ -176,14 +195,14 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
                 id="legal-document-title"
                 className={`${styles.title} mt-7 max-w-4xl !text-[clamp(2.5rem,12vw,4.75rem)] !leading-[0.96] font-bold tracking-[-0.055em]`}
               >
-                {title}
+                {legalText(document.title)}
               </h1>
               <p className="mt-7 max-w-[72ch] text-base leading-7 text-primary-foreground/85 sm:text-lg sm:leading-8 print:text-black/75">
-                {intro}
+                {legalText(document.intro)}
               </p>
             </div>
 
-            <dl className="grid grid-cols-2 gap-x-5 gap-y-6 border-t border-background/15 pt-6 text-sm lg:grid-cols-1 lg:border-l lg:border-t-0 lg:pl-8 lg:pt-0 print:border-black/15">
+            <dl className="grid grid-cols-2 gap-x-5 gap-y-6 border-t border-background/15 pt-6 text-sm lg:grid-cols-1 lg:border-s lg:border-t-0 lg:ps-8 lg:pt-0 print:border-black/15">
               <div className="flex items-start gap-3">
                 <CalendarBlank
                   className="mt-0.5 size-4 shrink-0 text-primary-foreground/80 print:text-black/60"
@@ -191,10 +210,10 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
                 />
                 <div>
                   <dt className="text-xs uppercase tracking-[0.12em] text-primary-foreground/65 print:text-black/55">
-                    {CHROME.lastUpdated}
+                    {msg("legal.chrome.last_updated")}
                   </dt>
                   <dd className="mt-1 font-semibold text-primary-foreground print:text-black">
-                    {LEGAL_CONFIG.lastUpdated}
+                    {formatLegalDate(LEGAL_CONFIG.lastUpdated)}
                   </dd>
                 </div>
               </div>
@@ -205,10 +224,10 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
                 />
                 <div>
                   <dt className="text-xs uppercase tracking-[0.12em] text-primary-foreground/65 print:text-black/55">
-                    {CHROME.effective}
+                    {msg("legal.chrome.effective")}
                   </dt>
                   <dd className="mt-1 font-semibold text-primary-foreground print:text-black">
-                    {LEGAL_CONFIG.effectiveDate}
+                    {formatLegalDate(LEGAL_CONFIG.effectiveDate)}
                   </dd>
                 </div>
               </div>
@@ -219,10 +238,10 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
                 />
                 <div>
                   <dt className="text-xs uppercase tracking-[0.12em] text-primary-foreground/65 print:text-black/55">
-                    {CHROME.readingTime}
+                    {msg("legal.chrome.reading_time")}
                   </dt>
                   <dd className="mt-1 font-semibold text-primary-foreground print:text-black">
-                    {`${minutes} ${CHROME.minutes}`}
+                    {msg("legal.chrome.minutes", { count: minutes })}
                   </dd>
                 </div>
               </div>
@@ -233,10 +252,10 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
                 />
                 <div>
                   <dt className="text-xs uppercase tracking-[0.12em] text-primary-foreground/65 print:text-black/55">
-                    {CHROME.current}
+                    {msg("legal.chrome.current")}
                   </dt>
                   <dd className="mt-1 font-semibold text-primary-foreground print:text-black">
-                    {`${sections.length} ${CHROME.sections}`}
+                    {msg("legal.chrome.sections", { count: sections.length })}
                   </dd>
                 </div>
               </div>
@@ -247,12 +266,12 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
         <div className="grid gap-12 py-12 lg:grid-cols-[18rem_minmax(0,1fr)] lg:gap-16 lg:py-16 xl:grid-cols-[20rem_minmax(0,1fr)] xl:gap-24">
           <aside className="print:hidden">
             <nav
-              aria-label={CHROME.contentsAria}
+              aria-label={msg("legal.chrome.contents_aria")}
               className="border-y border-border/70 py-6 lg:sticky lg:top-24 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:overscroll-contain"
             >
               <div className="mb-5 flex items-center justify-between gap-4">
                 <p className="text-xs font-bold uppercase tracking-[0.15em] text-foreground">
-                  {CHROME.contents}
+                  {msg("legal.chrome.contents")}
                 </p>
                 <span className="rounded-md bg-[#E8DFD4] dark:bg-[#4b4237] px-2.5 py-1 font-mono text-[0.6875rem] text-primary">
                   {sections.length}
@@ -260,15 +279,15 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
               </div>
               <ol className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-1">
                 {sections.map((section, index) => (
-                  <li key={section.heading}>
+                  <li key={section.id}>
                     <a
-                      href={`#${slugifyLegalHeading(section.heading)}`}
+                      href={`#${section.id}`}
                       className="group grid min-h-[44px] grid-cols-[1.75rem_minmax(0,1fr)] items-start gap-2 rounded-lg px-2 py-2 text-sm text-foreground/60 outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/60"
                     >
                       <span className="font-mono text-[0.6875rem] leading-5 text-[#9B8877] dark:text-[#cebaa8]">
                         {String(index + 1).padStart(2, "0")}
                       </span>
-                      <span className="leading-5">{section.heading}</span>
+                      <span className="leading-5">{legalText(section.heading)}</span>
                     </a>
                   </li>
                 ))}
@@ -278,11 +297,11 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
 
           <div className="min-w-0 max-w-[78ch]">
             {sections.map((section, index) => {
-              const SectionIcon = iconForSection(section.heading);
+              const SectionIcon = iconForSection(section.id);
               return (
                 <section
-                  key={section.heading}
-                  id={slugifyLegalHeading(section.heading)}
+                  key={section.id}
+                  id={section.id}
                   className="scroll-mt-24 border-b border-border/60 py-10 first:pt-0 last:border-b-0 last:pb-0 print:break-inside-avoid"
                 >
                   <div className="grid grid-cols-[2.75rem_minmax(0,1fr)] items-start gap-4 sm:grid-cols-[3rem_minmax(0,1fr)] sm:gap-5">
@@ -294,11 +313,11 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
                         {String(index + 1).padStart(2, "0")}
                       </p>
                       <h2 className="mt-1 !text-2xl !leading-tight font-bold tracking-[-0.025em] text-foreground sm:!text-[1.75rem]">
-                        {section.heading}
+                        {legalText(section.heading)}
                       </h2>
                     </div>
                   </div>
-                  <div className="mt-6 grid gap-5 sm:pl-[4.25rem]">
+                  <div className="mt-6 grid gap-5 sm:ps-[4.25rem]">
                     {section.blocks.map((block, blockIndex) => (
                       <Block key={blockIndex} block={block} />
                     ))}
@@ -316,10 +335,10 @@ export function LegalDocument({ document, kind }: { document: LegalDoc; kind: Le
                 <Envelope className="size-5" aria-hidden="true" />
               </span>
               <h2 className="mt-6 text-2xl font-bold tracking-tight text-foreground">
-                {CHROME.questions}
+                {msg("legal.chrome.questions")}
               </h2>
               <p className="mt-3 max-w-[52ch] text-base leading-7 text-foreground/65">
-                {CHROME.contactPrompt}
+                {msg("legal.chrome.contact_prompt")}
               </p>
             </div>
             <LegalActionLink kind="mail" href={`mailto:${contactEmail}`} label={contactEmail} />
