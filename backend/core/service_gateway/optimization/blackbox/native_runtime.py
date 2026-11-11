@@ -1095,6 +1095,14 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         raise ServiceError("This agent proposer needs a repository checkout.")
     if shinka and not options.shinka_models:
         raise ServiceError("ShinkaEvolve needs at least one optimization model route.")
+    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
+    # The ShinkaEvolve runner never reads the proposer launch, so it would run
+    # without the tools the [proposer] mcp file lists; an Auto run loses only this lane (SKY-610).
+    if shinka and mcp_route.get("servers"):
+        raise ServiceError(
+            "ShinkaEvolve cannot load the [proposer] mcp servers yet. "
+            "Choose another engine, or remove [proposer] mcp from optimize.toml."
+        )
     if own_venv and options.repo is None and task.seed_candidate is None:
         # A blank run patches an empty starting text rather than refusing.
         task = replace(task, seed_candidate="")
@@ -1124,7 +1132,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
     relay = app_env("APP_BUDGET_RELAY_URL")
     proposer = options.proposer
     editor = _shinka_editor(options, relay) if shinka and (options.shinka or {}).get("editor") == "agent" else None
-    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
+    if mcp_route.get("servers") and not relay:
+        raise ServiceError("The [proposer] mcp servers require the box's mailbox relay.")
     launch = build_launch(
         BlackboxTarget(
             kind="agent",

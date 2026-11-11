@@ -2485,6 +2485,7 @@ def test_a_codex_proposer_loads_the_routed_proposer_mcp_servers(
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     # The parent's budget authority is not part of this unit run.
     monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:3210/v1")
     session = FakeSession()
     ctx = _context(tmp_path, FakeRuntime(session))
     route = {
@@ -2503,6 +2504,60 @@ def test_a_codex_proposer_loads_the_routed_proposer_mcp_servers(
     assert "APP_BUDGET_RELAY_URL" in proposer["run_command"]
     assert "mcp-relay-token" not in session.files["native_input.json"]
     assert session.calls[-1][1]["env"][MCP_TOKEN_ENV] == "mcp-relay-token"
+
+
+_MCP_ROUTE = {
+    "url": "https://gateway.example/v1",
+    "token": "scoped",
+    MCP_RELAY_ROUTE_KEY: {"token": "mcp-relay-token", "servers": ["search"]},
+}
+
+
+def test_shinka_refuses_routed_proposer_mcp_servers_before_a_box_opens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse ShinkaEvolve with [proposer] mcp, since its runner never loads the proposer launch (SKY-610).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:3210/v1")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options,
+        budget_route=_MCP_ROUTE,
+        shinka_models=({"model": "claude-test", "url": "https://gateway.example/v1", "token": "route-a"},),
+    )
+
+    with pytest.raises(ServiceError, match="ShinkaEvolve cannot load the \\[proposer\\] mcp servers"):
+        run_native_engine("shinka_evolve", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    assert session.calls == []
+
+
+def test_a_routed_proposer_mcp_server_needs_the_mailbox_relay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse the run when the box has no mailbox relay, instead of starting Codex without its tools (SKY-610).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.delenv("APP_BUDGET_RELAY_URL", raising=False)
+    monkeypatch.delenv("SKYNET_BUDGET_RELAY_URL", raising=False)
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="codex"), budget_route=_MCP_ROUTE
+    )
+
+    with pytest.raises(ServiceError, match="require the box's mailbox relay"):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.calls == []
 
 
 class ProtectedRuntime(FakeRuntime):

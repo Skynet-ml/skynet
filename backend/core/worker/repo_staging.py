@@ -484,8 +484,10 @@ def relay_mcp_archive(archive: Path, roles: tuple[RoleEnvironment, ...], destina
 
     Args:
         archive: Packed full tree.
-        roles: Every role that may name an MCP file; [run] and [metric] call
-            through the relay, and the other files get loopback urls too.
+        roles: Every role that may name an MCP file; [run], [metric] and
+            [proposer] call through the relay, and the other files get
+            loopback urls too. Both the scorer's tree and the proposer's
+            tree get this rewrite (SKY-610).
         destination: Where to write the copy.
 
     Returns:
