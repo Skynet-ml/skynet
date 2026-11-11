@@ -1282,7 +1282,12 @@ def test_webhook_clawback_drains_free_grant_before_recording_debt(engine: object
 
 
 def _close_wallet(engine: object, username: str) -> None:
-    """Forfeit the purchased balance the way account deletion closes a wallet (SKY-567)."""
+    """Forfeit the purchased balance the way account deletion closes a wallet (SKY-567).
+
+    Args:
+        engine: The SQLite engine holding the seeded wallet.
+        username: The wallet owner whose balance and free grant go to zero.
+    """
     with Session(engine) as session:
         customer = session.get(BillingCustomerModel, username)
         session.add(
