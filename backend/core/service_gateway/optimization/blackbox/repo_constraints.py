@@ -124,6 +124,34 @@ _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 class ConstraintsError(ValueError):
     """The repository's constraints file is invalid or asks for more than the run allows."""
 
+    def __init__(self, message: str, *, section: str | None = None, key: str | None = None) -> None:
+        """Keep the message and where in the file the problem is, so an editor can show it there.
+
+        Args:
+            message: The reason, which names the setting.
+            section: The table, such as ``paths`` or ``target.planner``; ``None`` for a top-level key or the whole file.
+            key: The setting in that table, such as ``editable``; ``None`` when the whole table is wrong.
+        """
+        super().__init__(message)
+        self.section = section
+        self.key = key
+
+
+def _at(setting: str) -> dict[str, str | None]:
+    """Split a setting as errors name it, such as ``[target.planner] entry``, into its section and key.
+
+    Args:
+        setting: ``[section] key ...``, ``[section]``, or a top-level key such as ``instructions``.
+
+    Returns:
+        The ``section`` and ``key`` keyword arguments of :class:`ConstraintsError`.
+    """
+    if not setting.startswith("["):
+        return {"section": None, "key": setting}
+    section, _, rest = setting[1:].partition("]")
+    words = rest.split()
+    return {"section": section, "key": words[0] if words else None}
+
 
 @dataclass(frozen=True)
 class McpServer:
@@ -373,23 +401,24 @@ def _clean_path(raw: Any, setting: str) -> str:
         ConstraintsError: When the value is not a path inside the repository, or is a pattern.
     """
     if not isinstance(raw, str):
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: every entry of {setting} must be a text path.")
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: every entry of {setting} must be a text path.", **_at(setting))
     path = raw.strip().replace("\\", "/")
     if path in (".", "./"):
         return "."
     stripped = path.strip("/")
     if path.startswith("/") or not stripped or any(part in ("", ".", "..") for part in stripped.split("/")):
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: '{raw}' in {setting} must be relative and stay inside the repository."
+            f"{CONSTRAINTS_FILE}: '{raw}' in {setting} must be relative and stay inside the repository.", **_at(setting)
         )
     if stripped == ".git" or stripped.startswith(".git/"):
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} cannot name the .git folder.")
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} cannot name the .git folder.", **_at(setting))
     # Paths are compared literally, so a pattern would match no file and
     # protect nothing while still being listed as protected.
     if any(char in stripped for char in "*?["):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: '{raw}' in {setting} looks like a pattern. Patterns are not supported;"
-            " name the files or folders."
+            " name the files or folders.",
+            **_at(setting),
         )
     return stripped
 
@@ -413,7 +442,9 @@ def _paths(section: Mapping[str, Any], key: str, section_name: str = "paths") ->
     setting = f"[{section_name}] {key}"
     values = section[key]
     if not isinstance(values, list) or len(values) > _MAX_PATHS:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} must be a list of at most {_MAX_PATHS} paths.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} must be a list of at most {_MAX_PATHS} paths.", **_at(setting)
+        )
     return tuple(dict.fromkeys(_clean_path(value, setting) for value in values))
 
 
@@ -432,7 +463,9 @@ def _text(value: Any, setting: str, limit: int) -> str:
         ConstraintsError: When the value is not text, is blank, or is too long.
     """
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} must be text of 1 to {limit} characters.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} must be text of 1 to {limit} characters.", **_at(setting)
+        )
     return value.strip()
 
 
@@ -451,7 +484,9 @@ def _one_file(raw: Any, setting: str) -> str:
     """
     path = _clean_path(raw, setting)
     if path == ".":
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} must name one file, not the whole repository.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} must name one file, not the whole repository.", **_at(setting)
+        )
     return path
 
 
@@ -474,7 +509,8 @@ def _illegal_file(section: Mapping[str, Any], label: str) -> str | None:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} illegal must be the path of a markdown rule file, not the rules"
             " themselves. Move the rules into a file in the repository, one top-level '- ' bullet for each rule,"
-            f' and set illegal = "<path>" in {label}.'
+            f' and set illegal = "<path>" in {label}.',
+            **_at(f"{label} illegal"),
         )
     return _one_file(section["illegal"], f"{label} illegal")
 
@@ -495,7 +531,9 @@ def _names(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...]:
     """
     values = section.get(key, [])
     if not isinstance(values, list) or len(values) > _MAX_NAMES:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} {key} must be a list of at most {_MAX_NAMES} names.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} {key} must be a list of at most {_MAX_NAMES} names.", **_at(f"{label} {key}")
+        )
     return tuple(dict.fromkeys(_text(value, f"{label} {key}", _MAX_NAME_CHARS) for value in values))
 
 
@@ -517,13 +555,15 @@ def _network(section: Mapping[str, Any], label: str) -> tuple[str, ...] | None:
     hosts = section["network"]
     if not isinstance(hosts, list) or len(hosts) > _MAX_HOSTS:
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {label} network must be a list of at most {_MAX_HOSTS} host names."
+            f"{CONSTRAINTS_FILE}: {label} network must be a list of at most {_MAX_HOSTS} host names.",
+            **_at(f"{label} network"),
         )
     for host in hosts:
         if not isinstance(host, str) or len(host) > 253 or not _HOST.fullmatch(host):
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: {label} network entry {str(host)[:100]!r} must be a host name such as"
-                " api.example.com, not a URL. Use network = [] for no network."
+                " api.example.com, not a URL. Use network = [] for no network.",
+                **_at(f"{label} network"),
             )
     return tuple(dict.fromkeys(host.lower() for host in hosts))
 
@@ -546,7 +586,8 @@ def _role(section: Mapping[str, Any], label: str, services: Mapping[str, Service
     for name in named:
         if name not in services:
             raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: {label} services names '{name}', but the file has no [services.{name}] table."
+                f"{CONSTRAINTS_FILE}: {label} services names '{name}', but the file has no [services.{name}] table.",
+                **_at(f"{label} services"),
             )
     return {
         "mcp": _mcp(section, label),
@@ -567,7 +608,8 @@ def _tools_moved(label: str) -> ConstraintsError:
     """
     return ConstraintsError(
         f"{CONSTRAINTS_FILE}: {label} tools is not supported. List the MCP servers in a .mcp.json"
-        f' file in the repository and set mcp = "<path>" in {label} instead.'
+        f' file in the repository and set mcp = "<path>" in {label} instead.',
+        **_at(f"{label} tools"),
     )
 
 
@@ -604,7 +646,8 @@ def _entry(value: Any, label: str) -> str | tuple[str, ...]:
     """
     problem = ConstraintsError(
         f'{CONSTRAINTS_FILE}: {label} entry must be "path/to/file.py:function" for a Python function,'
-        ' or a command list such as ["node", "planner.js"].'
+        ' or a command list such as ["node", "planner.js"].',
+        **_at(f"{label} entry"),
     )
     if isinstance(value, str):
         path, _, function = value.rpartition(":")
@@ -640,23 +683,32 @@ def _target(section: Any, name: str, services: Mapping[str, ServiceSpec]) -> Tar
     if not isinstance(section, dict):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [target] {name} needs a stage name: use [target.<name>] for each stage,"
-            ' for example [target.planner] with entry = "agents/planner.py:plan".'
+            ' for example [target.planner] with entry = "agents/planner.py:plan".',
+            section="target",
+            key=name,
         )
     if not _TABLE_NAME.fullmatch(name):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: the [target] stage name {name[:100]!r} must start with a letter or digit"
-            " and use only letters, digits, '-' and '_' (at most 64)."
+            " and use only letters, digits, '-' and '_' (at most 64).",
+            section=f"target.{name}",
         )
     label = f"[target.{name}]"
     if "tools" in section:
         raise _tools_moved(label)
     unknown = sorted(set(section) - _TARGET_KEYS)
     if unknown:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} {unknown[0]} is not a supported setting.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} {unknown[0]} is not a supported setting.",
+            section=f"target.{name}",
+            key=unknown[0],
+        )
     if "entry" not in section:
         raise ConstraintsError(
             f'{CONSTRAINTS_FILE}: {label} entry is missing. Name the function ("path/to/file.py:function")'
-            ' or the command (["node", "planner.js"]) that runs the stage.'
+            ' or the command (["node", "planner.js"]) that runs the stage.',
+            section=f"target.{name}",
+            key="entry",
         )
     vcpus = section.get("vcpus", _DEFAULT_VCPUS)
     # bool is an int in Python, so ``vcpus = true`` would otherwise read as 1.
@@ -665,7 +717,11 @@ def _target(section: Any, name: str, services: Mapping[str, ServiceSpec]) -> Tar
         or isinstance(vcpus, bool)
         or not (vcpus == 1 or (vcpus % 2 == 0 and 2 <= vcpus <= 32))
     ):
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to 32.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to 32.",
+            section=f"target.{name}",
+            key="vcpus",
+        )
     return TargetStage(
         **_role(section, label, services),
         entry=_entry(section["entry"], label),
@@ -692,7 +748,8 @@ def _timeout(section: Mapping[str, Any], label: str, unit: str) -> float:
     # bool is an int in Python, so ``timeout = true`` would otherwise read as 1.
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {label} timeout must be a positive number of seconds for each {unit}."
+            f"{CONSTRAINTS_FILE}: {label} timeout must be a positive number of seconds for each {unit}.",
+            **_at(f"{label} timeout"),
         )
     return float(timeout)
 
@@ -714,7 +771,9 @@ def _run(section: Mapping[str, Any] | None) -> tuple[str | tuple[str, ...] | Non
     if "entry" not in section:
         raise ConstraintsError(
             f'{CONSTRAINTS_FILE}: [run] entry is missing. Name the function ("path/to/file.py:function")'
-            ' or the command (["pytest", "-q"]) that runs the candidate for each case.'
+            ' or the command (["pytest", "-q"]) that runs the candidate for each case.',
+            section="run",
+            key="entry",
         )
     return _entry(section["entry"], "[run]"), _timeout(section, "[run]", "case")
 
@@ -741,28 +800,39 @@ def _service(section: Any, name: str) -> ServiceSpec:
     if not isinstance(section, dict):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [services] {name[:100]} must be a [services.<name>] table with a url and"
-            " headers. A repository file cannot grant services with a value."
+            " headers. A repository file cannot grant services with a value.",
+            section="services",
+            key=name,
         )
     if not _TABLE_NAME.fullmatch(name):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: the service name {name[:100]!r} must start with a letter or digit"
-            " and use only letters, digits, '-' and '_' (at most 64)."
+            " and use only letters, digits, '-' and '_' (at most 64).",
+            section=f"services.{name}",
         )
     label = f"[services.{name}]"
     # The older form listed names in secrets = [...] (E53); name the move instead of "not supported".
     if "secrets" in section:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} secrets is no longer supported. Remove it and write each secret as"
-            ' ${NAME} in headers, such as Authorization = "Bearer ${API_KEY}".'
+            ' ${NAME} in headers, such as Authorization = "Bearer ${API_KEY}".',
+            section=f"services.{name}",
+            key="secrets",
         )
     unknown = sorted(set(section) - {"url", "headers"})
     if unknown:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} {unknown[0][:100]} is not a supported setting. A service has only a"
-            " url and headers; write each secret as ${NAME} in headers, never as a value."
+            " url and headers; write each secret as ${NAME} in headers, never as a value.",
+            section=f"services.{name}",
+            key=unknown[0],
         )
     if "url" not in section:
-        raise ConstraintsError(f'{CONSTRAINTS_FILE}: {label} needs a url, such as url = "https://api.example.com".')
+        raise ConstraintsError(
+            f'{CONSTRAINTS_FILE}: {label} needs a url, such as url = "https://api.example.com".',
+            section=f"services.{name}",
+            key="url",
+        )
     headers = _service_headers(section["headers"], label) if "headers" in section else None
     return ServiceSpec(
         secrets=_placeholders(*(headers or {}).values()),
@@ -795,22 +865,26 @@ def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
             address, or a host without a domain.
     """
     if not isinstance(value, str) or len(value) > _MAX_URL_CHARS or not value.startswith("https://"):
-        raise ConstraintsError(f"{prefix}: {label} url must be an https:// address.")
+        raise ConstraintsError(f"{prefix}: {label} url must be an https:// address.", **_at(f"{label} url"))
     # A secret in the url would reach logs and the box; only headers carry secrets.
     if "${" in value:
-        raise ConstraintsError(f"{prefix}: {label} url must not hold a ${{NAME}} secret; put it in headers.")
+        raise ConstraintsError(
+            f"{prefix}: {label} url must not hold a ${{NAME}} secret; put it in headers.", **_at(f"{label} url")
+        )
     try:
         parts = urlsplit(value)
         parts.port  # noqa: B018 - reading it raises ValueError for a bad port
     except ValueError as error:
-        raise ConstraintsError(f"{prefix}: {label} url is not a valid address.") from error
+        raise ConstraintsError(f"{prefix}: {label} url is not a valid address.", **_at(f"{label} url")) from error
     if _looks_secret(" ".join(re.split(r"[/?&#=]+", f"{parts.path}?{parts.query}"))):
         raise ConstraintsError(
-            f"{prefix}: {label} url holds what looks like a secret value. Put the secret in headers as ${{NAME}}."
+            f"{prefix}: {label} url holds what looks like a secret value. Put the secret in headers as ${{NAME}}.",
+            **_at(f"{label} url"),
         )
     if parts.username is not None or parts.password is not None:
         raise ConstraintsError(
-            f"{prefix}: {label} url must not hold credentials; write the secret as ${{NAME}} in headers."
+            f"{prefix}: {label} url must not hold credentials; write the secret as ${{NAME}} in headers.",
+            **_at(f"{label} url"),
         )
     host = (parts.hostname or "").rstrip(".")
     try:
@@ -838,7 +912,8 @@ def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
         or not any(char.isalpha() for char in last)
     ):
         raise ConstraintsError(
-            f"{prefix}: {label} url must name a public host such as api.example.com, not an IP address or localhost."
+            f"{prefix}: {label} url must name a public host such as api.example.com, not an IP address or localhost.",
+            **_at(f"{label} url"),
         )
     return value
 
@@ -861,16 +936,19 @@ def _service_headers(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> 
     """
     if not isinstance(value, dict) or len(value) > _MAX_NAMES:
         raise ConstraintsError(
-            f"{prefix}: {label} headers must be a table of at most {_MAX_NAMES} header names to text."
+            f"{prefix}: {label} headers must be a table of at most {_MAX_NAMES} header names to text.",
+            **_at(f"{label} headers"),
         )
     for header, text in value.items():
         if not _HEADER_NAME.fullmatch(header):
             raise ConstraintsError(
-                f"{prefix}: {label} header name {header[:100]!r} must use only letters, digits and '-'."
+                f"{prefix}: {label} header name {header[:100]!r} must use only letters, digits and '-'.",
+                **_at(f"{label} headers"),
             )
         if not isinstance(text, str) or len(text) > _MAX_HEADER_CHARS or "\r" in text or "\n" in text:
             raise ConstraintsError(
-                f"{prefix}: {label} headers {header} must be one line of at most {_MAX_HEADER_CHARS} characters."
+                f"{prefix}: {label} headers {header} must be one line of at most {_MAX_HEADER_CHARS} characters.",
+                **_at(f"{label} headers"),
             )
         _check_value(text, f"{label} headers {header}", prefix)
     return dict(value)
@@ -893,15 +971,19 @@ def _check_value(text: str, where: str, prefix: str) -> None:
         if not _SECRET_NAME.fullmatch(name):
             raise ConstraintsError(
                 f"{prefix}: {where} uses a placeholder that is not a secret name. Write ${{NAME}} with"
-                " A-Z, 0-9 and _ only, such as ${MAPS_API_KEY}."
+                " A-Z, 0-9 and _ only, such as ${MAPS_API_KEY}.",
+                **_at(where),
             )
     rest = _PLACEHOLDER.sub(" ", text)
     if "${" in rest:
-        raise ConstraintsError(f"{prefix}: {where} has a ${{ that is not closed. Write each secret as ${{NAME}}.")
+        raise ConstraintsError(
+            f"{prefix}: {where} has a ${{ that is not closed. Write each secret as ${{NAME}}.", **_at(where)
+        )
     if _looks_secret(rest):
         raise ConstraintsError(
             f"{prefix}: {where} holds what looks like a secret value. The file is public with the repository."
-            ' Save the value as a Skynet secret and write ${NAME} here instead, such as "Bearer ${API_KEY}".'
+            ' Save the value as a Skynet secret and write ${NAME} here instead, such as "Bearer ${API_KEY}".',
+            **_at(where),
         )
 
 
@@ -971,7 +1053,9 @@ def _named_tables(document: Mapping[str, Any], section_name: str) -> Mapping[str
     """
     tables = document.get(section_name, {})
     if len(tables) > _MAX_TABLES:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{section_name}] may hold at most {_MAX_TABLES} tables.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [{section_name}] may hold at most {_MAX_TABLES} tables.", section=section_name
+        )
     return tables
 
 
@@ -991,7 +1075,7 @@ def _metric_path(section: Mapping[str, Any], key: str) -> str | None:
     if key not in section:
         return None
     if not isinstance(section[key], str):
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [metric] {key} must be a text path.")
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [metric] {key} must be a text path.", section="metric", key=key)
     return _clean_path(section[key], f"[metric] {key}")
 
 
@@ -1012,7 +1096,7 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
     reference = _metric_path(section, "reference")
     # The runtime hides these paths from the agent, so "." would hide the whole repository.
     if "." in (*files, exploits, reference):
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [metric] cannot name the whole repository.")
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [metric] cannot name the whole repository.", section="metric")
     return MetricSpec(files=files, exploits=exploits, reference=reference)
 
 
@@ -1032,10 +1116,14 @@ def _cases_file(section: Mapping[str, Any] | None) -> str | None:
         return None
     if "cases" not in section:
         raise ConstraintsError(
-            f'{CONSTRAINTS_FILE}: [data] must set cases = "<path>" to a JSONL file of cases, or be removed.'
+            f'{CONSTRAINTS_FILE}: [data] must set cases = "<path>" to a JSONL file of cases, or be removed.',
+            section="data",
+            key="cases",
         )
     if not isinstance(section["cases"], str):
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [data] cases must be the path of one JSONL file.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [data] cases must be the path of one JSONL file.", section="data", key="cases"
+        )
     return _one_file(section["cases"], "[data] cases")
 
 
@@ -1058,7 +1146,9 @@ def _refuse_visible_cases(cases_file: str | None, rule_files: list[tuple[str, st
         if path is not None and cases_file == path:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: [data] cases and {setting} name the same file '{path}'. The agent reads"
-                " the instructions and rule files, so the cases must be in a file of their own."
+                " the instructions and rule files, so the cases must be in a file of their own.",
+                section="data",
+                key="cases",
             )
 
 
@@ -1099,7 +1189,8 @@ def _refuse_hidden_visible_files(
         if path is not None and _inside(path, scoring):
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: {setting} '{path}' is inside the hidden scoring files ({CONSTRAINTS_FILE},"
-                " [metric] or [data] cases), but the agent must read it. Move it out of the hidden paths."
+                " [metric] or [data] cases), but the agent must read it. Move it out of the hidden paths.",
+                **_at(setting),
             )
     if run_entry is None:
         return
@@ -1109,7 +1200,9 @@ def _refuse_hidden_visible_files(
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: [run] entry names '{part}', which is inside the hidden scoring files"
                 f" ({CONSTRAINTS_FILE} or [metric] or [data] cases). The candidate's box does not hold them; name a"
-                " visible file."
+                " visible file.",
+                section="run",
+                key="entry",
             )
 
 
@@ -1137,24 +1230,28 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         raise ConstraintsError(f"{CONSTRAINTS_FILE} is not valid TOML: {error}") from error
     version = document.pop("version", 1)
     if version != 1:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: version {version!r} is not supported; use version = 1.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: version {version!r} is not supported; use version = 1.", key="version"
+        )
     instructions = document.pop("instructions", None)
     # The older forms held the text in the toml (E48); name the move instead of "not supported".
     if isinstance(instructions, dict):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [instructions] is no longer supported. Move the intent and invariants text into"
-            ' a file in the repository and set instructions = "<path>" at the top of the file, before any section.'
+            ' a file in the repository and set instructions = "<path>" at the top of the file, before any section.',
+            section="instructions",
         )
     if "rules" in document:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [rules] is no longer supported. Move the rules into a markdown file in the"
-            " repository, one top-level '- ' bullet for each rule, and set illegal = \"<path>\" in [proposer]."
+            " repository, one top-level '- ' bullet for each rule, and set illegal = \"<path>\" in [proposer].",
+            section="rules",
         )
     for name, section in document.items():
         if name not in _SECTIONS and name not in _NAMED_SECTIONS:
-            raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{name}] is not a supported section.")
+            raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{name}] is not a supported section.", section=name)
         if not isinstance(section, dict):
-            raise ConstraintsError(f"{CONSTRAINTS_FILE}: {name} must be a [{name}] table.")
+            raise ConstraintsError(f"{CONSTRAINTS_FILE}: {name} must be a [{name}] table.", key=name)
         if name in _NAMED_SECTIONS:
             continue
         shared = sorted(set(section) & _SHARED_BOX_KEYS) if name in _RUN_ROLE_SECTIONS else []
@@ -1163,27 +1260,39 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         if shared:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: [{name}] {shared[0]} is not supported: the candidate and the metric"
-                " share one box, so neither can set its own network or vcpus. Remove the setting."
+                " share one box, so neither can set its own network or vcpus. Remove the setting.",
+                section=name,
+                key=shared[0],
             )
         unknown = sorted(set(section) - _SECTIONS[name])
         # The split comes from the run seed (E59), so a split key would be ignored, not obeyed.
         if name == "data" and "split" in unknown:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: [data] split is not supported. The run shuffles the cases with its seed"
-                " and splits them 70/15/15. Remove the setting."
+                " and splits them 70/15/15. Remove the setting.",
+                section="data",
+                key="split",
             )
         if unknown:
-            raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{name}] {unknown[0]} is not a supported setting.")
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [{name}] {unknown[0]} is not a supported setting.", section=name, key=unknown[0]
+            )
     paths = document.get("paths", {})
     setup = document.get("setup", {})
     protected = _paths(paths, "protected") or ()
     if "." in protected:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [paths] protected cannot protect the whole repository.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [paths] protected cannot protect the whole repository.",
+            section="paths",
+            key="protected",
+        )
     editable = _paths(paths, "editable")
     if editable == ():
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: [paths] editable is empty, so no version could change anything."
-            " List at least one path, or remove the setting to keep the approved ones."
+            " List at least one path, or remove the setting to keep the approved ones.",
+            section="paths",
+            key="editable",
         )
     services = {name: _service(table, name) for name, table in _named_tables(document, "services").items()}
     targets = {name: _target(table, name, services) for name, table in _named_tables(document, "target").items()}
@@ -1290,7 +1399,9 @@ def _load_compose(constraints: RepoConstraints, archive: Path) -> RepoConstraint
     try:
         services = parse_compose(text)
     except ComposeError as error:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [sandbox] compose names '{path}': {error}") from None
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [sandbox] compose names '{path}': {error}", section="sandbox", key="compose"
+        ) from None
     return replace(constraints, compose_services=services)
 
 
@@ -1317,23 +1428,27 @@ def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
         member = next((m for m in packed.getmembers() if str(PurePosixPath(m.name)) == path), None)
         if member is None:
             raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: {setting} names '{path}', but the repository has no such file."
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', but the repository has no such file.", **_at(setting)
             )
         if not member.isfile():
             raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: {setting} names '{path}', which must be a regular file, not a link or folder."
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', which must be a regular file, not a link or folder.",
+                **_at(setting),
             )
         if member.size > _MAX_CASES_FILE_BYTES:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is larger than"
-                f" {_MAX_CASES_FILE_BYTES // (1024 * 1024)} MiB."
+                f" {_MAX_CASES_FILE_BYTES // (1024 * 1024)} MiB.",
+                **_at(setting),
             )
         handle = packed.extractfile(member)
         data = handle.read() if handle is not None else b""
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is not UTF-8 text.") from exc
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is not UTF-8 text.", **_at(setting)
+        ) from exc
     cases: list[dict[str, Any]] = []
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
@@ -1345,13 +1460,16 @@ def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
         if not isinstance(case, dict) or "input" not in case or set(case) - _CASE_KEYS:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: line {number} of '{path}' ({setting}) is not a case. Write each case on"
-                ' one line as a JSON object {"input": ..., "expected": ...}; "expected" is optional.'
+                ' one line as a JSON object {"input": ..., "expected": ...}; "expected" is optional.',
+                **_at(setting),
             )
         cases.append(case)
         if len(cases) > _MAX_CASES:
-            raise ConstraintsError(f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds more than {_MAX_CASES} cases.")
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds more than {_MAX_CASES} cases.", **_at(setting)
+            )
     if not cases:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which holds no cases.")
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which holds no cases.", **_at(setting))
     return replace(constraints, cases=tuple(cases))
 
 
@@ -1410,12 +1528,14 @@ def _load_rule_files(constraints: RepoConstraints, archive: Path) -> RepoConstra
         intent = texts[constraints.instructions_file].strip()
         if not intent:
             raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: instructions names '{constraints.instructions_file}', but that file is empty."
+                f"{CONSTRAINTS_FILE}: instructions names '{constraints.instructions_file}', but that file is empty.",
+                key="instructions",
             )
         if len(intent) > _MAX_INTENT_CHARS:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: the instructions file '{constraints.instructions_file}' is longer than"
-                f" {_MAX_INTENT_CHARS} characters."
+                f" {_MAX_INTENT_CHARS} characters.",
+                key="instructions",
             )
     proposer = rules_of(constraints.proposer, "[proposer] illegal")
     return replace(
@@ -1445,21 +1565,27 @@ def _read_text_file(packed: tarfile.TarFile, member: tarfile.TarInfo | None, set
         ConstraintsError: When the file is missing, is a link or folder, is too large, or is not UTF-8 text.
     """
     if member is None:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', but the repository has no such file.")
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', but the repository has no such file.", **_at(setting)
+        )
     if not member.isfile():
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which must be a regular file, not a link or folder."
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which must be a regular file, not a link or folder.",
+            **_at(setting),
         )
     if member.size > _MAX_RULE_FILE_BYTES:
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is larger than {_MAX_RULE_FILE_BYTES // 1024} KiB."
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is larger than {_MAX_RULE_FILE_BYTES // 1024} KiB.",
+            **_at(setting),
         )
     handle = packed.extractfile(member)
     try:
         # utf-8-sig drops a leading byte-order mark, which editors on Windows add.
         return (handle.read() if handle is not None else b"").decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is not UTF-8 text.") from exc
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is not UTF-8 text.", **_at(setting)
+        ) from exc
 
 
 def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
@@ -1500,24 +1626,28 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
         else:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: line {number} of '{path}' ({setting}) is not part of a top-level bullet."
-                " Write each rule as a line that starts with '- '."
+                " Write each rule as a line that starts with '- '.",
+                **_at(setting),
             )
         after_blank = False
     if not rules:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {setting} names '{path}', which holds no rules. Write each rule as a line"
-            " that starts with '- '."
+            " that starts with '- '.",
+            **_at(setting),
         )
     if len(rules) > _MAX_RULES:
         raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds {len(rules)} rules; the most is {_MAX_RULES}."
+            f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds {len(rules)} rules; the most is {_MAX_RULES}.",
+            **_at(setting),
         )
     joined = [" ".join(part for part in parts if part) for parts in rules]
     for number, rule in enumerate(joined, start=1):
         if not rule or len(rule) > _MAX_RULE_CHARS:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: rule {number} in '{path}' ({setting}) must be text of 1 to"
-                f" {_MAX_RULE_CHARS} characters."
+                f" {_MAX_RULE_CHARS} characters.",
+                **_at(setting),
             )
     return tuple(joined)
 
@@ -1585,13 +1715,21 @@ def _mcp_servers(text: str, setting: str, path: str) -> tuple[McpServer, ...]:
     try:
         document = json.loads(text)
     except (ValueError, RecursionError) as error:
-        raise ConstraintsError(f"{prefix} is not valid JSON.") from error
+        raise ConstraintsError(f"{prefix} is not valid JSON.", **_at(setting)) from error
     if not isinstance(document, dict) or set(document) != {"mcpServers"}:
-        raise ConstraintsError(f'{prefix} must be one object with only "mcpServers": {{"<name>": {{...}}}}.')
+        raise ConstraintsError(
+            f'{prefix} must be one object with only "mcpServers": {{"<name>": {{...}}}}.', **_at(setting)
+        )
     entries = document["mcpServers"]
     if not isinstance(entries, dict) or len(entries) > _MAX_TABLES:
-        raise ConstraintsError(f"{prefix}: mcpServers must be an object of at most {_MAX_TABLES} servers.")
-    return tuple(_mcp_server(name, entry, prefix) for name, entry in entries.items())
+        raise ConstraintsError(
+            f"{prefix}: mcpServers must be an object of at most {_MAX_TABLES} servers.", **_at(setting)
+        )
+    try:
+        return tuple(_mcp_server(name, entry, prefix) for name, entry in entries.items())
+    except ConstraintsError as error:
+        # A server's errors name it inside the .mcp.json file; the toml place to fix is the role's mcp setting.
+        raise ConstraintsError(str(error), **_at(setting)) from error
 
 
 def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
@@ -1662,7 +1800,8 @@ def _check_secret_receivers(services: Mapping[str, ServiceSpec], roles: Mapping[
         if first != where:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: ${{{name}}} goes to {first} and, in {setting}, to {where}. A secret may go to"
-                " one host only; use a separate secret for each host."
+                " one host only; use a separate secret for each host.",
+                **_at(setting),
             )
 
 
@@ -1781,7 +1920,9 @@ def effective_environment(
             approved = ", ".join(approved_editable)
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE} makes '{wider[0]}' editable, which is outside the approved editable"
-                f" paths ({approved}). A repository file can only narrow them; widen them in the run's settings."
+                f" paths ({approved}). A repository file can only narrow them; widen them in the run's settings.",
+                section="paths",
+                key="editable",
             )
         editable = constraints.editable_paths
     protected = tuple(
@@ -1792,7 +1933,9 @@ def effective_environment(
     if all(_inside(path, protected) for path in editable):
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE} protects every editable path ({', '.join(editable)}), so no version could"
-            " change anything. Protect less, or make a path outside [paths] protected editable."
+            " change anything. Protect less, or make a path outside [paths] protected editable.",
+            section="paths",
+            key="protected",
         )
     # The brief names every editable path, so one inside a scorer-only path would name a hidden path.
     hidden = scorer_only_paths(constraints)
@@ -1800,7 +1943,9 @@ def effective_environment(
     if hidden_editable:
         raise ConstraintsError(
             f"'{hidden_editable[0]}' is editable, but only the scorer reads it: it is {CONSTRAINTS_FILE} or inside"
-            " the hidden scoring files ([metric] or [data] cases). Make only paths outside them editable."
+            " the hidden scoring files ([metric] or [data] cases). Make only paths outside them editable.",
+            section="paths",
+            key="editable",
         )
     notes: list[str] = []
     setup = approved_setup

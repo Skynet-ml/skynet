@@ -30,6 +30,7 @@ from core.service_gateway.agents.generalist import (
     tools_for,
 )
 from core.service_gateway.agents.workspace_coder import CODING_AGENT_TOOL, coder_tools, open_repo
+from core.service_gateway.optimization.blackbox import repo_constraints
 
 _REPO_METRIC: dict[str, Any] = {
     "wizard_screen": "metric",
@@ -313,6 +314,7 @@ async def test_setup_agent_resumes_from_the_coding_agents_result(monkeypatch: py
                 {
                     "run_code": "ignored for a repository run",
                     "metric_code": _SCORER,
+                    "optimize_toml": "",
                     "summary": "Runs the tests and scores their time.",
                     "open_questions": ["Which test counts as the main one?"],
                 },
@@ -451,3 +453,96 @@ def test_coding_agent_reports_the_rate_limit_not_a_private_repository(monkeypatc
     assert reason == "GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit."
     assert linked_browser is None
     assert linked_reason == "GitHub's rate limit is reached. Try again later."
+
+
+def test_coder_prompt_names_every_optimize_toml_section_and_key() -> None:
+    """The coding agent sees the parser's whole schema, so it writes only keys the parser accepts (SKY-184)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    for section, keys in repo_constraints._SECTIONS.items():
+        assert f"``[{section}]``" in prompt
+        for key in keys:
+            assert f"``{key}``" in prompt, (section, key)
+    for key in repo_constraints._TARGET_KEYS:
+        assert f"``{key}``" in prompt, key
+    assert "``[target.<name>]``" in prompt
+    assert "``[services.<name>]``" in prompt
+    assert "``version = 1``" in prompt
+
+
+def test_coder_prompt_example_is_a_valid_optimize_toml() -> None:
+    """The example in the prompt passes the parser, so the agent never copies a broken file (SKY-184)."""
+    constraints = repo_constraints.parse_constraints(workspace_coder.OPTIMIZE_TOML_EXAMPLE.encode())
+
+    assert workspace_coder.OPTIMIZE_TOML_EXAMPLE in workspace_coder.CODER_PROMPT
+    assert constraints.run_entry == ("pytest", "-q", "--junitxml=out.xml")
+    assert constraints.editable_paths == ("src",)
+
+
+def test_coder_prompt_quotes_the_parser_errors() -> None:
+    """The prompt names the errors the parser gives most, so the agent avoids them (SKY-184)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "is not a supported setting" in prompt
+    assert "[run] entry is missing" in prompt
+    assert "share one box" in prompt
+    assert "must be a host name such as api.example.com, not a URL" in prompt
+
+
+def _run_coder(toml_text: str, context: dict[str, Any]) -> dict[str, Any]:
+    """Run the coding agent once with a scripted answer that writes ``toml_text``.
+
+    Args:
+        toml_text: The optimize.toml the agent returns.
+        context: The run's setup.
+
+    Returns:
+        The hand-off result.
+    """
+    lm = _ScriptedLM(
+        [
+            (
+                "submit",
+                {
+                    "run_code": "",
+                    "metric_code": _SCORER,
+                    "optimize_toml": toml_text,
+                    "summary": "Runs the tests.",
+                    "open_questions": [],
+                },
+            )
+        ]
+    )
+    return workspace_coder.run_coding_agent(context, "Score the tests.", lm=lm, emit=lambda _e: None, github_token=None)
+
+
+def test_coding_agent_returns_optimize_toml_as_a_file() -> None:
+    """The agent's optimize.toml goes into the wizard_state patch, beside metric.py (SKY-184)."""
+    toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+
+    assert result["wizard_state"] == {"metric_code": _SCORER, "optimize_toml": toml_text}
+    assert "optimize_toml_error" not in result
+
+
+def test_coding_agent_reports_the_parser_error_of_its_optimize_toml() -> None:
+    """A file the parser refuses still reaches the draft, with the error and its place for the setup agent."""
+    toml_text = "[run]\ntimeout = 30\n"
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+
+    assert result["wizard_state"]["optimize_toml"] == toml_text
+    error = result["optimize_toml_error"]
+    assert (error["section"], error["key"]) == ("run", "entry")
+    assert "[run] entry is missing" in error["message"]
+
+
+def test_coding_agent_leaves_an_unchanged_optimize_toml_out_of_the_patch() -> None:
+    """The agent gets the current optimize.toml and an unchanged file is no write."""
+    toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
+
+    result = _run_coder(toml_text, {"artifact_kind": "repo", "optimize_toml": toml_text})
+
+    assert "optimize_toml" in workspace_coder.CONTEXT_FIELDS
+    assert result["wizard_state"] == {"metric_code": _SCORER}

@@ -2157,3 +2157,24 @@ def test_chat_replay_drops_turn_checks() -> None:
     )
     names = [call.name for event in history.messages for call in getattr(event.get("tool_calls"), "tool_calls", [])]
     assert names == ["submit"]
+
+
+@pytest.mark.asyncio
+async def test_hand_off_puts_the_coding_agents_optimize_toml_into_the_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hand-off sends the current optimize.toml and puts the returned file into the turn's patch (SKY-184)."""
+    seen: dict[str, Any] = {}
+
+    def fake_coder(context: dict[str, Any], request: str, **_kwargs: Any) -> dict[str, Any]:
+        """Record the context and return a new optimize.toml."""
+        seen.update(context)
+        return {"wizard_state": {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}, "summary": "", "open_questions": []}
+
+    monkeypatch.setattr(generalist_module, "run_coding_agent", fake_coder)
+    state = cast(WizardState, {"wizard_screen": "metric", "artifact_kind": "repo", "optimize_toml": "version = 1\n"})
+    turn = _TurnAuthoringFlag()
+    (tool,) = generalist_module.coding_agent_tools(state, turn, lm=None, emit=lambda _e: None, github_token=None)
+
+    await tool.func("Run the tests.")
+
+    assert seen["optimize_toml"] == "version = 1\n"
+    assert turn.wizard_patch == {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}

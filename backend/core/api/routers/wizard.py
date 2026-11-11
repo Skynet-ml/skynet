@@ -7,6 +7,10 @@ validated against a narrow whitelist and echoed back in a
 wizard. The keys follow the wizard's four steps: task and artifact,
 inputs, optimizer (with models and budget), and the metric/code workspace.
 
+``POST /wizard/optimize-toml/check`` runs the repository parser on the text
+of an ``optimize.toml`` from the setup draft and returns each error with the
+section and key that caused it, so the editor can show it there.
+
 Hidden from the public Scalar reference (not in ``_SCALAR_PUBLIC_PATHS``).
 """
 
@@ -19,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...models import DataMode, OptimizerChoice, OptimizerTarget, optimizers_for
 from ...models.blackbox import BlackboxCandidate
+from ...service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
 from ..errors import DomainError
 
 
@@ -123,6 +128,29 @@ class WizardUpdateResponse(BaseModel):
     wizard_state: dict[str, Any]
 
 
+# The text of an optimize.toml to check. No class docstring: it would enter the OpenAPI contract.
+class OptimizeTomlCheckRequest(BaseModel):
+    text: str = Field(description="The whole optimize.toml file as text.")
+
+
+# One parser error and the place in the file that caused it.
+class OptimizeTomlError(BaseModel):
+    section: str | None = Field(
+        default=None,
+        description="The table, such as 'paths' or 'target.planner'. Null for a top-level key or the whole file.",
+    )
+    key: str | None = Field(
+        default=None, description="The setting in that table, such as 'editable'. Null when the whole table is wrong."
+    )
+    message: str = Field(description="The parser's reason, which names the setting.")
+
+
+# The parser stops at the first error, so ``errors`` holds at most one item.
+class OptimizeTomlCheckResponse(BaseModel):
+    ok: bool
+    errors: list[OptimizeTomlError]
+
+
 def validate_model_config_dict(v: Any, field_name: str) -> dict[str, Any]:
     """Light-weight validation of a ``ModelConfig``-shaped dict.
 
@@ -191,7 +219,7 @@ def create_wizard_router() -> APIRouter:
     """Build the wizard-state router.
 
     Returns:
-        A FastAPI ``APIRouter`` exposing ``POST /wizard/update``.
+        A FastAPI ``APIRouter`` exposing ``POST /wizard/update`` and ``POST /wizard/optimize-toml/check``.
     """
     router = APIRouter()
 
@@ -318,5 +346,35 @@ def create_wizard_router() -> APIRouter:
             patch["max_cost_cents"] = None if dollars is None else max(1, round(dollars * 100))
 
         return WizardUpdateResponse(wizard_state=patch)
+
+    @router.post(
+        "/wizard/optimize-toml/check",
+        response_model=OptimizeTomlCheckResponse,
+        status_code=200,
+        operation_id="check_optimize_toml",
+        summary="Check the text of an optimize.toml with the repository parser",
+    )
+    def check_optimize_toml(req: OptimizeTomlCheckRequest) -> OptimizeTomlCheckResponse:
+        """Parse an ``optimize.toml`` text the way a run reads it, and return the first error.
+
+        It checks only the text. It does not read the files the text names
+        (rule, instructions, ``.mcp.json``, cases or compose files), and it
+        does not compare the editable paths with the ones a run approves.
+
+        Args:
+            req: The file text.
+
+        Returns:
+            ``ok`` true with no errors, or ``ok`` false with the error and its section and key.
+        """
+        try:
+            # A lone surrogate from JSON cannot encode as UTF-8; let the parser refuse it instead of a 500.
+            parse_constraints(req.text.encode("utf-8", "surrogatepass"))
+        except ConstraintsError as error:
+            return OptimizeTomlCheckResponse(
+                ok=False,
+                errors=[OptimizeTomlError(section=error.section, key=error.key, message=str(error))],
+            )
+        return OptimizeTomlCheckResponse(ok=True, errors=[])
 
     return router

@@ -1488,3 +1488,57 @@ def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr("core.service_gateway.optimization.blackbox.repo_constraints._MAX_CASES", 1)
     with pytest.raises(ConstraintsError, match=r"holds more than 1 cases"):
         _read(tmp_path, _DATA, {"data/cases.jsonl": _CASES})
+
+
+@pytest.mark.parametrize(
+    ("raw", "section", "key"),
+    [
+        (b"[paths\n", None, None),
+        (b"version = 2\n", None, "version"),
+        (b"paths = 1\n", None, "paths"),
+        (b"[network]\nallow = true\n", "network", None),
+        (b"[instructions]\nintent = 'x'\n", "instructions", None),
+        (b"[paths]\nwritable = []\n", "paths", "writable"),
+        (b"[paths]\neditable = []\n", "paths", "editable"),
+        (b'[paths]\nprotected = ["data/*.csv"]\n', "paths", "protected"),
+        (b'[setup]\ncommand = ""\n', "setup", "command"),
+        (b'instructions = "../intent.md"\n', None, "instructions"),
+        (b'[proposer]\ntools = ["search"]\n', "proposer", "tools"),
+        (b"[proposer]\nnetwork = ['https://a.example.com']\n", "proposer", "network"),
+        (b'[proposer]\nillegal = ["no"]\n', "proposer", "illegal"),
+        (b'[proposer]\nservices = ["maps"]\n', "proposer", "services"),
+        (b"[run]\nnetwork = []\n", "run", "network"),
+        (b'[run]\nentry = "a.py:f"\ntimeout = 0\n', "run", "timeout"),
+        (b"[run]\ntimeout = 5\n", "run", "entry"),
+        (b"[target]\nplanner = 1\n", "target", "planner"),
+        (b'[target.planner]\nentry = "a.py:f"\nvcpus = 3\n', "target.planner", "vcpus"),
+        (b"[target.planner]\nentry = 'a.js'\n", "target.planner", "entry"),
+        (b'[target.planner]\nentry = "a.py:f"\ncolor = 1\n', "target.planner", "color"),
+        (b'[target.planner]\nentry = "a.py:f"\nmcp = "."\n', "target.planner", "mcp"),
+        (b'[services.maps]\nurl = "http://maps.example.com"\n', "services.maps", "url"),
+        (
+            b'[services.maps]\nurl = "https://maps.example.com"\nheaders = {Authorization = "${bad"}\n',
+            "services.maps",
+            "headers",
+        ),
+        (b"[metric]\nreference = 1\n", "metric", "reference"),
+        (b"[data]\nsplit = [70, 30]\ncases = 'a.jsonl'\n", "data", "split"),
+        (b"[data]\n", "data", "cases"),
+        (b'[metric]\nfiles = ["eval"]\n[proposer]\nillegal = "eval/rules.md"\n', "proposer", "illegal"),
+        (b'[run]\nentry = "eval/run.py:main"\n[metric]\nfiles = ["eval"]\n', "run", "entry"),
+    ],
+)
+def test_a_parse_error_names_the_section_and_key_that_caused_it(
+    raw: bytes, section: str | None, key: str | None
+) -> None:
+    """An editor shows each parser error next to the setting that caused it (SKY-184)."""
+    with pytest.raises(ConstraintsError) as caught:
+        parse_constraints(raw)
+    assert (caught.value.section, caught.value.key) == (section, key)
+
+
+def test_an_mcp_file_error_names_the_role_mcp_setting(tmp_path: Path) -> None:
+    """A bad server in an .mcp.json file points to the role's mcp setting, the place to fix in the toml."""
+    with pytest.raises(ConstraintsError, match="server 'm' needs a url") as caught:
+        _read_mcp(tmp_path, run=b'{"mcpServers": {"m": {"type": "http"}}}')
+    assert (caught.value.section, caught.value.key) == ("run", "mcp")
