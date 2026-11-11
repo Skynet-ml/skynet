@@ -146,6 +146,14 @@ def test_dashboard_aggregates_and_excludes_internal_accounts() -> None:
                 WalletLedgerModel(username="new@x.io", delta_cents=500, kind="topup", created_at=now),
                 WalletLedgerModel(username="new@x.io", delta_cents=-120, kind="run", created_at=now),
                 WalletLedgerModel(username="new@x.io", delta_cents=-50, kind="refund", created_at=now),
+                WalletLedgerModel(username="new@x.io", delta_cents=-30, kind="closure", created_at=now),
+                WalletLedgerModel(
+                    username="new@x.io",
+                    delta_cents=20,
+                    kind="closure",
+                    description="Forfeit reversed by refund",
+                    created_at=now,
+                ),
                 WalletLedgerModel(username="staff@x.io", delta_cents=900, kind="topup", created_at=now),
             ]
         )

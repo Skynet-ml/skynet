@@ -28,8 +28,9 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 TOP_LIMIT = 10
 RUN_FAILED_EVENT = "run_failed"
 # Clawbacks are negative rows too, but they reverse a top-up rather than
-# charge for usage, so they stay out of the usage total.
-_NON_USAGE_DEBITS = ("refund", "dispute")
+# charge for usage, so they stay out of the usage total. A closure row
+# forfeits a deleted account's balance (SKY-567); it is not usage either.
+_NON_USAGE_DEBITS = ("refund", "dispute", "closure")
 
 
 class AdminDashboardTotals(BaseModel):
