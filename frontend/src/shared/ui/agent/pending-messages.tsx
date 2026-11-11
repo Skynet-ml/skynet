@@ -53,12 +53,7 @@ function IconAction({
 }: { label: string } & React.ComponentProps<"button">) {
   return (
     <TooltipButton tooltip={label} side="top">
-      <button
-        type="button"
-        aria-label={label}
-        className={cn(iconButtonClass, className)}
-        {...props}
-      />
+      <button type="button" aria-label={label} className={cn(iconButtonClass, className)} {...props} />
     </TooltipButton>
   );
 }
@@ -106,12 +101,7 @@ function PendingRow({
       </TooltipButton>
       {item.uncertain ? (
         <TooltipButton tooltip={msg("agent.pending.uncertain_description")} side="top">
-          <button
-            type="button"
-            className="shrink-0 px-1.5 text-xs text-muted-foreground max-[400px]:max-w-16 max-[400px]:truncate"
-          >
-            {msg("agent.pending.uncertain")}
-          </button>
+          <button type="button" className="shrink-0 px-1.5 text-xs text-muted-foreground max-[400px]:max-w-16 max-[400px]:truncate">{msg("agent.pending.uncertain")}</button>
         </TooltipButton>
       ) : steering ? (
         <TooltipButton tooltip={msg("agent.pending.steering")} side="top">
@@ -156,17 +146,11 @@ function PendingRow({
           </DropdownMenuTrigger>
         </TooltipButton>
         <DropdownMenuContent align="end" side="top">
-          <DropdownMenuItem
-            onSelect={() => onEdit(item.id)}
-            className="[@media(pointer:coarse)]:min-h-[44px]"
-          >
+          <DropdownMenuItem onSelect={() => onEdit(item.id)} className="[@media(pointer:coarse)]:min-h-[44px]">
             <PencilSimple className="size-4" />
             {msg("agent.pending.edit")}
           </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => onRemove(item.id)}
-            className="[@media(pointer:coarse)]:min-h-[44px]"
-          >
+          <DropdownMenuItem onSelect={() => onRemove(item.id)} className="[@media(pointer:coarse)]:min-h-[44px]">
             <Trash className="size-4" />
             {removeLabel}
           </DropdownMenuItem>
@@ -249,16 +233,10 @@ export function PendingMessages({
     >
       {paused && (
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span role="status" className="me-auto">
-            {msg("agent.pending.paused")}
-          </span>
+          <span role="status" className="me-auto">{msg("agent.pending.paused")}</span>
         </div>
       )}
-      {!streaming && sendNowReason && (
-        <p role="status" className="px-2 py-1 text-xs text-destructive">
-          {sendNowReason}
-        </p>
-      )}
+      {!streaming && sendNowReason && <p role="status" className="px-2 py-1 text-xs text-destructive">{sendNowReason}</p>}
       <PendingSection items={steering} steering onReorder={onReorderSteering} rowProps={rowProps} />
       <PendingSection
         items={queued}

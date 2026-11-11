@@ -141,11 +141,7 @@ function laterScreen(a: string | null, b: string | null): string | null {
  * Returns:
  *   The return screen after the move.
  */
-export function nextReturnScreen(
-  current: string | null,
-  nav: ScreenNav,
-  shown: string | null = null,
-): string | null {
+export function nextReturnScreen(current: string | null, nav: ScreenNav, shown: string | null = null): string | null {
   if (nav.action !== "back") return current;
   return laterScreen(current, laterScreen(nav.from || null, shown));
 }
@@ -234,9 +230,7 @@ export function encodeSetupChat(chat: SetupChat): string {
   // The edits read each write's result, so without results the ledger is dead weight.
   const { ledger: _ledger, ...lean } = chat;
   const messages = lean.messages.map((m) =>
-    m.toolCalls?.length
-      ? { ...m, toolCalls: m.toolCalls.map(({ payload: _, ...call }) => call) }
-      : m,
+    m.toolCalls?.length ? { ...m, toolCalls: m.toolCalls.map(({ payload: _, ...call }) => call) } : m,
   );
   // Each message costs its own text plus one comma. The array has one comma
   // fewer than messages, so starting one below the empty chat makes the sum exact.
@@ -263,9 +257,7 @@ export function decodeSetupChat(raw: string | null): SetupChat | null {
       : [];
     const messages = value.messages.filter(
       (m): m is AgentMessage =>
-        isRecord(m) &&
-        (m.role === "user" || m.role === "assistant") &&
-        typeof m.content === "string",
+        isRecord(m) && (m.role === "user" || m.role === "assistant") && typeof m.content === "string",
     );
     const ledger = isRecord(value.ledger)
       ? Object.fromEntries(Object.entries(value.ledger).filter(([, before]) => isRecord(before)))
@@ -331,9 +323,7 @@ export function setupChatSnapshot(
   const ended: AgentMessage = {
     ...last,
     ...(last.toolCalls ? { toolCalls: stopToolCalls(last.toolCalls, now) } : {}),
-    ...(last.thinkingSegments
-      ? { thinkingSegments: closeThinking(last.thinkingSegments, now) }
-      : {}),
+    ...(last.thinkingSegments ? { thinkingSegments: closeThinking(last.thinkingSegments, now) } : {}),
   };
   if (!ended.content && !ended.toolCalls?.length) kept.pop();
   else kept[kept.length - 1] = ended;
@@ -362,10 +352,7 @@ export function trackKickoffTurn(turn: KickoffTurn | null, busy: boolean): Kicko
 }
 
 /** The screens the tab's copy counts as started: a kickoff still running does not count. */
-export function storedKickedScreens(
-  kicked: Iterable<string>,
-  running: KickoffTurn | null,
-): string[] {
+export function storedKickedScreens(kicked: Iterable<string>, running: KickoffTurn | null): string[] {
   return [...kicked].filter((s) => s !== running?.screen);
 }
 

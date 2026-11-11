@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "Yeniden uygula",
   "agent.edited_files.reverted": "Değişiklikler geri alındı",
   "agent.edited_files.reapplied": "Değişiklikler yeniden uygulandı",
+  "agent.edited_files.changed_since": "Dosyalar bu turdan sonra değişti",
   "agent.setup_check.failed_chip": "{count, plural, one {Kontrol başarısız: # hata} other {Kontrol başarısız: # hata}}",
   "agent.setup_check.ask_fix": "Ajandan düzeltmesini iste",
   "submit.agentic_ide.chat_tab": "Sohbet",

@@ -34,7 +34,7 @@ import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
 import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
-import { joinLineComments, type LineComment } from "@/shared/ui/agent/line-comments";
+import { joinLineComments, withLineComments, type LineComment } from "@/shared/ui/agent/line-comments";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
@@ -115,7 +115,7 @@ import {
   type KickoffTurn,
   type SetupChat,
 } from "../lib/screen-agent";
-import { latestTurnEdits, messageEdits, turnUndone, type FileEdit } from "../lib/turn-edits";
+import { latestTurnEdits, messageEdits, turnState, type FileEdit } from "../lib/turn-edits";
 import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
@@ -626,7 +626,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // A chat on the web account must not stage rows or act on the Mac's data.
   // A new chat starts on the side picked in the header.
   const { web } = useResourceMode();
-  const webChat = agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
+  const webChat =
+    agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
   const localMenu = useLocalAgentMenuModels(agent.model, webChat);
   const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
   React.useEffect(() => {
@@ -701,16 +702,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (action === "skip") return;
     autoTurnRef.current = { id: autoFeedback.id, started: false };
     sendToAgent(autoFeedback.text);
-  }, [
-    inSetup,
-    autoFeedback,
-    panelDock,
-    activeBusy,
-    backgroundBusy,
-    cloned,
-    userSpoke,
-    sendToAgent,
-  ]);
+  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, cloned, userSpoke, sendToAgent]);
   // The wizard checks the code again only once the agent finished the turn
   // the failed check started, not on the end of some other turn.
   const setFinishedAutoFeedback = wizardCtx?.setFinishedAutoFeedback;
@@ -770,7 +762,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           undo={
             draftFiles && message === newestEdited
               ? {
-                  undone: turnUndone(edits, draftFiles.text),
+                  state: turnState(edits, draftFiles.text),
                   disabled: ideBusy,
                   onUndo: () => writeTurn(edits, "before"),
                   onReapply: () => writeTurn(edits, "after"),
@@ -932,6 +924,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     setDraft("");
     clearLineComments?.();
   }, [agent, draft, lineComments, clearLineComments]);
+  const midTurn = React.useMemo(
+    () => withLineComments(agent.midTurn, lineComments, clearLineComments),
+    [agent.midTurn, lineComments, clearLineComments],
+  );
 
   // Prompts other features queue (the first-login setup) open the panel and
   // go out as if typed; one queued before the lazy panel mounted drains here.
@@ -1139,7 +1135,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       hidden: !efforts.length,
       current: shownEffort ?? "default",
       options: [
-        { value: "default", label: msg("agent.model_menu.effort_default") },
+          { value: "default", label: msg("agent.model_menu.effort_default") },
         ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
       ],
     });
@@ -1199,9 +1195,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         case "thinking": {
           const value = resolveSlashOption(arg, command.options ?? []);
           if (!value) {
-            toast.error(
-              formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }),
-            );
+            toast.error(formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }));
             return;
           }
           if (command.name === "thinking") {
@@ -1325,38 +1319,38 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           <CopyChatMenu messages={agent.messages} />
           {/* The setup's chat is the draft's own: no history, sharing or second chat. */}
           {!inSetup && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={() => setDrawerOpen(true)}
-                  className="relative text-muted-foreground hover:text-foreground"
-                  aria-label={msg(
-                    "auto.features.agent.panel.components.generalistpanel.history_button",
-                  )}
-                >
-                  <ClockCounterClockwise className="size-3.5" />
-                  {agent.backgroundBusyCount > 0 && (
-                    <CountBadge overlay aria-hidden="true">
-                      {agent.backgroundBusyCount}
-                    </CountBadge>
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                {msg("auto.features.agent.panel.components.generalistpanel.history_button")}
-                {agent.backgroundBusyCount > 0 && (
-                  <>
-                    {" · "}
-                    {formatMsg("agent.parallel.background_count", {
-                      p1: agent.backgroundBusyCount,
-                    })}
-                  </>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={() => setDrawerOpen(true)}
+                className="relative text-muted-foreground hover:text-foreground"
+                aria-label={msg(
+                  "auto.features.agent.panel.components.generalistpanel.history_button",
                 )}
-              </TooltipContent>
-            </Tooltip>
+              >
+                <ClockCounterClockwise className="size-3.5" />
+                {agent.backgroundBusyCount > 0 && (
+                  <CountBadge overlay aria-hidden="true">
+                    {agent.backgroundBusyCount}
+                  </CountBadge>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {msg("auto.features.agent.panel.components.generalistpanel.history_button")}
+              {agent.backgroundBusyCount > 0 && (
+                <>
+                  {" · "}
+                  {formatMsg("agent.parallel.background_count", {
+                    p1: agent.backgroundBusyCount,
+                  })}
+                </>
+              )}
+            </TooltipContent>
+          </Tooltip>
           )}
           {canShareChat && (
             <Tooltip>
@@ -1464,23 +1458,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               animatePairs
               trailing={({ isEditingAny }) => (
                 <>
-                  {choices &&
-                    !isEditingAny &&
-                    !streaming &&
-                    !agent.pendingApproval &&
-                    !agent.error && (
-                      <QuestionChoices
-                        options={choices}
-                        onSelect={(label) => agent.send(label)}
-                        hint={msg("agent.choices.hint")}
-                        ariaLabel={msg("agent.choices.label")}
-                      />
-                    )}
-                  {agent.pendingApproval && (
-                    <ApprovalCard
-                      payload={agent.pendingApproval}
-                      onResolve={agent.confirmApproval}
+                  {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
+                    <QuestionChoices
+                      options={choices}
+                      onSelect={(label) => agent.send(label)}
+                      hint={msg("agent.choices.hint")}
+                      ariaLabel={msg("agent.choices.label")}
                     />
+                  )}
+                  {agent.pendingApproval && (
+                    <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
                   )}
                   {agent.error && (
                     <ChatErrorBanner
@@ -1495,11 +1482,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                       }
                       action={
                         agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                          <Button
-                            size="sm"
-                            className="h-7"
-                            onClick={() => openSettingsTo("billing")}
-                          >
+                          <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
                             {msg("billing.action.add_funds")}
                           </Button>
                         ) : undefined
@@ -1543,7 +1526,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   : "auto.features.agent.panel.components.generalistpanel.literal.5",
               )
         }
-        sendsEmpty={lineComments.length > 0 && !activeBusy}
+        sendsEmpty={lineComments.length > 0}
         chips={
           lineComments.length > 0 && (
             <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 py-0.5 ps-2 pe-1 text-xs text-foreground">
@@ -1561,7 +1544,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           )
         }
         streaming={activeBusy}
-        midTurn={agent.midTurn}
+        midTurn={midTurn}
         slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={

@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "Застосувати знову",
   "agent.edited_files.reverted": "Зміни скасовано",
   "agent.edited_files.reapplied": "Зміни застосовано знову",
+  "agent.edited_files.changed_since": "Файли змінено після цього ходу",
   "agent.setup_check.failed_chip": "{count, plural, one {Перевірку не пройдено: # помилка} few {Перевірку не пройдено: # помилки} many {Перевірку не пройдено: # помилок} other {Перевірку не пройдено: # помилки}}",
   "agent.setup_check.ask_fix": "Попросити агента виправити",
   "submit.agentic_ide.chat_tab": "Чат",

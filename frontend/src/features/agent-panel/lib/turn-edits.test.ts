@@ -14,7 +14,7 @@ registerHooks({
   },
 });
 
-const { editTotals, latestTurnEdits, messageEdits, turnUndone } = await import("./turn-edits.ts");
+const { editTotals, latestTurnEdits, messageEdits, turnState } = await import("./turn-edits.ts");
 
 const call = (id: string, wizard_state: Record<string, unknown>) => ({
   id,
@@ -103,14 +103,29 @@ test("the latest turn is the newest message that edited a file", () => {
   assert.deepEqual(latestTurnEdits([user, reply], {}), []);
 });
 
-test("a turn is undone when every file holds its before-state again", () => {
+test("a turn is applied or undone only when every file still matches that side", () => {
   const edits = [
     { path: "metric.py", before: "x = 0\n", after: "x = 1\n", added: 1, removed: 1 },
     { path: "run.py", before: "", after: "run()\n", added: 1, removed: 0 },
   ];
   const now = (texts: Record<string, string>) => (path: string) => texts[path] ?? "";
-  assert.equal(turnUndone(edits, now({ "metric.py": "x = 0", "run.py": "" })), true);
-  assert.equal(turnUndone(edits, now({ "metric.py": "x = 0\n", "run.py": "run()\n" })), false);
-  assert.equal(turnUndone(edits, now({ "metric.py": "x = 1\n", "run.py": "run()\n" })), false);
-  assert.equal(turnUndone([], now({})), false);
+  assert.equal(turnState(edits, now({ "metric.py": "x = 1\n", "run.py": "run()" })), "applied");
+  assert.equal(turnState(edits, now({ "metric.py": "x = 0", "run.py": "" })), "undone");
+  assert.equal(turnState([], now({})), "changed");
+});
+
+test("a direct edit after the turn blocks Undo", () => {
+  const edits = [{ path: "metric.py", before: "x = 0\n", after: "x = 1\n", added: 1, removed: 1 }];
+  assert.equal(turnState(edits, () => "x = 2\n"), "changed");
+});
+
+test("a hand edit after Undo blocks Reapply", () => {
+  const edits = [
+    { path: "metric.py", before: "x = 0\n", after: "x = 1\n", added: 1, removed: 1 },
+    { path: "run.py", before: "", after: "run()\n", added: 1, removed: 0 },
+  ];
+  const texts: Record<string, string> = { "metric.py": "x = 0\n", "run.py": "" };
+  assert.equal(turnState(edits, (path) => texts[path] ?? ""), "undone");
+  texts["metric.py"] = "x = 5\n";
+  assert.equal(turnState(edits, (path) => texts[path] ?? ""), "changed");
 });

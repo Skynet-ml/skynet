@@ -179,9 +179,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const [lastTurnEdits, setLastTurnEditsState] = React.useState<readonly FileEdit[]>([]);
   // The panel recomputes the list on each streamed token; only a new list is a change.
   const setLastTurnEdits = React.useCallback((edits: readonly FileEdit[]) => {
-    setLastTurnEditsState((prev) =>
-      JSON.stringify(prev) === JSON.stringify(edits) ? prev : edits,
-    );
+    setLastTurnEditsState((prev) => (JSON.stringify(prev) === JSON.stringify(edits) ? prev : edits));
   }, []);
   const [viewChanges, setViewChangesState] = React.useState<((path?: string) => void) | null>(null);
   // A function in state must go through the updater form, or React calls it.
@@ -424,9 +422,7 @@ export function useWizardStateOptional(): WizardStateContextValue | null {
 }
 
 /** Whether a running agent write is changing this wizard field (or any of these), so the form holds it. */
-export function useAgentFieldLock(
-  field: keyof WizardState | ReadonlyArray<keyof WizardState>,
-): boolean {
+export function useAgentFieldLock(field: keyof WizardState | ReadonlyArray<keyof WizardState>): boolean {
   const writing = React.useContext(Ctx)?.agentWritingFields ?? [];
   const fields: readonly string[] = typeof field === "string" ? [field] : field;
   return fields.some((f) => writing.includes(f));
@@ -494,12 +490,7 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
   ] as const) {
     if (typeof wrap[key] === "string") patch[key] = wrap[key] as string;
   }
-  for (const key of [
-    "staged_dataset_id",
-    "source_dataset_id",
-    "expected_field",
-    "repository",
-  ] as const) {
+  for (const key of ["staged_dataset_id", "source_dataset_id", "expected_field", "repository"] as const) {
     if (typeof wrap[key] === "string" && wrap[key]) patch[key] = wrap[key] as string;
   }
   if (isStringList(wrap.dataset_columns)) patch.dataset_columns = wrap.dataset_columns;

@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "Reaplicar",
   "agent.edited_files.reverted": "Alterações revertidas",
   "agent.edited_files.reapplied": "Alterações reaplicadas",
+  "agent.edited_files.changed_since": "Arquivos alterados depois deste turno",
   "agent.setup_check.failed_chip": "{count, plural, one {A verificação falhou: # erro} other {A verificação falhou: # erros}}",
   "agent.setup_check.ask_fix": "Pedir ao agente para corrigir",
   "submit.agentic_ide.chat_tab": "Chat",

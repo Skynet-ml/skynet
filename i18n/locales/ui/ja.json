@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "再適用",
   "agent.edited_files.reverted": "変更を取り消しました",
   "agent.edited_files.reapplied": "変更を再適用しました",
+  "agent.edited_files.changed_since": "このターンの後でファイルが変更されました",
   "agent.setup_check.failed_chip": "{count, plural, other {チェック失敗: # 件のエラー}}",
   "agent.setup_check.ask_fix": "エージェントに修正を依頼",
   "submit.agentic_ide.chat_tab": "チャット",

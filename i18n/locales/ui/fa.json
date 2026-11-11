@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "اعمال دوباره",
   "agent.edited_files.reverted": "تغییرات برگردانده شد",
   "agent.edited_files.reapplied": "تغییرات دوباره اعمال شد",
+  "agent.edited_files.changed_since": "فایل‌ها پس از این نوبت تغییر کردند",
   "agent.setup_check.failed_chip": "{count, plural, one {بررسی ناموفق: # خطا} other {بررسی ناموفق: # خطا}}",
   "agent.setup_check.ask_fix": "از عامل بخواهید درستش کند",
   "submit.agentic_ide.chat_tab": "گفتگو",

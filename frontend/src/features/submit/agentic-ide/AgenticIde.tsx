@@ -3,7 +3,12 @@
 import * as React from "react";
 import { toast } from "react-toastify";
 
-import { useWizardStateOptional, type DraftFiles, type FileEdit } from "@/features/agent-panel";
+import {
+  turnState,
+  useWizardStateOptional,
+  type DraftFiles,
+  type FileEdit,
+} from "@/features/agent-panel";
 import { checkOptimizeToml } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -276,12 +281,15 @@ export function AgenticIde({
     [busy, onWrite],
   );
 
-  // The chat's Undo and Reapply read and write the draft through these.
+  // The chat's Undo and Reapply read and write the draft through these. A
+  // write refuses when a file changed after the turn, so it never drops the user's edit.
   const draftFiles = React.useMemo<DraftFiles>(
     () => ({
       text: (path) => texts[path] ?? "",
       write: (edits, side) => {
         if (busy) return false;
+        const from = side === "before" ? "applied" : "undone";
+        if (turnState(edits, (path) => texts[path] ?? "") !== from) return false;
         for (const edit of edits) write(edit, side === "before" ? edit.before : edit.after);
         return true;
       },

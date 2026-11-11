@@ -40,6 +40,7 @@
   "agent.edited_files.reapply": "Reapply",
   "agent.edited_files.reverted": "Changes reverted",
   "agent.edited_files.reapplied": "Changes reapplied",
+  "agent.edited_files.changed_since": "Files changed after this turn",
   "agent.setup_check.failed_chip": "{count, plural, one {Check failed: 1 error} other {Check failed: # errors}}",
   "agent.setup_check.ask_fix": "Ask the agent to fix",
   "submit.agentic_ide.chat_tab": "Chat",

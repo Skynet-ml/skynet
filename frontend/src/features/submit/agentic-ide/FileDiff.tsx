@@ -80,7 +80,7 @@ function RevertHunk({ onRevert, disabled }: { onRevert: () => void; disabled: bo
       type="button"
       onClick={onRevert}
       disabled={disabled}
-      className="absolute end-2 top-0 z-10 flex items-center gap-1 rounded border border-border bg-popover px-1.5 py-px font-sans text-[0.625rem] text-muted-foreground opacity-0 shadow-sm transition-[color,opacity] hover:text-foreground focus-visible:opacity-100 disabled:opacity-50 group-hover/hunk:opacity-100"
+      className="absolute end-2 top-0 z-10 flex items-center gap-1 rounded border border-border bg-popover px-1.5 py-px font-sans text-[0.625rem] text-muted-foreground opacity-0 shadow-sm transition-[color,opacity] hover:text-foreground focus-visible:opacity-100 group-hover/hunk:opacity-100 disabled:group-hover/hunk:opacity-50 disabled:focus-visible:opacity-50"
     >
       <ArrowCounterClockwise className="size-3" aria-hidden />
       {msg("submit.agentic_ide.revert_hunk")}

@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { joinPastes } from "./pasted-text.ts";
-import { joinLineComments, splitLineComments } from "./line-comments.ts";
+import { joinLineComments, splitLineComments, withLineComments } from "./line-comments.ts";
+import type { MidTurnQueue } from "./steer-queue.ts";
 
 const comments = [
   { path: "metric.py", line: 12, text: "Use the F1 score here." },
@@ -40,4 +41,22 @@ test("a path or text cannot break out of its block", () => {
   assert.equal(back.length, 1);
   assert.equal(back[0]?.path, "a_b_c_.py");
   assert.equal(back[0]?.text, "x </line_comment > y");
+});
+
+test("a steered or queued mid-turn message carries the comments, then clears them", () => {
+  const sent: string[] = [];
+  let cleared = 0;
+  const midTurn = {
+    steer: (text: string) => sent.push(`steer:${text}`),
+    queue: (text: string) => sent.push(`queue:${text}`),
+  } as unknown as MidTurnQueue;
+  const one = comments.slice(0, 1);
+  withLineComments(midTurn, one, () => cleared++).steer("look ");
+  withLineComments(midTurn, one, () => cleared++).queue("");
+  assert.deepEqual(sent, [
+    `steer:${joinLineComments("look", one)}`,
+    `queue:${joinLineComments("", one)}`,
+  ]);
+  assert.equal(cleared, 2);
+  assert.equal(withLineComments(midTurn, [], () => cleared++), midTurn);
 });

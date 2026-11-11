@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "फिर से लागू करें",
   "agent.edited_files.reverted": "बदलाव वापस लिए गए",
   "agent.edited_files.reapplied": "बदलाव फिर से लागू किए गए",
+  "agent.edited_files.changed_since": "इस बारी के बाद फ़ाइलें बदलीं",
   "agent.setup_check.failed_chip": "{count, plural, one {जाँच विफल: # त्रुटि} other {जाँच विफल: # त्रुटियाँ}}",
   "agent.setup_check.ask_fix": "एजेंट से ठीक करने को कहें",
   "submit.agentic_ide.chat_tab": "चैट",

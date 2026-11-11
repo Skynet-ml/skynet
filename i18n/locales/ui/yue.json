@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "再套用",
   "agent.edited_files.reverted": "已撤銷改動",
   "agent.edited_files.reapplied": "已再套用改動",
+  "agent.edited_files.changed_since": "呢一輪之後啲檔案改咗",
   "agent.setup_check.failed_chip": "{count, plural, other {檢查失敗：# 個錯誤}}",
   "agent.setup_check.ask_fix": "叫代理修正",
   "submit.agentic_ide.chat_tab": "傾偈",

@@ -5,6 +5,8 @@
  * shows each one as a row linked to its line.
  */
 
+import type { MidTurnQueue } from "./steer-queue";
+
 /** A comment on one line of a file's current text. */
 export interface LineComment {
   path: string;
@@ -52,4 +54,34 @@ export function splitLineComments(message: string): { rest: string; comments: Li
     return "";
   });
   return { rest: comments.length ? rest.replace(/^\n+/, "") : rest, comments };
+}
+
+/**
+ * Send line comments with a message the user steers or queues mid-turn.
+ *
+ * Args:
+ *   midTurn: The agent's mid-turn queue.
+ *   comments: The comments to send with the next message.
+ *   clear: Drops the comments once they are sent.
+ *
+ * Returns:
+ *   The queue, unchanged when there are no comments.
+ */
+export function withLineComments(
+  midTurn: MidTurnQueue,
+  comments: readonly LineComment[],
+  clear?: () => void,
+): MidTurnQueue {
+  if (!comments.length) return midTurn;
+  return {
+    ...midTurn,
+    steer: (text) => {
+      midTurn.steer(joinLineComments(text.trim(), comments));
+      clear?.();
+    },
+    queue: (text) => {
+      midTurn.queue(joinLineComments(text.trim(), comments));
+      clear?.();
+    },
+  };
 }

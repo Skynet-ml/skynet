@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "다시 적용",
   "agent.edited_files.reverted": "변경 사항을 되돌렸습니다",
   "agent.edited_files.reapplied": "변경 사항을 다시 적용했습니다",
+  "agent.edited_files.changed_since": "이 턴 이후 파일이 변경되었습니다",
   "agent.setup_check.failed_chip": "{count, plural, other {검사 실패: 오류 #개}}",
   "agent.setup_check.ask_fix": "에이전트에게 수정 요청",
   "submit.agentic_ide.chat_tab": "채팅",

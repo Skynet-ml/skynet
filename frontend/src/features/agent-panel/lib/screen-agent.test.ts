@@ -62,9 +62,7 @@ test("a continue with a return screen jumps straight back there", () => {
     goToScreen: (s: string) => calls.push(`go:${s}`),
     goForwardTo: (s: string) => calls.push(`to:${s}`),
   };
-  const nav = parseScreenNav({
-    screen_nav: { action: "continue", from: "optimizer", to: "budget" },
-  });
+  const nav = parseScreenNav({ screen_nav: { action: "continue", from: "optimizer", to: "budget" } });
   assert.deepEqual(nav, { action: "continue", from: "optimizer", to: "budget" });
   runScreenNav(nav!, navigator);
   assert.deepEqual(calls, ["to:budget"]);
@@ -76,10 +74,7 @@ test("the return screen is the latest screen a go-back left, until the wizard re
   assert.equal(nextReturnScreen("budget", back("optimizer")), "budget");
   assert.equal(nextReturnScreen("budget", { action: "continue", from: "brief" }), "budget");
   // A held jump keeps the screen; the wizard clears it when it gets there.
-  assert.equal(
-    nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }),
-    "budget",
-  );
+  assert.equal(nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }), "budget");
   // A go-back from past the old screen means the user moved on: the newer screen wins.
   assert.equal(nextReturnScreen("budget", back("overview")), "overview");
   // The user moved on to metric while the agent's turn from budget ran.
@@ -139,9 +134,7 @@ test("the setup chat keeps its id, the screens already started and its messages"
   assert.equal(decodeSetupChat("not json"), null);
   assert.equal(decodeSetupChat('{"kicked":[],"messages":[]}'), null);
   assert.deepEqual(
-    decodeSetupChat(
-      '{"id":"c2","kicked":[1,"brief"],"messages":[{"role":"user","content":"a"},{"role":"x"},null]}',
-    ),
+    decodeSetupChat('{"id":"c2","kicked":[1,"brief"],"messages":[{"role":"user","content":"a"},{"role":"x"},null]}'),
     { id: "c2", kicked: ["brief"], messages: [{ role: "user", content: "a" }] },
   );
 });
@@ -166,26 +159,13 @@ test("a mid-turn copy keeps the user's message and the reply so far, without an 
 test("a mid-turn copy ends running and pending tool rows and open thinking", () => {
   const user = { role: "user" as const, content: "set it" };
   const running = {
-    id: "t1",
-    tool: "update_wizard_state",
-    reason: "",
-    status: "running" as const,
-    startedAt: 1,
-    endedAt: null,
-    payload: { arguments: { objective: "x" } },
+    id: "t1", tool: "update_wizard_state", reason: "", status: "running" as const,
+    startedAt: 1, endedAt: null, payload: { arguments: { objective: "x" } },
   };
-  const pending = {
-    id: "pending:0",
-    tool: "x",
-    reason: "",
-    status: "running" as const,
-    startedAt: 1,
-    endedAt: null,
-  };
+  const pending = { id: "pending:0", tool: "x", reason: "", status: "running" as const, startedAt: 1, endedAt: null };
   const done = { ...running, id: "t0", status: "done" as const, endedAt: 2 };
   const reply = {
-    role: "assistant" as const,
-    content: "",
+    role: "assistant" as const, content: "",
     toolCalls: [done, running, pending],
     thinkingSegments: [{ reasoning: "hm", toolsBefore: 0, startedAt: 1, endedAt: null }],
   };
@@ -202,10 +182,7 @@ test("a mid-turn copy drops a running kickoff but keeps what the user wrote duri
   const reply = { role: "assistant" as const, content: "half" };
   const steer = { role: "user" as const, content: "use refunds" };
   assert.deepEqual(setupChatSnapshot([earlier, kickoff, reply], 1, 5), [earlier]);
-  assert.deepEqual(setupChatSnapshot([earlier, kickoff, reply, steer, reply], 1, 5), [
-    earlier,
-    steer,
-  ]);
+  assert.deepEqual(setupChatSnapshot([earlier, kickoff, reply, steer, reply], 1, 5), [earlier, steer]);
 });
 
 test("a kickoff turn ends only after the agent started on it", () => {
@@ -220,9 +197,7 @@ test("a kickoff turn ends only after the agent started on it", () => {
 
 test("the tab's copy counts a screen as started only once its kickoff ended", () => {
   const kicked = new Set(["brief", "source"]);
-  assert.deepEqual(storedKickedScreens(kicked, { screen: "source", from: 0, started: true }), [
-    "brief",
-  ]);
+  assert.deepEqual(storedKickedScreens(kicked, { screen: "source", from: 0, started: true }), ["brief"]);
   assert.deepEqual(storedKickedScreens(kicked, null), ["brief", "source"]);
 });
 
@@ -250,32 +225,15 @@ test("a setup chat id is the browser's own", () => {
 
 test("a setup chat too long for storage loses tool results, then its oldest messages", () => {
   const big = "x".repeat(SETUP_CHAT_MAX_CHARS / 4);
-  const call = {
-    id: "t",
-    tool: "read",
-    reason: "",
-    status: "done" as const,
-    startedAt: 0,
-    endedAt: 1,
-  };
+  const call = { id: "t", tool: "read", reason: "", status: "done" as const, startedAt: 0, endedAt: 1 };
   const withResults = [
     { role: "user" as const, content: "q" },
-    {
-      role: "assistant" as const,
-      content: "a",
-      toolCalls: [{ ...call, payload: { result: big.repeat(5) } }],
-    },
+    { role: "assistant" as const, content: "a", toolCalls: [{ ...call, payload: { result: big.repeat(5) } }] },
   ];
   const trimmed = decodeSetupChat(encodeSetupChat({ id: "c", kicked: [], messages: withResults }));
-  assert.deepEqual(trimmed?.messages, [
-    withResults[0],
-    { role: "assistant", content: "a", toolCalls: [call] },
-  ]);
+  assert.deepEqual(trimmed?.messages, [withResults[0], { role: "assistant", content: "a", toolCalls: [call] }]);
 
-  const long = Array.from({ length: 6 }, (_, i) => ({
-    role: "user" as const,
-    content: `${i}${big}`,
-  }));
+  const long = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `${i}${big}` }));
   const raw = encodeSetupChat({ id: "c", kicked: [], messages: long });
   assert.ok(raw.length <= SETUP_CHAT_MAX_CHARS);
   const kept = decodeSetupChat(raw)?.messages ?? [];
@@ -295,9 +253,7 @@ test("trimming a long setup chat keeps the longest tail that fits, in one pass",
   const kept = decodeSetupChat(raw)?.messages ?? [];
   assert.deepEqual(kept, messages.slice(messages.length - kept.length));
   const oneMore = messages.slice(messages.length - kept.length - 1);
-  assert.ok(
-    JSON.stringify({ id: "c", kicked: ["brief"], messages: oneMore }).length > SETUP_CHAT_MAX_CHARS,
-  );
+  assert.ok(JSON.stringify({ id: "c", kicked: ["brief"], messages: oneMore }).length > SETUP_CHAT_MAX_CHARS);
 });
 
 test("an automatic message waits for the chat on view and a free agent, and a silent clone drops it", () => {

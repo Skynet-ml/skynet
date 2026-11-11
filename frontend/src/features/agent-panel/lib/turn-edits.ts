@@ -118,16 +118,23 @@ export function editTotals(edits: readonly FileEdit[]): { added: number; removed
 }
 
 /**
- * Tell whether a turn's edits are undone: each file holds its text from
- * before the turn again.
+ * Tell where a turn's files stand now, so Undo and Reapply never overwrite
+ * an edit made after the turn.
  *
  * Args:
  *   edits: The turn's edits.
  *   text: A file's text now, by path.
  *
  * Returns:
- *   True when there are edits and every file is back to its before-state.
+ *   "applied" when every file holds the turn's after-state, "undone" when
+ *   every file holds its before-state again, else "changed".
  */
-export function turnUndone(edits: readonly FileEdit[], text: (path: string) => string): boolean {
-  return edits.length > 0 && edits.every((edit) => body(text(edit.path)) === body(edit.before));
+export function turnState(
+  edits: readonly FileEdit[],
+  text: (path: string) => string,
+): "applied" | "undone" | "changed" {
+  if (edits.length === 0) return "changed";
+  if (edits.every((edit) => body(text(edit.path)) === body(edit.after))) return "applied";
+  if (edits.every((edit) => body(text(edit.path)) === body(edit.before))) return "undone";
+  return "changed";
 }

@@ -4617,6 +4617,7 @@
   "agent.edited_files.reapply": "إعادة التطبيق",
   "agent.edited_files.reverted": "تم التراجع عن التغييرات",
   "agent.edited_files.reapplied": "أُعيد تطبيق التغييرات",
+  "agent.edited_files.changed_since": "تغيّرت الملفات بعد هذه الجولة",
   "agent.setup_check.failed_chip": "{count, plural, zero {فشل الفحص: لا أخطاء} one {فشل الفحص: خطأ واحد} two {فشل الفحص: خطآن} few {فشل الفحص: # أخطاء} many {فشل الفحص: # خطأً} other {فشل الفحص: # خطأ}}",
   "agent.setup_check.ask_fix": "اطلب من الوكيل الإصلاح",
   "submit.agentic_ide.chat_tab": "الدردشة",
