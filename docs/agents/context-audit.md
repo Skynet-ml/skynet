@@ -16,7 +16,7 @@ and list what to cut.
   and connectors cost about 14–18k. Global and repo instruction trims save
   about 6.7k more. Unused plugin skills cost about 2k, and MCP server
   instructions about 1.1k.
-- Each PR task also reads two overlapping 20 KB policy files (about 11.5k
+- Each PR task also reads two overlapping 21 KB policy files (about 11.7k
   tokens). In Skynet, the agent can read only the repo skill (about 5.9k
   saved per PR task).
 - The repo files are small (about 14 KB loaded). This PR trims them only a
@@ -54,14 +54,14 @@ and list what to cut.
 
 ## 3. Layers, sizes and actions
 
-"Before" is the measured size. "After" is the size after you apply all actions in
-this report. Savings are tokens on every session start, unless the row
-says otherwise.
+"Before" is the measured size. "After" is the size after you apply all
+actions in this report. Savings are tokens on every session start, unless
+the row says otherwise.
 
 | Layer | Before | After | Purpose | Action | Reason | Est. saving |
 | --- | --- | --- | --- | --- | --- | --- |
 | System prompt (harness) | 35 KB | 35 KB | Claude Code rules | Keep | Not user-controlled | 0 |
-| Loaded tool schemas (desktop built-ins) | 195 KB | about 76 KB less (request-record sizes, §6); about 70 KB of the 146 KB request record, see §2 | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
+| Loaded tool schemas (desktop built-ins) | 195 KB | about 70 KB (of the 146 KB request record, §2; §6 lists the 76 KB to turn off) | Artifact, built-in browser, Workflow, iOS Simulator, visualize, Agent and others | Trim (partly) | Several groups are unused in Skynet (see §6) | about 6k; up to about 21k |
 | Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 14–18k |
 | Global user instruction file | 17.9 KB | 1.3 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.1 KB workflow table; Skynet-only rules | 4.6k, every repo |
 | Shared conventions file (also read by Codex) | 21.7 KB | 16.9 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.3k, every repo |
@@ -109,7 +109,8 @@ Local Droid setup:
 - The Droid MCP configuration has 5 servers. Claude Code has about 40 servers
   and connectors in this session.
 - All Droid hooks run a notify script that adds no context.
-- The Droid settings set no `compactionTokenLimit`. The repo has no `.factory/` folder.
+- The Droid settings set no `compactionTokenLimit`. The repo has no
+  `.factory/` folder.
 
 Conclusion: Droid starts with about one third of the instruction text, far
 fewer tool names and no desktop-app tool schemas. Rolling compaction also
@@ -219,9 +220,8 @@ files.
   UI proof (every repo)` section. It takes the generic rules from the global
   file's `Pull request review requirements` and RevEngine sections. Keep the
   generic parallel-agent and UI-evidence rules, because other repos use
-  them. Codex
-  reads this file too. The repo `AGENTS.md` covers Codex in Skynet, so Codex
-  loses no Skynet rule.
+  them. Codex reads this file too. The repo `AGENTS.md` covers Codex in
+  Skynet, so Codex loses no Skynet rule.
 - **Machine-local rules file (3.5 KB → 0.9 KB).** Remove a stale rule.
   Replace the third copy of the memory rules with one `MEMORY_DIR` line.
   Keep the local port notes. Add a `## Parallel agents` section with the
