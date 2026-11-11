@@ -96,12 +96,19 @@ export function allLoaded(runs: RunLike[], totals: SourceTotals): boolean {
 /**
  * Load one page from each side and merge it. A hosted failure (offline,
  * revoked link, older server) leaves the local runs alone; a local failure
- * still throws, as before.
+ * still throws, as before. Without `withLocal` the web side is the only
+ * side, so its failure throws as a local one does.
  */
 export async function loadRuns<P extends RunPage>(
   load: (source: ApiSource) => Promise<P>,
   withHosted: boolean,
+  withLocal = true,
 ): Promise<P & { totals: SourceTotals; hostedFailed: boolean }> {
+  if (!withLocal) {
+    const hosted = await load("hosted");
+    const items = hosted.items.map((run) => ({ ...run, source: "hosted" as const }));
+    return { ...hosted, items, totals: { local: 0, hosted: hosted.total }, hostedFailed: false };
+  }
   let hostedFailed = false;
   const [local, hosted] = await Promise.all([
     load("local"),

@@ -20,6 +20,29 @@ export function modelProviderSlug(id: string): string {
   return BRAND_SLUGS[slug] ?? slug;
 }
 
+// Brand names for the picker's lab headers. Not translated: they are names.
+const LAB_NAMES: Record<string, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google",
+  xai: "xAI",
+  zai: "Z.ai",
+  deepseek: "DeepSeek",
+  meta: "Meta",
+  minimax: "MiniMax",
+  mistral: "Mistral",
+  qwen: "Qwen",
+  moonshot: "Moonshot AI",
+  moonshotai: "Moonshot AI",
+  xiaomi: "Xiaomi",
+  cohere: "Cohere",
+};
+
+/** Lab name for a `modelProviderSlug` value; an unknown slug shows as itself. */
+export function modelLabName(slug: string): string {
+  return LAB_NAMES[slug] ?? slug;
+}
+
 type CatalogLike = ReadonlyArray<Pick<CatalogModel, "value" | "display_name">> | null | undefined;
 
 /**

@@ -186,3 +186,28 @@ test("a refresh asks each side for its own loaded rows, not the merged count", (
   assert.equal(refreshLimit([], "hosted", 20, 200), 20);
   assert.equal(refreshLimit(runs, "local", 20, 10), 10);
 });
+
+test("a web-only list asks only the web side, tags it, and throws on its failure", async () => {
+  const asked: string[] = [];
+  const page = await loadRuns(
+    async (source) => {
+      asked.push(source);
+      return { items: [run("w", null)], total: 3 };
+    },
+    true,
+    false,
+  );
+  assert.deepEqual(asked, ["hosted"]);
+  assert.deepEqual(page.items.map(runKey), ["hosted:w"]);
+  assert.deepEqual(page.totals, { local: 0, hosted: 3 });
+  assert.equal(page.hostedFailed, false);
+  await assert.rejects(
+    loadRuns(
+      async () => {
+        throw new Error("503");
+      },
+      true,
+      false,
+    ),
+  );
+});

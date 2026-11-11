@@ -264,7 +264,9 @@ def test_turn_forwards_chosen_model(
     monkeypatch.setattr(
         model_catalog,
         "get_catalog_cached",
-        lambda: SimpleNamespace(models=[SimpleNamespace(value="openai/gpt-test")]),
+        lambda: SimpleNamespace(
+            models=[SimpleNamespace(value="openai/gpt-test", supports_thinking=True, reasoning_efforts=None)]
+        ),
     )
     resp = client.post(
         "/optimizations/generalist-agent",

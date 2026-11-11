@@ -70,6 +70,7 @@ import type { ApiSource } from "@/shared/lib/api-route";
 // A cycle (use-linked-account imports this module), safe because both sides
 // only call each other at request time, never while the modules load.
 import { wasLinked } from "@/shared/hooks/use-linked-account";
+import { readResourcePick, resolveResourceMode } from "@/shared/lib/resource-mode";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
 import { readServerSentEvents } from "@/shared/lib/sse";
 
@@ -90,6 +91,16 @@ export function hostedRunsAvailable(): boolean {
 }
 
 /**
+ * Whether the app works on the linked web account: a linked Mac with Web
+ * picked in the header. Lists then read only web rows, and new runs and
+ * chats start on the web account.
+ */
+export function webPicked(): boolean {
+  if (!hostedRunsAvailable()) return false;
+  return resolveResourceMode(readResourcePick(), true, true) === "hosted";
+}
+
+/**
  * The routed path for `source`; hosted falls back to local when not linked.
  * Closed routes (keys, payments, account actions) never leave the Mac.
  */
@@ -101,6 +112,25 @@ function routedPath(path: string, source?: ApiSource): string {
 /** Full URL for raw stream callers (SSE, NDJSON) that pass it to {@link fetchWithAuthRetry}. */
 export function apiUrl(path: string, source?: ApiSource): string {
   return `${apiBase()}${routedPath(path, source)}`;
+}
+
+/** Account data always belongs to the web account; an unlinked Mac must fail closed. */
+function accountRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(isLocalMode() ? apiPath(path, "hosted") : path, init);
+}
+
+/** The side the inbox and its settings live on: the Local/Web pick, local when not linked. */
+function inboxSource(): ApiSource {
+  return webPicked() ? "hosted" : "local";
+}
+
+/**
+ * Inbox and notification-settings calls follow the Local/Web pick: local
+ * runs write their alerts to the Mac's own inbox, and an unlinked Mac has
+ * only that one.
+ */
+function inboxRequest<T>(path: string, init?: RequestInit, source: ApiSource = inboxSource()): Promise<T> {
+  return request<T>(path, init, source);
 }
 
 /** Hosted revoked the Mac's link: let the link state re-read instead of refreshing the local token. */
@@ -1201,12 +1231,12 @@ export interface NotificationPreferencesPatch {
 
 /** Fetch where each notification event is routed. */
 export function getNotificationPreferences() {
-  return request<NotificationPreferences>("/account/notification-preferences");
+  return inboxRequest<NotificationPreferences>("/account/notification-preferences");
 }
 
 /** Change grid cells and hold settings; untouched fields keep their value. */
 export function updateNotificationPreferences(patch: NotificationPreferencesPatch) {
-  return request<NotificationPreferences>("/account/notification-preferences", {
+  return inboxRequest<NotificationPreferences>("/account/notification-preferences", {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
@@ -1370,38 +1400,50 @@ export interface NotificationUnreadCounts {
 export function listNotifications(tab: NotificationTab, cursor?: string | null) {
   const q = new URLSearchParams({ tab });
   if (cursor) q.set("cursor", cursor);
-  return request<NotificationPage>(`/notifications?${q.toString()}`);
+  const source = inboxSource();
+  return inboxRequest<NotificationPage>(`/notifications?${q.toString()}`, undefined, source).then((page) => {
+    if (!isLocalMode() || source !== "hosted") return page;
+    return {
+      ...page,
+      items: page.items.map((item) => {
+        if (!item.link?.startsWith("/optimizations/")) return item;
+        const link = new URL(item.link, "https://skynet.invalid");
+        link.searchParams.set("source", "hosted");
+        return { ...item, link: `${link.pathname}${link.search}${link.hash}` };
+      }),
+    };
+  });
 }
 
 export function getNotificationUnreadCount() {
-  return request<NotificationUnreadCounts>("/notifications/unread-count");
+  return inboxRequest<NotificationUnreadCounts>("/notifications/unread-count");
 }
 
 export function markNotificationRead(id: string) {
-  return request<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
+  return inboxRequest<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
     method: "POST",
   });
 }
 
 export function markAllNotificationsRead(tab: NotificationTab) {
-  return request<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
+  return inboxRequest<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
 }
 
 /** Take one item out of the caller's inbox; held email, Chrome and Slack sends still go out. */
 export function removeNotification(id: string) {
-  return request<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
+  return inboxRequest<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
 /** Take every item on a tab out of the caller's inbox. */
 export function clearNotifications(tab: NotificationTab) {
-  return request<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
+  return inboxRequest<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
 }
 
 /** The VAPID key browsers subscribe with; null while web push is off on the server. */
 export function getPushVapidKey() {
-  return request<{ public_key: string | null }>("/notifications/push/vapid-key");
+  return accountRequest<{ public_key: string | null }>("/notifications/push/vapid-key");
 }
 
 /** Save (or refresh) this browser's web push subscription for the caller. */
@@ -1409,7 +1451,7 @@ export function savePushSubscription(subscription: {
   endpoint: string;
   keys: { p256dh: string; auth: string };
 }) {
-  return request<{ subscribed: boolean }>("/notifications/push/subscriptions", {
+  return accountRequest<{ subscribed: boolean }>("/notifications/push/subscriptions", {
     method: "POST",
     body: JSON.stringify(subscription),
   });
@@ -1417,7 +1459,7 @@ export function savePushSubscription(subscription: {
 
 /** Forget this browser's web push subscription; repeating it is harmless. */
 export function deletePushSubscription(endpoint: string) {
-  return request<{ subscribed: boolean }>("/notifications/push/subscriptions", {
+  return accountRequest<{ subscribed: boolean }>("/notifications/push/subscriptions", {
     method: "DELETE",
     body: JSON.stringify({ endpoint }),
   });
@@ -1447,7 +1489,7 @@ export interface SlackChannelOption {
 
 /** Whether Slack is set up and where the caller's Slack notifications go. */
 export function getSlackConnection() {
-  return request<SlackConnection>("/notifications/slack");
+  return accountRequest<SlackConnection>("/notifications/slack");
 }
 
 /** Mint the "Add to Slack" URL; the page navigates to it. */
@@ -1457,14 +1499,14 @@ export function startSlackOAuth() {
 
 /** The channels the Slack app can see in the caller's workspace. */
 export function listSlackChannels() {
-  return request<{ channels: SlackChannelOption[]; truncated: boolean }>(
+  return accountRequest<{ channels: SlackChannelOption[]; truncated: boolean }>(
     "/notifications/slack/channels",
   );
 }
 
 /** Post to a channel, or (null) as a direct message from the app. */
 export function updateSlackTarget(channelId: string | null) {
-  return request<SlackConnection>("/notifications/slack", {
+  return accountRequest<SlackConnection>("/notifications/slack", {
     method: "PATCH",
     body: JSON.stringify({ channel_id: channelId }),
   });
@@ -1472,7 +1514,7 @@ export function updateSlackTarget(channelId: string | null) {
 
 /** Revoke and forget the caller's Slack install; repeating it is harmless. */
 export function disconnectSlack() {
-  return request<SlackConnection>("/notifications/slack", { method: "DELETE" });
+  return accountRequest<SlackConnection>("/notifications/slack", { method: "DELETE" });
 }
 
 export type ExperienceLevelValue = "guided" | "standard" | "expert";
@@ -1512,26 +1554,6 @@ export function updateModelPrivacy(settings: ModelPrivacySettings) {
   return request<ModelPrivacySettings>("/account/model-privacy", {
     method: "PUT",
     body: JSON.stringify(settings),
-  });
-}
-
-/** The caller's agent engine; see `AgentEngine` in the local-runtime feature. */
-export interface AgentEnginePreference {
-  engine: string | null;
-  /** False (or missing) when `engine` is the backend's automatic pick. */
-  stored?: boolean;
-}
-
-/** Fetch which engine runs the caller's agent turns that pick no model. */
-export function getAgentEngine() {
-  return request<AgentEnginePreference>("/account/agent-engine");
-}
-
-/** Persist which engine runs the caller's agent turns that pick no model. */
-export function updateAgentEngine(engine: string) {
-  return request<AgentEnginePreference>("/account/agent-engine", {
-    method: "PUT",
-    body: JSON.stringify({ engine }),
   });
 }
 
@@ -1593,17 +1615,6 @@ export interface BillingUsageEntry {
   kind: string;
 }
 
-/** The caller's wallet as the backend reports it (snake_case mirrors the API). */
-/** The caller's platform plan, mirrored from their Stripe subscription. */
-export interface BillingPlanResponse {
-  plan: "free" | "pro";
-  status: string | null;
-  renews_at: string | null;
-  cancel_at_period_end: boolean;
-  /** Whether this deployment sells Pro at all (a price is configured). */
-  available: boolean;
-}
-
 /** The backend's live pricing terms (markup, BYOK fee, top-up fee). */
 export interface BillingPricingTerms {
   usage_markup: number;
@@ -1612,11 +1623,11 @@ export interface BillingPricingTerms {
   purchase_fee_fixed_cents: number;
 }
 
+/** The caller's wallet as the backend reports it (snake_case mirrors the API). */
 export interface BillingWalletResponse {
   paid_balance_cents: number;
   free_grant: BillingFreeGrant;
   usage: BillingUsageEntry[];
-  plan: BillingPlanResponse;
   /** Absent from a backend older than the frontend (e.g. mid-deploy). */
   pricing?: BillingPricingTerms;
 }
@@ -1669,7 +1680,10 @@ export function getUsage(start?: string, end?: string, source: ApiSource = "host
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingUsageResponse>(`/billing/usage${qs ? `?${qs}` : ""}`, undefined, source);
+  const path = `/billing/usage${qs ? `?${qs}` : ""}`;
+  return source === "hosted"
+    ? accountRequest<BillingUsageResponse>(path)
+    : request<BillingUsageResponse>(path);
 }
 
 /** Display-safe billing address fields stored on the Stripe customer. */
@@ -1725,7 +1739,7 @@ export interface BillingTransactionsResponse {
 
 /** Fetch billing contact details and masked saved payment methods from Stripe. */
 export function getBillingProfile() {
-  return request<BillingProfileResponse>("/billing/profile");
+  return accountRequest<BillingProfileResponse>("/billing/profile");
 }
 
 /** Fetch completed Stripe purchases over an optional ISO-8601 date window; a linked Mac reads hosted. */
@@ -1734,10 +1748,8 @@ export function getBillingTransactions(start?: string, end?: string) {
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingTransactionsResponse>(
+  return accountRequest<BillingTransactionsResponse>(
     `/billing/transactions${qs ? `?${qs}` : ""}`,
-    undefined,
-    "hosted",
   );
 }
 
@@ -1780,11 +1792,6 @@ export function createCheckoutSession(purchase: { packId: string } | { cents: nu
       "packId" in purchase ? { pack_id: purchase.packId } : { cents: purchase.cents },
     ),
   });
-}
-
-/** Start a Stripe Checkout session for the Skynet Pro subscription; redirect to `.url`. */
-export function createSubscriptionCheckout() {
-  return request<{ url: string }>("/billing/subscription/checkout", { method: "POST" });
 }
 
 /** One stored BYOK provider connection as the backend reports it — masked, never the secret. */
@@ -2359,6 +2366,7 @@ export interface DashboardAnalytics {
 
 export function getDashboardAnalytics(params?: {
   username?: string;
+  source?: ApiSource;
   optimizer?: string;
   model?: string;
   status?: string;
@@ -2378,7 +2386,8 @@ export function getDashboardAnalytics(params?: {
   dataset_max?: number | null;
 }) {
   const q = new URLSearchParams();
-  if (params?.username) q.set("username", params.username);
+  // The web account scopes its rows by the linked token, not by the Mac's username.
+  if (params?.username && params.source !== "hosted") q.set("username", params.username);
   if (params?.optimizer) q.set("optimizer", params.optimizer);
   if (params?.model) q.set("model", params.model);
   if (params?.status) q.set("status", params.status);
@@ -2402,7 +2411,11 @@ export function getDashboardAnalytics(params?: {
     if (value != null) q.set(key, String(value));
   }
   const qs = q.toString();
-  return cachedGet<DashboardAnalytics>(`/analytics/dashboard${qs ? `?${qs}` : ""}`);
+  return cachedGet<DashboardAnalytics>(
+    `/analytics/dashboard${qs ? `?${qs}` : ""}`,
+    undefined,
+    params?.source,
+  );
 }
 
 export function getJob(
@@ -2440,33 +2453,41 @@ export function getRunUsage(optimizationId: string, pairIndex?: number | null) {
 }
 
 /** Continuous optimization of one run: its plan (or null) and whether one can start. */
-export function getContinuousState(optimizationId: string) {
+export function getContinuousState(optimizationId: string, source?: ApiSource) {
   return request<ContinuousState>(
     `/optimizations/${encodeURIComponent(optimizationId)}/continuous`,
+    undefined,
+    source,
   );
 }
 
-export function enableContinuous(optimizationId: string, body: ContinuousEnableRequest) {
+export function enableContinuous(
+  optimizationId: string,
+  body: ContinuousEnableRequest,
+  source?: ApiSource,
+) {
   return request<ContinuousPlan>(
     `/optimizations/${encodeURIComponent(optimizationId)}/continuous`,
     {
       method: "POST",
       body: JSON.stringify(body),
     },
+    source,
   );
 }
 
 /** Pause or resume a plan. */
-export function setContinuousPaused(planId: string, paused: boolean) {
+export function setContinuousPaused(planId: string, paused: boolean, source?: ApiSource) {
   return request<ContinuousPlan>(
     `/continuous/${encodeURIComponent(planId)}/${paused ? "pause" : "resume"}`,
     { method: "POST" },
+    source,
   );
 }
 
 /** Delete a plan and its check history; the runs it started stay. The route returns 204. */
-export async function deleteContinuous(planId: string): Promise<void> {
-  const res = await fetchWithAuthRetry(`${apiBase()}/continuous/${encodeURIComponent(planId)}`, {
+export async function deleteContinuous(planId: string, source?: ApiSource): Promise<void> {
+  const res = await fetchWithAuthRetry(apiUrl(`/continuous/${encodeURIComponent(planId)}`, source), {
     method: "DELETE",
   });
   if (!res.ok) {
@@ -2479,18 +2500,25 @@ export async function deleteContinuous(planId: string): Promise<void> {
 }
 
 /** Replace when a plan checks; a paused plan stays paused. */
-export function updateContinuousSchedule(planId: string, rule: ScheduleRule) {
-  return request<ContinuousPlan>(`/continuous/${encodeURIComponent(planId)}/schedule`, {
-    method: "PUT",
-    body: JSON.stringify(rule),
-  });
+export function updateContinuousSchedule(planId: string, rule: ScheduleRule, source?: ApiSource) {
+  return request<ContinuousPlan>(
+    `/continuous/${encodeURIComponent(planId)}/schedule`,
+    { method: "PUT", body: JSON.stringify(rule) },
+    source,
+  );
 }
 
 /** Approve (the candidate becomes the incumbent) or reject a candidate in review. */
-export function reviewContinuousCycle(planId: string, cycleId: string, approve: boolean) {
+export function reviewContinuousCycle(
+  planId: string,
+  cycleId: string,
+  approve: boolean,
+  source?: ApiSource,
+) {
   return request<ContinuousPlan>(
     `/continuous/${encodeURIComponent(planId)}/cycles/${encodeURIComponent(cycleId)}/${approve ? "approve" : "reject"}`,
     { method: "POST" },
+    source,
   );
 }
 
@@ -3980,15 +4008,16 @@ export async function claimSharedFolder(token: string) {
   return result;
 }
 
-export function getServeInfo(optimizationId: string) {
-  return request<ServeInfoResponse>(`/serve/${optimizationId}/info`);
+export function getServeInfo(optimizationId: string, source?: ApiSource) {
+  return request<ServeInfoResponse>(`/serve/${optimizationId}/info`, undefined, source);
 }
 
 /** Turn serving on or off for a finished repository run (owner only). */
-export function setServingEnabled(optimizationId: string, enabled: boolean) {
+export function setServingEnabled(optimizationId: string, enabled: boolean, source?: ApiSource) {
   return request<{ optimization_id: string; serving_enabled: boolean }>(
     `/serve/${optimizationId}/enabled`,
     { method: "PUT", body: JSON.stringify({ enabled }) },
+    source,
   );
 }
 
@@ -4007,12 +4036,17 @@ export function serveProgram(
   optimizationId: string,
   inputs: Record<string, unknown>,
   idempotencyKey: string,
+  source?: ApiSource,
 ) {
-  return request<ServeResponse>(`/serve/${optimizationId}`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
+  return request<ServeResponse>(
+    `/serve/${optimizationId}`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ inputs }),
+    },
+    source,
+  );
 }
 
 /** Run inference through one grid-search pair (non-streaming). */
@@ -4031,12 +4065,20 @@ export function servePairProgram(
 
 /** Deliver a message into the running turn opened with `steerKey`; resolves
  *  the message's id, which a later `steer_applied` event or withdraw names. */
-export async function postAgentSteer(steerKey: string, text: string): Promise<string> {
-  const res = await request<{ id: string }>("/optimizations/agent-steer", {
-    method: "POST",
-    signal: AbortSignal.timeout(30_000),
-    body: JSON.stringify({ steer_key: steerKey, text }),
-  });
+export async function postAgentSteer(
+  steerKey: string,
+  text: string,
+  source?: ApiSource,
+): Promise<string> {
+  const res = await request<{ id: string }>(
+    "/optimizations/agent-steer",
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ steer_key: steerKey, text }),
+    },
+    source,
+  );
   return String(res.id);
 }
 
@@ -4064,6 +4106,7 @@ export async function fetchNextPromptSuggestion(
 export async function withdrawAgentSteers(
   steerKey: string,
   ids: string[],
+  source?: ApiSource,
 ): Promise<{ ids: string[]; delivered?: string[] }> {
   const res = await request<{ ids: string[]; delivered?: string[] }>(
     "/optimizations/agent-steer/withdraw",
@@ -4072,6 +4115,7 @@ export async function withdrawAgentSteers(
       signal: AbortSignal.timeout(30_000),
       body: JSON.stringify({ steer_key: steerKey, ids }),
     },
+    source,
   );
   if (!Array.isArray(res.ids)) throw new Error("Invalid withdrawal outcome");
   if (res.delivered !== undefined && !Array.isArray(res.delivered))

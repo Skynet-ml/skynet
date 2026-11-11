@@ -101,7 +101,6 @@ from .routers.accounts import create_accounts_router
 from .routers.admin import create_admin_router
 from .routers.admin_dashboard import create_admin_dashboard_router
 from .routers.agent_attachments import create_agent_attachments_router
-from .routers.agent_engine import create_agent_engine_router
 from .routers.agent_history import create_agent_history_router
 from .routers.agent_settings import create_agent_settings_router
 from .routers.analytics import create_analytics_router
@@ -128,6 +127,7 @@ from .routers.local_hosted_link import create_local_hosted_link_router
 from .routers.local_hosted_proxy import create_local_hosted_proxy_router
 from .routers.local_notifications import create_local_notifications_router
 from .routers.local_runtime import create_local_runtime_router
+from .routers.managed_inference import create_managed_inference_router
 from .routers.mcp_connections import create_mcp_connections_router
 from .routers.mcp_oauth import create_mcp_oauth_router
 from .routers.mcp_probe import create_mcp_probe_router
@@ -1346,6 +1346,7 @@ def create_app(
     # via closure, which a module-level dependency can't reach).
     app.state.job_store = job_store
     app.include_router(create_models_router(), tags=["Models"])
+    app.include_router(create_managed_inference_router(job_store=job_store), tags=["Models"])
     app.include_router(
         create_admin_router(job_store=job_store, directory_client=build_directory_client()),
         tags=["Admin"],
@@ -1382,7 +1383,6 @@ def create_app(
     app.include_router(create_notifications_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_experience_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_model_privacy_router(job_store=job_store), tags=["Settings"])
-    app.include_router(create_agent_engine_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_package_registry_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_scorer_dependencies_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_datasets_router(job_store=job_store), tags=["Datasets"])
