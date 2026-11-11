@@ -47,20 +47,23 @@ def _target() -> BlackboxTarget:
     return BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=BLACKBOX_HARNESS_GOOSE, model="target-model")
 
 
-def _run_with_fake_goose(tmp_path: Path, *, protected: bool) -> tuple[str, str, Path]:
+def _run_with_fake_goose(
+    tmp_path: Path, *, protected: bool, gateway: GatewayConfig = _GATEWAY
+) -> tuple[str, str, Path]:
     """Run the built goose command in a scratch workspace against a fake ``goose`` binary.
 
     The env also carries an inherited ``OPENAI_HOST`` and ``OPENAI_BASE_PATH``,
-    which the run must drop so they cannot override the gateway URL.
+    which the run must replace so they cannot override the gateway URL.
 
     Args:
         tmp_path: Scratch directory for the workspace, the fake binary and its log.
         protected: Build the protected launch, with the sandbox-local relay set.
+        gateway: Gateway URL and key for the launch.
 
     Returns:
         The command's stdout, the fake binary's call log, and the workspace.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected)
+    launch = build_launch(_target(), gateway, protected=protected)
     workspace = tmp_path / "work"
     for name, content in launch.files.items():
         path = workspace / name
@@ -80,6 +83,7 @@ def _run_with_fake_goose(tmp_path: Path, *, protected: bool) -> tuple[str, str, 
         "HOME": str(tmp_path / "home"),
         "OPENAI_HOST": "https://api.openai.com",
         "OPENAI_BASE_PATH": "v1/other",
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
         "FAKE_LOG": str(log),
         "FAKE_ANSWER": _RECORDED_STDOUT,
     }
@@ -141,8 +145,9 @@ def test_open_launch_sends_model_calls_only_to_the_gateway() -> None:
     assert launch.files == {GOOSE_BASE_URL_FILE: _GATEWAY.url}
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
-    assert "unset OPENAI_HOST OPENAI_BASE_PATH && " in launch.run_command
-    assert f'OPENAI_BASE_URL="$(cat {GOOSE_BASE_URL_FILE})" OPENAI_API_KEY="$APP_API_KEY" ' in launch.run_command
+    assert (
+        f'OPENAI_HOST="$(cat {GOOSE_BASE_URL_FILE})" OPENAI_BASE_PATH=chat/completions OPENAI_API_KEY="$APP_API_KEY" '
+    ) in launch.run_command
     assert (
         "goose run --no-session --quiet --no-profile --with-builtin developer "
         '--provider openai --model "$APP_MODEL" -i "$APP_PROMPT_FILE" < /dev/null'
@@ -205,11 +210,10 @@ def test_protected_run_points_goose_at_the_relay_and_returns_its_answer(tmp_path
         "ARGS [run] [--no-session] [--quiet] [--no-profile] [--with-builtin] [developer] "
         "[--provider] [openai] [--model] [target-model] [-i] [task/PROMPT.md]"
     )
-    assert _logged(calls, "OPENAI_BASE_URL") == _RELAY
+    assert _logged(calls, "OPENAI_HOST") == _RELAY
+    assert _logged(calls, "OPENAI_BASE_PATH") == "chat/completions"
     assert _GATEWAY.url not in calls
     assert _logged(calls, "OPENAI_API_KEY") == "gateway-token"
-    assert _logged(calls, "OPENAI_HOST") == "unset"
-    assert _logged(calls, "OPENAI_BASE_PATH") == "unset"
     assert _logged(calls, "ANTHROPIC_API_KEY") == ""
     root = Path(_logged(calls, "GOOSE_PATH_ROOT"))
     assert root.is_dir()
@@ -226,8 +230,27 @@ def test_open_run_reads_the_gateway_url_from_the_generated_file(tmp_path: Path) 
     """Without a relay, point goose at the gateway URL the launch wrote."""
     _, calls, _ = _run_with_fake_goose(tmp_path, protected=False)
 
-    assert _logged(calls, "OPENAI_BASE_URL") == _GATEWAY.url
-    assert _logged(calls, "OPENAI_HOST") == "unset"
+    assert _logged(calls, "OPENAI_HOST") == _GATEWAY.url
+    shutil.rmtree(_logged(calls, "GOOSE_PATH_ROOT"))
+
+
+def test_run_forces_chat_completions_on_the_full_gateway_url(tmp_path: Path) -> None:
+    """Pass the whole gateway URL as ``OPENAI_HOST`` with the custom ``chat/completions`` base path.
+
+    Goose 1.57.0 sends gpt-5*, gpt-6* and o* models to /responses when the base
+    path is its default ``v1/chat/completions``
+    (``OpenAiProvider::should_use_responses_api``), and Skynet's local CLI and
+    BYOK routes reject /responses. Only a custom chat path forces chat
+    completions. ``ApiClient::build_url`` appends that relative path to
+    ``OPENAI_HOST``, so the calls go to ``<gateway>/chat/completions`` with the
+    gateway's path prefix kept. An inherited ``OPENAI_HOST``, ``OPENAI_BASE_PATH``
+    or ``OPENAI_BASE_URL`` must not change either value.
+    """
+    gateway = GatewayConfig(url="https://gw.example/relay/abc/v1", api_key="gateway-token")
+    _, calls, _ = _run_with_fake_goose(tmp_path, protected=False, gateway=gateway)
+
+    assert _logged(calls, "OPENAI_HOST") == gateway.url
+    assert _logged(calls, "OPENAI_BASE_PATH") == "chat/completions"
     shutil.rmtree(_logged(calls, "GOOSE_PATH_ROOT"))
 
 

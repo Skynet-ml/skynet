@@ -16,7 +16,7 @@ from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
 from .base import ENV_API_KEY, ENV_MODEL, ENV_PROMPT_FILE, GatewayConfig, HarnessLaunch, _base_env, _version_check
 
-# GitHub release ``v1.57.0`` of aaif-goose/goose (Apache-2.0), 2026-11-08.
+# GitHub release ``v1.57.0`` of aaif-goose/goose (Apache-2.0), 2026-10-28.
 GOOSE_VERSION = "1.57.0"
 GOOSE_PROVIDER = "openai"
 _RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GOOSE_VERSION}"
@@ -47,9 +47,9 @@ _PROTECTED_ENV = {
     "MISTRAL_API_KEY": "",
     "DEEPSEEK_API_KEY": "",
     "AZURE_OPENAI_API_KEY": "",
-    # Telemetry is opt-in upstream; these keep it off even if a config enables
-    # it. Goose has no auto-update, only the manual ``goose update`` command.
-    "GOOSE_TELEMETRY_OFF": "1",
+    # Telemetry is opt-in upstream; these and the launch's GOOSE_TELEMETRY_OFF
+    # keep it off even if a config enables it. Goose has no auto-update, only
+    # the manual ``goose update`` command.
     "GOOSE_TELEMETRY_ENABLED": "false",
     "DO_NOT_TRACK": "1",
 }
@@ -75,7 +75,7 @@ def _goose_install() -> str:
         'echo "$s  $d/$f" | sha256sum -c - && '
         'tar -xzf "$d/$f" -C "$d" && '
         f"mkdir -p {_LOCAL_BIN} && "
-        f'install -m 755 "$d/goose" {_LOCAL_BIN}/goose; }}'
+        f'install -m 755 "$d/goose" {_LOCAL_BIN}/goose && rm -rf "$d"; }}'
     )
 
 
@@ -110,13 +110,21 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
     Returns:
         The launch.
     """
-    # OPENAI_HOST wins over OPENAI_BASE_URL even when it is empty, and
-    # OPENAI_BASE_PATH would override the gateway's path, so neither may leak in.
+    # Goose 1.57.0 sends gpt-5*, gpt-6* and o* models to the Responses API
+    # when the base path is the default ``v1/chat/completions``
+    # (``OpenAiProvider::should_use_responses_api``), and Skynet's local CLI
+    # and BYOK routes reject /responses. OPENAI_BASE_URL cannot avoid this: for
+    # a URL that ends in /v1, ``parse_openai_base_url`` strips the /v1 and
+    # ``openai_def`` defaults the path back to ``v1/chat/completions``. So the
+    # whole gateway URL goes in OPENAI_HOST, which wins over OPENAI_BASE_URL
+    # (``resolve_base_url``), with the custom path ``chat/completions``. A
+    # custom chat path forces chat completions, and ``ApiClient::build_url``
+    # appends it to the gateway URL, path prefix included.
     run_command = (
         f'export PATH={_LOCAL_BIN}:"$PATH" && '
-        "unset OPENAI_HOST OPENAI_BASE_PATH && "
         'export GOOSE_PATH_ROOT="$(mktemp -d)" && '
-        f'OPENAI_BASE_URL="$(cat {GOOSE_BASE_URL_FILE})" OPENAI_API_KEY="${ENV_API_KEY}" '
+        f'OPENAI_HOST="$(cat {GOOSE_BASE_URL_FILE})" OPENAI_BASE_PATH=chat/completions '
+        f'OPENAI_API_KEY="${ENV_API_KEY}" '
         "goose run --no-session --quiet --no-profile --with-builtin developer "
         f'--provider {GOOSE_PROVIDER} --model "${ENV_MODEL}" -i "${ENV_PROMPT_FILE}" < /dev/null'
     )
