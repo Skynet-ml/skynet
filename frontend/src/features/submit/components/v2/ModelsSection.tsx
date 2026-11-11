@@ -102,9 +102,6 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
   const knobs = proposerKnobs(choice, kind);
   const extraModels = takesExtraModels(choice);
   const showShinka = resolved === "shinka_evolve" || resolved === "auto";
-  // DSPy programs call the task model through the harness's configured LM, so
-  // they cannot run without one; plain run code may never call `llm`.
-  const taskModelRequired = kind === "dspy_program";
   const taskLabel = t("submit.v2.optimizer.models.task.label");
   const reflectionLabel = t("submit.v2.optimizer.models.reflection.label");
   const updateProposer = (patch: Partial<typeof proposer>) =>
@@ -129,18 +126,13 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
       <ModelRoleRow
         id="v2-task-model"
         role={taskLabel}
-        binding={taskModelRequired ? undefined : t("submit.v2.optimizer.models.task.optional")}
-        description={t(
-          kind === "dspy_program"
-            ? "submit.v2.optimizer.models.task.desc_dspy"
-            : "submit.v2.optimizer.models.task.desc",
-        )}
+        binding={t("submit.v2.optimizer.models.task.optional")}
+        description={t("submit.v2.optimizer.models.task.desc")}
       >
         <ModelChip
           config={taskModel ?? emptyModelConfig()}
           className={MOBILE_MODEL_CHIP_CLASS}
           roleLabel={taskLabel}
-          required={taskModelRequired}
           catalogModels={catalog?.models}
           onClick={() =>
             setEditing({
@@ -154,11 +146,6 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
           }
           onRemove={taskModel?.name ? () => patchOptimizer({ taskModel: null }) : undefined}
         />
-        {taskModelRequired && !taskModel?.name.trim() && (
-          <p role="alert" className="text-xs text-destructive">
-            {t("submit.v2.optimizer.models.task.required")}
-          </p>
-        )}
         <EconomySwitch
           id="v2-task-economy"
           config={taskModel}

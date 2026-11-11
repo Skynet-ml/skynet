@@ -3,7 +3,6 @@ import { registerHooks } from "node:module";
 import { test } from "node:test";
 
 import {
-  decodeScheduledRun,
   decodeWizardSession,
   encodeWizardSession,
   setupWorthKeeping,
@@ -52,6 +51,15 @@ test("missing, broken or older setups are ignored", () => {
   const { inputs: _inputs, ...withoutInputs } = good;
   assert.equal(
     decodeWizardSession(JSON.stringify({ account: "a", state: withoutInputs }), "a", STEPS),
+    null,
+  );
+  // A DSPy program draft saved before that target was retired has no repository.
+  assert.equal(
+    decodeWizardSession(
+      JSON.stringify({ account: "a", state: { ...good, task: { ...good.task, repo: null } } }),
+      "a",
+      STEPS,
+    ),
     null,
   );
 });
@@ -135,40 +143,16 @@ test("a saved spending limit survives any number of reloads", async () => {
   }
 });
 
-test("a saved scheduled run reads back after a reload", () => {
-  const plan = {
-    schedule: { kind: "daily", time: "09:00", timezone: "UTC" },
-    permitted: { task_model: true, reflection_model: false },
-  };
-  assert.deepEqual(decodeScheduledRun(JSON.stringify(plan)), plan);
-});
-
-test("a missing, malformed or older scheduled run reads back as none", () => {
-  assert.equal(decodeScheduledRun(null), null);
-  assert.equal(decodeScheduledRun("{not json"), null);
-  assert.equal(
-    decodeScheduledRun(JSON.stringify({ permitted: { task_model: true, reflection_model: true } })),
-    null,
-  );
-  assert.equal(decodeScheduledRun(JSON.stringify({ schedule: {} })), null);
-  assert.equal(
-    decodeScheduledRun(
-      JSON.stringify({
-        schedule: { kind: "daily", time: "09:00", timezone: "UTC" },
-        permitted: { data: true, models: false, optimizers: false },
-        source: null,
-      }),
-    ),
-    null,
-  );
-});
-
 test("only a setup with an answer, data or a later step is worth offering back", () => {
   const fresh = initialWizardV2State();
   assert.equal(setupWorthKeeping(fresh), false);
   assert.equal(setupWorthKeeping({ ...fresh, task: { ...fresh.task, objective: "Shorter replies" } }), true);
   assert.equal(setupWorthKeeping({ ...fresh, meta: { ...fresh.meta, name: "Replies" } }), true);
   assert.equal(setupWorthKeeping({ ...fresh, furthestStep: WIZARD_V2_STEPS[1] }), true);
+  assert.equal(
+    setupWorthKeeping({ ...fresh, task: { ...fresh.task, repo: { ...fresh.task.repo, repository: "acme/agent" } } }),
+    true,
+  );
 });
 
 test("a saved setup keeps its repository secrets without their values", () => {

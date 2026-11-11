@@ -23,7 +23,7 @@ const {
   usesNativeProposer,
 } = await import("./engine-contract.ts");
 const { DEFAULT_SHINKA_SETTINGS } = await import("./shinka-settings.ts");
-const { BLACKBOX_OPTIMIZERS, DSPY_OPTIMIZERS } = await import(unifiedRunUrl);
+const { BLACKBOX_OPTIMIZERS } = await import(unifiedRunUrl);
 
 test("iteration limits apply only to a version-capped engine", () => {
   for (const choice of ["meta_harness", "autosaddler", "shinka_evolve"] as const) {
@@ -32,30 +32,20 @@ test("iteration limits apply only to a version-capped engine", () => {
   for (const choice of ["gepa", "best_of_n", "autoresearch", "auto"] as const) {
     assert.equal(supportsIterationLimit(choice, "repo"), false);
   }
-  for (const choice of DSPY_OPTIMIZERS) {
-    assert.equal(supportsIterationLimit(choice, "dspy_program"), false);
-  }
-  assert.equal(supportsIterationLimit("auto", "dspy_program"), false);
 });
 
-test("coding-agent proposers: black-box Auto and the agent engines, never DSPy", () => {
+test("coding-agent proposers: Auto and the agent engines", () => {
   for (const choice of ["auto", "meta_harness", "autoresearch", "autosaddler"] as const) {
     assert.equal(usesNativeProposer(choice, "code"), true);
   }
   for (const choice of ["gepa", "best_of_n", "shinka_evolve"] as const) {
     assert.equal(usesNativeProposer(choice, "code"), false);
   }
-  for (const choice of DSPY_OPTIMIZERS) {
-    assert.equal(usesNativeProposer(choice, "dspy_program"), false);
-  }
-  // Auto on a DSPy program resolves to DSPy GEPA, which calls its model directly.
-  assert.equal(usesNativeProposer("auto", "dspy_program"), false);
 });
 
 test("black-box Auto's minimum budget covers five lanes plus the continuation", () => {
   assert.equal(AUTO_MIN_SCORER_RUNS, 6);
   assert.equal(minScorerRuns("auto", "repo"), AUTO_MIN_SCORER_RUNS);
-  assert.equal(minScorerRuns("auto", "dspy_program"), 1);
   for (const choice of BLACKBOX_OPTIMIZERS) assert.equal(minScorerRuns(choice, "text"), 1);
 });
 
@@ -65,7 +55,6 @@ test("proposer knobs follow the engine that reads them, and Auto exposes them al
   assert.deepEqual(proposerKnobs("autosaddler", "code"), { candidates: false, ralph: false });
   assert.deepEqual(proposerKnobs("shinka_evolve", "code"), { candidates: false, ralph: false });
   assert.deepEqual(proposerKnobs("auto", "repo"), { candidates: true, ralph: true });
-  assert.deepEqual(proposerKnobs("auto", "dspy_program"), { candidates: false, ralph: false });
 });
 
 test("submitted proposer resets every knob the form hides, and always runs research rounds", () => {
@@ -132,10 +121,6 @@ test("ShinkaEvolve sends a proposer only for the agent editor's tool-call cap", 
       submittedRunProposer({ ...base, choice, shinka: { ...shinka, editor: "agent" } }),
       undefined,
     );
-  assert.equal(
-    submittedRunProposer({ proposer, choice: "auto", kind: "dspy_program", shinka: null }),
-    undefined,
-  );
   // A coding-agent proposer sends its own settings, cap included.
   assert.deepEqual(
     submittedRunProposer({ proposer, choice: "auto", kind: "repo", shinka }),

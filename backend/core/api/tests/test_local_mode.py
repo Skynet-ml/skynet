@@ -47,7 +47,6 @@ from .test_submissions_router import (
     _FakeJobStore,
     _verified_byok_row,
     make_client,
-    unified_payload,
 )
 
 harness = _harness_fixture
@@ -547,7 +546,7 @@ def test_local_mode_grants_the_local_credit(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def _execution_request(**overrides: Any) -> WizardPreflightRequest:
-    """Build a unified execution setup check around ``unified_payload``.
+    """Build a repository execution setup check around ``_run_payload``.
 
     Args:
         **overrides: Top-level payload keys replacing the defaults.
@@ -557,8 +556,8 @@ def _execution_request(**overrides: Any) -> WizardPreflightRequest:
     """
     return WizardPreflightRequest(
         scope="execution",
-        workflow="unified",
-        payload=unified_payload(**overrides),
+        workflow="anything",
+        payload=_run_payload(**overrides),
         execution_budget_id="draft",
         execution_budget_revision=1,
     )
@@ -573,7 +572,7 @@ def test_hosted_execution_check_refuses_a_subscription_model(monkeypatch: pytest
     monkeypatch.setattr(settings, "local_mode", False)
 
     with pytest.raises(DomainError) as refused:
-        _canonical_execution_payload(_execution_request(models=_SUBSCRIPTION_MODELS), "alice", None)
+        _canonical_execution_payload(_execution_request(**_SUBSCRIPTION_RUN), "alice", None)
 
     assert refused.value.status_code == 422
     assert refused.value.code == "models.subscription_local_only"
@@ -586,9 +585,12 @@ def test_hosted_execution_checks_local_mode_before_byok_admission(monkeypatch: p
     app = FastAPI()
     app.include_router(wizard_preflight.create_wizard_preflight_router(job_store=object()))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser("alice", "user", ())
-    models = {**_SUBSCRIPTION_MODELS, "task_model": {"name": "bare-model", "token_source": "byok"}}
+    scorer = {**_payload()["scorer"], "model": {"name": "bare-model", "token_source": "byok"}}
     with TestClient(app) as client:
-        response = client.post("/wizard/preflight", json=_execution_request(models=models).model_dump(mode="json"))
+        response = client.post(
+            "/wizard/preflight",
+            json=_execution_request(**_SUBSCRIPTION_RUN, scorer=scorer).model_dump(mode="json"),
+        )
     assert response.status_code == 422
     assert response.json()["detail"] == DomainError("models.subscription_local_only").detail
 
@@ -601,7 +603,7 @@ def test_local_execution_check_keeps_a_subscription_model(monkeypatch: pytest.Mo
     """
     monkeypatch.setattr(settings, "local_mode", True)
 
-    payload = _canonical_execution_payload(_execution_request(models=_SUBSCRIPTION_MODELS), "alice", None)
+    payload = _canonical_execution_payload(_execution_request(**_SUBSCRIPTION_RUN), "alice", None)
 
     assert payload["token_source"] == "subscription"
 
@@ -883,9 +885,9 @@ def test_local_execution_check_fills_the_proposer_cli(monkeypatch: pytest.Monkey
     store = SimpleNamespace(engine=_billing_engine())
     _engine_setup(monkeypatch, store, ready=("claude", "codex"), stored=None)
 
-    payload = _canonical_execution_payload(_execution_request(models=_SUBSCRIPTION_MODELS), "alice", store)
+    payload = _canonical_execution_payload(_execution_request(**_SUBSCRIPTION_RUN), "alice", store)
 
-    assert payload["optimizer"]["proposer"]["host_cli"] == "claude"
+    assert payload["proposer"]["host_cli"] == "claude"
 
 
 def test_blackbox_proposer_follows_the_agent_engine(monkeypatch: pytest.MonkeyPatch) -> None:

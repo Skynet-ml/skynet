@@ -1,5 +1,3 @@
-import type { ContinuousEnableRequest } from "@/shared/types/continuous";
-
 import type { WizardV2State } from "./wizard-v2";
 
 /**
@@ -12,14 +10,13 @@ export const WIZARD_SESSION_KEY = "skynet.wizard.session.v1";
 /**
  * What the setup's screens hold beside its answers, kept for the same tab and
  * read back only when the setup itself came back: the screen on view inside
- * the step and the scheduled run saved for the run.
+ * the step.
  */
 export const WIZARD_SCREEN_KEY = "skynet.wizard.screen.v1";
-export const WIZARD_SCHEDULE_KEY = "skynet.wizard.schedule.v1";
 // The setup's hardening job is found by this id. It goes with the setup, so a
 // submit or Start new drops it and the next setup never shows the old job.
 export const WIZARD_HARDENING_KEY = "skynet.wizard.hardening-draft.v1";
-export const WIZARD_VIEW_KEYS = [WIZARD_SCREEN_KEY, WIZARD_SCHEDULE_KEY, WIZARD_HARDENING_KEY] as const;
+export const WIZARD_VIEW_KEYS = [WIZARD_SCREEN_KEY, WIZARD_HARDENING_KEY] as const;
 
 const SLICES = ["task", "inputs", "optimizer", "workspace", "meta"] as const;
 
@@ -78,6 +75,9 @@ export function decodeWizardSession(
   if (typeof s.step !== "string" || !steps.includes(s.step)) return null;
   if (typeof s.furthestStep !== "string" || !steps.includes(s.furthestStep)) return null;
   if (!SLICES.every((slice) => s[slice] && typeof s[slice] === "object")) return null;
+  // A draft from before DSPy program setups were retired may have no repository.
+  const repo = (s.task as Record<string, unknown>).repo;
+  if (!repo || typeof repo !== "object") return null;
   return state as WizardV2State;
 }
 
@@ -127,34 +127,6 @@ export function reopenedPage(screens: readonly string[], saved: string | null): 
 }
 
 /**
- * Read back the scheduled run saved on the setup's schedule screen, or none
- * when it is missing or malformed.
- *
- * Args:
- *   raw: The stored text, or null.
- *
- * Returns:
- *   The saved plan request, or null.
- */
-export function decodeScheduledRun(raw: string | null): ContinuousEnableRequest | null {
-  if (!raw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const { schedule, permitted } = parsed as Record<string, unknown>;
-  if (!schedule || typeof schedule !== "object") return null;
-  if (!permitted || typeof permitted !== "object") return null;
-  const { task_model, reflection_model } = permitted as Record<string, unknown>;
-  // A draft saved before the model switches existed has neither, so it no longer describes a plan.
-  if (typeof task_model !== "boolean" || typeof reflection_model !== "boolean") return null;
-  return { schedule: schedule as ContinuousEnableRequest["schedule"], permitted: { task_model, reflection_model } };
-}
-
-/**
  * Whether a left setup holds anything worth offering back: an answer, data,
  * a repository or a step past the first.
  *
@@ -168,7 +140,7 @@ export function setupWorthKeeping(state: WizardV2State): boolean {
   return (
     state.furthestStep !== "task" ||
     Boolean(state.task.objective.trim() || state.task.background.trim() || state.meta.name.trim()) ||
-    state.task.repo !== null ||
+    Boolean(state.task.repo.repository.trim()) ||
     state.inputs.cases.length > 0 ||
     state.inputs.stagedDatasetId !== null
   );

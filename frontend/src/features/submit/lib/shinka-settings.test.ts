@@ -132,11 +132,9 @@ test("the editor choice goes out with the settings, for ShinkaEvolve and Auto", 
 });
 
 test("other optimizers never send ShinkaEvolve settings", () => {
-  for (const choice of ["gepa", "meta_harness", "autosaddler", "dspy_gepa"] as const) {
+  for (const choice of ["gepa", "meta_harness", "autosaddler"] as const) {
     assert.equal(submittedShinka(DEFAULT_SHINKA_SETTINGS, choice, "code"), undefined);
   }
-  // Auto on a DSPy program is DSPy GEPA, which has no ShinkaEvolve lane.
-  assert.equal(submittedShinka(DEFAULT_SHINKA_SETTINGS, "auto", "dspy_program"), undefined);
 });
 
 test("black-box Auto sends the settings only once the user edited them", () => {

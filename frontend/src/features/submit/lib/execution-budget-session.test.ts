@@ -3,11 +3,9 @@ import { test } from "node:test";
 import type { ExecutionBudget } from "../../../shared/types/execution-budget.ts";
 import {
   ExecutionBudgetSession,
-  readBudgetDraft,
   type BudgetSessionDependencies,
   type WizardBudgetDraft,
 } from "./execution-budget-session.ts";
-import type { StoredPreflightEvidence } from "./preflight-outcome.ts";
 
 const snapshot = (total = 20, revision = 1): ExecutionBudget => ({
   id: "budget-1",
@@ -180,41 +178,3 @@ test("a rejected decrease restores the accepted total and exposes the funded min
   assert.equal(saved.at(-1)?.budgetTotalCents, 20);
 });
 
-const evidence = (identity: string, budgetId = "budget-1"): StoredPreflightEvidence =>
-  ({
-    identity,
-    response: { budget: { id: budgetId }, status: "succeeded" },
-  }) as StoredPreflightEvidence;
-
-test("a passed check is stored beside its budget, persisted, and never re-persisted for the same identity", async () => {
-  const { session, saved } = fixture();
-  await session.recordEvidence("execution", evidence("id-1"));
-  assert.equal(session.draft.preflightEvidence?.execution?.identity, "id-1");
-  assert.equal(saved.at(-1)?.preflightEvidence?.execution?.identity, "id-1");
-
-  const writes = saved.length;
-  await session.recordEvidence("execution", evidence("id-1"));
-  assert.equal(saved.length, writes);
-
-  await session.recordEvidence("evaluation", evidence("id-2"));
-  assert.equal(session.draft.preflightEvidence?.execution?.identity, "id-1");
-  assert.equal(session.draft.preflightEvidence?.evaluation?.identity, "id-2");
-});
-
-test("a restored draft keeps well-formed evidence and drops malformed entries", () => {
-  const read = readBudgetDraft({
-    executionBudgetRef: { id: "budget-1", revision: 1 },
-    preflightEvidence: {
-      execution: evidence("kept"),
-      evaluation: { identity: "", response: { budget: { id: "b" } } },
-    },
-  } as unknown as WizardBudgetDraft);
-  assert.equal(read.preflightEvidence?.execution?.identity, "kept");
-  assert.equal(read.preflightEvidence?.evaluation, undefined);
-
-  const allBad = readBudgetDraft({
-    executionBudgetRef: { id: "budget-1", revision: 1 },
-    preflightEvidence: { execution: { identity: "x", response: {} } },
-  } as unknown as WizardBudgetDraft);
-  assert.equal(allBad.preflightEvidence, undefined);
-});

@@ -5,7 +5,6 @@ import { useEffect } from "react";
 import { setupDraftApi } from "@/shared/lib/api";
 import { SETUP_SUBMITTED_EVENT } from "@/shared/lib/setup-draft";
 
-import { usePreflightNotifications } from "../hooks/use-wizard-preflight";
 import { deleteSetupDraft } from "../lib/setup-draft-sync";
 
 /**
@@ -19,13 +18,8 @@ function forgetSubmittedSetup(event: Event) {
   if (typeof account === "string" && account) void deleteSetupDraft(account, setupDraftApi);
 }
 
-/**
- * Follows running setup checks from the root, so a check that finishes while
- * the user is elsewhere in the app still sends its notification. It also
- * deletes the left setup the agent submits. Renders nothing.
- */
+/** Deletes, from the root, the left setup the agent submits. Renders nothing. */
 export function PreflightNotifications() {
-  usePreflightNotifications();
   useEffect(() => {
     window.addEventListener(SETUP_SUBMITTED_EVENT, forgetSubmittedSetup);
     return () => window.removeEventListener(SETUP_SUBMITTED_EVENT, forgetSubmittedSetup);

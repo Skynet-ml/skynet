@@ -1,20 +1,10 @@
 /**
- * Unified (wizard v2) run contract. Mirrors `backend/core/models/unified.py`
- * field for field (snake_case), plus the pure optimizer rules the backend
- * applies, so the wizard shows the same choices the server will accept.
+ * Wizard v2 optimizer rules and the run types the wizard and stored-run views
+ * share. The optimizer rules mirror the backend, so the wizard shows the same
+ * choices the server will accept.
  */
-import type {
-  BlackboxBudget,
-  BlackboxProposer,
-  BlackboxShinkaSettings,
-  ModelConfig,
-  ScorerDependencyLock,
-  SplitFractions,
-} from "@/shared/types/api";
-
-export type ArtifactKind = "dspy_program";
-/** What the optimizer catalog is keyed on: a unified run's artifact, or a repository run. */
-export type OptimizerTarget = ArtifactKind | "repo";
+/** What the optimizer catalog is keyed on: a repository run. */
+export type OptimizerTarget = "repo";
 export type DataMode = "single" | "pairs";
 export type OptimizerChoice =
   | "auto"
@@ -24,13 +14,8 @@ export type OptimizerChoice =
   | "meta_harness"
   | "autosaddler"
   | "shinka_evolve";
-export type OptimizerFamily = "auto" | "dspy" | "blackbox";
-export type UnifiedCandidate = string | Record<string, string>;
+export type OptimizerFamily = "auto" | "blackbox";
 
-export const UNIFIED_PAYLOAD_KIND = "unified_v1";
-// Retired DSPy optimizer ids. They are no longer choices, but stored runs,
-// saved Settings defaults and resolved ids can still carry them.
-export const DSPY_OPTIMIZERS: readonly string[] = ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"];
 export const BLACKBOX_OPTIMIZERS = [
   "gepa",
   "best_of_n",
@@ -39,43 +24,30 @@ export const BLACKBOX_OPTIMIZERS = [
   "autosaddler",
   "shinka_evolve",
 ] as const;
-// "auto" counts because both of its resolutions consume feedback text.
-const FEEDBACK_OPTIMIZERS: ReadonlySet<string> = new Set(["dspy_gepa", "gepa", "auto"]);
+// "auto" counts because its resolution consumes feedback text.
+const FEEDBACK_OPTIMIZERS: ReadonlySet<string> = new Set(["gepa", "auto"]);
 export const MIN_PAIRS_FOR_HELD_OUT = 5;
-export const CONTRACT_SAMPLE_MAX = 5;
 
-/**
- * Optimizer choices that fit a target and data mode, `"auto"` first. A
- * repository run lists Auto and the six repository engines; a DSPy program
- * lists only Auto, as its DSPy optimizers are retired.
- */
+/** Optimizer choices that fit a target and data mode: Auto and the six repository engines. */
 export function optimizersFor(target: OptimizerTarget, mode: DataMode): OptimizerChoice[] {
-  if (target === "dspy_program") return ["auto"];
   return ["auto", ...BLACKBOX_OPTIMIZERS];
 }
 
-/**
- * A stored optimizer id as a current choice. A retired DSPy optimizer id
- * becomes `"auto"`; any other unknown value gives null.
- */
+/** A stored optimizer id as a current choice; any unknown value gives null. */
 export function storedOptimizerChoice(value: unknown): OptimizerChoice | null {
   if (typeof value !== "string") return null;
-  if (DSPY_OPTIMIZERS.includes(value)) return "auto";
   return value === "auto" || (BLACKBOX_OPTIMIZERS as readonly string[]).includes(value)
     ? (value as OptimizerChoice)
     : null;
 }
 
-/** The optimizer that actually runs: Auto is DSPy GEPA on a DSPy program, else the black-box Auto strategy. */
+/** The optimizer that actually runs: the choice itself, Auto included. */
 export function resolveOptimizer(choice: OptimizerChoice, target: OptimizerTarget): string {
-  if (choice === "auto") return target === "dspy_program" ? "dspy_gepa" : "auto";
   return choice;
 }
 
 export function optimizerFamily(resolved: string): OptimizerFamily {
-  if (DSPY_OPTIMIZERS.includes(resolved)) return "dspy";
-  if (resolved === "auto") return "auto";
-  return "blackbox";
+  return resolved === "auto" ? "auto" : "blackbox";
 }
 
 /** Whether the resolved optimizer reads the metric's feedback text. */
@@ -86,78 +58,6 @@ export function usesFeedback(choice: OptimizerChoice, target: OptimizerTarget): 
 export interface UnifiedCase {
   input: Record<string, unknown>;
   expected?: unknown;
-}
-
-export interface UnifiedArtifact {
-  kind: ArtifactKind;
-  starting_version: UnifiedCandidate;
-}
-
-export interface UnifiedTask {
-  objective: string;
-  background?: string;
-  artifact: UnifiedArtifact;
-}
-
-export interface UnifiedData {
-  mode: DataMode;
-  cases?: UnifiedCase[] | null;
-  staged_dataset_id?: string | null;
-  input_fields?: string[];
-  expected_field?: string | null;
-  split?: SplitFractions;
-  shuffle?: boolean;
-}
-
-export interface UnifiedOptimizer {
-  choice: OptimizerChoice;
-  budget: BlackboxBudget;
-  proposer?: BlackboxProposer;
-  shinka?: BlackboxShinkaSettings | null;
-  dspy_kwargs?: Record<string, unknown>;
-}
-
-export interface UnifiedModels {
-  task_model?: ModelConfig | null;
-  reflection_model: ModelConfig;
-  metric_model?: ModelConfig | null;
-  extra_reflection_models?: ModelConfig[];
-}
-
-export interface UnifiedWorkspace {
-  /** `run.py`. */
-  run_code: string;
-  /** `metric.py`. */
-  metric_code: string;
-  /** Every other workspace file, relative path to text; only the run code can import them. */
-  files?: Record<string, string>;
-  metric_timeout_seconds?: number;
-  install_command?: string | null;
-  dependency_lock?: ScorerDependencyLock | null;
-}
-
-export interface UnifiedRunRequest {
-  payload_kind: "unified_v1";
-  name?: string | null;
-  description?: string | null;
-  username?: string | null;
-  task: UnifiedTask;
-  data: UnifiedData;
-  optimizer: UnifiedOptimizer;
-  models: UnifiedModels;
-  workspace: UnifiedWorkspace;
-  seed?: number | null;
-  token_source?: "managed" | "byok" | "subscription";
-  is_private?: boolean;
-  economy_mode?: boolean;
-  preflight_id?: string | null;
-  preflight_fingerprint?: string | null;
-  execution_budget_id?: string | null;
-  execution_budget_revision?: number | null;
-  execution_budget_generation?: number | null;
-  max_cost_cents?: number | null;
-  estimated_cents_low?: number | null;
-  estimated_cents_high?: number | null;
 }
 
 /** How a unified run's cases were split; selection and reporting may use different splits. */
@@ -193,55 +93,6 @@ export interface OptimizerCatalogResponse {
   auto_resolves_to: string[];
   sandbox_available: boolean;
   sandbox_reason?: string | null;
-}
-
-export type ContractCheckKey =
-  | "workspace.run_signature"
-  | "workspace.files"
-  | "metric.signature"
-  | "metric.model"
-  | "workspace.run"
-  | "metric.shape";
-
-export interface ContractCheckItem {
-  key: ContractCheckKey;
-  status: "passed" | "failed" | "pending" | "skipped";
-  /** Hebrew base rendering; render `message_code` in the active locale instead. */
-  message: string;
-  /** Backend i18n code for `message`, resolved with `tI18n`; absent on older servers. */
-  message_code?: string | null;
-  message_params?: Record<string, string | number>;
-  sample_index?: number | null;
-  /** Exact error text, trimmed to frames from the user's own code. */
-  detail?: string | null;
-}
-
-export interface ContractSample {
-  index: number;
-  input_preview: string;
-  output_preview?: string | null;
-  score?: number | null;
-  feedback_preview?: string | null;
-  duration_ms?: number | null;
-}
-
-export interface ContractCheckRequest {
-  spec: UnifiedRunRequest;
-  sample_count?: number;
-}
-
-export interface ContractCheckResponse {
-  ok: boolean;
-  optimizer_resolved: string;
-  checks: ContractCheckItem[];
-  samples: ContractSample[];
-  fingerprint: string;
-  /** Whether the metric calls a model, from the server's introspection; absent on older servers. */
-  uses_llm?: boolean;
-  /** Each Python file's lint, so each file shows its own findings; absent on older servers. */
-  files?: WorkspaceFileLint[];
-  /** The sandboxed check's redacted terminal log; absent on the static check and older servers. */
-  terminal?: CheckTerminalLog | null;
 }
 
 /** A Check row the terminal log files its events under. */
@@ -289,16 +140,4 @@ export interface CheckTerminalLog {
   truncated: CheckTerminalPhase[];
   /** Set when an identical earlier check answered, so this is its stored log. */
   reused?: boolean;
-}
-
-/** Lint lines are `"<path>:<line>:<col> <rule> <message>"`. */
-export interface WorkspaceFileLint {
-  path: string;
-  errors: string[];
-  warnings: string[];
-}
-
-export interface UnifiedChatTurn {
-  role: "user" | "assistant";
-  content: string;
 }

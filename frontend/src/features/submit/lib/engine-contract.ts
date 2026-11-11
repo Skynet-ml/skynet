@@ -10,7 +10,7 @@ import {
 
 /**
  * Whether the run's proposer is a coding agent. Auto and the agent-driven
- * engines drive one; DSPy optimizers, GEPA and Best-of-N call their
+ * engines drive one; GEPA and Best-of-N call their
  * optimization model directly, and ShinkaEvolve edits through its own editor.
  */
 export function usesNativeProposer(choice: OptimizerChoice, kind: OptimizerTarget): boolean {

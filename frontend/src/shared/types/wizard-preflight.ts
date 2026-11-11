@@ -1,53 +1,5 @@
-import type {
-  ExecutionRuntime,
-  ScorerDryRunResponse,
-  WorkflowDryRunResponse,
-  RuntimeCostProfile,
-} from "./api";
-import type { ExecutionBudget } from "./execution-budget";
-import type { UnifiedRunRequest } from "./unified-run";
+import type { ExecutionRuntime, RuntimeCostProfile } from "./api";
 
-export type PreflightScope = "evaluation" | "execution";
-type PreflightStatus = "succeeded" | "failed" | "pending";
-type PreflightPendingCategory =
-  | "later_stage_dependency"
-  | "usage_reconciliation"
-  | "setup_incomplete";
-export type WizardPreflightPayload = UnifiedRunRequest;
-export interface WizardPreflightRequest {
-  scope: PreflightScope;
-  workflow: "unified";
-  payload: WizardPreflightPayload;
-  execution_budget_id: string;
-  execution_budget_revision: number;
-  /** UI locale the server words check messages in. */
-  locale?: string;
-}
-export interface WizardPreflightResponse {
-  id: string;
-  fingerprint: string;
-  status: PreflightStatus;
-  may_advance: boolean;
-  pending_reason?: {
-    category: PreflightPendingCategory;
-    message: string;
-    field?: string;
-  };
-  checks: Array<{
-    key: string;
-    status: PreflightStatus | "skipped";
-    /** Worded in the request's locale. */
-    message?: string;
-    message_code?: string;
-    message_params?: Record<string, string | number>;
-    field?: string;
-  }>;
-  budget: ExecutionBudget;
-  scorer_result?: ScorerDryRunResponse;
-  workflow_result?: WorkflowDryRunResponse;
-  /** The proposer CLI the check ran on; a submit sends it back unchanged. */
-  proposer_host_cli?: "codex" | "claude" | null;
-}
 export interface ExecutionRuntimeCatalog {
   runtimes: Array<{
     id: ExecutionRuntime;
