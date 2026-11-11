@@ -489,14 +489,18 @@ def test_runner_answers_after_a_tool_call_turn_that_ends_with_an_end_event(tmp_p
         "content": "Done.",
         "usage_metadata": {"input_tokens": 20, "output_tokens": 3},
     }
+    # Snapshots hold the whole thread, the human and tool messages too.
+    human = {"type": "human", "id": "h1", "content": "List the files."}
+    tool = {"type": "tool", "id": "t1", "name": "bash", "tool_call_id": "c1", "content": "README.md"}
     events = [
+        ["values", {"title": None, "messages": [human], "artifacts": []}],
         ["messages-tuple", m1],
-        ["values", {"title": None, "messages": [m1_usage]}],
-        ["messages-tuple", {"type": "tool", "id": "t1", "name": "bash", "tool_call_id": "c1", "content": "README.md"}],
-        ["values", {"title": None, "messages": [m1_usage]}],
+        ["values", {"title": None, "messages": [human, m1_usage], "artifacts": []}],
+        ["messages-tuple", tool],
+        ["values", {"title": None, "messages": [human, m1_usage, tool], "artifacts": []}],
         ["messages-tuple", {"type": "ai", "id": "m2", "content": "Do"}],
         ["messages-tuple", {"type": "ai", "id": "m2", "content": "ne."}],
-        ["values", {"title": None, "messages": [m1_usage, m2_usage]}],
+        ["values", {"title": None, "messages": [human, m1_usage, tool, m2_usage], "artifacts": []}],
         ["end", {"usage": {"input_tokens": 99, "output_tokens": 99}}],
     ]
     completed, _, _ = _run_fake_runner(tmp_path, FAKE_DEERFLOW_EVENTS=json.dumps(events))
