@@ -254,8 +254,9 @@ async function stopServer(child) {
 # PATH and every image tool. Each command starts detached, in its own session
 # and process group, so an abort or ``kill()`` stops the whole group. The
 # bridge's stop sweep finds these groups through the process tree; on Linux
-# the bridge makes the harness shell a child subreaper, so a background job
-# that a finished command left behind stays in that tree.
+# the bridge starts the harness shell under a reaper process that is a child
+# subreaper, so a background job that a finished command left behind stays in
+# that tree.
 EVE_SANDBOX = r"""import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";

@@ -337,6 +337,29 @@ def test_harness_pipelines_end_when_the_reader_closes_the_pipe(tmp_path: Path) -
     assert outcome.duration_seconds < 10
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="the reaper entry point runs only on Linux")
+def test_cap_stop_lets_the_harness_exit_trap_remove_its_temp_folder(tmp_path: Path) -> None:
+    """Let the shell's EXIT trap finish after a tool-call cap stop, so a large temp folder is gone."""
+    scratch = tmp_path / "scratch"
+    for index in range(20):
+        part = scratch / str(index)
+        part.mkdir(parents=True)
+        for name in range(1000):
+            (part / str(name)).touch()
+    command = f"trap 'rm -rf {shlex.quote(str(scratch))}' EXIT; {_tool_events_command(3)}"
+    outcome = run_session(
+        {**_PLAIN, "output_format": "pi", "run_command": command, "max_tool_calls": 1},
+        workspace=tmp_path / "work",
+        prompt="x",
+        model="m",
+        session_dir=tmp_path / "session",
+        timeout_seconds=30,
+    )
+
+    assert outcome.tool_cap_reached is True
+    assert not scratch.exists()
+
+
 def _running(pid: int) -> bool:
     """Tell whether a process runs and is not a zombie, on Linux and macOS.
 

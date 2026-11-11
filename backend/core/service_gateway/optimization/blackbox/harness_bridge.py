@@ -1262,6 +1262,12 @@ def reaper_main(command: list[str]) -> int:
     # restore_signals (the default) puts SIGPIPE and SIGXFSZ back to their
     # default action, which CPython ignores; an ignored SIGPIPE would leave
     # ``producer | head -1`` writing forever.
+    # The bridge's stop signals the whole group, this process included. Wait
+    # for the shell instead of dying, so the bridge's wait still covers the
+    # shell's EXIT trap. A Python handler, unlike SIG_IGN, resets to the
+    # default in the shell at exec.
+    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(signum, lambda *_: None)
     returncode = subprocess.Popen(command, restore_signals=True).wait()
     for _ in range(_REAPER_SWEEPS):
         left = _descendants(_proc_stats() or {}, os.getpid())
