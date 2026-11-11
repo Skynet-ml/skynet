@@ -44,6 +44,12 @@ bugs before you push. Follow this order for every PR:
 If the review gate or the acceptance checks find a bug, fix all findings
 locally, check them again, and then push them together in one push.
 
+A PR that adds a harness to `BLACKBOX_HARNESSES` in
+`backend/core/models/blackbox.py` must also update the frontend in the same
+PR: `frontend/src/shared/lib/blackbox-harness.ts`, the `BlackboxHarness` type
+in `frontend/src/shared/types/api.ts`, and the harness label in every locale
+catalog. Then the harness parity test stays green (SKY-625).
+
 ## 2. Required for every PR
 
 - State the problem, the resulting behavior and the linked Linear issue in
@@ -122,6 +128,10 @@ for review until the evidence is there.
   permits a production deploy.
 - For a PR the automation cannot control, record the failed gate. Do not
   call it ready to merge.
+- **A red check on `staging` is never a "known failure".** The reviewer or
+  implementation agent that sees it names the failing check and the commit
+  where it started, in its report. The orchestrator then opens an Urgent
+  Linear issue and fixes it before other merges (SKY-625).
 
 ## 4. Acceptance on staging or the PR preview
 
