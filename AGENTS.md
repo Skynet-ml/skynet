@@ -39,6 +39,9 @@ dagger check -l                             # list the checks
 dagger check skynet-ci/backend-gates        # one check; `dagger check 'skynet-ci/*'` runs all
 ```
 
+- PRs to `staging` run no CI (SKY-570). This local gate is the PR check.
+  Run all of it that the change touches before every push, and put the
+  commands and results in the PR body.
 - CI jobs call `dagger check skynet-ci/<name>`. The module is in
   `.dagger/modules/skynet-ci/`. Add a new CI gate there, not only in `ci.yml`.
 
@@ -119,6 +122,9 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
+- **CI runs only per batch and on the promotion PR** (`staging` → `main`).
+  A red batch run or a red promotion run blocks the promotion. Put its fix
+  in a new PR.
 
 ## Test accounts and environments (MANDATORY)
 
