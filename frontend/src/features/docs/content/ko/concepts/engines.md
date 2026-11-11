@@ -79,7 +79,7 @@ Auto는 모든 실행의 기본값입니다. Auto는 두 단계로 작동합니�
 
 | 설정                         | 기본값 | 범위                                                  |
 | ---------------------------- | ------ | ----------------------------------------------------- |
-| 코딩 에이전트                | Codex  | Pi, Codex, OpenCode, Prime Agent, 사용자 지정 명령    |
+| 코딩 에이전트                | Codex  | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, 사용자 지정 명령    |
 | 반복당 후보 수               | 3      | 1~8. |
 | 후보당 최대 도구 호출 수     | 100    | 1~1000                                                |
 

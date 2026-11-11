@@ -79,7 +79,7 @@ Ces paramètres s'appliquent à AutoResearch, Meta-Harness et AutoSaddler.
 
 | Paramètre                          | Par défaut | Plage                                                    |
 | ---------------------------------- | ---------- | -------------------------------------------------------- |
-| Agent de code                      | Codex      | Pi, Codex, OpenCode, Prime Agent, commande personnalisée |
+| Agent de code                      | Codex      | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, commande personnalisée |
 | Candidats par itération            | 3          | 1 à 8. |
 | Appels d'outils max. par candidat  | 100        | 1 à 1000                                                 |
 
