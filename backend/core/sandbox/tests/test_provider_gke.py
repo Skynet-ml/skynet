@@ -10,6 +10,8 @@ reaches a cluster.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import inspect
 import json
 import os
@@ -800,6 +802,156 @@ async def test_a_connect_at_the_limit_is_not_reported_as_a_command_that_did_not_
         with pytest.raises(SandboxInfraError, match="connected only after") as raised:
             await env._call(env._name, ["true"])
         assert not isinstance(raised.value, gke._ConnectTimeoutError)
+
+
+async def test_a_late_connect_never_sends_the_env_stream(cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Close a session that connects after its limit, so the command never runs without a kill."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 0.2)
+    monkeypatch.setattr(gke, "_GROUP_KILL_SECONDS", 5.0)
+    sessions: list[FakeSession] = []
+
+    def late_stream(method: Any, name: str, namespace: str, **kwargs: Any) -> FakeSession:
+        """Connect the first session just after the connect limit runs out.
+
+        Args:
+            method: The bound exec call.
+            name: The pod name.
+            namespace: The namespace.
+            **kwargs: The exec options.
+
+        Returns:
+            The running session.
+        """
+        if not sessions:
+            time.sleep(0.4)
+        session = fake_stream(method, name, namespace, **kwargs)
+        sessions.append(session)
+        return session
+
+    async def lost_kill(name: str, state: str) -> None:
+        """Drop the kill, as when it cannot reach the pod.
+
+        Args:
+            name: The pod name.
+            state: The command's state id.
+        """
+
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "k8s_stream", late_stream)
+        monkeypatch.setattr(env, "_kill_group", lost_kill)
+        with pytest.raises(SandboxInfraError, match="connected only after"):
+            await env.exec("touch ran")
+        late = sessions[0].process
+        assert late.wait(5) != 0
+        assert not (cluster.root / env._name / "ran").exists()
+
+
+@pytest.mark.parametrize(
+    ("stream", "runs"),
+    [(b"A=1\0\0", True), (b"A=1\0", False), (b"A=1", False), (b"", False)],
+)
+def test_the_env_loader_runs_the_command_only_after_the_end_marker(tmp_path: Path, stream: bytes, runs: bool) -> None:
+    """Refuse to run the command when stdin ends before the empty pair."""
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", gke._ENV_LOADER, "skynet-env", "sh", "-c", 'echo "$A" > ran'],
+        input=stream,
+        cwd=tmp_path,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert (result.returncode == 0) is runs
+    assert (tmp_path / "ran").exists() is runs
+    if runs:
+        assert (tmp_path / "ran").read_text() == "1\n"
+
+
+async def test_an_exec_dropped_from_a_full_pool_sends_no_kill(
+    cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail an exec that never left the pool queue at once, with no kill that queues again."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 1.0)
+    monkeypatch.setattr(gke, "_GROUP_KILL_SECONDS", 5.0)
+    release = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=1)
+    kills: list[str] = []
+
+    async def record_kill(name: str, state: str) -> None:
+        """Record a kill instead of sending it.
+
+        Args:
+            name: The pod name.
+            state: The command's state id.
+        """
+        kills.append(state)
+
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "_SESSION_POOL", pool)
+        monkeypatch.setattr(env, "_kill_group", record_kill)
+        blocker = pool.submit(release.wait, 10)
+        try:
+            started = time.monotonic()
+            with pytest.raises(gke._DroppedSessionError, match="did not connect"):
+                await env.exec("true", timeout_sec=60)
+            assert time.monotonic() - started < 1.8
+            assert kills == []
+        finally:
+            release.set()
+            blocker.result(5)
+            pool.shutdown()
+
+
+def _stalled_websocket_server(server: socket.socket, done: threading.Event) -> None:
+    """Accept one websocket handshake, then send half a frame and go quiet.
+
+    Args:
+        server: The listening socket.
+        done: Set by the test when the server may close.
+    """
+    connection, _ = server.accept()
+    with connection:
+        request = b""
+        while b"\r\n\r\n" not in request:
+            request += connection.recv(4096)
+        key = next(
+            line.split(b":", 1)[1].strip()
+            for line in request.split(b"\r\n")
+            if line.lower().startswith(b"sec-websocket-key:")
+        )
+        accept = base64.b64encode(hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+        connection.sendall(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+        )
+        # A binary frame header that announces 10 bytes, then only 3 of them.
+        connection.sendall(bytes([0x82, 10]) + b"abc")
+        done.wait(10)
+
+
+def test_the_websocket_keeps_its_timeout_after_the_connect() -> None:
+    """End a read of a frame that stops half way when the scope's timeout runs out."""
+    if gke.k8s_ws_client is None:
+        pytest.skip("The kubernetes package is not installed.")
+    configuration = pytest.importorskip("kubernetes").client.Configuration()
+    done = threading.Event()
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        thread = threading.Thread(target=_stalled_websocket_server, args=(server, done), daemon=True)
+        thread.start()
+        url = f"ws://127.0.0.1:{server.getsockname()[1]}/"
+        try:
+            with gke._connect_timeout(0.3):
+                websocket = gke.k8s_ws_client.create_websocket(configuration, url)
+            assert websocket.gettimeout() == 0.3
+            started = time.monotonic()
+            with pytest.raises(Exception, match="timed out"):
+                websocket.recv_data_frame(True)
+            assert time.monotonic() - started < 5
+            websocket.shutdown()
+        finally:
+            done.set()
+            thread.join(5)
 
 
 def test_the_websocket_connect_obeys_the_scope_timeout() -> None:

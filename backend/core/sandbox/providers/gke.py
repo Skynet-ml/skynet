@@ -19,16 +19,17 @@ Adapted from Harbor 0.25.0 (Apache-2.0), gke.py. Changes:
   that a crashed worker leaves behind.
 - Environment values reach the command on stdin, never on a command line or
   in the pod manifest, so ``ps`` and ``kubectl get pod -o yaml`` do not show
-  them. The v4 exec protocol cannot close stdin, so the stream ends with an
-  empty pair, and files go through ``head -c <size>`` instead of ``cat``.
+  them. The client offers the v5 and v4 exec protocols, and a cluster can
+  choose v4, which cannot close stdin. So the stream ends with an empty
+  pair, and files go through ``head -c <size>`` instead of ``cat``.
 - Output comes back as bytes and goes through incremental UTF-8 decoders:
   the client's text mode decodes each frame on its own and breaks a
   character that two frames split.
 - A timeout or a cancel kills the command's process group in the pod.
   Closing the websocket alone does not stop the remote command.
 - Exec sessions run on a bounded pool of their own, and their websocket
-  connect has a socket timeout, so a hung cluster cannot fill the event
-  loop's default executor with threads that never end.
+  has a socket timeout for the connect and for each later send and receive,
+  so a hung cluster cannot hold a thread forever.
 
 Egress is open: the provider sets no NetworkPolicy, as in Harbor. Not for
 production; the factory refuses it there.
@@ -104,9 +105,12 @@ _GCLOUD_BIN = "gcloud"
 # PID 1 must answer SIGTERM, or every delete waits the full grace period.
 _IDLE_COMMAND = ("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done")
 _CALL_SECONDS = 60.0
-# The client's websocket connect has no timeout (``_request_timeout`` does
-# not reach it). The async side bounds the connect phase, and
-# ``_TimedWebSocket`` gives the socket the same limit, so the thread ends too.
+# The client's websocket has no timeout (``_request_timeout`` does not reach
+# it). The async side bounds the connect phase, and ``_TimedWebSocket`` gives
+# the socket the same limit, so the thread ends too. The limit stays on the
+# socket after the connect: a send to a hung pod, or a frame that stops half
+# way, then fails instead of holding its thread. ``WSClient.update`` polls
+# before it reads, so a quiet command does not reach the limit.
 _CONNECT_SECONDS = 30.0
 _UPDATE_SECONDS = 1.0
 # Each running exec holds one thread for its whole run. A session that waits
@@ -121,9 +125,10 @@ _DETAIL_SEPARATOR = " -+-+- "
 _NOT_FOUND = 404
 # Like openshift's loader, but an empty pair ends the stream: a v4 exec
 # session never sends EOF on stdin. The command gets /dev/null as stdin, so
-# it never waits on the open session.
+# it never waits on the open session. An EOF before the empty pair means a
+# session that closed before it sent the stream, so the command must not run.
 _ENV_LOADER = (
-    'pairs=(); while IFS= read -r -d "" pair && [ -n "$pair" ]; do pairs+=("$pair"); done; '
+    'pairs=(); while IFS= read -r -d "" pair || exit 1; [ -n "$pair" ]; do pairs+=("$pair"); done; '
     'exec env -- "${pairs[@]}" "$@" </dev/null'
 )
 # ``head -c`` stops after the file's size, so it needs no EOF on stdin. BSD
@@ -142,11 +147,15 @@ class _ConnectTimeoutError(SandboxInfraError):
     """An exec websocket did not connect in time; the command did not start."""
 
 
+class _DroppedSessionError(_ConnectTimeoutError):
+    """A queued exec session was dropped before a pool thread took it, so no session opened."""
+
+
 class _TimedWebSocket(k8s_ws_client.WebSocket if k8s_ws_client is not None else object):
-    """A websocket whose connect obeys the calling thread's ``_connect_scope`` limit."""
+    """A websocket that takes the calling thread's ``_connect_scope`` limit as its socket timeout."""
 
     def connect(self, url: str, **options: Any) -> None:
-        """Connect with the scope's socket timeout, then restore the earlier timeout.
+        """Connect with the scope's socket timeout, and keep it for later sends and receives.
 
         Args:
             url: The websocket URL.
@@ -156,9 +165,7 @@ class _TimedWebSocket(k8s_ws_client.WebSocket if k8s_ws_client is not None else 
         if seconds is None:
             super().connect(url, **options)
             return
-        previous = self.sock_opt.timeout
         super().connect(url, **{**options, "timeout": seconds})
-        self.settimeout(previous)
 
 
 # ``create_websocket`` builds its socket from this module name. A thread
@@ -169,10 +176,10 @@ if k8s_ws_client is not None:
 
 @contextlib.contextmanager
 def _connect_timeout(seconds: float) -> Iterator[None]:
-    """Give every exec websocket connect in this thread a socket timeout.
+    """Give every exec websocket that this thread opens a socket timeout.
 
     Args:
-        seconds: The timeout for the connect and the handshake.
+        seconds: The timeout for the connect, the handshake and each later socket call.
 
     Yields:
         Nothing.
@@ -373,6 +380,10 @@ def _session_sync(
                 _preload_content=False,
             )
         on_connect()
+        # A connect that ends after the caller gave up must not send the env
+        # stream: without its end marker, the loader exits and the command never runs.
+        if stop.is_set():
+            return -1
         if stdin:
             response.write_stdin(stdin)
         while response.is_open() and not stop.is_set():
@@ -404,13 +415,16 @@ def _session_sync(
             session_client.close()
 
 
-async def _abandon(job: Future[Any], worker: asyncio.Future[Any], stop: threading.Event) -> None:
+async def _abandon(job: Future[Any], worker: asyncio.Future[Any], stop: threading.Event) -> bool:
     """Stop an exec session thread and wait a bounded time for it to end.
 
     Args:
         job: The session's pool job.
         worker: The loop's future for ``job``.
         stop: The session's stop flag.
+
+    Returns:
+        True when the job still waited for a pool thread and never ran.
 
     Raises:
         asyncio.CancelledError: The task was cancelled during the wait.
@@ -421,7 +435,7 @@ async def _abandon(job: Future[Any], worker: asyncio.Future[Any], stop: threadin
     # ``worker.cancel()`` would also mark a running job done at once and skip
     # the wait for its thread.
     if job.cancel():
-        return
+        return True
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _GROUP_KILL_SECONDS
     cancelled: asyncio.CancelledError | None = None
@@ -432,6 +446,7 @@ async def _abandon(job: Future[Any], worker: asyncio.Future[Any], stop: threadin
             cancelled = error
     if cancelled is not None:
         raise cancelled
+    return False
 
 
 def _delete_pod_sync(api_client: Any, namespace: str, name: str) -> bool:
@@ -695,6 +710,7 @@ class GKEEnvironment(SandboxEnvironment):
             SandboxFatalError: The cluster refused the login or RBAC for exec.
             SandboxInfraError: The session failed, or did not connect in time
                 (``_ConnectTimeoutError``; the command did not start).
+                ``_DroppedSessionError`` says that no pool thread took the session.
         """
         loop = asyncio.get_running_loop()
         connected = asyncio.Event()
@@ -719,13 +735,18 @@ class GKEEnvironment(SandboxEnvironment):
                 {worker, connecting}, timeout=connect_limit, return_when=asyncio.FIRST_COMPLETED
             )
             if not done and not connected.is_set():
-                await _abandon(job, worker, stop)
+                dropped = await _abandon(job, worker, stop)
                 # The connect can end just as the limit runs out. Then the
                 # command started, and the stop flag closed its session.
                 if connected.is_set():
                     raise SandboxInfraError(
                         f"The exec session in the GKE sandbox {name} connected only after its "
                         f"{connect_limit:g}s limit, so it was closed."
+                    )
+                if dropped:
+                    raise _DroppedSessionError(
+                        f"The exec session in the GKE sandbox {name} did not connect in {connect_limit:g}s: "
+                        "every session thread was busy."
                     )
                 raise _ConnectTimeoutError(
                     f"The exec session in the GKE sandbox {name} did not connect in {connect_limit:g}s."
@@ -877,6 +898,10 @@ class GKEEnvironment(SandboxEnvironment):
 
         try:
             exit_code = await self._session(name, argv, stdin=stream, on_chunk=take, seconds=deadline)
+        except _DroppedSessionError:
+            # No session opened, so no command runs. A kill would only queue
+            # behind the same full pool.
+            raise
         except TimeoutError as error:
             await self._kill_group(name, state)
             raise SandboxInfraError(
