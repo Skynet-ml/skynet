@@ -2152,6 +2152,12 @@ class StripeBillingService:
         full reversal and a later event cannot claw it twice. A debt is logged and
         sent as an operator alert.
 
+        On a closed wallet (SKY-567), account deletion forfeited the balance with
+        a negative ``closure`` row. A refund of those cents returns them to the
+        card, so before the draw the clawback reverses up to the net forfeit with
+        a positive ``closure`` row ("Forfeit reversed by refund"). The refund then
+        collects those cents instead of recording debt on a closed wallet.
+
         Args:
             session: Open session (caller commits).
             event_id: Stripe event id, recorded on the ledger row.
@@ -2175,9 +2181,7 @@ class StripeBillingService:
             )
             session.add(customer)
         paid = max(int(customer.balance_cents), 0)
-        # SKY-567: account deletion forfeits the balance with a negative
-        # closure row. A refund of those cents returns them to the card, so
-        # it reverses the forfeit instead of recording debt on a closed wallet.
+        # Net of earlier reversals, so two refunds cannot restore the same forfeit twice.
         forfeited = -int(
             session.scalar(
                 select(func.coalesce(func.sum(WalletLedgerModel.delta_cents), 0)).where(

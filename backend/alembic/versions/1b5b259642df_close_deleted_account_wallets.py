@@ -6,6 +6,10 @@ orphan rows still counted as outstanding liability. This migration closes
 them the same way account deletion now does: a ``closure`` ledger row
 records the forfeited balance, and the balance and grant go to zero.
 
+Only a positive balance gets a closure row. The
+``ck_billing_customers_balance_cents_non_negative`` CHECK constraint makes a
+negative balance impossible, so the UPDATE never zeroes one without a row.
+
 Revision ID: 1b5b259642df
 Revises: bfe5a0ff5942
 """
