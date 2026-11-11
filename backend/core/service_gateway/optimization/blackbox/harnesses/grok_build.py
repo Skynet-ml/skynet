@@ -65,9 +65,11 @@ _URL_FORBIDDEN = frozenset("\"'\\")
 # cache buckets and the completion total is the output. Without an ``end``
 # event, the per-call ``usage`` events add up. Grok exits 0 on an ``end`` event
 # whose ``stopReason`` is ``cancelled`` (for example when the gateway drops
-# mid-run), so any stop reason other than ``end_turn`` fails the run and drops
-# the text of earlier turns. The converter runs inline: a script in ``files``
-# would land in the workspace that Grok can edit.
+# mid-run), so only an ``end`` event with ``end_turn`` gives an answer. A
+# missing ``end`` event or another stop reason fails the run with status 1, and
+# a non-zero Grok exit keeps Grok's status; both drop the text of earlier turns.
+# The converter runs inline: a script in ``files`` would land in the workspace
+# that Grok can edit.
 _CONVERTER_SCRIPT = '''"""Turn a Grok Build run into one Pi ``message_end`` line."""
 
 import glob
@@ -112,8 +114,8 @@ def text_of(content):
 
 
 def main():
-    """Print the last assistant text of the session and the run usage as a Pi event."""
-    stream, home, session = sys.argv[1:4]
+    """Print the run usage as a Pi event, with the last assistant text only for a finished turn."""
+    stream, home, session, status = sys.argv[1:5]
     calls, total, end = [], None, None
     for event in json_lines(stream):
         if event.get("type") == "end":
@@ -129,9 +131,9 @@ def main():
     prompt = sum(count(used, name) for used in picked for name in _PROMPT_BUCKETS)
     completion = sum(count(used, "output_tokens") for used in picked)
     usage = {"input": prompt, "output": completion}
-    if end is not None and end.get("stopReason") != "end_turn":
+    if status != "0" or end is None or end.get("stopReason") != "end_turn":
         print(json.dumps({"type": "message_end", "message": {"role": "assistant", "content": [], "usage": usage}}))
-        sys.exit(1)
+        sys.exit(int(status) or 1)
     text = ""
     pattern = os.path.join(home, ".grok", "sessions", "**", session, "chat_history.jsonl")
     for path in sorted(glob.glob(pattern, recursive=True)):
@@ -298,7 +300,7 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
         f"{GROK_BINARY} --no-auto-update --single={_PROMPT_ARG} --always-approve "
         f'--output-format streaming-json --session-id {_SESSION_ID} --model "${ENV_MODEL}"{effort_flag} '
         '< /dev/null > "$g/stream.jsonl"; s=$?; '
-        f'python3 -I -c {shlex.quote(_CONVERTER_SCRIPT)} "$g/stream.jsonl" "$g" {_SESSION_ID} && exit "$s"; }}'
+        f'python3 -I -c {shlex.quote(_CONVERTER_SCRIPT)} "$g/stream.jsonl" "$g" {_SESSION_ID} "$s"; }}'
     )
     env = _base_env(model, gateway)
     env.update(_NO_DIRECT_KEYS)

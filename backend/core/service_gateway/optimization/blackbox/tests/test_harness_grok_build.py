@@ -459,20 +459,25 @@ def test_open_run_reads_the_gateway_url_from_the_generated_config(tmp_path: Path
     assert config["endpoints"]["xai_api_base_url"] == _GATEWAY.url
 
 
-def test_without_an_end_event_the_per_call_usage_adds_up(tmp_path: Path) -> None:
-    """Sum the ``usage`` events when Grok stops before its ``end`` event."""
+def test_without_an_end_event_the_run_fails_and_the_per_call_usage_adds_up(tmp_path: Path) -> None:
+    """Fail a run with no ``end`` event, even when Grok exits 0, drop its text, and sum the ``usage`` events."""
     stream = "\n".join(_RECORDED_STREAM.splitlines()[:3])
     result, _, _, _ = _run_with_fake_grok(tmp_path, protected=False, stream=stream)
 
-    assert parse_output("pi", result.stdout)[1] == {"input_tokens": 100, "output_tokens": 40}
+    assert result.returncode == 1
+    assert parse_output("pi", result.stdout) == (None, {"input_tokens": 100, "output_tokens": 40})
 
 
-def test_a_failed_grok_run_keeps_its_exit_status_and_usage(tmp_path: Path) -> None:
-    """Return Grok's own exit status, and still report the tokens it used, and remove its home."""
-    result, calls, _, _ = _run_with_fake_grok(tmp_path, protected=False, fake_exit=3)
+@pytest.mark.parametrize("stop_reason", ["end_turn", "cancelled"])
+def test_a_failed_grok_run_keeps_its_exit_status_and_usage(tmp_path: Path, stop_reason: str) -> None:
+    """Return Grok's own exit status with no answer, still report the tokens it used, and remove its home."""
+    events = [json.loads(line) for line in _RECORDED_STREAM.splitlines()]
+    events[-1]["stopReason"] = stop_reason
+    stream = "\n".join(json.dumps(event) for event in events)
+    result, calls, _, _ = _run_with_fake_grok(tmp_path, protected=False, stream=stream, fake_exit=3)
 
     assert result.returncode == 3
-    assert parse_output("pi", result.stdout)[1] == {"input_tokens": 125, "output_tokens": 40}
+    assert parse_output("pi", result.stdout) == (None, {"input_tokens": 125, "output_tokens": 40})
     grok_home = Path(next(line for line in calls.splitlines() if line.startswith("HOME=")).split("=", 1)[1])
     assert not grok_home.exists()
 
