@@ -126,10 +126,13 @@ sys.stdout.write("\\n".join(lines) + "\\n")
 # also strips Unicode whitespace and U+FEFF, so the check runs in Python. It
 # exits 0 only for a prompt the goal parser does not take, so a failed check
 # frames the prompt.
+# Python's ``\s`` also matches U+001C to U+001F and U+0085, which ``trim()``
+# keeps, so the check spells out the ECMAScript WhiteSpace and LineTerminator set.
+_JS_TRIM_WHITESPACE = r"\t\n\v\f\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 _PLAIN_PROMPT_CHECK = (
     "import re, sys; "
     'text = open(sys.argv[1], encoding="utf-8", errors="replace").read(); '
-    'sys.exit(bool(re.match(r"[\\s\\ufeff]*/goal(?:[\\s\\ufeff]|$)", text)))'
+    f'sys.exit(bool(re.match(r"[{_JS_TRIM_WHITESPACE}]*/goal(?:[{_JS_TRIM_WHITESPACE}]|$)", text)))'
 )
 # Kimi Code reads these for its native providers and services. Every launch
 # blanks them, so an inherited key or URL never gives it a route around the
@@ -281,7 +284,9 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         f'KIMI_MODEL_BASE_URL="$(cat {KIMI_CODE_BASE_URL_FILE})" || exit 1; export KIMI_MODEL_BASE_URL; '
         # Command substitution drops trailing newlines, so the sentinel ``x``
         # keeps them and the next step removes only it.
-        f'_kc_prompt="$(cat "${ENV_PROMPT_FILE}" && printf x)"; _kc_prompt="${{_kc_prompt%x}}"; '
+        f'_kc_prompt="$(cat "${ENV_PROMPT_FILE}" && printf x)" '
+        '|| { echo "kimi_code: cannot read the task prompt file" >&2; exit 1; }; '
+        '_kc_prompt="${_kc_prompt%x}"; '
         f"python3 -I -c '{_PLAIN_PROMPT_CHECK}' \"${ENV_PROMPT_FILE}\" || "
         '_kc_prompt="Task request:\n$_kc_prompt"; '
         'kimi --prompt "$_kc_prompt" --output-format stream-json < /dev/null > /dev/null; '

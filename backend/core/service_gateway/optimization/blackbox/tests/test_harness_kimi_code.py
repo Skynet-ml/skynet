@@ -140,7 +140,7 @@ def _run_with_fake_kimi(
     workspace: Path | None = None,
     parser_fails: bool = False,
     inherited: dict[str, str] | None = None,
-    prompt: str = "Fix `main.py` and say $(echo done).",
+    prompt: str | None = "Fix `main.py` and say $(echo done).",
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Kimi Code command in a scratch workspace against a fake ``kimi`` binary.
 
@@ -152,7 +152,7 @@ def _run_with_fake_kimi(
         workspace: An existing checkout to run in; a fresh folder when ``None``.
         parser_fails: Put a ``python3`` on PATH that fails, so the usage parse step fails.
         inherited: Sandbox env that the launch env overrides, as the bridge applies it.
-        prompt: The task prompt the bridge writes.
+        prompt: The task prompt the bridge writes, or ``None`` to leave the prompt file missing.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -167,7 +167,8 @@ def _run_with_fake_kimi(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     (workspace / "task").mkdir(parents=True)
-    (workspace / "task" / "PROMPT.md").write_text(prompt, encoding="utf-8")
+    if prompt is not None:
+        (workspace / "task" / "PROMPT.md").write_text(prompt, encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "kimi"
@@ -340,7 +341,16 @@ def test_failed_parse_keeps_a_kimi_code_failure_and_fails_a_success(tmp_path: Pa
 
 @pytest.mark.parametrize(
     "prompt",
-    ["/goal ship it", "  /goal ship it", "/goal", "﻿/goal ship it", " /goal\tship it", "\n/goal\nship it"],
+    [
+        "/goal ship it",
+        "  /goal ship it",
+        "/goal",
+        "﻿/goal ship it",
+        " /goal\tship it",
+        "\n/goal\nship it",
+        "\u3000/goal\u2009ship it",
+        "\u2028/goal\u2029",
+    ],
 )
 def test_goal_command_prompt_is_framed_so_it_reaches_the_model(tmp_path: Path, prompt: str) -> None:
     """Frame a prompt that Kimi Code's headless ``/goal`` parser would take, so the model gets it as a task."""
@@ -350,13 +360,26 @@ def test_goal_command_prompt_is_framed_so_it_reaches_the_model(tmp_path: Path, p
     assert f"ARGS [--prompt] [Task request:\n{prompt}] [--output-format] [stream-json]\n" in calls
 
 
-@pytest.mark.parametrize("prompt", ["/goals ship it", "/help", "Use /goal later.", "!ls", "Fix it.\n\n", "x\n"])
+@pytest.mark.parametrize(
+    "prompt",
+    # Python's ``\\s`` matches U+001C and U+0085, but JavaScript's ``trim()`` keeps them.
+    ["/goals ship it", "/help", "Use /goal later.", "!ls", "Fix it.\n\n", "x\n", "\x1c/goal ship it", "\x85/goal"],
+)
 def test_other_prompts_reach_kimi_code_unchanged(tmp_path: Path, prompt: str) -> None:
     """Leave every prompt that the ``/goal`` parser does not take byte-identical."""
     result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, prompt=prompt)
 
     assert result.returncode == 0, result.stderr
     assert f"ARGS [--prompt] [{prompt}] [--output-format] [stream-json]\n" in calls
+
+
+def test_unreadable_prompt_file_stops_the_run_before_kimi_code(tmp_path: Path) -> None:
+    """Stop the run with a clear error when the prompt file cannot be read, so Kimi Code never gets a blank task."""
+    result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, prompt=None)
+
+    assert result.returncode == 1
+    assert "kimi_code: cannot read the task prompt file" in result.stderr
+    assert "ARGS" not in calls
 
 
 def _loop_event(event: dict[str, object]) -> dict[str, object]:
