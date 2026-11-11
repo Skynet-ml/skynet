@@ -16,33 +16,6 @@ export { CLI_PROVIDERS, isCliProvider } from "@/shared/lib/cli-providers";
 
 export const SUBSCRIPTION_MODEL_PREFIX = "subscription/";
 
-/**
- * Which engine runs agent turns that pick no model (`/account/agent-engine`):
- * OpenRouter (managed models; in the local build, the saved OpenRouter key) or
- * a subscription CLI on this computer.
- */
-export type AgentEngine = "openrouter" | CliProvider;
-
-export const OPENROUTER_ENGINE = "openrouter" as const;
-
-export function isAgentEngine(value: unknown): value is AgentEngine {
-  return value === OPENROUTER_ENGINE || isCliProvider(value);
-}
-
-/**
- * The engine agents run on in the local build. A stored OpenRouter engine
- * counts only while the saved OpenRouter key is verified: with the key removed
- * or unverified (`keyVerified` false) agents run on the default CLI, as with
- * no engine. A key list that loads or failed (null) keeps the stored engine.
- */
-export function effectiveAgentEngine(
-  engine: AgentEngine | null,
-  keyVerified: boolean | null,
-  managedAvailable = false,
-): AgentEngine | null {
-  return engine === OPENROUTER_ENGINE && keyVerified === false && !managedAvailable ? null : engine;
-}
-
 /** One coding-agent CLI as `GET /local/status` reports it. */
 export interface CliStatus {
   id: CliProvider;
@@ -208,174 +181,111 @@ export function subscriptionMenuModels(
   }));
 }
 
-/** The one provider key the local backend runs composer turns on. */
-export const LOCAL_KEY_PROVIDER = "openrouter";
-
-// Caps the key's rows when its listing flags no featured models; an OpenRouter
-// key can list hundreds, and the hosted menu uses the same cap.
-const KEY_MENU_CAP = 50;
-
-/** Whether a BYOK catalog model runs on the saved OpenRouter key. */
-export function isLocalKeyModel(model: CatalogModel): boolean {
-  // Only an `openrouter/<vendor>/<model>` id is sent as a key model, so a
-  // row such as `openrouter/auto` would name a model the request does not run.
-  return (
-    model.byok_provider === LOCAL_KEY_PROVIDER &&
-    model.available !== false &&
-    supportsEffortSlider(model) &&
-    isOpenRouterModelId(model.value)
-  );
-}
-
 /**
- * The composer menu rows for the saved OpenRouter key: the featured models,
- * or the first ones when the listing flags none. A `pick` the key lists but
- * the shortlist leaves out gets its row too, so the menu never judges a
- * listed pick stale.
+ * The effort an agent request sends with `sent`, the model it resolved for the
+ * saved `pick`. When the menu hides or drops the pick, the request runs
+ * another model: the effort goes along only when `sent` takes it, as the chip
+ * shows. Every other request sends the effort as is.
  */
-export function keyMenuModels(
-  catalog: CatalogModel[] | undefined,
-  pick?: string | null,
-): CatalogModel[] {
-  const rows = (catalog ?? []).filter(isLocalKeyModel);
-  const featured = rows.filter((model) => model.featured);
-  const menu = featured.length ? featured : rows.slice(0, KEY_MENU_CAP);
-  const kept =
-    pick && !menu.some((model) => model.value === pick)
-      ? rows.find((model) => model.value === pick)
-      : undefined;
-  return kept ? [...menu, kept] : menu;
-}
-
-/**
- * All the saved key's rows in the local build: empty with no verified key,
- * `null` while unknown. Unknown covers a key list or key model list that
- * still loads or failed to load, since an empty list there would make a
- * saved key pick look stale and clear it.
- */
-export function localKeyRows(state: {
-  keysLoading: boolean;
-  keysFailed: boolean;
-  /** Identifies the verified OpenRouter key; null when there is none. */
-  stamp: string | null;
-  /** The last model load; `models` is null when that load failed. */
-  loaded: { stamp: string; models: CatalogModel[] | null } | null;
-  /** The cached key catalog, or null before a load succeeds. */
-  cached: CatalogModel[] | null;
-}): CatalogModel[] | null {
-  if (state.keysLoading || state.keysFailed) return null;
-  if (!state.stamp) return [];
-  const models = (state.loaded?.stamp === state.stamp ? state.loaded.models : null) ?? state.cached;
-  return models ? models.filter(isLocalKeyModel) : null;
-}
-
-/** Identifies a verified OpenRouter key's model list; null when the key is not verified. */
-export function localKeyStamp(
-  key: { id: string; addedAt: string; status: string } | null | undefined,
-): string | null {
-  return key?.status === "verified" ? `${key.id}:${key.addedAt}` : null;
-}
-
-/**
- * The saved key's rows for an agent request, from the same state the menu
- * reads: the provider's key list, the last key model load, and the cached key
- * catalog. Null while the menu has no key rows yet, so a request sends no key
- * model while the chip shows the default label.
- */
-export function requestKeyRows(
-  keys: {
-    loading: boolean;
-    failed: boolean;
-    keys: Array<{ id: string; provider: string; status: string; addedAt: string }>;
-  } | null,
-  loaded: { stamp: string; models: CatalogModel[] | null } | null,
-  cached: CatalogModel[] | null,
-): CatalogModel[] | null {
-  if (!keys) return null;
-  return localKeyRows({
-    keysLoading: keys.loading,
-    keysFailed: keys.failed,
-    stamp: localKeyStamp(keys.keys.find((key) => key.provider === LOCAL_KEY_PROVIDER)),
-    loaded,
-    cached,
-  });
-}
-
-/**
- * The effort an agent request sends with `sent`, the model it resolved for
- * the saved `pick`. A pick the OpenRouter engine menu hides (a Local pick)
- * keeps its effort saved for a CLI engine, but the request runs a key model
- * (`sent`, or the key's default when null): the effort goes along only when
- * that model takes it, as the chip shows. Every other request sends it as is.
- */
-export function keyEngineEffort(
+export function replacedPickEffort(
   effort: string | null,
   pick: string | null,
   sent: string | null,
   rows: CatalogModel[] | null,
 ): string | null {
-  if (!effort || !pick || pick === RETIRED_AUTO_MODEL || isOpenRouterModelId(pick)) return effort;
-  if (sent && !isOpenRouterModelId(sent)) return effort;
+  if (!effort || !pick || pick === RETIRED_AUTO_MODEL || pick === sent) return effort;
   const row = sent ? rows?.find((model) => model.value === sent) : undefined;
   return row?.supports_thinking && effortsFor(sent, rows).includes(effort) ? effort : null;
 }
 
-/**
- * The key model load to keep after a load for `stamp` ends; `models` is null
- * when it failed. A failed load keeps the rows an earlier load got for the
- * same key, which other menus still show and requests still send.
- */
-export function nextKeyLoad(
-  last: { stamp: string; models: CatalogModel[] | null } | null,
-  stamp: string,
-  models: CatalogModel[] | null,
-): { stamp: string; models: CatalogModel[] | null } {
-  if (!models && last?.stamp === stamp) return last;
-  return { stamp, models };
-}
-
-/** The longest wait between retries of a failed key list or key model list. */
+/** The longest wait between retries of a failed catalog load. */
 export const KEY_RETRY_MAX_MS = 30_000;
 
-/** The wait before retry number `attempt` (from 0) of a failed key load. */
+/** The wait before retry number `attempt` (from 0) of a failed catalog load. */
 export function keyRetryDelayMs(attempt: number): number {
   return Math.min(2_000 * 2 ** attempt, KEY_RETRY_MAX_MS);
 }
 
 /**
- * The local composer menu lists only the agent engine's models. A CLI engine
- * lists the CLI's subscription models; `null` means `/local/status` has not
- * loaded, so the menu stays empty and never judges a saved pick stale (and
- * clears it) too early. The OpenRouter engine runs every agent on the saved
- * key, so it lists only the key's models (no Local group); `null` means they
- * still load.
+ * The CLIs on this computer that can run a model right now: installed, new
+ * enough, signed in, not rate limited, and serving at least one model.
  */
-export function localMenuModels(
-  cliModels: CatalogModel[] | null,
-  keyModels: CatalogModel[] | null,
-  openRouterEngine = false,
-): CatalogModel[] {
-  return (openRouterEngine ? keyModels : cliModels) ?? [];
+export function signedInClis(
+  status: LocalStatus | null | undefined,
+  now: Date = new Date(),
+): CliStatus[] {
+  // An older backend may still report a CLI the app no longer offers.
+  return (status?.clis ?? []).filter(
+    (cli) => isCliProvider(cli.id) && cliState(cli, now).kind === "ok" && cli.models.length > 0,
+  );
 }
 
 /**
- * Whether the saved OpenRouter key is verified in the key list the menu
- * shows; null while that list loads, failed to load, or is not known yet.
- * The request reads this same state, so it never sends a key model while the
- * menu has no key rows and the chip shows the default label.
+ * The Local side's composer rows: every signed-in CLI's models, in the order
+ * `/local/status` reports the CLIs. Before the status loads the menu has no
+ * rows, so it never judges a saved pick stale (and clears it) too early.
  */
-export function menuKeyVerified(
-  state: {
-    loading: boolean;
-    failed: boolean;
-    keys: Array<{ provider: string; status: string }>;
-  } | null,
-): boolean | null {
-  if (!state || state.loading || state.failed) return null;
-  return state.keys.some((key) => key.provider === LOCAL_KEY_PROVIDER && key.status === "verified");
+export function localMenuModels(
+  status: LocalStatus | null | undefined,
+  catalog: CatalogModel[] | undefined,
+  now: Date = new Date(),
+): CatalogModel[] {
+  return signedInClis(status, now).flatMap((cli) => subscriptionMenuModels(cli, catalog));
 }
 
-/** Whether `model` is an `openrouter/<vendor>/<model>` id, which runs on a saved key. */
+// Caps the Web side's list when the catalog flags no featured models, as the
+// web app's menu does.
+const WEB_MENU_CAP = 50;
+
+/**
+ * The Web side's composer rows on a linked Mac: the web account's catalog
+ * (Skynet credits and the account's own keys). `models` is the shortlist with
+ * the default model first; `allModels` is every row the composer can list,
+ * for search. A `pick` the shortlist leaves out gets its row too, so the menu
+ * never judges a listed pick stale. `openRouterOnly` keeps only OpenRouter
+ * rows, for a turn the Mac's own backend runs through the linked account.
+ */
+export function webMenuModels(
+  catalog: CatalogModel[] | null | undefined,
+  pick: string | null,
+  openRouterOnly = false,
+): { models: CatalogModel[]; allModels: CatalogModel[] } {
+  // The composer drops rows with no effort slider, so the shortlist does too:
+  // otherwise the request could send a row the chip never names.
+  const allModels = (catalog ?? []).filter(
+    (row) =>
+      row.available &&
+      supportsEffortSlider(row) &&
+      (!openRouterOnly || isOpenRouterModelId(row.value)),
+  );
+  const featured = allModels.filter((row) => row.featured || row.is_default);
+  const rows = featured.length ? featured : allModels.slice(0, WEB_MENU_CAP);
+  const kept =
+    pick && !rows.some((row) => row.value === pick)
+      ? allModels.find((row) => row.value === pick)
+      : undefined;
+  const models = [...rows, ...(kept ? [kept] : [])].sort(
+    (a, b) => Number(!!b.is_default) - Number(!!a.is_default),
+  );
+  return { models, allModels };
+}
+
+/**
+ * The model id a Web side request sends, matching what the composer chip
+ * shows: the pick when the catalog lists it, else the menu's first row. With
+ * no catalog yet it sends null, and the backend runs its default model.
+ */
+export function webAgentModel(
+  pick: string | null,
+  catalog: CatalogModel[] | null | undefined,
+  openRouterOnly = false,
+): string | null {
+  const { models, allModels } = webMenuModels(catalog, pick, openRouterOnly);
+  if (pick && allModels.some((row) => row.value === pick)) return pick;
+  return models[0]?.value ?? null;
+}
+
+/** Whether `model` is an `openrouter/<vendor>/<model>` id. */
 export function isOpenRouterModelId(model: string | null | undefined): boolean {
   return !!model && /^openrouter\/[^/]+\/[^/]/.test(model);
 }
@@ -385,36 +295,11 @@ export function isOpenRouterModelId(model: string | null | undefined): boolean {
 export const RETIRED_AUTO_MODEL = "auto:intelligent";
 
 /**
- * The model id an agent request sends with the OpenRouter engine. A key pick
- * is sent unchanged. Any other pick is not in the menu (it has no Local
- * group), so like no pick it sends the key's first menu model, as the chip
- * shows; with no key rows yet it sends nothing, and the backend runs the key's
- * default model.
- */
-function resolveOpenRouterEngineModel(
-  model: string | null,
-  keyRows: () => CatalogModel[] | null,
-): string | null {
-  if (isOpenRouterModelId(model)) return model;
-  const rows = keyRows();
-  return rows ? (keyMenuModels(rows)[0]?.value ?? null) : null;
-}
-
-/**
- * The model id a local agent request sends, matching what the composer chip
- * shows. The OpenRouter engine runs every role on the saved key, whatever CLI
- * the role has; with that key removed or unverified, roles run on their CLIs
- * as with no engine (`effectiveAgentEngine`). On a CLI the menu lists no key
- * models, so the request reads no key state: a subscription pick resolves on
- * the CLI, and an OpenRouter pick is not listed, so like no pick it sends the
- * CLI's first model. With no CLI model the menu is empty: the chip names a
- * saved OpenRouter pick, which is sent unchanged, or shows the default label
- * with no pick, and nothing is sent. The menu is also empty while the engine
- * load failed (`engineLoaded` false), so the same rule applies: a Local pick
- * resolves on its own CLI, which the chip names, and any other pick runs on the
- * CLI only as that same model, else it is sent unchanged. A role pinned to a CLI with
- * no pick still runs on that CLI: the backend would fill no pick from its own
- * engine and drop the pin.
+ * The model id a Local side request sends, matching what the composer chip
+ * shows. A CLI pick runs on its own CLI. The Local menu hides any other pick
+ * (a Web side model), so like no pick it runs the role's CLI's first model.
+ * With no role CLI it runs the menu's first row, else the default CLI's first
+ * model.
  */
 export async function resolveLocalAgentModel(
   model: string | null,
@@ -422,40 +307,22 @@ export async function resolveLocalAgentModel(
   deps: {
     loadStatus: () => Promise<LocalStatus>;
     peekStatus: () => LocalStatus | null;
-    /** Whether the saved OpenRouter key is verified; null while the menu's key list loads or failed. */
-    keyVerified: () => Promise<boolean | null>;
-    /** The saved key's rows the menu reads; null while they load or failed. */
-    keyRows: () => CatalogModel[] | null;
-    /** The agent engine; a role with no CLI runs on it. */
-    engine?: AgentEngine | null;
-    /** False when the engine load failed, so `engine` is unknown, not "none chosen". */
-    engineLoaded?: boolean;
   },
 ): Promise<string | null> {
-  if (model === RETIRED_AUTO_MODEL) model = null;
-  if (deps.engineLoaded === false) {
-    if (model ? isOpenRouterModelId(model) : !cli) return model;
-    const local = parseSubscriptionModelId(model);
-    const resolved = await resolveAgentModel(
-      model,
-      local?.cli ?? cli,
-      deps.loadStatus,
-      deps.peekStatus,
-    );
-    // The chip names any other pick as is, so it runs on the CLI only as that model.
-    if (model && !local && parseSubscriptionModelId(resolved)?.slug !== model) return model;
-    return resolved;
+  const parsed = parseSubscriptionModelId(model);
+  if (!parsed && !cli) {
+    const status = await deps.loadStatus().catch(() => deps.peekStatus());
+    // The menu skips a ready CLI with no usable model, which the default CLI
+    // does not; the catalog only adds labels, so the row ids do not need it.
+    const first = localMenuModels(status, undefined)[0]?.value;
+    return first ?? subscriptionAgentModel(null, defaultAgentCli(status), status);
   }
-  let engine = deps.engine ?? null;
-  if (engine === OPENROUTER_ENGINE) {
-    engine = effectiveAgentEngine(engine, await deps.keyVerified());
-    if (engine === OPENROUTER_ENGINE) return resolveOpenRouterEngineModel(model, deps.keyRows);
-  }
-  if (model && !isOpenRouterModelId(model)) {
-    return resolveAgentModel(model, cli, deps.loadStatus, deps.peekStatus, engine);
-  }
-  const status = await deps.loadStatus().catch(() => deps.peekStatus());
-  return subscriptionAgentModel(null, cli ?? defaultAgentCli(status, engine), status) ?? model;
+  return resolveAgentModel(
+    parsed ? model : null,
+    parsed?.cli ?? cli,
+    deps.loadStatus,
+    deps.peekStatus,
+  );
 }
 
 /**
@@ -569,17 +436,14 @@ export function subscriptionAgentModel(
 }
 
 /**
- * The CLI an agent role runs on when the user picked none for it. A CLI agent
- * engine wins. Otherwise, since the local build has no managed models and
- * every role needs a CLI: the first ready one, else the first installed one,
- * else Claude Code.
+ * The CLI an agent role runs on when the user picked no model for it. The
+ * local build has no managed models, so every role needs a CLI: the first
+ * ready one, else the first installed one, else Claude Code.
  */
 export function defaultAgentCli(
   status: LocalStatus | null | undefined,
-  engine: AgentEngine | null = null,
   now: Date = new Date(),
 ): CliProvider {
-  if (isCliProvider(engine)) return engine;
   // An older backend may still report a CLI the app no longer offers.
   const clis = (status?.clis ?? []).filter((cli) => isCliProvider(cli.id));
   const ready = clis.find((cli) => cliState(cli, now).kind === "ok");
@@ -587,169 +451,71 @@ export function defaultAgentCli(
   return ready?.id ?? installed?.id ?? "claude";
 }
 
-/**
- * The CLI an agent role runs on: none with the OpenRouter engine, which runs
- * every role on the saved key. Otherwise the role's own CLI, else the engine's
- * CLI, else the default CLI.
- */
-export function roleCli(
-  cli: CliProvider | null | undefined,
-  status: LocalStatus | null | undefined,
-  engine: AgentEngine | null,
-): CliProvider | null {
-  if (engine === OPENROUTER_ENGINE) return null;
-  return cli ?? defaultAgentCli(status, engine);
-}
+/** A model picker group: Skynet credits, the user's own key, or one CLI. */
+export type MenuModelGroup = "credits" | "byok" | CliProvider;
 
-/** A model picker group: Skynet credits, the user's own key, or a local CLI. */
-export type MenuModelGroup = "credits" | "byok" | "local";
-
-/** The heading of each model picker group. */
+/** The heading of each gateway group; a CLI group carries the CLI's own name. */
 export const MENU_GROUP_LABELS = {
   credits: "agent.model_menu.group_credits",
   byok: "agent.model_menu.group_byok",
-  local: "subscription.mode",
-} as const satisfies Record<MenuModelGroup, string>;
+} as const satisfies Record<"credits" | "byok", string>;
 
-/** The model picker group a listed model belongs to. */
+/** The model picker group a listed model belongs to; a CLI model groups by its CLI. */
 export function menuModelGroup(model: CatalogModel): MenuModelGroup {
-  if (model.value.startsWith(SUBSCRIPTION_MODEL_PREFIX)) return "local";
-  return model.byok_provider ? "byok" : "credits";
+  return parseSubscriptionModelId(model.value)?.cli ?? (model.byok_provider ? "byok" : "credits");
 }
 
+/** Which side of the Mac app's Local/Web pick a composer menu lists. */
+export type MenuSide = "local" | "web";
+
 /**
- * Whether a saved pick is a Local model that the OpenRouter engine menu hides.
- * The menu counts it as no pick but keeps it saved, so the pick comes back
- * with a CLI engine. A CLI engine menu never hides a pick: a pick it does not
- * list (such as a key pick) is stale, so the chip and the request both use the
- * first listed model.
+ * Whether a saved pick belongs to the other side: a Web model in the Local
+ * menu, or a CLI model in the Web menu. Both sides share one saved pick, so
+ * the menu hides such a pick but keeps it for when the user switches back.
  */
-export function hiddenLocalPick(
-  pick: string | null,
-  models: CatalogModel[] | undefined,
-  openRouterEngine: boolean,
-): boolean {
-  return (
-    openRouterEngine &&
-    !!pick?.startsWith(SUBSCRIPTION_MODEL_PREFIX) &&
-    !!models &&
-    !models.some((model) => menuModelGroup(model) === "local")
-  );
+export function otherSidePick(pick: string | null, side: MenuSide | undefined): boolean {
+  if (!pick || !side || pick === RETIRED_AUTO_MODEL) return false;
+  return pick.startsWith(SUBSCRIPTION_MODEL_PREFIX) === (side === "web");
 }
 
 /**
  * Whether the composer menu lists a saved pick, and whether the pick is stale
  * (the menu clears it). Only a non-empty list judges a pick, so a list that
- * still loads or failed never clears one. A Local pick the OpenRouter engine
- * menu hides is not stale. The OpenRouter engine sends no pick but an
- * OpenRouter one, so its chip lists no other pick, even with no rows yet.
+ * still loads or failed never clears one. A pick from the other side is
+ * unlisted but not stale.
  */
 export function menuPickState(
   pick: string | null,
   listed: CatalogModel[] | undefined,
-  models: CatalogModel[] | undefined,
-  openRouterEngine: boolean,
+  side: MenuSide | undefined,
 ): { unlisted: boolean; stale: boolean } {
   const omitted =
     !!pick && !!listed && listed.length > 0 && !listed.some((model) => model.value === pick);
-  const unlisted = omitted || (openRouterEngine && !!pick && !isOpenRouterModelId(pick));
-  return { unlisted, stale: omitted && !hiddenLocalPick(pick, models, openRouterEngine) };
-}
-
-/**
- * The local agent menu's rows for a role on `cli`, from the state
- * `useLocalAgentMenuModels` reads. Before `GET /account/agent-engine` loads,
- * or when that load failed, the engine is unknown: the menu has no rows, so it
- * never judges a saved pick stale. An unknown engine is not a CLI engine,
- * since an OpenRouter engine lists key picks that a CLI menu would clear.
- */
-export function localAgentMenu(state: {
-  engineLoaded: boolean;
-  /** The stored engine; null when none was chosen and no CLI is ready. */
-  stored: AgentEngine | null;
-  keyVerified: boolean | null;
-  status: LocalStatus | null;
-  cli: CliProvider | null;
-  /** All the saved key's rows; null while they load or failed. */
-  keyModels: CatalogModel[] | null;
-  pick: string | null;
-  catalog: CatalogModel[] | undefined;
-}): { models: CatalogModel[]; openRouterEngine: boolean } {
-  if (!state.engineLoaded) return { models: [], openRouterEngine: false };
-  const engine = effectiveAgentEngine(state.stored, state.keyVerified);
-  const openRouterEngine = engine === OPENROUTER_ENGINE;
-  const cliModels = state.status
-    ? subscriptionMenuModels(
-        findCli(state.status, roleCli(state.cli, state.status, engine)),
-        state.catalog,
-      )
-    : null;
-  const keyModels = state.keyModels && keyMenuModels(state.keyModels, state.pick);
-  return { models: localMenuModels(cliModels, keyModels, openRouterEngine), openRouterEngine };
+  const hidden = otherSidePick(pick, side);
+  return { unlisted: omitted || hidden, stale: omitted && !hidden };
 }
 
 /**
  * The agent model for a role, resolved against a loaded status: the CLI's
  * slugs decide what the request sends, so the request waits for the status.
- * A role with no CLI runs on `defaultAgentCli` for the agent engine. A failed
- * load falls back to the last status any caller loaded.
+ * A role with no CLI runs on `defaultAgentCli`. A failed load falls back to
+ * the last status any caller loaded.
  */
 export async function resolveAgentModel(
   model: string | null,
   cli: CliProvider | null | undefined,
   load: () => Promise<LocalStatus>,
   peek: () => LocalStatus | null,
-  engine: AgentEngine | null = null,
 ): Promise<string | null> {
   const status = await load().catch(() => peek());
-  return subscriptionAgentModel(model, cli ?? defaultAgentCli(status, engine), status);
-}
-
-/**
- * One choice in the Settings "Agent engine" select. A CLI carries its state
- * (null while the status loads); only a ready CLI can be chosen. OpenRouter
- * carries `keyPending`: the key list still loads or failed.
- */
-export type AgentEngineOption =
-  | { engine: typeof OPENROUTER_ENGINE; disabled: boolean; keyPending: boolean }
-  | { engine: CliProvider; disabled: boolean; state: CliState | null };
-
-/**
- * The "Agent engine" choices. Hosted builds run every agent on OpenRouter, so
- * that is the only choice. The local build lists the CLIs first, enabled only
- * when ready, then OpenRouter, enabled only when the saved OpenRouter key is
- * verified (`keyVerified`; null while the key list loads or failed).
- */
-export function agentEngineOptions(
-  status: LocalStatus | null | undefined,
-  localMode: boolean,
-  now: Date = new Date(),
-  keyVerified: boolean | null = false,
-  managedAvailable = false,
-): AgentEngineOption[] {
-  if (!localMode) return [{ engine: OPENROUTER_ENGINE, disabled: false, keyPending: false }];
-  const clis = CLI_PROVIDERS.map((cli): AgentEngineOption => {
-    const entry = findCli(status, cli);
-    let state: CliState | null = null;
-    if (entry) state = cliState(entry, now);
-    else if (status) state = { kind: "missing" };
-    return { engine: cli, disabled: state?.kind !== "ok", state };
-  });
-  return [
-    ...clis,
-    {
-      engine: OPENROUTER_ENGINE,
-      disabled: keyVerified !== true && !managedAvailable,
-      keyPending: keyVerified === null && !managedAvailable,
-    },
-  ];
+  return subscriptionAgentModel(model, cli ?? defaultAgentCli(status), status);
 }
 
 /**
  * The proposer patch for a host CLI choice. Picking a CLI keeps the current
  * permission, or starts at workspace only. "off" sends an explicit null, so
  * the backend keeps the sandboxed proposer; any other value sends no pick,
- * and the backend uses the agent engine's CLI.
+ * and the backend uses its own default CLI.
  */
 export function hostCliPatch(
   value: string,

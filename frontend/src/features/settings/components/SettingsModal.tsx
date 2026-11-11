@@ -110,21 +110,12 @@ import { isLocalMode } from "@/shared/lib/runtime-env";
 import { linkedUsername, useLinkedAccount } from "@/shared/hooks/use-linked-account";
 import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
-import { AgentEngineSetting } from "./AgentEngineSetting";
 
 function WizardTab() {
   return (
     <div className="space-y-1">
       <PackageRegistrySetting />
       <OptimizationDefaults />
-    </div>
-  );
-}
-
-function AgentTab() {
-  return (
-    <div className="space-y-1">
-      <AgentEngineSetting />
     </div>
   );
 }
@@ -1091,7 +1082,6 @@ function ApiTab() {
 
 const SETTINGS_GROUPS = [
   { key: "workflows", labelKey: "settings.group.workflows" },
-  { key: "assistants", labelKey: "settings.group.assistants" },
   { key: "preferences", labelKey: "settings.group.preferences" },
   { key: "access", labelKey: "settings.group.access" },
 ] as const;
@@ -1250,9 +1240,6 @@ export function SettingsModal() {
               )}
               <TabsContent value="wizard">
                 <WizardTab />
-              </TabsContent>
-              <TabsContent value="agent">
-                <AgentTab />
               </TabsContent>
               <TabsContent value="account">
                 <AccountTab />

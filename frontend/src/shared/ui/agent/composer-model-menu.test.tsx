@@ -8,6 +8,7 @@ import { describe, it } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import type { MenuSide } from "@/features/local-runtime";
 import { setClientLocale } from "@/shared/lib/runtime-locale";
 import type { CatalogModel } from "@/shared/types/api";
 
@@ -35,10 +36,34 @@ const SUBSCRIPTION: CatalogModel[] = [
   },
 ];
 
+const TWO_CLIS: CatalogModel[] = [
+  {
+    value: "subscription/claude/anthropic/claude-sonnet-4.5",
+    label: "Claude Sonnet 4.5",
+    display_name: "Claude Sonnet 4.5",
+    provider: "anthropic",
+    supports_thinking: true,
+    reasoning_efforts: ["low", "high"],
+    supports_vision: true,
+    available: true,
+  },
+  {
+    value: "subscription/codex/openai/gpt-5",
+    label: "GPT-5",
+    display_name: "GPT-5",
+    provider: "openai",
+    supports_thinking: true,
+    reasoning_efforts: ["low", "high", "max"],
+    supports_vision: true,
+    available: true,
+  },
+];
+
 function render(
   value: string | null,
   models?: CatalogModel[],
   effort: string | null = null,
+  side?: MenuSide,
 ): string {
   setClientLocale("en");
   return renderToStaticMarkup(
@@ -48,6 +73,7 @@ function render(
       effort={effort}
       onEffortChange={() => {}}
       models={models}
+      side={side}
     />,
   );
 }
@@ -92,5 +118,26 @@ void describe("ComposerModelMenu", () => {
   void it("names the effort that the request sends while no model is shown", () => {
     const html = render(null, undefined, "high");
     assert.match(html, />agent\.model_menu\.effort_high</);
+  });
+
+  void it("names a listed pick from the second CLI with its effort on the Local side", () => {
+    const html = render("subscription/codex/openai/gpt-5", TWO_CLIS, "max", "local");
+    assert.match(html, />GPT-5</);
+    assert.match(html, />agent\.model_menu\.effort_max</);
+  });
+
+  void it("hides a Web pick on the Local side and sets aside an effort the shown model does not take", () => {
+    const html = render("openrouter/google/gemini-3-pro", TWO_CLIS, "max", "local");
+    assert.match(html, />Claude Sonnet 4\.5</);
+    assert.doesNotMatch(html, /agent\.model_menu\.effort_/);
+    // With no side the same pick is stale, so the effort is not set aside.
+    assert.match(render("openrouter/google/gemini-3-pro", TWO_CLIS, "max"), /agent\.model_menu\.effort_high/);
+  });
+
+  void it("hides a CLI pick on the Web side", () => {
+    const web = TWO_CLIS.slice(0, 1);
+    const html = render("subscription/codex/openai/gpt-5", web, "max", "web");
+    assert.match(html, />Claude Sonnet 4\.5</);
+    assert.doesNotMatch(html, /GPT-5|agent\.model_menu\.effort_/);
   });
 });

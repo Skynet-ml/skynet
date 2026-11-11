@@ -67,7 +67,6 @@ test("the privacy question frames its real control in Settings", () => {
 // The stops where the user sets the real controls, and the file that tags each anchor.
 const HANDS_ON: Record<string, string> = {
   providers: "features/billing/components/ByokKeysSection.tsx",
-  clis: "features/settings/components/AgentEngineSetting.tsx",
   connectors: "features/connectors/components/ConnectorsTab.tsx",
   notifications: "features/settings/components/NotificationsTab.tsx",
 };
@@ -107,11 +106,8 @@ test("the model key stop shows only after a bring-your-own-key answer", () => {
   assert.ok(setupStops("byok").length <= MAX_SETUP_STOPS);
 });
 
-test("the CLI stop shows only after a CLI subscription answer", () => {
-  assert.ok(setupStops("subscription").some((s) => s.id === "clis"));
-  assert.ok(!setupStops("subscription").some((s) => s.id === "providers"));
-  assert.ok(!setupStops("platform").some((s) => s.id === "clis"));
-  assert.ok(!setupStops("byok").some((s) => s.id === "clis"));
+test("a CLI subscription answer adds no stop", () => {
+  assert.deepEqual(setupStops("subscription"), setupStops("platform"));
 });
 
 test("the Mac app offers the coding CLI subscription as a billing answer; the hosted app does not", () => {

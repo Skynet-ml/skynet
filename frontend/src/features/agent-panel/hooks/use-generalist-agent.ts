@@ -529,8 +529,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
 
       const unsaved = sessionsRef.current.get(key)?.unsaved === true;
       // A chat stays where it started; a new chat starts on the side picked
-      // in the header. The local engine's model and effort mean nothing on
-      // the web account, so a web turn uses its default model.
+      // in the header. The composer lists that side's models, so the turn
+      // sends the pick resolved for that side.
       const savedId = unsaved ? null : (sessionsRef.current.get(key)?.conversationId ?? null);
       const saved = savedId ? parseSourceKey(savedId) : null;
       const source: ApiSource = saved ? saved.source : webPicked() ? "hosted" : "local";
@@ -575,8 +575,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       // so a slow stream replaced by a fresh ``send`` (or by the unmount-time
       // abort) cannot leak state writes or window events into the live view.
       const hosted = source === "hosted";
-      rememberComposerPick(isLocalMode() && !hosted, modelRef.current, effortRef.current);
-      void (hosted ? Promise.resolve(null) : localAgentModel(modelRef.current)).then((sentModel) =>
+      rememberComposerPick(isLocalMode(), modelRef.current, effortRef.current);
+      void localAgentModel(modelRef.current, hosted).then((sentModel) =>
         streamGeneralistAgent(
           {
             user_message: run.message,
@@ -590,10 +590,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             edit_user_occurrence: run.editUserTurn?.occurrence,
             locale: getActiveLocale(),
             model: sentModel ?? undefined,
-            reasoning_effort: hosted
-              ? undefined
-              : (localAgentEffort(modelRef.current, effortRef.current, sentModel) ?? undefined),
-            fast_mode: (!hosted && sentFastMode(fastRef.current, sentModel)) || undefined,
+            reasoning_effort:
+              localAgentEffort(modelRef.current, effortRef.current, sentModel, hosted) ??
+              undefined,
+            fast_mode: sentFastMode(fastRef.current, sentModel) || undefined,
             steer_key: steerKey,
           },
           {

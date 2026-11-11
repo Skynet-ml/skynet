@@ -1,5 +1,6 @@
 import { isLocalModelRefusal, localAgentEffort, localAgentModel } from "@/features/local-runtime";
 import { composerSeed, rememberComposerPick } from "@/features/settings";
+import { webPicked } from "@/shared/lib/api";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { ModelConfig } from "@/shared/types/api";
 import type {
@@ -196,13 +197,14 @@ export function interviewComposerModel(assist: Pick<AssistState, "interviewModel
 }
 
 /**
- * The model an interview request sends: the composer's, resolved on the
- * local agent engine in the local build.
+ * The model an interview request sends: the composer's, resolved in the local
+ * build for the side picked in the header (a CLI model, or an OpenRouter
+ * model of the web account).
  */
 export function interviewRequestModel(
   assist: Pick<AssistState, "interviewModel">,
 ): Promise<string | null> {
-  return localAgentModel(interviewComposerModel(assist));
+  return localAgentModel(interviewComposerModel(assist), webPicked(), true);
 }
 
 /** The effort an interview request sends with `sent`, the model it resolved. */
@@ -210,7 +212,12 @@ export function interviewRequestEffort(
   assist: Pick<AssistState, "interviewModel" | "interviewEffort">,
   sent: string | null,
 ): string | null {
-  return localAgentEffort(interviewComposerModel(assist), interviewComposerEffort(assist), sent);
+  return localAgentEffort(
+    interviewComposerModel(assist),
+    interviewComposerEffort(assist),
+    sent,
+    webPicked(),
+  );
 }
 
 /** Effective reasoning effort for the interview composer; same fallback split. */

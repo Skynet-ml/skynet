@@ -380,7 +380,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onToolEnd: handleToolEnd,
     onConversationMeta: handleConversationMeta,
   });
-  const localMenu = useLocalAgentMenuModels(agent.model);
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
   // Each conversation on view gets fresh turn components, so one chat's
@@ -571,6 +570,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const { web } = useResourceMode();
   const webChat =
     agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
+  const localMenu = useLocalAgentMenuModels(agent.model, webChat);
   const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
   React.useEffect(() => {
     liveChatRef.current = { id: agentConversationId, messages: agentMessages };
@@ -1190,7 +1190,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             onFastChange={agent.setFastMode}
             models={localMenu.models}
             allModels={localMenu.allModels}
-            openRouterEngine={localMenu.openRouterEngine}
+            side={localMenu.side}
           />
         }
         // Dataset files keep their column-mapping card; any other file is

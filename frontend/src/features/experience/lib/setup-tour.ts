@@ -31,14 +31,12 @@ export interface SetupStop {
   above?: boolean;
   /** Shown only after the user chose to bring their own model key. */
   byokOnly?: boolean;
-  /** Shown only after the user chose their coding CLI subscription (the Mac app). */
-  subscriptionOnly?: boolean;
 }
 
 /*
  * The tour stays short: every stop past this is one the user would skip.
  * Ten covers the two looks the user sees change behind the card (level
- * and theme), the one stop a billing answer can add (the key, or the CLIs)
+ * and theme), the one stop a billing answer can add (the key)
  * and the two places the user connects things (data sources and the update
  * grid).
  */
@@ -89,15 +87,6 @@ export const SETUP_STOPS: readonly SetupStop[] = [
     body: "experience.setup.providers.body",
     byokOnly: true,
   },
-  // The Agent engine row lists each CLI on this computer, its state and its sign-in command.
-  {
-    id: "clis",
-    anchor: "local-clis",
-    settings: "agent",
-    title: "experience.setup.clis.title",
-    body: "experience.setup.clis.body",
-    subscriptionOnly: true,
-  },
   {
     id: "privacy",
     anchor: "model-privacy",
@@ -136,15 +125,9 @@ export const SETUP_STOPS: readonly SetupStop[] = [
   },
 ];
 
-/**
- * The stops this user walks: the key stop only follows a "my own key" answer,
- * and the CLI stop only follows a "my CLI subscription" answer.
- */
+/** The stops this user walks: the key stop only follows a "my own key" answer. */
 export function setupStops(billing: IntakeAnswers["billing"]): readonly SetupStop[] {
-  return SETUP_STOPS.filter(
-    (s) =>
-      (!s.byokOnly || billing === "byok") && (!s.subscriptionOnly || billing === "subscription"),
-  );
+  return SETUP_STOPS.filter((s) => !s.byokOnly || billing === "byok");
 }
 
 const BILLING_OPTIONS: ReadonlyArray<{

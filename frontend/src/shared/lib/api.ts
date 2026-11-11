@@ -1542,26 +1542,6 @@ export function updateModelPrivacy(settings: ModelPrivacySettings) {
   });
 }
 
-/** The caller's agent engine; see `AgentEngine` in the local-runtime feature. */
-export interface AgentEnginePreference {
-  engine: string | null;
-  /** False (or missing) when `engine` is the backend's automatic pick. */
-  stored?: boolean;
-}
-
-/** Fetch which engine runs the caller's agent turns that pick no model. */
-export function getAgentEngine() {
-  return request<AgentEnginePreference>("/account/agent-engine");
-}
-
-/** Persist which engine runs the caller's agent turns that pick no model. */
-export function updateAgentEngine(engine: string) {
-  return request<AgentEnginePreference>("/account/agent-engine", {
-    method: "PUT",
-    body: JSON.stringify({ engine }),
-  });
-}
-
 export type AccountExportFormat = "json" | "csv" | "xlsx" | "parquet" | "feather" | "pkl";
 
 /**

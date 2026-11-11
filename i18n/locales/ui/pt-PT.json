@@ -2,7 +2,6 @@
   "app.shell.search.kw.about": "sobre versão URL da API feedback redefinir preferências about version feedback reset",
   "app.shell.search.kw.account": "conta nome de utilizador função idioma interface opções avançadas account username role language",
   "app.shell.search.kw.admin": "administração armazenamento quota orçamentos utilizadores admin storage quota users",
-  "app.shell.search.kw.agent": "agente painel assistente modelo predefinido voz ditado nível de confiança agent assistant model voice dictation trust yolo",
   "app.shell.search.kw.api": "API token desenvolvedor integração gerar revogar documentação API token developer documentation",
   "app.shell.search.kw.billing": "faturação saldo fundos adicionar fundos carregamento assinatura plano pagamento formas de pagamento cartão faturas recibos transações billing balance funds top up {term.appName} Pro subscription payment receipts",
   "app.shell.search.kw.privacy": "privacidade dados notificações e-mail análises limpar cache exportar meus dados eliminar conta privacy notifications analytics cache export delete account",

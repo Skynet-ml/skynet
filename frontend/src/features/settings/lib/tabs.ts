@@ -8,7 +8,6 @@
 
 import {
   Bell,
-  CallBell,
   Code,
   CreditCard,
   Gauge,
@@ -29,7 +28,6 @@ type MessageKey = Parameters<typeof msg>[0];
 
 export const SETTINGS_TAB_ORDER = [
   "wizard",
-  "agent",
   "account",
   "notifications",
   "security",
@@ -49,7 +47,7 @@ export type SettingsTabMeta = {
   labelKey: MessageKey;
   /** Space/comma separated terms for what the tab contains, localized. */
   keywordsKey: MessageKey;
-  group: "workflows" | "assistants" | "preferences" | "access";
+  group: "workflows" | "preferences" | "access";
   adminOnly?: boolean;
 };
 
@@ -59,12 +57,6 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     labelKey: "settings.tab.wizard",
     keywordsKey: "app.shell.search.kw.wizard",
     group: "workflows",
-  },
-  agent: {
-    icon: CallBell,
-    labelKey: "settings.tab.agent",
-    keywordsKey: "app.shell.search.kw.agent",
-    group: "assistants",
   },
   account: {
     icon: User,

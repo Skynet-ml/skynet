@@ -3,10 +3,13 @@
 import * as React from "react";
 import { Collapsible } from "radix-ui";
 import {
+  cliLabel,
+  isCliProvider,
   MENU_GROUP_LABELS,
   menuModelGroup,
   menuPickState,
   RETIRED_AUTO_MODEL,
+  type MenuSide,
 } from "@/features/local-runtime";
 import { Check, CaretUp, Lightning, MagnifyingGlass, X } from "@/shared/ui/icons";
 import { EffortSlider, effortHint } from "@/shared/ui/agent/effort-slider";
@@ -54,13 +57,13 @@ interface ComposerModelMenuProps {
    * subscription models. The first one runs with no pick.
    */
   models?: CatalogModel[];
-  /** Full engine-scoped catalog for search and resolving saved selections. */
+  /** Full side-scoped catalog for search and resolving saved selections. */
   allModels?: CatalogModel[];
   /**
-   * The given list is the OpenRouter engine menu, which hides Local models.
-   * A saved Local pick it does not list stays saved for a CLI engine.
+   * The Mac app side the given list belongs to. A saved pick from the other
+   * side is hidden, not cleared, so it comes back when the user switches.
    */
-  openRouterEngine?: boolean;
+  side?: MenuSide;
 }
 
 // Caps the fallback list when the catalog flags no featured models (a
@@ -69,9 +72,9 @@ const FALLBACK_LIST_CAP = 50;
 
 /**
  * Whether the menu sets aside a saved effort while it hides the saved pick (a
- * Local pick under the OpenRouter engine): the menu names no model yet, or
- * one that does not take that effort. The effort stays saved for the pick,
- * but the chip and the request (keyEngineEffort) leave it out.
+ * pick from the other side): the menu names no model yet, or one that does
+ * not take that effort. The effort stays saved for the pick, but the chip and
+ * the request (replacedPickEffort) leave it out.
  */
 export function hiddenPickEffortStale(
   hidden: boolean,
@@ -95,7 +98,7 @@ export function ComposerModelMenu({
   defaultFlag = "is_default",
   models,
   allModels,
-  openRouterEngine = false,
+  side,
 }: ComposerModelMenuProps) {
   const savedValue = rawValue === RETIRED_AUTO_MODEL ? null : rawValue;
   // A saved "ultra" or "ultracode" runs at Max, so the menu shows and keeps Max.
@@ -136,9 +139,9 @@ export function ComposerModelMenu({
   const unsupported = !!savedModel && !supportsEffortSlider(savedModel);
   // A saved pick the live catalog no longer lists (a withdrawn model) would
   // name a dead id on the chip. Only judged against a loaded, non-empty
-  // catalog so a gateway outage never wipes a valid pick. A Local pick the
-  // OpenRouter engine menu hides is no pick here, but it stays saved for a CLI engine.
-  const { unlisted, stale } = menuPickState(savedValue, listed, allModels ?? models, openRouterEngine);
+  // catalog so a gateway outage never wipes a valid pick. A pick from the
+  // other side is no pick here, but it stays saved for that side.
+  const { unlisted, stale } = menuPickState(savedValue, listed, side);
   const value = savedValue && !unlisted && !unsupported ? savedValue : null;
   React.useEffect(() => {
     if (stale || unsupported) {
@@ -155,9 +158,8 @@ export function ComposerModelMenu({
     const rows = available.filter((m) => m.featured);
     return rows.length ? rows : available.slice(0, FALLBACK_LIST_CAP);
   }, [models, available]);
-  // A given list that mixes groups labels each group, since two groups can
-  // list the same model name. A local agent menu lists one engine's models, so
-  // it shows no labels.
+  // A given list that mixes groups labels each group, since two groups (two
+  // CLIs, or credits and a key) can list the same model name.
   const grouped = !!models && new Set(available.map(menuModelGroup)).size > 1;
   // A previously chosen model outside the shortlist keeps its checkmarked
   // row next time the menu opens.
@@ -185,7 +187,7 @@ export function ComposerModelMenu({
     current,
     efforts,
   );
-  const cliRow = !!current && menuModelGroup(current) === "local";
+  const cliRow = !!current && isCliProvider(menuModelGroup(current));
   // A CLI row shows the level the backend runs, so Max on a model whose top is lower shows that top.
   const shownEffort = effortStale ? null : cliRow ? cliEffort(savedEffort, efforts) : effort;
   const [fastModel, setFastModel] = React.useState<string | null>(null);
@@ -340,7 +342,7 @@ export function ComposerModelMenu({
           {visibleModels.map((m, i) => (
             <React.Fragment key={m.value}>
               {grouped && (i === 0 || menuModelGroup(visibleModels[i - 1]!) !== menuModelGroup(m)) && (
-                <DropdownMenuLabel>{msg(MENU_GROUP_LABELS[menuModelGroup(m)])}</DropdownMenuLabel>
+                <DropdownMenuLabel>{groupLabel(menuModelGroup(m))}</DropdownMenuLabel>
               )}
               <MenuItem
                 selected={effective === m.value}
@@ -459,6 +461,10 @@ export function ComposerModelMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function groupLabel(group: ReturnType<typeof menuModelGroup>): string {
+  return isCliProvider(group) ? cliLabel(group) : msg(MENU_GROUP_LABELS[group]);
 }
 
 function MenuItem({

@@ -8,26 +8,10 @@ export {
   useLocalAgentMenuModels,
 } from "./hooks/use-local-status";
 export {
-  useAgentEngine,
-  agentEngineLoaded,
-  loadAgentEngine,
-  peekAgentEngine,
-  peekAgentEngineStored,
-  saveAgentEngine,
-} from "./hooks/use-agent-engine";
-export {
-  agentEngineOptions,
-  effectiveAgentEngine,
-  isAgentEngine,
-  LOCAL_KEY_PROVIDER,
   MENU_GROUP_LABELS,
   menuModelGroup,
-  hiddenLocalPick,
   menuPickState,
-  roleCli,
-  OPENROUTER_ENGINE,
-  type AgentEngine,
-  type AgentEngineOption,
+  type MenuSide,
   byokHintKey,
   runEstimateLabelKey,
   usageChargedKey,
