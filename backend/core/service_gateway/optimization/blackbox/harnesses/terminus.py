@@ -181,6 +181,8 @@ async def _run(scratch):
     api_key, model = _env("API_KEY"), _env("MODEL")
     if not GATEWAY_URL or not api_key or not model:
         sys.exit("The Terminus harness needs the gateway URL, the gateway token and a model.")
+    if shutil.which("tmux") is None:
+        sys.exit("The Terminus harness needs tmux on PATH; add it to the box image.")
     prompt = Path(_env("PROMPT_FILE")).read_text(encoding="utf-8")
     tmux_dir = scratch / "tmux"
     tmux_dir.mkdir()
@@ -285,8 +287,9 @@ def _runner_script(gateway_url: str) -> str:
 def _terminus_install() -> str:
     """Return the command that installs uv if needed and warms the pinned Harbor environment.
 
-    Terminus also needs tmux; Harbor's session start installs it with the
-    box's package manager when it is missing.
+    Terminus also needs tmux, and the box image must carry it. Harbor's own
+    fallback installs tmux with the package manager as root, which fails for
+    the box's user and offline, so the runner stops when tmux is missing.
 
     Returns:
         The shell command.
@@ -309,12 +312,17 @@ def _terminus_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When the effort is not one Terminus 2 accepts.
     """
+    if reasoning_effort and reasoning_effort not in _EFFORTS:
+        raise ServiceError(f"The Terminus harness does not support the reasoning effort '{reasoning_effort}'.")
     env = _base_env(model, gateway)
     env.update(_NO_DIRECT_KEYS)
     env.update(_QUIET_ENV)
     env["UV_NO_PROGRESS"] = "1"
-    if reasoning_effort in _EFFORTS:
+    if reasoning_effort:
         env[ENV_REASONING_EFFORT] = reasoning_effort
     return HarnessLaunch(
         instructions_file="AGENTS.md",

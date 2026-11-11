@@ -147,17 +147,26 @@ def _fake_harbor(root: Path) -> Path:
     return root
 
 
-def _run_runner(tmp_path: Path, launch_files: dict[str, str], **env: str) -> subprocess.CompletedProcess:
+def _run_runner(
+    tmp_path: Path, launch_files: dict[str, str], *, tmux: bool = True, **env: str
+) -> subprocess.CompletedProcess:
     """Run the generated runner with the current Python against the fake Harbor package.
 
     Args:
         tmp_path: Test directory; the workspace and fake package live under it.
         launch_files: Generated launch files to write into the workspace.
+        tmux: Whether a fake ``tmux`` is on ``PATH``.
         **env: Extra environment variables.
 
     Returns:
         The finished process.
     """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if tmux:
+        fake_tmux = bin_dir / "tmux"
+        fake_tmux.write_text("#!/bin/sh\nexit 0\n")
+        fake_tmux.chmod(0o755)
     workspace = tmp_path / "ws"
     for name, content in launch_files.items():
         path = workspace / name
@@ -166,7 +175,7 @@ def _run_runner(tmp_path: Path, launch_files: dict[str, str], **env: str) -> sub
     return subprocess.run(
         [sys.executable, RUNNER_FILE],
         cwd=workspace,
-        env={"PATH": os.defpath, "PYTHONPATH": str(_fake_harbor(tmp_path / "fake")), **env},
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "PYTHONPATH": str(_fake_harbor(tmp_path / "fake")), **env},
         capture_output=True,
         text=True,
         timeout=30,
@@ -232,10 +241,17 @@ def test_every_supported_effort_passes_unchanged(effort: str) -> None:
     assert SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env[ENV_REASONING_EFFORT] == effort
 
 
-@pytest.mark.parametrize("effort", [None, "", "default", "HIGH", "turbo"])
-def test_unsupported_effort_is_left_to_the_model_default(effort: str | None) -> None:
-    """An effort outside the supported set never reaches the runner."""
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_is_left_to_the_model_default(effort: str | None) -> None:
+    """Without an effort, the runner gets none and the model default applies."""
     assert ENV_REASONING_EFFORT not in SPEC.launch("m", _GATEWAY, reasoning_effort=effort).env
+
+
+@pytest.mark.parametrize("effort", ["default", "HIGH", "turbo"])
+def test_unsupported_effort_stops_the_launch(effort: str) -> None:
+    """An effort Terminus 2 does not accept is refused, not dropped or remapped."""
+    with pytest.raises(ServiceError, match="reasoning effort"):
+        SPEC.launch("m", _GATEWAY, reasoning_effort=effort)
 
 
 @pytest.mark.parametrize(
@@ -346,6 +362,21 @@ def test_runner_refuses_without_the_gateway_token(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "gateway" in result.stderr
+    assert not record.exists()
+
+
+def test_runner_stops_when_tmux_is_missing(tmp_path: Path) -> None:
+    """Without tmux the runner exits with a clear message instead of Harbor's root package install."""
+    launch = SPEC.launch("m", _GATEWAY)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Fix it.\n")
+    record = tmp_path / "record.json"
+    env = {**launch.env, "APP_PROMPT_FILE": str(prompt), "FAKE_HARBOR_RECORD": str(record)}
+
+    result = _run_runner(tmp_path, launch.files, tmux=False, **env)
+
+    assert result.returncode != 0
+    assert "needs tmux" in result.stderr
     assert not record.exists()
 
 
