@@ -458,6 +458,8 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
         fast_config = byok_config or cli_fast_config(model, req.fast_mode)
         if req.fast_mode and model:
             fast_config = await asyncio.to_thread(with_fast_mode, fast_config or ModelConfig(name=model), True)
+        # A cold model catalog builds on the calling thread (SKY-603).
+        effort = await asyncio.to_thread(effective_reasoning_effort, model, req.reasoning_effort)
         usage_sink: list = []
 
         async def source() -> Any:
@@ -470,7 +472,7 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
                     [t.model_dump() for t in req.turns],
                     req.locale,
                     model=model,
-                    reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),
+                    reasoning_effort=effort,
                     usage_sink=usage_sink,
                     model_config=fast_config,
                 ):
@@ -585,7 +587,8 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
             data = cast("list[dict[str, Any]]", row.data)
             annotations = cast("dict[str, Any]", row.annotations)
             assist = cast("dict[str, Any]", row.assist) or {}
-        model_config = _resolve_assist_model(job_store, user.username, assist)
+        # A cold model catalog builds on the calling thread (SKY-603).
+        model_config = await asyncio.to_thread(_resolve_assist_model, job_store, user.username, assist)
         wanted = set(req.row_ids)
         rows = [r for r in data if str(r.get("id")) in wanted]
         if not rows:

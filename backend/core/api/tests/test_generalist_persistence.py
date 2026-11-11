@@ -12,16 +12,19 @@ end so that regression can't return unnoticed.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import threading
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -1129,3 +1132,60 @@ def test_confirm_resolves_only_for_the_stream_owner(
     assert not decided.is_set()
     assert confirm("alice@example.com") == 200
     assert decided.is_set()
+
+
+def test_turn_does_not_block_the_event_loop_on_a_cold_catalog(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold catalog build runs off the loop, so the loop can still run while it waits (SKY-603)."""
+    client, engine = persistence_client
+    _fund(engine)
+    release = threading.Event()
+    builds: list[bool] = []
+
+    def held_build() -> model_catalog.ModelCatalogResponse:
+        """Hold the build until the event loop releases it.
+
+        Returns:
+            A catalog with the chosen model.
+        """
+        builds.append(release.wait(2))
+        model = model_catalog.CatalogModel(value="openai/gpt-test", label="gpt-test", provider="openai", available=True)
+        return model_catalog.ModelCatalogResponse(providers=[], models=[model])
+
+    monkeypatch.setattr(model_catalog, "_cached_response", None)
+    monkeypatch.setattr(model_catalog, "_refresh_in_flight", False)
+    monkeypatch.setattr(model_catalog, "_refresh_thread", None)
+    monkeypatch.setattr(model_catalog, "get_catalog", held_build)
+
+    async def post_and_release() -> httpx.Response:
+        """Send the turn, then release the build from the event loop.
+
+        Returns:
+            The route's response.
+        """
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            request = asyncio.create_task(
+                http.post(
+                    "/optimizations/generalist-agent",
+                    json={
+                        "user_message": "hi",
+                        "chat_history": [],
+                        "wizard_state": {},
+                        "trust_mode": "ask",
+                        "model": "openai/gpt-test",
+                    },
+                    headers={"Authorization": f"Bearer {_session_token()}"},
+                )
+            )
+            await asyncio.sleep(0.05)
+            release.set()
+            return await request
+
+    resp = asyncio.run(post_and_release())
+
+    assert resp.status_code == 200, resp.text
+    assert builds
+    assert all(builds)
