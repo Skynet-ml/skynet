@@ -219,6 +219,7 @@
   "submit.v2.optimizer.proposer.harness": "Agent de code",
   "submit.v2.optimizer.sandbox.label": "Sandbox",
   "submit.v2.optimizer.sandbox.hint": "Où le code de l’exécution s’exécute. Sans choix, le serveur choisit.",
+  "submit.v2.optimizer.sandbox.load_failed": "Impossible de charger les sandboxes. L’exécution utilise la valeur par défaut du serveur.",
   "submit.v2.optimizer.proposer.title": "Paramètres de l'agent de code",
   "submit.v2.optimizer.proposer.title.guided": "Paramètres de l'agent (facultatif)",
   "submit.v2.optimizer.sandbox_unavailable": "La sandbox de code n'est pas disponible, les exécutions ne peuvent donc pas démarrer pour le moment.",

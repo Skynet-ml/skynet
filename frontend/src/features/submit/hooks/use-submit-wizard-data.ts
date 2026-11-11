@@ -1,12 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  getModelCallHolds,
-  getSandboxProviders,
-  type SandboxProviderCatalog,
-} from "@/shared/lib/api";
+import { getModelCallHolds, getSandboxProviders } from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
+import { reportHandledError } from "@/shared/lib/report-error";
+import type { SandboxProviders } from "@/shared/lib/sandbox-provider";
 import {
   cachedCatalog,
   cachedHostedCatalog,
@@ -86,25 +84,33 @@ export function useRecentModelConfigs() {
   return { recentConfigs, saveToRecent, clearRecentConfigs, removeRecentConfig };
 }
 
+// One object, so a memo that reads the list does not rerun on every render while it loads.
+const SANDBOXES_LOADING: SandboxProviders = { status: "loading", catalog: null };
+
 /**
- * The sandbox providers of the server the run goes to, or null while they
- * load or when the read fails; the run then uses the server default.
+ * The sandbox providers of the server the run goes to. Until they load, or
+ * after a failed read, the run names no provider and uses the server default.
  */
-export function useSandboxProviders(source: ApiSource): SandboxProviderCatalog | null {
-  const [loaded, setLoaded] = useState<{
-    source: ApiSource;
-    catalog: SandboxProviderCatalog;
-  } | null>(null);
+export function useSandboxProviders(source: ApiSource): SandboxProviders {
+  const [loaded, setLoaded] = useState<{ source: ApiSource; state: SandboxProviders } | null>(
+    null,
+  );
 
   useEffect(() => {
     const controller = new AbortController();
     getSandboxProviders(source, controller.signal)
-      .then((catalog) => setLoaded({ source, catalog }))
-      .catch(() => {});
+      .then((catalog) => setLoaded({ source, state: { status: "ready", catalog } }))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        // The API layer reports only 5xx and network drops; a 4xx here (for
+        // example a proxy that refuses the path) would stay silent otherwise.
+        reportHandledError(error, { tags: { feature: "sandbox-providers", source } });
+        setLoaded({ source, state: { status: "failed", catalog: null } });
+      });
     return () => controller.abort();
   }, [source]);
 
-  return loaded?.source === source ? loaded.catalog : null;
+  return loaded?.source === source ? loaded.state : SANDBOXES_LOADING;
 }
 
 /** The model catalog of the server the run goes to: the web's for a Remote run, else this server's. */

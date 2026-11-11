@@ -219,6 +219,7 @@
   "submit.v2.optimizer.proposer.harness": "编程智能体",
   "submit.v2.optimizer.sandbox.label": "沙箱",
   "submit.v2.optimizer.sandbox.hint": "运行代码的执行位置。不选择时由服务器选择。",
+  "submit.v2.optimizer.sandbox.load_failed": "无法加载沙盒列表。本次运行使用服务器默认值。",
   "submit.v2.optimizer.proposer.title": "编程智能体设置",
   "submit.v2.optimizer.proposer.title.guided": "智能体设置（可选）",
   "submit.v2.optimizer.sandbox_unavailable": "代码沙箱不可用，因此目前无法开始运行。",

@@ -1,11 +1,23 @@
-import { msg } from "@/shared/lib/messages";
-import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
+import { createElement } from "react";
+import type { IconProps } from "@phosphor-icons/react";
 
-const SANDBOX_PROVIDER_LABEL_KEYS: Record<string, MessageKey> = {
-  // The run view's runtime names; UI copy never names the sandbox vendor.
-  vercel: "submit.runtime.vercel",
-  docker: "submit.runtime.docker",
+import { msg } from "@/shared/lib/messages";
+import type { SandboxProviderCatalog } from "@/shared/lib/api";
+import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
+import type { OptimizerTarget } from "@/shared/types/unified-run";
+import { Cube, Desktop, Globe } from "@/shared/ui/icons";
+
+// The run view's runtime names and the Mac/Web icons of the run place choice;
+// UI copy never names the sandbox vendor.
+const SANDBOX_PROVIDERS: Record<string, { label: MessageKey; icon: typeof Cube }> = {
+  vercel: { label: "submit.runtime.vercel", icon: Globe },
+  docker: { label: "submit.runtime.docker", icon: Desktop },
 };
+
+/** The sandbox provider list of the run's server: loading, failed, or ready. */
+export type SandboxProviders =
+  | { status: "loading" | "failed"; catalog: null }
+  | { status: "ready"; catalog: SandboxProviderCatalog };
 
 /**
  * The translated name of a sandbox provider. A provider the UI has no name
@@ -13,8 +25,18 @@ const SANDBOX_PROVIDER_LABEL_KEYS: Record<string, MessageKey> = {
  * no UI change.
  */
 export function sandboxProviderLabel(id: string, serverLabel?: string): string {
-  const key = SANDBOX_PROVIDER_LABEL_KEYS[id];
-  return key ? msg(key) : serverLabel || id;
+  const known = SANDBOX_PROVIDERS[id];
+  return known ? msg(known.label) : serverLabel || id;
+}
+
+/** The icon of a sandbox provider; a provider the UI does not know shows a generic box. */
+export function sandboxProviderIcon(id: string): typeof Cube {
+  return SANDBOX_PROVIDERS[id]?.icon ?? Cube;
+}
+
+/** The icon of a sandbox provider, as one stable component for every provider. */
+export function SandboxProviderIcon({ id, ...props }: { id: string } & IconProps) {
+  return createElement(sandboxProviderIcon(id), props);
 }
 
 /** The chosen provider while the server still offers it, else null (the server default). */
@@ -23,4 +45,40 @@ export function offeredSandboxProvider(
   providers: ReadonlyArray<{ id: string }>,
 ): string | null {
   return chosen && providers.some((provider) => provider.id === chosen) ? chosen : null;
+}
+
+/**
+ * The provider the run request names: an offered pick only, never a pick from
+ * another server or from a list that is still loading or failed.
+ */
+export function requestSandboxProvider(
+  chosen: string | null | undefined,
+  sandboxes: SandboxProviders,
+): string | null {
+  return offeredSandboxProvider(chosen, sandboxes.catalog?.providers ?? []);
+}
+
+/**
+ * The provider the picker shows: the offered pick, else the server default,
+ * else the first offered provider.
+ */
+export function shownSandboxProvider(
+  chosen: string | null | undefined,
+  catalog: SandboxProviderCatalog,
+): string | undefined {
+  return (
+    offeredSandboxProvider(chosen, catalog.providers) ??
+    offeredSandboxProvider(catalog.default_provider, catalog.providers) ??
+    catalog.providers[0]?.id
+  );
+}
+
+/**
+ * Whether run setup shows the sandbox picker. Only a repository run request
+ * (`/blackbox/run`) accepts a sandbox choice. A failed read shows the field
+ * with its failure note; a list still loading, or empty, shows nothing.
+ */
+export function showsSandboxPicker(kind: OptimizerTarget, sandboxes: SandboxProviders): boolean {
+  if (kind !== "repo") return false;
+  return sandboxes.status === "failed" || (sandboxes.catalog?.providers.length ?? 0) > 0;
 }

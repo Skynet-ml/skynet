@@ -29,7 +29,7 @@ import {
   Wrench,
 } from "@/shared/ui/icons";
 import { harnessLabel } from "@/shared/lib/blackbox-harness";
-import { sandboxProviderLabel } from "@/shared/lib/sandbox-provider";
+import { SandboxProviderIcon, sandboxProviderLabel } from "@/shared/lib/sandbox-provider";
 import { FadeIn } from "@/shared/ui/motion";
 import { HelpTip } from "@/shared/ui/help-tip";
 import type {
@@ -243,7 +243,7 @@ export function BlackboxConfigCard({
     generalRows.push({
       label: msg("submit.v2.optimizer.sandbox.label"),
       value: sandboxProviderLabel(sandboxProvider),
-      icon: <Cube />,
+      icon: <SandboxProviderIcon id={sandboxProvider} />,
     });
   }
   if (hasCostCap) {

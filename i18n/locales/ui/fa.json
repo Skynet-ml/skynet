@@ -219,6 +219,7 @@
   "submit.v2.optimizer.proposer.harness": "عامل برنامه‌نویس",
   "submit.v2.optimizer.sandbox.label": "محیط ایزوله",
   "submit.v2.optimizer.sandbox.hint": "جایی که کد اجرا در آن اجرا می‌شود. اگر انتخاب نکنید، سرور انتخاب می‌کند.",
+  "submit.v2.optimizer.sandbox.load_failed": "بارگیری محیط‌های ایزوله ممکن نشد. اجرا از پیش‌فرض سرور استفاده می‌کند.",
   "submit.v2.optimizer.proposer.title": "تنظیمات عامل برنامه‌نویس",
   "submit.v2.optimizer.proposer.title.guided": "تنظیمات عامل (اختیاری)",
   "submit.v2.optimizer.sandbox_unavailable": "محیط ایزولهٔ کد در دسترس نیست، بنابراین اکنون نمی‌توان اجرا را شروع کرد.",

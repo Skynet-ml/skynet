@@ -23,7 +23,12 @@ import {
   harnessLabel,
   keepHarnessEffort,
 } from "@/shared/lib/blackbox-harness";
-import { offeredSandboxProvider, sandboxProviderLabel } from "@/shared/lib/sandbox-provider";
+import {
+  SandboxProviderIcon,
+  sandboxProviderLabel,
+  shownSandboxProvider,
+  showsSandboxPicker,
+} from "@/shared/lib/sandbox-provider";
 import { tip } from "@/shared/lib/tooltips";
 import { cn } from "@/shared/lib/utils";
 import { defaultOpen, useExperienceLevel } from "@/features/experience";
@@ -40,11 +45,7 @@ import { msg } from "@/shared/lib/messages";
 
 import { emptyModelConfig } from "../../constants";
 import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
-import {
-  useModelCatalog,
-  useRecentModelConfigs,
-  useSandboxProviders,
-} from "../../hooks/use-submit-wizard-data";
+import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
 import { DEFAULT_PROPOSER, proposerKnobs, usesNativeProposer } from "../../lib/engine-contract";
 import { keepEconomy } from "../../lib/model-config";
 import {
@@ -79,11 +80,11 @@ type Editing = {
  * metric model lives with the metric in step 4.
  */
 export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice: OptimizerChoice }) {
-  const { state, patchOptimizer, guided, runSource } = useWizardV2Shell();
+  const { state, patchOptimizer, guided, runSource, sandboxProviders } =
+    useWizardV2Shell();
   const t = (key: string) => v2Msg(key, guided);
   const level = useExperienceLevel();
   const catalog = useModelCatalog(runSource);
-  const sandboxes = useSandboxProviders(runSource);
   const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
   const [editing, setEditing] = React.useState<Editing | null>(null);
   const [proposerOpen, setProposerOpen] = React.useState(() =>
@@ -118,13 +119,6 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
     const fitted = keepHarnessEffort(reflectionModel, limitingHarness);
     if (fitted !== reflectionModel) patchOptimizer({ reflectionModel: fitted });
   }, [limitingHarness, reflectionModel, patchOptimizer]);
-  // A pick the run's server does not offer (another server, or a provider it
-  // dropped) falls back to the server default instead of failing at submit.
-  React.useEffect(() => {
-    if (!sandboxes || !sandboxProvider) return;
-    if (!offeredSandboxProvider(sandboxProvider, sandboxes.providers))
-      patchOptimizer({ sandboxProvider: null });
-  }, [sandboxes, sandboxProvider, patchOptimizer]);
 
   return (
     <StepCard
@@ -281,27 +275,36 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
         />
       </ModelRoleRow>
 
-      {sandboxes && sandboxes.providers.length > 0 && (
+      {showsSandboxPicker(kind, sandboxProviders) && (
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
             label={t("submit.v2.optimizer.sandbox.label")}
             htmlFor="v2-sandbox-provider"
-            hint={t("submit.v2.optimizer.sandbox.hint")}
+            hint={t(
+              sandboxProviders.catalog
+                ? "submit.v2.optimizer.sandbox.hint"
+                : "submit.v2.optimizer.sandbox.load_failed",
+            )}
           >
             <Select
               value={
-                offeredSandboxProvider(sandboxProvider, sandboxes.providers) ??
-                sandboxes.default_provider
+                sandboxProviders.catalog
+                  ? shownSandboxProvider(sandboxProvider, sandboxProviders.catalog)
+                  : undefined
               }
               onValueChange={(value) => patchOptimizer({ sandboxProvider: value })}
+              disabled={!sandboxProviders.catalog}
             >
               <SelectTrigger id="v2-sandbox-provider" className={cn("w-full", TOUCH_FIELD)}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {sandboxes.providers.map((provider) => (
+                {sandboxProviders.catalog?.providers.map((provider) => (
                   <SelectItem key={provider.id} value={provider.id}>
-                    {sandboxProviderLabel(provider.id, provider.label)}
+                    <span className="flex items-center gap-2">
+                      <SandboxProviderIcon id={provider.id} size={16} aria-hidden />
+                      <span>{sandboxProviderLabel(provider.id, provider.label)}</span>
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -43,6 +43,7 @@ import {
   enableContinuous,
 } from "@/shared/lib/api";
 import { runHref, type ApiSource } from "@/shared/lib/api-route";
+import { requestSandboxProvider, type SandboxProviders } from "@/shared/lib/sandbox-provider";
 import { onLinkChange } from "@/shared/hooks/use-linked-account";
 import { contractCheckMessage } from "@/shared/lib/i18n";
 import {
@@ -151,7 +152,11 @@ import {
 } from "../lib/wizard-v2";
 import { useExecutionBudget } from "./use-execution-budget";
 import { tableRows } from "./use-inputs-data";
-import { useModelCallHolds, useModelCatalog } from "./use-submit-wizard-data";
+import {
+  useModelCallHolds,
+  useModelCatalog,
+  useSandboxProviders,
+} from "./use-submit-wizard-data";
 import { useWizardPreflight } from "./use-wizard-preflight";
 
 // A repository run's optimize.toml; the coding agent writes it into the draft (SKY-184).
@@ -181,6 +186,8 @@ export interface WizardV2Shell extends WizardV2Context {
   hostedBlock: MessageKey | null;
   /** Load the hosted optimizer catalog again after a failed load. */
   retryHostedCatalog: () => void;
+  /** The sandbox providers of the server in `runSource`. */
+  sandboxProviders: SandboxProviders;
 }
 
 export type HostedCatalogState = "ready" | "loading" | "failed";
@@ -432,6 +439,7 @@ export function WizardV2Provider({
   const [runOn, setRunOn] = useState<ApiSource>(() => (webPicked() ? "hosted" : "local"));
   const runSource: ApiSource = hostedChoice && runOn === "hosted" ? "hosted" : "local";
   const modelCatalog = useModelCatalog(runSource);
+  const sandboxProviders = useSandboxProviders(runSource);
   const [catalogEntry, setCatalogEntry] = useState<{
     source: ApiSource;
     catalog: OptimizerCatalogResponse;
@@ -658,11 +666,18 @@ export function WizardV2Provider({
   // Submit sends this exact request, and the Web check judges it.
   const repoRequest = useMemo(() => {
     const proposer = withSupportedHostCli(state.optimizer.proposer);
+    // The pick stays in the setup, but the request names it only while the
+    // run's server offers it: a Mac/Web switch on any step, a draft from the
+    // other server, or a list that is loading or failed sends no provider.
+    const sandboxProvider = requestSandboxProvider(
+      state.optimizer.sandboxProvider,
+      sandboxProviders,
+    );
     return repoRunRequest(
-      { ...state, optimizer: { ...state.optimizer, proposer } },
+      { ...state, optimizer: { ...state.optimizer, proposer, sandboxProvider } },
       { username, tokenSource, maxCostCents: budgetUncapped ? null : maxCostCents },
     );
-  }, [state, username, tokenSource, budgetUncapped, maxCostCents]);
+  }, [state, username, tokenSource, budgetUncapped, maxCostCents, sandboxProviders]);
   const exposedCatalog =
     optimizerCatalog &&
     optimizerCatalog.artifact_kind === kind &&
@@ -1311,6 +1326,7 @@ export function WizardV2Provider({
     runSource,
     hostedBlock,
     retryHostedCatalog,
+    sandboxProviders,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
