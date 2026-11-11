@@ -172,7 +172,16 @@ for review until the evidence is there.
   Never disable verification on previews. Test authentication changes with
   fresh accounts and real codes.
 - Use only test allowances that already exist. Never add funds, grant
-  credits, change balances or create charges.
+  credits, change balances or create charges. The one exception is the
+  staging test-credit grant command in the `skynet-test-accounts` skill
+  ("Grant test credit"). Use it only for a check account you created for
+  this check, only after Gilad approves that grant in chat, and within the
+  $50 UTC-day cap. Amounts depend on the check. Before each grant, ask Gilad
+  in chat for a specific dollar amount: the smallest amount the check needs,
+  with a short cost estimate. Gilad approves that amount, or a larger one if
+  he thinks the check needs more. Record his approval text. Spend as little
+  as possible. Never grant on production, to real customers or to manual
+  accounts. Never use a raw wallet INSERT, Stripe or any other path.
 - Mocks are allowed for focused unit tests or unavailable dependencies.
   Explain the reason, boundary and coverage gap.
 - Costly or rare workflows (for example expensive scheduled runs): backend

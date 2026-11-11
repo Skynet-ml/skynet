@@ -157,8 +157,72 @@ of an id with no secret changes nothing and exits 0.
 
 - A new staging account gets no credit. A new preview account gets
   `PREVIEW_GRANT_CENTS` (see `docs/agents/pr-previews.md`). Run checks
-  that need a paid run on the preview, or record the gap. Never add funds.
+  that need a paid run on the preview, or record the gap.
+- Never add funds except through "Grant test credit" below.
 - Staging keeps the setup intake for new accounts. Previews skip it.
+
+### Grant test credit (staging only)
+
+A staging check that needs a paid run can fund its own check account with
+the grant command `python -m core.billing.grant_test_credit`. All of these
+rules apply:
+
+- Use it only for a check account you created for this check with
+  `account.py`. Never grant on production, to real customers or to manual
+  accounts.
+- Amounts depend on the check. Before each grant, ask Gilad in chat for a
+  specific dollar amount: the smallest amount the check needs, with a short
+  cost estimate. Gilad approves that amount, or a larger one if he thinks
+  the check needs more. Spend as little as possible.
+- Grant only after Gilad approves that grant in chat. Put his approval text
+  in `--approval`. The command records it on the ledger row.
+- All grants on all accounts share a $50 cap for each UTC day. The command
+  refuses a grant that passes it.
+- Never use a raw wallet INSERT, Stripe or any other path.
+
+The command refuses unless `APP_ENVIRONMENT` is `staging` or a PR preview,
+the account id has the `account.py` shape for that target, and the account
+has a user row. Amounts are dollars with at most 2 decimals. A retry with
+the same `--idempotency-key` credits nothing more. Use a new key for each
+approved grant, for example `<account-id>-1`. The key has at most 54
+characters. `--reason` and `--approval` together have at most about 220
+characters.
+
+Run it on staging as a one-off ECS task. It uses the migrate task
+definition, which has the staging database URL and `APP_ENVIRONMENT`.
+The command line holds no email and no secret:
+
+```bash
+export AWS_PROFILE=skynet AWS_REGION=us-east-2
+CFG=$(aws ssm get-parameter --name /skynet/staging/deploy --query Parameter.Value --output text)
+CLUSTER=$(jq -r .cluster <<<"$CFG")
+SUBNETS=$(jq -r '.subnets | join(",")' <<<"$CFG")
+SG=$(jq -r '.security_groups.migrate' <<<"$CFG")
+PUBLIC_IP=$(jq -r 'if .assign_public_ip then "ENABLED" else "DISABLED" end' <<<"$CFG")
+FAMILY=$(jq -r '.families.migrate' <<<"$CFG")
+OVERRIDES=$(jq -nc --arg id "$ACCOUNT_ID" --arg usd "$DOLLARS" --arg reason "$REASON" \
+  --arg approval "$APPROVAL" --arg key "$KEY" \
+  '{containerOverrides: [{name: "migrate", command: ["python", "-m", "core.billing.grant_test_credit",
+    "--account-id", $id, "--dollars", $usd, "--reason", $reason, "--approval", $approval,
+    "--idempotency-key", $key]}]}')
+ARN=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$FAMILY" --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=$PUBLIC_IP}" \
+  --overrides "$OVERRIDES" --query 'tasks[0].taskArn' --output text)
+aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$ARN"
+aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$ARN" --query 'tasks[0].containers[0].exitCode' --output text
+aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migrate/${ARN##*/}"
+```
+
+- Set `ACCOUNT_ID` to the id `account.py` printed, `DOLLARS` to the approved
+  amount, `REASON` to the check, `APPROVAL` to Gilad's words, and `KEY` to a
+  new key.
+- Exit code `0` prints `Granted $X to <id>` or, on a retry, `Already
+  granted`. Exit code `2` prints `Grant refused: <reason>` and writes
+  nothing. Report a refusal; do not work around it.
+- Record the grant (account id, dollars, key) in the PR test scope.
+- A preview already gives new accounts `PREVIEW_GRANT_CENTS`. This section
+  documents no preview invocation. If a preview check needs more, ask the
+  orchestrator.
 
 ### Authentication changes
 
@@ -187,7 +251,9 @@ Record in the PR that you used fresh accounts and real codes.
 - Create data through normal app flows when you can. Use realistic synthetic
   values, never real personal data.
 - Never add funds, grant credits, change billing or change balances. Use only
-  test allowances that already exist.
+  test allowances that already exist. The one exception is the staging
+  test-credit grant command ("Grant test credit" in section 4), under all of
+  its rules.
 - Do not start expensive or scheduled runs only to see their UI. Follow the
   costly-workflow rule in the `skynet-pr-workflow` skill.
 - Never borrow another agent's account, Gilad's session or a personal

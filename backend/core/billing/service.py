@@ -18,9 +18,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 
 import stripe
@@ -40,6 +41,7 @@ from ..storage.models import (
     BillingWebhookEventModel,
     ExecutionBudgetModel,
     JobModel,
+    UserModel,
     WalletLedgerModel,
 )
 from ..telemetry import record_server_event
@@ -151,6 +153,83 @@ def _is_customerless(customer_id: str) -> bool:
         ``True`` for an empty or placeholder id.
     """
     return not customer_id or customer_id.startswith(LOCAL_CUSTOMER_PREFIX)
+
+
+# Staging test-credit grants (SKY-573). The test-account tool signs up
+# ``<target>-<label>-<6 hex>@`` this inbox, where the target is ``staging`` or
+# ``pr-<n>``; nothing else may receive a grant. The cap is one shared total per
+# UTC day across all accounts, so an agent loop cannot drain more than $50.
+TEST_ACCOUNT_INBOX = "eegeupelae.resend.app"
+TEST_GRANT_DAILY_CAP_CENTS = 5000
+TEST_GRANT_KEY_PREFIX = "testgrant:"
+_TEST_ACCOUNT_ID = re.compile(r"(staging|pr-\d+)-[a-z0-9-]+-[0-9a-f]{6}")
+_SETTLEMENT_KEY_MAX_LENGTH = 64
+_LEDGER_DESCRIPTION_MAX_LENGTH = 255
+# Arbitrary constant id for ``pg_advisory_xact_lock``: it serializes grants on
+# different accounts, which the per-account row lock cannot, so two grants
+# cannot both read a total under the cap and together pass it.
+_TEST_GRANT_LOCK_ID = 573_000_573
+
+
+class GrantRefusedError(Exception):
+    """A test-credit grant failed a guard; nothing was written."""
+
+
+@dataclass(frozen=True)
+class GrantResult:
+    """Outcome of a test-credit grant.
+
+    Attributes:
+        credited_cents: Cents this key credited (on a replay, the first grant's cents).
+        balance_cents: Account balance after the grant.
+        replayed: Whether the key was already used, so nothing new was credited.
+    """
+
+    credited_cents: int
+    balance_cents: int
+    replayed: bool
+
+
+def check_account_email(account_id: str) -> str:
+    """Build the email the test-account tool signs up for an account id.
+
+    Args:
+        account_id: Id the tool printed, such as ``staging-label-a1b2c3``.
+
+    Returns:
+        The lowercased account email, which is also the username.
+    """
+    return f"{account_id.strip().lower()}@{TEST_ACCOUNT_INBOX}"
+
+
+def _test_grant_target() -> str | None:
+    """Return the account-id prefix this deployment may grant to.
+
+    Returns:
+        ``"staging"`` on staging, ``"pr-<n>"`` on a PR preview, else ``None``.
+    """
+    if settings.app_environment == "staging":
+        return "staging"
+    match = re.search(r"-(pr-\d+)$", settings.app_environment)
+    return match.group(1) if match else None
+
+
+def _is_test_account(username: str, target: str) -> bool:
+    """Return whether ``username`` is a test-tool account for this deployment.
+
+    Args:
+        username: Account email.
+        target: ``staging`` or ``pr-<n>``, from :func:`_test_grant_target`.
+
+    Returns:
+        ``True`` when the email has the tool's shape and this deployment's target.
+    """
+    local, _, domain = username.partition("@")
+    return (
+        domain == TEST_ACCOUNT_INBOX
+        and _TEST_ACCOUNT_ID.fullmatch(local) is not None
+        and local.startswith(f"{target}-")
+    )
 
 
 # Subscription lifecycle events the webhook mirrors onto ``billing_customers``.
@@ -1481,6 +1560,117 @@ class StripeBillingService:
         if uncollected > 0:
             _report_uncollected_run(username, cost=cost, charged=charged, description=description or "Run")
         return charged
+
+    def grant_test_credit(
+        self,
+        username: str,
+        cents: int,
+        *,
+        reason: str,
+        approval: str,
+        idempotency_key: str,
+    ) -> GrantResult:
+        """Credit a staging or PR-preview test account, once per idempotency key.
+
+        This is the only allowed way to fund a check account. It raises the
+        purchased balance and writes one ``grant`` ledger row in one
+        transaction. The row records the reason and the approval text, and its
+        ``settlement_key`` (``testgrant:<key>``) makes a retry a no-op. A grant
+        row carries no payment intent and no ``topup`` kind, so revenue reports
+        and refund clawbacks never count it.
+
+        Args:
+            username: Test-account email, as built by :func:`check_account_email`.
+            cents: Amount to credit, in cents.
+            reason: Why the check needs the money.
+            approval: The approval text for this grant, recorded as given.
+            idempotency_key: Caller key; a repeated key credits nothing.
+
+        Returns:
+            The credited cents, the new balance, and whether the key was a replay.
+
+        Raises:
+            GrantRefusedError: The environment, account, amount, text, key or
+                daily cap fails a guard. Nothing is written.
+        """
+        target = _test_grant_target()
+        if target is None:
+            raise GrantRefusedError("APP_ENVIRONMENT must be staging or a PR preview environment")
+        reason, approval, idempotency_key = reason.strip(), approval.strip(), idempotency_key.strip()
+        if not approval:
+            raise GrantRefusedError("approval text is required")
+        if not reason:
+            raise GrantRefusedError("reason text is required")
+        if cents <= 0:
+            raise GrantRefusedError("amount must be positive")
+        settlement_key = f"{TEST_GRANT_KEY_PREFIX}{idempotency_key}"
+        if not idempotency_key or len(settlement_key) > _SETTLEMENT_KEY_MAX_LENGTH:
+            raise GrantRefusedError(
+                f"idempotency key must be 1-{_SETTLEMENT_KEY_MAX_LENGTH - len(TEST_GRANT_KEY_PREFIX)} characters"
+            )
+        description = f"Test grant: {reason} | approval: {approval}"
+        if len(description) > _LEDGER_DESCRIPTION_MAX_LENGTH:
+            raise GrantRefusedError(
+                f"reason and approval are too long: keep them under {_LEDGER_DESCRIPTION_MAX_LENGTH - 30} characters"
+            )
+        username = username.strip().lower()
+        if not _is_test_account(username, target):
+            raise GrantRefusedError(f"the account is not a {target} test account from the test-account tool")
+        now = datetime.now(UTC)
+        with Session(self._engine) as session:
+            if session.get_bind().dialect.name == "postgresql":
+                session.execute(select(func.pg_advisory_xact_lock(_TEST_GRANT_LOCK_ID)))
+            if session.get(UserModel, username) is None:
+                raise GrantRefusedError("the test account has no user row; sign it up first")
+            customer = session.get(BillingCustomerModel, username, with_for_update=True)
+            prior = session.scalar(
+                select(WalletLedgerModel.delta_cents).where(WalletLedgerModel.settlement_key == settlement_key)
+            )
+            if prior is not None:
+                balance = int(customer.balance_cents) if customer is not None else 0
+                return GrantResult(credited_cents=int(prior), balance_cents=balance, replayed=True)
+            day_start = datetime.combine(now.date(), time.min, tzinfo=UTC)
+            granted_today = int(
+                session.scalar(
+                    select(func.coalesce(func.sum(WalletLedgerModel.delta_cents), 0)).where(
+                        WalletLedgerModel.kind == "grant",
+                        WalletLedgerModel.settlement_key.like(f"{TEST_GRANT_KEY_PREFIX}%"),
+                        WalletLedgerModel.created_at >= day_start,
+                    )
+                )
+            )
+            if granted_today + cents > TEST_GRANT_DAILY_CAP_CENTS:
+                raise GrantRefusedError(
+                    f"the grant passes the ${TEST_GRANT_DAILY_CAP_CENTS / 100:.2f} daily cap: "
+                    f"${granted_today / 100:.2f} already granted today (UTC)"
+                )
+            if customer is None:
+                customer = BillingCustomerModel(
+                    username=username,
+                    stripe_customer_id=local_customer_id(username),
+                    balance_cents=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(customer)
+            customer.balance_cents = int(customer.balance_cents) + cents
+            customer.updated_at = now
+            session.add(
+                WalletLedgerModel(
+                    username=username,
+                    delta_cents=cents,
+                    kind="grant",
+                    description=description,
+                    settlement_key=settlement_key,
+                    created_at=now,
+                )
+            )
+            balance = int(customer.balance_cents)
+            session.commit()
+        logger.warning(
+            "Test credit grant: %s cents, key %s, reason %r, approval %r", cents, settlement_key, reason, approval
+        )
+        return GrantResult(credited_cents=cents, balance_cents=balance, replayed=False)
 
     def handle_webhook(self, payload: bytes, sig_header: str | None) -> None:
         """Verify and apply a Stripe webhook event, exactly once.
