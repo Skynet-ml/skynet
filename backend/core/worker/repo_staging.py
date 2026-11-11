@@ -868,7 +868,7 @@ def bind_repo_scorer(
             budget=getattr(gateway, "runtime", None),
             services=staged.services,
             # Box code can put any token it holds into a call (SKY-640).
-            record_secrets=lambda: _box_route_tokens(proposer_route),
+            record_secrets=lambda: _box_route_tokens(payload, proposer_route),
         )
         # Beside the proposer's model route, as the host proposer's token is:
         # the guest's harness launch reads only that route.
@@ -879,26 +879,36 @@ def bind_repo_scorer(
         }
 
 
-def _box_route_tokens(route: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return every token the proposer box reads from its model route.
+def _box_route_tokens(payload: Mapping[str, Any], route: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return every token the proposer box reads from its model routes.
 
     The worker attaches the host agent token after the relay is made, so
     the relay calls this for each record, not once.
 
     Args:
+        payload: The run payload, whose extra reflection models a ShinkaEvolve
+            box also receives, one ``APP_SHINKA_KEY_<n>`` each.
         route: The proposer's model route, which later steps change in place.
 
     Returns:
-        The model, host agent, embedding and MCP relay tokens that are set.
+        The model, host agent, embedding, MCP relay and extra reflection
+        model tokens that are set.
     """
     embedding = route.get(EMBEDDING_ROUTE_KEY)
     mcp = route.get(MCP_RELAY_ROUTE_KEY)
-    tokens = (
+    tokens = [
         route.get("token"),
         route.get(HOST_AGENT_TOKEN_KEY),
         embedding.get("token") if isinstance(embedding, dict) else None,
         mcp.get("token") if isinstance(mcp, dict) else None,
-    )
+    ]
+    # The same configs the blackbox service's ``_shinka_models`` turns into
+    # the box's ShinkaEvolve keys; one with no route reuses the proposer's token.
+    for config in payload.get("extra_reflection_model_configs") or ():
+        extra = config.get("extra") if isinstance(config, dict) else None
+        extra_route = extra.get(ROUTE_KEY) if isinstance(extra, dict) else None
+        if isinstance(extra_route, dict):
+            tokens.append(extra_route.get("token"))
     return tuple(str(token) for token in tokens if token)
 
 

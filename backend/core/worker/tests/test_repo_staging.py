@@ -1041,6 +1041,7 @@ _BOX_TOKENS = {
     "host_agent": "host-agent-token-0123456789",
     "embedding": "embedding-token-0123456789",
     "mcp_relay": "mcp-relay-token-0123456789",
+    "extra_reflection": "extra-reflection-token-0123456789",
 }
 
 
@@ -1061,6 +1062,10 @@ def test_every_token_the_proposer_box_holds_is_masked_in_its_service_record(
         EMBEDDING_ROUTE_KEY: {"url": "http://127.0.0.1:1/v1", "token": _BOX_TOKENS["embedding"]},
     }
     payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
+    # A ShinkaEvolve box gets each extra reflection model's token as APP_SHINKA_KEY_<n>.
+    payload["extra_reflection_model_configs"] = [
+        {"name": "vendor/extra", "extra": {ROUTE_KEY: {"url": route["url"], "token": _BOX_TOKENS["extra_reflection"]}}}
+    ]
     staged = dataclasses.replace(
         bare,
         proposer_role=RoleEnvironment(services=("maps",)),
