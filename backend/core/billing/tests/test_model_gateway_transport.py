@@ -27,14 +27,14 @@ from sqlalchemy.orm import Session
 
 from core.api.errors import DomainError
 from core.api.preflight_execution import _verify_model_routes
-from core.billing import mcp_oauth_client
+from core.billing import guest_model_proxy, mcp_oauth_client
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
 from core.billing.env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS, CONNECTORS_KEY
-from core.billing.guest_model_proxy import MCP_PATH, MCP_TOKEN_ENV, METHOD_HEADER
+from core.billing.guest_model_proxy import MCP_PATH, MCP_TOKEN_ENV, METHOD_HEADER, SERVICES_ENV
 from core.billing.mcp_oauth_client import McpOAuthError
-from core.billing.model_dispatch import ModelHTTPResult, response_complete
+from core.billing.model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
     MCP_RELAY_ROUTE_KEY,
@@ -64,11 +64,11 @@ from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.models.blackbox import BlackboxTarget
 from core.provider_registry import BYOK_PROVIDER_SLUGS
-from core.service_gateway.optimization.blackbox import harness_bridge
+from core.service_gateway.optimization.blackbox import harness_bridge, runner
 from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
 from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
-from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment
+from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment, ServiceSpec
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
@@ -2725,3 +2725,316 @@ def test_a_quiet_upstream_stream_ends_cleanly_at_the_gateway(
     assert answer.status == 200
     assert answer.stream is not None
     answer.stream.close()
+
+
+_SERVICE_KEY = "service-secret-value-5151"
+_SERVICE_HOST = "svc.example.test"
+
+
+class _EchoService:
+    """Serve a small HTTP service that echoes each request, the key it gets included, back to the caller."""
+
+    def __init__(self) -> None:
+        """Start the service on a free loopback port."""
+        self.requests: list[tuple[str, str]] = []
+        service = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Echo the method, path, headers and body as JSON, and redirect ``/api/redirect``."""
+
+            def log_message(self, format: str, *args: object) -> None:
+                """Keep the test output quiet."""
+
+            def _echo(self) -> None:
+                """Answer with the request as JSON, and the key in a response header too."""
+                service.requests.append((self.command, self.path))
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+                if self.path == "/api/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/api/landed")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                payload = json.dumps(
+                    {"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("X-Echo", self.headers.get("Authorization", ""))
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self) -> None:
+                """Echo a GET."""
+                self._echo()
+
+            def do_POST(self) -> None:
+                """Echo a POST."""
+                self._echo()
+
+            def do_PUT(self) -> None:
+                """Echo a PUT."""
+                self._echo()
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_port
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop the service."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def echo_service(monkeypatch: pytest.MonkeyPatch) -> Iterator[_EchoService]:
+    """Start the echoing service and let the relay reach its test host on loopback.
+
+    Args:
+        monkeypatch: Pins the test host to 127.0.0.1, as DNS would pin a public host.
+
+    Yields:
+        The running service.
+    """
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    service = _EchoService()
+    yield service
+    service.close()
+
+
+def _service_relay(port: int) -> McpRelay:
+    """Return a ``[proposer]`` relay that lists the ``echo`` service but not ``other``.
+
+    Args:
+        port: The echoing service's port.
+
+    Returns:
+        The relay.
+    """
+    url = f"http://{_SERVICE_HOST}:{port}/api"
+    return McpRelay(
+        "[proposer]",
+        RoleEnvironment(services=("echo",)),
+        secrets={"SVC_KEY": _SERVICE_KEY},
+        secret_hosts={"SVC_KEY": _SERVICE_HOST},
+        allowed_hosts={"SVC_KEY": (_SERVICE_HOST,)},
+        services={
+            "echo": ServiceSpec(secrets=("SVC_KEY",), url=url, headers={"Authorization": "Bearer ${SVC_KEY}"}),
+            "other": ServiceSpec(url=url),
+        },
+    )
+
+
+def test_a_box_calls_its_proposer_service_through_the_mailbox_relay(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """A box reaches only its listed service at a loopback url, never sees the key, and gets redirects unfollowed.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    store = _record_calls(gateway)
+    gateway.bind_sandbox(
+        SandboxBroker(
+            LocalSubprocessRuntime(),
+            image=IMAGE,
+            max_lifetime_seconds=30,
+            command_runner=ModelMailbox(gateway.dispatch_guest).run,
+        ),
+        image=IMAGE,
+        lifetime_seconds=30,
+    )
+    protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
+    descriptor = protected["_budget_gateway_descriptor"]
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    source = (
+        "import json, os, urllib.error, urllib.request\n"
+        "class Keep(urllib.request.HTTPRedirectHandler):\n"
+        "    def redirect_request(self, *args, **kwargs):\n"
+        "        return None\n"
+        "opener=urllib.request.build_opener(Keep)\n"
+        "url=os.environ['SKYNET_SERVICE_ECHO_URL']\n"
+        "def call(address, method='GET', data=None):\n"
+        "    request=urllib.request.Request(address, data=data, method=method, headers={'X-Custom':'yes'})\n"
+        "    try:\n"
+        "        reply=opener.open(request)\n"
+        "    except urllib.error.HTTPError as error:\n"
+        "        reply=error\n"
+        "    return {'status':reply.status,'headers':dict(reply.headers),'body':reply.read().decode()}\n"
+        "out={'url':url,'post':call(url+'lookup?q=1','POST',b'{\"a\": 1}'),'redirect':call(url+'redirect')}\n"
+        "base=url.rsplit('/echo/',1)[0]\n"
+        "out['other']=call(base+'/other/')\n"
+        "out['missing']=call(base+'/missing/')\n"
+        "print(json.dumps(out))\n"
+    )
+    runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
+    session = runtime.open(SandboxSpec(lifetime_seconds=30, image=IMAGE, network_disabled=True))
+    session.write_files({"check.py": source})
+    try:
+        result = session.run(
+            "python3 check.py", env={MCP_TOKEN_ENV: route["token"], SERVICES_ENV: '["echo"]'}, timeout_seconds=25
+        )
+    finally:
+        session.close()
+
+    assert result.ok, result.stderr
+    out = json.loads(result.stdout)
+    assert out["url"].startswith("http://127.0.0.1:")
+    assert out["url"].endswith("/v1/service/echo/")
+    post = out["post"]
+    echoed = json.loads(post["body"])
+    sent = {key.lower(): value for key, value in echoed["headers"].items()}
+    assert post["status"] == 200
+    assert (echoed["method"], echoed["path"], echoed["body"]) == ("POST", "/api/lookup?q=1", '{"a": 1}')
+    assert sent["authorization"] == "[REDACTED]"
+    assert sent["x-custom"] == "yes"
+    assert not {METHOD_HEADER, MODEL_ATTEMPT_HEADER, USAGE_TAGS_HEADER} & set(sent)
+    assert post["headers"]["X-Echo"] == "[REDACTED]"
+    assert out["redirect"]["status"] == 302
+    assert out["redirect"]["headers"]["Location"] == "/api/landed"
+    assert out["other"]["status"] == 403
+    assert "Add it: [proposer] services" in out["other"]["body"]
+    assert out["missing"]["status"] == 404
+    assert "Add a [services.missing] table" in out["missing"]["body"]
+    assert echo_service.requests == [("POST", "/api/lookup?q=1"), ("GET", "/api/redirect")]
+    assert _SERVICE_KEY not in result.stdout + result.stderr
+    assert route["token"] not in result.stdout
+    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert [(call["kind"], call["role"], call["target"], call["status"]) for call in calls] == [
+        ("host", "proposer", _SERVICE_HOST, "ok"),
+        ("host", "proposer", _SERVICE_HOST, "ok"),
+        ("host", "proposer", "other", "refused"),
+        ("host", "proposer", "missing", "refused"),
+    ]
+    assert _SERVICE_KEY not in json.dumps(calls, default=str)
+    assert route["token"] not in json.dumps(calls, default=str)
+
+
+def test_a_service_call_is_recorded_under_the_tagged_candidate(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """An HTTP service call writes one record with the run id and the candidate its usage tags name.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    tags = with_tags_header({}, {"candidate": "7", "lane": "gepa"})
+
+    reply = httpx.get(
+        f"{route['url']}/service/echo/item",
+        headers={"Authorization": f"Bearer {route['token']}", **tags},
+        trust_env=False,
+    )
+
+    assert reply.status_code == 200
+    assert reply.json()["path"] == "/api/item"
+    assert _SERVICE_KEY not in reply.text
+    [call] = store.list_calls("job-1", "gepa:7")
+    assert (call["kind"], call["role"], call["status"]) == ("host", "proposer", "ok")
+    assert store.list_calls("job-1", NO_CANDIDATE_ID) == []
+
+
+def test_the_forwarder_passes_a_service_method_and_body_to_the_gateway(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """The scoped relay forwards a service PUT with its raw body, and refuses a path that leaves the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    dispatch = model_forwarder({MCP_RELAY_ROUTE_KEY: route})
+
+    answer = dispatch(route["token"], "/v1/service/echo/item", b"raw bytes", {METHOD_HEADER: "PUT"})
+
+    echoed = json.loads(answer.body)
+    assert answer.status == 200
+    assert (echoed["method"], echoed["path"], echoed["body"]) == ("PUT", "/api/item", "raw bytes")
+    assert _SERVICE_KEY.encode() not in answer.body
+    with pytest.raises(ValueError, match="outside the service relay"):
+        dispatch(route["token"], "/v1/service/echo/../x", b"", {METHOD_HEADER: "GET"})
+    assert echo_service.requests == [("PUT", "/api/item")]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/service/echo/../x",
+        "/v1/service/echo/a/%2e%2e/x",
+        "/v1/service/echo/%2E%2E",
+        "/v1/service/echo/%252e%252e/x",
+        "/v1/service/echo/./x",
+        "/v1/service/echo/..\\x",
+        "/v1/service/echo/..%5cx",
+        "/v1/service/echo/..;/x",
+        "/v1/service/echo/x/..%5c..%5cadmin",
+        "/v1/service/echo/..%00/admin",
+        "/v1/service/echo/a;b",
+        "/v1/service/echo/..%3F",
+        "/v1/service/echo/..%3Fx",
+        "/v1/service/echo/..%253F/x",
+        "/v1/service/echo/..%23",
+        "/v1/service/echo/..%2523",
+        "/v1/service/echo/x/..%3F/..%3F",
+        "/v1/service/echo/%c0%ae%c0%ae/x",
+        "/v1/service/echo/a%20b",
+        "/v1/service/echo/%EF%BC%8E%EF%BC%8E/x",
+    ],
+)
+def test_the_mailbox_path_refuses_a_service_path_that_leaves_the_service(
+    gateway: ModelGateway, echo_service: _EchoService, path: str
+) -> None:
+    """A dot segment, raw or percent-encoded, gets a 400 and a refused record, and never reaches the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+        path: The path the box asks for.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+
+    answer = gateway.dispatch_guest(route["token"], path, b"", {METHOD_HEADER: "GET"})
+
+    assert answer.status == 400
+    assert b"a path outside its url" in answer.body
+    assert echo_service.requests == []
+    [call] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (call["kind"], call["role"], call["target"], call["status"]) == ("host", "proposer", "echo", "refused")
+
+
+def test_the_mailbox_path_reaches_a_sub_path_and_drops_encoding_and_range(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """A deeper path under the service passes; the guest's accept-encoding and range never reach the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    headers = {METHOD_HEADER: "GET", "Accept-Encoding": "x-guest-encoding", "Range": "bytes=0-3", "X-Custom": "yes"}
+
+    answer = gateway.dispatch_guest(route["token"], "/v1/service/echo/v2/a..b/item.json", b"", headers)
+
+    echoed = json.loads(answer.body)
+    sent = {key.lower(): value for key, value in echoed["headers"].items()}
+    assert answer.status == 200
+    assert echoed["path"] == "/api/v2/a..b/item.json"
+    assert "range" not in sent
+    assert "x-guest-encoding" not in sent.get("accept-encoding", "")
+    assert sent["x-custom"] == "yes"
+    assert _SERVICE_KEY.encode() not in answer.body
+
+
+def test_the_box_service_variable_matches_the_runner() -> None:
+    """The box proxy names each service variable as the runner does, so a role's code reads one name everywhere."""
+    for name in ("echo", "geo-coder", "maps.v2"):
+        assert guest_model_proxy.service_env_name(name) == runner.service_env_name(name)

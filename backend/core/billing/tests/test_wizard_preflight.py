@@ -581,7 +581,8 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     client, _engine, calls = setup_client
     archive = tmp_path / "tree.tgz"
     raw = (
-        b'[proposer]\nservices = []\n[services.maps]\nurl = "https://maps.example.com"\n'
+        b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
         b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }\n'
     )
     with tarfile.open(archive, "w:gz") as packed:
@@ -610,7 +611,7 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
         ("setup", "repo_gate.unenforced_cloud"),
         ("setup", "repo_gate.missing_secret"),
     ]
-    assert body["checks"][0]["message"] == t_locale("he", "repo_gate.unenforced_cloud", key="[proposer] services")
+    assert body["checks"][0]["message"] == t_locale("he", "repo_gate.unenforced_cloud", key="[target.planner] network")
     assert not inferred
     assert not calls
     assert body["budget"]["setup_spent_cents"] == "0"

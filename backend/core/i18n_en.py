@@ -262,7 +262,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "repo_gate.secret_host_not_allowed": "The secret {secret} may go only to {allowed}, but the repository sends it to {host}. Add {host} to the allowed hosts of {secret} in the run, or change the url.",
     "repo_gate.secret_host_unlisted": "The secret {secret} has no allowed hosts, but the repository sends it to {host}. Add {host} to the allowed hosts of {secret} in the run.",
     "repo_gate.managed_secret_unavailable": f"The secret {{secret}} is bound to a {APP_NAME} key, but {APP_NAME} has no key for {{host}}. Bind the secret to user, or use one of these hosts, which have a {APP_NAME} key: {{known}}.",
-    "repo_gate.proposer_hosts_unsupported": "optimize.toml sets [proposer] network to {hosts}. Allowed hosts for the proposer are not supported yet. Remove the list to run.",
     "serve.subscription_model_hosted": (
         f"This run used a local subscription model. Serve it in the {APP_NAME} Mac app, "
         "or start a new optimization with a managed model or your own provider key."

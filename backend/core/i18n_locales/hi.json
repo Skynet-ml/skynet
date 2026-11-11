@@ -325,7 +325,6 @@
     "repo_gate.secret_host_unlisted": "सीक्रेट {secret} का कोई अनुमत होस्ट नहीं है, लेकिन रिपॉज़िटरी इसे {host} पर भेजती है। रन में {secret} के अनुमत होस्ट में {host} जोड़ें।",
     "repo_gate.managed_secret_unavailable": "सीक्रेट {secret} एक {term.appName} कुंजी से जुड़ा है, लेकिन {term.appName} के पास {host} के लिए कोई कुंजी नहीं है। सीक्रेट को user से जोड़ें, या इनमें से कोई होस्ट इस्तेमाल करें जिनके पास {term.appName} कुंजी है: {known}।",
     "repo_gate.unknown_connector": "optimize.toml में सेवा {service} कोई कनेक्टर नहीं है। इनमें से कोई एक नाम इस्तेमाल करें: {known}।",
-    "repo_gate.proposer_hosts_unsupported": "optimize.toml में [proposer] network को {hosts} पर सेट किया गया है। प्रस्तावक के लिए अनुमत होस्ट अभी समर्थित नहीं हैं। चलाने के लिए सूची हटाएँ।",
     "optimization.retry_no_payload": "स्रोत ऑप्टिमाइज़ेशन में पुनः प्रयास करने के लिए कोई सहेजा गया पेलोड नहीं है।",
     "optimization.retry_wrong_status": "केवल 'failed' या 'cancelled' स्थिति वाले ऑप्टिमाइज़ेशन का ही पुनः प्रयास किया जा सकता है — यह '{status}' में है। इसके बजाय इसे क्लोन करें।",
     "quota.reached": "आप {quota, plural, one {1 ऑप्टिमाइज़ेशन} other {# ऑप्टिमाइज़ेशन}} की अपनी सीमा तक पहुँच गए हैं। नए बनाने के लिए पुराने ऑप्टिमाइज़ेशन हटाएँ।",

@@ -38,7 +38,7 @@ from .credential_safety import credential_fragments, scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
 from .env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS_KEY
-from .guest_model_proxy import MCP_PATH, METHOD_HEADER
+from .guest_model_proxy import MCP_PATH, METHOD_HEADER, SERVICE_PATH
 from .mcp_broker import McpToolsBroker, _pinned_address, _PinnedTransport
 from .mcp_oauth_client import McpOAuthError, access_token, connected_server_url
 from .model_batch import BatchCollector
@@ -215,6 +215,18 @@ class McpRelayEndpoint(Protocol):
         self, name: str, method: str, body: bytes, headers: Mapping[str, str], recorder: CallRecorder | None
     ) -> ModelHTTPResult:
         """Send one MCP request and return the masked answer."""
+        ...
+
+    def service(
+        self,
+        name: str,
+        path: str,
+        method: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        recorder: CallRecorder | None,
+    ) -> ModelHTTPResult:
+        """Send one request to a service the role lists and return the masked answer."""
         ...
 
 
@@ -396,7 +408,7 @@ class ModelGateway:
 
             def do_GET(self) -> None:
                 """Return state only to a token already bound to this spending authority."""
-                if self.path.startswith(MCP_PATH):
+                if self.path.startswith((MCP_PATH, SERVICE_PATH)):
                     self._mcp_request()
                     return
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
@@ -413,14 +425,29 @@ class ModelGateway:
                 self._reply(ModelHTTPResult(200, "application/json", json.dumps(body, default=str).encode()))
 
             def do_DELETE(self) -> None:
-                """End an MCP session; no other path takes DELETE."""
-                if not self.path.startswith(MCP_PATH):
-                    self._error(405, "method_not_allowed", "Only an MCP relay path takes DELETE.")
+                """End an MCP session, or relay a service DELETE; no other path takes DELETE."""
+                if not self.path.startswith((MCP_PATH, SERVICE_PATH)):
+                    self._error(405, "method_not_allowed", "Only an MCP or service relay path takes DELETE.")
+                    return
+                self._mcp_request()
+
+            def do_PUT(self) -> None:
+                """Relay a service PUT; no other path takes PUT."""
+                self._service_request()
+
+            def do_PATCH(self) -> None:
+                """Relay a service PATCH; no other path takes PATCH."""
+                self._service_request()
+
+            def _service_request(self) -> None:
+                """Relay a request whose method only a service relay path takes."""
+                if not self.path.startswith(SERVICE_PATH):
+                    self._error(405, "method_not_allowed", f"Only a service relay path takes {self.command}.")
                     return
                 self._mcp_request()
 
             def _mcp_request(self) -> None:
-                """Send one MCP request of a role box to its own server through the bound relay."""
+                """Send one MCP or service request of a role box through its bound relay."""
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 if gateway._mcp_relay(token) is None:
                     self._error(401, "unauthorized", "Unknown scoped MCP relay route.")
@@ -446,7 +473,7 @@ class ModelGateway:
 
             def do_POST(self) -> None:
                 """Admit the fully resolved SDK body before forwarding any provider request."""
-                if self.path.startswith(MCP_PATH):
+                if self.path.startswith((MCP_PATH, SERVICE_PATH)):
                     self._mcp_request()
                     return
                 if self.path == "/v1/_sandbox":
@@ -814,10 +841,12 @@ class ModelGateway:
         return {"url": self.url, "token": self._evaluator_token}
 
     def bind_mcp_relay(self, relay: McpRelayEndpoint) -> dict[str, str]:
-        """Serve one role box's MCP servers at ``/v1/mcp/<name>`` behind their own token.
+        """Serve one role box's MCP servers at ``/v1/mcp/<name>`` and services at ``/v1/service/<name>/``.
 
-        Write the box's ``.mcp.json`` with ``repo_services.box_mcp_config`` and
-        the box's relay url; the box's proxy adds the token to each request.
+        Both sit behind one token. Write the box's ``.mcp.json`` with
+        ``repo_services.box_mcp_config`` and the box's relay url; the box's
+        proxy adds the token to each request and gives the command each
+        service's url (SKY-612).
 
         Args:
             relay: Sends the role's MCP requests to its own servers.
@@ -848,11 +877,11 @@ class ModelGateway:
     def _mcp_relay_call(
         self, token: str, path: str, body: Mapping[str, Any] | bytes, headers: Mapping[str, str]
     ) -> ModelHTTPResult:
-        """Send one MCP relay request and write it under this run and the candidate its usage tags name.
+        """Send one MCP or service relay request and write it under this run and the candidate its usage tags name.
 
         Args:
             token: The MCP relay token.
-            path: ``/v1/mcp/<name>``, with the name percent-encoded.
+            path: ``/v1/mcp/<name>`` or ``/v1/service/<name>/<path>``, with the name percent-encoded.
             body: The client's raw body; a mapping from an in-process caller.
             headers: The request headers, with the HTTP method in ``METHOD_HEADER``.
 
@@ -872,6 +901,9 @@ class ModelGateway:
             recorder = recorder.bind(candidate_id=call_candidate_key(candidate, header_tags(lowered).get(LANE_KEY)))
         method = lowered.get(METHOD_HEADER, "POST").upper()
         raw = body if isinstance(body, bytes) else json.dumps(dict(body)).encode()
+        if path.startswith(SERVICE_PATH):
+            name, _, rest = path[len(SERVICE_PATH) :].partition("/")
+            return relay.service(unquote(name), rest, method, raw, lowered, recorder)
         name = unquote(path[len(MCP_PATH) :].partition("?")[0])
         return relay.dispatch(name, method, raw, lowered, recorder)
 
@@ -960,17 +992,17 @@ class ModelGateway:
 
         Args:
             token: Short-lived scoped role credential registered by this parent.
-            path: Supported model protocol path, own-budget state endpoint or MCP relay path.
-            body: Exact model request emitted by the guest SDK; raw bytes for an MCP relay path.
+            path: Supported model protocol path, own-budget state endpoint, or MCP or service relay path.
+            body: Exact model request emitted by the guest SDK; raw bytes for an MCP or service relay path.
             headers: Permitted protocol headers, never upstream credentials.
 
         Returns:
             Model response after authoritative admission and settlement.
 
         Raises:
-            TypeError: When a path other than an MCP relay path gets raw bytes.
+            TypeError: When a path other than an MCP or service relay path gets raw bytes.
         """
-        if path.startswith(MCP_PATH):
+        if path.startswith((MCP_PATH, SERVICE_PATH)):
             return self._mcp_relay_call(token, path, body, headers)
         if isinstance(body, bytes):
             raise TypeError("A JSON object is required.")

@@ -23,7 +23,7 @@ import pytest
 from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.task import Task as UpstreamTask
 
-from core.billing.guest_model_proxy import MCP_TOKEN_ENV
+from core.billing.guest_model_proxy import MCP_TOKEN_ENV, SERVICES_ENV
 from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.pricing import model_token_costs
 from core.billing.runtime import UsagePendingError
@@ -2555,6 +2555,62 @@ def test_a_routed_proposer_mcp_server_needs_the_mailbox_relay(tmp_path: Path, mo
     )
 
     with pytest.raises(ServiceError, match="require the box's mailbox relay"):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.calls == []
+
+
+_SERVICE_ROUTE = {
+    "url": "https://gateway.example/v1",
+    "token": "scoped",
+    MCP_RELAY_ROUTE_KEY: {"token": "mcp-relay-token", "servers": [], "services": ["maps"]},
+}
+
+
+def test_a_proposer_gets_its_routed_service_names_in_the_box_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass the [proposer] service names and the relay token only in the box env, for any harness (SKY-612).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive, the budget stop and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    # The parent's budget authority is not part of this unit run.
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:3210/v1")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="pi"), budget_route=_SERVICE_ROUTE
+    )
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    env = session.calls[-1][1]["env"]
+    assert json.loads(env[SERVICES_ENV]) == ["maps"]
+    assert env[MCP_TOKEN_ENV] == "mcp-relay-token"
+    assert "mcp-relay-token" not in session.files["native_input.json"]
+
+
+def test_routed_proposer_services_need_the_mailbox_relay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse the run when the box has no mailbox relay, instead of starting a proposer that cannot reach them.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.delenv("APP_BUDGET_RELAY_URL", raising=False)
+    monkeypatch.delenv("SKYNET_BUDGET_RELAY_URL", raising=False)
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="pi"), budget_route=_SERVICE_ROUTE
+    )
+
+    with pytest.raises(ServiceError, match="services require the box's mailbox relay"):
         run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
 
     assert session.calls == []

@@ -45,15 +45,24 @@ Place = Literal["local", "cloud"]
 # ``harness.MCP_HARNESSES`` load them; any other harness stops the launch
 # (SKY-610). Each ``[target.<name>]`` stage reaches the servers of its own MCP
 # file only through its stage box's relay, which checks the stage's own role
-# (SKY-611).
+# (SKY-611). The proposer's box reaches the services ``[proposer] services``
+# lists only through the parent's relay, which checks the role and fills each
+# secret by host (SKY-612).
 _METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
 _PROPOSER_NETWORK = frozenset({"proposer.network"})
 _PROPOSER_MCP = frozenset({"proposer.mcp"})
+_PROPOSER_SERVICES = frozenset({"proposer.services"})
 _STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
 _TARGET_STAGES = frozenset({"target.entry", "target.timeout", "target.vcpus", "target.illegal"})
 _TARGET_MCP = frozenset({"target.mcp"})
 _ENFORCED_EVERYWHERE = (
-    _METRIC_HIDING | _PROPOSER_NETWORK | _PROPOSER_MCP | _STAGE_SERVICES | _TARGET_STAGES | _TARGET_MCP
+    _METRIC_HIDING
+    | _PROPOSER_NETWORK
+    | _PROPOSER_MCP
+    | _PROPOSER_SERVICES
+    | _STAGE_SERVICES
+    | _TARGET_STAGES
+    | _TARGET_MCP
 )
 ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 

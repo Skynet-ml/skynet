@@ -94,8 +94,8 @@ class ModelMailbox:
                 headers[MODEL_ATTEMPT_HEADER] = document["id"]
                 token = headers.get("authorization", "").removeprefix("Bearer ") or headers.get("x-api-key", "")
                 body = base64.b64decode(document["body"])
-                # An MCP server takes the client's bytes as they are; only a model request is one JSON object.
-                if not str(document["path"]).startswith(guest_model_proxy.MCP_PATH):
+                # An MCP server or a service takes the client's bytes as they are; a model request is one JSON object.
+                if not str(document["path"]).startswith((guest_model_proxy.MCP_PATH, guest_model_proxy.SERVICE_PATH)):
                     body = json.loads(body)
                 response = self._dispatch(token, document["path"], body, headers)
             except BudgetReached as error:

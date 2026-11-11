@@ -11,6 +11,7 @@ import binascii
 import contextlib
 import json
 import logging
+import string
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping
@@ -23,19 +24,21 @@ import httpx
 
 from ..billing.budgets import BudgetError
 from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms, relay_request
-from ..billing.guest_model_proxy import MCP_PATH, METHOD_HEADER
+from ..billing.guest_model_proxy import MCP_PATH, METHOD_HEADER, SERVICE_PATH
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.mcp_broker import _pinned_address, _PinnedTransport
-from ..billing.model_dispatch import ModelHTTPResult
+from ..billing.model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult
 from ..billing.model_gateway import MCP_RELAY_ROUTE_KEY, _tool_target
 from ..billing.operation_pricing import UnpricedOperationError
-from ..billing.usage_tags import LANE_KEY, current_tags
+from ..billing.usage_tags import LANE_KEY, USAGE_TAGS_HEADERS, current_tags
 from ..config import settings
 from ..models.blackbox import BLACKBOX_TARGET_REPO
-from ..service_gateway.optimization.blackbox.repo_constraints import RoleEnvironment
+from ..service_gateway.optimization.blackbox.repo_constraints import RoleEnvironment, ServiceSpec
 from ..service_gateway.optimization.blackbox.repo_scorer import (
     _DECODED_HEADERS,
     _HEAD_END,
+    _HOP_HEADERS,
+    _HTTP_METHOD,
     _MCP_STREAMS,
     _SERVICE_BODY_BYTES,
     _SERVICE_TIMEOUT_SECONDS,
@@ -45,7 +48,7 @@ from ..service_gateway.optimization.blackbox.repo_scorer import (
     _streamed,
     _UnreachableError,
 )
-from ..service_gateway.optimization.blackbox.repo_services import RoleRelayError, mcp_endpoint
+from ..service_gateway.optimization.blackbox.repo_services import RoleRelayError, mcp_endpoint, service_endpoint
 from ..storage.run_call_store import call_candidate_key
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,23 @@ NO_CANDIDATE_ID = "run"
 _MCP_REQUEST_HEADERS = frozenset({"accept", "content-type", "last-event-id", "mcp-protocol-version", "mcp-session-id"})
 _MCP_ANSWER_HEADERS = frozenset({"mcp-session-id", "mcp-protocol-version"})
 _MCP_METHODS = frozenset({"GET", "POST", "DELETE"})
+# A service gets the guest's own headers, but never the relay token or the parent's bookkeeping headers.
+# The answer must come back decoded and whole, or the masker cannot find a filled secret in it.
+_SERVICE_DROPPED_HEADERS = (
+    _HOP_HEADERS
+    | USAGE_TAGS_HEADERS
+    | {
+        "authorization",
+        "accept-encoding",
+        "range",
+        METHOD_HEADER,
+        MODEL_ATTEMPT_HEADER,
+    }
+)
+# The answer's content type travels on its own, and each server on the way back sets its own date and name.
+_SERVICE_ANSWER_DROPPED = frozenset({"content-type", "date", "server"})
+# A server may decode a path again, so a fully decoded service path may hold only plain URL path characters.
+_SERVICE_PATH_CHARS = frozenset(string.ascii_letters + string.digits + "-._~!$&'()*+,=:@/")
 
 
 class RunCallSink(Protocol):
@@ -259,6 +279,8 @@ class McpRelay:
     every filled value from the answer. A server outside the role's file gets
     a 403 that names the file to change. The relay url builder is
     ``repo_services.box_mcp_config``, so any harness can write the same urls.
+    The same relay sends the box's requests to the services the role lists,
+    in the same way (SKY-612).
     """
 
     def __init__(
@@ -271,19 +293,22 @@ class McpRelay:
         secret_hosts: Mapping[str, str] | None = None,
         allowed_hosts: Mapping[str, Collection[str]] | None = None,
         budget: Any = None,
+        services: Mapping[str, ServiceSpec] | None = None,
     ) -> None:
         """Bind the relay to one role and the run's secrets.
 
         Args:
             label: The role's label, such as ``[proposer]``.
-            role: The role, with the servers of its own MCP file.
+            role: The role, with the servers of its own MCP file and the services it lists.
             secrets: The run's secret values, filled in here in the parent.
             bindings: ``user`` or ``managed`` for each secret name.
             secret_hosts: The one host each secret may go to.
             allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
             budget: The run budget, which meters a call with a Skynet key.
+            services: The file's ``[services]`` tables.
         """
         self._label = label
+        self._services = dict(services or {})
         self._role = role
         self._secrets = dict(secrets or {})
         self._bindings = dict(bindings or {})
@@ -342,6 +367,76 @@ class McpRelay:
             self._release()
         return response
 
+    def service(
+        self,
+        name: str,
+        path: str,
+        method: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        recorder: CallRecorder | None,
+    ) -> ModelHTTPResult:
+        """Send one request to a service the role lists and return the masked answer.
+
+        Args:
+            name: The service, as the box's service url names it.
+            path: The request path after the service url, with its query.
+            method: The HTTP method.
+            body: The client's raw request body.
+            headers: The guest's headers; the relay token and hop headers stay here.
+            recorder: Writes the call into the run record; ``None`` records nothing.
+
+        Returns:
+            The answer, with the service's headers. A refused call gets a 404
+            for an unknown service, a 403 for one the role does not list, or a
+            400 for a malformed request; each error names the fix.
+
+        Raises:
+            BudgetError: When the budget stops a metered call.
+            UnpricedOperationError: When a metered call has no price.
+        """
+        if recorder is not None:
+            recorder = recorder.bind(role=self._label.strip("[]"))
+        label = f"Service {name!r}"
+        try:
+            origin, declared = service_endpoint(self._label, self._role, self._services, name)
+        except RoleRelayError as error:
+            return self._refused(recorder, name, 404 if name not in self._services else 403, str(error))
+        origin = str(origin)
+        # An empty path is the declared url itself, as in the stage relay.
+        url = origin.rstrip("/") + "/" + path.lstrip("/") if path else origin
+        try:
+            base, target = httpx.URL(origin), httpx.URL(url)
+        except httpx.InvalidURL:
+            base = target = None
+        if (
+            not _HTTP_METHOD.fullmatch(method)
+            or _unsafe_path(path)
+            or base is None
+            or target is None
+            or (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
+            or not _under(target, base)
+        ):
+            return self._refused(recorder, name, 400, f"{label} got a malformed request or a path outside its url.")
+        return self._request(url, declared, label, name, method, body, headers, recorder, kind="host")
+
+    @staticmethod
+    def _refused(recorder: CallRecorder | None, name: str, status: int, message: str) -> ModelHTTPResult:
+        """Record a service call the relay refused, then return the refusal.
+
+        Args:
+            recorder: Writes the call into the run record.
+            name: The service; the record's target.
+            status: The HTTP status.
+            message: Why the relay refused; it names the fix.
+
+        Returns:
+            The error answer.
+        """
+        if recorder is not None:
+            recorder.record(recorder.start(), kind="host", target=name, status="refused", failure_reason=message)
+        return _mcp_error(status, message)
+
     def _release(self) -> None:
         """Free one event stream place."""
         with self._streams_lock:
@@ -357,18 +452,23 @@ class McpRelay:
         body: bytes,
         headers: Mapping[str, str],
         recorder: CallRecorder | None,
+        *,
+        kind: str = "mcp",
     ) -> ModelHTTPResult:
         """Send the request through :func:`relay_request` to the declared url, pinned and with no redirect.
 
         Args:
-            url: The server's declared url.
+            url: The server's declared url, or the service's url with the guest's path.
             declared: The declared headers, with ``${SECRET}`` placeholders.
-            label: ``MCP server '<name>'``, for the errors.
-            name: The server, for the record target.
+            label: ``MCP server '<name>'`` or ``Service '<name>'``, for the errors.
+            name: The server or service, for the record target and the log.
             method: The HTTP method.
             body: The raw request body.
             headers: The guest's headers.
             recorder: Writes the call into the run record.
+            kind: ``mcp`` for an MCP server, ``host`` for a service. A service
+                gets the guest's own headers, never streams, and answers with
+                its own headers.
 
         Returns:
             The masked answer.
@@ -381,7 +481,8 @@ class McpRelay:
         guest = [
             (key, value)
             for key, value in headers.items()
-            if key.lower() in _MCP_REQUEST_HEADERS and key.lower() not in overrides
+            if (key.lower() in _MCP_REQUEST_HEADERS if kind == "mcp" else key.lower() not in _SERVICE_DROPPED_HEADERS)
+            and key.lower() not in overrides
         ]
         status: list[int] = []
 
@@ -427,7 +528,11 @@ class McpRelay:
                     + _HEAD_END[2:]
                 )
                 status.append(response.status_code)
-                if method == "GET" and response.headers.get("content-type", "").lower().startswith("text/event-stream"):
+                if (
+                    kind == "mcp"
+                    and method == "GET"
+                    and response.headers.get("content-type", "").lower().startswith("text/event-stream")
+                ):
                     return _streamed(stack.pop_all(), head, response.iter_bytes())
                 answer = bytearray()
                 for chunk in response.iter_bytes():
@@ -448,8 +553,8 @@ class McpRelay:
                 send=send,
                 runtime=self._budget,
                 recorder=recorder,
-                kind="mcp",
-                target=_tool_target(name, url, _json_object(body)),
+                kind=kind,
+                target=_tool_target(name, url, _json_object(body)) if kind == "mcp" else "",
             )
         except _AnswerTooLargeError:
             return _mcp_error(502, f"{label} answered with more than 4 MiB.")
@@ -461,11 +566,11 @@ class McpRelay:
             return _mcp_error(403, f"{label} was refused: {error}")
         except (_UnreachableError, httpx.HTTPError) as error:
             # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
-            logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
+            logger.warning("%s request failed in the parent: %s", label, type(error).__name__)
             return _mcp_error(502, f"{label} could not be reached.")
         if isinstance(answer, bytes):
             head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
-            return _answer(status[0], head, content)
+            return _answer(status[0], head, content, kind=kind)
         # The masker may hold the head back with the first event; read on until the head is whole.
         buffered = b"\r\n"
         try:
@@ -538,20 +643,26 @@ class _ClosingStream:
             self._on_close()
 
 
-def _answer(status: int, head: bytes, content: bytes) -> ModelHTTPResult:
+def _answer(status: int, head: bytes, content: bytes, *, kind: str = "mcp") -> ModelHTTPResult:
     """Build the box's answer from the masked header lines and body.
 
     Args:
         status: The server's HTTP status.
         head: The masked header lines.
         content: The masked body.
+        kind: ``mcp`` keeps only the MCP headers; ``host`` keeps each
+            service header, a redirect's location included.
 
     Returns:
-        The answer with its content type and MCP headers only.
+        The answer with its content type and the headers its kind keeps.
     """
     lines = [line.decode("latin-1").split(": ", 1) for line in head.split(b"\r\n") if b": " in line]
     content_type = next((value for key, value in lines if key.lower() == "content-type"), "application/json")
-    kept = tuple((key, value) for key, value in lines if key.lower() in _MCP_ANSWER_HEADERS)
+    kept = tuple(
+        (key, value)
+        for key, value in lines
+        if (key.lower() in _MCP_ANSWER_HEADERS if kind == "mcp" else key.lower() not in _SERVICE_ANSWER_DROPPED)
+    )
     return ModelHTTPResult(status, content_type, content, headers=kept)
 
 
@@ -570,6 +681,74 @@ def _mcp_name(path: str) -> str | None:
     if not segment or any(mark in segment for mark in "/?#") or name in {".", ".."}:
         return None
     return name
+
+
+def _service_path_safe(path: str) -> bool:
+    """Check that a service relay path names one service and stays under it.
+
+    Args:
+        path: A path under ``/v1/service/``.
+
+    Returns:
+        False for an empty name, a raw query or fragment in the name, or a
+        path that :func:`_unsafe_path` refuses; True otherwise.
+    """
+    name, _, rest = path[len(SERVICE_PATH) :].partition("/")
+    return bool(name) and not any(mark in name for mark in "?#") and not _unsafe_path(f"{name}/{rest}")
+
+
+def _decoded(path: str) -> str:
+    """Return a path without its query, percent-decoded until nothing changes.
+
+    A server may decode ``%252e`` to ``%2e`` and then to ``.``, so one pass is not enough.
+
+    Args:
+        path: A path, with or without a query.
+
+    Returns:
+        The fully decoded path.
+    """
+    path = path.partition("?")[0]
+    while (decoded := unquote(path)) != path:
+        path = decoded
+    return path
+
+
+def _unsafe_path(path: str) -> bool:
+    """Check a relative service path for anything a server could read as a way out of the service.
+
+    Only the characters of ``_SERVICE_PATH_CHARS`` may stay after full
+    decoding. So ``?``, ``#``, ``\\``, ``;``, ``%``, spaces, control
+    characters and all non-ASCII characters fail: a server that decodes
+    again could read them as a query, a separator or a dot.
+
+    Args:
+        path: The path after the service name, with its query.
+
+    Returns:
+        True when the decoded path has a character outside the allowlist,
+        or a ``.`` or ``..`` segment.
+    """
+    path = _decoded(path)
+    return not _SERVICE_PATH_CHARS.issuperset(path) or bool({".", ".."} & set(path.split("/")))
+
+
+def _under(target: httpx.URL, base: httpx.URL) -> bool:
+    """Check that a request url stays under the service's declared path, as a directory.
+
+    It compares the paths as :func:`_unsafe_path` reads them, fully decoded.
+
+    Args:
+        target: The url the relay is about to call.
+        base: The service's declared url.
+
+    Returns:
+        True when the target path is the base path or below it: base
+        ``/api`` allows ``/api`` and ``/api/x``, not ``/apix``.
+    """
+    root = _decoded(base.raw_path.decode("ascii")).rstrip("/")
+    path = _decoded(target.raw_path.decode("ascii"))
+    return path == root or path.startswith(root + "/")
 
 
 def model_forwarder(payload: dict[str, Any]) -> Any:
@@ -641,7 +820,7 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
     register(payload.get("_skynet_evaluator_route"), frozenset({"/v1/_evaluator", "/v1/_budget/state"}))
     mcp_route = payload.get(MCP_RELAY_ROUTE_KEY)
     register(mcp_route, frozenset())
-    # Each server of the role's MCP file has its own path under the prefix.
+    # Each server of the role's MCP file, and each service it lists, has its own path under its prefix.
     mcp_tokens = {mcp_route["token"]} if isinstance(mcp_route, dict) else set()
     target = payload.get("target")
     evaluator_timeout = 630.0
@@ -669,6 +848,10 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
             if _mcp_name(path) is None:
                 raise ValueError("The guest requested a path outside the MCP relay.")
             return _forward_mcp(routes[token][0] + path, token, body, headers)
+        if token in mcp_tokens and path.startswith(SERVICE_PATH):
+            if not _service_path_safe(path):
+                raise ValueError("The guest requested a path outside the service relay.")
+            return _forward_mcp(routes[token][0] + path, token, body, headers)
         if token not in routes or path not in routes[token][1]:
             raise ValueError("The guest requested an unknown metered model capability.")
         timeout = evaluator_timeout if path == "/v1/_evaluator" else 600
@@ -692,10 +875,10 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
 
 
 def _forward_mcp(url: str, token: str, body: bytes, headers: Mapping[str, str]) -> ModelHTTPResult:
-    """Send one MCP relay request to the parent gateway with its own method, and stream an event stream back.
+    """Send one MCP or service relay request to the parent gateway with its own method; stream an MCP event stream back.
 
     Args:
-        url: The gateway's MCP relay url for the server.
+        url: The gateway's MCP relay url for the server, or its service relay url.
         token: The MCP relay token.
         body: The client's raw body.
         headers: The mailbox headers, with the method header.
@@ -704,6 +887,8 @@ def _forward_mcp(url: str, token: str, body: bytes, headers: Mapping[str, str]) 
         The gateway's answer; a GET event stream comes back with ``stream`` set.
     """
     method = headers.get(METHOD_HEADER, "POST")
+    # The gateway already kept only the headers the box may see; its own hop headers stay here.
+    service = urlsplit(url).path.startswith(SERVICE_PATH)
     sent = {key: value for key, value in headers.items() if key.lower() != "authorization"}
     client = httpx.Client(trust_env=False, timeout=600)
     try:
@@ -718,9 +903,17 @@ def _forward_mcp(url: str, token: str, body: bytes, headers: Mapping[str, str]) 
         response.status_code,
         response.headers.get("Content-Type", "application/json"),
         b"",
-        headers=tuple((key, value) for key, value in response.headers.items() if key.lower() in _MCP_ANSWER_HEADERS),
+        headers=tuple(
+            (key, value)
+            for key, value in response.headers.items()
+            if (
+                key.lower() not in _DECODED_HEADERS | _SERVICE_ANSWER_DROPPED
+                if service
+                else key.lower() in _MCP_ANSWER_HEADERS
+            )
+        ),
     )
-    if method == "GET" and answer.content_type.lower().startswith("text/event-stream"):
+    if not service and method == "GET" and answer.content_type.lower().startswith("text/event-stream"):
         return replace(
             answer, stream=_ClosingStream(response.iter_bytes(), lambda: _close_gateway_stream(client, response))
         )

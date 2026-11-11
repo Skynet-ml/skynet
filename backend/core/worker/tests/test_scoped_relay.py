@@ -287,8 +287,86 @@ def test_the_mcp_route_refuses_a_path_that_leaves_one_server_name(client: type[_
     assert client.timeouts == []
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/service/",
+        "/v1/service//x",
+        "/v1/service/../_sandbox",
+        "/v1/service/%2e%2e/x",
+        "/v1/service/echo/../other/",
+        "/v1/service/echo/a/%2E%2E/b",
+        "/v1/service/echo/%252e%252e/x",
+        "/v1/service/echo/..\\x",
+        "/v1/service/echo/..%5cx",
+        "/v1/service/echo/..;/x",
+        "/v1/service/echo/x/..%5c..%5cadmin",
+        "/v1/service/echo/..%00/admin",
+        "/v1/service/echo/a;b",
+        "/v1/service/echo/..%3F",
+        "/v1/service/echo/..%3Fx",
+        "/v1/service/echo/..%253F/x",
+        "/v1/service/echo/..%23",
+        "/v1/service/echo/..%2523",
+        "/v1/service/echo/x/..%3F/..%3F",
+        "/v1/service/echo/%c0%ae%c0%ae/x",
+        "/v1/service/echo/a%20b",
+        "/v1/service/echo/%EF%BC%8E%EF%BC%8E/x",
+        "/v1/service/echo/./a",
+        "/v1/service/echo?x/",
+        "/v1/service/echo#x/",
+    ],
+)
+def test_the_service_route_refuses_a_path_that_leaves_one_service(client: type[_Client], path: str) -> None:
+    """A service relay path must name one service and stay under it; anything else never leaves the parent.
+
+    Args:
+        client: The fake HTTP client.
+        path: The path the box asks for.
+    """
+    dispatch = scoped_relay.model_forwarder({MCP_RELAY_ROUTE_KEY: _MCP_ROUTE})
+
+    with pytest.raises(ValueError, match="outside the service relay"):
+        dispatch(_MCP_ROUTE["token"], path, b"", {})
+
+    assert client.timeouts == []
+
+
+@pytest.mark.parametrize("path", ["/v1/service/echo/v2/a..b/item.json", "/v1/service/echo/item?q=a;b"])
+def test_the_service_route_allows_a_plain_sub_path_and_any_query(path: str) -> None:
+    """A deeper path of plain characters passes, and the allowlist does not read the query.
+
+    Args:
+        path: The path the box asks for.
+    """
+    assert scoped_relay._service_path_safe(path)
+
+
+@pytest.mark.parametrize(
+    ("base", "target", "under"),
+    [
+        ("http://h/api", "http://h/api", True),
+        ("http://h/api", "http://h/api/x?q=1", True),
+        ("http://h/api/", "http://h/api/x", True),
+        ("http://h", "http://h/anything", True),
+        ("http://h/api", "http://h/apix", False),
+        ("http://h/api", "http://h/ap%69x", False),
+        ("http://h/api", "http://h/", False),
+    ],
+)
+def test_a_service_url_stays_under_its_declared_path_as_a_directory(base: str, target: str, under: bool) -> None:
+    """Base ``/api`` allows ``/api`` and ``/api/x``, never a sibling such as ``/apix``.
+
+    Args:
+        base: The service's declared url.
+        target: The url the relay would call.
+        under: Whether the relay may call it.
+    """
+    assert scoped_relay._under(httpx.URL(target), httpx.URL(base)) is under
+
+
 def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) -> None:
-    """The MCP token opens no model route, and a model token opens no MCP server.
+    """The MCP token opens no model route, and a model token opens no MCP server or service.
 
     Args:
         client: The fake HTTP client.
@@ -299,6 +377,8 @@ def test_mcp_and_model_tokens_reach_only_their_own_paths(client: type[_Client]) 
         dispatch(_MCP_ROUTE["token"], "/v1/chat/completions", {"model": "fixture/text"}, {})
     with pytest.raises(ValueError, match="unknown metered model capability"):
         dispatch(_ROUTE["token"], "/v1/mcp/search", b"{}", {})
+    with pytest.raises(ValueError, match="unknown metered model capability"):
+        dispatch(_ROUTE["token"], "/v1/service/echo/", b"", {})
 
     assert client.timeouts == []
 

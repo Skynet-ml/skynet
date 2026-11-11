@@ -156,10 +156,9 @@ stops the run.
 
 ## What fails the setup check
 
-- A `services` list in `[proposer]` or in a `[target.<name>]`, or a
-  `network` host list in a `[target.<name>]`. Runs cannot use these settings
-  yet. `network = []` in a stage passes, because a stage box is already
-  offline except for the relay.
+- A `services` list in a `[target.<name>]`, or a `network` host list in a
+  `[target.<name>]`. Runs cannot use these settings yet. `network = []` in a
+  stage passes, because a stage box is already offline except for the relay.
 - A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
   The message says to list the MCP servers in a `.mcp.json` file and set
   `mcp = "<path>"` instead.
@@ -216,8 +215,13 @@ mcp = "eval/.mcp.json"
 ```
 
 - There are no default services. A role gets only the services that its own
-  `services` list names. Only `[run]` and `[metric]` can have a `services`
-  list now. In `[proposer]` or a `[target.<name>]`, it fails the setup check.
+  `services` list names. `[run]`, `[metric]` and `[proposer]` can have a
+  `services` list now. In a `[target.<name>]`, it fails the setup check.
+- The proposer reaches the services of `[proposer] services` through the
+  parent's relay (SKY-612). Its box gets one `SKYNET_SERVICE_<NAME>_URL`
+  for each service, with a loopback url and no secret. Skynet checks each
+  call against the proposer's own list, fills the secrets in the parent,
+  and returns redirects without following them.
 - `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
   standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
   servers of its own file, so the proposer gets none of the metric's
