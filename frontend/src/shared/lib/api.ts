@@ -1166,6 +1166,14 @@ export function resolveScorerDependencies(input: {
   }>("/wizard/scorer-dependencies", { method: "POST", body: JSON.stringify(input) });
 }
 
+/** Check an optimize.toml text with the repository parser; it stops at the first error. */
+export function checkOptimizeToml(text: string, signal?: AbortSignal) {
+  return request<{
+    ok: boolean;
+    errors: Array<{ section: string | null; key: string | null; message: string }>;
+  }>("/wizard/optimize-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
+}
+
 export interface PackageRegistryPreference {
   index_url: string;
 }

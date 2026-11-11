@@ -110,6 +110,7 @@ import {
   type KickoffTurn,
   type SetupChat,
 } from "../lib/screen-agent";
+import { latestTurnEdits, messageEdits } from "../lib/turn-edits";
 import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
@@ -122,6 +123,7 @@ import { MAX_WIDTH, MIN_WIDTH, NARROW_VIEWPORT_QUERY } from "../constants";
 import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import { DatasetUploadCard, type ConfirmedDataset } from "./DatasetUploadCard";
+import { EditedFilesCard } from "./EditedFilesCard";
 import { LibraryDatasetCard, type ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 import { InferenceFormCard } from "./InferenceFormCard";
 import { MinimizedPill } from "./MinimizedPill";
@@ -376,8 +378,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (!wizardCtx) return;
       const patch = extractWizardPatch(ev.result);
       if (Object.keys(patch).length > 0) {
-        if (isWizardWrite(ev.tool))
-          wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
+        // Every write, not only the form's own tool: the coding agent's files
+        // need their before-state for the "Edited N files" card.
+        wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
         wizardCtx.applyAgentPatch(patch);
         liveStateRef.current = { ...liveStateRef.current, ...patch };
       }
@@ -698,6 +701,24 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   React.useEffect(() => {
     setAgentWritingFields?.(writingKey ? writingKey.split(",") : []);
   }, [writingKey, setAgentWritingFields]);
+  // The Changes pane's "Last turn" reads the newest turn that edited files.
+  const writeBefore = wizardCtx?.writeBefore;
+  const setLastTurnEdits = wizardCtx?.setLastTurnEdits;
+  React.useEffect(() => {
+    if (!inSetup || !setLastTurnEdits || !writeBefore) return;
+    setLastTurnEdits(latestTurnEdits(agent.messages, writeBefore));
+  }, [inSetup, agent.messages, writeBefore, setLastTurnEdits]);
+  const renderEditedFiles = React.useCallback(
+    (message: AgentMessage) => {
+      if (!writeBefore) return null;
+      const edits = messageEdits(message, writeBefore);
+      return edits.length > 0 ? (
+        <EditedFilesCard edits={edits} onView={wizardCtx?.viewChanges ?? null} />
+      ) : null;
+    },
+    [writeBefore, wizardCtx?.viewChanges],
+  );
+  const setupCheckIssue = inSetup ? (wizardCtx?.setupCheckIssue ?? null) : null;
   // Deleting the conversation you're currently viewing must drop you back to a
   // clean slate — otherwise the panel keeps showing the just-deleted thread and
   // the next message would try to append to a row that no longer exists (404).
@@ -1369,6 +1390,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             isPinnedCall={isPinnedCall}
             stepKind={stepKind}
             onRunCode={handleRunCode}
+            renderAfterContent={inSetup ? renderEditedFiles : undefined}
             animatePairs
             trailing={({ isEditingAny }) => (
               <>
@@ -1409,6 +1431,21 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </ChatSourceContext.Provider>
       </AgentThread>
 
+      {setupCheckIssue && !activeBusy && (
+        <div className="mx-3 mb-1.5 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-xs">
+          <span className="text-destructive">
+            {formatMsg("agent.setup_check.failed_chip", { count: setupCheckIssue.count })}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-xs"
+            onClick={() => agent.send(setupCheckIssue.feedback)}
+          >
+            {msg("agent.setup_check.ask_fix")}
+          </Button>
+        </div>
+      )}
       <Composer
         value={draft}
         onChange={setDraft}

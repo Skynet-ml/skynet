@@ -65,6 +65,8 @@ export interface WizardState {
   spending_floor_cents?: number;
   run_code?: string;
   metric_code?: string;
+  /** A repository run's optimize.toml in the setup draft; only the coding agent writes it. */
+  optimize_toml?: string;
   /** The wizard screen on view; the agent may edit only the fields on it. */
   wizard_screen?: string;
   /** Notes screen agents left for later screens, oldest first. */

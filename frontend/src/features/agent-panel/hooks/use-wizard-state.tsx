@@ -10,6 +10,7 @@ import {
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
 import { nextReturnScreen, reachedReturnScreen, runScreenNav } from "../lib/screen-agent";
+import type { FileEdit } from "../lib/turn-edits";
 import { rolesFields } from "../lib/wizard-write";
 import type { ScreenNote, WizardState } from "../lib/types";
 
@@ -86,6 +87,21 @@ interface WizardStateContextValue {
   /** What each wizard write's fields held on the form when it landed, by tool call id. */
   writeBefore: Readonly<Record<string, Record<string, unknown>>>;
   noteWriteBefore: (callId: string, before: Record<string, unknown>) => void;
+  /** The files the newest turn that edited any changed, for the Changes pane's "Last turn". */
+  lastTurnEdits: readonly FileEdit[];
+  setLastTurnEdits: (edits: readonly FileEdit[]) => void;
+  /** Opens the Changes pane, at one file when given; null while no pane is mounted. */
+  viewChanges: ((path?: string) => void) | null;
+  setViewChanges: (open: ((path?: string) => void) | null) => void;
+  /** A failed setup check the composer offers to send to the agent; null when there is none. */
+  setupCheckIssue: SetupCheckIssue | null;
+  setSetupCheckIssue: (issue: SetupCheckIssue | null) => void;
+}
+
+/** A failed setup check: how many errors it found, and the message that asks the agent to fix them. */
+export interface SetupCheckIssue {
+  count: number;
+  feedback: string;
 }
 
 /** A message the wizard sends its agent without the user typing it. */
@@ -131,6 +147,22 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const [writeBefore, setWriteBefore] = React.useState<Record<string, Record<string, unknown>>>({});
   const noteWriteBefore = React.useCallback((callId: string, before: Record<string, unknown>) => {
     setWriteBefore((prev) => ({ ...prev, [callId]: before }));
+  }, []);
+  const [lastTurnEdits, setLastTurnEditsState] = React.useState<readonly FileEdit[]>([]);
+  // The panel recomputes the list on each streamed token; only a new list is a change.
+  const setLastTurnEdits = React.useCallback((edits: readonly FileEdit[]) => {
+    setLastTurnEditsState((prev) => (JSON.stringify(prev) === JSON.stringify(edits) ? prev : edits));
+  }, []);
+  const [viewChanges, setViewChangesState] = React.useState<((path?: string) => void) | null>(null);
+  // A function in state must go through the updater form, or React calls it.
+  const setViewChanges = React.useCallback((open: ((path?: string) => void) | null) => {
+    setViewChangesState(() => open);
+  }, []);
+  const [setupCheckIssue, setSetupCheckIssueState] = React.useState<SetupCheckIssue | null>(null);
+  const setSetupCheckIssue = React.useCallback((issue: SetupCheckIssue | null) => {
+    setSetupCheckIssueState((prev) =>
+      prev?.count === issue?.count && prev?.feedback === issue?.feedback ? prev : issue,
+    );
   }, []);
   // A ref, not state: the frame re-registers on every render that changes its
   // handlers, and the agent reads it only when a move arrives.
@@ -247,8 +279,10 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     setPulseKeys([]);
     setAutoFeedback(null);
     setWriteBefore({});
+    setLastTurnEdits([]);
+    setSetupCheckIssue(null);
     setReturnScreen(null);
-  }, []);
+  }, [setLastTurnEdits, setSetupCheckIssue]);
 
   const overriddenFields = React.useMemo(() => Array.from(overridden).sort(), [overridden]);
 
@@ -283,6 +317,12 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setFinishedAutoFeedback,
       writeBefore,
       noteWriteBefore,
+      lastTurnEdits,
+      setLastTurnEdits,
+      viewChanges,
+      setViewChanges,
+      setupCheckIssue,
+      setSetupCheckIssue,
     }),
     [
       state,
@@ -308,6 +348,12 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       finishedAutoFeedback,
       writeBefore,
       noteWriteBefore,
+      lastTurnEdits,
+      setLastTurnEdits,
+      viewChanges,
+      setViewChanges,
+      setupCheckIssue,
+      setSetupCheckIssue,
     ],
   );
 
@@ -384,6 +430,7 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
     "optimizer_name",
     "run_code",
     "metric_code",
+    "optimize_toml",
   ] as const) {
     if (typeof wrap[key] === "string") patch[key] = wrap[key] as string;
   }

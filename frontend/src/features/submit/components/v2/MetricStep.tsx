@@ -11,12 +11,14 @@ import { githubRepoFile, githubRepoTree, type RepoHost } from "@/shared/lib/api"
 import { contractCheckMessage } from "@/shared/lib/i18n";
 import { msg } from "@/shared/lib/messages";
 import type { ContractCheckResponse } from "@/shared/types/unified-run";
+import { AgenticIde, type OpenRequest } from "../../agentic-ide/AgenticIde";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { useContractCheck } from "../../hooks/use-contract-check";
 import { useHardening } from "../../hooks/use-hardening";
 import { IdeWorkspace } from "../../ide/IdeWorkspace";
 import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-files";
 import { activeContractPhase } from "../../lib/contract-validation";
+import { workspaceTexts } from "../../lib/ide-workspace";
 import { withScorerImports } from "../../lib/scorer-dependencies";
 import { setupCheckFeedback } from "../../lib/setup-check-feedback";
 import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
@@ -194,29 +196,54 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     if (code !== metricCode) setMetricCode(code);
   }, [page, metricCode, setMetricCode]);
 
+  // A repository run's setup is the agentic IDE: the chat beside its changes,
+  // with the workbench one click away for direct edits.
+  const agentic = repo && isGeneralistAgentEnabled();
+  const draftTexts = React.useMemo(
+    () => workspaceTexts(workspace.runCode, workspace.metricCode, workspace.files),
+    [workspace.runCode, workspace.metricCode, workspace.files],
+  );
+  const ideWorkspace = (sidePanel: React.ReactNode, openRequest: OpenRequest | null) => (
+    <IdeWorkspace
+      runCode={workspace.runCode}
+      metricCode={workspace.metricCode}
+      files={workspace.files}
+      onFileChange={setWorkspaceFile}
+      onFileDelete={deleteFile}
+      onCheck={repo ? null : contract.check}
+      checkPhase={checkPhaseLabel}
+      checkResult={repo ? null : consoleResult}
+      resultsStale={!repo && !showStatic && contract.stale}
+      repo={repoFiles}
+      lockedFiles={lockedFiles}
+      guided={guided}
+      sidePanel={sidePanel}
+      openRequest={openRequest}
+    />
+  );
+  const renderEditor = (request: OpenRequest | null) => ideWorkspace(null, request);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Clip, not hide: a hidden box still scrolls when the editor takes focus. */}
       <WizardScreen active={page === 0} className="flex flex-col overflow-clip">
-        <IdeWorkspace
-          runCode={workspace.runCode}
-          metricCode={workspace.metricCode}
-          files={workspace.files}
-          onFileChange={setWorkspaceFile}
-          onFileDelete={deleteFile}
-          onCheck={repo ? null : contract.check}
-          checkPhase={checkPhaseLabel}
-          checkResult={repo ? null : consoleResult}
-          resultsStale={!repo && !showStatic && contract.stale}
-          repo={repoFiles}
-          lockedFiles={lockedFiles}
-          guided={guided}
-          sidePanel={
+        {agentic ? (
+          <AgenticIde
+            chat={onScreen ? <AgentPanelDock className="absolute inset-0" /> : null}
+            texts={draftTexts}
+            repo={repoFiles}
+            busy={agent?.agentBusy ?? false}
+            onWrite={setWorkspaceFile}
+            renderEditor={renderEditor}
+          />
+        ) : (
+          ideWorkspace(
             onScreen && isGeneralistAgentEnabled() ? (
               <AgentPanelDock className="absolute inset-0" />
-            ) : null
-          }
-        />
+            ) : null,
+            null,
+          )
+        )}
       </WizardScreen>
       <WizardScreen active={page === 1} className="overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
         <HardenMetricScreen
