@@ -34,11 +34,13 @@ const {
   setupChatUnchanged,
   newSetupChatId,
   hideKickoffs,
+  setupChatGone,
 } = await import("./screen-agent.ts");
 
 const hook = "src/features/agent-panel/hooks/use-generalist-agent.ts";
 const panel = "src/features/agent-panel/components/GeneralistPanel.tsx";
 const wizard = "src/features/submit/hooks/use-unified-wizard.tsx";
+const conversationApi = "src/features/agent-panel/lib/conversation-api.ts";
 
 function source(file: string): string {
   return readFileSync(new URL(`../../../../${file}`, import.meta.url), "utf8");
@@ -61,13 +63,6 @@ function expression(file: string, name: string, context: Record<string, unknown>
   const code = ts.transpileModule(`(${text})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   return new Function(...Object.keys(context), `return ${code}`)(...Object.values(context));
 }
-
-test("every turn is saved: a chat with no server id sends none, and the server makes one", () => {
-  const text = source(hook);
-  assert.match(text, /const savedId = sessionsRef\.current\.get\(key\)\?\.conversationId \?\? null;/);
-  assert.match(text, /conversation_id: saved\?\.id \?\? null,/);
-  assert.ok(!text.includes("persist:"));
-});
 
 test("pruning keeps an idle chat with messages and no server id, which the server cannot reload", () => {
   const blankSession = expression(hook, "blankSession", {});
@@ -98,11 +93,6 @@ test("openConversation with no id shows the messages with no server id", () => {
   assert.equal(draft.get("k1")?.conversationId, "c1");
 });
 
-test("a new setup chat starts with no server id, so its first turn saves it", () => {
-  const text = source(panel);
-  assert.ok(text.includes("keepSetupChat(newSetupChatId());\n      newSession();"));
-});
-
 test("the setup chat takes the server's id from its first saved turn", () => {
   assert.equal(adoptedSetupChatId("setup-1", "c1", true), "c1");
   assert.equal(adoptedSetupChatId("setup-1", "c1", false), null);
@@ -126,59 +116,161 @@ test("only a setup chat with a server id counts as saved", () => {
   assert.equal(isSavedSetupChat("setup-1"), false);
 });
 
-function settleWith(live: { id: string | null; messages: unknown[] }, setupId: string | null = "c1") {
-  const opened: any[] = [];
-  const kept: (string | null)[] = [];
-  const settle = expression(panel, "settleSetupLoad", {
-    setupChatUnchanged, hideKickoffs, newSetupChatId,
-    setupChatRef: { current: setupId }, liveChatRef: { current: live },
-    openConversation: (id: string | null, messages: unknown[]) => opened.push({ id, messages }),
-    keepSetupChat: (id: string | null) => kept.push(id),
+// The panel's setup chat callbacks, wired to each other, with the hook and the API stubbed.
+function setupChat(options: {
+  setupId?: string | null;
+  live?: { id: string | null; messages: unknown[]; busy?: boolean };
+  load?: (id: string) => Promise<unknown>;
+  active?: boolean;
+} = {}) {
+  const log: unknown[][] = [];
+  const setupChatRef = { current: options.setupId === undefined ? "c1" : options.setupId };
+  const liveChatRef = { current: { busy: false, ...(options.live ?? { id: "c1", messages: [] }) } };
+  const setupMessagesRef = { current: [] as unknown[] };
+  const keepSetupChat = (id: string | null) => {
+    setupChatRef.current = id;
+    log.push(["keep", id]);
+  };
+  const openConversation = (id: string | null, messages: unknown[]) => {
+    liveChatRef.current = { id, messages, busy: false };
+    log.push(["open", id, messages]);
+  };
+  const restartSetupChat = expression(panel, "restartSetupChat", {
+    setupMessagesRef, keepSetupChat, newSetupChatId, openConversation,
   });
-  return { settle, opened, kept };
+  const settleSetupLoad = expression(panel, "settleSetupLoad", {
+    setupChatUnchanged, hideKickoffs, setupChatRef, liveChatRef, openConversation, restartSetupChat,
+  });
+  const openSetupChat = expression(panel, "openSetupChat", {
+    keepSetupChat, newSetupChatId, isSavedSetupChat, openConversation, settleSetupLoad, setupChatRef,
+    newSession: () => log.push(["new"]),
+    activateConversation: (id: string) => (log.push(["activate", id]), options.active ?? false),
+    setSetupLoad: (id: string | null) => log.push(["loading", id]),
+    setKickoffScreen: (screen: string) => log.push(["kickoff", screen]),
+    loadConversation: (id: string) => (log.push(["load", id]), (options.load ?? (async () => ({ detail: null, missing: false })))(id)),
+  });
+  return { log, setupChatRef, liveChatRef, setupMessagesRef, settleSetupLoad, openSetupChat, restartSetupChat };
 }
 
-test("the server copy of a reopened setup chat replaces the tab copy while nothing changed", () => {
-  const messages = [{ role: "user", content: "tab" }];
-  const { settle, opened, kept } = settleWith({ id: "c1", messages });
-  settle({ id: "c1", messages }, { messages: [{ role: "user", content: "server" }] });
-  assert.deepEqual(opened, [{ id: "c1", messages: [{ role: "user", content: "server" }] }]);
-  assert.deepEqual(kept, []);
+const tab = [{ role: "user", content: "tab" }];
+const server = [{ role: "user", content: "server" }];
+
+test("a new setup chat starts with no server id and its kickoff, so its first turn saves it", async () => {
+  const chat = setupChat({ setupId: null });
+  await chat.openSetupChat(null, "brief");
+  assert.equal(chat.log.length, 3);
+  assert.match(String(chat.log[0][1]), /^setup-/);
+  assert.deepEqual(chat.log.slice(1), [["new"], ["kickoff", "brief"]]);
 });
 
-test("a failed server load moves the tab copy to a new browser id, so the next turn makes a new chat", () => {
-  const messages = [{ role: "user", content: "tab" }];
-  const { settle, opened, kept } = settleWith({ id: "c1", messages });
-  settle({ id: "c1", messages }, null);
-  assert.equal(kept.length, 1);
-  assert.match(String(kept[0]), /^setup-/);
-  assert.deepEqual(opened, [{ id: null, messages }]);
+test("a tab-only setup chat from an older build opens with no server id", async () => {
+  const chat = setupChat({ setupId: "setup-1" });
+  await chat.openSetupChat({ id: "setup-1", messages: tab }, "brief");
+  assert.deepEqual(chat.log, [["open", null, tab], ["kickoff", "brief"]]);
+});
+
+test("a reopened setup chat shows the tab copy, loads the server copy, then sends its kickoff", async () => {
+  const chat = setupChat({ live: { id: null, messages: [] }, load: async () => ({ detail: { messages: server }, missing: false }) });
+  await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  assert.deepEqual(chat.log, [
+    ["activate", "c1"], ["open", "c1", tab], ["loading", "c1"], ["load", "c1"],
+    ["loading", null], ["open", "c1", server], ["kickoff", "brief"],
+  ]);
+});
+
+test("a setup chat already open in the panel sends its kickoff at once", async () => {
+  const chat = setupChat({ active: true });
+  await chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  assert.deepEqual(chat.log, [["activate", "c1"], ["kickoff", "brief"]]);
+});
+
+test("a load for a setup that closed or moved on changes nothing and sends no kickoff", async () => {
+  let finish: (load: unknown) => void = () => {};
+  const chat = setupChat({ load: () => new Promise((resolve) => { finish = resolve; }) });
+  const done = chat.openSetupChat({ id: "c1", messages: tab }, "brief");
+  chat.setupChatRef.current = "c2";
+  finish({ detail: null, missing: true });
+  await done;
+  assert.deepEqual(chat.log.slice(-2), [["load", "c1"], ["loading", null]]);
+});
+
+test("the server copy replaces the tab copy only while nothing changed", () => {
+  const same = setupChat({ live: { id: "c1", messages: tab } });
+  same.settleSetupLoad({ id: "c1", messages: tab }, { detail: { messages: server }, missing: false });
+  assert.deepEqual(same.log, [["open", "c1", server]]);
+  const sent = setupChat({ live: { id: "c1", messages: [...tab, { role: "user", content: "new" }] } });
+  sent.settleSetupLoad({ id: "c1", messages: tab }, { detail: { messages: server }, missing: false });
+  assert.deepEqual(sent.log, []);
+});
+
+test("a setup chat the server lost moves its live messages to a new browser id, even after a turn", () => {
+  const live = [...tab, { role: "user", content: "new" }];
+  const chat = setupChat({ live: { id: "c1", messages: live } });
+  chat.settleSetupLoad({ id: "c1", messages: tab }, { detail: null, missing: true });
+  assert.equal(chat.log.length, 2);
+  assert.match(String(chat.log[0][1]), /^setup-/);
+  assert.deepEqual(chat.log[1], ["open", null, live]);
+  assert.equal(chat.setupMessagesRef.current, live);
   // The next saved turn gives the chat its new server id.
-  assert.equal(adoptedSetupChatId(kept[0], "c9", true), "c9");
+  assert.equal(adoptedSetupChatId(chat.setupChatRef.current, "c9", true), "c9");
 });
 
-test("a turn sent while the server copy loads keeps the chat on view", () => {
-  const messages = [{ role: "user", content: "tab" }];
-  const sent = [...messages, { role: "user", content: "new" }];
-  for (const load of [{ messages: [] }, null]) {
-    const { settle, opened, kept } = settleWith({ id: "c1", messages: sent });
-    settle({ id: "c1", messages }, load);
-    assert.deepEqual(opened, []);
-    assert.deepEqual(kept, []);
+test("a lost setup chat stays while a turn runs, or when it is not on view", () => {
+  for (const options of [
+    { live: { id: "c1", messages: tab, busy: true } },
+    { live: { id: "other", messages: tab } },
+    { setupId: null, live: { id: "c1", messages: tab } },
+  ]) {
+    const chat = setupChat(options);
+    chat.settleSetupLoad({ id: "c1", messages: tab }, { detail: null, missing: true });
+    assert.deepEqual(chat.log, []);
   }
-  const closed = settleWith({ id: "c1", messages }, null);
-  closed.settle({ id: "c1", messages }, null);
-  assert.deepEqual(closed.opened, []);
 });
 
-test("the setup chat shows Share only once the server saved it", () => {
-  const share = (conversationId: string | null) =>
+test("a load that fails for another reason keeps the server id, so no second chat starts", () => {
+  const chat = setupChat({ live: { id: "c1", messages: tab } });
+  chat.settleSetupLoad({ id: "c1", messages: tab }, { detail: null, missing: false });
+  assert.deepEqual(chat.log, []);
+  assert.equal(chat.setupChatRef.current, "c1");
+});
+
+test("a setup chat turn the server refuses as not found moves the chat to a new browser id", () => {
+  assert.equal(setupChatGone("c1", "c1", "agent.conversation.not_found"), true);
+  assert.equal(setupChatGone("c1", "c1", "context_too_long"), false);
+  assert.equal(setupChatGone("c1", "c2", "agent.conversation.not_found"), false);
+  assert.equal(setupChatGone(null, "c1", "agent.conversation.not_found"), false);
+  const chat = setupChat({ live: { id: "c1", messages: tab } });
+  chat.restartSetupChat(tab);
+  assert.match(String(chat.setupChatRef.current), /^setup-/);
+  assert.deepEqual(chat.liveChatRef.current, { id: null, messages: tab, busy: false });
+});
+
+test("only a 404 marks a conversation as gone", async () => {
+  const load = (respond: () => Promise<any>) =>
+    expression(conversationApi, "loadConversation", {
+      parseSourceKey: (id: string) => ({ source: "local", id }), hostedRunsAvailable: () => true,
+      apiUrl: () => "", apiBase: () => "", fetchWithAuthRetry: respond,
+      toSummary: (raw: any) => ({ id: raw.id }), toMessage: (m: unknown) => m,
+    })("c1");
+  assert.deepEqual(await load(async () => ({ ok: false, status: 404 })), { detail: null, missing: true });
+  assert.deepEqual(await load(async () => ({ ok: false, status: 502 })), { detail: null, missing: false });
+  assert.deepEqual(await load(async () => { throw new Error("offline"); }), { detail: null, missing: false });
+  assert.deepEqual(
+    await load(async () => ({ ok: true, status: 200, json: async () => ({ id: "c1", messages: server }) })),
+    { detail: { id: "c1", messages: server }, missing: false },
+  );
+});
+
+test("the setup chat shows Share only once the server saved it and its load ended", () => {
+  const share = (conversationId: string | null, setupLoad: string | null = null) =>
     expression(panel, "canShareChat", {
-      canShare: true, webChat: false, agent: { conversationId, messages: [{ role: "user", content: "q" }] },
+      canShare: true, webChat: false, setupLoad,
+      agent: { conversationId, messages: [{ role: "user", content: "q" }] },
     });
   assert.equal(share("c1"), true);
-  // An older build's tab-only chat, or one whose server copy failed to load, opens with no id.
+  // An older build's tab-only chat, or one the server lost, opens with no id.
   assert.equal(share(null), false);
+  assert.equal(share("c1", "c1"), false);
 });
 
 function keepWith(
@@ -272,7 +364,7 @@ test("a new setup chat on a screen the wizard did not reopen starts with a kicko
 test("the panel starts a new setup chat through newSetupChatStart", () => {
   const text = source(panel);
   assert.ok(text.includes("const start = newSetupChatStart(shownScreen, reopenedScreenRef.current);"));
-  assert.ok(text.indexOf("kickedScreensRef.current = new Set(start.kicked);") < text.indexOf("keepSetupChat(newSetupChatId());\n      newSession();"));
+  assert.ok(text.indexOf("kickedScreensRef.current = new Set(start.kicked);") < text.indexOf("void openSetupChat(null, start.kickoff ? shownScreen : null);"));
 });
 
 test("a chat deep link waits while the setup is open", () => {

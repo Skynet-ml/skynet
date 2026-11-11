@@ -271,6 +271,22 @@ export function setupChatUnchanged(
 }
 
 /**
+ * Whether the setup chat on view lost its server copy: its last turn failed
+ * because the server has no conversation under its id (deleted elsewhere).
+ *
+ * Args:
+ *   setupId: The setup chat's id now.
+ *   liveId: The id of the chat on view.
+ *   errorCode: The machine code of the chat's last error.
+ *
+ * Returns:
+ *   True when the setup chat must move to a new browser id.
+ */
+export function setupChatGone(setupId: string | null, liveId: string | null, errorCode: string | null): boolean {
+  return setupId !== null && liveId === setupId && errorCode === "agent.conversation.not_found";
+}
+
+/**
  * Write the setup's chat for the tab, within ``SETUP_CHAT_MAX_CHARS``. A chat
  * too long first loses its tool results and its ledger, then its oldest messages.
  */
