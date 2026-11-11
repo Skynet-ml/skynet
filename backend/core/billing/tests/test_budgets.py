@@ -33,6 +33,7 @@ from core.billing.operation_pricing import OperationCharge, OperationQuote
 from core.billing.pricing import ModelUsage
 from core.billing.runtime import BudgetRuntime, UsagePendingError, generation_operation_key
 from core.billing.service import StripeBillingService, committed_spend_cents, legacy_job_committed_cents
+from core.billing.signals import BudgetReached
 from core.config import settings
 from core.storage.models import (
     Base,
@@ -854,17 +855,36 @@ def test_setup_check_waits_again_once_its_box_is_unpinned(engine: Engine) -> Non
         runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
 
 
-def test_run_lanes_wait_for_each_other_even_with_pinned_boxes(engine: Engine) -> None:
-    """A run's lanes release each other's coverage, so a run never refuses early."""
+def test_run_stops_at_once_when_only_its_own_boxes_hold_the_room(engine: Engine) -> None:
+    """A run's open boxes stay open while it waits, so it stops at its limit instead of stalling (SKY-647)."""
     service = BudgetService(engine=engine)
-    budget = service.create("alice", 40, idempotency_key="run-lanes")
-    service.attach_to_job(budget.id, "alice", "lanes-job", expected_revision=budget.revision)
-    runtime = _setup_runtime(service, budget.id, phase="run", wait=0)
-    box = runtime.reserve(_quote(10), operation_key="box", cost_kind="sandbox", role="runtime")
+    budget = service.create("alice", 60, idempotency_key="run-own-boxes")
+    service.attach_to_job(budget.id, "alice", "own-boxes-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=5)
+    box = runtime.reserve(_quote(47), operation_key="box", cost_kind="sandbox", role="runtime")
     runtime.pin(box.id, cent_units(box.max_cents))
 
+    started = time.monotonic()
+    with pytest.raises(BudgetReached, match=r"needs up to \$0\.20, but this run's sandboxes hold \$0\.47"):
+        runtime.reserve(_quote(20), operation_key="call", cost_kind="model")
+    assert time.monotonic() - started < 5
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+    assert service.get(budget.id, "alice").reserved_cents == 47
+
+
+def test_run_waits_for_room_held_by_unpinned_work(engine: Engine) -> None:
+    """In-flight work that is not an open box settles soon, so the run still waits for it."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 60, idempotency_key="run-other-work")
+    service.attach_to_job(budget.id, "alice", "other-work-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=0)
+    box = runtime.reserve(_quote(20), operation_key="box", cost_kind="sandbox", role="runtime")
+    runtime.pin(box.id, cent_units(box.max_cents))
+    runtime.reserve(_quote(30), operation_key="other-call", cost_kind="model")
+
     with pytest.raises(UsagePendingError):
-        runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
+        runtime.reserve(_quote(20), operation_key="call", cost_kind="model")
+    assert service.get(budget.id, "alice").blocked_reason is None
 
 
 def _settled_run_call(service: BudgetService, budget_id: str, key: str, cents: int, generation: int = 0) -> None:

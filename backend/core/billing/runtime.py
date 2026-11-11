@@ -138,31 +138,40 @@ class BudgetRuntime:
             self._pinned.pop(operation_id, None)
             self._changed.notify_all()
 
-    def _wait_cannot_help(self, error: BudgetInFlightError) -> BudgetInsufficientError | None:
-        """Refuse a setup operation that only this check's own open sandboxes keep out.
+    def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
+        """Refuse an operation that only this runtime's own open sandboxes keep out.
 
-        A setup check runs its samples one at a time inside sandboxes it opened
-        itself, and those stay open while it waits, so their coverage can never
-        make room. A run's lanes do release each other's coverage, so only the
-        setup phase gives up early.
+        The sandboxes stay open while their work waits: a setup check runs its
+        samples inside boxes it opened itself, and a run's scorer and agent
+        boxes host the very work that asks for the next operation. Their
+        coverage cannot make room, so waiting would only stall until the
+        timeout (SKY-647). Unpinned in-flight work still settles, so the
+        operation waits whenever it would fit once that work is done.
 
         Args:
             error: The admission refusal, with its limit arithmetic when it has one.
 
         Returns:
             The refusal to raise instead of waiting, or None when waiting may help.
+            In the run phase it is the stop latch's ``BudgetReached``, after
+            the budget stopped admitting work, like any other run refusal.
         """
-        if self.phase != "setup" or error.scope_units is None or error.room_units is None:
+        if error.scope_units is None or error.room_units is None:
             return None
         with self._changed:
             pinned = sum(self._pinned.values())
         if error.scope_units <= error.room_units - pinned:
             return None
-        return BudgetInsufficientError(
-            f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this check's "
+        owner = "check's" if self.phase == "setup" else "run's"
+        message = (
+            f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this {owner} "
             f"sandboxes hold {usd_text(ceil_cents(pinned))} of the "
             f"{usd_text(max(error.room_units, 0) // CENT_SCALE)} that remain."
         )
+        if self.phase == "setup":
+            return BudgetInsufficientError(message)
+        self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
+        return self.stop.trip(message)
 
     def check_admission(self) -> None:
         """Fence unpaid control calls against the same cancellation and recovery authority.
