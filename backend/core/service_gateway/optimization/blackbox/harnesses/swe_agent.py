@@ -70,10 +70,16 @@ _PROBE = f"{_VENV_PYTHON} -I -c " + shlex.quote(
 # run's workspace is already a repo with the earlier run's edits; committing
 # them keeps the submitted patch to this run's edits only. ``git add -A`` is
 # bounded as in the Aider harness, so a huge workspace cannot stall the start.
+# A workspace inside an outer repo gets its own repo: otherwise the snapshot
+# commits the outer repo's files and the patch paths carry a folder prefix.
+# ``pwd -P`` matches the resolved path that ``--show-toplevel`` prints.
+# ``--no-verify`` skips only two hooks, so the commit also turns off the hooks
+# folder and signing: a failing hook or a missing gpg would stop the snapshot.
 _SNAPSHOT_WORKSPACE = (
     "_swe_bound=; command -v timeout >/dev/null 2>&1 && _swe_bound='timeout 120'; "
-    "{ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init -q; } && "
+    '{ [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || git init -q; } && '
     "$_swe_bound git add -A && git -c user.name=Agent -c user.email=agent@localhost "
+    "-c core.hooksPath=/dev/null -c commit.gpgsign=false "
     "commit -q --no-verify --allow-empty -m 'Task files before agent run'"
 )
 # Telemetry stays off in every run. LiteLLM loads a ``.env`` from the workspace

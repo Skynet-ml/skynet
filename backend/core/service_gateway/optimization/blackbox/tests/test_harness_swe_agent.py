@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -408,6 +409,114 @@ def test_snapshot_commits_an_earlier_runs_edits_so_the_patch_holds_only_this_run
         ["git", "status", "--porcelain"], cwd=tmp_path, env=env, capture_output=True, text=True, check=True
     )
     assert status.stdout == ""
+
+
+def _snapshot(cwd: Path, env: dict[str, str]) -> None:
+    """Run the real snapshot shell string in ``cwd``.
+
+    Args:
+        cwd: Workspace folder.
+        env: Environment for the shell.
+    """
+    subprocess.run(
+        [shutil.which("bash") or "/bin/sh", "-c", _SNAPSHOT_WORKSPACE], cwd=cwd, env=env, check=True, timeout=30
+    )
+
+
+def _git_out(cwd: Path, env: dict[str, str], *args: str) -> str:
+    """Return the stdout of one git command in ``cwd``.
+
+    Args:
+        cwd: Folder to run git in.
+        env: Environment for git.
+        *args: Git arguments.
+
+    Returns:
+        The command's stdout.
+    """
+    return subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_snapshot_bounds_git_add_with_timeout_when_timeout_is_present(tmp_path: Path) -> None:
+    """Run ``git add -A`` through ``timeout 120`` when the image has ``timeout``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "timeout-args"
+    fake = bin_dir / "timeout"
+    fake.write_text(f'#!/bin/sh\necho "$@" > {shlex.quote(str(record))}\nshift\nexec "$@"\n')
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("old\n")
+    env = _host_env(str(bin_dir))
+
+    _snapshot(workspace, env)
+
+    assert record.read_text().strip() == "120 git add -A"
+    assert _git_out(workspace, env, "ls-files").split() == ["a.txt"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_snapshot_runs_git_add_unbounded_when_timeout_is_missing(tmp_path: Path) -> None:
+    """Still snapshot the workspace on an image without ``timeout``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").symlink_to(shutil.which("git") or "git")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("old\n")
+    env = {**_host_env(str(bin_dir)), "PATH": str(bin_dir)}
+    probe = subprocess.run(
+        [shutil.which("bash") or "/bin/sh", "-c", "command -v timeout"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert probe.returncode != 0
+
+    _snapshot(workspace, env)
+
+    assert _git_out(workspace, env, "ls-files").split() == ["a.txt"]
+    assert _git_out(workspace, env, "status", "--porcelain") == ""
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_snapshot_ignores_a_failing_commit_hook_and_gpg_signing(tmp_path: Path) -> None:
+    """Commit the snapshot when a ``prepare-commit-msg`` hook fails and signing has no gpg."""
+    env = _host_env(str(tmp_path))
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=env, check=True)
+    hook = tmp_path / ".git" / "hooks" / "prepare-commit-msg"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(hook.stat().st_mode | stat.S_IEXEC)
+    subprocess.run(["git", "config", "commit.gpgsign", "true"], cwd=tmp_path, env=env, check=True)
+    subprocess.run(["git", "config", "gpg.program", str(tmp_path / "no-gpg")], cwd=tmp_path, env=env, check=True)
+    (tmp_path / "a.txt").write_text("old\n")
+
+    _snapshot(tmp_path, env)
+
+    assert _git_out(tmp_path, env, "log", "--format=%s") == "Task files before agent run\n"
+    assert _git_out(tmp_path, env, "status", "--porcelain") == ""
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_snapshot_gives_a_workspace_inside_an_outer_repo_its_own_repo(tmp_path: Path) -> None:
+    """Keep the outer repo's files out of the snapshot, so the patch paths start at the workspace."""
+    env = _host_env(str(tmp_path))
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=env, check=True)
+    (tmp_path / "outer.txt").write_text("outer\n")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("old\n")
+
+    _snapshot(workspace, env)
+
+    assert Path(_git_out(workspace, env, "rev-parse", "--show-toplevel").strip()) == workspace.resolve()
+    assert _git_out(workspace, env, "ls-files").split() == ["a.txt"]
+    (workspace / "a.txt").write_text("fixed\n")
+    assert "diff --git a/a.txt b/a.txt" in _git_out(workspace, env, "diff")
 
 
 def test_probe_prints_the_release_only_for_the_pinned_litellm_and_swe_rex(tmp_path: Path) -> None:
