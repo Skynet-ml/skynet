@@ -24,6 +24,11 @@ PI_VERSION = "0.87.1"
 PI_THINKING_LEVEL = "low"
 # Skynet's effort names that the CLIs spell differently; others pass through.
 _PI_THINKING_LEVELS = {"none": "off"}
+# Every Skynet level has a Pi 0.87.1 thinking level (``VALID_THINKING_LEVELS``:
+# off, minimal, low, medium, high, xhigh, max), and the ``thinkingLevelMap``
+# entry below keeps Pi from clamping ``xhigh`` or ``max``. Prime Agent 0.9.7
+# bundles the same list and clamp, so it declares these levels too.
+PI_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # The sandbox image ships its own pi in /usr/local/bin. A pinned copy lives in
 # a private prefix put ahead of it on PATH, so the version the transcript logs
 # is the one that ran.
@@ -132,5 +137,6 @@ SPEC = register(
         version=PI_VERSION,
         output_format="pi",
         position=10,
+        supported_efforts=PI_EFFORTS,
     )
 )

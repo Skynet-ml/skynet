@@ -43,15 +43,15 @@ _SDK_ENV = (
 _PROBE = f"uv run --quiet --offline {_SDK_ENV}"
 _WARM = f"uv run --quiet {_SDK_ENV}"
 ENV_THINKING_LEVEL = "ANTIGRAVITY_THINKING_LEVEL"
-# Gemini has no thinking-off switch, so ``none`` maps to the lowest level.
+# One Skynet level for each ``ThinkingLevel`` member of google-antigravity 0.1.20
+# (MINIMAL, LOW, MEDIUM, HIGH, EXTRA_HIGH). Gemini has no thinking-off switch and
+# nothing above EXTRA_HIGH, so ``none`` and ``max`` are refused, not remapped.
 _THINKING_LEVELS = {
-    "none": "MINIMAL",
     "minimal": "MINIMAL",
     "low": "LOW",
     "medium": "MEDIUM",
     "high": "HIGH",
     "xhigh": "EXTRA_HIGH",
-    "max": "EXTRA_HIGH",
 }
 # Empty values override any key the host shell leaks into the box, so the SDK
 # cannot fall back to a direct Gemini or Vertex route.
@@ -229,13 +229,21 @@ def _antigravity_launch(model: str, gateway: GatewayConfig, *, reasoning_effort:
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When ``reasoning_effort`` has no Gemini thinking level. Submit
+            refuses it first; this is the backstop.
     """
+    if reasoning_effort and reasoning_effort not in _THINKING_LEVELS:
+        raise ServiceError(
+            f"The Antigravity SDK harness does not support the effort level {reasoning_effort!r}. "
+            f"Supported levels: {', '.join(_THINKING_LEVELS)}."
+        )
     env = _base_env(model, gateway)
     env.update(_NO_DIRECT_KEYS)
     env["UV_NO_PROGRESS"] = "1"
-    level = _THINKING_LEVELS.get((reasoning_effort or "").lower())
-    if level:
-        env[ENV_THINKING_LEVEL] = level
+    if reasoning_effort:
+        env[ENV_THINKING_LEVEL] = _THINKING_LEVELS[reasoning_effort]
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_antigravity_install(),
@@ -255,5 +263,6 @@ SPEC = register(
         output_format="pi",
         protected_env=_PROTECTED_ENV,
         position=60,
+        supported_efforts=tuple(_THINKING_LEVELS),
     )
 )

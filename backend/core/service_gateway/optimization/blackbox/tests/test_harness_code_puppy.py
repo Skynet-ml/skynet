@@ -22,7 +22,7 @@ from .. import repo_tree
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_pi_output, tool_call_ids, workspace_files
 from ..harnesses import REGISTRY
-from ..harnesses.code_puppy import CODE_PUPPY_MODELS_FILE, CODE_PUPPY_VERSION
+from ..harnesses.code_puppy import CODE_PUPPY_EFFORTS, CODE_PUPPY_MODELS_FILE, CODE_PUPPY_VERSION, SPEC
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -238,6 +238,11 @@ def test_reasoning_effort_goes_to_the_config_only_when_code_puppy_knows_it(
     else:
         assert f"\n{line}\n" in cfg
         assert model_entry["setting_choices"] == {"reasoning_effort": [effort]}
+
+
+def test_spec_declares_the_levels_the_launch_accepts() -> None:
+    """Submit and the launch check one constant, so both refuse the same levels."""
+    assert SPEC.supported_efforts == CODE_PUPPY_EFFORTS == ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 @pytest.mark.parametrize("effort", ["auto", "HIGH", "extreme"])

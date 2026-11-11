@@ -47,7 +47,7 @@ ENV_REASONING_EFFORT = "OPENHANDS_SDK_REASONING_EFFORT"
 INSTRUCTIONS_FILE = "AGENTS.md"
 # The provider-neutral values that ``LLM.reasoning_effort`` documents in
 # openhands-sdk 1.61.0; the SDK hands them to LiteLLM unchanged.
-EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # Empty values override any key the host shell leaks into the box, so LiteLLM
 # cannot fall back to a direct provider route. The runner sets its own
 # ``LLM_API_KEY`` and ``LLM_BASE_URL`` from the gateway inside the process.
@@ -186,6 +186,9 @@ def _run(prompt, model, api_key):
     }}
     if effort:
         settings["reasoning_effort"] = effort
+        # LiteLLM's GPT-5 config silently drops ``minimal`` and ``xhigh`` for some
+        # ``gpt-5`` ids. The extra body field reaches the gateway unchanged.
+        settings["litellm_extra_body"] = {{"reasoning_effort": effort}}
     llm = LLM(**settings)
     tools = [Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name), Tool(name=TaskTrackerTool.name)]
     # The candidate is the optimization target, so it goes in as raw system
@@ -324,7 +327,7 @@ def _openhands_sdk_launch(model: str, gateway: GatewayConfig, *, reasoning_effor
     if reasoning_effort and reasoning_effort not in EFFORTS:
         raise ServiceError(
             f"The OpenHands SDK harness does not support the effort level {reasoning_effort!r}. "
-            f"Supported levels: {', '.join(sorted(EFFORTS))}."
+            f"Supported levels: {', '.join(EFFORTS)}."
         )
     env = _base_env(model, gateway)
     env.update(_NO_DIRECT_KEYS)
@@ -350,5 +353,6 @@ SPEC = register(
         output_format="pi",
         protected_env=_PROTECTED_ENV,
         position=56,
+        supported_efforts=EFFORTS,
     )
 )
