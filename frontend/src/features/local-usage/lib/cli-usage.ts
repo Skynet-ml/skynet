@@ -20,10 +20,43 @@ export interface CliQuotaWindow {
   resets_at: string | null;
 }
 
+/** The account the CLI is signed in as; `plan` is the CLI's own plan name. */
+export interface CliAccount {
+  email: string;
+  plan: string | null;
+}
+
+/** A limit that covers only some models, for example Claude's weekly Opus limit. */
+export interface CliModelLimit {
+  name: string;
+  used_percent: number;
+  resets_at: string | null;
+}
+
+/** The share of this week's use in one product, for example Claude Code. */
+export interface CliProductShare {
+  name: string;
+  percent: number;
+}
+
+/** Codex's credits and free limit resets. Each field is null when Codex does not send it. */
+export interface CliCredits {
+  balance: number | null;
+  resets_available: number | null;
+  resets_expire_at: string | null;
+}
+
+/** What Codex answered when the user used a free limit reset; `error` means no clear answer. */
+export type CodexResetOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed" | "error";
+
 /** `reconnect`: the CLI sign-in expired or is missing. `unavailable`: the CLI did not answer. */
 export interface CliQuota {
   status: "ok" | "reconnect" | "unavailable";
   windows: CliQuotaWindow[];
+  account?: CliAccount | null;
+  models?: CliModelLimit[];
+  products?: CliProductShare[];
+  credits?: CliCredits | null;
 }
 
 export interface CliUsageEntry {
@@ -57,6 +90,11 @@ export function formatReset(iso: string, locale: string): string | null {
   const time = new Date(iso);
   if (Number.isNaN(time.getTime())) return null;
   return new Intl.DateTimeFormat(locale, { weekday: "long", hour: "numeric", minute: "2-digit" }).format(time);
+}
+
+/** Format a Codex credit balance as a whole number. */
+export function formatCredits(value: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value);
 }
 
 /** Format a backend ISO time in the active locale, or `null` when it does not parse. */

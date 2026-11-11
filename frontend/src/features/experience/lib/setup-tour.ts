@@ -31,18 +31,16 @@ export interface SetupStop {
   above?: boolean;
   /** Shown only after the user chose to bring their own model key. */
   byokOnly?: boolean;
-  /** Shown only after the user chose their coding CLI subscription (the Mac app). */
-  subscriptionOnly?: boolean;
 }
 
 /*
  * The tour stays short: every stop past this is one the user would skip.
- * Eleven covers the two looks the user sees change behind the card (level
- * and theme), the one stop a billing answer can add (the key, or the CLIs)
- * and the three places the user connects things (data sources, the update
- * grid, Chrome and Slack).
+ * Ten covers the two looks the user sees change behind the card (level
+ * and theme), the one stop a billing answer can add (the key)
+ * and the two places the user connects things (data sources and the update
+ * grid).
  */
-export const MAX_SETUP_STOPS = 11;
+export const MAX_SETUP_STOPS = 10;
 
 /*
  * The dashboard comes first because the level reshapes it (Guided hides its
@@ -75,7 +73,7 @@ export const SETUP_STOPS: readonly SetupStop[] = [
   },
   {
     id: "billing",
-    anchor: "balance",
+    anchor: "account",
     title: "experience.intake.billing.title",
     body: "experience.intake.billing.hint",
     question: "billing",
@@ -88,15 +86,6 @@ export const SETUP_STOPS: readonly SetupStop[] = [
     title: "experience.setup.providers.title",
     body: "experience.setup.providers.body",
     byokOnly: true,
-  },
-  // The Agent engine row lists each CLI on this computer, its state and its sign-in command.
-  {
-    id: "clis",
-    anchor: "local-clis",
-    settings: "agent",
-    title: "experience.setup.clis.title",
-    body: "experience.setup.clis.body",
-    subscriptionOnly: true,
   },
   {
     id: "privacy",
@@ -121,14 +110,6 @@ export const SETUP_STOPS: readonly SetupStop[] = [
     title: "experience.setup.notifications.title",
     body: "experience.setup.notifications.body",
   },
-  // Its own stop: the grid and these rows together are taller than a laptop's Settings.
-  {
-    id: "channels",
-    anchor: "notification-channels",
-    settings: "notifications",
-    title: "experience.setup.channels.title",
-    body: "experience.setup.channels.body",
-  },
   {
     id: "trust",
     anchor: "agent",
@@ -144,15 +125,9 @@ export const SETUP_STOPS: readonly SetupStop[] = [
   },
 ];
 
-/**
- * The stops this user walks: the key stop only follows a "my own key" answer,
- * and the CLI stop only follows a "my CLI subscription" answer.
- */
+/** The stops this user walks: the key stop only follows a "my own key" answer. */
 export function setupStops(billing: IntakeAnswers["billing"]): readonly SetupStop[] {
-  return SETUP_STOPS.filter(
-    (s) =>
-      (!s.byokOnly || billing === "byok") && (!s.subscriptionOnly || billing === "subscription"),
-  );
+  return SETUP_STOPS.filter((s) => !s.byokOnly || billing === "byok");
 }
 
 const BILLING_OPTIONS: ReadonlyArray<{

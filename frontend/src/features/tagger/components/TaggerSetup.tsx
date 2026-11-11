@@ -47,6 +47,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { perLocale } from "@/shared/lib/per-locale";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { Input } from "@/shared/ui/primitives/input";
+import { Switch } from "@/shared/ui/primitives/switch";
 import { TOUCH_FIELD } from "@/shared/ui/touch";
 
 interface TaggerSetupProps {
@@ -188,7 +189,7 @@ export function TaggerSetup({ onStart }: TaggerSetupProps) {
   // answers — so it needs the assistant, and it rules out the manual flow.
   const [synthetic, setSynthetic] = useState(false);
 
-  const { prefs } = useUserPrefs();
+  const { prefs, setPref } = useUserPrefs();
   const assistAvailable = isTaggerAssistEnabled() && prefs.taggerAssist;
   const effectiveAssistMode = assistAvailable
     ? synthetic && assistMode === "manual"
@@ -387,6 +388,25 @@ export function TaggerSetup({ onStart }: TaggerSetupProps) {
         <CardTitle className="text-lg">{msg("tagger.setup.data_title")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        {isTaggerAssistEnabled() && (
+          <div className="flex items-center justify-between gap-3 rounded-xl border p-3">
+            <div className="min-w-0 space-y-0.5">
+              <p id="tagger-assist-label" className="text-sm font-medium">
+                {msg("settings.tagger.assist.label")}
+              </p>
+              <p className="text-xs text-muted-foreground">{msg("settings.tagger.assist.description")}</p>
+            </div>
+            <Switch
+              aria-labelledby="tagger-assist-label"
+              checked={prefs.taggerAssist}
+              onCheckedChange={(on) => {
+                // Synthetic data needs the assistant, so turning it off drops that pick.
+                if (!on) setSynthetic(false);
+                setPref("taggerAssist", on);
+              }}
+            />
+          </div>
+        )}
         {libraryName ? (
           <div className="rounded-xl border on-primary p-4 text-center">
             <p className="font-medium text-foreground" dir="auto">

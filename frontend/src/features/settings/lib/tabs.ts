@@ -8,18 +8,15 @@
 
 import {
   Bell,
-  ChartBar,
+  Code,
   CreditCard,
+  Gauge,
   HardDrive,
   HardDrives,
-  Info,
-  Key,
   Lock,
   Plug,
-  Robot,
+  Shapes,
   ShieldCheck,
-  Sparkle,
-  Tag,
   User,
 } from "@/shared/ui/icons";
 import type { Icon } from "@/shared/ui/icons";
@@ -31,8 +28,6 @@ type MessageKey = Parameters<typeof msg>[0];
 
 export const SETTINGS_TAB_ORDER = [
   "wizard",
-  "tagging",
-  "agent",
   "account",
   "notifications",
   "security",
@@ -43,7 +38,6 @@ export const SETTINGS_TAB_ORDER = [
   "connectors",
   "api",
   "admin",
-  "about",
 ] as const;
 
 export type SettingsTab = (typeof SETTINGS_TAB_ORDER)[number];
@@ -53,28 +47,16 @@ export type SettingsTabMeta = {
   labelKey: MessageKey;
   /** Space/comma separated terms for what the tab contains, localized. */
   keywordsKey: MessageKey;
-  group: "workflows" | "assistants" | "preferences" | "access" | "system";
+  group: "workflows" | "preferences" | "access";
   adminOnly?: boolean;
 };
 
 export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
   wizard: {
-    icon: Sparkle,
+    icon: Shapes,
     labelKey: "settings.tab.wizard",
     keywordsKey: "app.shell.search.kw.wizard",
     group: "workflows",
-  },
-  tagging: {
-    icon: Tag,
-    labelKey: "settings.tab.tagging",
-    keywordsKey: "app.shell.search.kw.tagging",
-    group: "workflows",
-  },
-  agent: {
-    icon: Robot,
-    labelKey: "settings.tab.agent",
-    keywordsKey: "app.shell.search.kw.agent",
-    group: "assistants",
   },
   account: {
     icon: User,
@@ -89,13 +71,13 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     group: "preferences",
   },
   security: {
-    icon: ShieldCheck,
+    icon: Lock,
     labelKey: "settings.tab.security",
     keywordsKey: "app.shell.search.kw.security",
     group: "access",
   },
   privacy: {
-    icon: Lock,
+    icon: ShieldCheck,
     labelKey: "settings.tab.privacy",
     keywordsKey: "app.shell.search.kw.privacy",
     group: "access",
@@ -107,7 +89,7 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     group: "access",
   },
   usage: {
-    icon: ChartBar,
+    icon: Gauge,
     labelKey: "settings.tab.usage",
     keywordsKey: "app.shell.search.kw.usage",
     group: "access",
@@ -125,7 +107,7 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     group: "access",
   },
   api: {
-    icon: Key,
+    icon: Code,
     labelKey: "settings.tab.api",
     keywordsKey: "app.shell.search.kw.api",
     group: "access",
@@ -134,20 +116,15 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
     icon: HardDrive,
     labelKey: "settings.tab.admin",
     keywordsKey: "app.shell.search.kw.admin",
-    group: "system",
+    group: "access",
     adminOnly: true,
-  },
-  about: {
-    icon: Info,
-    labelKey: "settings.tab.about",
-    keywordsKey: "app.shell.search.kw.about",
-    group: "system",
   },
 };
 
 /**
  * List the tabs this user may open, in rail order. The Mac app leaves out the
  * web-only tabs, and the linked-only tabs while no hosted account is linked.
+ * The web leaves out the Mac-only tabs.
  */
 export function visibleSettingsTabs(isAdmin: boolean, hostedAvailable = true): SettingsTab[] {
   return withoutHostedOnlyTabs(

@@ -20,6 +20,7 @@ import {
   localOffReason,
   maybeLocalHost,
   mergeHead,
+  slackGridReady,
   type FactFormatters,
 } from "./catalog.ts";
 
@@ -155,14 +156,16 @@ test("the Mac app keeps every hosted column and adds macOS last", () => {
   assert.deepEqual(LOCAL_CHANNELS, [...CHANNELS, "macos"]);
 });
 
-test("in the Mac app an unset hosted channel is off with a reason, macOS and inbox stay on", () => {
+test("local provider credentials do not disable hosted account channels", () => {
   const local = localState();
-  assert.equal(localOffReason("email", local), "notifications.local.not_configured");
-  assert.equal(localOffReason("chrome", local), "notifications.local.not_configured");
-  assert.equal(localOffReason("slack", local), "notifications.local.not_configured");
+  assert.equal(localOffReason("email", local), null);
+  assert.equal(localOffReason("chrome", local), null);
+  assert.equal(localOffReason("slack", local), null);
   assert.equal(localOffReason("macos", local), null);
   assert.equal(localOffReason("inbox", local), null);
-  assert.equal(cellEditable("finished", "email", true, local), false);
+  assert.equal(cellEditable("finished", "email", true, local), true);
+  assert.equal(cellEditable("finished", "slack", true, local), true);
+  assert.equal(cellEditable("finished", "slack", false, local), false);
   assert.equal(cellEditable("finished", "macos", false, local), true);
   assert.equal(cellEditable("product_news", "macos", false, local), false);
 });
@@ -185,17 +188,20 @@ test("only loopback pages probe the local-only routes", () => {
   assert.equal(maybeLocalHost("app.example.com"), false);
 });
 
-test("in the Mac app a channel that is not set up shows off, whatever the saved value", () => {
+test("the Mac app preserves hosted preferences without local provider setup", () => {
   const local = localState({ email: true });
-  assert.equal(cellShownOn(true, "chrome", local), false);
+  assert.equal(cellShownOn(true, "chrome", local), true);
   assert.equal(cellShownOn(true, "email", local), true);
   assert.equal(cellShownOn(false, "email", local), false);
   assert.equal(cellShownOn(true, "inbox", local), true);
   assert.equal(cellShownOn(true, "slack", null), true);
 });
 
-test("the Mac app lists the channels that are not set up, in column order", () => {
-  assert.deepEqual(localOffChannels(localState({ email: true })), ["chrome", "slack"]);
+test("only unavailable native delivery appears in the local setup warning", () => {
+  assert.deepEqual(localOffChannels(localState({ email: true })), []);
+  assert.deepEqual(localOffChannels(localState({ macos: false })), ["macos"]);
+  assert.equal(cellEditable("finished", "macos", true, localState({ macos: false })), false);
+  assert.equal(cellShownOn(true, "macos", localState({ macos: false })), false);
   assert.deepEqual(localOffChannels(localState({ email: true, chrome: true, slack: true })), []);
   assert.deepEqual(localOffChannels(null), []);
 });
@@ -222,10 +228,21 @@ test("a hosted header keeps its own Slack wording, without the channel prefix", 
   assert.deepEqual(channelHeaderTip("email", false, null), ["notifications.channel.email"]);
 });
 
-test("a Mac app header names the channel and why it is off", () => {
+test("a Mac app header uses hosted Slack status and local native availability", () => {
   assert.deepEqual(channelHeaderTip("slack", false, localState()), [
-    "notifications.channel.slack",
-    "notifications.local.not_configured",
+    "notifications.slack.unavailable",
   ]);
   assert.deepEqual(channelHeaderTip("macos", false, localState()), ["notifications.channel.macos"]);
+});
+
+test("a grid on the Mac's own side locks Slack and says why", () => {
+  assert.equal(slackGridReady(true, false), true);
+  assert.equal(slackGridReady(true, true), false);
+  assert.equal(slackGridReady(false, false), false);
+  const ready = slackGridReady(true, true);
+  assert.equal(cellEditable("finished", "slack", ready, localState()), false);
+  assert.deepEqual(channelHeaderTip("slack", ready, localState(), true), [
+    "notifications.slack.local_grid",
+  ]);
+  assert.deepEqual(channelHeaderTip("email", ready, localState(), true), ["notifications.channel.email"]);
 });

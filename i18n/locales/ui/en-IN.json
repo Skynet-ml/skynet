@@ -2,7 +2,6 @@
   "app.shell.search.kw.about": "about version API URL feedback reset preferences",
   "app.shell.search.kw.account": "account username role language interface advanced options",
   "app.shell.search.kw.admin": "admin storage quota budgets users",
-  "app.shell.search.kw.agent": "agent panel assistant default model voice dictation trust level yolo",
   "app.shell.search.kw.api": "API token developer integration generate revoke documentation",
   "app.shell.search.kw.billing": "billing balance add funds top up {term.appName} Pro subscription plan payment methods card invoices receipts transactions",
   "app.shell.search.kw.dashboard": "dashboard home optimizations runs jobs",

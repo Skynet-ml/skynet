@@ -1,7 +1,7 @@
-"""Tests for header-less tool calls on the text protocol of :mod:`...agents.conversation_react`.
+"""Tests for header-less tool calls on the text protocol of :mod:`...agents.agent_program`.
 
 A subscription CLI route has no native tools, so the loop runs DSPy's text
-protocol. With native reasoning on, ``tool_calls`` is the only output field, and
+protocol, and the Pi model relay parses it. With native reasoning on, ``tool_calls`` is the only output field, and
 Claude sometimes writes its ``{"tool_calls": [...]}`` value without the
 ``[[ ## tool_calls ## ]]`` header. The LM texts below are copied from the
 app's ``api.log``.
@@ -9,14 +9,11 @@ app's ``api.log``.
 
 from __future__ import annotations
 
-from typing import Any
-
 import dspy
-import litellm
 import pytest
 from dspy.utils.exceptions import AdapterParseError
 
-from ..agents.conversation_react import AppendOnlyChatAdapter, ConversationReAct
+from ..agents.agent_program import AgentProgram, AppendOnlyChatAdapter
 
 _PLAN_AND_LIST = (
     '{"tool_calls": [{"name": "share_plan", "args": {"plan": "I\'ll list your existing optimizations first so '
@@ -38,7 +35,7 @@ def _inner_signature() -> type[dspy.Signature]:
         The ReActV2 inner signature without its ``next_thought`` field.
     """
     signature = dspy.Signature("user_message: str -> assistant_message: str", "Be helpful.")
-    program = ConversationReAct(signature, tools=[_lookup], max_iters=3)
+    program = AgentProgram(signature, tools=[_lookup], max_iters=3)
     return program.react.signature.delete("next_thought")
 
 
@@ -97,61 +94,3 @@ def test_other_failures_still_raise(completion: str) -> None:
         AppendOnlyChatAdapter().parse(_inner_signature(), completion)
 
     assert caught.value.lm_response == completion
-
-
-class _TextOnlyLM(dspy.BaseLM):
-    """An LM without native tools, like a subscription CLI route, that answers with fixed texts."""
-
-    def __init__(self, replies: list[str]) -> None:
-        """Store the replies.
-
-        Args:
-            replies: One raw assistant text per expected LM call.
-        """
-        super().__init__(model="scripted")
-        self._replies = list(replies)
-        self.requests: list[dict[str, Any]] = []
-
-    @property
-    def supports_reasoning(self) -> bool:
-        """Report native reasoning support, which removes ``next_thought`` from the text protocol."""
-        return True
-
-    def forward(self, prompt=None, messages=None, **kwargs):
-        """Record the request and return the next text.
-
-        Args:
-            prompt: Unused legacy prompt.
-            messages: The rendered chat messages.
-            **kwargs: Provider kwargs.
-
-        Returns:
-            An OpenAI-shaped text response.
-        """
-        self.requests.append({"messages": messages, **kwargs})
-        message = {"role": "assistant", "content": self._replies.pop(0)}
-        return litellm.ModelResponse(
-            model="scripted",
-            choices=[{"index": 0, "finish_reason": "stop", "message": message}],
-            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        )
-
-
-def test_loop_answers_through_header_less_turns() -> None:
-    """The loop runs the tool and submits without a resample or a forced submit."""
-    lm = _TextOnlyLM(
-        [
-            '{"tool_calls": [{"name": "_lookup", "args": {"name": "a"}}]}\n\n[[ ## completed ## ]]',
-            _SUBMIT,
-        ]
-    )
-    signature = dspy.Signature("user_message: str -> assistant_message: str", "Be helpful.")
-    program = ConversationReAct(signature, tools=[_lookup], max_iters=3)
-
-    with dspy.context(lm=lm):
-        prediction = program(user_message="Open the docs.")
-
-    assert prediction.termination_reason == "submit"
-    assert prediction.assistant_message.startswith("I can't open the Skynet documentation")
-    assert len(lm.requests) == 2
-    assert "tools" not in lm.requests[0]

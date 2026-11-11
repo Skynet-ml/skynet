@@ -205,14 +205,64 @@ const SAMPLE_RUN_ID = "00000000-0000-4000-8000-000000000000";
 // A cold first visit: one status group of four runs.
 const DEFAULT_JOBS_LAYOUT: JobsLayout = { groups: [4], shared: false, pager: false };
 
-export function DashboardSkeleton() {
+/** The Jobs tab card alone, in the last layout the tab showed. */
+export function JobsTabSkeleton() {
   const isPhone = useIsPhone();
   const remembered = useLayoutHint<JobsLayout>(JOBS_LAYOUT_KEY);
   const layout = remembered?.groups ? remembered : DEFAULT_JOBS_LAYOUT;
-  const level = useExperienceLevel();
-  const keepColumn = jobsColumnGate(level);
+  const keepColumn = jobsColumnGate(useExperienceLevel());
   const columns = visibleJobsColumns(layout.shared, keepColumn);
   const rowCount = layout.groups.reduce((sum, n) => sum + n, 0);
+
+  return (
+    <Card className="overflow-hidden border-border/60" aria-hidden="true">
+      <CardContent className="px-3 pt-4 sm:px-6 sm:pt-5">
+        <div className="mb-3 flex min-h-[44px] items-center gap-2 text-[0.6875rem] lg:min-h-0">
+          <Skeleton width={64} height={11} />
+          <span className="ms-auto flex size-8 any-pointer-coarse:size-[44px]">
+            <Skeleton containerClassName="flex flex-1" className="h-full" borderRadius={6} />
+          </span>
+        </div>
+
+        {isPhone ? (
+          <ul className="flex flex-col gap-2">
+            {Array.from({ length: rowCount }).map((_, i) => (
+              <PhoneRow key={i} />
+            ))}
+          </ul>
+        ) : (
+          rowCount > 0 && (
+            <div className="overflow-x-auto rounded-2xl border border-border/40 bg-card/60">
+              <Table className={JOBS_TABLE_CLASS}>
+                <TableHeader>
+                  <HeaderRow columns={columns} />
+                </TableHeader>
+                {layout.groups.map((rows, g) => (
+                  <tbody key={g}>
+                    <GroupRow colSpan={jobsColSpan(layout.shared, keepColumn)} />
+                    {Array.from({ length: rows }).map((_, i) => (
+                      <BodyRow key={i} columns={columns} shared={layout.shared} />
+                    ))}
+                  </tbody>
+                ))}
+              </Table>
+            </div>
+          )
+        )}
+        {layout.pager && (
+          <div className="mt-4 flex items-center justify-center gap-2 border-t border-border/50 pt-5">
+            <Skeleton width={32} height={32} borderRadius={8} />
+            <TextBone className="text-xs" width={32} />
+            <Skeleton width={32} height={32} borderRadius={8} />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+export function DashboardSkeleton() {
+  const level = useExperienceLevel();
   const analytics = useOpensOnAnalytics();
   // The same rule as the loaded tab bar: Guided hides it unless linked to Analytics.
   const showTabs = isVisible("dashboard.analytics", level) || analytics;
@@ -237,53 +287,7 @@ export function DashboardSkeleton() {
           </div>
         )}
 
-        {analytics ? (
-          <AnalyticsTabSkeleton />
-        ) : (
-          <Card className="overflow-hidden border-border/60">
-            <CardContent className="px-3 pt-4 sm:px-6 sm:pt-5">
-              <div className="mb-3 flex min-h-[44px] items-center gap-2 text-[0.6875rem] lg:min-h-0">
-                <Skeleton width={64} height={11} />
-                <span className="ms-auto flex size-8 any-pointer-coarse:size-[44px]">
-                  <Skeleton containerClassName="flex flex-1" className="h-full" borderRadius={6} />
-                </span>
-              </div>
-
-              {isPhone ? (
-                <ul className="flex flex-col gap-2">
-                  {Array.from({ length: rowCount }).map((_, i) => (
-                    <PhoneRow key={i} />
-                  ))}
-                </ul>
-              ) : (
-                rowCount > 0 && (
-                  <div className="overflow-x-auto rounded-2xl border border-border/40 bg-card/60">
-                    <Table className={JOBS_TABLE_CLASS}>
-                      <TableHeader>
-                        <HeaderRow columns={columns} />
-                      </TableHeader>
-                      {layout.groups.map((rows, g) => (
-                        <tbody key={g}>
-                          <GroupRow colSpan={jobsColSpan(layout.shared, keepColumn)} />
-                          {Array.from({ length: rows }).map((_, i) => (
-                            <BodyRow key={i} columns={columns} shared={layout.shared} />
-                          ))}
-                        </tbody>
-                      ))}
-                    </Table>
-                  </div>
-                )
-              )}
-              {layout.pager && (
-                <div className="mt-4 flex items-center justify-center gap-2 border-t border-border/50 pt-5">
-                  <Skeleton width={32} height={32} borderRadius={8} />
-                  <TextBone className="text-xs" width={32} />
-                  <Skeleton width={32} height={32} borderRadius={8} />
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
+        {analytics ? <AnalyticsTabSkeleton /> : <JobsTabSkeleton />}
       </div>
     </div>
   );
