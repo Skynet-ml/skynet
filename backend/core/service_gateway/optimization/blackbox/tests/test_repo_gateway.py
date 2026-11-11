@@ -28,6 +28,7 @@ from core.exceptions import ServiceError
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import repo_staging
 
+from ..preflight import verify_anything_in_sandbox
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
@@ -343,3 +344,45 @@ def test_route_dispatch_refuses_every_non_route_token_and_capability_path(
     ):
         with pytest.raises(ValueError, match="only its scoped model route"):
             model_gateway.dispatch_route(token, path, {}, {})
+
+
+def test_the_setup_check_scores_the_checkout_the_run_scores(
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+) -> None:
+    """The setup check scores through the parent's repository scorer, so the metric reads the real checkout (SKY-644)."""
+    model_gateway, _ = gateway
+    metric_code = (
+        "from pathlib import Path\n"
+        "def score(repo_path, case):\n"
+        "    text = Path(repo_path, 'README').read_text()\n"
+        "    return {'score': 1.0 if text == 'hello' else 0.0, 'feedback': text}\n"
+    )
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=model_gateway.parent_sandbox_runtime(),
+            spec=SandboxSpec(lifetime_seconds=120, image=IMAGE, network_disabled=True, operation_key="repo-scorer:job"),
+            archive=_archive(tmp_path, {"README": "hello"}),
+            editable_paths=["README"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        metric_code,
+        timeout_seconds=60,
+    )
+    payload = {
+        "scorer": {"kind": "python", "metric_code": metric_code},
+        "target": {"kind": "repo", "repo": {"repository": "octo/hello", "editable_paths": ["README"]}},
+        "seed_candidate": "",
+        "cases": [{"input": "x"}],
+        "_skynet_evaluator_route": model_gateway.bind_evaluator(scorer),
+    }
+    try:
+        result = verify_anything_in_sandbox(
+            payload, scope="evaluation", identity="repo-check", runtime=LocalSubprocessRuntime()
+        )
+    finally:
+        scorer.close()
+
+    assert result["checks"] == [{"key": "scorer", "status": "succeeded", "field": "scorer"}]
+    assert result["scorer_result"]["score"] == 1.0
