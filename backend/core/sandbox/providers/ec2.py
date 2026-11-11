@@ -173,6 +173,8 @@ class _LaunchState:
     launch_id: str = dataclasses.field(default_factory=lambda: uuid.uuid4().hex)
     instance_id: str | None = None
     cancelled: bool = False
+    # A stop from another task ended this launch, so it fails with a sandbox error, not a cancel.
+    stopped: bool = False
     known_hosts: str | None = None
     # The worker thread of ``run_instances`` and the event loop both read
     # and write the fields below, so they change only under this lock.
@@ -237,7 +239,8 @@ class EC2Environment(SandboxEnvironment):
             ssh_known_hosts_path: The SSH known hosts file; ``None`` uses a
                 temporary file for the life of the instance. Unless
                 ``strict_host_key_checking`` is ``"yes"``, the file keys each
-                host key by the instance id, not the address.
+                host key by the instance id, not the address, and stop
+                removes the key of the terminated instance.
             timeouts: The phase timeouts. The start phase bounds the SSH
                 readiness wait; the run phase is the default ``exec`` limit.
 
@@ -298,12 +301,17 @@ class EC2Environment(SandboxEnvironment):
         terminates its own instance. A failed start removes its temporary
         known hosts file.
 
+        A stop from another task during the start terminates the instance of
+        the launch, and the start then raises ``SandboxInfraError``. The
+        start never keeps an instance that such a stop terminated.
+
         The launch stays in the lost launches until its instance runs for
         this start or a terminate succeeds, so stop tries again when the
         terminate of a failed or cancelled start fails.
 
         Raises:
             SandboxError: An AWS call failed, or the instance has no address.
+            SandboxInfraError: A stop from another task ran during the start.
             StartTimeoutError: SSH did not answer in time.
             asyncio.CancelledError: The task was cancelled during the launch.
         """
@@ -339,6 +347,11 @@ class EC2Environment(SandboxEnvironment):
         except BaseException:
             self._remove_known_hosts()
             raise
+        if state.stopped:
+            # The stop terminated the instance after the launch returned, or
+            # keeps the launch for a retry when its terminate failed.
+            self._remove_known_hosts()
+            raise _stopped_during_start()
         # No await between these lines, so the instance always has an owner.
         self._lost_launches.pop(state.launch_id, None)
         self._instance_id = instance_id
@@ -404,6 +417,7 @@ class EC2Environment(SandboxEnvironment):
                 self._clear()
             raise
         self._clear()
+        await self._forget_host_key(instance_id)
 
     async def exec(
         self,
@@ -586,6 +600,7 @@ class EC2Environment(SandboxEnvironment):
 
         Raises:
             SandboxError: An AWS call failed, or the instance has no address.
+            SandboxInfraError: A stop from another task ended the launch.
             StartTimeoutError: SSH did not answer in time.
             asyncio.CancelledError: The start was cancelled during the launch.
         """
@@ -604,7 +619,8 @@ class EC2Environment(SandboxEnvironment):
         instance_id = response["Instances"][0]["InstanceId"]
         if state.terminated:
             self._lost_launches.pop(state.launch_id, None)
-            raise asyncio.CancelledError
+            # The worker thread terminates only the instance of a cancelled or stopped launch.
+            _raise_if_cancelled(state)
         loop = asyncio.get_running_loop()
         # The start phase time limit bounds the running wait and the SSH wait together.
         deadline = loop.time() + self._connect_timeout
@@ -727,6 +743,7 @@ class EC2Environment(SandboxEnvironment):
         for launch_id, state in list(self._lost_launches.items()):
             with state.lock:
                 state.cancelled = True
+                state.stopped = True
                 if not state.call_done:
                     continue
             if state.terminated or state.nothing_launched:
@@ -734,6 +751,7 @@ class EC2Environment(SandboxEnvironment):
             elif state.instance_id is not None:
                 await _terminate(self._client, state.instance_id)
                 self._lost_launches.pop(launch_id, None)
+                await self._forget_host_key(state.instance_id)
             else:
                 unknown.append((launch_id, state))
         for launch_id, state in unknown:
@@ -765,6 +783,7 @@ class EC2Environment(SandboxEnvironment):
             deadline: The event loop time when the start phase ends.
 
         Raises:
+            SandboxInfraError: A stop from another task ended the launch.
             StartTimeoutError: SSH did not answer in time.
             asyncio.CancelledError: The start was cancelled during the wait.
         """
@@ -828,7 +847,7 @@ class EC2Environment(SandboxEnvironment):
             "-o",
             f"ServerAliveCountMax={_SSH_ALIVE_COUNT}",
         ]
-        if self._strict_host_key_checking != "yes":
+        if self._aliases_host_keys():
             # EC2 reuses private addresses, and a new instance has a new host
             # key. Keyed by the instance id, a shared known hosts file never
             # holds a stale key for a new instance. With "yes" the file must
@@ -840,6 +859,41 @@ class EC2Environment(SandboxEnvironment):
             argv += ["-i", self._ssh_key_path]
         argv += [f"{self._ssh_user}@{host or self._host}", "bash -lc " + shlex.quote(script)]
         return argv
+
+    def _aliases_host_keys(self) -> bool:
+        """Tell if ssh keys each host key by the instance id instead of the address.
+
+        Returns:
+            True unless ``strict_host_key_checking`` is ``"yes"`` in any case,
+            as ssh reads the value.
+        """
+        return self._strict_host_key_checking.lower() != "yes"
+
+    async def _forget_host_key(self, instance_id: str) -> None:
+        """Remove the host key of a terminated instance from the configured known hosts file.
+
+        A shared file with an instance id alias gets one new line for each
+        instance, and no later instance uses that line again. A temporary
+        file goes away with the sandbox, so only a configured file needs
+        this. A failure only logs, because the terminate itself succeeded.
+
+        Args:
+            instance_id: The id of the terminated instance, which is its host key alias.
+        """
+        if not self._known_hosts_path or not self._aliases_host_keys():
+            return
+        argv = ["ssh-keygen", "-R", instance_id, "-f", self._known_hosts_path]
+        try:
+            code, _, err = await _run_process(argv, None, _SSH_PROBE_TIMEOUT_SEC)
+        except (OSError, TimeoutError) as error:
+            logger.warning("Could not remove the host key of ec2 instance %s: %s", instance_id, type(error).__name__)
+            return
+        if code != 0:
+            logger.warning(
+                "Could not remove the host key of ec2 instance %s: %s",
+                instance_id,
+                err.decode("utf-8", errors="replace")[:500],
+            )
 
     def _known_hosts(self) -> str:
         """Return the known hosts file, and make a temporary one when none is set.
@@ -1102,7 +1156,7 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
         that does not come from boto3 or botocore.
     """
     if ClientError is not None and isinstance(error, ClientError):
-        code = _error_code(error) or "Unknown"
+        code = _error_code(error)
         response = error.response if isinstance(error.response, Mapping) else {}
         status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
         message = f"EC2 {action} failed with {code}."
@@ -1244,10 +1298,22 @@ def _raise_if_cancelled(state: _LaunchState) -> None:
         state: The state of the launch.
 
     Raises:
+        SandboxInfraError: A stop from another task ended the launch.
         asyncio.CancelledError: The start was cancelled.
     """
+    if state.stopped:
+        raise _stopped_during_start()
     if state.cancelled:
         raise asyncio.CancelledError
+
+
+def _stopped_during_start() -> SandboxInfraError:
+    """Return the error of a start that a stop from another task ended.
+
+    Returns:
+        The error.
+    """
+    return SandboxInfraError("The ec2 sandbox stopped during its start.")
 
 
 def _safe_text(error: BaseException | None) -> str:

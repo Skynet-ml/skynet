@@ -73,6 +73,26 @@ FAKE_SSH = textwrap.dedent(
     """
 )
 
+# Logs each call, and removes the lines of one host as ``ssh-keygen -R <host> -f <file>`` does.
+FAKE_KEYGEN = textwrap.dedent(
+    """
+    import json, os, sys
+    from pathlib import Path
+
+    state = Path(os.environ["SKYNET_FAKE_SSH_STATE"])
+    args = sys.argv[1:]
+    with open(state / "keygen.jsonl", "a", encoding="utf-8") as log:
+        log.write(json.dumps(args) + "\\n")
+    if (state / "keygen_fail").exists():
+        sys.stderr.write("ssh-keygen: cannot update the file\\n")
+        sys.exit(1)
+    path = Path(args[args.index("-f") + 1])
+    host = args[args.index("-R") + 1]
+    lines = path.read_text().splitlines(keepends=True)
+    path.write_text("".join(line for line in lines if line.split(" ", 1)[0] != host))
+    """
+)
+
 # A login shell would read the host profile and could reset PATH past the shims.
 BASH_SHIM = '#!/bin/sh\nif [ "$1" = "-lc" ]; then shift; exec /bin/bash -c "$@"; fi\nexec /bin/bash "$@"\n'
 SUDO_SHIM = '#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n'
@@ -332,6 +352,7 @@ def fake_ec2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEC
         ("bash", BASH_SHIM),
         ("sudo", SUDO_SHIM),
         ("timeout", TIMEOUT_SHIM),
+        ("ssh-keygen", f"#!{sys.executable}\n{FAKE_KEYGEN}"),
     ):
         path = bin_dir / name
         path.write_text(body)
@@ -1336,8 +1357,87 @@ async def test_ssh_keys_each_host_key_by_its_instance_id(fake_ec2: FakeEC2, tmp_
     assert all("CheckHostIP=no" in argv for argv in calls)
 
 
-async def test_strict_host_key_checking_yes_keeps_the_address_as_the_key(fake_ec2: FakeEC2) -> None:
-    """Send no host key alias when the known hosts file must already hold the key."""
-    async with EC2Environment(_spec(), strict_host_key_checking="yes") as env:
+@pytest.mark.parametrize("value", ["yes", "Yes"])
+async def test_strict_host_key_checking_yes_keeps_the_address_as_the_key(
+    fake_ec2: FakeEC2, tmp_path: Path, value: str
+) -> None:
+    """Send no host key alias and remove no host key when the known hosts file must already hold the key."""
+    known = tmp_path / "known_hosts"
+    known.write_text("")
+    async with EC2Environment(_spec(), strict_host_key_checking=value, ssh_known_hosts_path=str(known)) as env:
         await env.exec("true")
     assert not any(arg.startswith("HostKeyAlias=") for argv in _ssh_calls(fake_ec2) for arg in argv)
+    assert not (fake_ec2.state / "keygen.jsonl").exists()
+
+
+async def test_stop_removes_the_host_key_of_the_terminated_instance(fake_ec2: FakeEC2, tmp_path: Path) -> None:
+    """Remove only the alias line of the terminated instance from a shared known hosts file."""
+    known = tmp_path / "known_hosts"
+    env = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
+    await env.start()
+    instance_id = env._instance_id
+    known.write_text(f"{instance_id} ssh-ed25519 AAAA1\ni-other ssh-ed25519 AAAA2\n")
+    await env.stop()
+    assert known.read_text() == "i-other ssh-ed25519 AAAA2\n"
+    calls = [json.loads(line) for line in (fake_ec2.state / "keygen.jsonl").read_text().splitlines()]
+    assert calls == [["-R", instance_id, "-f", str(known)]]
+
+
+async def test_a_failed_host_key_removal_only_logs(
+    fake_ec2: FakeEC2, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Finish the stop and log a warning when ssh-keygen cannot remove the host key."""
+    known = tmp_path / "known_hosts"
+    env = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
+    await env.start()
+    (fake_ec2.state / "keygen_fail").touch()
+    with caplog.at_level(logging.WARNING, logger=ec2_provider.__name__):
+        await env.stop()
+    assert "Could not remove the host key" in caplog.text
+    assert env._instance_id is None
+    assert fake_ec2.live() == []
+
+
+async def test_a_stop_during_the_ssh_wait_fails_the_start_with_an_infra_error(fake_ec2: FakeEC2) -> None:
+    """Raise SandboxInfraError, not a cancel, when a stop from another task ends the launch during the SSH wait."""
+    (fake_ec2.state / "ssh_down").touch()
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: len(_ssh_calls(fake_ec2)) >= 1)
+    await env.stop()
+    assert fake_ec2.live() == []
+    with pytest.raises(SandboxInfraError, match="stopped during its start"):
+        await task
+    assert env._instance_id is None
+    assert env._lost_launches == {}
+    assert env not in ec2_provider._LIVE
+
+
+async def test_a_stop_after_the_launch_returns_never_leaves_a_terminated_instance(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise SandboxInfraError when a stop runs after the launch returns and before the start takes the instance."""
+    env = EC2Environment(_spec())
+    real = env._launch
+
+    async def launch_then_stop(client: Any, state: Any) -> tuple[str, str]:
+        """Run the real launch, then a stop, before the start resumes.
+
+        Args:
+            client: The EC2 client.
+            state: The launch state.
+
+        Returns:
+            The instance id and the host of the real launch.
+        """
+        result = await real(client, state)
+        await env.stop()
+        return result
+
+    monkeypatch.setattr(env, "_launch", launch_then_stop)
+    with pytest.raises(SandboxInfraError, match="stopped during its start"):
+        await env.start()
+    assert fake_ec2.live() == []
+    assert env._instance_id is None
+    assert env._lost_launches == {}
+    assert env not in ec2_provider._LIVE
