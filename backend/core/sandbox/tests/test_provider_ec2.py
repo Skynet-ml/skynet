@@ -1413,6 +1413,28 @@ async def test_parallel_host_key_removals_keep_every_other_line(fake_ec2: FakeEC
     second = EC2Environment(_spec(), ssh_known_hosts_path=str(known))
     await asyncio.gather(first._forget_host_key("i-a"), second._forget_host_key("i-b"))
     assert known.read_text() == "i-c ssh-ed25519 AAAA3\n"
+    assert ec2_provider._KNOWN_HOSTS_LOCKS == {}
+
+
+async def test_a_home_known_hosts_path_is_expanded_and_its_key_removed(
+    fake_ec2: FakeEC2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Expand a ``~`` known hosts path, so stop removes the host key from the real file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    known = tmp_path / "known_hosts"
+    known.write_text("i-a ssh-ed25519 AAAA1\ni-b ssh-ed25519 AAAA2\n")
+    env = EC2Environment(_spec(), ssh_known_hosts_path="~/known_hosts")
+    assert env._known_hosts_path == str(known.resolve())
+    await env._forget_host_key("i-a")
+    assert known.read_text() == "i-b ssh-ed25519 AAAA2\n"
+
+
+def test_two_spellings_of_one_known_hosts_file_share_one_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Normalize the known hosts path, so two spellings of one file share one removal lock."""
+    monkeypatch.chdir(tmp_path)
+    first = EC2Environment(_spec(), ssh_known_hosts_path="known_hosts")
+    second = EC2Environment(_spec(), ssh_known_hosts_path=str(tmp_path / "sub" / ".." / "known_hosts"))
+    assert first._known_hosts_path == second._known_hosts_path == str((tmp_path / "known_hosts").resolve())
 
 
 async def test_a_failed_host_key_removal_only_logs(

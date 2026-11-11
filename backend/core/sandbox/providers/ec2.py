@@ -43,8 +43,7 @@ import tempfile
 import threading
 import time
 import uuid
-import weakref
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
@@ -165,11 +164,10 @@ _READ_STDIN_SCRIPT = 'eval "$(cat)"'
 # and find the regions that they run in.
 _LIVE: set[EC2Environment] = set()
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
-# One lock for each known hosts file, kept for each event loop because an
-# asyncio lock works in one loop only.
-_KNOWN_HOSTS_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
-    weakref.WeakKeyDictionary()
-)
+# One lock for each known hosts file and event loop, because an asyncio lock
+# works in one loop only. Each entry also counts its users, and the last user
+# drops it, so the map never keeps a loop or a path alive.
+_KNOWN_HOSTS_LOCKS: dict[tuple[asyncio.AbstractEventLoop, str], tuple[asyncio.Lock, int]] = {}
 
 
 @dataclasses.dataclass
@@ -244,9 +242,9 @@ class EC2Environment(SandboxEnvironment):
             strict_host_key_checking: The SSH ``StrictHostKeyChecking`` value.
             ssh_known_hosts_path: The SSH known hosts file; ``None`` uses a
                 temporary file for the life of the instance. Unless
-                ``strict_host_key_checking`` is ``"yes"``, the file keys each
-                host key by the instance id, not the address, and stop
-                removes the key of the terminated instance.
+                ``strict_host_key_checking`` is ``"yes"`` or ``"true"``, the
+                file keys each host key by the instance id, not the address,
+                and stop removes the key of the terminated instance.
             timeouts: The phase timeouts. The start phase bounds the SSH
                 readiness wait; the run phase is the default ``exec`` limit.
 
@@ -272,7 +270,10 @@ class EC2Environment(SandboxEnvironment):
         self._root_device_name = root_device_name
         self._iam_instance_profile = iam_instance_profile
         self._strict_host_key_checking = strict_host_key_checking
-        self._known_hosts_path = ssh_known_hosts_path
+        # One real path for one file, so two spellings of it share one removal lock.
+        self._known_hosts_path = (
+            str(Path(ssh_known_hosts_path).expanduser().resolve()) if ssh_known_hosts_path else None
+        )
         self._temp_known_hosts: str | None = None
         self._lost_launches: dict[str, _LaunchState] = {}
         self._connect_timeout = (
@@ -307,9 +308,9 @@ class EC2Environment(SandboxEnvironment):
         terminates its own instance. A failed start removes its temporary
         known hosts file.
 
-        A stop from another task after the launch joins the lost launches,
-        that is after the image lookup, terminates the instance of the
-        launch, and the start then raises ``SandboxInfraError``. The start
+        The launch joins the lost launches after the image lookup. A stop
+        from another task after that point terminates the instance of the
+        launch. The start then raises ``SandboxInfraError``. The start
         never keeps an instance that such a stop terminated. A stop before
         that point, during the image lookup, does not affect this start.
 
@@ -1336,17 +1337,28 @@ def _raise_if_cancelled(state: _LaunchState) -> None:
         raise asyncio.CancelledError
 
 
-def _known_hosts_lock(path: str) -> asyncio.Lock:
-    """Return the lock of one known hosts file in the running event loop.
+@contextlib.asynccontextmanager
+async def _known_hosts_lock(path: str) -> AsyncIterator[None]:
+    """Hold the lock of one known hosts file in the running event loop.
 
     Args:
         path: The known hosts file.
 
-    Returns:
-        The lock.
+    Yields:
+        Nothing, while the lock is held.
     """
-    locks = _KNOWN_HOSTS_LOCKS.setdefault(asyncio.get_running_loop(), {})
-    return locks.setdefault(path, asyncio.Lock())
+    key = (asyncio.get_running_loop(), path)
+    lock, users = _KNOWN_HOSTS_LOCKS.get(key, (asyncio.Lock(), 0))
+    _KNOWN_HOSTS_LOCKS[key] = (lock, users + 1)
+    try:
+        async with lock:
+            yield
+    finally:
+        lock, users = _KNOWN_HOSTS_LOCKS[key]
+        if users == 1:
+            del _KNOWN_HOSTS_LOCKS[key]
+        else:
+            _KNOWN_HOSTS_LOCKS[key] = (lock, users - 1)
 
 
 def _stopped_during_start() -> SandboxInfraError:
