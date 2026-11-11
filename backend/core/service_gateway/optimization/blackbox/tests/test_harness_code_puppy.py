@@ -19,19 +19,20 @@ from core.models.blackbox import BLACKBOX_HARNESS_CODE_PUPPY, BLACKBOX_HARNESSES
 
 from .. import repo_tree
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
-from ..harness_bridge import parse_output, parse_plain_output, workspace_files
+from ..harness_bridge import parse_output, parse_pi_output, tool_call_ids, workspace_files
 from ..harnesses import REGISTRY
 from ..harnesses.code_puppy import CODE_PUPPY_MODELS_FILE, CODE_PUPPY_VERSION
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
 _PROVIDER_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")
-# Synthetic one-shot transcript in the shape of ``code-puppy --prompt`` plain output.
-_RECORDED_STDOUT = "\nI read solution.py and fixed the off-by-one error.\n\nThe answer is 42.\n\n"
-# Stand-in for Code Puppy: it records its call and seeded config, writes a
-# session and a cache under its XDG dirs like the real CLI, makes one code
-# change when the workspace has ``main.py``, and writes the usage file unless
-# FAKE_FAIL is set (like a swallowed model error).
+_ANSWER = "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42."
+# Stand-in for Code Puppy: it records its call and seeded config, prints the
+# prompt echo and a tool trace on stdout like the real CLI, writes a session,
+# a cache and the autosave under its XDG dirs (the last response holds the
+# answer in two text parts), makes one code change when the workspace has
+# ``main.py``, and writes the usage file unless FAKE_FAIL is set (like a
+# swallowed model error).
 _FAKE_CODE_PUPPY = """#!/bin/sh
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
@@ -41,6 +42,7 @@ _FAKE_CODE_PUPPY = """#!/bin/sh
   printf 'GEMINI_API_KEY=%s\\n' "$GEMINI_API_KEY"
   printf 'NO_VERSION_UPDATE=%s\\n' "$NO_VERSION_UPDATE"
   printf 'CFG=%s\\n' "$XDG_CONFIG_HOME/code_puppy/puppy.cfg"
+  printf 'CFG_MODE=%s\\n' "$(ls -l "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" | cut -c1-10)"
   printf 'MODELS=%s\\n' "$XDG_DATA_HOME/code_puppy/extra_models.json"
   printf 'MODEL_URL=%s\\n' "$(grep -o '"url": "[^"]*"' "$XDG_DATA_HOME/code_puppy/extra_models.json")"
   printf 'CFG_BEGIN\\n'; cat "$XDG_CONFIG_HOME/code_puppy/puppy.cfg"; printf 'CFG_END\\n'
@@ -51,10 +53,26 @@ mkdir -p "$XDG_DATA_HOME/code_puppy/sessions" "$XDG_CACHE_HOME/code_puppy"
 printf 'USER: the prompt\\n' > "$XDG_DATA_HOME/code_puppy/sessions/s1.json"
 printf 'cache' > "$XDG_CACHE_HOME/code_puppy/c.bin"
 if [ -f main.py ]; then echo 'print(2)' > main.py; fi
-printf '%s' "$FAKE_ANSWER"
+for a in "$@"; do _last="$a"; done
+printf 'Executing prompt: %s\\n' "$_last"
+printf 'TOOL edit_file main.py\\nRESPONSE The answer is 42.\\n'
+_auto="$XDG_CACHE_HOME/code_puppy/autosaves"
+mkdir -p "$_auto"
+printf '{"title": "not the answer"}' > "$_auto/auto_session_1_meta.json"
+printf '%s' '{"format": 2, "encoding": "pydantic-ai-messages", "messages": [
+ {"kind": "request", "parts": [{"part_kind": "user-prompt", "content": "the prompt"}]},
+ {"kind": "response", "parts": [{"part_kind": "text", "content": "Let me look."},
+  {"part_kind": "tool-call", "tool_name": "edit_file", "args": "{}"}]},
+ {"kind": "request", "parts": [{"part_kind": "tool-return", "content": "ok"}]},
+ {"kind": "response", "parts": [{"part_kind": "thinking", "content": "hidden"},
+  {"part_kind": "text", "content": "I read solution.py and fixed the off-by-one error."},
+  {"part_kind": "text", "content": "The answer is 42."}]}
+]}' > "$_auto/auto_session_1.json"
 if [ -z "$FAKE_FAIL" ]; then
   while [ "$#" -gt 0 ]; do
-    if [ "$1" = "--usage-file" ]; then printf '{"requests": 1}' > "$2"; fi
+    if [ "$1" = "--usage-file" ]; then
+      printf '{"input_tokens": 120, "output_tokens": 30, "requests": 2, "tool_calls": 2}' > "$2"
+    fi
     shift
   done
 fi
@@ -121,7 +139,6 @@ def _run_with_fake_code_puppy(
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
         "HOME": str(tmp_path / "home"),
         "FAKE_LOG": str(log),
-        "FAKE_ANSWER": _RECORDED_STDOUT,
     }
     if fail:
         env["FAKE_FAIL"] = "1"
@@ -136,7 +153,7 @@ def _run_with_fake_code_puppy(
 def test_code_puppy_is_registered_last_with_its_pin() -> None:
     """List Code Puppy in the registry and the request model, pinned to the exact PyPI release."""
     spec = REGISTRY[BLACKBOX_HARNESS_CODE_PUPPY]
-    assert (spec.binary, spec.version, spec.output_format) == ("code-puppy", "0.0.967", "plain")
+    assert (spec.binary, spec.version, spec.output_format) == ("code-puppy", "0.0.967", "pi")
     assert list(REGISTRY)[-1] == BLACKBOX_HARNESS_CODE_PUPPY
     assert BLACKBOX_HARNESSES[-2:] == (BLACKBOX_HARNESS_CODE_PUPPY, "custom")
     assert (
@@ -167,13 +184,13 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     assert _GATEWAY.api_key not in launch.run_command
     assert (
         'code-puppy --disable-ask-user-question --usage-file "$_cp_dir/usage.json" '
-        '--model app --prompt "$_cp_prompt" < /dev/null'
+        '--model app --prompt "$_cp_prompt" < /dev/null >&2'
     ) in launch.run_command
     assert "CODE_PUPPY_API_KEY=" not in launch.run_command
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert {name: launch.env[name] for name in _PROVIDER_KEYS} == dict.fromkeys(_PROVIDER_KEYS, "")
     assert "CODE_PUPPY_API_KEY" not in launch.env
-    assert launch.parse_output is parse_plain_output
+    assert launch.parse_output is parse_pi_output
 
 
 @pytest.mark.parametrize(
@@ -238,10 +255,7 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
         assert not Path(path).resolve().is_relative_to(workspace.resolve())
         assert not Path(path).exists(), "the run removes its temporary Code Puppy folder"
     assert f'MODEL_URL="url": "{_RELAY}"' in calls
-    assert parse_output("plain", result.stdout) == (
-        "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.",
-        {},
-    )
+    assert parse_output("pi", result.stdout) == (_ANSWER, {"input_tokens": 120, "output_tokens": 30})
 
 
 @pytest.mark.parametrize("protected", [False, True])
@@ -295,14 +309,28 @@ def test_run_fails_when_code_puppy_writes_no_usage_file(tmp_path: Path) -> None:
     assert "its usage file was not written" in result.stderr
 
 
-def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_parser() -> None:
-    """Parse a recorded transcript to its stripped text, and serialize the launch with the bridge's plain parser."""
-    assert parse_plain_output(_RECORDED_STDOUT) == (
-        "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.",
-        {},
-    )
-    assert parse_plain_output("  \n") == (None, {})
-    assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "plain"
+@pytest.mark.parametrize("protected", [False, True])
+def test_stdout_holds_only_the_final_answer_and_usage(tmp_path: Path, protected: bool) -> None:
+    """Keep the prompt echo and tool traces out of the scored answer, and give the bridge tokens and tool calls."""
+    result, _, _ = _run_with_fake_code_puppy(tmp_path, protected=protected, prompt="Echo me SECRET-PROMPT")
+
+    assert result.returncode == 0, result.stderr
+    assert "SECRET-PROMPT" not in result.stdout
+    assert "TOOL edit_file" not in result.stdout
+    assert "Executing prompt: Echo me SECRET-PROMPT" in result.stderr
+    assert parse_pi_output(result.stdout) == (_ANSWER, {"input_tokens": 120, "output_tokens": 30})
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert events[0]["type"] == "message_end"
+    assert [call for event in events for call in tool_call_ids("pi", event)] == ["code-puppy-0", "code-puppy-1"]
+    assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "pi"
+
+
+def test_config_with_the_token_is_owner_only(tmp_path: Path) -> None:
+    """Write puppy.cfg, which holds the gateway token, readable by its owner only."""
+    result, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "CFG_MODE=-rw-------\n" in calls
 
 
 def _shipped_tree(tmp_path: Path) -> Path:

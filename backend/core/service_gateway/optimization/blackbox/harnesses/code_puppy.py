@@ -8,9 +8,8 @@ for a prompt that starts with ``!`` or ``/``, and the usage-file check that
 turns a swallowed model error into a failed run. Skynet pins the release and
 always routes the custom endpoint to the model gateway, and writes the gateway
 token to ``puppy.cfg`` instead of the environment (see :data:`_KEY_CFG_LINE`).
-Harbor passes
-``--yolo true``, but the pinned CLI has no such argument and exits on it, so
-``puppy.cfg`` sets ``yolo_mode = true`` instead.
+Harbor passes ``--yolo true``, but the pinned CLI has no such argument and
+exits on it, so ``puppy.cfg`` sets ``yolo_mode = true`` instead.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import json
 import shlex
 
 from .....models.blackbox import BLACKBOX_HARNESS_CODE_PUPPY
-from ..harness_bridge import parse_plain_output
+from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
 from .base import ENV_API_KEY, ENV_PROMPT_FILE, PROVIDER, GatewayConfig, HarnessLaunch, _base_env, _version_check
 
@@ -45,6 +44,62 @@ _XDG_DIRS = {
     "XDG_STATE_HOME": "state",
 }
 _USAGE_FILE = '"$_cp_dir/usage.json"'
+# Code Puppy prints the prompt, its tool traces and status lines on stdout, so
+# its stdout goes to stderr and this script prints the answer as one Pi
+# ``message_end`` line. The answer is the text of the last model response in
+# the session that 0.0.967 always autosaves under
+# ``$XDG_CACHE_HOME/code_puppy/autosaves``; the usage file gives the tokens and
+# one Pi ``tool_execution_start`` line per tool call, so the bridge's cost and
+# tool-call stops read them. The answer line comes first, because a stop
+# signals the whole group while the script prints. It runs inline
+# (``python3 -I -c '...'``) for the reasons :data:`.fx.FX_TO_PI` gives, so it
+# must hold no single quote.
+CODE_PUPPY_TO_PI = """import glob
+import json
+import os
+import sys
+
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def count(value):
+    return value if type(value) is int and value >= 0 else 0
+
+
+used = load(sys.argv[1])
+used = used if isinstance(used, dict) else {}
+text = ""
+sessions = [
+    path
+    for path in glob.glob(os.path.join(sys.argv[2], "*.json"))
+    if not path.endswith(("_meta.json", "_acp.json"))
+]
+for path in sorted(sessions, key=os.path.getmtime):
+    envelope = load(path)
+    messages = envelope.get("messages") if isinstance(envelope, dict) else None
+    for message in messages if isinstance(messages, list) else []:
+        if not isinstance(message, dict) or message.get("kind") != "response":
+            continue
+        parts = [
+            part.get("content")
+            for part in message.get("parts") or []
+            if isinstance(part, dict) and part.get("part_kind") == "text" and isinstance(part.get("content"), str)
+        ]
+        if any(parts):
+            text = "\\n\\n".join(part for part in parts if part).strip()
+usage = {"input": count(used.get("input_tokens")), "output": count(used.get("output_tokens"))}
+content = [{"type": "text", "text": text}] if text else []
+lines = [json.dumps({"type": "message_end", "message": {"role": "assistant", "content": content, "usage": usage}})]
+calls = min(count(used.get("tool_calls")), 10000)
+lines += [json.dumps({"type": "tool_execution_start", "toolCallId": f"code-puppy-{index}"}) for index in range(calls)]
+sys.stdout.write("\\n".join(lines) + "\\n")
+"""
 # Code Puppy resolves a ``$NAME`` api_key of a custom endpoint from this variable.
 _CUSTOM_API_KEY_ENV = "CODE_PUPPY_API_KEY"
 # At startup Code Puppy 0.0.967 copies every model's ``$NAME`` api_key from
@@ -147,9 +202,10 @@ def _extra_models(model: str, gateway: GatewayConfig, reasoning_effort: str | No
 def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
     """Build the launch for Code Puppy (:data:`CODE_PUPPY_PACKAGE`, pinned to :data:`CODE_PUPPY_VERSION`).
 
-    Code Puppy has no JSON event stream on stdout, so the bridge keeps its
-    whole stdout as the answer. Code Puppy exits 0 after a model error and
-    writes the usage file only after a real result, so the run fails when
+    Code Puppy has no JSON event stream on stdout, so its stdout goes to
+    stderr and :data:`CODE_PUPPY_TO_PI` prints the answer and usage as Pi
+    lines for the bridge's Pi parser. Code Puppy exits 0 after a model error
+    and writes the usage file only after a real result, so the run fails when
     that file is missing.
 
     Args:
@@ -168,14 +224,17 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
         f"export {xdg_exports}; "
         'mkdir -p "$XDG_CONFIG_HOME/code_puppy" "$XDG_DATA_HOME/code_puppy" && '
         f'cp {CODE_PUPPY_MODELS_FILE} "$XDG_DATA_HOME/code_puppy/extra_models.json" && '
-        f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" && "
-        f'{_KEY_CFG_LINE} >> "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" || exit 1; '
+        # A SIGKILL at the session timeout skips the EXIT trap, so puppy.cfg,
+        # which holds the gateway token, is made owner-only in case it stays behind.
+        f"( umask 077 && printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" && "
+        f'{_KEY_CFG_LINE} >> "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" ) || exit 1; '
         f"{_FRAMED_PROMPT}"
         "code-puppy --disable-ask-user-question "
-        f'--usage-file {_USAGE_FILE} --model {PROVIDER} --prompt "$_cp_prompt" < /dev/null; '
+        f'--usage-file {_USAGE_FILE} --model {PROVIDER} --prompt "$_cp_prompt" < /dev/null >&2; '
         "_cp_status=$?; "
         f"if [ ! -s {_USAGE_FILE} ]; then "
         "echo 'code-puppy produced no result: its usage file was not written' >&2; exit 1; fi; "
+        f"python3 -I -c '{CODE_PUPPY_TO_PI}' {_USAGE_FILE} \"$XDG_CACHE_HOME/code_puppy/autosaves\" || exit 1; "
         "exit $_cp_status"
     )
     return HarnessLaunch(
@@ -184,7 +243,7 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
         files={CODE_PUPPY_MODELS_FILE: _extra_models(model, gateway, reasoning_effort)},
         run_command=run_command,
         env={**_base_env(model, gateway), **_BLANK_PROVIDER_KEYS},
-        parse_output=parse_plain_output,
+        parse_output=parse_pi_output,
     )
 
 
@@ -194,7 +253,7 @@ SPEC = register(
         launch=_code_puppy_launch,
         binary="code-puppy",
         version=CODE_PUPPY_VERSION,
-        output_format="plain",
+        output_format="pi",
         protected_env=_PROTECTED_ENV,
         position=90,
     )
