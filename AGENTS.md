@@ -135,9 +135,21 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   coverage gap. Do not ask Gilad to create one. Never borrow a personal
   session. Never print or commit passwords, tokens, cookies or email codes.
 - New staging accounts get no credit. Run paid checks on the PR preview,
-  which gives new accounts a test grant, or record the gap.
-- Never add funds, grant credits, change balances or change live billing
-  configuration. Never deploy production.
+  which gives new accounts a test grant, or record the gap. Or, with
+  Gilad's approval in chat, fund the check account with the staging
+  test-credit grant (see `skynet-test-accounts`).
+- Never add funds, grant credits or change balances, with one exception: the
+  staging test-credit grant command (`skynet-test-accounts`, "Grant test
+  credit"). Use it only for a check account you created for this check,
+  only after Gilad approves that grant in chat, and within the one $50
+  UTC-day cap on the staging database. The command refuses PR previews.
+  Amounts depend on the check. Before each grant, ask Gilad in chat for
+  a specific dollar amount: the smallest amount the check needs, with a short
+  cost estimate. Gilad approves that amount, or a larger one if he thinks the
+  check needs more. Record his approval text. Spend as little as possible.
+  Never grant on production, to real customers or to manual accounts. Never
+  use a raw wallet INSERT, Stripe or any other path.
+- Never change live billing configuration. Never deploy production.
 - Create, sign in, delete, served-commit check: `skynet-test-accounts`.
 
 ## Writing rule (MANDATORY)
