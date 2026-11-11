@@ -313,6 +313,49 @@ test("a repository run sends each secret with its allowed hosts as a list", () =
   ]);
 });
 
+const SERVICES_TOML = [
+  "[services.geocode]",
+  'url = "https://Maps.GoogleApis.com/maps/api/geocode/json"',
+  'query = { key = "${MAPS_KEY}" }',
+  "",
+  "[services.search]",
+  'url = "https://api.search.example/v1"',
+  "",
+  "[services.search.headers]",
+  'X-Api-Key = "${SEARCH_KEY}"',
+  "",
+  "[metric]",
+  'note = "${NOT_A_SERVICE}"',
+].join("\n");
+
+test("a repository run sends the saved secrets its services name, by id, to their host only", () => {
+  const state = repoState();
+  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.task.repo = { ...state.task.repo!, secrets: [{ name: "SEARCH_KEY", value: "typed", allowedHosts: "api.search.example" }] };
+  const savedSecrets = [
+    { id: "sec-maps", name: "MAPS_KEY" },
+    { id: "sec-search", name: "SEARCH_KEY" },
+    { id: "sec-other", name: "NOT_A_SERVICE" },
+    { id: "sec-unused", name: "UNUSED_KEY" },
+  ];
+  const request = repoRunRequest(state, { ...options, savedSecrets });
+  assert.ok(request);
+  // The typed SEARCH_KEY wins over the saved one; only service secrets go, never a value.
+  assert.deepEqual((request.target as { repo: { secrets?: unknown } }).repo.secrets, [
+    { name: "SEARCH_KEY", value: "typed", allowed_hosts: ["api.search.example"] },
+    { name: "MAPS_KEY", saved_secret_id: "sec-maps", allowed_hosts: ["maps.googleapis.com"] },
+  ]);
+});
+
+test("a repository run with no saved secret for its services sends only the typed ones", () => {
+  const state = repoState();
+  state.workspace.files = { ...state.workspace.files, "optimize.toml": SERVICES_TOML };
+  state.task.repo = { ...state.task.repo!, secrets: [] };
+  const request = repoRunRequest(state, { ...options, savedSecrets: [{ id: "x", name: "UNUSED_KEY" }] });
+  assert.ok(request);
+  assert.equal("secrets" in (request.target as { repo: object }).repo, false);
+});
+
 test("a repository run with no secrets sends no secrets key", () => {
   const state = repoState();
   state.task.repo = { ...state.task.repo!, secrets: [] };

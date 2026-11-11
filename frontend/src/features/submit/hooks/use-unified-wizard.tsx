@@ -41,6 +41,9 @@ import {
   submitRepoRun,
   submitUnifiedRun,
   enableContinuous,
+  listSavedSecrets,
+  SAVED_SECRETS_CHANGED_EVENT,
+  type SavedSecret,
 } from "@/shared/lib/api";
 import { runHref, type ApiSource } from "@/shared/lib/api-route";
 import { requestSandboxProvider, type SandboxProviders } from "@/shared/lib/sandbox-provider";
@@ -440,6 +443,23 @@ export function WizardV2Provider({
   const runSource: ApiSource = hostedChoice && runOn === "hosted" ? "hosted" : "local";
   const modelCatalog = useModelCatalog(runSource);
   const sandboxProviders = useSandboxProviders(runSource);
+  // Names and ids only. A repository run sends the saved secrets its
+  // optimize.toml names, so a secret saved once serves every run (SKY-641).
+  const [savedSecrets, setSavedSecrets] = useState<SavedSecret[]>([]);
+  useEffect(() => {
+    let live = true;
+    const read = () => {
+      listSavedSecrets()
+        .then((res) => live && setSavedSecrets(res.secrets))
+        .catch(() => {});
+    };
+    read();
+    window.addEventListener(SAVED_SECRETS_CHANGED_EVENT, read);
+    return () => {
+      live = false;
+      window.removeEventListener(SAVED_SECRETS_CHANGED_EVENT, read);
+    };
+  }, []);
   const [catalogEntry, setCatalogEntry] = useState<{
     source: ApiSource;
     catalog: OptimizerCatalogResponse;
@@ -676,9 +696,15 @@ export function WizardV2Provider({
     );
     return repoRunRequest(
       { ...state, optimizer: { ...state.optimizer, proposer, sandboxProvider } },
-      { username, tokenSource, maxCostCents: budgetUncapped ? null : maxCostCents },
+      {
+        username,
+        tokenSource,
+        maxCostCents: budgetUncapped ? null : maxCostCents,
+        // The ids belong to this app's server; a web run from the Mac cannot resolve them.
+        savedSecrets: runSource === "local" ? savedSecrets : [],
+      },
     );
-  }, [state, username, tokenSource, budgetUncapped, maxCostCents, sandboxProviders]);
+  }, [state, username, tokenSource, budgetUncapped, maxCostCents, sandboxProviders, runSource, savedSecrets]);
   const exposedCatalog =
     optimizerCatalog &&
     optimizerCatalog.artifact_kind === kind &&

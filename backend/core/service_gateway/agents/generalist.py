@@ -79,6 +79,7 @@ from .docs_tools import build_docs_tools
 from .github_mcp import github_repo_tools
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
+from .secret_request import SECRET_REQUEST_TOOL, secret_request_problem, secret_request_result, secret_request_tool
 from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
 from .workspace_coder import CODING_AGENT_TOOL, run_coding_agent
@@ -168,8 +169,9 @@ _DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
 
 # Passkeys, linked sign-ins and two-factor codes. These ask in every trust
 # mode, YOLO included, and in every approval policy, because one wrong call
-# can lock the user out.
-_ALWAYS_CONFIRM_TOOLS: frozenset[str] = frozenset({"change_protected_setting"})
+# can lock the user out. ``request_secret`` pauses on the same flow so the
+# user can type the secret in the browser while the turn waits (SKY-641).
+_ALWAYS_CONFIRM_TOOLS: frozenset[str] = frozenset({"change_protected_setting", SECRET_REQUEST_TOOL})
 
 # Safe mutations — metadata toggles, local-only operations.
 # Confirm in Ask mode; auto-approve in Auto-safe and YOLO.
@@ -711,6 +713,14 @@ class _ApprovalGatedTool:
                         }
                     )
                     return order_error
+            if self._tool_name == SECRET_REQUEST_TOOL and (problem := secret_request_problem(kwargs)):
+                self._emit(
+                    {
+                        "event": "tool_end",
+                        "data": {"id": call_id, "tool": self._tool_name, "status": "error", "result": problem},
+                    }
+                )
+                return problem
             pending_key = approval_key(call_id, self._approval_owner)
             # An injected policy (react-serve gates by its own rules) must not
             # be able to wave a protected settings action through.
@@ -747,18 +757,24 @@ class _ApprovalGatedTool:
                     }
                 )
                 if not approved:
+                    declined: Any = (
+                        secret_request_result(str(kwargs.get("name")), saved=False)
+                        if self._tool_name == SECRET_REQUEST_TOOL
+                        else "User declined"
+                    )
                     self._emit(
                         {
                             "event": "tool_end",
                             "data": {
                                 "id": call_id,
                                 "tool": self._tool_name,
-                                "status": "error",
-                                "result": "User declined",
+                                # A skipped secret is the user's answer, not a failure.
+                                "status": "ok" if self._tool_name == SECRET_REQUEST_TOOL else "error",
+                                "result": declined,
                             },
                         }
                     )
-                    return "User declined"
+                    return declined
             result = await self._original(*args, **kwargs)
             shown = self._keep_existing_job_name(_serialize_tool_result(result))
             if self._tool_name == "update_wizard_state":
@@ -2230,6 +2246,12 @@ Capabilities worth knowing about:
   token or key change, 2FA setup, password change, deleting the account)
   call ``open_page`` with the area's tab and tell the user what to do there.
   Use ``open_page`` too when the user asks to see a settings tab.
+* Saved secrets: when a run's optimize.toml sends a secret as ``${NAME}``
+  in a ``[services.<name>]`` entry, call ``request_secret`` with that name,
+  what it is for and its host, one secret per call. The user types the value
+  in a secure card and you get back only ``saved`` or ``skipped``. Never ask
+  for a secret value in the chat. When the user pastes one anyway, never
+  repeat it, write it anywhere or pass it to a tool; ask them to use the card.
 * When you NAME a run, describe it too: set ``job_description`` (one
   or two plain sentences — the task, the data, the goal, in
   ``reply_language``) in the SAME ``update_wizard_state`` patch as
@@ -2523,7 +2545,10 @@ SCREEN_FOCUS: dict[str, str] = {
         "repository run has no ``run_code``). Its result is where you go on from: the code is already in "
         "the editor, so say in one sentence what it measures and which files it read, and ask the user its "
         "``open_questions``. Check ``metric_code`` with ``validate_code`` before you continue; for a "
-        "repository run the wizard fills its ``column_mapping``."
+        "repository run the wizard fills its ``column_mapping``. When optimize.toml sends a secret as "
+        "``${NAME}`` in a ``[services.<name>]`` entry, call ``request_secret`` for it with its purpose and "
+        "host, one secret per call: the user types the value in a secure card, and you get back only "
+        "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted."
     ),
     "check": (
         "Check: explain the results of the dry run on the screen. When it failed, fix ``run_code`` or "
@@ -3499,7 +3524,7 @@ async def _drive_generalist_agent(
                 authoring_flag=authoring_flag,
                 approval_owner=approval_owner,
             )
-            for tool in [*build_web_tools(), *build_docs_tools(), *github_tools]
+            for tool in [*build_web_tools(), *build_docs_tools(), *github_tools, secret_request_tool()]
         ]
         if screen is not None:
             dspy_tools += [
