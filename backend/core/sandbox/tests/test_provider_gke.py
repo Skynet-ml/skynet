@@ -942,6 +942,39 @@ async def test_a_cancelled_exec_dropped_from_a_full_pool_sends_no_kill(
             pool.shutdown()
 
 
+async def test_a_timeout_scope_over_a_queued_exec_raises_a_timeout(
+    cluster: FakeCluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Let ``asyncio.timeout`` turn the cancel of a queued exec into ``TimeoutError``, with no kill."""
+    monkeypatch.setattr(gke, "_CONNECT_SECONDS", 30.0)
+    release = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=1)
+    kills: list[str] = []
+
+    async def record_kill(name: str, state: str) -> None:
+        """Record a kill instead of sending it.
+
+        Args:
+            name: The pod name.
+            state: The command's state id.
+        """
+        kills.append(state)
+
+    async with GKEEnvironment(_spec()) as env:
+        monkeypatch.setattr(gke, "_SESSION_POOL", pool)
+        monkeypatch.setattr(env, "_kill_group", record_kill)
+        blocker = pool.submit(release.wait, 10)
+        try:
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.3):
+                    await env.exec("true", timeout_sec=60)
+            assert kills == []
+        finally:
+            release.set()
+            blocker.result(5)
+            pool.shutdown()
+
+
 def _stalled_websocket_server(server: socket.socket, done: threading.Event) -> None:
     """Accept one websocket handshake, then send half a frame and go quiet.
 

@@ -151,8 +151,23 @@ class _DroppedSessionError(_ConnectTimeoutError):
     """A queued exec session was dropped before a pool thread took it, so no session opened."""
 
 
-class _DroppedCancelledError(asyncio.CancelledError):
-    """A cancel dropped a queued exec session before a pool thread took it, so no session opened."""
+# A cancel that dropped a queued exec session (no pool thread took it, so no
+# session opened) carries this attribute. A CancelledError subclass would
+# escape ``asyncio.timeout`` on Python 3.11 and 3.12, which checks the exact
+# type, so the original error is marked and raised again.
+_DROPPED_ATTR = "_skynet_gke_dropped"
+
+
+def _is_dropped_cancel(error: BaseException) -> bool:
+    """Say whether a cancel dropped a queued exec session before it opened.
+
+    Args:
+        error: The error that ended the session.
+
+    Returns:
+        ``True`` for a marked ``asyncio.CancelledError``.
+    """
+    return isinstance(error, asyncio.CancelledError) and getattr(error, _DROPPED_ATTR, False)
 
 
 class _TimedWebSocket(k8s_ws_client.WebSocket if k8s_ws_client is not None else object):
@@ -715,7 +730,7 @@ class GKEEnvironment(SandboxEnvironment):
             SandboxInfraError: The session failed, or did not connect in time
                 (``_ConnectTimeoutError``; the command did not start).
                 ``_DroppedSessionError`` says that no pool thread took the session.
-            asyncio.CancelledError: The task was cancelled. ``_DroppedCancelledError``
+            asyncio.CancelledError: The task was cancelled. ``_is_dropped_cancel``
                 says that no pool thread took the session.
         """
         loop = asyncio.get_running_loop()
@@ -761,7 +776,7 @@ class GKEEnvironment(SandboxEnvironment):
             done, _ = await asyncio.wait({worker}, timeout=remaining)
         except asyncio.CancelledError as error:
             if await _abandon(job, worker, stop):
-                raise _DroppedCancelledError(*error.args) from error
+                setattr(error, _DROPPED_ATTR, True)
             raise
         finally:
             connecting.cancel()
@@ -905,7 +920,7 @@ class GKEEnvironment(SandboxEnvironment):
 
         try:
             exit_code = await self._session(name, argv, stdin=stream, on_chunk=take, seconds=deadline)
-        except (_DroppedSessionError, _DroppedCancelledError):
+        except _DroppedSessionError:
             # No session opened, so no command runs. A kill would only queue
             # behind the same full pool.
             raise
@@ -914,8 +929,9 @@ class GKEEnvironment(SandboxEnvironment):
             raise SandboxInfraError(
                 f"The command still ran {_KILL_GRACE_SECONDS}s past its {timeout_sec}s timeout: {command[:200]}"
             ) from error
-        except BaseException:
-            await self._kill_group(name, state)
+        except BaseException as error:
+            if not _is_dropped_cancel(error):
+                await self._kill_group(name, state)
             raise
         if exit_code == _NO_GROUP_EXIT_CODE and await self._take_marker(name, state, "nogroup"):
             raise SandboxInfraError(
