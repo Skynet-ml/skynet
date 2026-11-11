@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,7 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from core.api.routers.folders import create_folders_router
 from core.config import settings
-from core.service_gateway.agents import docs_tools, pi_react, web_tools
+from core.service_gateway.agents import docs_tools, pi_bridge, pi_react, web_tools
 from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload
 from core.service_gateway.agents.docs_retrieval import DocsCorpus
@@ -859,6 +860,70 @@ def _make_fake_tool(name: str, return_value: str = "ok") -> dspy.Tool:
         return return_value
 
     return dspy.Tool(func=func, name=name, desc="test tool", args={}, arg_types={}, arg_desc={})
+
+
+async def test_a_stopped_pi_turn_ends_an_approval_wait_in_its_tool_thread() -> None:
+    """When the Pi turn stops, the tool thread cancels the call waiting for approval and gives up."""
+    events: list[dict] = []
+    registry = ApprovalRegistry()
+    tool = _wrap_tool_with_approval(
+        _make_fake_tool("rename_job_optimizations", return_value="renamed"),
+        trust_mode="ask",
+        registry=registry,
+        emit=events.append,
+        outer_loop=asyncio.get_running_loop(),
+        needs_approval=lambda _name, _mode: True,
+    )
+    stop = threading.Event()
+    token = pi_bridge._TURN_STOP.set((stop,))
+    try:
+        call = asyncio.ensure_future(asyncio.to_thread(tool.func))
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+    for _ in range(200):
+        if any(event["event"] == "pending_approval" for event in events):
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    with pytest.raises(RuntimeError, match="turn stopped"):
+        await asyncio.wait_for(call, timeout=5)
+    for _ in range(200):
+        if any(event["event"] == "tool_end" for event in events):
+            break
+        await asyncio.sleep(0.01)
+    end = next(event for event in events if event["event"] == "tool_end")
+    assert end["data"]["result"] == "cancelled"
+    assert not registry._pending
+
+
+async def test_a_tool_thread_hands_the_turn_stop_to_the_work_it_starts() -> None:
+    """A gated tool's body, and a thread it starts (a coding-agent hand-off), see the Pi turn's stop signal."""
+
+    async def hand_off(**_kwargs: Any) -> Any:
+        """Return the stop signals a worker thread sees.
+
+        Args:
+            **_kwargs: Ignored.
+
+        Returns:
+            The signals.
+        """
+        return await asyncio.to_thread(pi_bridge._TURN_STOP.get)
+
+    tool = _wrap_tool_with_approval(
+        dspy.Tool(func=hand_off, name="hand_off", desc="test tool", args={}, arg_types={}, arg_desc={}),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _event: None,
+        outer_loop=asyncio.get_running_loop(),
+    )
+    stop = threading.Event()
+    token = pi_bridge._TURN_STOP.set((stop,))
+    try:
+        seen = await asyncio.to_thread(tool.func)
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+    assert seen == (stop,)
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ from typing import Any
 import dspy
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.types import Tool
+from mcp.types import CallToolResult, EmbeddedResource, TextContent, TextResourceContents, Tool
 
 GITHUB_MCP_VERSION = "2.1.0"
 TOKEN_ENV = "GITHUB_PERSONAL_ACCESS_TOKEN"
@@ -84,16 +84,16 @@ def read_only_tools(tools: Iterable[Tool]) -> list[Tool]:
     ]
 
 
-def cap_result(result: Any) -> Any:
+def cap_result(result: str) -> str:
     """Cut a long text tool result to :data:`MAX_RESULT_CHARS` and say so.
 
     Args:
-        result: One tool result.
+        result: One tool result's text.
 
     Returns:
-        The result, with a truncation note when the text was cut.
+        The text, with a truncation note when it was cut.
     """
-    if not isinstance(result, str) or len(result) <= MAX_RESULT_CHARS:
+    if len(result) <= MAX_RESULT_CHARS:
         return result
     return (
         f"{result[:MAX_RESULT_CHARS]}\n\n[Truncated: the result has {len(result)} characters and only the first "
@@ -101,27 +101,57 @@ def cap_result(result: Any) -> Any:
     )
 
 
-def _capped(tool: dspy.Tool) -> dspy.Tool:
-    """Make the tool return results capped by :func:`cap_result`.
+def result_text(result: CallToolResult) -> str:
+    """Join the text of a tool result, embedded text resources included, and cap it.
+
+    ``get_file_contents`` sends a status line as text and the file body as an
+    embedded resource. DSPy's own conversion keeps only the text parts, so the
+    model would see the status line and not the file.
 
     Args:
-        tool: A tool built from the MCP listing.
+        result: The MCP tool result.
 
     Returns:
-        The same tool.
-    """
-    call = tool.func
+        The text parts and text resource bodies, in order, capped by
+        :func:`cap_result`.
 
-    async def func(**kwargs: Any) -> Any:
-        """Call the MCP tool and cap its result.
+    Raises:
+        RuntimeError: When the server marks the result as an error.
+    """
+    parts = []
+    for content in result.content:
+        if isinstance(content, TextContent):
+            parts.append(content.text)
+        elif isinstance(content, EmbeddedResource) and isinstance(content.resource, TextResourceContents):
+            parts.append(content.resource.text)
+    text = "\n\n".join(parts)
+    if result.isError:
+        raise RuntimeError(f"Failed to call a MCP tool: {cap_result(text)}")
+    return cap_result(text)
+
+
+def _repo_tool(session: ClientSession, spec: Tool) -> dspy.Tool:
+    """Build one agent tool whose result is :func:`result_text`.
+
+    Args:
+        session: The turn's MCP session.
+        spec: The tool's listing entry.
+
+    Returns:
+        The tool, with the schema DSPy reads from the listing.
+    """
+    tool = dspy.Tool.from_mcp_tool(session, spec)
+
+    async def func(**kwargs: Any) -> str:
+        """Call the MCP tool and return its text.
 
         Args:
             **kwargs: The tool's arguments.
 
         Returns:
-            The capped result.
+            The capped text.
         """
-        return cap_result(await call(**kwargs))
+        return result_text(await session.call_tool(spec.name, arguments=kwargs))
 
     tool.func = func
     return tool
@@ -138,7 +168,7 @@ async def github_repo_tools(binary: str, token: str | None) -> AsyncGenerator[li
 
     Yields:
         The read-only tools, bound to a session that closes with the context.
-        Their text results are capped by :func:`cap_result`.
+        Their results are the text of :func:`result_text`, capped.
 
     Raises:
         GitHubMcpError: When the token is missing or the executable is not
@@ -160,4 +190,4 @@ async def github_repo_tools(binary: str, token: str | None) -> AsyncGenerator[li
         ):
             await session.initialize()
             listing = await session.list_tools()
-            yield [_capped(dspy.Tool.from_mcp_tool(session, spec)) for spec in read_only_tools(listing.tools)]
+            yield [_repo_tool(session, spec) for spec in read_only_tools(listing.tools)]

@@ -45,11 +45,13 @@ from dspy.utils.exceptions import AdapterParseError, format_error_for_lm
 
 from ..optimization.retrying_react import PARSE_RETRY_ATTEMPTS
 from .agent_program import SUBMIT_TOOL, AgentProgram, AppendOnlyChatAdapter
-from .pi_bridge import PiEventTranslator, ToolOutcome, run_pi_turn
+from .pi_bridge import PiEventTranslator, ToolOutcome, run_pi_turn, turn_stopped
 from .steering import STEER_APPLIED_EVENT, SteerInbox, claim_delivery
 
 logger = logging.getLogger(__name__)
 
+# How long a stopped turn holds its lock for a tool thread to see the stop.
+_TOOL_STOP_WAIT_SECONDS = 10.0
 _DELIVERED = "Delivered to the user."
 _SUBMIT_NOT_ALONE = (
     "Not delivered: `submit` was called beside other tools, before their results existed. "
@@ -96,6 +98,31 @@ def _wire_message(message: dict[str, Any]) -> dict[str, Any] | None:
     if role == "user":
         return {"role": "user", "content": message.get("content")}
     return None
+
+
+async def _in_thread(func: Callable[..., Any], args: dict[str, Any]) -> Any:
+    """Run a blocking tool off the event loop, and wait for the thread when cancelled.
+
+    A cancel does not stop the thread. The caller holds the turn's lock, so
+    it waits, bounded, until the thread sees the stop through
+    :func:`~.pi_bridge.turn_stopped` and ends.
+
+    Args:
+        func: The tool.
+        args: Its arguments.
+
+    Returns:
+        The tool's value.
+    """
+    work = asyncio.ensure_future(asyncio.to_thread(func, **args))
+    work.add_done_callback(lambda done: done.cancelled() or done.exception())
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        _, running = await asyncio.wait({work}, timeout=_TOOL_STOP_WAIT_SECONDS)
+        if running:
+            logger.warning("A tool thread still runs %.0f s after its turn stopped", _TOOL_STOP_WAIT_SECONDS)
+        raise
 
 
 def _chunk_json(chunk: Any) -> str:
@@ -262,7 +289,7 @@ class ReactOnPi:
                 return ToolOutcome(f"Unknown tool: {name}", is_error=True)
             try:
                 # Gated tools block on the event loop for approvals, so they run off it.
-                value = await asyncio.to_thread(tool, **args)
+                value = await _in_thread(tool, args)
             except Exception as error:
                 return ToolOutcome(
                     f"Execution error in {name}: {format_error_for_lm(error, traceback_frames=5)}", is_error=True
@@ -285,7 +312,7 @@ class ReactOnPi:
             return ToolOutcome(_SUBMIT_NOT_ALONE)
         self._react._forcing = self._forcing
         try:
-            value = await asyncio.to_thread(self._react.tools[SUBMIT_TOOL], **args)
+            value = await _in_thread(self._react.tools[SUBMIT_TOOL], args)
         except Exception as error:
             self._translator.retract()
             return ToolOutcome(
@@ -368,14 +395,16 @@ class ReactOnPi:
             OpenAI stream chunks as JSON strings.
         """
         self._calls += 1
+        raw = body.get("messages") or []
+        first_user = next((i for i, message in enumerate(raw) if message.get("role") == "user"), len(raw))
+        tail = [kept for message in raw[first_user + 1 :] if (kept := _wire_message(message))]
+        # Kept before the stop below, so a forced submit after the step limit
+        # sees the last step's call and result.
+        self._tail = tail
         if self.reply is not None or self._calls > self._react.max_iters + 1:
             yield stop_chunk()
             return
         self._forcing = self._calls == self._react.max_iters + 1
-        raw = body.get("messages") or []
-        first_user = next((i for i, message in enumerate(raw) if message.get("role") == "user"), len(raw))
-        tail = [kept for message in raw[first_user + 1 :] if (kept := _wire_message(message))]
-        self._tail = tail
         await self._take_steers(len(tail))
         messages = self._messages(tail)
         if not self._native:
@@ -427,13 +456,15 @@ class ReactOnPi:
 
         The call goes through the turn's metered LM with ``submit`` forced, as
         ``dspy.ReActV2``'s forced submit did. A reply that still has no
-        ``submit`` leaves :attr:`outputs` unset. Only a native model can end
-        in plain text: the text protocol answers with tool calls or raises.
+        ``submit``, or a ``submit`` whose arguments are not JSON, leaves
+        :attr:`outputs` unset. Only a native model can end in plain text: the
+        text protocol answers with tool calls or raises. A stopped parent turn
+        (a coding-agent hand-off) gets no forced call.
 
         Args:
             final_text: The text of the model's final message.
         """
-        if not self._native:
+        if not self._native or turn_stopped():
             return
         self._forcing = True
         tail = [*self._tail, {"role": "assistant", "content": final_text}] if final_text else self._tail
@@ -449,8 +480,13 @@ class ReactOnPi:
         if submit is None:
             logger.warning("Forced submit returned no submit call")
             return
+        try:
+            args = json.loads(submit["arguments"] or "{}")
+        except ValueError:
+            logger.warning("Forced submit arguments are not JSON")
+            return
         self._last_tools = [SUBMIT_TOOL]
-        await self._submit(json.loads(submit["arguments"] or "{}"))
+        await self._submit(args)
 
     async def _text_protocol_reply(self, messages: list[dict[str, Any]]) -> str:
         """Call a model without native tool calls and hand Pi its calls natively.

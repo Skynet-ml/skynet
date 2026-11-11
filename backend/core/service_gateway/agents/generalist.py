@@ -30,6 +30,7 @@ instead.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import inspect
 import json
@@ -75,6 +76,7 @@ from .code import _agent_error_payload, _format_agent_error, _reply_language, _r
 from .conduct import with_conduct
 from .docs_tools import build_docs_tools
 from .github_mcp import github_repo_tools
+from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
 from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
@@ -210,6 +212,8 @@ MCP_CALL_TIMEOUT_SECONDS = 120.0
 # a confirm landing on another replica persisted. The in-process future still
 # resolves same-pod confirms instantly; this only bounds cross-pod latency.
 _DURABLE_POLL_SECONDS = 1.5
+# How often a tool thread checks whether its Pi turn stopped.
+_STOP_POLL_SECONDS = 0.25
 
 
 class ApprovalRegistry:
@@ -625,7 +629,16 @@ class _ApprovalGatedTool:
         errors instead of timing out on a hung coroutine.
         """
         future = asyncio.run_coroutine_threadsafe(self._async_body(*args, **kwargs), self._outer_loop)
-        return future.result()
+        # A stopped Pi turn cannot cancel this thread, so the thread cancels
+        # the call: an approval wait, a web fetch or a coding-agent hand-off
+        # then ends with the turn instead of running on.
+        while True:
+            done, _ = concurrent.futures.wait((future,), timeout=_STOP_POLL_SECONDS)
+            if done:
+                return future.result()
+            if turn_stopped():
+                future.cancel()
+                raise RuntimeError(f"The agent turn stopped before {self._tool_name} finished")
 
     async def _async_body(self, *args: Any, **kwargs: Any) -> Any:
         """Run the wrapped tool, emitting approval and lifecycle events.

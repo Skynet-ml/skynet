@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import dspy
+import httpx
 import litellm
 import pytest
 from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices, Usage
@@ -31,7 +34,7 @@ from core.service_gateway.agents.generalist import (
     screen_tools,
     tools_for,
 )
-from core.service_gateway.agents.pi_bridge import PiEventTranslator, ToolOutcome
+from core.service_gateway.agents.pi_bridge import PiEventTranslator, ToolOutcome, _BridgeApp, turn_stopped
 from core.service_gateway.agents.pi_react import AgentReplyFormatError, ReactOnPi
 from core.service_gateway.agents.steering import STEER_APPLIED_EVENT, SteerInbox
 from core.service_gateway.language_models import MeteredLM
@@ -39,25 +42,26 @@ from core.service_gateway.language_models import MeteredLM
 _REPLY = "assistant_message"
 
 
-def _tool_message(name: str, args: dict[str, Any], index: int) -> dict[str, Any]:
+def _tool_message(name: str, args: dict[str, Any] | str, index: int) -> dict[str, Any]:
     """Build an assistant message that calls one tool.
 
     Args:
         name: The tool.
-        args: Its arguments.
+        args: Its arguments, or the raw arguments text.
         index: Makes the call id unique.
 
     Returns:
         The OpenAI message.
     """
-    call = {"id": f"call_{index}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+    arguments = args if isinstance(args, str) else json.dumps(args)
+    call = {"id": f"call_{index}", "type": "function", "function": {"name": name, "arguments": arguments}}
     return {"role": "assistant", "content": None, "tool_calls": [call]}
 
 
 class _ScriptedLM(dspy.BaseLM):
     """An LM that records requests and answers with scripted tool calls or text."""
 
-    def __init__(self, script: Iterable[tuple[str, dict[str, Any]] | str | list[tuple[str, dict]]]) -> None:
+    def __init__(self, script: Iterable[tuple[str, dict[str, Any] | str] | str | list[tuple[str, dict]]]) -> None:
         """Store the script.
 
         Args:
@@ -339,6 +343,161 @@ async def test_budget_forces_submit_with_the_guard_off_then_stops() -> None:
     after = [json.loads(chunk) async for chunk in handlers.complete({"messages": []})]
     assert after == [json.loads(pi_react.stop_chunk())]
     assert len(lm.requests) == 3
+
+
+def _coder_program(*, max_iters: int = 5) -> AgentProgram:
+    """Build a program with two outputs, so a plain-text end gets a forced submit.
+
+    Args:
+        max_iters: The loop budget.
+
+    Returns:
+        The program.
+    """
+    signature = dspy.Signature("request: str -> summary: str, run_code: str", "Code.")
+    return AgentProgram(signature, tools=[_lookup], max_iters=max_iters)
+
+
+async def _run_coder(lm: dspy.BaseLM, monkeypatch: pytest.MonkeyPatch, *, max_iters: int = 5) -> dict[str, Any] | str:
+    """Run the two-output program on the simulated Pi.
+
+    Args:
+        lm: The turn's LM.
+        monkeypatch: Pytest's monkeypatch fixture.
+        max_iters: The loop budget.
+
+    Returns:
+        The program's outputs, or the text reply.
+    """
+    monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
+    return await pi_react.run_react_program_on_pi(
+        _coder_program(max_iters=max_iters), {"request": "write it"}, lm, input_field="request", binary="pi"
+    )
+
+
+async def test_forced_submit_with_cut_off_arguments_falls_back_to_the_text_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced submit arguments that are not JSON leave the outputs unset, so the text reply stands."""
+    lm = _ScriptedLM(["I wrote it.", ("submit", '{"summary": "Wro')])
+    assert await _run_coder(lm, monkeypatch) == "I wrote it."
+    assert len(lm.requests) == 2
+
+
+async def test_forced_call_answered_in_plain_text_gives_the_text_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forced call that still answers in plain text calls no submit; the first text reply stands."""
+    lm = _ScriptedLM(["I wrote it.", "Here is the summary again."])
+    assert await _run_coder(lm, monkeypatch) == "I wrote it."
+    assert len(lm.requests) == 2
+
+
+async def test_forced_submit_after_the_step_limit_sees_the_last_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the step limit stops Pi, the forced submit's prompt holds the last forced step's call and result."""
+    done = {"summary": "s", "run_code": "c"}
+    lm = _ScriptedLM([("_lookup", {"name": "a"}), [("_lookup", {"name": "b"}), ("submit", done)], ("submit", done)])
+    assert await _run_coder(lm, monkeypatch, max_iters=1) == done
+    assert len(lm.requests) == 3
+    forced = lm.requests[2]["messages"]
+    results = [message["content"] for message in forced if message["role"] == "tool"]
+    assert results == ["value of a", "value of b", pi_react._SUBMIT_NOT_ALONE]
+
+
+def _bridge(handlers: ReactOnPi) -> tuple[_BridgeApp, httpx.AsyncClient]:
+    """Serve the handlers on an in-process bridge.
+
+    Args:
+        handlers: The turn's handlers.
+
+    Returns:
+        The bridge and a client bound to it.
+    """
+    app = _BridgeApp(handlers, "turn-token")
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app.app),
+        base_url="http://bridge",
+        headers={"authorization": "Bearer turn-token"},
+    )
+    return app, client
+
+
+async def _close_during(handlers: ReactOnPi, tool: str, started: threading.Event) -> float:
+    """Start a tool call on the bridge, then close the turn while the tool thread runs.
+
+    Args:
+        handlers: The turn's handlers.
+        tool: The tool to call.
+        started: Set by the tool when its thread starts.
+
+    Returns:
+        How long the close took, in seconds.
+    """
+    app, client = _bridge(handlers)
+    request = asyncio.ensure_future(client.post("/call", json={"tool": tool, "args": {"name": "a"}}))
+    assert await asyncio.to_thread(started.wait, 5)
+    begin = time.monotonic()
+    await app.close()
+    took = time.monotonic() - begin
+    request.cancel()
+    await asyncio.gather(request, return_exceptions=True)
+    await client.aclose()
+    return took
+
+
+async def test_a_stopped_turn_keeps_its_lock_until_the_tool_thread_ends() -> None:
+    """Closing the turn signals the tool thread, and the lock stays held until the thread ends."""
+    started, ended = threading.Event(), threading.Event()
+
+    def wait_for_stop(name: str) -> str:
+        """Block until the turn stops, then take a moment to end.
+
+        Args:
+            name: Ignored.
+
+        Returns:
+            A constant.
+        """
+        started.set()
+        while not turn_stopped():
+            time.sleep(0.01)
+        time.sleep(0.2)
+        ended.set()
+        return "stopped"
+
+    program = AgentProgram(dspy.Signature(f"user_message: str -> {_REPLY}: str"), tools=[wait_for_stop])
+    handlers, _ = _handlers(_ScriptedLM([]), program=program)
+    await _close_during(handlers, "wait_for_stop", started)
+    assert ended.is_set()
+    assert not handlers._lock.locked()
+
+
+async def test_a_tool_thread_that_ignores_the_stop_holds_the_lock_only_for_a_bounded_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool thread that never checks the stop does not hold the turn open past the bound."""
+    monkeypatch.setattr(pi_react, "_TOOL_STOP_WAIT_SECONDS", 0.2)
+    started, release = threading.Event(), threading.Event()
+
+    def stuck(name: str) -> str:
+        """Block until the test releases it.
+
+        Args:
+            name: Ignored.
+
+        Returns:
+            A constant.
+        """
+        started.set()
+        release.wait(10)
+        return "late"
+
+    program = AgentProgram(dspy.Signature(f"user_message: str -> {_REPLY}: str"), tools=[stuck])
+    handlers, _ = _handlers(_ScriptedLM([]), program=program)
+    try:
+        took = await _close_during(handlers, "stuck", started)
+    finally:
+        release.set()
+    assert 0.15 < took < 2
+    assert not handlers._lock.locked()
 
 
 def _text_stream(text: str) -> list[ModelResponseStream]:

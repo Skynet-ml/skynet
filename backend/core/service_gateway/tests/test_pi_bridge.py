@@ -261,6 +261,91 @@ async def test_server_shutdown_cancels_running_tool_calls() -> None:
     assert not app._tool_tasks
 
 
+async def test_close_sets_the_stop_signal_for_tool_calls() -> None:
+    """A tool call sees no stop while its turn runs, and the stop after the turn closes."""
+    seen: list[bool] = []
+
+    class _Recording(_Handlers):
+        """Handlers whose tool records the stop signal."""
+
+        async def call_tool(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+            """Record whether the turn stopped.
+
+            Args:
+                name: The tool name.
+                args: The call's arguments.
+
+            Returns:
+                A plain result.
+            """
+            seen.append(pi_bridge.turn_stopped())
+            return ToolOutcome("ok")
+
+    app = _BridgeApp(_Recording(), _TOKEN)
+    async with _client(app) as client:
+        await client.post("/call", json={"tool": "get_x", "args": {}})
+    assert seen == [False]
+    assert not pi_bridge.turn_stopped()
+    await app.close()
+    assert app.stop.is_set()
+    token = pi_bridge._TURN_STOP.set(app._stops)
+    try:
+        assert pi_bridge.turn_stopped()
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+
+
+async def test_nested_turn_starts_no_model_call_after_its_parent_stops() -> None:
+    """A turn started inside a stopped turn's tool refuses the next model call and ends with an error."""
+    parent = pi_bridge.threading.Event()
+    token = pi_bridge._TURN_STOP.set((parent,))
+    try:
+        handlers = _Handlers()
+        nested = _BridgeApp(handlers, _TOKEN)
+    finally:
+        pi_bridge._TURN_STOP.reset(token)
+    async with _client(nested) as client:
+        await client.post("/v1/chat/completions", json={})
+        parent.set()
+        response = await client.post("/v1/chat/completions", json={})
+    assert len(handlers.bodies) == 1
+    assert "[DONE]" not in response.text
+    assert isinstance(nested.failure, PiBridgeError)
+
+
+async def test_a_second_cancel_during_server_shutdown_still_stops_the_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel that lands while the server shuts down does not skip the tool shutdown."""
+    started = pi_bridge.asyncio.Event()
+    in_shutdown = pi_bridge.asyncio.Event()
+
+    async def slow_shutdown(self: Any, sockets: Any = None) -> None:
+        """Hold the server's shutdown open until cancelled.
+
+        Args:
+            self: The server.
+            sockets: Ignored.
+        """
+        in_shutdown.set()
+        await pi_bridge.asyncio.sleep(3600)
+
+    monkeypatch.setattr(pi_bridge._LoopbackServer, "shutdown", slow_shutdown)
+    app = _BridgeApp(_Handlers(), _TOKEN)
+
+    async def hold() -> None:
+        """Serve the bridge until cancelled."""
+        async with pi_bridge._serve(app):
+            started.set()
+            await pi_bridge.asyncio.sleep(3600)
+
+    holder = pi_bridge.asyncio.ensure_future(hold())
+    await pi_bridge.asyncio.wait_for(started.wait(), timeout=5)
+    holder.cancel()
+    await pi_bridge.asyncio.wait_for(in_shutdown.wait(), timeout=5)
+    holder.cancel()
+    await pi_bridge.asyncio.gather(holder, return_exceptions=True)
+    assert app.stop.is_set()
+
+
 def _feed(translator: PiEventTranslator, *updates: dict[str, Any]) -> None:
     """Feed assistant-message updates to the translator.
 

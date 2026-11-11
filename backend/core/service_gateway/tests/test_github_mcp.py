@@ -31,7 +31,7 @@ TOKEN = "test-token-not-real"
 _FAKE_SERVER = """
 import json, os, sys
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import EmbeddedResource, TextContent, TextResourceContents, ToolAnnotations
 
 with open(sys.argv[1], "w") as fh:
     json.dump({"argv": sys.argv[2:], "token": os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")}, fh)
@@ -43,8 +43,17 @@ def search_repositories(query: str) -> str:
     return "found " + query
 
 @server.tool(annotations=read)
-def get_file_contents(owner: str, repo: str, path: str) -> str:
-    return "x" * int(path) if path.isdigit() else "contents"
+def get_file_contents(owner: str, repo: str, path: str) -> list:
+    # The real server answers a file read with a status line and the body as
+    # an embedded resource; a directory read with several text parts.
+    if path.startswith("parts:"):
+        return [TextContent(type="text", text="p" * int(path[6:])) for _ in range(3)]
+    body = "x" * int(path) if path.isdigit() else "contents"
+    resource = TextResourceContents(uri=f"repo://{owner}/{repo}/contents/{path}", mimeType="text/plain", text=body)
+    return [
+        TextContent(type="text", text="successfully downloaded text file (SHA: abc123)"),
+        EmbeddedResource(type="resource", resource=resource),
+    ]
 
 @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
 def create_or_update_file(owner: str, repo: str, path: str, content: str) -> str:
@@ -169,27 +178,50 @@ def test_tools_are_offered_read_only_and_callable(tmp_path: Path) -> None:
     assert launch == {"argv": ["stdio", "--read-only", "--toolsets", "repos"], "token": TOKEN}
 
 
-def test_long_results_are_cut_with_a_clear_marker(tmp_path: Path) -> None:
-    """A file larger than the cap reaches the model cut, with a note; a short file is unchanged."""
+_STATUS = "successfully downloaded text file (SHA: abc123)"
+
+
+def _read_file(tmp_path: Path, *paths: str) -> list[str]:
+    """Call ``get_file_contents`` on the fake server once for each path.
+
+    Args:
+        tmp_path: Directory for the fake server.
+        *paths: The paths to read.
+
+    Returns:
+        The results, in order.
+    """
     binary, _ = _fake_binary(tmp_path)
 
-    async def run() -> tuple[str, str]:
-        """Read one file larger than the cap and one small file.
+    async def run() -> list[str]:
+        """Read each path.
 
         Returns:
-            The two results.
+            The results.
         """
         async with github_repo_tools(str(binary), TOKEN) as tools:
             read = next(tool for tool in tools if tool.name == "get_file_contents")
-            big = await read.acall(owner="o", repo="r", path=str(MAX_RESULT_CHARS + 500))
-            small = await read.acall(owner="o", repo="r", path="README.md")
-            return str(big), str(small)
+            return [await read.acall(owner="o", repo="r", path=path) for path in paths]
 
-    big, small = asyncio.run(run())
-    assert big.startswith("x" * MAX_RESULT_CHARS + "\n\n[Truncated:")
-    assert f"has {MAX_RESULT_CHARS + 500} characters" in big
+    return asyncio.run(run())
+
+
+def test_file_read_gives_the_model_the_file_body(tmp_path: Path) -> None:
+    """The body that the server sends as an embedded resource reaches the model after the status line."""
+    (small,) = _read_file(tmp_path, "README.md")
+    assert small == f"{_STATUS}\n\ncontents"
+
+
+def test_long_file_bodies_and_part_lists_are_cut_with_a_clear_marker(tmp_path: Path) -> None:
+    """The cap applies to the whole result: a long embedded file body, and several text parts together."""
+    part = MAX_RESULT_CHARS // 2
+    big, parts = _read_file(tmp_path, str(MAX_RESULT_CHARS + 500), f"parts:{part}")
+    whole = len(_STATUS) + 2 + MAX_RESULT_CHARS + 500
+    assert big.startswith(f"{_STATUS}\n\n" + "x" * (MAX_RESULT_CHARS - len(_STATUS) - 2) + "\n\n[Truncated:")
+    assert f"has {whole} characters" in big
     assert len(big) < MAX_RESULT_CHARS + 300
-    assert small == "contents"
+    assert parts.startswith("p" * part + "\n\n" + "p" * (MAX_RESULT_CHARS - part - 2) + "\n\n[Truncated:")
+    assert f"has {3 * part + 4} characters" in parts
 
 
 @pytest.mark.skipif(shutil.which("github-mcp-server") is None, reason="github-mcp-server is not installed")

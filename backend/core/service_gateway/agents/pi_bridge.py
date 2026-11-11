@@ -33,7 +33,9 @@ import secrets
 import shutil
 import socket
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -72,10 +74,25 @@ _PI_SETTINGS = {
 _STDOUT_LIMIT = 64 * 1024 * 1024
 _KEEPALIVE_SECONDS = 15.0
 _STOP_GRACE_SECONDS = 3.0
+# The stop signals of the turn whose tool runs the current code and of the
+# turns above it: a coding-agent hand-off runs a nested turn in a tool thread.
+_TURN_STOP: ContextVar[tuple[threading.Event, ...]] = ContextVar("pi_turn_stop", default=())
 
 
 class PiBridgeError(RuntimeError):
     """Pi could not start, rejected a command, or ended the turn with an error."""
+
+
+def turn_stopped() -> bool:
+    """Report whether a Pi turn that runs the current tool call has stopped.
+
+    A tool thread cannot be cancelled. A tool that can run long checks this
+    while it waits and gives up, so it does not run on after its turn.
+
+    Returns:
+        Whether the stop signal of this turn, or of a turn above it, is set.
+    """
+    return any(stop.is_set() for stop in _TURN_STOP.get())
 
 
 @dataclass
@@ -250,6 +267,8 @@ class _BridgeApp:
         self._token = token
         self.failure: BaseException | None = None
         self.failed = asyncio.Event()
+        self.stop = threading.Event()
+        self._stops = (*_TURN_STOP.get(), self.stop)
         self._tool_tasks: set[asyncio.Future[ToolOutcome]] = set()
         self.app = Starlette(
             routes=[
@@ -311,7 +330,7 @@ class _BridgeApp:
         body = await request.json()
         name = str(body.get("tool") or "")
         args = body.get("args") if isinstance(body.get("args"), dict) else {}
-        task = asyncio.ensure_future(self._handlers.call_tool(name, args))
+        task = asyncio.ensure_future(self._run_tool(name, args))
         self._tool_tasks.add(task)
         task.add_done_callback(self._tool_tasks.discard)
 
@@ -340,12 +359,36 @@ class _BridgeApp:
 
         return StreamingResponse(stream(), media_type="application/json")
 
+    async def _run_tool(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+        """Run one tool call with the turn's stop signals in its context.
+
+        Args:
+            name: The tool name.
+            args: The call's arguments.
+
+        Returns:
+            The handler's outcome.
+        """
+        _TURN_STOP.set(self._stops)
+        return await self._handlers.call_tool(name, args)
+
+    def _stopped(self) -> bool:
+        """Report whether this turn or a turn above it has stopped.
+
+        Returns:
+            Whether a stop signal is set.
+        """
+        return any(stop.is_set() for stop in self._stops)
+
     async def close(self) -> None:
-        """Cancel the tool calls that still run and wait for them to end.
+        """Set the turn's stop signal, cancel the tool calls that still run and wait for them.
 
         A forced server exit drops the response streams but not the tasks
-        behind them, which would run on after the turn ended.
+        behind them. A tool thread does not stop on a cancel; it sees the
+        signal through :func:`turn_stopped`, and the handler waits for it
+        for a bounded time.
         """
+        self.stop.set()
         tasks = list(self._tool_tasks)
         for task in tasks:
             task.cancel()
@@ -373,6 +416,11 @@ class _BridgeApp:
             Yields:
                 Body bytes.
             """
+            # A nested turn whose parent stopped must not start a metered call.
+            if self._stopped():
+                self._fail(PiBridgeError("The agent turn stopped before this model call"))
+                yield b'data: {"error": {"message": "The agent turn stopped"}}\n\n'
+                return
             try:
                 async for chunk in self._handlers.complete(body):
                     yield f"data: {chunk}\n\n".encode()
@@ -635,10 +683,15 @@ async def _serve(app: _BridgeApp) -> AsyncIterator[str]:
     finally:
         server.should_exit = True
         server.force_exit = True
-        with contextlib.suppress(Exception):
-            await task
-        await app.close()
-        sock.close()
+        # A second cancel can land in this wait; the tools must still stop.
+        try:
+            with contextlib.suppress(Exception):
+                await task
+        finally:
+            try:
+                await app.close()
+            finally:
+                sock.close()
 
 
 async def run_pi_turn(
@@ -739,4 +792,5 @@ __all__ = [
     "pi_command",
     "resolve_allowed",
     "run_pi_turn",
+    "turn_stopped",
 ]
