@@ -30,7 +30,7 @@ way out (E27).
 
 The same relay carries the metric's requests to the run's ``[services.<name>]``
 that have a url (E45). The parent checks that the calling role lists the
-service (E55), fills the service's ``${NAME}`` headers with
+service (E55), fills the service's ``${NAME}`` headers and query with
 :func:`relay_request` (each secret only to its own host and the run's allowed
 hosts, a Skynet key metered, E49-E53), calls the url with no redirects, and
 removes every filled value from the answer's headers and body before the box
@@ -61,7 +61,7 @@ from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 
 import httpx
 
@@ -142,6 +142,10 @@ _DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection"
 _GUEST_DROPPED_HEADERS = frozenset({"accept-encoding", "range"})
 # A server may decode a path again, so a fully decoded service path may hold only plain URL path characters.
 _SERVICE_PATH_CHARS = frozenset(string.ascii_letters + string.digits + "-._~!$&'()*+,=:@/")
+# A service's query secrets ride through relay_request as declared values under this mark, so
+# they get the same host checks, record and answer mask as header secrets. No header name
+# holds it: the parser allows only letters, digits and '-' there (SKY-630).
+_QUERY_MARK = "?"
 # The version's [run] entry and the metric run in separate processes, each
 # with its own relay, so each service frame is checked against its own role (E37).
 _METRIC_ROLE = "metric"
@@ -1061,6 +1065,57 @@ def _under(target: httpx.URL, base: httpx.URL) -> bool:
     return path == root or path.startswith(root + "/")
 
 
+class _SecretQueryTransport(httpx.BaseTransport):
+    """Add a service's filled query secrets to each request, below the client (SKY-630).
+
+    The client logs and raises with its own request url, so the secret is
+    added only to the copy that goes to the wire. A guest parameter with a
+    declared name, in any case, is dropped first, so the guest can never
+    replace the secret.
+    """
+
+    def __init__(self, transport: httpx.BaseTransport, query: Mapping[str, str]) -> None:
+        """Wrap a transport.
+
+        Args:
+            transport: The pinned transport that sends the request.
+            query: The declared parameters with their secrets filled in.
+        """
+        self._transport = transport
+        self._query = dict(query)
+        self._names = {name.lower() for name in query}
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Send the request with the guest's other parameters and the filled secrets.
+
+        Args:
+            request: The request the client built from the guest's path.
+
+        Returns:
+            The upstream response.
+        """
+        # Some servers also split on ';', so a guest "a=1;key=x" must not slip a declared name past.
+        kept = [
+            part
+            for part in re.split(r"[&;]", request.url.query.decode("ascii"))
+            if part and unquote(part.partition("=")[0].replace("+", " ")).lower() not in self._names
+        ]
+        query = "&".join([*kept, urlencode(self._query)])
+        return self._transport.handle_request(
+            httpx.Request(
+                request.method,
+                request.url.copy_with(query=query.encode("ascii")),
+                headers=request.headers,
+                stream=request.stream,
+                extensions=request.extensions,
+            )
+        )
+
+    def close(self) -> None:
+        """Close the wrapped transport."""
+        self._transport.close()
+
+
 def _json_object(body: bytes) -> dict[str, Any]:
     """Read an MCP request body as one JSON-RPC object, for its run-call target.
 
@@ -1452,7 +1507,7 @@ class _StageRelay:
         """
         try:
             spec = self._services[name]
-            response = self._request(str(spec.url), spec.request_headers, f"Service {name!r}", frame)
+            response = self._request(str(spec.url), spec.request_headers, f"Service {name!r}", frame, query=spec.query)
         except (BudgetReached, Exception) as error:
             response = self._stopped(error)
             if response is None:
@@ -1486,10 +1541,11 @@ class _StageRelay:
         *,
         kind: str = "host",
         server: str = "",
+        query: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Call a service's or MCP server's url through :func:`relay_request`, so its secrets stay in the parent.
 
-        ``relay_request`` fills the declared headers, refuses a secret outside
+        ``relay_request`` fills the declared headers and query, refuses a secret outside
         its host or the run's allowed hosts, meters a Skynet key, and removes
         every filled value from the answer. The host must resolve to public
         addresses only, the connection stays on that address and origin, and
@@ -1503,6 +1559,8 @@ class _StageRelay:
             kind: ``host`` for a service, ``mcp`` for an MCP server, for the run record.
             server: The MCP server's name, so its record target is
                 ``server@host/tool``; ``""`` for a service.
+            query: The service's declared query parameters, each one
+                ``${SECRET}``; they replace any guest parameter of the same name.
 
         Returns:
             ``{"status", "headers", "body"}`` with a base64 body, or
@@ -1546,7 +1604,8 @@ class _StageRelay:
 
             Args:
                 address: The declared url with the guest's path.
-                filled: The declared headers with their secrets filled in.
+                filled: The declared headers with their secrets filled in, and
+                    the filled query parameters under ``_QUERY_MARK``.
                 content: The guest's body.
 
             Returns:
@@ -1563,7 +1622,11 @@ class _StageRelay:
             except ValueError as error:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
-            transport = _PinnedTransport(origin, pinned)
+            secret_query = {key[1:]: value for key, value in filled.items() if key.startswith(_QUERY_MARK)}
+            filled = {key: value for key, value in filled.items() if not key.startswith(_QUERY_MARK)}
+            transport: httpx.BaseTransport = _PinnedTransport(origin, pinned)
+            if secret_query:
+                transport = _SecretQueryTransport(transport, secret_query)
             with contextlib.ExitStack() as stack:
                 stack.callback(transport.close)
                 client = stack.enter_context(
@@ -1602,7 +1665,7 @@ class _StageRelay:
         try:
             answer = relay_request(
                 url=url,
-                headers=declared,
+                headers={**declared, **{_QUERY_MARK + key: value for key, value in (query or {}).items()}},
                 body=body,
                 user_secrets=self._secrets,
                 bindings=self._bindings,

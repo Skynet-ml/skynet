@@ -246,6 +246,19 @@ mcp = "eval/.mcp.json"
 - Secrets appear only as `${NAME}` in `headers`. A value that looks like a real key fails with a message that says
   to use a placeholder. The old `secrets = [...]` key fails with a message
   that says to move each name into `headers`.
+- An API that reads its key from the URL query gets a `query` table. Each
+  value must be exactly one `${NAME}`; any other value fails the setup
+  check. For `[run]` and `[metric]` calls, the relay adds the filled
+  parameters to the URL in the parent. It drops any parameter of the same
+  name that the code sends, and it removes the value from the answer, as
+  for headers. Only `[run]` and `[metric]` can list a service with a
+  `query`; the setup check refuses it in `[proposer]` and `[target.<name>]`.
+
+  ```toml
+  [services.geocode]
+  url = "https://maps.googleapis.com/maps/api/geocode"
+  query = { key = "${GOOGLE_MAPS_KEY}" }
+  ```
 - Each secret goes to one host only: the host of the `url` that uses it. A
   file that sends the same `${NAME}` to two hosts fails.
 - The run, not the repository, says where each user secret may go. Each

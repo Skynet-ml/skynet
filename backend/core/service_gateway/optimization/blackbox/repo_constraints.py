@@ -17,8 +17,9 @@ files, not in the toml (E48), and every file they name is protected like
 
 Parsed and validated here, but not enforced yet: ``[proposer]`` and
 ``[target.<name>]`` (mcp, network, services, and for a target its entry,
-vcpus and timeout), ``[services.<name>]`` (a user's API: an https ``url``
-and ``headers`` that name secrets only as ``${NAME}`` placeholders),
+vcpus and timeout), ``[services.<name>]`` (a user's API: an https ``url``,
+and ``headers`` and a ``query`` table that name secrets only as ``${NAME}``
+placeholders),
 ``[metric]`` (the files and exploit folder hidden from the agent) and
 ``[run]`` (the entry that starts the candidate for each case, and its
 timeout; with no ``[run]``, nothing runs and the metric judges only the tree
@@ -104,6 +105,7 @@ _NAMED_SECTIONS = frozenset({"target", "services"})
 _TABLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _SECRET_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 _HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
+_QUERY_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
 _MAX_URL_CHARS = 2_048
 _MAX_HEADER_CHARS = 1_000
@@ -223,12 +225,15 @@ class TargetStage(RoleEnvironment):
 class ServiceSpec:
     """One ``[services.<name>]`` declaration: the names of the secrets it needs, never values."""
 
-    # The ${NAME} placeholders of headers, in file order (E53).
+    # The ${NAME} placeholders of headers, then of query, in file order (E53, SKY-630).
     secrets: tuple[str, ...] = ()
     # The parser always sets it (E53); only specs built in code leave it None.
     url: str | None = None
     # As written in the file, with ${SECRET} placeholders; None when the file sets none.
     headers: Mapping[str, str] | None = None
+    # URL query parameters whose values are each one ${SECRET} placeholder, for an API
+    # that reads its key from the query, such as Google Geocoding's ?key= (SKY-630).
+    query: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def host(self) -> str | None:
@@ -241,11 +246,12 @@ class ServiceSpec:
 
         Returns:
             The file's headers, or ``Authorization: Bearer ${SECRET}`` when it
-            sets none and the service has exactly one secret (E45).
+            sets no headers and no query and the service has exactly one
+            secret (E45). A query secret never goes out as a header too.
         """
         if self.headers is not None:
             return dict(self.headers)
-        if len(self.secrets) == 1:
+        if not self.query and len(self.secrets) == 1:
             return {"Authorization": f"Bearer ${{{self.secrets[0]}}}"}
         return {}
 
@@ -568,13 +574,16 @@ def _network(section: Mapping[str, Any], label: str) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(host.lower() for host in hosts))
 
 
-def _role(section: Mapping[str, Any], label: str, services: Mapping[str, ServiceSpec]) -> dict[str, Any]:
+def _role(
+    section: Mapping[str, Any], label: str, services: Mapping[str, ServiceSpec], *, query: bool = False
+) -> dict[str, Any]:
     """Read the settings every role shares: mcp, network, services and illegal.
 
     Args:
         section: The parsed ``[proposer]`` or ``[target.<name>]`` table.
         label: The table as the file names it, used in errors.
         services: The services the file declares.
+        query: Whether this role's relay fills a service's ``query`` secrets.
 
     Returns:
         Keyword arguments for :class:`RoleEnvironment`.
@@ -587,6 +596,14 @@ def _role(section: Mapping[str, Any], label: str, services: Mapping[str, Service
         if name not in services:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: {label} services names '{name}', but the file has no [services.{name}] table.",
+                **_at(f"{label} services"),
+            )
+        # The proposer and target relays (scoped_relay.py) send no query yet; without this the call
+        # would go out with no key and fail at run time (SKY-630).
+        if services[name].query and not query:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} services names '{name}', which has a query. Only [run] and"
+                " [metric] can use a service with a query.",
                 **_at(f"{label} services"),
             )
     return {
@@ -782,8 +799,9 @@ def _service(section: Any, name: str) -> ServiceSpec:
     """Read one ``[services.<name>]`` declaration.
 
     The file is public with the repository, so it may name secrets but must
-    never hold one. A header names each secret as ``${NAME}`` (E53). Error
-    messages never repeat a refused value.
+    never hold one. A header names each secret as ``${NAME}`` (E53), and so
+    does each ``query`` value (SKY-630). Error messages never repeat a
+    refused value.
 
     Args:
         section: The value under the service's name.
@@ -794,8 +812,8 @@ def _service(section: Any, name: str) -> ServiceSpec:
 
     Raises:
         ConstraintsError: When the declaration is not a table, has no url, has
-            an unknown key or the removed ``secrets`` key, or a header holds a
-            raw secret value.
+            an unknown key or the removed ``secrets`` key, a header holds a
+            raw secret value, or a query value is not one ``${NAME}``.
     """
     if not isinstance(section, dict):
         raise ConstraintsError(
@@ -819,11 +837,11 @@ def _service(section: Any, name: str) -> ServiceSpec:
             section=f"services.{name}",
             key="secrets",
         )
-    unknown = sorted(set(section) - {"url", "headers"})
+    unknown = sorted(set(section) - {"url", "headers", "query"})
     if unknown:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} {unknown[0][:100]} is not a supported setting. A service has only a"
-            " url and headers; write each secret as ${NAME} in headers, never as a value.",
+            " url, headers and query; write each secret as ${NAME} in headers or query, never as a value.",
             section=f"services.{name}",
             key=unknown[0],
         )
@@ -834,10 +852,12 @@ def _service(section: Any, name: str) -> ServiceSpec:
             key="url",
         )
     headers = _service_headers(section["headers"], label) if "headers" in section else None
+    query = _service_query(section["query"], label) if "query" in section else {}
     return ServiceSpec(
-        secrets=_placeholders(*(headers or {}).values()),
+        secrets=_placeholders(*(headers or {}).values(), *query.values()),
         url=_service_url(section["url"], label),
         headers=headers,
+        query=query,
     )
 
 
@@ -951,6 +971,47 @@ def _service_headers(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> 
                 **_at(f"{label} headers"),
             )
         _check_value(text, f"{label} headers {header}", prefix)
+    return dict(value)
+
+
+def _service_query(value: Any, label: str) -> dict[str, str]:
+    """Read a service's ``query`` table, whose values are each exactly one ``${NAME}`` placeholder (SKY-630).
+
+    The relay adds each parameter, filled, to the url it calls. A query value
+    is never mixed text, so it can only name a secret, never hold one.
+
+    Args:
+        value: The ``query`` value as parsed.
+        label: The service's table, used in errors.
+
+    Returns:
+        The query parameters as written.
+
+    Raises:
+        ConstraintsError: When the value is not a table of parameter names to
+            one ``${NAME}`` each. The message never repeats a value.
+    """
+    if not isinstance(value, dict) or len(value) > _MAX_NAMES:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} query must be a table of at most {_MAX_NAMES} parameter names"
+            ' to ${NAME}, such as query = { key = "${MAPS_API_KEY}" }.',
+            **_at(f"{label} query"),
+        )
+    for name, text in value.items():
+        if not _QUERY_NAME.fullmatch(name):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} query name {name[:100]!r} must use only letters, digits, '_', '.'"
+                " and '-'.",
+                **_at(f"{label} query"),
+            )
+        placeholder = _PLACEHOLDER.fullmatch(text) if isinstance(text, str) else None
+        if placeholder is None or not _SECRET_NAME.fullmatch(placeholder.group(1)):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} query {name} must be one ${{NAME}} placeholder with A-Z, 0-9 and _"
+                ' only, such as "${MAPS_API_KEY}". The file is public with the repository; save the value as a'
+                " Skynet secret.",
+                **_at(f"{label} query"),
+            )
     return dict(value)
 
 
@@ -1299,9 +1360,9 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     proposer = _role(document.get("proposer", {}), "[proposer]", services)
     run_entry, run_timeout = _run(document.get("run"))
     run_section = document.get("run", {})
-    run_role = _role(run_section, "[run]", services)
+    run_role = _role(run_section, "[run]", services, query=True)
     metric_section = document.get("metric", {})
-    metric_role = _role(metric_section, "[metric]", services)
+    metric_role = _role(metric_section, "[metric]", services, query=True)
     _check_secret_receivers(services, {})
     instructions_file = None if instructions is None else _one_file(instructions, "instructions")
     cases_file = _cases_file(document.get("data"))
