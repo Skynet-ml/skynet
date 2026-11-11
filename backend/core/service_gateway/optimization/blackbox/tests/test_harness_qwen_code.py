@@ -634,6 +634,30 @@ def test_failed_restore_keeps_the_stash_and_the_next_run_stops_until_it_restores
     assert not (workspace / _STASH_DIR).exists()
 
 
+def test_failed_relay_rewrite_stops_the_protected_run_before_the_stash(tmp_path: Path) -> None:
+    """Stop the whole protected command when the relay rewrite in front of it fails.
+
+    ``build_launch`` puts the rewrite and ``&&`` in front of the qwen command.
+    A failed rewrite must not start Qwen Code with the gateway URL or move the
+    workspace ``.qwen`` files.
+    """
+    files = {".qwen/settings.json": _HOSTILE_HELPER_SETTINGS, ".qwen/agents/helper.md": _HOSTILE_AGENT}
+    args, workspace, env, log = _fake_qwen_run(tmp_path, protected=True, workspace_files=files)
+    failing = tmp_path / "bin" / "python3"
+    failing.write_text("#!/bin/sh\nexit 7\n")
+    failing.chmod(failing.stat().st_mode | stat.S_IEXEC)
+
+    result = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=10, check=False)
+
+    assert args[-1].startswith("python3 -c ")
+    assert result.returncode == 7
+    assert "command not found" not in result.stderr
+    assert not log.exists()
+    for name, content in files.items():
+        assert (workspace / name).read_text() == content
+    assert not (workspace / _STASH_DIR).exists()
+
+
 def test_hostile_helper_models_cannot_select_a_non_gateway_provider() -> None:
     """Give every model setting only gateway entries, even if a scope under the system scope names a hostile provider.
 

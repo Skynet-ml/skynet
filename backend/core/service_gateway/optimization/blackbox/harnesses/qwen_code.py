@@ -7,8 +7,8 @@ provider key with ``--openai-api-key`` and records the chat under
 ``~/.qwen``; Skynet pins one release, gives Qwen Code the gateway token only
 through ``OPENAI_API_KEY``, points ``OPENAI_BASE_URL`` at the model gateway,
 keeps Qwen Code's home in a per-run temp folder, moves the candidate repo's
-Qwen Code settings and agents into a stash folder for the run, and loads a fixed system
-settings file that pins the model provider to the gateway.
+Qwen Code settings and agents into a stash folder for the run, and loads a
+fixed system settings file that pins the model provider to the gateway.
 """
 
 from __future__ import annotations
@@ -130,8 +130,8 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     back. The run first puts back a stash that a killed run left, then moves
     the workspace :data:`_WORKSPACE_QWEN_FILES` into :data:`_STASH_DIR`. An
     EXIT trap puts them back, removes the temp folder and keeps Qwen Code's
-    exit status. A restore that fails keeps the stash and says so on stderr. The plain text that ``--prompt`` mode
-    prints is the answer.
+    exit status. A restore that fails keeps the stash and says so on stderr.
+    The plain text that ``--prompt`` mode prints is the answer.
 
     Args:
         model: Target model id.
@@ -168,8 +168,11 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         f'echo "Skynet could not restore .qwen/settings.json or .qwen/agents. The originals stay in {_STASH_DIR}." >&2; '
         'fi; return "$_ok"; }'
     )
+    # One ``&&`` chain: a protected run puts the relay rewrite and ``&&`` in
+    # front, so a failed rewrite must stop the whole command, not only the
+    # function definition.
     run_command = (
-        f"{restore}; "
+        f"{restore} && "
         f"if [ -e {_STASH_DIR} ] || [ -L {_STASH_DIR} ]; then _qwen_restore || exit 1; fi && "
         'export QWEN_HOME="$(mktemp -d)" && '
         "trap '_qwen_restore; rm -rf \"$QWEN_HOME\"' EXIT && "
