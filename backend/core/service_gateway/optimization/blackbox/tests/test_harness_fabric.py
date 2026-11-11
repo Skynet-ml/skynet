@@ -171,7 +171,9 @@ def test_fabric_is_registered_before_cline_with_its_pin() -> None:
     """List Fabric in the registry and the request model, pinned to the exact runtime release."""
     spec = REGISTRY[BLACKBOX_HARNESS_FABRIC]
     assert (spec.binary, spec.version, spec.output_format) == ("fabric", "0.5.0", "plain")
-    assert list(REGISTRY)[-2:] == [BLACKBOX_HARNESS_FABRIC, "cline"]
+    order = list(REGISTRY)
+    # Relative order only, so later harnesses can join the registry without breaking this test.
+    assert order.index("prime") < order.index(BLACKBOX_HARNESS_FABRIC) < order.index("cline")
     assert BLACKBOX_HARNESS_FABRIC in BLACKBOX_HARNESSES
     assert (
         pinned_harness_check(BLACKBOX_HARNESS_FABRIC) == "fabric --version 2>/dev/null | grep -Eq '(^| )0[.]5[.]0( |$)'"
