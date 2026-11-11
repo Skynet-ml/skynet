@@ -52,8 +52,8 @@ dagger check skynet-ci/backend-gates        # one check; `dagger check 'skynet-c
   requirements files aligned, and pass the stable and preview Docker builds.
 - Lint, typecheck and build are not behavior tests. Say which is which.
 - Local frontend work: do not drive a browser unless the task asks for it.
-  Tell the user what to check at `localhost:3000`. PR acceptance checks and
-  UI evidence still follow the `skynet-pr-workflow` skill.
+  Tell the user what to check at `localhost:3000`. PR acceptance checks
+  still follow the `skynet-pr-workflow` skill.
 
 Local dev servers: backend `:8000` (`cd backend && .venv/bin/python main.py`
 or `just backend`), frontend `:3000` (`cd frontend && npm run dev` or `just
@@ -105,13 +105,15 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   need no before/after images or videos.
 - **Fix bugs locally, deploy once.** Each push rebuilds the preview and
   starts a new review. Test and review the full diff locally, then push once.
-- **Only the orchestrator merges**, in the daily window (03:00
+- **Among agents, only the orchestrator merges**, in the daily window (03:00
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
 - Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
-  gates pass. UI PRs (`frontend/`) follow the same review loop, then stay
-  ready for review and unmerged until Gilad merges them or tells the
-  orchestrator to. Other PRs wait for the user's approval.
+  gates pass. UI PRs (`frontend/`) follow the same review loop. When the
+  review is clean, CI passes and the acceptance checks pass (or an exemption
+  applies), they are ready for review and stay unmerged. Gilad merges them,
+  or approves them in chat, on GitHub or with `Approved for merge` on the
+  Linear issue. Other PRs wait for the user's approval.
   A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
