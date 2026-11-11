@@ -55,6 +55,7 @@ _BUILT_INS = (
     "qwen_code",
     "antigravity_sdk",
     "fabric",
+    "terminus",
     "goose",
     "hermes",
     "eve",
@@ -315,6 +316,12 @@ def test_registry_keeps_the_catalog_order() -> None:
             "0.1.20",
         ),
         "goose": ("goose", "1.57.0"),
+        "terminus": (
+            "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with harbor==0.25.0"
+            " --with litellm==1.93.0 --with openai==2.24.0 python -c"
+            """ 'import importlib.metadata as m; print(m.version("harbor"))'""",
+            "0.25.0",
+        ),
         "hermes": ("hermes", "v0.19.0"),
         "eve": ("eve", "1.0.0-rc.6"),
         "grok_build": ("grok", "1.0.77"),
