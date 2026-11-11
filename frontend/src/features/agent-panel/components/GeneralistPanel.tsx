@@ -2,14 +2,21 @@
 
 import { CountBadge } from "@/shared/ui/count-badge";
 import * as React from "react";
+import { toast } from "react-toastify";
 import { useCompletionNotification } from "@/shared/hooks/use-completion-notification";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
+  Brain,
   ClockCounterClockwise,
+  Copy,
+  Cpu,
+  DownloadSimple,
+  Gear,
   SidebarSimple,
+  PencilSimple,
   Plus,
   MagicWand,
   ShareNetwork,
@@ -27,6 +34,24 @@ import { Composer } from "@/shared/ui/agent/composer";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
+import {
+  resolveSlashOption,
+  slashEfforts,
+  slashKeepsFast,
+  slashModels as slashListedModels,
+  type SlashCommand,
+} from "@/shared/ui/agent/slash-commands";
+import { chatToMarkdown } from "@/shared/lib/chat-export";
+import { cliEffort, liveEffort } from "@/shared/lib/effort-slider";
+import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
+import { effortLabel, effortsFor, supportsEffortSlider } from "@/shared/lib/model-efforts";
+import {
+  catalogFallbackModel,
+  modelDisplayName,
+  modelProviderSlug,
+} from "@/shared/lib/model-provider";
+import { ProviderLogo } from "@/shared/ui/provider-logo";
+import type { CatalogModel } from "@/shared/types/api";
 import { QuestionChoices } from "@/shared/ui/agent/question-choices";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 import { EmptyState } from "@/shared/ui/empty-state";
@@ -36,7 +61,13 @@ import { SETUP_CHAT_KEPT_EVENT, SETUP_SUBMITTED_EVENT } from "@/shared/lib/setup
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { formatMsg } from "@/shared/lib/messages";
 
-import { useLocalAgentMenuModels } from "@/features/local-runtime";
+import {
+  isCliProvider,
+  menuModelGroup,
+  menuPickState,
+  RETIRED_AUTO_MODEL,
+  useLocalAgentMenuModels,
+} from "@/features/local-runtime";
 import {
   SETTINGS_TABS,
   parseAgentPreferencePatch,
@@ -305,9 +336,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [account, router, wizardCtx],
   );
 
-  const { openTo: openSettingsTo } = useSettingsModal();
+  const { openTo: openSettingsTo, setOpen: setSettingsOpen } = useSettingsModal();
   const { setTheme } = useColorTheme();
-  const { setLocale } = useLocale();
+  const { locale, setLocale } = useLocale();
 
   // The form's state as of the last write, so a write's card shows what each
   // field held when it landed rather than when the turn began.
@@ -936,6 +967,222 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const canShare = !isLocalMode();
   const [shareOpen, setShareOpen] = React.useState(false);
 
+  // Pi runs its built-in slash commands only in its own terminal, so the
+  // composer runs the ones that fit a hosted chat on this panel's controls
+  // (SKY-604). /model and /thinking list what the model menu lists.
+  const [catalogAll, setCatalogAll] = React.useState<CatalogModel[] | undefined>(undefined);
+  React.useEffect(() => {
+    let cancelled = false;
+    const cached = cachedCatalog();
+    if (cached) setCatalogAll(cached.models);
+    getModelCatalog()
+      .then((c) => {
+        if (!cancelled) setCatalogAll(c.models);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const catalogModels = React.useMemo(() => slashListedModels(catalogAll ?? []), [catalogAll]);
+  const localModels = React.useMemo(
+    () => (localMenu.models ? slashListedModels(localMenu.models) : undefined),
+    [localMenu.models],
+  );
+  const slashModels = localModels ?? catalogModels;
+  // The model menu's pick rule: a retired "auto" pick, one the list does not
+  // show, or one without the effort slider counts as no pick.
+  const savedModel = agent.model === RETIRED_AUTO_MODEL ? null : agent.model;
+  const pickSource = localMenu.allModels ?? localMenu.models ?? catalogAll;
+  const pickRow = pickSource?.find((m) => m.value === savedModel);
+  const slashPick =
+    menuPickState(savedModel, pickSource?.filter(supportsEffortSlider), localMenu.side).unlisted ||
+    (!!pickRow && !supportsEffortSlider(pickRow))
+      ? null
+      : savedModel;
+  // /model offers what the model menu lists: its featured shortlist (the
+  // first 50 when the catalog flags none) and a current pick outside it.
+  const slashMenuModels = React.useMemo(() => {
+    if (localModels) return localModels;
+    const featured = catalogModels.filter((m) => m.featured);
+    const rows = featured.length ? featured : catalogModels.slice(0, 50);
+    const extra =
+      slashPick && !rows.some((m) => m.value === slashPick)
+        ? catalogModels.find((m) => m.value === slashPick)
+        : undefined;
+    return extra ? [extra, ...rows] : rows;
+  }, [localModels, catalogModels, slashPick]);
+  const canShareChat =
+    !inSetup && canShare && !webChat && !!agent.conversationId && agent.messages.length > 0;
+  const slashCommands = React.useMemo(() => {
+    const effective =
+      slashPick ??
+      (localModels ? localModels[0] : catalogFallbackModel(slashModels))?.value ??
+      null;
+    const current = slashModels.find((m) => m.value === effective);
+    const efforts = slashEfforts(effective, slashModels);
+    // As the model menu shows it: a local CLI model checks the level it runs,
+    // so a saved level above the model's top checks the top.
+    const shownEffort =
+      current && isCliProvider(menuModelGroup(current))
+        ? cliEffort(agent.reasoningEffort, efforts)
+        : liveEffort(agent.reasoningEffort);
+    const commands: SlashCommand[] = [
+      {
+        name: "model",
+        argHint: "<model>",
+        description: msg("agent.slash.model"),
+        icon: Cpu,
+        current: effective ?? undefined,
+        options: slashMenuModels.map((m) => ({
+          value: m.value,
+          label: modelDisplayName(m.value, slashModels),
+          icon: <ProviderLogo slug={modelProviderSlug(m.value)} size={16} />,
+        })),
+      },
+    ];
+    // A command the chat cannot run now is hidden, not left out: a typed
+    // call then shows an error instead of going to the agent as text.
+    commands.push({
+      name: "thinking",
+      argHint: "<level>",
+      description: msg("agent.slash.thinking"),
+      icon: Brain,
+      hidden: !efforts.length,
+      current: shownEffort ?? "default",
+      options: [
+          { value: "default", label: msg("agent.model_menu.effort_default") },
+        ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
+      ],
+    });
+    commands.push(
+      { name: "new", description: msg("agent.slash.new"), icon: Plus, hidden: inSetup },
+      {
+        name: "resume",
+        description: msg("agent.slash.resume"),
+        icon: ClockCounterClockwise,
+        hidden: inSetup,
+      },
+      {
+        name: "name",
+        argHint: "<name>",
+        description: msg("agent.slash.name"),
+        icon: PencilSimple,
+        hidden: inSetup || !agent.conversationId,
+      },
+      {
+        name: "share",
+        description: msg("agent.slash.share"),
+        icon: ShareNetwork,
+        hidden: !canShareChat,
+      },
+      {
+        name: "copy",
+        description: msg("agent.slash.copy"),
+        icon: Copy,
+        hidden: !agent.messages.length,
+      },
+      {
+        name: "export",
+        description: msg("agent.slash.export"),
+        icon: DownloadSimple,
+        hidden: !agent.messages.length,
+      },
+    );
+    commands.push({ name: "settings", description: msg("agent.slash.settings"), icon: Gear });
+    return commands;
+  }, [
+    slashPick,
+    agent.reasoningEffort,
+    agent.conversationId,
+    agent.messages.length,
+    localModels,
+    slashModels,
+    slashMenuModels,
+    inSetup,
+    canShareChat,
+    locale,
+  ]);
+
+  const runSlash = React.useCallback(
+    (command: SlashCommand, arg: string) => {
+      switch (command.name) {
+        case "model":
+        case "thinking": {
+          const value = resolveSlashOption(arg, command.options ?? []);
+          if (!value) {
+            toast.error(formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }));
+            return;
+          }
+          if (command.name === "thinking") {
+            agent.setReasoningEffort(value === "default" ? null : value);
+            return;
+          }
+          // The same rule as a pick in the model menu: a level or fast mode
+          // the new model does not take goes back to its default.
+          agent.setModel(value);
+          const picked = slashModels.find((m) => m.value === value);
+          const effort = liveEffort(agent.reasoningEffort);
+          if (
+            !picked?.supports_thinking ||
+            (effort !== null && !effortsFor(value, slashModels).includes(effort))
+          )
+            agent.setReasoningEffort(null);
+          const cliRow = !!picked && isCliProvider(menuModelGroup(picked));
+          if (agent.fastMode && !slashKeepsFast(value, picked, cliRow)) agent.setFastMode(false);
+          return;
+        }
+        case "new":
+          handleNewConversation();
+          return;
+        case "resume":
+          setDrawerOpen(true);
+          return;
+        case "name":
+          if (!arg || !agent.conversationId) {
+            toast.error(msg("agent.slash.name_needed"));
+            return;
+          }
+          void store.rename(agent.conversationId, arg);
+          return;
+        case "share":
+          setShareOpen(true);
+          return;
+        case "copy": {
+          const last = agent.messages.findLast((m) => m.role === "assistant" && m.content.trim());
+          if (!last) return;
+          navigator.clipboard.writeText(last.content).then(
+            () => toast.success(msg("agent.slash.copied")),
+            () => toast.error(msg("clipboard.copy_failed")),
+          );
+          return;
+        }
+        case "export": {
+          const title = store.conversations.find((c) => c.id === agent.conversationId)?.title;
+          const blob = new Blob([chatToMarkdown(agent.messages, "messages", title)], {
+            type: "text/markdown",
+          });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "skynet-chat.md";
+          link.click();
+          // Revoke after the click's download starts, as api.ts does.
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+          return;
+        }
+        case "settings":
+          setSettingsOpen(true);
+          return;
+      }
+    },
+    [agent, slashModels, handleNewConversation, store, setSettingsOpen],
+  );
+  const slash = React.useMemo(
+    () => ({ commands: slashCommands, run: runSlash }),
+    [slashCommands, runSlash],
+  );
+
   const emptyState = (
     <EmptyState
       icon={AppMark}
@@ -1021,11 +1268,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             </TooltipContent>
           </Tooltip>
           )}
-          {!inSetup &&
-            canShare &&
-            !webChat &&
-            agent.conversationId &&
-            agent.messages.length > 0 && (
+          {canShareChat && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1179,6 +1422,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         )}
         streaming={activeBusy}
         midTurn={agent.midTurn}
+        slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
           <ComposerModelMenu

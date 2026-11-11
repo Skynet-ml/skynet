@@ -29,6 +29,14 @@ import { PendingMessages } from "./pending-messages";
 import { suggestKeyAction } from "./next-prompt";
 import { appendToDraft, midTurnKeyAction, type MidTurnQueue } from "./steer-queue";
 import { SuggestionGhost } from "./suggestion-ghost";
+import {
+  completeSlash,
+  enterRunsSlash,
+  parseSlashCommand,
+  slashMenu,
+  stepSlashMenu,
+  type SlashCommand,
+} from "./slash-commands";
 import type { AgentMessage } from "./types";
 import { formatRecSeconds, useDictation } from "./use-dictation";
 import { useNextPrompt, type SuggestFetcher } from "./use-next-prompt";
@@ -80,6 +88,58 @@ interface ComposerProps {
   attachments?: boolean;
   /** False hides the dictation mic. */
   dictation?: boolean;
+  /** Opts the chat into slash commands: "/" lists `commands`, and a sent
+   *  draft that calls one runs `run` instead of going out as a message. */
+  slash?: {
+    commands: readonly SlashCommand[];
+    run: (command: SlashCommand, arg: string) => void;
+  };
+}
+
+/** One slash menu row, with the composer model menu's row metrics and highlight. */
+function SlashRow({
+  id,
+  active,
+  checked,
+  icon,
+  onPick,
+  onHover,
+  children,
+}: {
+  id: string;
+  active: boolean;
+  /** The current value of an option row; screen readers announce it as checked. */
+  checked?: boolean;
+  icon?: React.ReactNode;
+  onPick: () => void;
+  onHover: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      id={id}
+      role="option"
+      aria-selected={active}
+      aria-checked={checked}
+      // Keeps focus in the textarea, so typing goes on after a click.
+      onMouseDown={(e) => {
+        e.preventDefault();
+        onPick();
+      }}
+      onMouseMove={active ? undefined : onHover}
+      className={cn(
+        "flex min-h-[44px] w-full min-w-0 cursor-pointer select-none items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-start text-sm transition-colors lg:min-h-9 any-pointer-coarse:min-h-[44px]",
+        active && "bg-accent",
+      )}
+    >
+      {icon !== undefined && (
+        <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground" aria-hidden>
+          {icon}
+        </span>
+      )}
+      {children}
+    </div>
+  );
 }
 
 /**
@@ -113,6 +173,7 @@ export function Composer({
   suggest,
   attachments = true,
   dictation: showMic = true,
+  slash,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -162,6 +223,25 @@ export function Composer({
   const setPastes = (pastes: string[], text = draft.text) =>
     onChange(joinPastes({ ...draft, text, pastes }));
   const setFiles = (files: AttachedFile[]) => onChange(joinPastes({ ...draft, files }));
+
+  const [slashIndex, setSlashIndex] = React.useState(0);
+  // Escape hides the menu for this exact draft; typing shows it again.
+  const [slashDismissed, setSlashDismissed] = React.useState<string | null>(null);
+  const slashListId = React.useId();
+  // The menu shows only while the textarea has focus, so it never stays
+  // open next to the model menu or another popup.
+  const [focused, setFocused] = React.useState(false);
+  const plainDraft = !draft.pastes.length && !draft.files.length;
+  const menu =
+    slash && focused && plainDraft && !disabled && !dictating && slashDismissed !== draft.text
+      ? slashMenu(draft.text, slash.commands)
+      : null;
+  const slashRow = menu ? Math.min(slashIndex, menu.items.length - 1) : 0;
+  const slashActiveId = menu ? `${slashListId}-${slashRow}` : undefined;
+  // Arrow keys can move the highlight past the menu's scroll edge.
+  React.useEffect(() => {
+    if (slashActiveId) document.getElementById(slashActiveId)?.scrollIntoView({ block: "nearest" });
+  }, [slashActiveId]);
 
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [attaching, setAttaching] = React.useState(0);
@@ -224,6 +304,33 @@ export function Composer({
       }
     });
 
+  const runSlash = (text: string): boolean => {
+    if (!slash || !plainDraft) return false;
+    const call = parseSlashCommand(text, slash.commands);
+    if (!call) return false;
+    if (call.command.hidden)
+      // The isolates keep "/name" whole between right-to-left words.
+      toast.error(msg("agent.slash.unavailable", { command: `\u2066/${call.command.name}\u2069` }));
+    else slash.run(call.command, call.arg);
+    onChange("");
+    setSlashIndex(0);
+    setSlashDismissed(null);
+    resetHeight();
+    return true;
+  };
+
+  // Enter or a click runs a command that needs nothing more; Tab, or a
+  // command that takes an argument, only fills the draft.
+  const pickSlash = (index: number, run: boolean) => {
+    if (!menu) return;
+    const next = completeSlash(menu, index);
+    const complete = menu.kind === "options" || !menu.items[index]?.argHint;
+    if (run && complete && runSlash(next)) return;
+    onChange(joinPastes({ ...draft, text: next }));
+    setSlashIndex(0);
+    refocus();
+  };
+
   const sendMidTurn = (mode: "steer" | "queue") => {
     if (!midTurn || disabled || dictating || attaching > 0 || !hasDraft) return;
     if (value.trim().length > maxLength) {
@@ -240,6 +347,8 @@ export function Composer({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // A command runs mid-turn too: a model or effort change applies to the next turn.
+    if (!disabled && !dictating && runSlash(draft.text)) return;
     if (streaming) {
       sendMidTurn(midTurn?.canSteer ? "steer" : "queue");
       return;
@@ -267,6 +376,25 @@ export function Composer({
       || controlledPopup?.getAttribute("data-state") === "open";
     const popupOpen = Boolean(suggestion || menuOpen);
     if (handleComposerEscape(e, { streaming: Boolean(streaming), popupOpen, composing: Boolean(e.nativeEvent.isComposing || e.keyCode === 229) }, onStop)) return;
+    if (menu) {
+      const step = stepSlashMenu(slashRow, menu.items.length, e.key);
+      if (step !== undefined) {
+        e.preventDefault();
+        setSlashIndex(step);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setSlashDismissed(draft.text);
+        return;
+      }
+      if ((e.key === "Tab" && !e.shiftKey) || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        pickSlash(slashRow, e.key === "Enter" && enterRunsSlash(menu, slashRow, draft.text));
+        return;
+      }
+    }
     const suggestAction = suggestKeyAction(e, {
       suggestion,
       draft: value,
@@ -302,6 +430,8 @@ export function Composer({
       }
       if (action) {
         e.preventDefault();
+        // Enter and Tab during a reply skip handleSubmit, so run a command here.
+        if (runSlash(draft.text)) return;
         sendMidTurn(action);
         return;
       }
@@ -347,11 +477,93 @@ export function Composer({
       <ComposerLoader active={Boolean(streaming)} radius={16}>
       <div
         className={cn(
-          "rounded-2xl border border-border bg-muted/20 transition-colors",
+          "relative rounded-2xl border border-border bg-muted/20 transition-colors",
           "focus-within:border-primary-fill",
           inline && "flex min-h-[44px] items-end gap-1 p-1",
         )}
       >
+        {menu && (
+          <div
+            id={slashListId}
+            role="listbox"
+            aria-label={menu.kind === "commands" ? msg("agent.slash.menu") : `/${menu.command.name}`}
+            data-state="open"
+            // A click on the header, padding or scrollbar must not blur the textarea and close the menu.
+            onMouseDown={(e) => e.preventDefault()}
+            className={cn(
+              "bui-menu origin-bottom absolute inset-x-0 bottom-full z-20 mb-2",
+              "flex max-h-72 flex-col gap-0.5 overflow-y-auto overscroll-contain rounded-2xl border border-border bg-card p-1.5 shadow-[var(--shadow-float)]",
+            )}
+          >
+            {/* The listbox label already names this, so screen readers skip it. */}
+            <div
+              aria-hidden
+              className="flex items-baseline gap-2 px-2.5 pb-1 pt-1 text-xs font-medium text-muted-foreground"
+            >
+              {menu.kind === "commands" ? (
+                msg("agent.slash.menu")
+              ) : (
+                <>
+                  <span className="font-mono text-foreground">
+                    <bdi dir="ltr">/{menu.command.name}</bdi>
+                  </span>
+                  <span className="min-w-0 truncate font-normal">{menu.command.description}</span>
+                </>
+              )}
+            </div>
+            {menu.kind === "commands"
+              ? menu.items.map((c, i) => {
+                  const Icon = c.icon;
+                  return (
+                    <SlashRow
+                      key={c.name}
+                      id={`${slashListId}-${i}`}
+                      active={i === slashRow}
+                      onPick={() => pickSlash(i, true)}
+                      onHover={() => setSlashIndex(i)}
+                      icon={Icon ? <Icon className="size-4" /> : null}
+                    >
+                      {/* The column follows the page direction; the name inside reads left to right. */}
+                      <span className="w-36 shrink-0 truncate text-start font-mono text-[0.8125rem] text-foreground">
+                        <bdi dir="ltr">
+                          /{c.name}
+                          {c.argHint && <span className="text-muted-foreground"> {c.argHint}</span>}
+                        </bdi>
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                        {c.description}
+                      </span>
+                    </SlashRow>
+                  );
+                })
+              : menu.items.map((o, i) => {
+                  const current = menu.command.current === o.value;
+                  return (
+                    <SlashRow
+                      key={o.value}
+                      id={`${slashListId}-${i}`}
+                      active={i === slashRow}
+                      checked={current}
+                      onPick={() => pickSlash(i, true)}
+                      onHover={() => setSlashIndex(i)}
+                      icon={o.icon}
+                    >
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className={cn("truncate text-start text-foreground", current && "font-medium")}>
+                          <bdi dir="auto">{o.label}</bdi>
+                        </span>
+                        {o.label !== o.value && (
+                          <span className="truncate text-start text-xs text-muted-foreground">
+                            <bdi dir="ltr">{o.value}</bdi>
+                          </span>
+                        )}
+                      </span>
+                      <Check aria-hidden className={cn("size-4 shrink-0 text-primary", !current && "invisible")} />
+                    </SlashRow>
+                  );
+                })}
+          </div>
+        )}
         {draft.pastes.length + draft.files.length > 0 && !inline && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {draft.files.map((file, i) => (
@@ -388,15 +600,24 @@ export function Composer({
               ref={textareaRef}
               value={draft.text}
               onChange={(e) => {
+                setSlashIndex(0);
+                setSlashDismissed(null);
                 onChange(joinPastes({ ...draft, text: e.target.value }));
                 autoResizeTextarea(e.target);
               }}
               onPaste={inline || !attachments ? undefined : handlePaste}
               onKeyDown={handleKeyDown}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
               disabled={disabled || locked}
               rows={1}
               placeholder={suggestion ? undefined : placeholder}
               aria-describedby={suggestion ? suggestionHintId : undefined}
+              role={menu ? "combobox" : undefined}
+              aria-autocomplete={menu ? "list" : undefined}
+              aria-controls={menu ? slashListId : undefined}
+              aria-expanded={menu ? true : undefined}
+              aria-activedescendant={slashActiveId}
               className={cn(
                 "bg-transparent text-sm leading-[20px] resize-none overflow-hidden",
                 "max-h-[120px] outline-none ring-0 border-0 shadow-none",
