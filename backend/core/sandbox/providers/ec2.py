@@ -40,6 +40,7 @@ import re
 import shlex
 import shutil
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
@@ -156,6 +157,12 @@ class _LaunchState:
     instance_id: str | None = None
     cancelled: bool = False
     known_hosts: str | None = None
+    # The worker thread of ``run_instances`` and the event loop both read
+    # and write the fields below, so they change only under this lock.
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    call_done: bool = False
+    nothing_launched: bool = False
+    terminated: bool = False
 
 
 class EC2Environment(SandboxEnvironment):
@@ -237,7 +244,7 @@ class EC2Environment(SandboxEnvironment):
         self._strict_host_key_checking = strict_host_key_checking
         self._known_hosts_path = ssh_known_hosts_path
         self._temp_known_hosts: str | None = None
-        self._lost_launches: set[str] = set()
+        self._lost_launches: dict[str, _LaunchState] = {}
         self._connect_timeout = (
             timeouts.seconds(Phase.START) if timeouts is not None else DEFAULT_SSH_CONNECT_TIMEOUT_SEC
         )
@@ -290,7 +297,8 @@ class EC2Environment(SandboxEnvironment):
             # The launch stops at its next step and terminates its own
             # instance. An instance id that is known already ends now, so it
             # does not wait for the running state or SSH.
-            state.cancelled = True
+            with state.lock:
+                state.cancelled = True
             try:
                 if state.instance_id is None:
                     await _wait_through_cancels(launch, _CANCEL_GRACE_SEC)
@@ -318,15 +326,34 @@ class EC2Environment(SandboxEnvironment):
         The sandbox keeps the instance until the terminate succeeds, so a
         second stop tries again after a failed or unfinished terminate.
         Stop also terminates the instances of launches that ended inside
-        ``run_instances``, found by their launch tag. With no instance and
-        no such launch, stop only removes a temporary known hosts file.
+        ``run_instances``. It always tries both terminates, then raises the
+        first error. With no instance and no such launch, stop only removes
+        a temporary known hosts file.
 
         Raises:
             SandboxError: The terminate failed for a reason other than a gone instance.
             asyncio.CancelledError: The task was cancelled during the terminate.
         """
+        error: SandboxError | None = None
+        try:
+            await self._terminate_instance()
+        except SandboxError as caught:
+            error = caught
         if self._lost_launches:
-            await self._terminate_lost_launches()
+            try:
+                await self._terminate_lost_launches()
+            except SandboxError as caught:
+                error = error or caught
+        if error is not None:
+            raise error
+
+    async def _terminate_instance(self) -> None:
+        """Terminate the instance of the last start, and keep its id until the terminate succeeds.
+
+        Raises:
+            SandboxError: The terminate failed for a reason other than a gone instance.
+            asyncio.CancelledError: The task was cancelled during the terminate.
+        """
         instance_id = self._instance_id
         if instance_id is None:
             self._remove_known_hosts()
@@ -535,13 +562,19 @@ class EC2Environment(SandboxEnvironment):
         kwargs = await _aws("describe_images", self._run_kwargs, state.launch_id)
         # A cancel during the image lookup must not start a paid instance.
         _raise_if_cancelled(state)
-        # A cancel or an error here, also from a loop shutdown, can leave an
-        # instance with no known id. Stop finds it by the launch tag.
-        self._lost_launches.add(state.launch_id)
-        response = await _aws("run_instances", client.run_instances, **kwargs)
-        self._lost_launches.discard(state.launch_id)
+        # A cancel, also from a loop shutdown, or an error with an unknown
+        # outcome can leave an instance that no start code knows. Stop finds it.
+        self._lost_launches[state.launch_id] = state
+        try:
+            response = await _aws("run_instances", _run_instances, client, state, kwargs)
+        except SandboxError:
+            if state.nothing_launched:
+                self._lost_launches.pop(state.launch_id, None)
+            raise
+        self._lost_launches.pop(state.launch_id, None)
         instance_id = response["Instances"][0]["InstanceId"]
-        state.instance_id = instance_id
+        if state.terminated:
+            raise asyncio.CancelledError
         loop = asyncio.get_running_loop()
         # The start phase time limit bounds the running wait and the SSH wait together.
         deadline = loop.time() + self._connect_timeout
@@ -640,16 +673,36 @@ class EC2Environment(SandboxEnvironment):
         return (images[0].get("RootDeviceName") if images else None) or DEFAULT_ROOT_DEVICE
 
     async def _terminate_lost_launches(self) -> None:
-        """Terminate the instances of launches that ended before ``run_instances`` returned.
+        """Terminate the instances of launches that ended before ``run_instances`` returned to them.
+
+        A launch whose call is still open stays: its worker thread
+        terminates the instance when the call returns. A launch with a known
+        instance id ends by that id. Only a launch with an unknown outcome
+        needs the lookup by its launch tag.
 
         Raises:
             SandboxError: The lookup or the terminate failed; the launches stay for a retry.
         """
-        launches = sorted(self._lost_launches)
-        ids = await _aws("describe_instances", _tagged_instances, self._client, _LAUNCH_TAG, launches)
+        unknown: list[str] = []
+        for launch_id, state in list(self._lost_launches.items()):
+            with state.lock:
+                if not state.call_done:
+                    state.cancelled = True
+                    continue
+            if state.terminated or state.nothing_launched:
+                self._lost_launches.pop(launch_id, None)
+            elif state.instance_id is not None:
+                await _terminate(self._client, state.instance_id)
+                self._lost_launches.pop(launch_id, None)
+            else:
+                unknown.append(launch_id)
+        if not unknown:
+            return
+        ids = await _aws("describe_instances", _tagged_instances, self._client, _LAUNCH_TAG, sorted(unknown))
         if ids:
             await _aws("terminate_instances", self._client.terminate_instances, InstanceIds=ids)
-        self._lost_launches.difference_update(launches)
+        for launch_id in unknown:
+            self._lost_launches.pop(launch_id, None)
 
     async def _wait_for_ssh(self, host: str, state: _LaunchState, deadline: float) -> None:
         """Probe SSH with ``true`` until it answers or the start deadline passes.
@@ -1005,6 +1058,69 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
         message = f"EC2 {action} failed: {type(error).__name__}."
         return SandboxFatalError(message) if isinstance(error, fatal) else SandboxTransientError(message)
     return None
+
+
+def _run_instances(client: Any, state: _LaunchState, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Call ``run_instances`` in a worker thread, and terminate the instance there when the launch ended meanwhile.
+
+    A cancel or a loop shutdown cannot stop the thread, so the thread itself
+    terminates the instance. This needs no running event loop.
+
+    Args:
+        client: The EC2 client.
+        state: The state of the launch.
+        kwargs: The ``run_instances`` arguments.
+
+    Returns:
+        The ``run_instances`` response.
+    """
+    try:
+        response = client.run_instances(**kwargs)
+    except Exception as error:
+        with state.lock:
+            state.call_done = True
+            state.nothing_launched = _nothing_launched(error)
+        raise
+    instance_id = response["Instances"][0]["InstanceId"]
+    with state.lock:
+        state.call_done = True
+        state.instance_id = instance_id
+        abandoned = state.cancelled
+    if not abandoned:
+        return response
+    failure: BaseException | None = None
+    try:
+        client.terminate_instances(InstanceIds=[instance_id])
+    except Exception as error:
+        mapped = _aws_error(error, "terminate_instances")
+        if getattr(mapped, "aws_code", None) not in _GONE_CODES:
+            failure = mapped or error
+    if failure is not None:
+        # The log keeps no AWS response text. Stop or the launch tries again by the instance id.
+        logger.error("Could not terminate an ec2 instance after an ended launch: %s", _safe_text(failure))
+        return response
+    with state.lock:
+        state.terminated = True
+    return response
+
+
+def _nothing_launched(error: Exception) -> bool:
+    """Tell if a failed ``run_instances`` call surely launched no instance.
+
+    Only a 4xx EC2 response proves it. A 5xx response, a response with no
+    status or a botocore error with no response leaves the outcome unknown.
+
+    Args:
+        error: The error of the call.
+
+    Returns:
+        True when no instance launched.
+    """
+    if ClientError is None or not isinstance(error, ClientError):
+        return False
+    response = error.response if isinstance(error.response, Mapping) else {}
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return isinstance(status, int) and 400 <= status < 500
 
 
 def _raise_if_cancelled(state: _LaunchState) -> None:

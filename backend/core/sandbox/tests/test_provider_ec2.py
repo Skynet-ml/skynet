@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError, NoCredentialsError, WaiterError
+from botocore.exceptions import ClientError, NoCredentialsError, ReadTimeoutError, WaiterError
 
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
@@ -899,7 +899,7 @@ async def test_stop_terminates_an_instance_whose_launch_lost_the_id(
     assert env._instance_id is None
     await env.stop()
     assert fake_ec2.live() == []
-    assert env._lost_launches == set()
+    assert env._lost_launches == {}
     calls = len(fake_ec2.calls)
     await env.stop()
     assert len(fake_ec2.calls) == calls
@@ -921,9 +921,65 @@ async def test_the_lost_launch_sweep_touches_only_its_own_instance(
         await env.stop()
     assert len(env._lost_launches) == 1
     await env.stop()
-    assert env._lost_launches == set()
+    assert env._lost_launches == {}
     assert fake_ec2.live() == [other._instance_id]
     await other.stop()
+
+
+async def test_a_stop_during_an_open_lost_launch_still_terminates_its_instance(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminate the instance when stop runs before the run_instances call of a lost launch returns."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_ec2.run_gate = threading.Event()
+    env = EC2Environment(_spec())
+    env._client = fake_ec2
+    # A loop shutdown cancels the launch task, and the worker thread keeps the request open.
+    launch = asyncio.create_task(env._launch(fake_ec2, ec2_provider._LaunchState()))
+    await _until(lambda: "run_instances" in fake_ec2.ops())
+    launch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+    # Real EC2 lookups are eventually consistent, so the tag lookup cannot see the instance yet.
+    await env.stop()
+    assert len(env._lost_launches) == 1
+    fake_ec2.run_gate.set()
+    await _until(lambda: "terminate_instances" in fake_ec2.ops())
+    assert fake_ec2.instances
+    await _until(lambda: fake_ec2.live() == [])
+    await env.stop()
+    assert env._lost_launches == {}
+
+
+async def test_a_run_instances_error_with_a_4xx_response_records_no_lost_launch(fake_ec2: FakeEC2) -> None:
+    """Forget the launch when EC2 answers run_instances with a 4xx error, because no instance launched."""
+    fake_ec2.errors["run_instances"] = _client_error("InsufficientInstanceCapacity", 400)
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert env._lost_launches == {}
+    await env.stop()
+    assert "describe_instances" not in fake_ec2.ops()
+
+
+async def test_a_failed_lost_launch_lookup_still_terminates_the_running_instance(fake_ec2: FakeEC2) -> None:
+    """Terminate the running instance first, then raise the error of the lost launch lookup."""
+    fake_ec2.errors["run_instances"] = ReadTimeoutError(endpoint_url="https://ec2.example")
+    env = EC2Environment(_spec())
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert len(env._lost_launches) == 1
+    await env.start()
+    instance_id = env._instance_id
+    fake_ec2.errors["describe_instances"] = _client_error("RequestLimitExceeded", 503)
+    with pytest.raises(SandboxTransientError):
+        await env.stop()
+    assert instance_id not in fake_ec2.live()
+    assert env._instance_id is None
+    assert len(env._lost_launches) == 1
+    await env.stop()
+    assert env._lost_launches == {}
+    assert fake_ec2.live() == []
 
 
 async def test_a_late_launch_never_touches_a_newer_start(fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch) -> None:
