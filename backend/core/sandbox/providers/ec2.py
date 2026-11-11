@@ -14,7 +14,10 @@ SSH readiness probe and the terminate on stop come from it. Changes:
 - AWS errors keep only the operation and the error code, so no response
   body or account identifier reaches an error or a log.
 - The exec script and its env go over SSH stdin, so no credential is in an
-  argv.
+  argv. An env name must be a shell identifier. A remote ``timeout`` ends
+  the command at the exec limit.
+- Each start sends a new client token, so a restart never gets back the
+  instance of an earlier start.
 - The instance shuts itself down and terminates at the end of the spec
   lifetime.
 - The job sweep terminates the instances by tag.
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import logging
 import math
@@ -117,9 +121,12 @@ _TRANSIENT_CODES = frozenset(
     }
 )
 _CODE_CHARS = re.compile(r"[^A-Za-z0-9.]")
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SSH_PROBE_TIMEOUT_SEC = 10.0
 _SSH_PROBE_INTERVAL_SEC = 5.0
 _TIMEOUT_EXIT_CODE = 124
+# The seconds between TERM and KILL when the remote timeout ends a command.
+_REMOTE_KILL_AFTER_SEC = 5
 # ssh exits with 255 when it cannot reach the host.
 _SSH_FAILED = 255
 # How long a cancelled start or stop waits for an open AWS call before the cancel passes on.
@@ -132,6 +139,14 @@ _READ_STDIN_SCRIPT = 'eval "$(cat)"'
 # and find the regions that they run in.
 _LIVE: set[EC2Environment] = set()
 _LATE_TERMINATES: set[asyncio.Future[None]] = set()
+
+
+@dataclasses.dataclass
+class _LaunchState:
+    """Hold the state of one launch, so a late launch never touches a newer start."""
+
+    instance_id: str | None = None
+    cancelled: bool = False
 
 
 class EC2Environment(SandboxEnvironment):
@@ -219,7 +234,6 @@ class EC2Environment(SandboxEnvironment):
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts is not None else None
         self._client: Any = None
         self._instance_id: str | None = None
-        self._pending_id: str | None = None
         self._host: str | None = None
 
     @classmethod
@@ -236,11 +250,12 @@ class EC2Environment(SandboxEnvironment):
     async def start(self) -> None:
         """Launch the instance and wait for SSH. Do nothing when the instance already runs.
 
-        A cancel during the launch waits for it for at most
-        ``_CANCEL_GRACE_SEC``, also through repeat cancels, and terminates
-        the instance that the launch created. A launch that is still open
-        after the grace time goes on in the background and terminates its
-        instance when it ends, so no instance leaks.
+        A cancel terminates the launched instance at once when its id is
+        known. Otherwise the launch terminates it as soon as
+        ``run_instances`` returns. The cancel waits for the launch for at
+        most ``_CANCEL_GRACE_SEC``, also through repeat cancels. A launch
+        that is still open after that ends in the background, and it only
+        ever terminates its own instance.
 
         Raises:
             SandboxError: An AWS call failed, or the instance has no address.
@@ -253,22 +268,26 @@ class EC2Environment(SandboxEnvironment):
         if self._client is None:
             with _translated("client setup"):
                 self._client = ec2_client(self._aws_profile, self._region)
-        launch = asyncio.ensure_future(self._launch())
+        client = self._client
+        state = _LaunchState()
+        launch = asyncio.ensure_future(self._launch(client, state))
         try:
             instance_id, host = await asyncio.shield(launch)
         except asyncio.CancelledError:
+            # The launch stops at its next step and terminates its own
+            # instance. An instance id that is known already ends now, so it
+            # does not wait for the running state or SSH.
+            state.cancelled = True
+            if state.instance_id is not None:
+                await _terminate_bounded(client, state.instance_id)
             await _wait_through_cancels(launch, _CANCEL_GRACE_SEC)
             if not launch.done():
-                launch.add_done_callback(lambda done: _terminate_late_launch(self._client, done))
-                if self._pending_id is not None:
-                    await _terminate_bounded(self._client, self._pending_id)
+                launch.add_done_callback(lambda done: _terminate_late_launch(client, done))
                 raise
             if launch.cancelled() or launch.exception() is not None:
                 raise
-            await _terminate_bounded(self._client, launch.result()[0])
+            await _terminate_bounded(client, launch.result()[0])
             raise
-        finally:
-            self._pending_id = None
         self._instance_id = instance_id
         self._host = host
         _LIVE.add(self)
@@ -323,7 +342,8 @@ class EC2Environment(SandboxEnvironment):
             cwd: The working directory, or the SSH user's home.
             env: Extra environment variables.
             timeout_sec: After this long, kill the local ssh and return
-                ``timed_out=True``; ``None`` uses the run phase timeout.
+                ``timed_out=True``. A remote ``timeout`` also ends the
+                command. ``None`` uses the run phase timeout.
             on_output: Receives ``(stream, text)`` chunks; ``None`` uses the
                 sink of the current task.
             sudo: Run the command as root instead of the SSH user.
@@ -333,6 +353,7 @@ class EC2Environment(SandboxEnvironment):
 
         Raises:
             RuntimeError: The instance is not running.
+            SandboxRejectedError: An env name is not a shell identifier.
         """
         self._require_running()
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
@@ -340,7 +361,13 @@ class EC2Environment(SandboxEnvironment):
         # The env can hold credentials, so the script goes over stdin and
         # never into the argv of the local ssh or the remote shell.
         script = wrap_script(command, env={**self.spec.env, **(env or {})}, cwd=cwd, sudo=False)
-        reader = wrap_script(_READ_STDIN_SCRIPT, env={}, cwd=None, sudo=sudo)
+        reader = _READ_STDIN_SCRIPT
+        if limit is not None:
+            # Killing the local ssh does not end the remote command, so the
+            # instance ends it at the same limit.
+            seconds = max(1, math.ceil(limit))
+            reader = f"timeout -k {_REMOTE_KILL_AFTER_SEC} {seconds} bash -c {shlex.quote(reader)}"
+        reader = wrap_script(reader, env={}, cwd=None, sudo=sudo)
         try:
             code, out, err = await _run_process(
                 self._ssh_argv(reader, stdin=True, limit=limit), script.encode("utf-8"), limit
@@ -447,8 +474,15 @@ class EC2Environment(SandboxEnvironment):
             env._clear()
         return len(terminated)
 
-    async def _launch(self) -> tuple[str, str]:
+    async def _launch(self, client: Any, state: _LaunchState) -> tuple[str, str]:
         """Launch one instance, wait until it runs and answers SSH.
+
+        The launch keeps its instance and host in local state, so a launch
+        that ends after a cancelled start never changes a newer start.
+
+        Args:
+            client: The EC2 client.
+            state: The state of this launch, which the start marks as cancelled.
 
         Returns:
             The instance id and the SSH host.
@@ -456,21 +490,23 @@ class EC2Environment(SandboxEnvironment):
         Raises:
             SandboxError: An AWS call failed, or the instance has no address.
             StartTimeoutError: SSH did not answer in time.
+            asyncio.CancelledError: The start was cancelled during the launch.
         """
-        client = self._client
         kwargs = await _aws("describe_images", self._run_kwargs)
         response = await _aws("run_instances", client.run_instances, **kwargs)
         instance_id = response["Instances"][0]["InstanceId"]
-        self._pending_id = instance_id
+        state.instance_id = instance_id
         try:
+            _raise_if_cancelled(state)
             waiter = client.get_waiter("instance_running")
             await _aws("instance_running wait", waiter.wait, InstanceIds=[instance_id], WaiterConfig=_RUNNING_WAITER)
+            _raise_if_cancelled(state)
             described = await _aws("describe_instances", client.describe_instances, InstanceIds=[instance_id])
             host = instance_host(described["Reservations"][0]["Instances"][0], use_public_ip=self._use_public_ip)
             if host is None:
                 raise SandboxInfraError(f"The ec2 instance {instance_id} has no IP address.")
-            self._host = host
-            await self._wait_for_ssh()
+            await self._wait_for_ssh(host, state)
+            _raise_if_cancelled(state)
         except BaseException:
             # A failed launch must not leave a paid instance behind.
             await _terminate_bounded(client, instance_id)
@@ -491,7 +527,10 @@ class EC2Environment(SandboxEnvironment):
             "InstanceType": self._instance_type,
             "MinCount": 1,
             "MaxCount": 1,
-            "ClientToken": client_token(spec.operation_key or uuid.uuid4().hex),
+            # EC2 keeps a client token for about a day, and a stable box key
+            # would return the terminated instance of an earlier start. The
+            # call never retries, so a new token for each start loses nothing.
+            "ClientToken": client_token(uuid.uuid4().hex),
             "TagSpecifications": [
                 {"ResourceType": "instance", "Tags": tags},
                 {"ResourceType": "volume", "Tags": tags},
@@ -542,19 +581,25 @@ class EC2Environment(SandboxEnvironment):
         images = self._client.describe_images(ImageIds=[self._ami_id]).get("Images") or []
         return (images[0].get("RootDeviceName") if images else None) or DEFAULT_ROOT_DEVICE
 
-    async def _wait_for_ssh(self) -> None:
+    async def _wait_for_ssh(self, host: str, state: _LaunchState) -> None:
         """Probe SSH with ``true`` until it answers or the connect timeout passes.
 
         This is a readiness wait for a new host, not a retry of an AWS call.
 
+        Args:
+            host: The SSH host of the new instance.
+            state: The state of the launch; a cancelled launch stops probing.
+
         Raises:
             StartTimeoutError: SSH did not answer in time.
+            asyncio.CancelledError: The start was cancelled during the wait.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._connect_timeout
-        argv = self._ssh_argv(wrap_script("true", env={}, cwd=None, sudo=False), stdin=False, limit=None)
+        argv = self._ssh_argv(wrap_script("true", env={}, cwd=None, sudo=False), stdin=False, limit=None, host=host)
         last = b""
         while True:
+            _raise_if_cancelled(state)
             remaining = deadline - loop.time()
             try:
                 code, _, last = await _run_process(argv, None, max(0.0, min(_SSH_PROBE_TIMEOUT_SEC, remaining)))
@@ -569,13 +614,14 @@ class EC2Environment(SandboxEnvironment):
         logger.warning("SSH to an ec2 instance did not answer: %s", last.decode("utf-8", errors="replace")[:500])
         raise StartTimeoutError(self._connect_timeout)
 
-    def _ssh_argv(self, script: str, *, stdin: bool, limit: float | None) -> list[str]:
+    def _ssh_argv(self, script: str, *, stdin: bool, limit: float | None, host: str | None = None) -> list[str]:
         """Build the ssh command line that runs a script on the instance.
 
         Args:
             script: The remote shell script.
             stdin: Send stdin to the remote command; otherwise pass ``-n``.
             limit: The command time limit, which caps the connect timeout.
+            host: The SSH host; ``None`` uses the host of the running instance.
 
         Returns:
             The argv list.
@@ -598,7 +644,7 @@ class EC2Environment(SandboxEnvironment):
             argv.append("-n")
         if self._ssh_key_path:
             argv += ["-i", self._ssh_key_path]
-        argv += [f"{self._ssh_user}@{self._host}", "bash -lc " + shlex.quote(script)]
+        argv += [f"{self._ssh_user}@{host or self._host}", "bash -lc " + shlex.quote(script)]
         return argv
 
     def _known_hosts(self) -> str:
@@ -659,7 +705,14 @@ def wrap_script(command: str, *, env: Mapping[str, str], cwd: str | None, sudo: 
 
     Returns:
         The remote script.
+
+    Raises:
+        SandboxRejectedError: An env name is not a shell identifier.
     """
+    for key in env:
+        # The names go into the script unquoted, so a bad name could inject shell code.
+        if not _ENV_KEY.fullmatch(key):
+            raise SandboxRejectedError(f"{key!r} is not a valid environment variable name.")
     script = command
     if cwd:
         script = f"cd {shlex.quote(cwd)} && {script}"
@@ -857,9 +910,9 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
         message = f"EC2 {action} failed with {code}."
         if code in _AUTH_CODES or status in (401, 403):
             mapped: SandboxError = SandboxFatalError(message)
-        elif code in _TRANSIENT_CODES or (isinstance(status, int) and status >= 500):
+        elif code in _TRANSIENT_CODES or (isinstance(status, int) and (status == 429 or status >= 500)):
             mapped = SandboxTransientError(message)
-        elif status == 400:
+        elif isinstance(status, int) and 400 <= status < 500:
             mapped = SandboxRejectedError(message)
         else:
             mapped = SandboxInfraError(message)
@@ -872,6 +925,19 @@ def _aws_error(error: Exception, action: str) -> SandboxError | None:
         message = f"EC2 {action} failed: {type(error).__name__}."
         return SandboxFatalError(message) if isinstance(error, fatal) else SandboxTransientError(message)
     return None
+
+
+def _raise_if_cancelled(state: _LaunchState) -> None:
+    """Stop a launch whose start was cancelled.
+
+    Args:
+        state: The state of the launch.
+
+    Raises:
+        asyncio.CancelledError: The start was cancelled.
+    """
+    if state.cancelled:
+        raise asyncio.CancelledError
 
 
 def _safe_text(error: BaseException | None) -> str:

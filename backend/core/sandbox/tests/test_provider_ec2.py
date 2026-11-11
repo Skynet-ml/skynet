@@ -3,7 +3,7 @@
 A fake EC2 client replaces boto3's, and a fake ``ssh`` script replaces the
 real client. The fake ssh runs the remote command on this machine inside one
 directory per instance, with ``bash`` and ``sudo`` shims that drop the login
-and root switches. No test calls AWS or opens a network connection.
+and root switches, and a ``timeout`` shim that drops its limits. No test calls AWS or opens a network connection.
 """
 
 from __future__ import annotations
@@ -65,23 +65,25 @@ FAKE_SSH = textwrap.dedent(
 # A login shell would read the host profile and could reset PATH past the shims.
 BASH_SHIM = '#!/bin/sh\nif [ "$1" = "-lc" ]; then shift; exec /bin/bash -c "$@"; fi\nexec /bin/bash "$@"\n'
 SUDO_SHIM = '#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n'
+# macOS has no timeout command, and the local ssh kill already bounds each test command.
+TIMEOUT_SHIM = '#!/bin/sh\n[ "$1" = "-k" ] && shift 2\nshift\nexec "$@"\n'
 
 
-def _client_error(code: str, status: int, message: str = "") -> ClientError:
+def _client_error(code: str, status: int | None, message: str = "") -> ClientError:
     """Build a botocore client error like the one EC2 returns.
 
     Args:
         code: The AWS error code.
-        status: The HTTP status.
+        status: The HTTP status, or ``None`` for a response without one.
         message: The AWS error message.
 
     Returns:
         The error.
     """
-    response = {
-        "Error": {"Code": code, "Message": message},
-        "ResponseMetadata": {"HTTPStatusCode": status, "RequestId": "req-1"},
-    }
+    metadata: dict[str, Any] = {"RequestId": "req-1"}
+    if status is not None:
+        metadata["HTTPStatusCode"] = status
+    response = {"Error": {"Code": code, "Message": message}, "ResponseMetadata": metadata}
     return ClientError(response, "RunInstances")
 
 
@@ -101,13 +103,19 @@ class FakeWaiter:
 
         Args:
             **kwargs: The waiter arguments.
+
+        Raises:
+            WaiterError: The instance is terminated, as the real waiter's failure state says.
         """
         self.client.calls.append(("wait", kwargs))
-        if self.client.wait_gate is not None:
-            self.client.wait_gate.wait(timeout=5)
+        gate = self.client.wait_gate
+        if gate is not None:
+            gate.wait(timeout=5)
         error = self.client.errors.pop("wait", None)
         if error is not None:
             raise error
+        if any(self.client.instances[i]["state"] == "terminated" for i in kwargs["InstanceIds"]):
+            raise WaiterError("InstanceRunning", "terminal failure state", {})
 
 
 # The argument names are boto3's, because the provider calls the client by keyword.
@@ -128,6 +136,7 @@ class FakeEC2:
         self.no_address = False
         self.root_device = "/dev/sda1"
         self.wait_gate: threading.Event | None = None
+        self.run_gate: threading.Event | None = None
 
     def _fail(self, name: str) -> None:
         """Raise the queued error of one operation.
@@ -149,6 +158,8 @@ class FakeEC2:
             The response with the instance id.
         """
         self.calls.append(("run_instances", kwargs))
+        if self.run_gate is not None:
+            self.run_gate.wait(timeout=5)
         self._fail("run_instances")
         token = kwargs["ClientToken"]
         if token in self.tokens:
@@ -292,7 +303,12 @@ def fake_ec2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEC
     state.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, body in (("ssh", f"#!{sys.executable}\n{FAKE_SSH}"), ("bash", BASH_SHIM), ("sudo", SUDO_SHIM)):
+    for name, body in (
+        ("ssh", f"#!{sys.executable}\n{FAKE_SSH}"),
+        ("bash", BASH_SHIM),
+        ("sudo", SUDO_SHIM),
+        ("timeout", TIMEOUT_SHIM),
+    ):
         path = bin_dir / name
         path.write_text(body)
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -486,7 +502,7 @@ async def test_run_instances_carries_the_spec(fake_ec2: FakeEC2) -> None:
     async with env:
         pass
     kwargs = _run_kwargs(fake_ec2)
-    assert kwargs["ClientToken"] == client_token(spec.operation_key)
+    assert kwargs["ClientToken"] != client_token(spec.operation_key)
     assert len(kwargs["ClientToken"]) <= 64
     tags = {tag["Key"]: tag["Value"] for tag in kwargs["TagSpecifications"][0]["Tags"]}
     assert tags == {"Name": "trial-one", JOB_TAG: "job-1"}
@@ -531,6 +547,22 @@ async def test_start_twice_launches_one_instance(fake_ec2: FakeEC2) -> None:
     assert fake_ec2.ops().count("run_instances") == 1
 
 
+async def test_start_stop_start_with_the_same_spec_launches_a_new_instance(fake_ec2: FakeEC2) -> None:
+    """Send a new client token on each start, so a restart never gets the terminated instance back."""
+    env = EC2Environment(_spec(name="box", operation_key="dspy:artifact-1"))
+    await env.start()
+    first = env._instance_id
+    await env.stop()
+    await env.start()
+    second = env._instance_id
+    assert (await env.exec("echo ok")).stdout == "ok\n"
+    await env.stop()
+    tokens = [kwargs["ClientToken"] for name, kwargs in fake_ec2.calls if name == "run_instances"]
+    assert len(set(tokens)) == 2
+    assert first != second
+    assert fake_ec2.live() == []
+
+
 async def test_exec_sends_env_cwd_and_sudo_over_stdin_not_argv(fake_ec2: FakeEC2) -> None:
     """Keep the env values out of every argv, and still run with them, the cwd and sudo."""
     secret = "sk-test-not-a-real-key"
@@ -550,6 +582,38 @@ async def test_exec_returns_timed_out_past_the_limit(fake_ec2: FakeEC2) -> None:
     async with EC2Environment(_spec()) as env:
         result = await env.exec("sleep 5", timeout_sec=0.2)
     assert (result.exit_code, result.timed_out) == (124, True)
+
+
+async def test_exec_ends_the_remote_command_at_the_limit(fake_ec2: FakeEC2) -> None:
+    """Wrap the remote command in timeout when a limit is set, and send it plain without one."""
+    async with EC2Environment(_spec()) as env:
+        await env.exec("true", timeout_sec=2.5)
+        limited = _ssh_calls(fake_ec2)[-1][-1]
+        await env.exec("true", timeout_sec=2.5, sudo=True)
+        limited_root = _ssh_calls(fake_ec2)[-1][-1]
+        await env.exec("true")
+        plain = _ssh_calls(fake_ec2)[-1][-1]
+    assert "timeout -k 5 3 bash -c" in limited
+    assert "sudo -n bash -lc" in limited_root
+    assert "timeout -k 5 3 bash -c" in limited_root
+    assert "timeout" not in plain
+
+
+def test_wrap_script_rejects_env_names_that_are_not_identifiers() -> None:
+    """Refuse an env name that could inject shell code, and keep a valid one."""
+    for key in ("A;touch x", "1A", "A-B", "", "A B"):
+        with pytest.raises(SandboxRejectedError, match="not a valid environment variable name"):
+            wrap_script("true", env={key: "v"}, cwd=None, sudo=False)
+    assert wrap_script("true", env={"_A1": "v"}, cwd=None, sudo=False) == "export _A1=v; true"
+
+
+async def test_exec_rejects_a_bad_env_name_before_ssh(fake_ec2: FakeEC2) -> None:
+    """Raise before any ssh call when an exec env name is not a shell identifier."""
+    async with EC2Environment(_spec()) as env:
+        before = len(_ssh_calls(fake_ec2))
+        with pytest.raises(SandboxRejectedError):
+            await env.exec("true", env={"$(touch pwned)": "x"})
+        assert len(_ssh_calls(fake_ec2)) == before
 
 
 async def test_uploads_run_as_root(fake_ec2: FakeEC2) -> None:
@@ -608,6 +672,53 @@ async def test_a_cancelled_start_terminates_the_pending_instance(
     assert env._instance_id is None
 
 
+async def test_a_start_cancelled_during_run_instances_terminates_without_waiting(
+    fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminate the instance as soon as run_instances returns, with no running wait or SSH probe."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_ec2.run_gate = threading.Event()
+    env = EC2Environment(_spec())
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "run_instances" in fake_ec2.ops())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    fake_ec2.run_gate.set()
+    await _until(lambda: "terminate_instances" in fake_ec2.ops() and not ec2_provider._LATE_TERMINATES)
+    assert "wait" not in fake_ec2.ops()
+    assert _ssh_calls(fake_ec2) == []
+    assert fake_ec2.live() == []
+    assert env._instance_id is None
+
+
+async def test_a_late_launch_never_touches_a_newer_start(fake_ec2: FakeEC2, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a cancelled launch end after a new start, and keep the new instance and host."""
+    monkeypatch.setattr(ec2_provider, "_CANCEL_GRACE_SEC", 0.05)
+    gate = threading.Event()
+    fake_ec2.wait_gate = gate
+    env = EC2Environment(_spec(name="box", operation_key="dspy:artifact-1"))
+    task = asyncio.create_task(env.start())
+    await _until(lambda: "wait" in fake_ec2.ops())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    old = next(name for name in fake_ec2.instances)
+    assert fake_ec2.instances[old]["state"] == "terminated"
+    fake_ec2.wait_gate = None
+    await env.start()
+    new, host = env._instance_id, env._host
+    gate.set()
+    await _until(lambda: fake_ec2.ops().count("wait") == 2 and not ec2_provider._LATE_TERMINATES)
+    await asyncio.sleep(0.1)
+    terminated = [i for name, kwargs in fake_ec2.calls if name == "terminate_instances" for i in kwargs["InstanceIds"]]
+    assert new not in terminated
+    assert fake_ec2.live() == [new]
+    assert (env._instance_id, env._host) == (new, host)
+    assert (await env.exec("echo ok")).stdout == "ok\n"
+    await env.stop()
+
+
 async def test_an_instance_without_an_address_is_terminated(fake_ec2: FakeEC2) -> None:
     """Raise SandboxInfraError and terminate an instance that has no IP address."""
     fake_ec2.no_address = True
@@ -633,12 +744,14 @@ async def test_a_failed_wait_is_terminated_and_hides_the_response(fake_ec2: Fake
         ("AuthFailure", 401, SandboxFatalError),
         ("RequestLimitExceeded", 503, SandboxTransientError),
         ("InsufficientInstanceCapacity", 500, SandboxTransientError),
+        ("Throttled", 429, SandboxTransientError),
         ("InvalidAMIID.NotFound", 400, SandboxRejectedError),
-        ("Weird", 404, SandboxInfraError),
+        ("NotFound", 404, SandboxRejectedError),
+        ("Weird", None, SandboxInfraError),
     ],
 )
 async def test_run_instances_errors_map_to_groups_once_and_hide_the_account(
-    fake_ec2: FakeEC2, code: str, status: int, group: type[Exception]
+    fake_ec2: FakeEC2, code: str, status: int | None, group: type[Exception]
 ) -> None:
     """Map an AWS error to its group after one call, with only the operation and the code."""
     message = f"User: arn:aws:iam::{ACCOUNT}:user/dev is not authorized. Encoded message: abc"
