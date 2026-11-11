@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shlex
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CLINE
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
@@ -24,10 +25,10 @@ CLINE_PROVIDER = "openai"
 # protected run's relay rewrite of generated files reaches it.
 CLINE_BASE_URL_FILE = ".app/cline/base_url"
 _GLOBAL_STATE = '{"welcomeViewCompleted": true, "isNewUser": false}'
-# Skynet's effort names that Cline's ``--thinking`` spells differently; Cline
-# knows none, low, medium, high and xhigh, and gets no flag for anything else.
-_CLINE_THINKING_LEVELS = {"minimal": "low", "max": "xhigh"}
-_CLINE_THINKING_KNOWN = frozenset({"none", "low", "medium", "high", "xhigh"})
+# The ``--thinking`` levels of the pinned release (its README options table).
+# Skynet's ``minimal`` and ``max`` are other levels, not other spellings, so
+# Cline refuses them instead of running at a level the user did not pick.
+CLINE_THINKING_LEVELS = ("none", "low", "medium", "high", "xhigh")
 # Cline reads these keys for its other providers. A protected run blanks them,
 # so an inherited key never gives Cline a route around the gateway.
 _PROTECTED_ENV = {
@@ -49,11 +50,18 @@ def _cline_thinking(reasoning_effort: str | None) -> str:
 
     Returns:
         The flag with a trailing space, or an empty string.
+
+    Raises:
+        ServiceError: When Cline does not support the effort level.
     """
     if not reasoning_effort:
         return ""
-    level = _CLINE_THINKING_LEVELS.get(reasoning_effort, reasoning_effort)
-    return f"--thinking {level} " if level in _CLINE_THINKING_KNOWN else ""
+    if reasoning_effort not in CLINE_THINKING_LEVELS:
+        raise ServiceError(
+            f"Cline does not support the effort level '{reasoning_effort}'. "
+            f"Supported levels: {', '.join(CLINE_THINKING_LEVELS)}."
+        )
+    return f"--thinking {reasoning_effort} "
 
 
 def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
@@ -71,6 +79,9 @@ def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When Cline does not support the effort level.
     """
     key = f'"${ENV_API_KEY}"'
     model_arg = f'"${ENV_MODEL}"'

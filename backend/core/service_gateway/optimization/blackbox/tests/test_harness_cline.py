@@ -11,12 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CLINE, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_plain_output
 from ..harnesses import REGISTRY
-from ..harnesses.cline import CLINE_BASE_URL_FILE, CLINE_VERSION
+from ..harnesses.cline import CLINE_BASE_URL_FILE, CLINE_THINKING_LEVELS, CLINE_VERSION
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -117,17 +118,31 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     assert launch.parse_output is parse_plain_output
 
 
-@pytest.mark.parametrize(
-    ("effort", "flag"),
-    [(None, None), ("none", "none"), ("high", "high"), ("xhigh", "xhigh"), ("max", "xhigh"), ("minimal", "low")],
-)
-def test_reasoning_effort_maps_to_the_thinking_flag(effort: str | None, flag: str | None) -> None:
-    """Pass the user's effort as Cline's ``--thinking`` level, or no flag for Cline's default."""
+def test_supported_levels_are_the_pinned_release_thinking_levels() -> None:
+    """Declare exactly the ``--thinking`` levels of Cline 3.0.74."""
+    assert CLINE_THINKING_LEVELS == ("none", "low", "medium", "high", "xhigh")
+
+
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh"])
+def test_supported_effort_goes_to_the_thinking_flag_unchanged(effort: str) -> None:
+    """Pass each level Cline supports as its ``--thinking`` value, with no remap."""
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
-    if flag is None:
-        assert "--thinking" not in launch.run_command
-    else:
-        assert f"--yolo --thinking {flag} -- " in launch.run_command
+    assert f"--yolo --thinking {effort} -- " in launch.run_command
+    assert launch.run_command.count("--thinking") == 1
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_keeps_clines_default(effort: str | None) -> None:
+    """Send no ``--thinking`` flag when the user picks no effort."""
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
+    assert "--thinking" not in launch.run_command
+
+
+@pytest.mark.parametrize("effort", ["minimal", "max", "auto", "High", "extreme"])
+def test_unsupported_effort_raises_before_launch(effort: str) -> None:
+    """Refuse a level Cline does not support, instead of a silent remap or drop."""
+    with pytest.raises(ServiceError, match=f"Cline does not support the effort level '{effort}'"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
