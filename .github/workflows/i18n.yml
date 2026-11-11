@@ -1,9 +1,12 @@
 name: i18n
 
+# Same triggers as ci.yml: batch dispatch, promotion PR, push to main (SKY-570).
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 env:
   # Keep the same value as DAGGER_VERSION in ci.yml.

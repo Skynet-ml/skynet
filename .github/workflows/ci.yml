@@ -1,11 +1,13 @@
 name: ci
 
-# Pull requests do not run this workflow. Each PR runs its related tests
-# locally. The full suite runs once for each batch branch through
-# workflow_dispatch, and again on the push to staging or main (SKY-570).
+# PRs to staging do not run this workflow: each PR runs the local gate in
+# AGENTS.md. The full suite runs on each batch branch (workflow_dispatch),
+# on the staging -> main promotion PR, and on the push to main (SKY-570).
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:

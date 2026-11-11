@@ -261,7 +261,8 @@ Any other PR (files outside `backend/` and `docs/**/*.md`, or no backend
 file) also waits for Gilad's approval.
 
 **`staging` → `main`**: a change in `staging` is approved for production.
-The orchestrator promotes `staging` to `main` when the staging checks pass.
+The orchestrator promotes `staging` to `main` when the staging checks pass
+and CI passes on the promotion PR (see "PR tests and batch CI").
 Do not send a promotion card or a video tour, and do not wait for "promote".
 A manual hold on a change or on a promotion still stops it.
 
@@ -314,11 +315,13 @@ A manual hold on a change or on a promotion still stops it.
 
 ### PR tests and batch CI (Gilad, 2026-11-10)
 
-- The `ci` workflow does not run on pull requests. Each PR runs the tests
-  for the code that it changes, locally. Put the exact commands and their
-  results in the PR body.
-- The small PR workflows (gitleaks, i18n, pr files scope, pr kind label,
-  preview) still run on every PR.
+- No CI workflow (`ci`, `i18n`, `desktop`) runs on a pull request to
+  `staging`. Before every push, run the local gate in `AGENTS.md`
+  ("Verification"). Put the exact commands and their results in the PR body.
+- The policy checks still run on every PR: gitleaks, pr files scope
+  (`scope`), pr kind label, preview and terraform.
+- CI runs on each batch (dispatch), on the `staging` → `main` promotion PR
+  and on the push to `main`.
 - An individual PR never merges on its own. The orchestrator merges approved
   PRs into `staging` through one batch PR. GitHub marks each included PR as
   merged when the batch merges.
@@ -330,15 +333,15 @@ A manual hold on a change or on a promotion still stops it.
      batches of that day (1, 2, ...), so each batch has a new name.
   2. Merge the approved head of each PR branch into it with a merge commit.
      Never force-push.
-  3. Run `gh workflow run ci.yml --ref batch/<date>-<n>`. Wait for the run
-     to pass.
+  3. Run `gh workflow run ci.yml --ref batch/<date>-<n>` and `gh workflow
+     run i18n.yml --ref batch/<date>-<n>`. Wait for both runs to pass.
   4. Open one PR from `batch/<date>-<n>` to `staging`. List the included PRs
      and their merged heads, and link the CI run.
   5. Merge it with a merge commit (`gh pr merge <pr> --merge --delete-branch
      --match-head-commit <sha>`).
-- Required checks match by commit. The dispatched CI run reports the `ci`
-  checks on the batch head commit, so the batch PR meets the `staging merge
-  gates` ruleset. A new batch commit needs a new dispatched run.
+- The `staging merge gates` ruleset requires only `scope`. So the
+  orchestrator must check the green batch run itself before the merge. A new
+  batch commit needs a new dispatched run.
 - **No unreviewed code on the batch branch.**
   - A CI failure or a bug: fix it in the PR's own branch. That PR gets a new
     review, then its new head goes into the batch again. Or remove the PR
@@ -349,10 +352,12 @@ A manual hold on a change or on a promotion still stops it.
     batch merge commit. Then the batch head needs a fresh Opus 5.5
     medium-effort review before the merge. If the resolution changes a UI
     PR's visible UI, stop and wait for Gilad.
-- The push to `staging` runs the full CI again.
+- **A red batch run or a red promotion run blocks the promotion.** Fix it in
+  a new PR, which goes through the next batch. Do not promote `staging` to
+  `main` while the latest batch run or the promotion run is red.
 - Bootstrap (SKY-570): the PR that adds this flow merges the same way.
-  Dispatch `ci` on its own branch (`gh workflow run ci.yml --ref <branch>`),
-  wait for the run to pass, then merge the PR.
+  Dispatch `ci` and `i18n` on its own branch (`gh workflow run ci.yml --ref
+  <branch>`), wait for both runs to pass, then merge the PR.
 
 ### Daily merge window (2026-10-20, batch flow 2026-11-10)
 
