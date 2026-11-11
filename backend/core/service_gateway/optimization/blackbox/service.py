@@ -131,7 +131,7 @@ _PROGRESS_EVENTS = 100
 
 # No choice, or one of the catalog's ``ReasoningEffort`` levels (core/api/model_catalog.py). Pi and Prime Agent put
 # the effort into a shell command line, so a free-form value must never reach them.
-_NATIVE_EFFORTS = (None, "none", "minimal", "low", "medium", "high", "xhigh", "max")
+_NATIVE_EFFORTS = (None, "", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def _proposer_runtime() -> Literal["vercel", "docker"]:
@@ -443,13 +443,13 @@ def _check_proposer_effort(proposer: BlackboxProposer, effort: str | None) -> No
 
     Args:
         proposer: The job's proposer.
-        effort: The chosen effort level; ``None`` keeps the harness default.
+        effort: The chosen effort level; ``None`` or ``""`` keeps the harness default.
 
     Raises:
         ServiceError: When the harness declares its levels and ``effort`` is not one of them.
     """
     spec = REGISTRY.get(proposer.harness)
-    if effort is None or proposer.host_cli is not None or spec is None or spec.supported_efforts is None:
+    if not effort or proposer.host_cli is not None or spec is None or spec.supported_efforts is None:
         return
     if effort not in spec.supported_efforts:
         raise ServiceError(

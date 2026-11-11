@@ -950,9 +950,11 @@ def test_native_model_controls_are_rejected_without_restricting_direct_engines(
         (("low", "high"), "max", False),
         (("low", "high"), "high", True),
         (("low", "high"), None, True),
+        (("low", "high"), "", True),
         (None, "max", True),
+        (None, "", True),
     ],
-    ids=["unsupported", "supported", "default", "undeclared"],
+    ids=["unsupported", "supported", "default", "empty", "undeclared", "empty-undeclared"],
 )
 def test_submit_checks_the_effort_against_the_proposer_harness(
     monkeypatch: pytest.MonkeyPatch,
@@ -967,13 +969,13 @@ def test_submit_checks_the_effort_against_the_proposer_harness(
         monkeypatch: Pytest fixture that swaps the registry entry and runtime capabilities.
         strategy: Auto or a single native engine; both run the proposer harness.
         declared: The harness's supported levels; ``None`` declares no list.
-        effort: The chosen effort level; ``None`` keeps the harness default.
+        effort: The chosen effort level; ``None`` or ``""`` keeps the harness default.
         accepted: Whether the submission passes validation.
     """
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
     monkeypatch.setitem(REGISTRY, "fake", replace(REGISTRY["codex"], id="fake", supported_efforts=declared))
     monkeypatch.setattr(blackbox_models, "BLACKBOX_HARNESSES", (*BLACKBOX_HARNESSES, "fake"))
-    extra = {"reasoning_effort": effort} if effort else {}
+    extra = {} if effort is None else {"reasoning_effort": effort}
     payload = _payload(
         strategy=strategy,
         max_cost_cents=100,
