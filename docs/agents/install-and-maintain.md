@@ -46,7 +46,8 @@ mv github-mcp-server ~/.local/bin/      # any folder on PATH
 - The Intel macOS checksum is
   `3c4b023b0d90bdc8f3a2ab63307ff55d293e98c27e733008eed0fa35aca55499`.
 - If the binaries are not on `PATH`, set `PI_BINARY` and `GITHUB_MCP_BINARY`
-  in `backend/.env` to their full paths.
+  in `backend/.env` to their full paths. The real-Pi bridge test in
+  `test_pi_bridge.py` reads the same `PI_BINARY`.
 - Without `pi`, agent turns fail with a clear error. Without
   `github-mcp-server`, a setup turn with GitHub linked fails with a clear error.
 - The backend gives the server the user's GitHub token only in its

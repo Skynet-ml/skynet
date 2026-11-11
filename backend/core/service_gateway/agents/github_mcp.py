@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator, Iterable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import dspy
 from mcp import ClientSession
@@ -24,6 +25,9 @@ GITHUB_MCP_VERSION = "2.1.0"
 TOKEN_ENV = "GITHUB_PERSONAL_ACCESS_TOKEN"
 SERVER_ARGS = ("stdio", "--read-only", "--toolsets", "repos")
 CALL_TIMEOUT_SECONDS = 60
+# get_file_contents and search_code can return megabytes, and every byte goes
+# back into the model's prompt for the rest of the turn.
+MAX_RESULT_CHARS = 40_000
 # The repos toolset also has read tools the setup agent does not need, such
 # as list_repository_collaborators, so only these reach the agent.
 READ_TOOLS = frozenset(
@@ -80,6 +84,49 @@ def read_only_tools(tools: Iterable[Tool]) -> list[Tool]:
     ]
 
 
+def cap_result(result: Any) -> Any:
+    """Cut a long text tool result to :data:`MAX_RESULT_CHARS` and say so.
+
+    Args:
+        result: One tool result.
+
+    Returns:
+        The result, with a truncation note when the text was cut.
+    """
+    if not isinstance(result, str) or len(result) <= MAX_RESULT_CHARS:
+        return result
+    return (
+        f"{result[:MAX_RESULT_CHARS]}\n\n[Truncated: the result has {len(result)} characters and only the first "
+        f"{MAX_RESULT_CHARS} are shown. Ask for a narrower path, file or query to see the rest.]"
+    )
+
+
+def _capped(tool: dspy.Tool) -> dspy.Tool:
+    """Make the tool return results capped by :func:`cap_result`.
+
+    Args:
+        tool: A tool built from the MCP listing.
+
+    Returns:
+        The same tool.
+    """
+    call = tool.func
+
+    async def func(**kwargs: Any) -> Any:
+        """Call the MCP tool and cap its result.
+
+        Args:
+            **kwargs: The tool's arguments.
+
+        Returns:
+            The capped result.
+        """
+        return cap_result(await call(**kwargs))
+
+    tool.func = func
+    return tool
+
+
 @asynccontextmanager
 async def github_repo_tools(binary: str, token: str | None) -> AsyncGenerator[list[dspy.Tool]]:
     """Start the GitHub MCP server for one turn and yield its read-only repository tools.
@@ -91,6 +138,7 @@ async def github_repo_tools(binary: str, token: str | None) -> AsyncGenerator[li
 
     Yields:
         The read-only tools, bound to a session that closes with the context.
+        Their text results are capped by :func:`cap_result`.
 
     Raises:
         GitHubMcpError: When the token is missing or the executable is not
@@ -112,4 +160,4 @@ async def github_repo_tools(binary: str, token: str | None) -> AsyncGenerator[li
         ):
             await session.initialize()
             listing = await session.list_tools()
-            yield [dspy.Tool.from_mcp_tool(session, spec) for spec in read_only_tools(listing.tools)]
+            yield [_capped(dspy.Tool.from_mcp_tool(session, spec)) for spec in read_only_tools(listing.tools)]

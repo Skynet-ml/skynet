@@ -14,7 +14,14 @@ import pytest
 from mcp.types import Tool, ToolAnnotations
 
 from ..agents import generalist
-from ..agents.github_mcp import READ_TOOLS, GitHubMcpError, github_repo_tools, read_only_tools, server_parameters
+from ..agents.github_mcp import (
+    MAX_RESULT_CHARS,
+    READ_TOOLS,
+    GitHubMcpError,
+    github_repo_tools,
+    read_only_tools,
+    server_parameters,
+)
 
 TOKEN = "test-token-not-real"
 
@@ -37,7 +44,7 @@ def search_repositories(query: str) -> str:
 
 @server.tool(annotations=read)
 def get_file_contents(owner: str, repo: str, path: str) -> str:
-    return "contents"
+    return "x" * int(path) if path.isdigit() else "contents"
 
 @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
 def create_or_update_file(owner: str, repo: str, path: str, content: str) -> str:
@@ -160,6 +167,29 @@ def test_tools_are_offered_read_only_and_callable(tmp_path: Path) -> None:
     assert "found personal website" in found
     launch = json.loads(record.read_text())
     assert launch == {"argv": ["stdio", "--read-only", "--toolsets", "repos"], "token": TOKEN}
+
+
+def test_long_results_are_cut_with_a_clear_marker(tmp_path: Path) -> None:
+    """A file larger than the cap reaches the model cut, with a note; a short file is unchanged."""
+    binary, _ = _fake_binary(tmp_path)
+
+    async def run() -> tuple[str, str]:
+        """Read one file larger than the cap and one small file.
+
+        Returns:
+            The two results.
+        """
+        async with github_repo_tools(str(binary), TOKEN) as tools:
+            read = next(tool for tool in tools if tool.name == "get_file_contents")
+            big = await read.acall(owner="o", repo="r", path=str(MAX_RESULT_CHARS + 500))
+            small = await read.acall(owner="o", repo="r", path="README.md")
+            return str(big), str(small)
+
+    big, small = asyncio.run(run())
+    assert big.startswith("x" * MAX_RESULT_CHARS + "\n\n[Truncated:")
+    assert f"has {MAX_RESULT_CHARS + 500} characters" in big
+    assert len(big) < MAX_RESULT_CHARS + 300
+    assert small == "contents"
 
 
 @pytest.mark.skipif(shutil.which("github-mcp-server") is None, reason="github-mcp-server is not installed")

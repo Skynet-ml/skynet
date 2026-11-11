@@ -220,6 +220,47 @@ async def test_model_relay_streams_sse_and_keeps_a_failure() -> None:
     assert failing.failed.is_set()
 
 
+async def test_server_shutdown_cancels_running_tool_calls() -> None:
+    """A tool call that still runs when the turn's server stops is cancelled and awaited."""
+    started = pi_bridge.asyncio.Event()
+    cancelled = pi_bridge.asyncio.Event()
+
+    class _Stuck(_Handlers):
+        """Handlers whose tool never finishes on its own."""
+
+        async def call_tool(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+            """Wait until cancelled.
+
+            Args:
+                name: The tool name.
+                args: The call's arguments.
+
+            Returns:
+                Never returns.
+
+            Raises:
+                asyncio.CancelledError: When the bridge cancels the call.
+            """
+            started.set()
+            try:
+                await pi_bridge.asyncio.sleep(3600)
+            except pi_bridge.asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return ToolOutcome("never")
+
+    app = _BridgeApp(_Stuck(), _TOKEN)
+    async with pi_bridge._serve(app) as base_url:
+        client = httpx.AsyncClient(base_url=base_url, headers={"authorization": f"Bearer {_TOKEN}"})
+        request = pi_bridge.asyncio.ensure_future(client.post("/call", json={"tool": "get_x", "args": {}}))
+        await pi_bridge.asyncio.wait_for(started.wait(), timeout=5)
+    request.cancel()
+    await pi_bridge.asyncio.gather(request, return_exceptions=True)
+    await client.aclose()
+    assert cancelled.is_set()
+    assert not app._tool_tasks
+
+
 def _feed(translator: PiEventTranslator, *updates: dict[str, Any]) -> None:
     """Feed assistant-message updates to the translator.
 
@@ -432,10 +473,10 @@ async def test_run_turn_without_pi_fails_with_a_clear_error(tmp_path: Path) -> N
         )
 
 
-_REAL_PI = os.environ.get("SKYNET_PI_BINARY") or shutil.which("pi")
+_REAL_PI = os.environ.get("PI_BINARY") or shutil.which("pi")
 
 
-@pytest.mark.skipif(not _REAL_PI, reason="needs the pinned pi binary (set SKYNET_PI_BINARY)")
+@pytest.mark.skipif(not _REAL_PI, reason="needs the pinned pi binary (set PI_BINARY)")
 async def test_real_pi_loads_the_tool_bridge_and_calls_a_tool() -> None:
     """The pinned Pi loads only the tool-bridge extension and runs a tool call through it."""
     calls = iter(

@@ -341,8 +341,105 @@ async def test_budget_forces_submit_with_the_guard_off_then_stops() -> None:
     assert len(lm.requests) == 3
 
 
-async def test_text_reply_ends_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plain-text final message is the reply; no forced submit follows."""
+def _text_stream(text: str) -> list[ModelResponseStream]:
+    """Build a provider stream that answers in plain text and reports usage.
+
+    Args:
+        text: The reply.
+
+    Returns:
+        The stream chunks.
+    """
+    return [
+        ModelResponseStream(id="r1", model="fake", choices=[StreamingChoices(index=0, delta=Delta(role="assistant", content=text))]),
+        ModelResponseStream(id="r1", model="fake", choices=[StreamingChoices(index=0, delta=Delta(), finish_reason="stop")]),
+        ModelResponseStream(
+            id="r1", model="fake", choices=[], usage=Usage(prompt_tokens=5, completion_tokens=3, total_tokens=8)
+        ),
+    ]  # fmt: skip
+
+
+async def test_plain_text_end_forces_one_metered_submit_that_fills_every_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A program with several outputs that ends in plain text gets one forced, metered submit with the guard off."""
+    monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
+    requests: list[dict[str, Any]] = []
+    forced_args = {"summary": "Wrote the scorer.", "run_code": "def run(): ...", "open_questions": ["Which split?"]}
+
+    async def fake_acompletion(**request: Any) -> Any:
+        """Answer the streamed call in plain text.
+
+        Args:
+            **request: The provider request.
+
+        Returns:
+            An async chunk iterator.
+        """
+        requests.append(request)
+
+        async def stream() -> AsyncIterator[ModelResponseStream]:
+            """Yield the text chunks.
+
+            Yields:
+                Stream chunks.
+            """
+            for chunk in _text_stream("I wrote it."):
+                yield chunk
+
+        return stream()
+
+    def fake_completion(**request: Any) -> litellm.ModelResponse:
+        """Answer the forced, unstreamed call with a submit.
+
+        Args:
+            **request: The provider request.
+
+        Returns:
+            The response.
+        """
+        requests.append(request)
+        return _forced_response(forced_args)
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    signature = dspy.Signature("request: str -> summary: str, run_code: str, open_questions: list[str]", "Code.")
+    program = AgentProgram(signature, tools=[_lookup], max_iters=5, submit_guard=lambda outputs: "never")
+    lm = MeteredLM(model="openai/gpt-4o-mini", cache=False)
+    with dspy.context(track_usage=True):
+        outputs = await pi_react.run_react_program_on_pi(
+            program, {"request": "write it"}, lm, input_field="request", binary="pi"
+        )
+
+    assert outputs == forced_args
+    assert len(requests) == 2
+    forced = requests[1]
+    assert forced["tool_choice"] == {"type": "function", "function": {"name": "submit"}}
+    assert "parallel_tool_calls" not in forced
+    assert forced["reasoning_effort"] is None
+    assert forced["messages"][-1] == {"role": "assistant", "content": "I wrote it."}
+    assert lm.usage_totals.calls == 2
+    assert program._forcing is False
+
+
+def _forced_response(args: dict[str, Any]) -> litellm.ModelResponse:
+    """Build a whole provider response that calls ``submit``.
+
+    Args:
+        args: The submit arguments.
+
+    Returns:
+        The response, with usage.
+    """
+    return litellm.ModelResponse(
+        model="fake",
+        choices=[{"index": 0, "finish_reason": "tool_calls", "message": _tool_message("submit", args, 99)}],
+        usage={"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
+    )
+
+
+async def test_single_output_text_reply_ends_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With one output, a plain-text final message is the reply; no forced submit follows."""
     monkeypatch.setattr(pi_react, "run_pi_turn", _simulated_pi)
     lm = _ScriptedLM(["Just text."])
     events: list[dict] = []

@@ -15,6 +15,9 @@ Pi owns the loop; this module keeps the program's contract:
 * **Reply.** A ``submit`` the guard accepts ends the turn. A refusal is the
   tool result, as before. A ``submit`` beside another tool call is refused.
   At the loop budget the next call forces ``submit`` with the guard off.
+  A program with several outputs whose turn ends in plain text gets one
+  more forced ``submit`` call, as ``dspy.ReActV2`` made, so every output
+  field is filled.
 * **Steering.** A waiting steer joins the prompt as a user message before
   the next model call, from the second call on.
 * **Models without native tool calls.** A local CLI subscription route
@@ -35,6 +38,7 @@ from typing import Any
 
 import anyio
 import dspy
+import litellm
 from dspy.adapters.base import _tool_result_content
 from dspy.adapters.types.tool import ToolCalls
 from dspy.utils.exceptions import AdapterParseError, format_error_for_lm
@@ -219,6 +223,7 @@ class ReactOnPi:
         self._calls = 0
         self._forcing = False
         self._last_tools: list[str] = []
+        self._tail: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
         self.reply: str | None = None
         self.outputs: dict[str, Any] | None = None
@@ -370,6 +375,7 @@ class ReactOnPi:
         raw = body.get("messages") or []
         first_user = next((i for i, message in enumerate(raw) if message.get("role") == "user"), len(raw))
         tail = [kept for message in raw[first_user + 1 :] if (kept := _wire_message(message))]
+        self._tail = tail
         await self._take_steers(len(tail))
         messages = self._messages(tail)
         if not self._native:
@@ -415,6 +421,36 @@ class ReactOnPi:
                 names[index] = _wire_call(index, call)["function"]["name"]
             yield output_chunk(output)
         self._last_tools = [names[index] for index in sorted(names)]
+
+    async def force_submit(self, final_text: str) -> None:
+        """Make one ``submit`` call with the guard off after a plain-text final message.
+
+        The call goes through the turn's metered LM with ``submit`` forced, as
+        ``dspy.ReActV2``'s forced submit did. A reply that still has no
+        ``submit`` leaves :attr:`outputs` unset. Only a native model can end
+        in plain text: the text protocol answers with tool calls or raises.
+
+        Args:
+            final_text: The text of the model's final message.
+        """
+        if not self._native:
+            return
+        self._forcing = True
+        tail = [*self._tail, {"role": "assistant", "content": final_text}] if final_text else self._tail
+        try:
+            outputs = await asyncio.to_thread(self._lm, messages=self._messages(tail), **self._call_kwargs())
+        except litellm.ContextWindowExceededError as error:
+            logger.warning("Forced submit failed: %s", error)
+            return
+        output = outputs[0] if outputs else ""
+        calls = (output.get("tool_calls") or []) if isinstance(output, dict) else []
+        wire = [_wire_call(index, call)["function"] for index, call in enumerate(calls)]
+        submit = next((call for call in wire if call["name"] == SUBMIT_TOOL), None)
+        if submit is None:
+            logger.warning("Forced submit returned no submit call")
+            return
+        self._last_tools = [SUBMIT_TOOL]
+        await self._submit(json.loads(submit["arguments"] or "{}"))
 
     async def _text_protocol_reply(self, messages: list[dict[str, Any]]) -> str:
         """Call a model without native tool calls and hand Pi its calls natively.
@@ -529,8 +565,8 @@ async def run_react_program_on_pi(
         binary: The ``pi`` executable.
 
     Returns:
-        The accepted ``submit`` outputs, else the text of the model's final
-        message.
+        The accepted ``submit`` outputs, from a forced ``submit`` when the
+        model ended in plain text, else the text of the model's final message.
     """
     handlers, translator = await _run_program(
         react,
@@ -581,6 +617,10 @@ async def _run_program(
     await run_pi_turn(
         binary=binary, handlers=handlers, translator=translator, prompt=str(inputs.get(input_field) or "")
     )
+    # A single output is the final text itself; with several, plain text would
+    # leave the other fields empty.
+    if handlers.outputs is None and len(react.signature.output_fields) > 1:
+        await handlers.force_submit(translator.text_reply)
     return handlers, translator
 
 

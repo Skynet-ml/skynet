@@ -250,6 +250,7 @@ class _BridgeApp:
         self._token = token
         self.failure: BaseException | None = None
         self.failed = asyncio.Event()
+        self._tool_tasks: set[asyncio.Future[ToolOutcome]] = set()
         self.app = Starlette(
             routes=[
                 Route("/tools", self._tools, methods=["GET"]),
@@ -311,6 +312,8 @@ class _BridgeApp:
         name = str(body.get("tool") or "")
         args = body.get("args") if isinstance(body.get("args"), dict) else {}
         task = asyncio.ensure_future(self._handlers.call_tool(name, args))
+        self._tool_tasks.add(task)
+        task.add_done_callback(self._tool_tasks.discard)
 
         async def stream() -> AsyncIterator[bytes]:
             """Yield keepalive whitespace, then the call's JSON reply.
@@ -336,6 +339,17 @@ class _BridgeApp:
             yield json.dumps(reply, ensure_ascii=False).encode()
 
         return StreamingResponse(stream(), media_type="application/json")
+
+    async def close(self) -> None:
+        """Cancel the tool calls that still run and wait for them to end.
+
+        A forced server exit drops the response streams but not the tasks
+        behind them, which would run on after the turn ended.
+        """
+        tasks = list(self._tool_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _complete(self, request: Request) -> Response:
         """Relay one model call as server-sent events.
@@ -623,6 +637,7 @@ async def _serve(app: _BridgeApp) -> AsyncIterator[str]:
         server.force_exit = True
         with contextlib.suppress(Exception):
             await task
+        await app.close()
         sock.close()
 
 
