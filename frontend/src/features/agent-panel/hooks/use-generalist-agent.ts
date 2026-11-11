@@ -96,12 +96,14 @@ export interface GeneralistAgentState {
    */
   activateConversation: (id: string) => boolean;
   /**
-   * Open a conversation as the displayed session. An `unsaved` one lives
-   * only in the browser: its turns go out with `persist: false`.
+   * Open a conversation as the displayed session. A null id shows messages
+   * the server has no copy of: the next turn saves a new conversation.
    */
-  openConversation: (id: string, messages: AgentMessage[], options?: { unsaved?: boolean }) => void;
+  openConversation: (id: string | null, messages: AgentMessage[], options?: { moveQueue?: boolean }) => void;
   /** Drop a conversation's session (aborting its stream) after deletion. */
   discardConversation: (id: string) => void;
+  /** Drop the displayed session (aborting its stream), even one with no server id yet. */
+  discardActive: () => void;
   /** Conversation ids with a stream running or waiting in the queue. */
   busyConversationIds: ReadonlySet<string>;
   /** Busy sessions other than the displayed one (badge / pill signal). */
@@ -180,8 +182,6 @@ interface SessionView {
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
   pendingApproval: PendingApprovalPayload | null;
-  /** The server keeps no copy: its id is the browser's own and its turns are not saved. */
-  unsaved?: boolean;
 }
 
 /** A turn captured at send time, replayed verbatim when a slot frees up. */
@@ -527,11 +527,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         if (streamingKeysRef.current.delete(key)) requestPump();
       };
 
-      const unsaved = sessionsRef.current.get(key)?.unsaved === true;
       // A chat stays where it started; a new chat starts on the side picked
       // in the header. The composer lists that side's models, so the turn
       // sends the pick resolved for that side.
-      const savedId = unsaved ? null : (sessionsRef.current.get(key)?.conversationId ?? null);
+      const savedId = sessionsRef.current.get(key)?.conversationId ?? null;
       const saved = savedId ? parseSourceKey(savedId) : null;
       const source: ApiSource = saved ? saved.source : webPicked() ? "hosted" : "local";
       rt.source = source;
@@ -584,7 +583,6 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             wizard_state: run.wizardState,
             trust_mode: run.trustMode,
             conversation_id: saved?.id ?? null,
-            persist: unsaved ? false : undefined,
             regenerate: run.regenerate,
             edit_user_text: run.editUserTurn?.text,
             edit_user_occurrence: run.editUserTurn?.occurrence,
@@ -1097,7 +1095,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       for (const [key, session] of draft) {
         if (key === keepKey) continue;
         if (isBusy(session) || session.status === "error") continue;
-        if ((session.conversationId === null || session.unsaved) && session.messages.length > 0) continue;
+        if (session.conversationId === null && session.messages.length > 0) continue;
         if (steerQueues.get(key)?.hasPending()) continue;
         draft.delete(key);
         runtimesRef.current.delete(key);
@@ -1139,33 +1137,30 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const openConversation = React.useCallback(
-    (id: string, loaded: AgentMessage[], options?: { unsaved?: boolean }) => {
+    (id: string | null, loaded: AgentMessage[], options?: { moveQueue?: boolean }) => {
+      const from = options?.moveQueue ? steerQueues.get(activeKeyRef.current) : undefined;
+      const moved = (from?.getSnapshot().queued ?? []).flatMap((item) => from?.take(item.id) ?? []);
       const key = nextKey();
       commit((draft) => {
         draft.set(key, {
           ...blankSession(key),
           conversationId: id,
           messages: loaded,
-          ...(options?.unsaved ? { unsaved: true } : {}),
         });
         pruneInactive(draft, key);
       });
       setActive(key);
+      if (moved.length === 0) return;
+      // Held, as on the old chat, so no follow-up runs ahead of a resent turn.
+      const queue = steerQueueFor(key);
+      for (const text of moved) queue.enqueue(text);
+      queue.pause();
     },
-    [commit, nextKey, pruneInactive, setActive],
+    [commit, nextKey, pruneInactive, setActive, steerQueues, steerQueueFor],
   );
 
-  const discardConversation = React.useCallback(
-    (id: string) => {
-      let found: string | null = null;
-      for (const [key, session] of sessionsRef.current) {
-        if (session.conversationId === id) {
-          found = key;
-          break;
-        }
-      }
-      if (found === null) return;
-      const key = found;
+  const discardSession = React.useCallback(
+    (key: string) => {
       abortSession(key);
       runtimesRef.current.delete(key);
       dropSteerQueue(key);
@@ -1185,6 +1180,20 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     },
     [abortSession, commit, nextKey, setActive, dropSteerQueue],
   );
+
+  const discardConversation = React.useCallback(
+    (id: string) => {
+      for (const [key, session] of sessionsRef.current) {
+        if (session.conversationId === id) {
+          discardSession(key);
+          return;
+        }
+      }
+    },
+    [discardSession],
+  );
+
+  const discardActive = React.useCallback(() => discardSession(activeKeyRef.current), [discardSession]);
 
   const active = sessions.get(activeKey) ?? blankSession(activeKey);
 
@@ -1258,6 +1267,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activateConversation,
     openConversation,
     discardConversation,
+    discardActive,
     busyConversationIds,
     backgroundBusyCount,
   };

@@ -30,6 +30,7 @@ import {
   GridFour,
   Hash,
   Info,
+  Key,
   LinkSimple,
   ListBullets,
   ListChecks,
@@ -363,6 +364,14 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     confirmLabel: () => msg("agent.tool.change_protected_setting.confirm"),
     severity: "destructive",
     icon: ShieldCheck,
+  },
+  // SecretRequestCard draws this one; the value never goes back to the agent (SKY-641).
+  request_secret: {
+    title: () => msg("agent.tool.request_secret.title"),
+    description: () => msg("agent.tool.request_secret.description"),
+    confirmLabel: () => msg("agent.tool.request_secret.confirm"),
+    severity: "info",
+    icon: Key,
   },
 };
 
