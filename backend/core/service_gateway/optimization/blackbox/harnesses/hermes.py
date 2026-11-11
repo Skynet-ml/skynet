@@ -63,9 +63,10 @@ _WHEEL_FETCH = (
 # stop it. It skips the check while ``$HERMES_HOME/.update_check`` is younger
 # than six hours and names the running version, so each run seeds that cache.
 _UPDATE_CHECK_CACHE = '{"ts": %s, "rev": null, "ver": "' + HERMES_VERSION + '", "behind": 0}'
-# The levels ``hermes_constants.parse_reasoning_effort`` accepts in 0.19.0.
-# Hermes ignores any other value without a warning, so the launch refuses it.
-HERMES_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+# The Skynet levels that ``hermes_constants.parse_reasoning_effort`` accepts in
+# 0.19.0. Hermes also accepts ``ultra``, which is not a Skynet level. Hermes
+# ignores an unknown value without a warning, so submit and launch refuse it.
+HERMES_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # Hermes 0.19.0 reads these keys for its native providers, its auxiliary
 # fallback chain and Langfuse tracing. A protected run blanks them, so an
 # inherited key never gives Hermes a route around the gateway. The run sets
@@ -259,5 +260,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=65,
+        supported_efforts=HERMES_EFFORTS,
     )
 )

@@ -463,11 +463,18 @@ def test_no_reasoning_effort_keeps_the_hermes_default() -> None:
     assert "agent" not in json.loads(launch.files[HERMES_CONFIG_FILE])
 
 
-@pytest.mark.parametrize("effort", ["turbo", "High", "auto"])
+def test_spec_declares_only_the_skynet_effort_levels() -> None:
+    """Submit sees the seven Skynet levels Hermes accepts; ``ultra`` is not one of them."""
+    assert SPEC.supported_efforts == ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+    assert "ultra" not in SPEC.supported_efforts
+
+
+@pytest.mark.parametrize("effort", ["ultra", "turbo", "High", "auto"])
 def test_unsupported_reasoning_effort_is_refused(effort: str) -> None:
-    """An effort Hermes does not know fails the launch instead of a silent drop or remap."""
-    with pytest.raises(ServiceError, match="Hermes does not support the reasoning effort"):
+    """An effort outside the Skynet levels fails the launch instead of a silent drop or remap."""
+    with pytest.raises(ServiceError, match="Hermes does not support the reasoning effort") as error:
         build_launch(_target(), _GATEWAY, reasoning_effort=effort)
+    assert str(error.value).endswith("Use one of: none, minimal, low, medium, high, xhigh, max.")
 
 
 def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Path) -> None:
