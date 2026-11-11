@@ -2,6 +2,7 @@
 
 import { CountBadge } from "@/shared/ui/count-badge";
 import * as React from "react";
+import { toast } from "react-toastify";
 import { useCompletionNotification } from "@/shared/hooks/use-completion-notification";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -27,6 +28,13 @@ import { Composer } from "@/shared/ui/agent/composer";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
+import { resolveSlashOption, type SlashCommand } from "@/shared/ui/agent/slash-commands";
+import { chatToMarkdown } from "@/shared/lib/chat-export";
+import { liveEffort } from "@/shared/lib/effort-slider";
+import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
+import { effortLabel, effortsFor } from "@/shared/lib/model-efforts";
+import { catalogFallbackModel, modelDisplayName } from "@/shared/lib/model-provider";
+import type { CatalogModel } from "@/shared/types/api";
 import { QuestionChoices } from "@/shared/ui/agent/question-choices";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 import { EmptyState } from "@/shared/ui/empty-state";
@@ -304,9 +312,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [account, router, wizardCtx],
   );
 
-  const { openTo: openSettingsTo } = useSettingsModal();
+  const { openTo: openSettingsTo, setOpen: setSettingsOpen } = useSettingsModal();
   const { setTheme } = useColorTheme();
-  const { setLocale } = useLocale();
+  const { locale, setLocale } = useLocale();
 
   // The form's state as of the last write, so a write's card shows what each
   // field held when it landed rather than when the turn began.
@@ -932,6 +940,155 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const canShare = !isLocalMode();
   const [shareOpen, setShareOpen] = React.useState(false);
 
+  // Pi runs its built-in slash commands only in its own terminal, so the
+  // composer runs the ones that fit a hosted chat on this panel's controls
+  // (SKY-604). /model and /thinking list what the model menu lists.
+  const [catalogModels, setCatalogModels] = React.useState<CatalogModel[]>([]);
+  React.useEffect(() => {
+    let cancelled = false;
+    const available = (models: CatalogModel[]) => models.filter((m) => m.available);
+    const cached = cachedCatalog();
+    if (cached) setCatalogModels(available(cached.models));
+    getModelCatalog()
+      .then((c) => {
+        if (!cancelled) setCatalogModels(available(c.models));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const slashModels = localMenu.models ?? catalogModels;
+  const canShareChat =
+    !inSetup && canShare && !webChat && !!agent.conversationId && agent.messages.length > 0;
+  const slashCommands = React.useMemo(() => {
+    const effective =
+      agent.model ??
+      (localMenu.models ? localMenu.models[0] : catalogFallbackModel(slashModels))?.value ??
+      null;
+    const current = slashModels.find((m) => m.value === effective);
+    const efforts = current?.supports_thinking ? effortsFor(effective, slashModels) : [];
+    const commands: SlashCommand[] = [
+      {
+        name: "model",
+        argHint: "<model>",
+        description: msg("agent.slash.model"),
+        options: slashModels.map((m) => ({
+          value: m.value,
+          label: modelDisplayName(m.value, slashModels),
+        })),
+      },
+    ];
+    if (efforts.length)
+      commands.push({
+        name: "thinking",
+        argHint: "<level>",
+        description: msg("agent.slash.thinking"),
+        options: [
+          { value: "default", label: msg("agent.model_menu.effort_default") },
+          ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
+        ],
+      });
+    if (!inSetup) {
+      commands.push({ name: "new", description: msg("agent.slash.new") });
+      commands.push({ name: "resume", description: msg("agent.slash.resume") });
+      if (agent.conversationId)
+        commands.push({ name: "name", argHint: "<name>", description: msg("agent.slash.name") });
+    }
+    if (canShareChat) commands.push({ name: "share", description: msg("agent.slash.share") });
+    if (agent.messages.length) {
+      commands.push({ name: "copy", description: msg("agent.slash.copy") });
+      commands.push({ name: "export", description: msg("agent.slash.export") });
+    }
+    commands.push({ name: "settings", description: msg("agent.slash.settings") });
+    return commands;
+  }, [
+    agent.model,
+    agent.conversationId,
+    agent.messages.length,
+    localMenu.models,
+    slashModels,
+    inSetup,
+    canShareChat,
+    locale,
+  ]);
+
+  const runSlash = React.useCallback(
+    (command: SlashCommand, arg: string) => {
+      switch (command.name) {
+        case "model":
+        case "thinking": {
+          const value = resolveSlashOption(arg, command.options ?? []);
+          if (!value) {
+            toast.error(formatMsg("agent.slash.pick_value", { command: `/${command.name}` }));
+            return;
+          }
+          if (command.name === "thinking") {
+            agent.setReasoningEffort(value === "default" ? null : value);
+            return;
+          }
+          // The same rule as a pick in the model menu: a level or fast mode
+          // the new model does not take goes back to its default.
+          agent.setModel(value);
+          const picked = slashModels.find((m) => m.value === value);
+          const effort = liveEffort(agent.reasoningEffort);
+          if (
+            !picked?.supports_thinking ||
+            (effort !== null && !effortsFor(value, slashModels).includes(effort))
+          )
+            agent.setReasoningEffort(null);
+          if (agent.fastMode && !picked?.supports_fast) agent.setFastMode(false);
+          return;
+        }
+        case "new":
+          handleNewConversation();
+          return;
+        case "resume":
+          setDrawerOpen(true);
+          return;
+        case "name":
+          if (!arg || !agent.conversationId) {
+            toast.error(formatMsg("agent.slash.pick_value", { command: "/name" }));
+            return;
+          }
+          void store.rename(agent.conversationId, arg);
+          return;
+        case "share":
+          setShareOpen(true);
+          return;
+        case "copy": {
+          const last = agent.messages.findLast((m) => m.role === "assistant" && m.content.trim());
+          if (!last) return;
+          navigator.clipboard.writeText(last.content).then(
+            () => toast.success(msg("agent.slash.copied")),
+            () => toast.error(msg("clipboard.copy_failed")),
+          );
+          return;
+        }
+        case "export": {
+          const blob = new Blob([chatToMarkdown(agent.messages, "messages")], {
+            type: "text/markdown",
+          });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "skynet-chat.md";
+          link.click();
+          URL.revokeObjectURL(url);
+          return;
+        }
+        case "settings":
+          setSettingsOpen(true);
+          return;
+      }
+    },
+    [agent, slashModels, handleNewConversation, store, setSettingsOpen],
+  );
+  const slash = React.useMemo(
+    () => ({ commands: slashCommands, run: runSlash }),
+    [slashCommands, runSlash],
+  );
+
   const emptyState = (
     <EmptyState
       icon={AppMark}
@@ -1017,11 +1174,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             </TooltipContent>
           </Tooltip>
           )}
-          {!inSetup &&
-            canShare &&
-            !webChat &&
-            agent.conversationId &&
-            agent.messages.length > 0 && (
+          {canShareChat && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1181,6 +1334,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         )}
         streaming={activeBusy}
         midTurn={agent.midTurn}
+        slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
           <ComposerModelMenu
