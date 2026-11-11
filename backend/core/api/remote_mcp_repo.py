@@ -1081,7 +1081,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 max_length=200_000,
                 description="Python that defines score(repo_path), score(repo_path, case) or "
                 "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
-                "returned for the case and None when nothing ran. It returns a "
+                "returned for the case and None when nothing ran. Add elapsed_s=None after output to get the "
+                "entry's run time in seconds, which Skynet measures outside the version's code. It returns a "
                 "(score, feedback) pair or a {'score': float, 'feedback': str} dict. A bare number fails the run.",
             ),
         ],

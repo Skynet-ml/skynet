@@ -3419,6 +3419,26 @@ def echo(value):
     return value
 
 
+def fakes_its_time(value):
+    import time
+    time.sleep(value)
+    for name in ("monotonic", "perf_counter", "time", "process_time"):
+        setattr(time, name, lambda: 0.0)
+    return {"elapsed_s": 0.0}
+
+
+def slows_the_clock(value):
+    # A .pth in the box python's site-packages runs in every later python
+    # that loads site: here it makes time.monotonic 1000 times slower. The
+    # test names the folder: a throwaway venv under its own tmp_path, never
+    # the host's site-packages.
+    import time
+    with open(os.path.join(value["folder"], "skynet_clock.pth"), "w") as handle:
+        handle.write("import time; _m = time.monotonic; time.monotonic = lambda: _m() / 1000\\n")
+    time.sleep(value["sleep"])
+    return {"elapsed_s": 0.0}
+
+
 FORGED_RUNNER = (
     "import json, os, sys\\n"
     "open(os.path.join(sys.argv[-1], 'output.json'), 'w').write(json.dumps({'score': 0.99, 'feedback': 'FORGED'}))\\n"
@@ -3490,7 +3510,11 @@ def score(repo_path, case, output):
 
 
 def _probed(
-    tmp_path: Path, run_entry: str | None, code: str = _PROBE_METRIC, env: dict[str, str] | None = None
+    tmp_path: Path,
+    run_entry: str | None,
+    code: str = _PROBE_METRIC,
+    env: dict[str, str] | None = None,
+    run_timeout: float = 10.0,
 ) -> RepoScorer:
     """Open a scorer with a hidden metric, a run secret and a ``[run]`` entry.
 
@@ -3499,6 +3523,7 @@ def _probed(
         run_entry: The ``[run]`` entry, if any.
         code: The metric's source.
         env: Extra box environment.
+        run_timeout: The ``[run]`` timeout in seconds.
 
     Returns:
         The scorer.
@@ -3521,7 +3546,7 @@ def _probed(
         code,
         timeout_seconds=60,
         run_entry=run_entry,
-        run_timeout=10.0,
+        run_timeout=run_timeout,
     )
 
 
@@ -3799,6 +3824,104 @@ def test_without_a_run_entry_no_candidate_runs(tmp_path: Path) -> None:
     finally:
         scorer.close()
     assert json.loads(result["feedback"]) is None
+
+
+_TIMED_METRIC = """
+import json
+
+
+def score(repo_path, case, output=None, elapsed_s=None):
+    return 1.0, json.dumps({"output": output, "elapsed_s": elapsed_s})
+"""
+
+# Stands in for version code that the metric step imports: it rewrites the
+# runner, so the next case's supervisor would report a fake time.
+_FORGED_SUPERVISOR = (
+    "import json, sys\n"
+    "open(sys.argv[-1] + '/output.json', 'w').write("
+    "json.dumps({'output': 'forged', 'error': None, 'stopped': True, 'elapsed_s': 0.0}))\n"
+)
+
+
+def test_the_metric_gets_the_run_time_that_the_supervisor_measured(tmp_path: Path) -> None:
+    """The metric gets the real run time, not the candidate's patched clocks or its faked output (SKY-642)."""
+    scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=_TIMED_METRIC)
+    try:
+        for _ in range(2):
+            seen = json.loads(scorer.score("", {"input": 0.4})["feedback"])
+            assert seen["output"] == {"elapsed_s": 0.0}
+            assert 0.4 <= seen["elapsed_s"] < 10
+    finally:
+        scorer.close()
+
+
+def test_a_runner_that_a_metric_step_rewrote_never_times_the_next_case(tmp_path: Path) -> None:
+    """The next case's supervisor is the real runner, so its time is real (SKY-642)."""
+    metric = (
+        "import json\n"
+        f"FORGED = {_FORGED_SUPERVISOR!r}\n"
+        "def score(repo_path, case, output=None, elapsed_s=None):\n"
+        "    open('../app_runner.py', 'w').write(FORGED)\n"
+        "    return 1.0, json.dumps({'output': output, 'elapsed_s': elapsed_s})\n"
+    )
+    scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=metric)
+    try:
+        for _ in range(2):
+            seen = json.loads(scorer.score("", {"input": 0.4})["feedback"])
+            assert seen["output"] == {"elapsed_s": 0.0}
+            assert seen["elapsed_s"] >= 0.4
+    finally:
+        scorer.close()
+
+
+def test_a_pth_that_a_version_plants_in_site_packages_cannot_slow_the_supervisor_clock(tmp_path: Path) -> None:
+    """The supervisor starts without site-packages, so a planted .pth cannot change the next case's time (SKY-642)."""
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, timeout=120)
+    # The venv's own bin folder goes on PATH, not a symlink to its python:
+    # through a symlink in another folder, python finds no pyvenv.cfg and
+    # uses the host's site-packages.
+    env = {"PATH": os.pathsep.join([str(venv / "bin"), "/usr/bin", "/bin"])}
+    purelib = subprocess.run(
+        [str(venv / "bin" / "python3"), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout.strip()
+    folder = Path(purelib).resolve()
+    assert folder.is_relative_to(tmp_path.resolve()), folder
+    scorer = _probed(tmp_path, "src/cand.py:slows_the_clock", code=_TIMED_METRIC, env=env)
+    try:
+        for _ in range(2):
+            seen = json.loads(scorer.score("", {"input": {"folder": str(folder), "sleep": 0.4}})["feedback"])
+            assert seen["elapsed_s"] >= 0.4
+        assert (folder / "skynet_clock.pth").is_file()
+    finally:
+        scorer.close()
+
+
+def test_a_timed_out_run_scores_zero_without_the_metric(tmp_path: Path) -> None:
+    """A ``[run]`` timeout scores 0, and the metric that would get the time never runs (SKY-642)."""
+    metric = "def score(repo_path, case, output=None, elapsed_s=None):\n    raise RuntimeError('metric ran')\n"
+    scorer = _probed(tmp_path, "src/cand.py:fakes_its_time", code=metric, run_timeout=1.0)
+    try:
+        result = scorer.score("", {"input": 5})
+    finally:
+        scorer.close()
+    assert result["score"] == 0.0
+    assert "timeout after 1 s" in result["feedback"]
+
+
+def test_without_a_run_entry_the_metric_gets_no_time(tmp_path: Path) -> None:
+    """With no ``[run]`` entry, ``elapsed_s`` keeps its default of None (SKY-642)."""
+    scorer = _probed(tmp_path, None, code=_TIMED_METRIC)
+    try:
+        seen = json.loads(scorer.score("", {"input": 1})["feedback"])
+    finally:
+        scorer.close()
+    assert seen == {"output": None, "elapsed_s": None}
 
 
 def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path) -> None:

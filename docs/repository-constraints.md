@@ -142,6 +142,40 @@ with package-registry network only. Then the box goes offline, a probe
 confirms it, and only then does version code run. A box that stays online
 stops the run.
 
+## Run time for the metric
+
+Skynet measures how long the `[run] entry` takes on each case. A metric
+gets this time when it names an `elapsed_s` parameter after `output`:
+
+```python
+def score(repo_path, case, output=None, elapsed_s=None):
+    ...
+```
+
+A keyword-only `*, elapsed_s=None` also works. `elapsed_s` is
+a float in seconds. When no `[run] entry` ran, the parameter keeps its
+default. A metric with
+`score(repo_path)`, `score(repo_path, case)` or
+`score(repo_path, case, output)` gets the same call as before. A `*args` or
+`**kwargs` metric does not get `elapsed_s`.
+
+The `[run]` supervisor measures the time in its own process, with a
+monotonic clock. The time starts just before the entry starts. It stops when
+the entry exits and the supervisor stopped every process that the entry
+left, so work in a left process also counts. It includes the Python start
+for a function entry. It does not include setup or the metric. The
+candidate's code runs in other processes, so it cannot patch this clock or
+change the time. A time that the candidate puts in its `output` is not
+trusted. Use `elapsed_s`.
+
+The supervisor starts without site-packages (`python3 -I -S`), and Skynet
+writes the runner again before each case. So version code from an earlier
+case cannot change the supervisor. Residual risk: code that gets root in the
+box (for example through `sudo`) could still trace or change the supervisor
+process.
+
+A timeout or other `[run]` failure scores 0, and the metric does not run.
+
 ## What is enforced
 
 | Setting | Enforcement |

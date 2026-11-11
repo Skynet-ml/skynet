@@ -103,6 +103,10 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 # its path: a planted json.py or .pth would run before any check (E38, E40).
 # -I drops PYTHONDONTWRITEBYTECODE and PYTHONUNBUFFERED, so -B and -u keep them.
 _ISOLATED = "-I -B -u"
+# The supervisor needs the standard library alone. Without site-packages, a .pth
+# that an earlier call's version code planted there cannot patch the clock that
+# times the [run] entry; the entry's own python still loads them (SKY-642).
+_NO_SITE = "-S"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # A stage box's relay answers, relative to the box; one folder for every call,
@@ -409,6 +413,9 @@ class RepoScorer:
                         "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
                     }
                 document["output"] = ran.get("output")
+                elapsed = ran.get(runner.ELAPSED_PARAM)
+                if isinstance(elapsed, int | float) and math.isfinite(elapsed) and elapsed >= 0:
+                    document[runner.ELAPSED_PARAM] = float(elapsed)
                 # The version's code could rewrite the runner, swap the calls
                 # folder for a link, leave files in this call's folder for the
                 # metric run to read, or plant a module next to the runner
@@ -549,8 +556,8 @@ class RepoScorer:
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
                     f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
-                    f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
+                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {_ISOLATED} {_NO_SITE}"
+                    f" {shlex.quote(f'{root}/{RUNNER_PATH}')} {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
                     on_output=relay.output if relay is not None else sandbox_log.ignore_output,
