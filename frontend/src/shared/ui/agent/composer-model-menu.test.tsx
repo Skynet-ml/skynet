@@ -14,7 +14,7 @@ import type { CatalogModel } from "@/shared/types/api";
 
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { ComposerModelMenu, hiddenPickEffortStale } = await import("./composer-model-menu");
+const { ComposerModelMenu, hiddenPickEffortStale, modelSections } = await import("./composer-model-menu");
 
 const SUBSCRIPTION: CatalogModel[] = [
   {
@@ -92,6 +92,39 @@ void describe("hiddenPickEffortStale", () => {
     assert.equal(hiddenPickEffortStale(true, "high", thinking, ["low", "high"]), false);
     assert.equal(hiddenPickEffortStale(false, "max", thinking, ["low", "high"]), false);
     assert.equal(hiddenPickEffortStale(true, null, thinking, ["low"]), false);
+  });
+});
+
+void describe("modelSections", () => {
+  const web = (value: string, patch: Partial<CatalogModel> = {}): CatalogModel => ({
+    value,
+    label: value,
+    provider: "openrouter",
+    supports_thinking: true,
+    supports_vision: false,
+    available: true,
+    ...patch,
+  });
+  const keys = (rows: CatalogModel[]) => modelSections(rows).map(({ key, rows }) => [key, rows.map((m) => m.value)]);
+
+  void it("puts each CLI in its own section, in the order the list gives", () => {
+    assert.deepEqual(keys([TWO_CLIS[1]!, TWO_CLIS[0]!]), [
+      ["cli:codex", ["subscription/codex/openai/gpt-5"]],
+      ["cli:claude", ["subscription/claude/anthropic/claude-sonnet-4.5"]],
+    ]);
+  });
+
+  void it("groups Web rows by lab and keeps the first row's lab first", () => {
+    const rows = [
+      web("openrouter/anthropic/claude-haiku-5.5"),
+      web("openrouter/google/gemini-4"),
+      web("openrouter/anthropic/claude-opus-5.5"),
+      web("anthropic/claude-sonnet-5.5", { provider: "anthropic", byok_provider: "anthropic" }),
+    ];
+    assert.deepEqual(keys(rows), [
+      ["lab:anthropic", ["openrouter/anthropic/claude-haiku-5.5", "openrouter/anthropic/claude-opus-5.5", "anthropic/claude-sonnet-5.5"]],
+      ["lab:google", ["openrouter/google/gemini-4"]],
+    ]);
   });
 });
 

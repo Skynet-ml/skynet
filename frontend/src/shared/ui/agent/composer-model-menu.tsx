@@ -24,6 +24,7 @@ import { ProviderLogo } from "@/shared/ui/provider-logo";
 import {
   catalogFallbackModel,
   modelDisplayName,
+  modelLabName,
   modelProviderSlug,
   type DefaultModelFlag,
 } from "@/shared/lib/model-provider";
@@ -158,9 +159,9 @@ export function ComposerModelMenu({
     const rows = available.filter((m) => m.featured);
     return rows.length ? rows : available.slice(0, FALLBACK_LIST_CAP);
   }, [models, available]);
-  // A given list that mixes groups labels each group, since two groups (two
-  // CLIs, or credits and a key) can list the same model name.
-  const grouped = !!models && new Set(available.map(menuModelGroup)).size > 1;
+  // A list that mixes credits and a key names the key rows, since both can
+  // list the same model.
+  const mixedBilling = new Set(available.filter((m) => !isCliProvider(menuModelGroup(m))).map(menuModelGroup)).size > 1;
   // A previously chosen model outside the shortlist keeps its checkmarked
   // row next time the menu opens.
   const currentExtra =
@@ -251,6 +252,7 @@ export function ComposerModelMenu({
   const visibleModels = query
     ? searchableModels.filter(({ text }) => terms.every((term) => text.includes(term))).map(({ model }) => model)
     : featured;
+  const sections = modelSections(visibleModels);
   const visibleExtra = query ? null : currentExtra;
   const resultsRef = React.useRef<HTMLDivElement>(null);
   React.useLayoutEffect(() => {
@@ -339,20 +341,32 @@ export function ComposerModelMenu({
               onSelect={() => choose(visibleExtra.value)}
             />
           )}
-          {visibleModels.map((m, i) => (
-            <React.Fragment key={m.value}>
-              {grouped && (i === 0 || menuModelGroup(visibleModels[i - 1]!) !== menuModelGroup(m)) && (
-                <DropdownMenuLabel>{groupLabel(menuModelGroup(m))}</DropdownMenuLabel>
-              )}
+          {sections.map(({ key, rows }) => {
+            const header = sections.length > 1 ? sectionHeader(key, rows[0]!) : null;
+            const items = rows.map((m) => (
               <MenuItem
+                key={m.value}
                 selected={effective === m.value}
                 label={modelDisplayName(m.value, available)}
-                icon={<ProviderLogo slug={modelProviderSlug(m.value)} size={16} />}
+                description={
+                  mixedBilling && menuModelGroup(m) === "byok" ? msg(MENU_GROUP_LABELS.byok) : undefined
+                }
+                icon={header ? undefined : <ProviderLogo slug={modelProviderSlug(m.value)} size={16} />}
                 keepOpen
                 onSelect={() => choose(m.value)}
               />
-            </React.Fragment>
-          ))}
+            ));
+            if (!header) return <React.Fragment key={key}>{items}</React.Fragment>;
+            return (
+              <div key={key} role="group" aria-label={header.label} className="model-section">
+                <DropdownMenuLabel className="sticky top-0 z-10 flex items-center gap-2 bg-card px-2 pb-1 pt-2.5 text-xs font-semibold text-foreground">
+                  <ProviderLogo slug={header.slug} size={14} />
+                  <span dir="ltr">{header.label}</span>
+                </DropdownMenuLabel>
+                {items}
+              </div>
+            );
+          })}
           {!visibleExtra && visibleModels.length === 0 && (
             <div role="status" className="px-3 py-6 text-center text-sm">
               <p className="text-foreground">{msg("agent.model_menu.no_results")}</p>
@@ -463,8 +477,25 @@ export function ComposerModelMenu({
   );
 }
 
-function groupLabel(group: ReturnType<typeof menuModelGroup>): string {
-  return isCliProvider(group) ? cliLabel(group) : msg(MENU_GROUP_LABELS[group]);
+/**
+ * Split rows into sections in first-seen order: one per CLI in Local mode,
+ * one per lab otherwise. The order keeps the default model's section first.
+ */
+export function modelSections(rows: readonly CatalogModel[]): Array<{ key: string; rows: CatalogModel[] }> {
+  const sections = new Map<string, CatalogModel[]>();
+  for (const row of rows) {
+    const group = menuModelGroup(row);
+    const key = isCliProvider(group) ? `cli:${group}` : `lab:${modelProviderSlug(row.value)}`;
+    sections.set(key, [...(sections.get(key) ?? []), row]);
+  }
+  return [...sections].map(([key, rows]) => ({ key, rows }));
+}
+
+function sectionHeader(key: string, first: CatalogModel): { label: string; slug: string } {
+  const slug = modelProviderSlug(first.value);
+  const group = menuModelGroup(first);
+  if (key.startsWith("cli:") && isCliProvider(group)) return { label: cliLabel(group), slug };
+  return { label: modelLabName(slug), slug };
 }
 
 function MenuItem({
