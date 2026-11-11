@@ -240,12 +240,12 @@ def _run_install(
     return result.returncode, result.stdout, scratch, log.read_text().splitlines()
 
 
-def test_grok_build_is_registered_before_cline_with_its_pin() -> None:
+def test_grok_build_is_registered_between_eve_and_deerflow_with_its_pin() -> None:
     """List Grok Build in the registry and the request model, pinned to the exact CLI release."""
     spec = REGISTRY[BLACKBOX_HARNESS_GROK_BUILD]
     assert (spec.binary, spec.version, spec.output_format, spec.position) == ("grok", "1.0.77", "pi", 67)
     ids = list(REGISTRY)
-    assert ids.index("goose") < ids.index(BLACKBOX_HARNESS_GROK_BUILD) < ids.index("cline")
+    assert ids.index("eve") + 1 == ids.index(BLACKBOX_HARNESS_GROK_BUILD) == ids.index("deerflow") - 1
     assert BLACKBOX_HARNESS_GROK_BUILD in BLACKBOX_HARNESSES
     assert (
         pinned_harness_check(BLACKBOX_HARNESS_GROK_BUILD)
