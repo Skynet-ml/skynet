@@ -238,8 +238,9 @@ gates pass:
    latest `staging`, and the full CI passes on the batch (see "PR tests and
    batch CI").
 5. After the merge, the staging smoke test passes. If it fails, revert that
-   PR's merge commit from the batch right away and reopen its issue with the
-   failure.
+   PR's merge commit from the batch right away (`git revert -m 1 <merge
+   commit>`) and reopen its issue with the failure. The revert goes in its
+   own PR and through the batch CI flow below.
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) follow
 section 5. A UI PR is ready for review when the section 5 conditions are
@@ -325,14 +326,15 @@ A manual hold on a change or on a promotion still stops it.
   passes for any `batch/` branch in this repository, because it trusts the
   name. Never use the `batch/` prefix for other work.
 - The orchestrator builds each batch:
-  1. Create `batch/<date>` from current `staging`.
+  1. Create `batch/<date>-<n>` from current `staging`. `<n>` counts the
+     batches of that day (1, 2, ...), so each batch has a new name.
   2. Merge the approved head of each PR branch into it with a merge commit.
      Never force-push.
-  3. Run `gh workflow run ci.yml --ref batch/<date>`. Wait for the run to
-     pass.
-  4. Open one PR from `batch/<date>` to `staging`. List the included PRs
+  3. Run `gh workflow run ci.yml --ref batch/<date>-<n>`. Wait for the run
+     to pass.
+  4. Open one PR from `batch/<date>-<n>` to `staging`. List the included PRs
      and their merged heads, and link the CI run.
-  5. Merge it with a merge commit (`gh pr merge <n> --merge
+  5. Merge it with a merge commit (`gh pr merge <pr> --merge --delete-branch
      --match-head-commit <sha>`).
 - Required checks match by commit. The dispatched CI run reports the `ci`
   checks on the batch head commit, so the batch PR meets the `staging merge
@@ -340,7 +342,9 @@ A manual hold on a change or on a promotion still stops it.
 - **No unreviewed code on the batch branch.**
   - A CI failure or a bug: fix it in the PR's own branch. That PR gets a new
     review, then its new head goes into the batch again. Or remove the PR
-    from the batch: build the batch again without it.
+    from the batch.
+  - A rebuild uses a new branch (`batch/<date>-<n+1>`) and a new batch PR.
+    Close the old batch PR and delete its branch.
   - A merge conflict between PRs: the orchestrator may resolve it in the
     batch merge commit. Then the batch head needs a fresh Opus 5.5
     medium-effort review before the merge. If the resolution changes a UI
@@ -359,7 +363,7 @@ A manual hold on a change or on a promotion still stops it.
   `agent-review/ready-to-merge` status on the approved head.
 - The approval stays valid when only `staging` moves. A new PR commit, a move
   back to draft or a Linear move withdraws it.
-- A cloud merger routine runs the window. It builds one batch from every
+- The orchestrator's cloud merger routine runs the window. It builds one batch from every
   PR in **Ready to Merge** (see "PR tests and batch CI"). A PR branch does
   not need a merge from `staging`, because the batch starts from current
   `staging`.
