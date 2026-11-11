@@ -33,6 +33,9 @@ class HarnessSpec:
     protected_env: Mapping[str, str] = field(default_factory=dict)
     # Catalog order; it is the order of the "Known harnesses" error text.
     position: int = 1000
+    # The Skynet effort levels the CLI accepts; ``None`` means all of them.
+    # Submit refuses any other level, before the run reserves budget (SKY-585).
+    supported_efforts: tuple[str, ...] | None = None
 
 
 REGISTRY: dict[str, HarnessSpec] = {}
