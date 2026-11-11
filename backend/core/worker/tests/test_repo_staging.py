@@ -1028,6 +1028,7 @@ def test_binding_hands_the_proposer_route_a_relay_for_its_services(tmp_path: Pat
     [relay] = relays
     assert relay._services == services
     assert relay._secrets == {"API_KEY": "secret-value"}
+    assert relay._record_secrets == ("proposer-token",)
     assert "secret-value" not in repr(payload)
     assert "maps.example.com" not in repr(payload)
     staged.close_scorers()

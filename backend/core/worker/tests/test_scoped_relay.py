@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import base64
+import http.server
+import json
+import threading
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from core.billing.budgets import BudgetService
 from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.protected_execution import run_call_recorder
-from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment
+from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment, ServiceSpec
 from core.service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
 from core.service_gateway.optimization.blackbox.repo_services import box_mcp_config
-from core.storage.run_call_store import PostgresRunCallStore, strip_secrets
+from core.storage.models import Base
+from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore, strip_secrets
 from core.worker import scoped_relay
 
 _ROUTE = {"url": "http://127.0.0.1:9000/v1", "token": "evaluator"}
@@ -399,3 +406,104 @@ def test_box_mcp_urls_name_each_server_and_hold_no_secret() -> None:
     assert names == {"search": "search", "a b/c": "a b/c"}
     assert "example.test" not in str(config)
     assert "KEY" not in str(config)
+
+
+# A route token with both quote kinds, so its JSON-escaped and repr forms differ from the raw value (SKY-640).
+_ROUTE_TOKEN = "route\"token'0123456789abcdef"
+
+
+class _BodyEcho:
+    """Serve an upstream that answers each POST with the body it got."""
+
+    def __init__(self) -> None:
+        """Start the server on a free loopback port."""
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Echo the request body."""
+
+            def do_POST(self) -> None:
+                """Answer with the request body."""
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_: object) -> None:
+                """Keep the test output quiet."""
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def body_echo(monkeypatch: pytest.MonkeyPatch) -> Iterator[_BodyEcho]:
+    """Start the echo server and let the relay reach its test host on loopback.
+
+    Args:
+        monkeypatch: Pins each test host to 127.0.0.1, as DNS would pin a public host.
+
+    Yields:
+        The running server.
+    """
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    server = _BodyEcho()
+    yield server
+    server.close()
+
+
+def _run_call_store() -> PostgresRunCallStore:
+    """Return the real run call store over a fresh in-memory SQLite schema.
+
+    Returns:
+        The store.
+    """
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return PostgresRunCallStore(engine)
+
+
+@pytest.mark.parametrize("kind", ["mcp", "host"])
+@pytest.mark.parametrize("outcome", ["ok", "failed", "refused"])
+def test_the_proposer_route_token_leaks_into_no_mcp_or_service_record(
+    body_echo: _BodyEcho, kind: str, outcome: str
+) -> None:
+    """The proposer box's route token is masked, raw, JSON-escaped and quoted, in each record (SKY-640)."""
+    store = _run_call_store()
+    recorder = scoped_relay.CallRecorder(store, "opt-1", "", "")
+    # A closed port makes the call fail after the relay sends it.
+    port = body_echo.port if outcome == "ok" else 1
+    relay = scoped_relay.McpRelay(
+        "[proposer]",
+        RoleEnvironment(
+            mcp=".mcp.json",
+            mcp_servers=(McpServer(name="search", url=f"http://mcp.example.test:{port}/mcp", headers={}),),
+            services=("echo",),
+        ),
+        services={"echo": ServiceSpec(url=f"http://svc.example.test:{port}/api")},
+        record_secrets=(_ROUTE_TOKEN,),
+    )
+    name = _ROUTE_TOKEN if outcome == "refused" else ("search" if kind == "mcp" else "echo")
+    params = {"name": "lookup", "arguments": {"key": _ROUTE_TOKEN}}
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}).encode()
+    headers = {"content-type": "application/json"}
+
+    if kind == "mcp":
+        answer = relay.dispatch(name, "POST", body, headers, recorder)
+    else:
+        answer = relay.service(name, "", "POST", body, headers, recorder)
+
+    assert answer.status == {"ok": 200, "failed": 502, "refused": 403 if kind == "mcp" else 404}[outcome]
+    [stored] = store.list_calls("opt-1", scoped_relay.NO_CANDIDATE_ID)
+    assert (stored["kind"], stored["status"]) == (kind, outcome)
+    leaked = {_ROUTE_TOKEN, json.dumps(_ROUTE_TOKEN)[1:-1], repr(_ROUTE_TOKEN)[1:-1]}
+    for field in ("target", "request", "response", "failure_reason"):
+        assert not any(form in (stored[field] or "") for form in leaked), field
+    assert SECRET_MASK in (stored["target"] if outcome == "refused" else stored["request"])

@@ -867,6 +867,8 @@ def bind_repo_scorer(
             allowed_hosts=staged.secret_allowed_hosts,
             budget=getattr(gateway, "runtime", None),
             services=staged.services,
+            # Box code can put the proposer's model route token into a call (SKY-640).
+            record_secrets=(str(proposer_route.get("token") or ""),),
         )
         # Beside the proposer's model route, as the host proposer's token is:
         # the guest's harness launch reads only that route.
