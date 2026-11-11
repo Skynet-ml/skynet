@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getModelCallHolds } from "@/shared/lib/api";
+import {
+  getModelCallHolds,
+  getSandboxProviders,
+  type SandboxProviderCatalog,
+} from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
 import {
   cachedCatalog,
@@ -80,6 +84,27 @@ export function useRecentModelConfigs() {
   }, []);
 
   return { recentConfigs, saveToRecent, clearRecentConfigs, removeRecentConfig };
+}
+
+/**
+ * The sandbox providers of the server the run goes to, or null while they
+ * load or when the read fails; the run then uses the server default.
+ */
+export function useSandboxProviders(source: ApiSource): SandboxProviderCatalog | null {
+  const [loaded, setLoaded] = useState<{
+    source: ApiSource;
+    catalog: SandboxProviderCatalog;
+  } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getSandboxProviders(source, controller.signal)
+      .then((catalog) => setLoaded({ source, catalog }))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [source]);
+
+  return loaded?.source === source ? loaded.catalog : null;
 }
 
 /** The model catalog of the server the run goes to: the web's for a Remote run, else this server's. */

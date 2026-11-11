@@ -4204,6 +4204,8 @@
   "submit.v2.optimizer.proposer.title": "Coding agent settings",
   "submit.v2.optimizer.proposer.title.guided": "Agent settings (optional)",
   "submit.v2.optimizer.proposer.harness": "Coding agent",
+  "submit.v2.optimizer.sandbox.label": "Sandbox",
+  "submit.v2.optimizer.sandbox.hint": "Where the run's code runs. The server picks one when you choose none.",
   "submit.v2.optimizer.proposer.candidates": "Candidates per iteration",
   "submit.v2.optimizer.shinka.title": "ShinkaEvolve settings",
   "submit.v2.optimizer.shinka.title.guided": "Evolution settings (optional)",

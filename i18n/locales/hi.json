@@ -317,6 +317,7 @@
     "optimization.protected_interactive_sandbox_required": "इस सुरक्षित ऑप्टिमाइज़ेशन का मूल्यांकन या सर्विंग API प्रक्रिया में नहीं किया जा सकता। अलग से मीटर किया गया {runtime} सैंडबॉक्स आवश्यक है, जो अभी इस एंडपॉइंट पर उपलब्ध नहीं है।",
     "sandbox.docker_unavailable": "इस कंप्यूटर पर Docker नहीं चल रहा है। Docker Desktop या OrbStack शुरू करें और फिर से कोशिश करें।",
     "sandbox.docker_image_missing": "लोकल सैंडबॉक्स इमेज अभी नहीं बनी है। इसे बनाने के लिए ऐप फिर से शुरू करें।",
+    "sandbox.provider_unavailable": "यह सैंडबॉक्स प्रदाता इस सर्वर पर उपलब्ध नहीं है। सूची से कोई प्रदाता चुनें।",
     "repo_gate.unenforced_local": "optimize.toml में {key} सेट है। लोकल Docker सैंडबॉक्स अभी इस सेटिंग को लागू नहीं कर सकता। चलाने के लिए इसे हटाएँ।",
     "repo_gate.unenforced_cloud": "optimize.toml में {key} सेट है। क्लाउड सैंडबॉक्स अभी इस सेटिंग को लागू नहीं कर सकता। चलाने के लिए इसे हटाएँ।",
     "repo_gate.missing_secret": "optimize.toml में सेवा {service} को सीक्रेट {secret} चाहिए, लेकिन इस रन में इस नाम का कोई सीक्रेट नहीं है। सीक्रेट को रन में जोड़ें या फ़ाइल से नाम हटाएँ।",

@@ -29,6 +29,7 @@ import {
   Wrench,
 } from "@/shared/ui/icons";
 import { harnessLabel } from "@/shared/lib/blackbox-harness";
+import { sandboxProviderLabel } from "@/shared/lib/sandbox-provider";
 import { FadeIn } from "@/shared/ui/motion";
 import { HelpTip } from "@/shared/ui/help-tip";
 import type {
@@ -206,6 +207,8 @@ export function BlackboxConfigCard({
       ? payload.token_source
       : null;
   const runtime = command(payload.proposer_runtime);
+  // Runs stored before SKY-606 name no provider; they show no row.
+  const sandboxProvider = command(payload.sandbox_provider);
   const hasCostCap = "max_cost_cents" in payload || "estimated_cents_low" in payload;
   const costCap = typeof payload.max_cost_cents === "number" ? payload.max_cost_cents : null;
   const estimateLow =
@@ -234,6 +237,13 @@ export function BlackboxConfigCard({
       label: msg("optimization.config.runtime"),
       value: runtimeKey ? msg(runtimeKey) : runtime,
       icon: <RocketLaunch />,
+    });
+  }
+  if (sandboxProvider) {
+    generalRows.push({
+      label: msg("submit.v2.optimizer.sandbox.label"),
+      value: sandboxProviderLabel(sandboxProvider),
+      icon: <Cube />,
     });
   }
   if (hasCostCap) {

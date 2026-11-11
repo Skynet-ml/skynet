@@ -217,6 +217,8 @@
   "submit.v2.optimizer.picker.title.guided": "Як покращувати",
   "submit.v2.optimizer.proposer.candidates": "Кандидатів за ітерацію",
   "submit.v2.optimizer.proposer.harness": "Агент-програміст",
+  "submit.v2.optimizer.sandbox.label": "Пісочниця",
+  "submit.v2.optimizer.sandbox.hint": "Де виконується код запуску. Якщо не вибрати, вибирає сервер.",
   "submit.v2.optimizer.proposer.title": "Налаштування агента-програміста",
   "submit.v2.optimizer.proposer.title.guided": "Налаштування агента (необов'язково)",
   "submit.v2.optimizer.sandbox_unavailable": "Пісочниця для коду недоступна, тому запуски зараз не можуть розпочатися.",

@@ -217,6 +217,8 @@
   "submit.v2.optimizer.picker.title.guided": "Wie es verbessert wird",
   "submit.v2.optimizer.proposer.candidates": "Kandidaten pro Iteration",
   "submit.v2.optimizer.proposer.harness": "Coding-Agent",
+  "submit.v2.optimizer.sandbox.label": "Sandbox",
+  "submit.v2.optimizer.sandbox.hint": "Wo der Code des Laufs ausgeführt wird. Ohne Auswahl wählt der Server.",
   "submit.v2.optimizer.proposer.title": "Einstellungen des Coding-Agenten",
   "submit.v2.optimizer.proposer.title.guided": "Agenteneinstellungen (optional)",
   "submit.v2.optimizer.sandbox_unavailable": "Die Code-Sandbox ist nicht verfügbar, daher können gerade keine Läufe starten.",

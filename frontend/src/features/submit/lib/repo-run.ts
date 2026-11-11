@@ -165,6 +165,7 @@ export function repoRunRequest(
         expected_field: inputs.expectedField,
       }),
     budget: optimizer.budget,
+    ...(optimizer.sandboxProvider && { sandbox_provider: optimizer.sandboxProvider }),
     // Auto composes the repository engines on the server; a named engine runs alone.
     strategy: auto ? { mode: "auto" } : { mode: "single", engine },
     proposer: optimizer.proposer,

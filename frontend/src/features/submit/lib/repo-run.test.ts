@@ -64,6 +64,21 @@ test("a repository run submits its repo, commit, paths and setup command", () =>
   assert.equal(request.task_model_config, null);
 });
 
+test("a repository run sends the chosen sandbox provider and omits it when none is chosen", () => {
+  const unset = repoRunRequest(repoState(), options);
+  assert.ok(unset);
+  assert.equal("sandbox_provider" in unset, false);
+
+  const state = repoState();
+  state.optimizer.sandboxProvider = "vercel";
+  assert.equal(repoRunRequest(state, options)?.sandbox_provider, "vercel");
+
+  // A draft saved before the picker existed has no field at all.
+  const older = repoState();
+  delete older.optimizer.sandboxProvider;
+  assert.equal("sandbox_provider" in repoRunRequest(older, options)!, false);
+});
+
 test("a repository Skynet created is flagged in the run request", () => {
   const state = repoState();
   state.task.repo = { ...state.task.repo!, createdBySkynet: true };

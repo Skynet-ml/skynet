@@ -217,6 +217,8 @@
   "submit.v2.optimizer.picker.title.guided": "改善の方法",
   "submit.v2.optimizer.proposer.candidates": "反復ごとの候補数",
   "submit.v2.optimizer.proposer.harness": "コーディングエージェント",
+  "submit.v2.optimizer.sandbox.label": "サンドボックス",
+  "submit.v2.optimizer.sandbox.hint": "実行のコードが動く場所です。選ばない場合はサーバーが選びます。",
   "submit.v2.optimizer.proposer.title": "コーディングエージェントの設定",
   "submit.v2.optimizer.proposer.title.guided": "エージェントの設定（任意）",
   "submit.v2.optimizer.sandbox_unavailable": "コードサンドボックスが利用できないため、現在は実行を開始できません。",

@@ -132,6 +132,8 @@ export interface OptimizerSlice {
   budgetUncapped: boolean;
   proposer: BlackboxProposer;
   shinka: BlackboxShinkaSettings | null;
+  /** The sandbox provider the user picked; null (or unset in an older draft) runs on the server default. */
+  sandboxProvider?: string | null;
 }
 
 export interface WorkspaceSlice {
@@ -219,6 +221,7 @@ export function initialWizardV2State(
         max_tool_calls: 100,
       },
       shinka: null,
+      sandboxProvider: null,
     },
     workspace: {
       runCode: "",

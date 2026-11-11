@@ -23,6 +23,7 @@ import {
   harnessLabel,
   keepHarnessEffort,
 } from "@/shared/lib/blackbox-harness";
+import { offeredSandboxProvider, sandboxProviderLabel } from "@/shared/lib/sandbox-provider";
 import { tip } from "@/shared/lib/tooltips";
 import { cn } from "@/shared/lib/utils";
 import { defaultOpen, useExperienceLevel } from "@/features/experience";
@@ -39,7 +40,11 @@ import { msg } from "@/shared/lib/messages";
 
 import { emptyModelConfig } from "../../constants";
 import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
-import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
+import {
+  useModelCatalog,
+  useRecentModelConfigs,
+  useSandboxProviders,
+} from "../../hooks/use-submit-wizard-data";
 import { DEFAULT_PROPOSER, proposerKnobs, usesNativeProposer } from "../../lib/engine-contract";
 import { keepEconomy } from "../../lib/model-config";
 import {
@@ -78,6 +83,7 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
   const t = (key: string) => v2Msg(key, guided);
   const level = useExperienceLevel();
   const catalog = useModelCatalog(runSource);
+  const sandboxes = useSandboxProviders(runSource);
   const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
   const [editing, setEditing] = React.useState<Editing | null>(null);
   const [proposerOpen, setProposerOpen] = React.useState(() =>
@@ -87,7 +93,8 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
     defaultOpen("wizard.shinka_settings", level),
   );
 
-  const { taskModel, reflectionModel, extraReflectionModels, proposer, shinka } = state.optimizer;
+  const { taskModel, reflectionModel, extraReflectionModels, proposer, shinka, sandboxProvider } =
+    state.optimizer;
   const resolved = resolveOptimizer(choice, kind);
   const nativeProposer = usesNativeProposer(choice, kind);
   const knobs = proposerKnobs(choice, kind);
@@ -111,6 +118,13 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
     const fitted = keepHarnessEffort(reflectionModel, limitingHarness);
     if (fitted !== reflectionModel) patchOptimizer({ reflectionModel: fitted });
   }, [limitingHarness, reflectionModel, patchOptimizer]);
+  // A pick the run's server does not offer (another server, or a provider it
+  // dropped) falls back to the server default instead of failing at submit.
+  React.useEffect(() => {
+    if (!sandboxes || !sandboxProvider) return;
+    if (!offeredSandboxProvider(sandboxProvider, sandboxes.providers))
+      patchOptimizer({ sandboxProvider: null });
+  }, [sandboxes, sandboxProvider, patchOptimizer]);
 
   return (
     <StepCard
@@ -266,6 +280,35 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
           }
         />
       </ModelRoleRow>
+
+      {sandboxes && sandboxes.providers.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label={t("submit.v2.optimizer.sandbox.label")}
+            htmlFor="v2-sandbox-provider"
+            hint={t("submit.v2.optimizer.sandbox.hint")}
+          >
+            <Select
+              value={
+                offeredSandboxProvider(sandboxProvider, sandboxes.providers) ??
+                sandboxes.default_provider
+              }
+              onValueChange={(value) => patchOptimizer({ sandboxProvider: value })}
+            >
+              <SelectTrigger id="v2-sandbox-provider" className={cn("w-full", TOUCH_FIELD)}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {sandboxes.providers.map((provider) => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    {sandboxProviderLabel(provider.id, provider.label)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        </div>
+      )}
 
       {nativeProposer && (
         <Disclosure

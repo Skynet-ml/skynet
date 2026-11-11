@@ -114,3 +114,28 @@ test("continuous and serving requests stay with their run's source", async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+test("sandbox providers come from the server the run goes to", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  const catalog = {
+    providers: [
+      { id: "vercel", label: "Vercel Sandbox" },
+      { id: "e2b", label: "E2B" },
+    ],
+    default_provider: "vercel",
+  };
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return Response.json(catalog);
+  };
+  try {
+    for (const source of ["local", "hosted"] as const) {
+      assert.deepEqual(await api.getSandboxProviders(source), catalog);
+      const url = new URL(calls.at(-1)!);
+      assert.equal(url.pathname, `${source === "hosted" ? "/local/hosted" : ""}/sandbox-providers`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -217,6 +217,8 @@
   "submit.v2.optimizer.picker.title.guided": "改善嘅方法",
   "submit.v2.optimizer.proposer.candidates": "每輪候選數",
   "submit.v2.optimizer.proposer.harness": "編程代理",
+  "submit.v2.optimizer.sandbox.label": "沙盒",
+  "submit.v2.optimizer.sandbox.hint": "執行程式碼運行嘅地方。唔揀嘅話，由伺服器揀。",
   "submit.v2.optimizer.proposer.title": "編程代理設定",
   "submit.v2.optimizer.proposer.title.guided": "代理設定（選填）",
   "submit.v2.optimizer.sandbox_unavailable": "程式碼沙盒用唔到，所以而家開始唔到運行。",
