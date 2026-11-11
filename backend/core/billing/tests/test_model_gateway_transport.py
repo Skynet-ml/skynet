@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import http.server
 import json
 import socket
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import nullcontext
 from decimal import Decimal
@@ -27,10 +30,12 @@ from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
 from core.billing.env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS, CONNECTORS_KEY
+from core.billing.guest_model_proxy import MCP_TOKEN_ENV, METHOD_HEADER
 from core.billing.mcp_oauth_client import McpOAuthError
 from core.billing.model_dispatch import ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
+    MCP_RELAY_ROUTE_KEY,
     PARENT_HOSTS_KEY,
     ROUTE_KEY,
     SHINKA_EMBEDDING_MODEL,
@@ -58,11 +63,13 @@ from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.provider_registry import BYOK_PROVIDER_SLUGS
 from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
 from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
+from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 from core.storage.run_call_store import PostgresRunCallStore
-from core.worker.scoped_relay import NO_CANDIDATE_ID, CallRecorder, model_forwarder
+from core.worker import scoped_relay
+from core.worker.scoped_relay import NO_CANDIDATE_ID, CallRecorder, McpRelay, model_forwarder
 
 IMAGE = "fixture@sha256:" + "a" * 64
 CATALOG = {
@@ -2044,3 +2051,487 @@ def test_a_gateway_without_a_recorder_writes_no_run_call(gateway: ModelGateway) 
 
     assert gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {}).status == 200
     assert store.list_calls("job-1", "") == []
+
+
+_MCP_KEY = "mcp-secret-value-4242"
+_MCP_HOST = "mcp.example.test"
+
+
+class _McpServer:
+    """Serve a small MCP streamable HTTP server that echoes the key it gets back to the caller."""
+
+    def __init__(self) -> None:
+        """Start the server on a free loopback port."""
+        self.requests: list[tuple[str, str, str]] = []
+        # Seconds a GET stream stays quiet after its first event.
+        self.hold = 0.0
+        mcp = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Answer initialize with a session, a later POST and a GET only inside it, and DELETE to end it."""
+
+            def log_message(self, format: str, *args: object) -> None:
+                """Keep the test output quiet."""
+
+            def _session(self) -> bool:
+                """Record the request and refuse one outside the session.
+
+                Returns:
+                    Whether the request carries the session id.
+                """
+                session = self.headers.get("Mcp-Session-Id", "")
+                mcp.requests.append((self.command, self.path, session))
+                if session == "session-1":
+                    return True
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+
+            def do_POST(self) -> None:
+                """Open the session on initialize, or answer a call inside it with the key it got."""
+                message = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                if message.get("method") == "initialize":
+                    mcp.requests.append((self.command, self.path, ""))
+                elif not self._session():
+                    return
+                payload = json.dumps(
+                    {"jsonrpc": "2.0", "id": message.get("id"), "result": {"seen": self.headers["Authorization"]}}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Mcp-Session-Id", "session-1")
+                self.send_header("X-Echo", self.headers["Authorization"])
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self) -> None:
+                """Send two events, the second with the key, then end the stream."""
+                if not self._session():
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for event in (b"data: first\n\n", b"data: " + self.headers["Authorization"].encode() + b"\n\n"):
+                    self.wfile.write(event)
+                    self.wfile.flush()
+                    time.sleep(mcp.hold)
+
+            def do_DELETE(self) -> None:
+                """End the session."""
+                if self._session():
+                    self.send_response(204)
+                    self.end_headers()
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_port
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def mcp_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[_McpServer]:
+    """Start the MCP server and let the relay reach its test host on loopback.
+
+    Args:
+        monkeypatch: Pins the test host to 127.0.0.1, as DNS would pin a public host.
+
+    Yields:
+        The running server.
+    """
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    server = _McpServer()
+    yield server
+    server.close()
+
+
+def _proposer_relay(port: int) -> McpRelay:
+    """Return a ``[proposer]`` relay whose MCP file holds one ``search`` server that needs the key.
+
+    Args:
+        port: The MCP server's port.
+
+    Returns:
+        The relay.
+    """
+    server = McpServer(
+        name="search", url=f"http://{_MCP_HOST}:{port}/mcp", headers={"Authorization": "Bearer ${MCP_KEY}"}
+    )
+    return McpRelay(
+        "[proposer]",
+        RoleEnvironment(mcp=".mcp.json", mcp_servers=(server,)),
+        secrets={"MCP_KEY": _MCP_KEY},
+        secret_hosts={"MCP_KEY": _MCP_HOST},
+        allowed_hosts={"MCP_KEY": (_MCP_HOST,)},
+    )
+
+
+def test_a_box_uses_its_proposer_mcp_server_through_the_mailbox_relay(
+    gateway: ModelGateway, mcp_server: _McpServer
+) -> None:
+    """A box POSTs, keeps the session, reads a GET event stream and ends it, and never sees the key.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    store = _record_calls(gateway)
+    gateway.bind_sandbox(
+        SandboxBroker(
+            LocalSubprocessRuntime(),
+            image=IMAGE,
+            max_lifetime_seconds=30,
+            command_runner=ModelMailbox(gateway.dispatch_guest).run,
+        ),
+        image=IMAGE,
+        lifetime_seconds=30,
+    )
+    protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
+    descriptor = protected["_budget_gateway_descriptor"]
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    # The box's MCP client sends no Authorization: the proxy adds the relay token from its environment.
+    source = (
+        "import json, os, urllib.request\n"
+        "url=os.environ['OPENAI_BASE_URL']+'/mcp/search'\n"
+        "def call(method, body=None, session=None):\n"
+        "    headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'}\n"
+        "    if session: headers['Mcp-Session-Id']=session\n"
+        "    data=json.dumps(body).encode() if body is not None else None\n"
+        "    return urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=headers))\n"
+        "first=call('POST', {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}})\n"
+        "session=first.headers['Mcp-Session-Id']\n"
+        "out={'session': session, 'init': json.load(first), 'echo': first.headers.get('X-Echo')}\n"
+        "out['tool']=json.load(call('POST', {'jsonrpc':'2.0','id':2,'method':'tools/call',"
+        "'params':{'name':'lookup','arguments':{}}}, session))\n"
+        "stream=call('GET', session=session)\n"
+        "out['type']=stream.headers['Content-Type']\n"
+        "out['events']=stream.read().decode()\n"
+        "out['delete']=call('DELETE', session=session).status\n"
+        "print(json.dumps(out))\n"
+    )
+    runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
+    session = runtime.open(SandboxSpec(lifetime_seconds=30, image=IMAGE, network_disabled=True))
+    session.write_files({"check.py": source})
+    try:
+        result = session.run("python3 check.py", env={MCP_TOKEN_ENV: route["token"]}, timeout_seconds=25)
+    finally:
+        session.close()
+
+    assert result.ok, result.stderr
+    out = json.loads(result.stdout)
+    assert out["session"] == "session-1"
+    assert out["init"]["result"] == {"seen": "[REDACTED]"}
+    assert out["echo"] is None
+    assert out["tool"]["result"] == {"seen": "[REDACTED]"}
+    assert out["type"] == "text/event-stream"
+    assert out["events"] == "data: first\n\ndata: [REDACTED]\n\n"
+    assert out["delete"] == 204
+    assert _MCP_KEY not in result.stdout + result.stderr
+    assert mcp_server.requests == [
+        ("POST", "/mcp", ""),
+        ("POST", "/mcp", "session-1"),
+        ("GET", "/mcp", "session-1"),
+        ("DELETE", "/mcp", "session-1"),
+    ]
+    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert [(call["kind"], call["role"], call["target"], call["status"]) for call in calls] == [
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/initialize", "ok"),
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/lookup", "ok"),
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/", "ok"),
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/", "ok"),
+    ]
+    assert _MCP_KEY not in json.dumps(calls, default=str)
+    assert route["token"] not in json.dumps(calls, default=str)
+
+
+def test_the_mcp_relay_records_each_call_under_the_run_and_the_tagged_candidate(
+    gateway: ModelGateway, mcp_server: _McpServer
+) -> None:
+    """An HTTP MCP call writes one record with the run id and the candidate its usage tags name.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    tags = with_tags_header({}, {"candidate": "7", "lane": "gepa"})
+
+    reply = httpx.post(
+        f"{route['url']}/mcp/search",
+        headers={"Authorization": f"Bearer {route['token']}", **tags},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        trust_env=False,
+    )
+
+    assert reply.status_code == 200
+    assert reply.headers["Mcp-Session-Id"] == "session-1"
+    assert "X-Echo" not in reply.headers
+    assert _MCP_KEY not in reply.text
+    [call] = store.list_calls("job-1", "gepa:7")
+    assert (call["kind"], call["role"], call["status"]) == ("mcp", "proposer", "ok")
+    assert store.list_calls("job-1", NO_CANDIDATE_ID) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("other", "MCP server 'other' is not in .mcp.json, the [proposer] MCP file. Add it there."),
+        ("..%2F_sandbox", "MCP server '../_sandbox' is not in .mcp.json"),
+        ("search%3Fx", "MCP server 'search?x' is not in .mcp.json"),
+    ],
+)
+def test_the_mcp_relay_refuses_a_server_outside_the_role_file(
+    gateway: ModelGateway, mcp_server: _McpServer, name: str, message: str
+) -> None:
+    """A server of another file, or a path that tries to leave the prefix, gets a 403 that names the file.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        name: The server segment the box asks for.
+        message: The start of the refusal.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+
+    reply = httpx.post(
+        f"{route['url']}/mcp/{name}",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        trust_env=False,
+    )
+
+    assert reply.status_code == 403
+    assert reply.json()["error"]["message"].startswith(message)
+    assert mcp_server.requests == []
+    [call] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (call["kind"], call["role"], call["status"]) == ("mcp", "proposer", "refused")
+    assert call["failure_reason"].startswith(message)
+
+
+def test_an_mcp_relay_token_of_another_run_opens_nothing(gateway: ModelGateway, mcp_server: _McpServer) -> None:
+    """Another run's relay token, and a model route token, get a 401 here, and nothing reaches the server.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    store = _record_calls(gateway)
+    gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    other = ModelGateway(gateway.runtime)
+    try:
+        foreign = other.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    finally:
+        other.close()
+    model = gateway.register(
+        model="fixture/text", api_key="upstream-secret", role="task", policy=ChargePolicy("managed_model")
+    )
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+
+    for token in (foreign["token"], model["token"], "not-a-token"):
+        reply = httpx.post(
+            f"{gateway.url}/mcp/search", headers={"Authorization": f"Bearer {token}"}, json=body, trust_env=False
+        )
+        assert reply.status_code == 401
+        with pytest.raises(ValueError, match="Unknown scoped MCP relay route"):
+            gateway.dispatch_guest(token, "/v1/mcp/search", json.dumps(body).encode(), {})
+    with pytest.raises(ValueError, match="parent box reaches only"):
+        gateway.dispatch_route(foreign["token"], "/v1/mcp/search", body, {})
+    assert mcp_server.requests == []
+    assert store.list_calls("job-1", NO_CANDIDATE_ID) == []
+
+
+def test_the_forwarder_passes_mcp_methods_session_and_event_streams_to_the_gateway(
+    gateway: ModelGateway, mcp_server: _McpServer
+) -> None:
+    """The scoped relay forwards the raw body, the method and the session header, and streams a GET.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    dispatch = model_forwarder({MCP_RELAY_ROUTE_KEY: route})
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).encode()
+
+    first = dispatch(route["token"], "/v1/mcp/search", body, {METHOD_HEADER: "POST"})
+    session = {"mcp-session-id": dict(first.headers)["mcp-session-id"]}
+    stream = dispatch(route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", **session})
+    events = first.body + b"".join(stream.stream)
+    ended = dispatch(route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "DELETE", **session})
+
+    assert (first.status, stream.status, ended.status) == (200, 200, 204)
+    assert stream.content_type == "text/event-stream"
+    assert b"data: first" in events
+    assert _MCP_KEY.encode() not in events
+    assert [request[0] for request in mcp_server.requests] == ["POST", "GET", "DELETE"]
+    with pytest.raises(ValueError, match="unknown metered model capability"):
+        dispatch(route["token"], "/v1/chat/completions", {"model": "fixture/text"}, {})
+
+
+def test_a_listener_closed_before_it_reads_frees_its_stream_place(mcp_server: _McpServer) -> None:
+    """Closing an event stream that nobody read frees its place, so a fifth listener still opens.
+
+    Args:
+        mcp_server: The echoing MCP server.
+    """
+    relay = _proposer_relay(mcp_server.port)
+
+    statuses = []
+    for _ in range(5):
+        answer = relay.dispatch("search", "GET", b"", {"mcp-session-id": "session-1"}, None)
+        statuses.append(answer.status)
+        assert answer.stream is not None
+        answer.stream.close()
+
+    assert statuses == [200] * 5
+
+
+def test_the_forwarder_closes_an_unread_gateway_stream(
+    gateway: ModelGateway, mcp_server: _McpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the forwarder's event stream before any read closes its gateway connection once.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        monkeypatch: Counts the connection closes.
+    """
+    closes: list[bool] = []
+    close = scoped_relay._close_gateway_stream
+
+    def counted(client: httpx.Client, response: httpx.Response) -> None:
+        """Close the connection and count it.
+
+        Args:
+            client: The client that holds the connection.
+            response: The open event stream.
+        """
+        close(client, response)
+        closes.append(response.is_closed)
+
+    monkeypatch.setattr(scoped_relay, "_close_gateway_stream", counted)
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    dispatch = model_forwarder({MCP_RELAY_ROUTE_KEY: route})
+
+    answer = dispatch(route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", "mcp-session-id": "session-1"})
+    assert answer.stream is not None
+    answer.stream.close()
+    answer.stream.close()
+
+    assert closes == [True]
+
+
+class _Pings:
+    """Keep an MCP event stream alive with a ping every 50 ms, as a server may, and note when it closes."""
+
+    def __init__(self) -> None:
+        """Start with the stream open."""
+        self.closed_at: float | None = None
+
+    def __iter__(self) -> _Pings:
+        """Return the stream as its own iterator."""
+        return self
+
+    def __next__(self) -> bytes:
+        """Return the next ping.
+
+        Returns:
+            One ping comment.
+
+        Raises:
+            StopIteration: When the stream is closed.
+        """
+        if self.closed_at is not None:
+            raise StopIteration
+        time.sleep(0.05)
+        return b": ping\n\n"
+
+    def close(self) -> None:
+        """Close the stream, once."""
+        if self.closed_at is None:
+            self.closed_at = time.monotonic()
+
+
+def test_the_mailbox_stops_a_pinged_stream_when_the_box_reader_leaves() -> None:
+    """A box that stops reading a pinged event stream makes the parent close it while the command still runs."""
+    pings = _Pings()
+
+    def dispatch(token: str, path: str, body: Any, headers: dict[str, str]) -> ModelHTTPResult:
+        """Answer the GET with an endless pinged stream.
+
+        Args:
+            token: The relay token.
+            path: The MCP path.
+            body: The raw body.
+            headers: The request headers.
+
+        Returns:
+            The stream answer.
+        """
+        assert path == "/v1/mcp/search"
+        return ModelHTTPResult(200, "text/event-stream", b"", stream=pings)
+
+    source = (
+        "import os, socket, time, urllib.parse\n"
+        "url=urllib.parse.urlsplit(os.environ['OPENAI_BASE_URL'])\n"
+        "sock=socket.create_connection((url.hostname, url.port))\n"
+        "sock.sendall(b'GET /v1/mcp/search HTTP/1.1\\r\\nHost: x\\r\\nAccept: text/event-stream\\r\\n\\r\\n')\n"
+        "print(b'ping' in sock.recv(4096) or b'ping' in sock.recv(4096), flush=True)\n"
+        "sock.close()\n"
+        "time.sleep(4)\n"
+    )
+    session = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=30))
+    session.write_files({"check.py": source})
+    try:
+        result = ModelMailbox(dispatch).run(session, "python3 check.py", timeout_seconds=25)
+        ended = time.monotonic()
+    finally:
+        session.close()
+
+    assert result.ok, result.stderr
+    assert result.stdout.strip() == "True"
+    assert pings.closed_at is not None
+    assert pings.closed_at < ended - 1
+
+
+def test_a_quiet_upstream_stream_ends_cleanly_at_the_gateway(
+    gateway: ModelGateway, mcp_server: _McpServer, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An event stream whose server goes quiet past the read timeout ends without a handler traceback.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        monkeypatch: Shortens the relay's read timeout.
+        capfd: Captures the handler's error output.
+    """
+    monkeypatch.setattr(scoped_relay, "_SERVICE_TIMEOUT_SECONDS", 0.5)
+    mcp_server.hold = 3.0
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+
+    with httpx.stream(
+        "GET",
+        f"{route['url']}/mcp/search",
+        headers={"Authorization": f"Bearer {route['token']}", "Mcp-Session-Id": "session-1"},
+        trust_env=False,
+        timeout=10,
+    ) as reply:
+        events = reply.read()
+
+    assert reply.status_code == 200
+    assert events == b"data: first\n\n"
+    assert "Traceback" not in capfd.readouterr().err
+    answer = gateway.dispatch_guest(
+        route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", "mcp-session-id": "session-1"}
+    )
+    assert answer.status == 200
+    assert answer.stream is not None
+    answer.stream.close()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import logging
 import secrets
 import shlex
 import threading
@@ -20,6 +22,8 @@ from .operation_pricing import UnpricedOperationError
 from .runtime import ProviderFailedError, UsagePendingError
 from .signals import BudgetReached
 from .usage_tags import current_tags, with_tags_header
+
+logger = logging.getLogger(__name__)
 
 
 class ModelMailbox:
@@ -77,6 +81,9 @@ class ModelMailbox:
         seen: set[str] = set()
         guard = threading.Lock()
         errors: list[BaseException] = []
+        # MCP event streams whose box reader left, and a flag for the end of the command.
+        abandoned: set[str] = set()
+        finished = threading.Event()
 
         def respond(document: dict[str, Any]) -> None:
             """Write one trusted response while preserving a paid attempt on transport failure."""
@@ -86,9 +93,11 @@ class ModelMailbox:
                 )
                 headers[MODEL_ATTEMPT_HEADER] = document["id"]
                 token = headers.get("authorization", "").removeprefix("Bearer ") or headers.get("x-api-key", "")
-                response = self._dispatch(
-                    token, document["path"], json.loads(base64.b64decode(document["body"])), headers
-                )
+                body = base64.b64decode(document["body"])
+                # An MCP server takes the client's bytes as they are; only a model request is one JSON object.
+                if not str(document["path"]).startswith(guest_model_proxy.MCP_PATH):
+                    body = json.loads(body)
+                response = self._dispatch(token, document["path"], body, headers)
             except BudgetReached as error:
                 response = failure(402, "budget_reached", str(error))
             except BudgetInsufficientError as error:
@@ -102,17 +111,62 @@ class ModelMailbox:
             except BaseException as error:
                 errors.append(error)
                 response = failure(502, "provider_unavailable", "The model transport was interrupted.")
-            session.write_files(
-                {
-                    f"{response_directory}/{document['id']}.json": json.dumps(
-                        {
-                            "status": response.status,
-                            "content_type": response.content_type,
-                            "body": base64.b64encode(response.body).decode(),
-                        }
+            answer: dict[str, Any] = {
+                "status": response.status,
+                "content_type": response.content_type,
+                "body": base64.b64encode(response.body).decode(),
+                "headers": [list(pair) for pair in response.headers],
+            }
+            if response.stream is None:
+                session.write_files({f"{response_directory}/{document['id']}.json": json.dumps(answer)})
+                return
+            try:
+                session.write_files(
+                    {f"{response_directory}/{document['id']}.json": json.dumps({**answer, "more": True})}
+                )
+            except BaseException:
+                response.stream.close()
+                raise
+            # An event stream can stay open for the whole command, so it gets its own thread, not a pool worker.
+            threading.Thread(
+                target=pump,
+                args=(document["id"], response.stream),
+                daemon=True,
+                name="sandbox-mcp-stream",
+            ).start()
+
+        def pump(identity: str, stream: Any) -> None:
+            """Write each part of an MCP event stream as its own response file, then an end part.
+
+            Part ``n`` goes to ``<id>.<n>.json``. The last part has ``"more": false``.
+            The stream stops with no last part when the box's reader left or the
+            command ended, so a server that keeps it alive with pings cannot hold
+            its place.
+
+            Args:
+                identity: The request's id.
+                stream: The relay's event stream.
+            """
+            base = f"{response_directory}/{identity}"
+            part = 0
+            try:
+                for chunk in stream:
+                    if identity in abandoned or finished.is_set():
+                        return
+                    part += 1
+                    session.write_files(
+                        {f"{base}.{part}.json": json.dumps({"body": base64.b64encode(chunk).decode(), "more": True})}
                     )
-                }
-            )
+            except Exception as error:
+                # Only the type: the relay already recorded the call, and a message could hold a body.
+                logger.warning("An MCP event stream ended early in the sandbox mailbox: %s", type(error).__name__)
+            finally:
+                stream.close()
+            if finished.is_set():
+                return
+            # A box that went away cannot take the end part; the guest proxy is gone with it.
+            with contextlib.suppress(Exception):
+                session.write_files({f"{base}.{part + 1}.json": json.dumps({"more": False})})
 
         def failure(status: int, code: str, message: str) -> ModelHTTPResult:
             """Return an admission error understood by both supported model protocols."""
@@ -150,7 +204,10 @@ class ModelMailbox:
                                 raise ValueError("Invalid model mailbox identity.")
                             if identity not in seen:
                                 seen.add(identity)
-                                futures.append(executor.submit(respond, document))
+                                if "stop" in document:
+                                    abandoned.add(str(document["stop"]))
+                                else:
+                                    futures.append(executor.submit(respond, document))
                         else:
                             visible.setdefault(stream, []).append(line + "\n")
                             if on_output is not None:
@@ -163,7 +220,10 @@ class ModelMailbox:
                 f"python3 -I {shlex.quote(source_path)} {shlex.quote(config_path)}"
                 f" bash --noprofile --norc -c {shlex.quote(command)}"
             )
-            result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
+            try:
+                result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
+            finally:
+                finished.set()
             for future in futures:
                 future.result()
             for stream, data in pending.items():

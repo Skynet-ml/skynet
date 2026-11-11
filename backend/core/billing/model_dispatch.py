@@ -6,10 +6,10 @@ import json
 import logging
 import re
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
@@ -53,6 +53,18 @@ BYOK_FUNDS_EXHAUSTED = "byok_funds_exhausted"
 _EPHEMERAL = {"type": "ephemeral"}
 
 
+class ByteStream(Protocol):
+    """Yield the rest of an answer; ``close`` frees it even when nothing was read."""
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Return the iterator over the chunks."""
+        ...
+
+    def close(self) -> None:
+        """Free the stream and its upstream connection."""
+        ...
+
+
 @dataclass(frozen=True)
 class ModelHTTPResult:
     """Retain the protocol response without putting generated text in the billing ledger."""
@@ -60,6 +72,10 @@ class ModelHTTPResult:
     status: int
     content_type: str
     body: bytes
+    # Only an MCP relay answer carries these: its session header, and a GET
+    # event stream that goes on after ``body``.
+    headers: tuple[tuple[str, str], ...] = ()
+    stream: ByteStream | None = field(default=None, compare=False)
 
 
 def funds_refusal(managed: bool, retry_after: str | None) -> tuple[bytes, float]:
