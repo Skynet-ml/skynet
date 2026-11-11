@@ -1,9 +1,14 @@
 name: ci
 
+# PRs to staging do not run this workflow: each PR runs the local gate in
+# AGENTS.md. The full suite runs on each batch branch (workflow_dispatch),
+# on the staging -> main promotion PR, and on the push to main (SKY-570).
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}

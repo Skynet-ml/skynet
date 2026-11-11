@@ -141,7 +141,7 @@ def _with_relay_config(command: str, files: dict[str, str], gateway: GatewayConf
         "import os,pathlib; "
         "endpoint=os.environ.get('APP_BUDGET_RELAY_URL') or os.environ.get('SKYNET_BUDGET_RELAY_URL'); "
         f"files={list(files)!r}; old={gateway.url!r}; "
-        "[(lambda p: p.write_text(p.read_text().replace(old,endpoint)))(pathlib.Path(name)) "
+        "[(lambda p: p.write_text(p.read_text(encoding='utf-8').replace(old,endpoint),encoding='utf-8'))(pathlib.Path(name)) "
         "for name in files if endpoint]"
     )
     return f"python3 -c {shlex.quote(script)} && {command}"
