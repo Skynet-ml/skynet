@@ -123,8 +123,8 @@ you return.
   Put placeholders such as ``${{MAPS_KEY}}`` only in ``headers``. Never write a secret value
   into any file, even when the user pastes one; write the placeholder and tell
   the user to add the secret to the run. Name every secret the run needs in
-  ``summary``, so the user can add it before the run. With no ``[run]``, nothing runs and the metric judges only the
-  checkout.
+  ``summary``, so the user can add it before the run. With no ``[run]``,
+  nothing runs and the metric judges only the checkout.
   Never put rule text in optimize.toml. When the user states the run's
   intent, write it in a markdown file, for example ``docs/intent.md``, and
   set ``instructions = "docs/intent.md"`` at the top of optimize.toml, before
