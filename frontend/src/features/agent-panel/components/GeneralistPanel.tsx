@@ -56,6 +56,7 @@ import { sessionIdentity } from "@/shared/lib/session-identity";
 import { formatMsg } from "@/shared/lib/messages";
 
 import {
+  isCliProvider,
   menuModelGroup,
   menuPickState,
   RETIRED_AUTO_MODEL,
@@ -78,6 +79,7 @@ import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-gener
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
 import { getConversation, isHostedConversation } from "../lib/conversation-api";
 import { isLocalMode } from "@/shared/lib/runtime-env";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
@@ -120,7 +122,7 @@ import { MinimizedPill } from "./MinimizedPill";
 import { PresenceStrip } from "./PresenceStrip";
 import { ToolCallRow } from "./ToolCallRow";
 import { ChatSourceContext } from "./JobSummaryCard";
-import { ToolsCarousel } from "./ToolsCarousel";
+import { ToolsShowcase } from "./ToolsShowcase";
 import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
 import { AGENT_PROMPT_EVENT, takeQueuedAgentPrompt } from "../lib/prompt-queue";
@@ -403,7 +405,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onToolEnd: handleToolEnd,
     onConversationMeta: handleConversationMeta,
   });
-  const localMenu = useLocalAgentMenuModels(agent.model);
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
   // Each conversation on view gets fresh turn components, so one chat's
@@ -589,8 +590,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // its text changes with every chunk.
   const agentMessages = agent.messages;
   const agentConversationId = agent.conversationId;
-  // A web chat opens read-only on the Mac; it continues on the web.
-  const webChat = agentConversationId !== null && isHostedConversation(agentConversationId);
+  // A chat on the web account must not stage rows or act on the Mac's data.
+  // A new chat starts on the side picked in the header.
+  const { web } = useResourceMode();
+  const webChat =
+    agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
+  const localMenu = useLocalAgentMenuModels(agent.model, webChat);
   const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
   React.useEffect(() => {
     liveChatRef.current = { id: agentConversationId, messages: agentMessages };
@@ -983,9 +988,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const savedModel = agent.model === RETIRED_AUTO_MODEL ? null : agent.model;
   const slashPick = menuPickState(
     savedModel,
-    localMenu.models ?? catalogAll,
-    localMenu.models,
-    localMenu.openRouterEngine,
+    localMenu.allModels ?? localMenu.models ?? catalogAll,
+    localMenu.side,
   ).unlisted
     ? null
     : savedModel;
@@ -1013,7 +1017,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     // As the model menu shows it: a local CLI model checks the level it runs,
     // so a saved level above the model's top checks the top.
     const shownEffort =
-      current && menuModelGroup(current) === "local"
+      current && isCliProvider(menuModelGroup(current))
         ? cliEffort(agent.reasoningEffort, efforts)
         : liveEffort(agent.reasoningEffort);
     const commands: SlashCommand[] = [
@@ -1213,7 +1217,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   </TooltipContent>
                 </Tooltip>
                 <PopoverContent side="bottom" align="center" sideOffset={8} className="p-0">
-                  <ToolsCarousel />
+                  <ToolsShowcase />
                 </PopoverContent>
               </Popover>
             </div>
@@ -1351,7 +1355,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             key={chatView.key}
             messages={agent.messages}
             streaming={streaming}
-            editAndResend={webChat ? () => false : agent.editAndResend}
+            editAndResend={agent.editAndResend}
             renderToolCall={renderToolCall}
             isStepCall={isStepCall}
             isPinnedCall={isPinnedCall}
@@ -1360,7 +1364,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             animatePairs
             trailing={({ isEditingAny }) => (
               <>
-                {choices && !webChat && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
+                {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
                   <QuestionChoices
                     options={choices}
                     onSelect={(label) => agent.send(label)}
@@ -1378,7 +1382,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                       "auto.features.agent.panel.components.generalistpanel.error_retry",
                     )}
                     onRetry={
-                      webChat || agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
+                      agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
                         ? undefined
                         : agent.retry
                     }
@@ -1397,13 +1401,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         </ChatSourceContext.Provider>
       </AgentThread>
 
-      {webChat && (
-        <p className="px-3 pb-1 text-[0.75rem] text-muted-foreground">
-          {msg("agent.web_chat.read_only")}
-        </p>
-      )}
       <Composer
-        disabled={webChat}
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}
@@ -1427,7 +1425,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             fast={agent.fastMode}
             onFastChange={agent.setFastMode}
             models={localMenu.models}
-            openRouterEngine={localMenu.openRouterEngine}
+            allModels={localMenu.allModels}
+            side={localMenu.side}
           />
         }
         // Dataset files keep their column-mapping card; any other file is
@@ -1571,6 +1570,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onOpenChange={setDrawerOpen}
         conversations={store.conversations}
         loading={store.loading}
+        swapping={store.swapping}
         activeId={agent.conversationId ?? store.activeId}
         unreadIds={store.unreadIds}
         busyIds={agent.busyConversationIds}

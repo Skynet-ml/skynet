@@ -61,6 +61,7 @@ from ...config import settings
 from ...constants import TOKEN_SOURCE_BYOK
 from ...exceptions import ServiceError
 from ...local.cli_catalog import CliProvider
+from ...local.managed_models import HOSTED_INFERENCE_KEY
 from ...models import ModelConfig
 from ...storage.models import AgentApprovalModel
 from ..language_models import (
@@ -948,6 +949,8 @@ class WizardState(TypedDict, total=False):
     spending_floor_cents: int | None
     run_code: str
     metric_code: str
+    # The repository's optimize.toml in the setup draft; only the coding agent writes it (SKY-184).
+    optimize_toml: str
     # The wizard screen on view (see ``_SCREEN_FIELDS``). Absent when the
     # wizard is not on screen, which leaves the agent unscoped.
     wizard_screen: str
@@ -1896,9 +1899,11 @@ def coding_agent_tools(
             name=CODING_AGENT_TOOL,
             desc=(
                 "Hand the screen's code to the workspace coding agent. It gets the run's setup and, for a "
-                "repository run with GitHub linked, reads the repository. It writes the code into the editor "
-                "and returns its summary, the files it read and its open questions. Do not write the same "
-                "code again with update_wizard_state."
+                "repository run with GitHub linked, reads the repository. It writes the code into the editor, "
+                "returns optimize.toml for a repository run in its wizard_state, and returns its summary, the "
+                "files it read, its open questions and the parser's optimize_toml_error when that file is not "
+                "valid. When it returns optimize_toml, show the user the returned optimize_toml in full. "
+                "Do not write the same code again with update_wizard_state."
             ),
             arg_desc={
                 "request": (
@@ -2206,7 +2211,7 @@ Capabilities worth knowing about:
 * Account settings: call ``list_settings`` to see each settings area, its
   tab, its fields and its actions; ``get_setting`` reads one area (secrets
   come back masked; never ask for or repeat a secret). Change profile,
-  appearance (theme, locale), agent_engine, notifications or privacy with
+  appearance (theme, locale), notifications or privacy with
   ``change_setting`` and only the fields the user asked to change.
   Passkeys, linked sign-ins and email codes go through
   ``change_protected_setting``; the user always confirms those. You never
@@ -2795,11 +2800,13 @@ def _build_local_summary_lm(turn_config: ModelConfig | None) -> Any | None:
         turn_config: The turn's resolved model config, or ``None``.
 
     Returns:
-        The summary LM, or ``None`` when the turn has no BYOK key and no CLI.
+        The summary LM, or None when the turn has no authorized model route.
     """
     if turn_config is None:
         return None
-    if turn_config.token_source == TOKEN_SOURCE_BYOK:
+    if turn_config.extra.get(HOSTED_INFERENCE_KEY):
+        config = turn_config.model_copy(update={"extra": _byok_side_extra(turn_config, turn_config.name)})
+    elif turn_config.token_source == TOKEN_SOURCE_BYOK:
         model = interview_model_id() or agent_model_id()
         config = apply_model_reasoning_config(
             turn_config.model_copy(update={"name": model, "extra": _byok_side_extra(turn_config, model)})
@@ -2877,10 +2884,8 @@ def build_hosted_suggest_lm(model: str, timeout: float) -> Any:
 def build_local_suggest_lm(turn_config: ModelConfig | None, timeout: float) -> Any | None:
     """Build the Mac app's suggestion model on the turn's engine.
 
-    It never uses the composer, interview or agent model, and never the linked
-    hosted account. A saved OpenRouter key writes on the best-scored catalog
-    model, on that key; a CLI subscription writes on the best-scored model
-    that CLI runs (:func:`core.api.suggest_model.suggest_model_for`).
+    A hosted route stays on its scoped model. A saved OpenRouter key writes
+    on the best-scored catalog model; a CLI uses its best-scored model.
 
     Args:
         turn_config: The turn's resolved model config, or ``None``.
@@ -2892,7 +2897,14 @@ def build_local_suggest_lm(turn_config: ModelConfig | None, timeout: float) -> A
     """
     if turn_config is None:
         return None
-    if turn_config.token_source == TOKEN_SOURCE_BYOK:
+    if turn_config.extra.get(HOSTED_INFERENCE_KEY):
+        config = turn_config.model_copy(
+            update={
+                "max_tokens": _suggest_max_tokens(turn_config.name),
+                "extra": _byok_side_extra(turn_config, turn_config.name),
+            }
+        )
+    elif turn_config.token_source == TOKEN_SOURCE_BYOK:
         model = byok_suggest_model()
         if model is None:
             return None

@@ -4,9 +4,10 @@ The setup agent cannot read a repository run's checkout, so on the Metric
 screen it hands the code work to this agent. The coding agent is a loop of its
 own: it gets the optimization's context (the brief, the artifact, the data and
 the code on the screen) and, for a repository run with GitHub linked,
-read-only tools over the repository. It returns the code it wrote, the files
-it read and the questions it could not settle. The setup agent's turn goes on
-from that result.
+read-only tools over the repository. It returns the code and the
+``optimize.toml`` it wrote, the parser's error when that file is not valid,
+the files it read and the questions it could not settle. The setup agent's
+turn goes on from that result.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from ...config import settings
 from ...connectors import github, repo_hosts
 from ...connectors.github_repo import rate_limit_message
 from ...connectors.transport import label
+from ..optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
 from .agent_program import AgentProgram
 from .pi_react import run_react_program_on_pi
 from .repo_browser import RepoBrowser
@@ -46,8 +48,33 @@ CONTEXT_FIELDS = (
     "dataset_columns",
     "run_code",
     "metric_code",
+    "optimize_toml",
 )
-CODE_FIELDS = ("run_code", "metric_code")
+CODE_FIELDS = ("run_code", "metric_code", "optimize_toml")
+# The prompt shows this file and a test parses it, so the agent never copies an example the parser refuses.
+OPTIMIZE_TOML_EXAMPLE = """\
+version = 1
+instructions = "docs/intent.md"
+
+[paths]
+editable = ["src"]
+protected = ["src/config.py"]
+
+[proposer]
+illegal = "docs/rules.md"
+network = ["pypi.org"]
+
+[run]
+entry = ["pytest", "-q", "--junitxml=out.xml"]
+timeout = 300
+
+[metric]
+services = ["judge"]
+
+[services.judge]
+url = "https://api.example.com/v1"
+headers = { Authorization = "Bearer ${JUDGE_KEY}" }
+"""
 
 CODER_PROMPT = f"""\
 You are the workspace coding agent of {APP_NAME}. The setup assistant hands
@@ -99,10 +126,8 @@ you return.
   Put placeholders such as ``${{MAPS_KEY}}`` only in ``headers``. Never write a secret value
   into any file, even when the user pastes one; write the placeholder and tell
   the user to add the secret to the run. Name every secret the run needs in
-  ``summary``, so the user can add it before the run. Give the
-  whole ``[run]`` section in ``summary``, so the setup assistant shows it to
-  the user. With no ``[run]``, nothing runs and the metric judges only the
-  checkout.
+  ``summary``, so the user can add it before the run. With no ``[run]``,
+  nothing runs and the metric judges only the checkout.
   Never put rule text in optimize.toml. When the user states the run's
   intent, write it in a markdown file, for example ``docs/intent.md``, and
   set ``instructions = "docs/intent.md"`` at the top of optimize.toml, before
@@ -110,8 +135,7 @@ you return.
   them in a markdown file, for example ``docs/rules.md``, one top-level
   ``- `` bullet for each rule, and set ``illegal = "docs/rules.md"`` in
   ``[proposer]``. {APP_NAME} protects both files, so no version can change
-  them. Give each file's contents and the optimize.toml lines in
-  ``summary``.
+  them. Give each file's contents in ``summary``.
   When the metric needs cases, write them in a JSONL file, for example
   ``data/cases.jsonl``, one ``{{"input": ..., "expected": ...}}`` object on
   each line (``expected`` is optional), and set
@@ -119,12 +143,50 @@ you return.
   user's data. {APP_NAME} hides the file from the agent and the candidate:
   the candidate gets only each case's ``input``, and the metric gets the
   whole case. When the metric needs no cases, such as a speed metric or a
-  metric that reads a test report, write no ``[data]`` section. Give the
-  ``[data]`` lines in ``summary``.
+  metric that reads a test report, write no ``[data]`` section.
   Read the files that show how the project runs and how it is judged (the
   entry point, its tests, the code the task names) with ``read_repo_file``
   and ``list_repo_folder`` before you write. Use only paths and commands
   that the files you read confirm.
+* Repository run only: ``optimize_toml`` is the whole optimize.toml at the
+  repository root; for any other run, return it empty.
+  ``context`` holds the current file, so start from it. {APP_NAME} checks
+  it with its parser, which stops at the first error and refuses any
+  section or key it does not know ("... is not a supported setting"). Use
+  only this schema. Every path is relative to the repository root.
+  - Top level, before any section: ``version = 1`` (the only version) and
+    ``instructions = "<path>"``.
+  - ``[paths]``: ``editable`` and ``protected``, lists of paths. They can
+    only narrow what the user approved, and an empty ``editable`` fails.
+  - ``[setup]``: ``command``, one shell command as text.
+  - ``[proposer]``: the role keys ``mcp`` (the path of a ``.mcp.json``
+    file), ``network`` (a list of host names, ``[]`` for no network),
+    ``services`` (names of ``[services.<name>]`` tables) and ``illegal``
+    (the path of a markdown rules file). A ``tools`` key fails: name the
+    MCP servers in the ``mcp`` file.
+  - ``[target.<name>]``, one table for each stage: ``entry`` (required),
+    ``vcpus`` (1 or an even number from 2 to 32, default 2), ``timeout``
+    (seconds for each ``skynet.call``, default 60) and the role keys.
+  - ``[run]``: ``entry`` (required when the section is there), ``timeout``
+    (seconds for each case, default 60), ``mcp``, ``services`` and
+    ``illegal``.
+  - ``[metric]``: ``files`` (a list of paths hidden from the agent),
+    ``exploits`` (a folder, default ``.optimize/exploits``), ``reference``
+    (one path), ``mcp``, ``services`` and ``illegal``. ``[run]`` and
+    ``[metric]`` share one box, so ``network`` and ``vcpus`` fail there.
+  - ``[data]``: ``cases``, the path of one JSONL file; ``split`` fails.
+  - ``[sandbox]``: ``compose``, the path of a compose file whose services
+    run beside the metric.
+  - ``[services.<name>]``: ``url`` (https, required) and ``headers``,
+    nothing else. One secret may go to one host only.
+  The errors you must avoid most: "[run] entry is missing", "network entry
+  ... must be a host name such as api.example.com, not a URL", "... is not a
+  supported setting" and "url must be an https:// address". This file is
+  valid. The paths in this example, such as docs/intent.md and
+  docs/rules.md, are placeholders: replace each one with a path that you
+  confirmed exists or a file that you write.
+
+{OPTIMIZE_TOML_EXAMPLE}
 * Return each file whole. Return a file empty to leave it unchanged.
 * Never invent the user's task or data. When only the user can settle
   something (a threshold, which command counts as success), write the best
@@ -142,10 +204,10 @@ class WorkspaceCoderSig(dspy.Signature):
     repo: str = dspy.InputField(desc="The repository's tree and key files, or why it cannot be read.")
     run_code: str = dspy.OutputField(desc="The whole run.py; empty to leave it unchanged or for a repository run.")
     metric_code: str = dspy.OutputField(desc="The whole metric.py; empty to leave it unchanged.")
+    optimize_toml: str = dspy.OutputField(desc="The whole optimize.toml; empty to leave it unchanged.")
     summary: str = dspy.OutputField(
-        desc="One or two sentences on what the code does and why, then the optimize.toml [run] section when"
-        " the metric needs one, any instructions or rule file, and the [data] cases file, with the optimize.toml"
-        " lines that name each file."
+        desc="One or two sentences on what the code does and why, then the contents of each .mcp.json,"
+        " instructions or rule file the run needs, and every secret it needs. optimize.toml comes back on its own."
     )
     open_questions: list[str] = dspy.OutputField(desc="Questions only the user can answer; empty when none.")
 
@@ -247,9 +309,10 @@ def run_coding_agent(
         github_token: As for :func:`open_repo`.
 
     Returns:
-        ``wizard_state`` with each code file the agent changed, ``summary``,
-        ``files_read``, ``open_questions`` and, when it could not read the
-        repository, ``repository_access``.
+        ``wizard_state`` with each code file and the ``optimize_toml`` the
+        agent changed, ``summary``, ``files_read``, ``open_questions``, the
+        parser's ``optimize_toml_error`` for a changed file it refuses and,
+        when the agent could not read the repository, ``repository_access``.
     """
     browser, no_repo = open_repo(context, github_token)
     if browser is not None:
@@ -274,6 +337,8 @@ def run_coding_agent(
         code = str(getattr(prediction, field, "") or "")
         if is_repo and field == "run_code":
             continue
+        if not is_repo and field == "optimize_toml":
+            continue
         if code.strip() and code != context.get(field):
             patch[field] = code
     questions = getattr(prediction, "open_questions", None) or []
@@ -285,6 +350,12 @@ def run_coding_agent(
         if isinstance(questions, list)
         else [str(questions)],
     }
+    if "optimize_toml" in patch:
+        try:
+            parse_constraints(patch["optimize_toml"].encode("utf-8", "surrogatepass"))
+        except ConstraintsError as error:
+            # The file still reaches the draft (last write wins); the setup agent relays or fixes the error.
+            result["optimize_toml_error"] = {"section": error.section, "key": error.key, "message": str(error)}
     if no_repo and is_repo:
         result["repository_access"] = no_repo
     return result

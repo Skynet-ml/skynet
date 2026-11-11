@@ -11,6 +11,7 @@ OpenAI-compatible provider at the model gateway instead.
 
 from __future__ import annotations
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_GOOSE
 from ..harness_bridge import parse_plain_output
 from . import HarnessSpec, register
@@ -39,10 +40,11 @@ GOOSE_SHA256 = {
 # protected run's relay rewrite of generated files reaches it.
 GOOSE_BASE_URL_FILE = ".app/goose/base_url"
 _LOCAL_BIN = '"$HOME/.local/bin"'
-# Skynet's effort names that ``GOOSE_THINKING_EFFORT`` spells differently;
-# goose gets no setting for a name it does not know.
-_GOOSE_THINKING_LEVELS = {"minimal": "low"}
-_GOOSE_THINKING_KNOWN = frozenset({"none", "low", "medium", "high", "max", "xhigh"})
+# Skynet's effort names that goose 1.57.0 has its own level for
+# (``ThinkingEffort::from_str``). Goose reads ``none`` as its ``off``, the same
+# level spelled differently. It reads ``xhigh`` as ``max``, a different Skynet
+# level, and has no ``minimal``, so those two are refused, not remapped.
+GOOSE_THINKING_LEVELS = ("none", "low", "medium", "high", "max")
 # Goose reads these keys for its other providers. A protected run blanks them,
 # so an inherited key never gives goose a route around the gateway.
 _PROTECTED_ENV = {
@@ -105,12 +107,17 @@ def _goose_thinking(reasoning_effort: str | None) -> dict[str, str]:
         reasoning_effort: The user's effort for the model, or ``None``.
 
     Returns:
-        The env entry, or an empty dict.
+        The env entry with the effort unchanged, or an empty dict.
+
+    Raises:
+        ServiceError: When goose has no level for the effort.
     """
     if not reasoning_effort:
         return {}
-    level = _GOOSE_THINKING_LEVELS.get(reasoning_effort, reasoning_effort)
-    return {"GOOSE_THINKING_EFFORT": level} if level in _GOOSE_THINKING_KNOWN else {}
+    if reasoning_effort not in GOOSE_THINKING_LEVELS:
+        supported = ", ".join(GOOSE_THINKING_LEVELS)
+        raise ServiceError(f"Goose does not support effort {reasoning_effort!r}. Supported efforts: {supported}.")
+    return {"GOOSE_THINKING_EFFORT": reasoning_effort}
 
 
 def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
@@ -130,6 +137,9 @@ def _goose_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When goose has no level for the effort.
     """
     # Goose 1.57.0 sends gpt-5*, gpt-6* and o* models to the Responses API
     # when the base path is the default ``v1/chat/completions``
@@ -177,5 +187,6 @@ SPEC = register(
         output_format="plain",
         protected_env=_PROTECTED_ENV,
         position=64,
+        supported_efforts=GOOSE_THINKING_LEVELS,
     )
 )

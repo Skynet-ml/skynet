@@ -16,7 +16,13 @@ import {
   SelectValue,
 } from "@/shared/ui/primitives/select";
 import { TOUCH_FIELD } from "@/shared/ui/touch";
-import { BLACKBOX_HARNESSES, harnessLabel } from "@/shared/lib/blackbox-harness";
+import {
+  BLACKBOX_HARNESSES,
+  effortHarness,
+  harnessEfforts,
+  harnessLabel,
+  keepHarnessEffort,
+} from "@/shared/lib/blackbox-harness";
 import { tip } from "@/shared/lib/tooltips";
 import { cn } from "@/shared/lib/utils";
 import { defaultOpen, useExperienceLevel } from "@/features/experience";
@@ -58,6 +64,7 @@ type Editing = {
   onSave: (config: ModelConfig) => void;
   label: string;
   modelDefaultsOnly?: boolean;
+  harnessEfforts?: readonly string[] | null;
 };
 
 /**
@@ -93,6 +100,17 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
   const reflectionLabel = t("submit.v2.optimizer.models.reflection.label");
   const updateProposer = (patch: Partial<typeof proposer>) =>
     patchOptimizer({ proposer: { ...proposer, ...patch } });
+  // The proposer harness runs the reflection model, so it limits the effort.
+  const limitingHarness = effortHarness(proposer, nativeProposer);
+  const fitHarness = (config: ModelConfig) =>
+    limitingHarness ? keepHarnessEffort(config, limitingHarness) : config;
+  // A harness, host CLI or engine change can leave a stored effort the new
+  // harness refuses; trim it here so every path that changes them is covered.
+  React.useEffect(() => {
+    if (!reflectionModel || !limitingHarness) return;
+    const fitted = keepHarnessEffort(reflectionModel, limitingHarness);
+    if (fitted !== reflectionModel) patchOptimizer({ reflectionModel: fitted });
+  }, [limitingHarness, reflectionModel, patchOptimizer]);
 
   return (
     <StepCard
@@ -164,10 +182,13 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
               config: reflectionModel ?? emptyModelConfig(),
               onSave: (next) =>
                 patchOptimizer({
-                  reflectionModel: next.name.trim() ? keepEconomy(next, reflectionModel) : null,
+                  reflectionModel: next.name.trim()
+                    ? fitHarness(keepEconomy(next, reflectionModel))
+                    : null,
                 }),
               label: reflectionLabel,
               modelDefaultsOnly: nativeProposer,
+              harnessEfforts: limitingHarness ? harnessEfforts(limitingHarness) : null,
             })
           }
           onRemove={
@@ -268,7 +289,10 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
             >
               <Select
                 value={proposer.harness}
-                onValueChange={(value) => updateProposer({ harness: value as BlackboxHarness })}
+                onValueChange={(value) => {
+                  const harness = value as BlackboxHarness;
+                  patchOptimizer({ proposer: { ...proposer, harness } });
+                }}
               >
                 <SelectTrigger id="v2-proposer-harness" className={cn("w-full", TOUCH_FIELD)}>
                   <SelectValue />
@@ -379,6 +403,7 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
           onRemoveRecent={removeRecentConfig}
           modelDefaultsOnly={editing.modelDefaultsOnly}
           remote={runSource === "hosted"}
+          harnessEfforts={editing.harnessEfforts}
         />
       )}
     </StepCard>

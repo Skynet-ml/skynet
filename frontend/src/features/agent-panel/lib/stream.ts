@@ -11,12 +11,17 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { readServerSentEvents } from "@/shared/lib/sse";
 import { dispatchGeneralistEvent } from "./stream-events";
-import { announceWalletChange, fetchWithAuthRetry } from "@/shared/lib/api";
-import { parseSourceKey } from "@/shared/lib/api-route";
+import { announceWalletChange, apiUrl, fetchWithAuthRetry } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
 // and freezes the build-time localhost fallback. See shared/lib/api.ts.
 const apiBase = () => getRuntimeEnv().apiUrl;
+
+/** The agent route on `source`; hosted goes through the linked Mac's proxy. */
+function agentUrl(path: string, source: ApiSource): string {
+  return source === "hosted" ? apiUrl(path, "hosted") : `${apiBase()}${path}`;
+}
 
 export interface GeneralistAgentRequest {
   user_message: string;
@@ -81,20 +86,18 @@ export interface GeneralistAgentHandlers {
   signal?: AbortSignal;
 }
 
-/** Stream generalist-agent events via SSE. */
+/**
+ * Stream generalist-agent events via SSE. `source` "hosted" runs the turn on
+ * the linked web account; `req.conversation_id` is then that account's id.
+ */
 export async function streamGeneralistAgent(
   req: GeneralistAgentRequest,
   handlers: GeneralistAgentHandlers,
+  source: ApiSource = "local",
 ): Promise<void> {
-  // A web chat opens read-only on the Mac: no turn goes to hosted, and the
-  // local agent never writes into a hosted conversation id.
-  if (req.conversation_id && parseSourceKey(req.conversation_id).source === "hosted") {
-    handlers.onError(msg("agent.web_chat.read_only"));
-    return;
-  }
   let res: Response;
   try {
-    res = await fetchWithAuthRetry(`${apiBase()}/optimizations/generalist-agent`, {
+    res = await fetchWithAuthRetry(agentUrl("/optimizations/generalist-agent", source), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -148,10 +151,11 @@ export async function streamGeneralistAgent(
 export async function confirmGeneralistApproval(
   callId: string,
   approved: boolean,
+  source: ApiSource = "local",
 ): Promise<boolean> {
   let res: Response;
   try {
-    res = await fetchWithAuthRetry(`${apiBase()}/optimizations/generalist-agent/confirm`, {
+    res = await fetchWithAuthRetry(agentUrl("/optimizations/generalist-agent/confirm", source), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ call_id: callId, approved }),

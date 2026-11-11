@@ -9,13 +9,13 @@ import { useSettingsModal } from "@/features/settings";
 import type { NotificationItem, NotificationTab } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { formatRelativeTime, formatScore } from "@/shared/lib/formatters";
-import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { Bell, Checks, GearSix, Stack, Target, Trash, X, type Icon } from "@/shared/ui/icons";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { TooltipBody, TooltipButton } from "@/shared/ui/tooltip-button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Sheet, SheetContent, SheetTitle } from "@/shared/ui/primitives/sheet";
 
@@ -247,7 +247,11 @@ function PanelBody({
             const active = value === tab;
             const unread = value === "focused" ? inbox.counts.focused : inbox.counts.everything;
             return (
-              <TooltipButton key={value} tooltip={msg(tip)}>
+              <TooltipButton
+                key={value}
+                dir={getActiveDir()}
+                tooltip={<TooltipBody title={msg(label)} detail={msg(tip)} centered />}
+              >
                 <button
                   type="button"
                   role="tab"

@@ -801,6 +801,8 @@ class DockerEnvironment(SandboxEnvironment):
     async def _run_box(self) -> None:
         """Start the box container.
 
+        Docker never pulls the image; a missing image fails the start.
+
         Raises:
             SandboxInfraError: Docker cannot start the container.
         """
@@ -820,6 +822,10 @@ class DockerEnvironment(SandboxEnvironment):
             "--init",
             "--name",
             name,
+            # The default pulls a missing image inside the CLI timeout, and a
+            # killed pull can still create the container after the timeout.
+            "--pull",
+            "never",
             "--network",
             egress.network if self._egress_up else "none",
             *limits,
@@ -900,6 +906,8 @@ class DockerEnvironment(SandboxEnvironment):
             "--init",
             "--name",
             egress.proxy,
+            "--pull",
+            "never",
             "--network",
             egress.network,
             "--cpus",

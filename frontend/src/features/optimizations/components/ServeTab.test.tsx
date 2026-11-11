@@ -16,10 +16,11 @@ const { getRuntimeEnv } = await import("@/shared/lib/runtime-env");
 const { msg } = await import("@/shared/lib/messages");
 
 const noop = () => {};
-const render = (enabled: boolean) =>
+const render = (enabled: boolean, endpointUrl?: string) =>
   renderToStaticMarkup(
     <ServeTabBody
       optimizationId="opt-1"
+      endpointUrl={endpointUrl}
       enabled={enabled}
       toggling={false}
       onToggle={noop}
@@ -34,6 +35,12 @@ const escape = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 void describe("ServeTabBody", () => {
+  void it("uses the serving backend's endpoint for a hosted run", () => {
+    const url = "https://api.example.test/serve/opt-1";
+    const html = render(true, url);
+    assert.ok(html.includes(url));
+    assert.ok(!html.includes(`${getRuntimeEnv().apiUrl}/serve/opt-1`));
+  });
   void it("shows only the switch and the opt-in hint while serving is off", () => {
     const html = render(false);
     assert.match(html, /role="switch"/);
