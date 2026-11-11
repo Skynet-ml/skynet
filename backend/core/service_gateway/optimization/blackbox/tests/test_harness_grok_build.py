@@ -18,7 +18,7 @@ from core.models.blackbox import BLACKBOX_HARNESS_GROK_BUILD, BLACKBOX_HARNESSES
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
 from ..harness_bridge import parse_output, parse_pi_output
 from ..harnesses import REGISTRY
-from ..harnesses.grok_build import _SESSION_ID, GROK_CONFIG_FILE, GROK_EFFORTS, GROK_VERSION
+from ..harnesses.grok_build import _SESSION_ID, GROK_CONFIG_FILE, GROK_EFFORTS, GROK_SHA256, GROK_VERSION
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
@@ -82,18 +82,24 @@ printf '%s\\n' '{"type": "assistant", "content": "subagent text"}' > "$HOME/.gro
 printf '%s\\n' "$FAKE_STREAM"
 exit "${FAKE_EXIT:-0}"
 """
-# Stand-ins for the install step's tools. ``curl`` logs the file it writes and
-# writes a fake ``grok`` that reports ``FAKE_VERSION``. macOS ``mktemp -d``
-# ignores ``TMPDIR``, so a fake one keeps the folder in scratch.
+# Stand-ins for the install step's tools. ``curl`` logs the URL and writes a
+# fake ``grok`` that reports ``FAKE_VERSION``; ``zstd`` copies it out of the
+# ``.zst`` file; ``sha256sum`` logs the line it checks and exits as told.
+# macOS ``mktemp -d`` ignores ``TMPDIR``, so a fake one keeps the folder in scratch.
 _FAKE_INSTALL_TOOLS = {
     "uname": "#!/bin/sh\necho x86_64\n",
     "mktemp": '#!/bin/sh\nd="$TMPDIR/download.$$"\nmkdir "$d" && echo "$d"\n',
     "curl": (
-        '#!/bin/sh\nprintf \'%s %s\\n\' "$3" "$4" >> "$FAKE_LOG"\n'
+        '#!/bin/sh\nprintf \'curl %s\\n\' "$4" >> "$FAKE_LOG"\n'
         '[ "${FAKE_CURL_EXIT:-0}" -eq 0 ] || exit "$FAKE_CURL_EXIT"\n'
-        'printf \'#!/bin/sh\\necho "grok %s (39d0c6872354) [stable]"\\n\' "$FAKE_VERSION" > "$3"\n'
+        'printf \'#!/bin/sh\\necho "grok %s (50ca579fa996)"\\n\' "$FAKE_VERSION" > "$3"\n'
     ),
+    "sha256sum": '#!/bin/sh\nprintf \'sha256sum %s\\n\' "$(cat)" >> "$FAKE_LOG"\nexit "${FAKE_SHA_EXIT:-0}"\n',
 }
+_FAKE_ZSTD = '#!/bin/sh\nprintf \'zstd %s %s\\n\' "$4" "$5" >> "$FAKE_LOG"\ncp "$5" "$4"\n'
+# Host tools the install needs. The run sees only these and the fakes, so a
+# real ``zstd`` on the test machine never changes which download it takes.
+_HOST_TOOLS = ("sh", "cat", "cp", "chmod", "grep", "mkdir", "mv", "rm")
 
 
 def _target() -> BlackboxTarget:
@@ -168,34 +174,47 @@ def _run_with_fake_grok(
     return result, log.read_text(), tomllib.loads(config_copy.read_text()), workspace
 
 
-def _run_install(tmp_path: Path, *, curl_exit: int = 0, version: str = GROK_VERSION) -> tuple[int, str, Path, str]:
+def _run_install(
+    tmp_path: Path, *, curl_exit: int = 0, sha_exit: int = 0, version: str = GROK_VERSION, zstd: bool = False
+) -> tuple[int, str, Path, list[str]]:
     """Run the open install command under ``set -eu`` with fake download tools.
 
     Args:
         tmp_path: Scratch directory for the fake tools, ``HOME`` and ``TMPDIR``.
         curl_exit: Exit status the fake ``curl`` returns.
+        sha_exit: Exit status the fake ``sha256sum`` returns.
         version: Version the downloaded fake ``grok`` reports.
+        zstd: Put a fake ``zstd`` on ``PATH``.
 
     Returns:
-        The exit status, the stdout, the ``TMPDIR`` folder, and the fake ``curl`` log.
+        The exit status, the stdout, the ``TMPDIR`` folder, and the fake tools' log lines.
     """
     install = build_launch(_target(), _GATEWAY).install_command
     assert install is not None
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, script in _FAKE_INSTALL_TOOLS.items():
+    fakes = {**_FAKE_INSTALL_TOOLS, **({"zstd": _FAKE_ZSTD} if zstd else {})}
+    for name, script in fakes.items():
         tool = bin_dir / name
         tool.write_text(script)
         tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    for name in _HOST_TOOLS:
+        found = shutil.which(name)
+        assert found is not None, name
+        (host_dir / name).symlink_to(found)
     scratch = tmp_path / "tmp"
     scratch.mkdir()
-    log = tmp_path / "curl.log"
+    log = tmp_path / "tools.log"
+    log.touch()
     env = {
-        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+        "PATH": f"{bin_dir}{os.pathsep}{host_dir}",
         "HOME": str(tmp_path / "home"),
         "TMPDIR": str(scratch),
         "FAKE_LOG": str(log),
         "FAKE_CURL_EXIT": str(curl_exit),
+        "FAKE_SHA_EXIT": str(sha_exit),
         "FAKE_VERSION": version,
     }
     shell = shutil.which("bash") or "/bin/sh"
@@ -208,7 +227,7 @@ def _run_install(tmp_path: Path, *, curl_exit: int = 0, version: str = GROK_VERS
         timeout=10,
         check=False,
     )
-    return result.returncode, result.stdout, scratch, log.read_text()
+    return result.returncode, result.stdout, scratch, log.read_text().splitlines()
 
 
 def test_grok_build_is_registered_before_cline_with_its_pin() -> None:
@@ -272,29 +291,56 @@ def test_open_install_downloads_the_pinned_binary_without_a_remote_script() -> N
     assert install is not None
     assert install.startswith(f'export PATH="$HOME/.grok/bin":"$PATH"; {pinned_harness_check("grok_build")} || {{ ')
     assert f'"https://x.ai/cli/grok-{GROK_VERSION}-linux-$a"' in install
+    assert f'"https://x.ai/cli/grok-{GROK_VERSION}-linux-$a.zst"' in install
+    assert install.index("sha256sum -c -") < install.index('"$d/grok" --version')
+    for arch, digest in GROK_SHA256.items():
+        assert f"a={arch}; s={digest};;" in install
     assert "install.sh" not in install
     assert "| bash" not in install
-    assert "| sh" not in install
+    assert "| sh " not in install
+    assert not install.endswith("| sh")
     assert "sudo" not in install
 
 
-def test_install_puts_the_pinned_binary_on_path_and_removes_the_download_folder(tmp_path: Path) -> None:
-    """Install the binary, remove the download folder, and let the caller's script continue."""
-    code, stdout, scratch, curl_log = _run_install(tmp_path)
+def test_pinned_digests_are_the_release_binaries() -> None:
+    """Pin the sha256 of the 1.0.77 Linux binaries, taken from xAI's downloads on 2026-11-10."""
+    assert GROK_SHA256 == {
+        "x86_64": "b702950aa5827d855e493278ab6215a4e0f5bceb5bba6c6243a9f55cdd143b0a",
+        "aarch64": "b30eee14a656124ef3c9da8577b5e783ef2cffabeb2b679c5c49633e77eed574",
+    }
+
+
+@pytest.mark.parametrize(
+    ("zstd", "expected"),
+    [
+        (False, [f"curl https://x.ai/cli/grok-{GROK_VERSION}-linux-x86_64"]),
+        (True, [f"curl https://x.ai/cli/grok-{GROK_VERSION}-linux-x86_64.zst", "zstd"]),
+    ],
+)
+def test_install_checks_the_digest_puts_grok_on_path_and_removes_the_download_folder(
+    tmp_path: Path, zstd: bool, expected: list[str]
+) -> None:
+    """Fetch the ``.zst`` file when zstd exists, else the raw binary, check its digest and install it."""
+    code, stdout, scratch, calls = _run_install(tmp_path, zstd=zstd)
 
     assert code == 0
     assert stdout.strip() == "after-install"
     assert (tmp_path / "home" / ".grok" / "bin" / "grok").is_file()
-    assert curl_log.split()[1] == f"https://x.ai/cli/grok-{GROK_VERSION}-linux-x86_64"
+    assert [line.split(" ", 2)[0] if line.startswith("zstd") else line for line in calls[:-1]] == expected
+    assert calls[-1].startswith(f"sha256sum {GROK_SHA256['x86_64']}  ")
+    assert calls[-1].endswith("/grok")
     assert list(scratch.iterdir()) == []
 
 
-@pytest.mark.parametrize(("curl_exit", "version", "code"), [(22, GROK_VERSION, 22), (0, "1.0.78", 1)])
-def test_failed_download_or_wrong_version_removes_the_download_folder_and_fails(
-    tmp_path: Path, curl_exit: int, version: str, code: int
+@pytest.mark.parametrize(
+    ("curl_exit", "sha_exit", "version", "code"),
+    [(22, 0, GROK_VERSION, 22), (0, 1, GROK_VERSION, 1), (0, 0, "1.0.78", 1)],
+)
+def test_failed_download_digest_or_version_removes_the_download_folder_and_fails(
+    tmp_path: Path, curl_exit: int, sha_exit: int, version: str, code: int
 ) -> None:
-    """Remove the download folder when the download fails or the binary is another release, and exit non-zero."""
-    exit_code, stdout, scratch, _ = _run_install(tmp_path, curl_exit=curl_exit, version=version)
+    """Remove the download folder when the download, the digest or the version check fails, and exit non-zero."""
+    exit_code, stdout, scratch, _ = _run_install(tmp_path, curl_exit=curl_exit, sha_exit=sha_exit, version=version)
 
     assert exit_code == code
     assert "after-install" not in stdout
@@ -304,15 +350,24 @@ def test_failed_download_or_wrong_version_removes_the_download_folder_and_fails(
 
 @pytest.mark.parametrize("effort", GROK_EFFORTS)
 def test_every_grok_effort_passes_unchanged(effort: str) -> None:
-    """Pass each level Grok Build knows as ``--reasoning-effort`` with the same spelling."""
+    """Pass each level Grok Build knows as ``--reasoning-effort`` with the same spelling, and declare it on the model.
+
+    Grok 1.0.77 drops the flag with only a warning when the custom model's menu
+    lacks the level, so the config must list it.
+    """
     launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
     assert f'--model "$APP_MODEL" --reasoning-effort {effort} < /dev/null' in launch.run_command
+    config = tomllib.loads(launch.files[GROK_CONFIG_FILE])
+    assert config["model"][_MODEL]["reasoning_efforts"] == [{"value": effort}]
 
 
 def test_no_effort_sends_no_flag() -> None:
     """Leave the effort to Grok's default when the user sets none."""
-    assert "--reasoning-effort" not in build_launch(_target(), _GATEWAY).run_command
+    launch = build_launch(_target(), _GATEWAY)
+
+    assert "--reasoning-effort" not in launch.run_command
+    assert "reasoning_efforts" not in launch.files[GROK_CONFIG_FILE]
 
 
 @pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH", ""])

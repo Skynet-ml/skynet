@@ -28,9 +28,16 @@ from .base import _PROMPT_ARG, ENV_API_KEY, ENV_MODEL, GatewayConfig, HarnessLau
 # The ``stable`` release that ``https://x.ai/cli/stable`` served on 2026-11-10.
 GROK_VERSION = "1.0.77"
 GROK_BINARY = "grok"
-# The address ``install.sh`` downloads a pinned release from. xAI publishes no
-# checksum for it, so the install checks the version the binary reports.
+# The address ``install.sh`` downloads a pinned release from, raw or with a
+# ``.zst`` suffix.
 _RELEASE_URL = f"https://x.ai/cli/grok-{GROK_VERSION}-linux"
+# sha256 of the release binary, taken on 2026-11-10 from the downloaded ``.zst``
+# files after decompression (each matches the raw file's Content-Length). xAI
+# publishes no checksum, so a swapped binary fails the install instead of running.
+GROK_SHA256 = {
+    "x86_64": "b702950aa5827d855e493278ab6215a4e0f5bceb5bba6c6243a9f55cdd143b0a",
+    "aarch64": "b30eee14a656124ef3c9da8577b5e783ef2cffabeb2b679c5c49633e77eed574",
+}
 _GROK_BIN = '"$HOME/.grok/bin"'
 _PATH_EXPORT = f'export PATH={_GROK_BIN}:"$PATH"'
 _DOWNLOADED = '"$d/grok"'
@@ -177,7 +184,7 @@ def _effort_flag(reasoning_effort: str | None) -> str:
     return f" --reasoning-effort {reasoning_effort}"
 
 
-def _config_toml(model: str, gateway_url: str) -> str:
+def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> str:
     """Return the Grok ``config.toml`` that routes every model role to the gateway.
 
     JSON string literals are valid TOML basic strings, so ``json.dumps``
@@ -186,6 +193,7 @@ def _config_toml(model: str, gateway_url: str) -> str:
     Args:
         model: Target model id as the gateway knows it.
         gateway_url: Validated gateway base URL.
+        reasoning_effort: A level from :data:`GROK_EFFORTS`, or ``None`` for Grok's default.
 
     Returns:
         The TOML text.
@@ -204,6 +212,14 @@ def _config_toml(model: str, gateway_url: str) -> str:
         f"[model.{slug}]\nname = {slug}\nmodel = {slug}\n"
         f"base_url = {json.dumps(gateway_url)}\nenv_key = {json.dumps(ENV_API_KEY)}\n"
         'api_backend = "chat_completions"\n'
+        # Grok 1.0.77 drops ``--reasoning-effort`` with only a warning for a
+        # custom model whose menu lacks the level, and the gateway's model list
+        # advertises none. Declaring the level keeps it on the wire.
+        + (
+            f"\n[[model.{slug}.reasoning_efforts]]\nvalue = {json.dumps(reasoning_effort)}\n"
+            if reasoning_effort
+            else ""
+        )
     )
 
 
@@ -212,20 +228,29 @@ def _grok_install() -> str:
 
     Returns:
         The shell command. It downloads the release binary into a fresh
-        folder, checks the version it reports, and moves it into
-        ``$HOME/.grok/bin``. It removes the download folder on success and on
-        failure, and exits non-zero when a step fails.
+        folder, checks its sha256 digest and then the version it reports, and
+        moves it into ``$HOME/.grok/bin``. It removes the download folder on
+        success and on failure, and exits non-zero when a step fails.
     """
+    arch_cases = " ".join(
+        f"{pattern}) a={arch}; s={GROK_SHA256[arch]};;"
+        for pattern, arch in (("x86_64|amd64", "x86_64"), ("aarch64|arm64", "aarch64"))
+    )
     # The bootstrap runs this inside its own ``set -eu`` script, so the step
     # records its status with ``|| r=$?`` (exempt from ``set -e``) and removes
     # the download folder before it fails, rather than with an EXIT trap that
     # would replace the caller's.
     return (
         f"{_PATH_EXPORT}; {_version_check(GROK_BINARY, GROK_VERSION)} || {{ "
-        'case "$(uname -m)" in x86_64|amd64) a=x86_64;; aarch64|arm64) a=aarch64;; '
-        '*) echo "grok: unsupported architecture" >&2; exit 1;; esac; '
+        f'case "$(uname -m)" in {arch_cases} *) echo "grok: unsupported architecture" >&2; exit 1;; esac; '
         'd="$(mktemp -d)"; r=0; '
-        f'curl -fsSL -o "$d/grok" "{_RELEASE_URL}-$a" && chmod 755 "$d/grok" && '
+        # The ``.zst`` file is about a third of the raw size. The runtime image
+        # has no zstd, so the raw file is the fallback, as in xAI's install.sh.
+        # Both paths check the digest of the final binary before it runs.
+        "{ if command -v zstd >/dev/null 2>&1; then "
+        f'curl -fsSL -o "$d/grok.zst" "{_RELEASE_URL}-$a.zst" && zstd -q -d -o "$d/grok" "$d/grok.zst"; '
+        f'else curl -fsSL -o "$d/grok" "{_RELEASE_URL}-$a"; fi; }} && '
+        'echo "$s  $d/grok" | sha256sum -c - >/dev/null && chmod 755 "$d/grok" && '
         f"{_version_check(_DOWNLOADED, GROK_VERSION)} && "
         f'mkdir -p {_GROK_BIN} && mv "$d/grok" {_GROK_BIN}/grok || r=$?; '
         'rm -rf "$d"; [ "$r" -eq 0 ] || exit "$r"; }'
@@ -269,7 +294,7 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_grok_install(),
-        files={GROK_CONFIG_FILE: _config_toml(model, _gateway_url(gateway))},
+        files={GROK_CONFIG_FILE: _config_toml(model, _gateway_url(gateway), reasoning_effort)},
         run_command=run_command,
         env=env,
         parse_output=parse_pi_output,
