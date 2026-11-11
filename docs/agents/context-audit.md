@@ -6,12 +6,12 @@ and list what to cut.
 
 ## 1. Summary
 
-- A Claude Code session in this repo loads about **121k tokens before the
+- A Claude Code session in this repo loads about **119k tokens before the
   first action**. About 54k of it is the desktop app's own tool schemas.
-- The user controls about **24–28k tokens** of the rest. The biggest parts are
-  unused MCP servers and connectors (about 14–18k), duplicated global
-  instructions (about 7.3k), unused plugin skills (about 2k) and MCP server
-  instructions (about 1.1k).
+- The user controls about **24–28k tokens** of the rest. Unused MCP servers
+  and connectors cost about 14–18k. Global and repo instruction trims save
+  about 7.3k. Unused plugin skills cost about 2k, and MCP server instructions
+  about 1.1k.
 - Each PR task also reads two overlapping 20 KB policy files (about 11k
   tokens). One of them can defer to the other (about 5.5k saved per PR task).
 - The repo files are small (about 13 KB loaded). This PR trims them only a
@@ -103,7 +103,7 @@ keeps more recent context after each compaction.
 1. **Turn off unused MCP servers and connectors in Skynet sessions.**
    About 14k tokens (about 18k with Vercel). See §6.
 2. **Apply the global instruction trims.** About 6.6k tokens on every session
-   in every repo, plus about 0.6k in Skynet. See §7.
+   in every repo, plus about 0.65k in Skynet. See §7.
 3. **Make the per-PR policy file defer to the repo skill for Skynet.** About
    5.5k tokens per PR task. See §7.
 4. **Turn off unused plugin skill groups for Skynet.** About 2k tokens. See §6.
