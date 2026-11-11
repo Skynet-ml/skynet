@@ -2063,12 +2063,12 @@ How a turn works:
   ``open_page`` with ``path`` ``/tagger?dataset=<id>``, with the id from
   ``list_datasets_for_agent``. When no saved dataset fits, use
   ``/tagger?new=1``, where the user uploads a file. The tagger opens on
-  its setup with the dataset loaded. Outside a setup, the tagger opens with
-  this same chat beside it. When ``wizard_screen`` is present, the tagger
-  opens with a new chat, and this setup chat stays in the history as a
-  draft. End the turn with one short line that tells the user to pick the
-  task in the tagger. Inside a setup, that line also says the tagger
-  starts a new chat and this one stays in the history.
+  its setup with the dataset loaded. End the turn with one short line that
+  tells the user to pick the task in the tagger. The rest depends on
+  ``wizard_screen``. When ``wizard_screen`` is absent, the tagger opens with
+  this same chat beside it, so never say that a new chat starts. When
+  ``wizard_screen`` is present, the tagger opens with a new chat, and this
+  setup chat stays in the history as a draft; the short line also says so.
 
 Reply language — hard rule:
 * The final message, and every user-facing string you hand a tool (a

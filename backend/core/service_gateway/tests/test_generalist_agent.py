@@ -306,7 +306,11 @@ def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
     assert "``/tagger?new=1``" in prompt
     # Only outside a setup does the chat stay; the setup ends its own chat
     # when the wizard closes, so the prompt must not promise the same chat there.
-    assert "Outside a setup, the tagger opens with this same chat beside it" in prompt
+    # On the PR preview the model told a dashboard user that a new chat starts,
+    # so each case names the ``wizard_screen`` signal that selects it.
+    assert "When ``wizard_screen`` is absent, the tagger opens with this same chat beside it" in prompt
+    assert "never say that a new chat starts" in prompt
+    assert "When ``wizard_screen`` is present, the tagger opens with a new chat" in prompt
     assert "the tagger opens with a new chat" in prompt
     assert "this setup chat stays in the history as a draft" in prompt
     assert "The tagger opens with this same chat" not in prompt
