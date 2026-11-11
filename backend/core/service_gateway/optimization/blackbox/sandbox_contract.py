@@ -1,6 +1,6 @@
 """Sandbox contract shared by every runtime: specs, results, sessions and naming.
 
-A leaf module, so a runtime module (``docker_sandbox``) and the settings
+A leaf module, so a runtime module (``sandbox_runtime``) and the settings
 factories in ``sandbox`` can both use it without importing each other.
 """
 
@@ -10,15 +10,15 @@ import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-# ``timeout --signal=KILL`` exits 124 when it fired; 137 is the shell dying of the KILL itself.
-_TIMEOUT_EXIT_CODES = frozenset({124, 137})
+if TYPE_CHECKING:
+    from ....sandbox.services import ComposeService
+
 # Slack past the in-sandbox timeout before the service kills the wrapper as well.
 KILL_GRACE_SECONDS = 15.0
 # Called with the stream name (``stdout``/``stderr``) and each new piece of output.
 OutputSink = Callable[[str, str], None]
-_BRIEF_COMMAND_CHARS = 80
 # Every sandbox carries this tag so stragglers from a crashed worker can be found and destroyed.
 # Both tags are stored on live Vercel sandboxes and queried by the straggler sweep;
 # renaming them would hide boxes created before the rename.
@@ -50,6 +50,12 @@ class SandboxSpec:
     # Holds code no optimizer may read (the metric): a local workspace opens
     # under a private root instead of beside proposer workspaces.
     private: bool = False
+    # The repository's ``[sandbox] compose`` services; a runtime that cannot
+    # run them refuses the spec instead of opening a box without them.
+    services: tuple[ComposeService, ...] = ()
+    # Start from this after-setup snapshot. A runtime without snapshots
+    # ignores it and opens a normal box, so callers always check the tree.
+    snapshot_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,19 +160,6 @@ def unique_sandbox_name(stem: str) -> str:
     safe = _NAME_UNSAFE.sub("-", stem.lower()).strip("-")
     head = safe[: _NAME_MAX_CHARS - _NAME_SUFFIX_CHARS - 1].rstrip("-")
     return f"{head}-{uuid.uuid4().hex[:_NAME_SUFFIX_CHARS]}"
-
-
-def _brief(command: str) -> str:
-    """Shorten ``command`` for an error message.
-
-    Args:
-        command: The shell command line.
-
-    Returns:
-        Its first line, cut to a readable length.
-    """
-    head = command.strip().splitlines()[0] if command.strip() else ""
-    return head if len(head) <= _BRIEF_COMMAND_CHARS else head[: _BRIEF_COMMAND_CHARS - 1] + "…"
 
 
 def _pump(name: str, pipe: Any, captured: list[str], on_output: OutputSink | None) -> None:

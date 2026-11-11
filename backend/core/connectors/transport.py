@@ -66,12 +66,16 @@ def raise_for_status(response: httpx.Response, provider: str) -> None:
         provider: Connector name for the message.
 
     Raises:
-        DomainError: 401/403 as ``rejected``, 404 as ``not_found``, anything
+        DomainError: 429, or 403 with no calls left, as ``rate_limited``;
+            other 401/403 as ``rejected``, 404 as ``not_found``, anything
             else 4xx/5xx as ``provider_error``.
     """
     status = response.status_code
     if status < 400:
         return
+    # GitHub answers a spent quota (60 calls an hour without a token) with 403, not 429.
+    if status == 429 or (status == 403 and response.headers.get("x-ratelimit-remaining") == "0"):
+        raise DomainError("connectors.rate_limited", status=429, provider=label(provider))
     if status in (401, 403):
         raise DomainError("connectors.rejected", status=409, provider=label(provider))
     if status == 404:

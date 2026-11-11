@@ -17,7 +17,6 @@ import pytest
 
 from core.sandbox import SandboxSpec, factory
 from core.sandbox.errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -676,24 +675,26 @@ async def test_exec_rejects_sudo(server: FakeServer) -> None:
     assert server.runs == []
 
 
-async def test_server_command_timeout_raises_run_timeout(server: FakeServer) -> None:
-    """Raise RunTimeoutError for the SDK command timeout and kill the command."""
+async def test_server_command_timeout_returns_a_timed_out_result(server: FakeServer) -> None:
+    """Return a timed-out result for the SDK command timeout and kill the command."""
     async with LangSmithEnvironment(_SPEC) as env:
         handle = FakeHandle(FakeResult("", "", 0), error=FakeCommandTimeoutError("late"))
         server.next_handle = handle
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 99", timeout_sec=5)
+        result = await env.exec("sleep 99", timeout_sec=5)
+        assert (result.exit_code, result.timed_out) == (124, True)
     assert handle.killed.is_set()
 
 
-async def test_local_deadline_raises_run_timeout_and_kills(server: FakeServer, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Raise RunTimeoutError when the stream outlives the local deadline, and kill the command."""
+async def test_local_deadline_returns_a_timed_out_result_and_kills(
+    server: FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return a timed-out result when the stream outlives the local deadline, and kill the command."""
     monkeypatch.setattr(langsmith, "_EXEC_TIMEOUT_GRACE_SECONDS", -0.95)
     async with LangSmithEnvironment(_SPEC) as env:
         handle = FakeHandle(FakeResult("", "", 0), block=True)
         server.next_handle = handle
-        with pytest.raises(RunTimeoutError):
-            await env.exec("sleep 99", timeout_sec=1)
+        result = await env.exec("sleep 99", timeout_sec=1)
+        assert (result.exit_code, result.timed_out) == (124, True)
     assert handle.killed.is_set()
 
 

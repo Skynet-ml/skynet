@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host}, {expected} değil. Skynet yalnızca gitlab.com ve Bitbucket Cloud'a bağlanır, kendi yönettiğiniz sunuculara bağlanmaz. Deponun {expected} adresini kullanın veya depoyu {expected} üzerine taşıyın.",
     "connectors.not_connected": "Önce {provider} hesabınızı bağlayın.",
     "connectors.not_found": "Bu öğe {provider} üzerinde bulunamadı veya hesabınızın erişimi yok.",
+    "connectors.rate_limited": "{provider} istek sınırına ulaşıldı. Daha sonra tekrar deneyin.",
     "connectors.oauth_failed": "{provider} ile oturum açma tamamlanamadı. Tekrar deneyin.",
     "connectors.oauth_not_configured": "{provider} ile oturum açma bu dağıtımda ayarlanmamış. Bunun yerine kimlik bilgilerini yapıştırın.",
     "connectors.oauth_state_invalid": "Oturum açma bağlantısı geçersiz veya süresi dolmuş. Yeniden başlayın.",

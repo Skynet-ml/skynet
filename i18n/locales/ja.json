@@ -132,6 +132,7 @@
     "connectors.other_repo_host": "{host} は {expected} ではありません。Skynet が接続できるのは gitlab.com と Bitbucket Cloud だけで、セルフマネージドのサーバーには接続できません。リポジトリの {expected} のアドレスを使うか、リポジトリを {expected} に移してください。",
     "connectors.not_connected": "先に{provider}アカウントを接続してください。",
     "connectors.not_found": "{provider}でその項目が見つからないか、アカウントにアクセス権がありません。",
+    "connectors.rate_limited": "{provider}のリクエスト上限に達しました。しばらくしてからもう一度お試しください。",
     "connectors.oauth_failed": "{provider}のサインインが完了しませんでした。もう一度お試しください。",
     "connectors.oauth_not_configured": "この環境では{provider}でのサインインが設定されていません。代わりに認証情報を入力してください。",
     "connectors.oauth_state_invalid": "サインインリンクが無効か、有効期限が切れています。最初からやり直してください。",

@@ -27,7 +27,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     read_constraints,
     read_constraints_file,
 )
-from ..service_gateway.optimization.blackbox.repo_tree import inside
+from ..service_gateway.optimization.blackbox.repo_tree import case_insensitive, fold_case, inside
 
 Place = Literal["local", "cloud"]
 
@@ -240,57 +240,67 @@ def check_hidden(
     *,
     place: Place,
     optional_paths: Collection[str] = (),
+    labels: Mapping[str, str] | None = None,
 ) -> list[GateFailure]:
-    """List every metric file the agent's tree still shows.
+    """List every hidden file the agent's tree still shows.
 
     A file fails when the agent's tree holds it under a hidden path, when the
     full tree has a symbolic link under a hidden path whose target outside
     the hidden paths the agent can still read, or when a hidden path lies
     below a symbolic link. A hidden path that matches no file also fails,
-    unless it is optional.
+    unless it is optional. On a disk that ignores case, paths compare
+    without case, as in the strip.
 
     Args:
         original_archive: The full tree that ``stage_repository`` fetched.
         agent_archive: The stripped tree the proposer's workspace receives.
-        hidden_paths: The ``[metric] files`` entries and the exploit folder.
+        hidden_paths: Every scoring-side path, from ``hidden_repo_paths``.
         place: Where the run's sandbox runs.
         optional_paths: Hidden paths that may match no file, such as the
             exploit folder.
+        labels: The ``optimize.toml`` setting that names each hidden path;
+            a path it does not hold is labelled ``[metric] files``.
 
     Returns:
-        One failure per visible path; an empty list means the metric is hidden.
+        One failure per visible path, labelled with the setting of the hidden
+        path that covers it; an empty list means every hidden path is hidden.
     """
-    hidden = [posixpath.normpath(path) for path in hidden_paths]
+    fold = fold_case(case_insensitive(agent_archive.parent))
+    hidden = [fold(posixpath.normpath(path)) for path in hidden_paths]
+    label_of = {fold(posixpath.normpath(path)): label for path, label in (labels or {}).items()}
     with tarfile.open(agent_archive) as packed:
-        visible = [posixpath.normpath(name) for name in packed.getnames()]
+        visible = [fold(posixpath.normpath(name)) for name in packed.getnames()]
     with tarfile.open(original_archive) as packed:
         members = packed.getmembers()
-    names = [posixpath.normpath(member.name) for member in members]
+    names = [fold(posixpath.normpath(member.name)) for member in members]
     links = [member for member in members if member.issym()]
+    link_names = [fold(posixpath.normpath(member.name)) for member in links]
     targets = [
-        target
-        for member in links
-        if inside(posixpath.normpath(member.name), hidden)
+        (target, root)
+        for member, name in zip(links, link_names, strict=True)
+        for root in hidden
+        if inside(name, [root])
         and not inside(
-            target := posixpath.normpath(
-                posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname)
-            ),
+            target := fold(posixpath.normpath(posixpath.join(posixpath.dirname(name), member.linkname))),
             hidden,
         )
     ]
-    optional = {posixpath.normpath(path) for path in optional_paths}
+    optional = {fold(posixpath.normpath(path)) for path in optional_paths}
     # A misspelled metric path hides nothing, so the agent could read the
     # real metric; the run stops instead of guessing (SKY-353).
-    leaked = [path for path in hidden if path not in optional and not any(inside(name, [path]) for name in names)]
+    leaked = [
+        (path, path) for path in hidden if path not in optional and not any(inside(name, [path]) for name in names)
+    ]
     # A hidden path below a linked folder lives at the link's target, which the
     # strip cannot see by name, so the run stops instead of guessing.
-    leaked += [path for path in hidden if any(path.startswith(posixpath.normpath(link.name) + "/") for link in links)]
-    leaked += [path for path in visible if inside(path, hidden)]
-    leaked += [path for path in targets if any(inside(name, [path]) for name in visible)]
-    return [
-        _failure("[metric] files", place, _UNENFORCED_CODE[place], key=f"[metric] files: {path}")
-        for path in dict.fromkeys(leaked)
-    ]
+    leaked += [(path, path) for path in hidden if any(path.startswith(link + "/") for link in link_names)]
+    leaked += [(path, root) for path in visible for root in hidden if inside(path, [root])]
+    leaked += [(path, root) for path, root in targets if any(inside(name, [path]) for name in visible)]
+    failures: dict[str, GateFailure] = {}
+    for path, root in leaked:
+        label = label_of.get(root, "[metric] files")
+        failures.setdefault(path, _failure(label, place, _UNENFORCED_CODE[place], key=f"{label}: {path}"))
+    return list(failures.values())
 
 
 def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -> list[tuple[str, str]]:

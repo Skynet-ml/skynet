@@ -28,7 +28,7 @@ from typing import Any, ClassVar, Literal
 
 from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
-from ..errors import RunTimeoutError, SandboxFatalError
+from ..errors import SandboxFatalError
 from ..resources import ResourceMode, SandboxSpec
 from ..telemetry import current_output_sink
 from ..timeouts import Phase, PhaseTimeouts
@@ -66,6 +66,8 @@ _GONE_CODES = frozenset({"NOT_FOUND", "VM_NOT_FOUND"})
 _TIMEOUT_GRACE_SEC = 30.0
 # How long a cancelled start or stop waits for an open SDK call before the cancel passes on.
 _CANCEL_GRACE_SEC = 0.5
+# The provider contract reports a timeout as exit code 124, like GNU timeout.
+_TIMEOUT_EXIT_CODE = 124
 
 # The machines of this process, for the job sweep.
 _LIVE: set[SmolEnvironment] = set()
@@ -210,11 +212,11 @@ class SmolEnvironment(SandboxEnvironment):
             sudo: Run the command as root instead of the image user.
 
         Returns:
-            The exit code and the captured output.
+            The exit code and the captured output. When the command runs past
+            the time limit, the result has exit code 124 and ``timed_out`` set.
 
         Raises:
             RuntimeError: The machine is not running.
-            RunTimeoutError: The command ran past the time limit.
         """
         machine = self._require_running()
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
@@ -234,7 +236,7 @@ class SmolEnvironment(SandboxEnvironment):
             # The SDK reports an expired exec as an error with no documented
             # code, so a failure at or past the limit counts as a timeout.
             if limit is not None and loop.time() - started >= limit:
-                raise RunTimeoutError(limit) from None
+                return ExecResult(exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
             raise
         stdout, stderr = result.stdout or "", result.stderr or ""
         if sink is not None:

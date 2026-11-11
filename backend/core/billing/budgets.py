@@ -313,6 +313,25 @@ def _admission(
     )
 
 
+def _release_reserved(session: Session, budget: ExecutionBudgetModel, now: datetime) -> None:
+    """Release every undispatched reservation of a locked budget.
+
+    Args:
+        session: Transaction that holds the wallet and budget locks.
+        budget: Locked envelope whose unstarted work no longer runs.
+        now: Update time for the released operations.
+    """
+    for operation in session.scalars(
+        select(ExecutionOperationModel).where(
+            ExecutionOperationModel.budget_id == budget.id, ExecutionOperationModel.state == "reserved"
+        )
+    ):
+        budget.reserved_units -= operation.max_units
+        budget.wallet_reserved_units -= operation.max_wallet_units
+        operation.state = "released"
+        operation.updated_at = now
+
+
 class BudgetService:
     """Own budget admission, immutable usage evidence and exactly-once settlement."""
 
@@ -1537,21 +1556,44 @@ class BudgetService:
             session.get(BillingCustomerModel, username, with_for_update=True)
             budget = session.get(ExecutionBudgetModel, budget_id, with_for_update=True)
             assert budget is not None
-            for operation in session.scalars(
-                select(ExecutionOperationModel).where(
-                    ExecutionOperationModel.budget_id == budget_id, ExecutionOperationModel.state == "reserved"
-                )
-            ):
-                budget.reserved_units -= operation.max_units
-                budget.wallet_reserved_units -= operation.max_wallet_units
-                operation.state = "released"
-                operation.updated_at = now
+            _release_reserved(session, budget, now)
             if budget.state != "blocked":
                 budget.state = "closed"
                 budget.blocked_reason = "job_deleted"
             budget.job_id = None
             budget.updated_at = now
         return len(owned)
+
+    def close_for_failed_job(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
+        """Close a failed job's envelope and return the holds of work that never started.
+
+        Settled usage stays billed. Dispatched and pending work keeps its
+        coverage until its usage settles or reconciles. The job stays attached,
+        so a resume can reopen admission once that work is reconciled.
+
+        Args:
+            budget_id: Envelope of the job that reached a terminal failure.
+            username: Authenticated owner.
+            expected_generation: Epoch of the worker that saw the failure.
+
+        Returns:
+            Closed budget with only the coverage of started work still held,
+            or the unchanged budget when a resume already fenced that epoch.
+        """
+        with self._transaction() as session:
+            wallet, budget = self._locked(session, budget_id, username)
+            # A manual resume can fence a new epoch between the failed status
+            # write and this close. The new epoch's holds and admission are
+            # not this worker's to end.
+            if budget.generation != expected_generation:
+                return self._snapshot(session, budget, wallet)
+            now = datetime.now(UTC)
+            _release_reserved(session, budget, now)
+            if budget.state not in {"blocked", "closed"}:
+                budget.state = "closed"
+                budget.blocked_reason = "job_failed"
+            budget.updated_at = now
+            return self._snapshot(session, budget, wallet)
 
     def resume_admission(self, budget_id: str, username: str, *, expected_generation: int) -> BudgetSnapshot:
         """Reopen an explicitly resumed attached job after obligations are reconciled.

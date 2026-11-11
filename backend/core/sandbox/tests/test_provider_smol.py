@@ -24,7 +24,7 @@ from core.sandbox import (
     SandboxSpecError,
     factory,
 )
-from core.sandbox.errors import RunTimeoutError, SandboxFatalError
+from core.sandbox.errors import SandboxFatalError
 from core.sandbox.factory import ProductionNotAllowedError
 from core.sandbox.providers import smol as smol_provider
 from core.sandbox.providers.smol import SmolEnvironment, machine_name, network_args, resource_spec
@@ -334,16 +334,16 @@ async def test_exec_before_start_raises() -> None:
 
 
 async def test_local_deadline_bounds_a_hung_exec(fake_smol: FakeSmol, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Raise a run timeout when the SDK exec hangs past the limit."""
+    """Return a timed-out result when the SDK exec hangs past the limit."""
     monkeypatch.setattr(smol_provider, "_TIMEOUT_GRACE_SEC", 0.0)
     async with SmolEnvironment(_SPEC) as env:
         fake_smol.exec_hook = asyncio.Event().wait
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.05)
+        result = await env.exec("true", timeout_sec=0.05)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_sdk_error_past_the_limit_becomes_a_run_timeout(fake_smol: FakeSmol) -> None:
-    """Treat an SDK error that arrives at the limit as a run timeout."""
+    """Treat an SDK error that arrives at the limit as a timed-out result."""
 
     async def slow_failure() -> None:
         await asyncio.sleep(0.06)
@@ -351,8 +351,8 @@ async def test_sdk_error_past_the_limit_becomes_a_run_timeout(fake_smol: FakeSmo
 
     async with SmolEnvironment(_SPEC) as env:
         fake_smol.exec_hook = slow_failure
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.05)
+        result = await env.exec("true", timeout_sec=0.05)
+        assert (result.exit_code, result.timed_out) == (124, True)
 
 
 async def test_sdk_error_before_the_limit_passes_on(fake_smol: FakeSmol) -> None:

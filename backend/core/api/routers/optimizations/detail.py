@@ -824,8 +824,7 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         """
         job_data = _load_job_for_owner(job_store, optimization_id, current_user)
         job_status = status_to_job_status(job_data.get("status", "pending"))
-        list_candidates = getattr(job_store, "list_run_candidates", None)
-        candidates = [] if list_candidates is None else list_candidates(optimization_id, limit=limit + 1, offset=offset)
+        candidates = job_store.list_run_candidates(optimization_id, limit=limit + 1, offset=offset)
         page = candidates[:limit]
         return RunCandidateList.model_validate(
             {
@@ -871,10 +870,8 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         """
         job_data = _load_job_for_owner(job_store, optimization_id, current_user)
         job_status = status_to_job_status(job_data.get("status", "pending"))
-        list_calls = getattr(job_store, "list_run_calls", None)
-        get_candidate = getattr(job_store, "get_run_candidate", None)
-        calls = [] if list_calls is None else list_calls(optimization_id, candidate_id, since=since, limit=limit + 1)
-        candidate = None if get_candidate is None else get_candidate(optimization_id, candidate_id)
+        calls = job_store.list_run_calls(optimization_id, candidate_id, since=since, limit=limit + 1)
+        candidate = job_store.get_run_candidate(optimization_id, candidate_id)
         # A candidate with no call yet may still start: it counts as running
         # until the run itself ends, so a monitor does not stop polling early.
         if candidate is None:

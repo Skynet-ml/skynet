@@ -58,7 +58,7 @@ infra/      Terraform for AWS staging and production
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and i18n rules. [MAINTENANCE.md](MAINTENANCE.md) says what support to expect. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and i18n rules. Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Citations
 

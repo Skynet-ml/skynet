@@ -4,7 +4,8 @@ The coding agent sees a repository job's structure as a compact,
 hierarchical tree (folders collapse to file counts past a depth or line
 budget) and opens what it needs through two ReAct tools: one expands a
 folder, the other reads a file. Every call goes to GitHub with the caller's
-own token, so the agent can only see what the caller can.
+own token, or with no token for a public repository when the caller has no
+link, so the agent can only see what the caller can.
 """
 
 from __future__ import annotations
@@ -181,7 +182,7 @@ class RepoBrowser:
     def __init__(
         self,
         *,
-        token: str,
+        token: str | None,
         repository: str,
         branch: str,
         editable_paths: list[str],
@@ -192,7 +193,8 @@ class RepoBrowser:
         """Hold the repository, its tree and the caller's token.
 
         Args:
-            token: The caller's token for the repository host.
+            token: The caller's token for the repository host; ``None`` reads a
+                public GitHub repository anonymously.
             repository: The repository path, ``owner/name`` or a GitLab group path.
             branch: Branch name; empty for the default branch.
             editable_paths: Paths the optimizer may change.

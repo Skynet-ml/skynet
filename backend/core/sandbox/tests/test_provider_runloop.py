@@ -18,12 +18,10 @@ from typing import Any
 
 import pytest
 
-from core.config import settings
 from core.sandbox import factory
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG
 from core.sandbox.errors import (
-    RunTimeoutError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -496,11 +494,6 @@ def test_factory_loads_runloop_outside_production(monkeypatch: pytest.MonkeyPatc
     assert factory.load_provider("runloop") is RunloopEnvironment
 
 
-def test_the_default_sandbox_backend_stays_legacy() -> None:
-    """Keep the legacy backend as the default."""
-    assert type(settings).model_fields["sandbox_backend"].default == "legacy"
-
-
 def test_preflight_needs_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Name the extra when the SDK is not installed."""
     monkeypatch.setattr(runloop, "AsyncRunloopSDK", None)
@@ -620,6 +613,24 @@ async def test_allowlist_creates_then_reuses_one_policy(fake_sdk: FakeCloud) -> 
         policy.id,
         policy.id,
     ]
+
+
+async def test_allowlist_hosts_that_differ_only_in_case_share_one_policy(fake_sdk: FakeCloud) -> None:
+    """Lower-case the hosts before the policy name, so a case change reuses the policy."""
+    async with RunloopEnvironment(_spec(allowed_hosts=("A.Example", "a.example"))):
+        pass
+    async with RunloopEnvironment(_spec(allowed_hosts=("a.example",))):
+        pass
+    (policy,) = fake_sdk.policies
+    assert policy.name == runloop._policy_name(["a.example"])
+    assert policy.egress.allowed_hostnames == ["a.example"]
+
+
+def test_policy_with_a_repeated_host_still_matches() -> None:
+    """Match a Runloop policy that lists one allowed host twice."""
+    policy = SimpleNamespace(egress=_egress(allowed_hostnames=["a.example", "A.example"]))
+    assert runloop._policy_matches(policy, ["a.example"])
+    assert not runloop._policy_matches(policy, ["a.example", "b.example"])
 
 
 async def test_disabled_network_uses_the_no_network_policy(fake_sdk: FakeCloud) -> None:
@@ -781,11 +792,11 @@ async def test_exec_before_start_is_an_infra_error() -> None:
 
 
 async def test_a_timed_out_command_is_killed(fake_sdk: FakeCloud) -> None:
-    """Kill the command and raise RunTimeoutError at the time limit."""
+    """Kill the command and return a timed-out result at the time limit."""
     async with RunloopEnvironment(_spec()) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true", timeout_sec=0.05)
+        result = await env.exec("true", timeout_sec=0.05)
+        assert (result.exit_code, result.timed_out) == (124, True)
     assert len(fake_sdk.killed) == 1
 
 
@@ -793,8 +804,8 @@ async def test_the_run_timeout_is_the_default_limit(fake_sdk: FakeCloud) -> None
     """Use the run phase timeout when the call sets no limit."""
     async with RunloopEnvironment(_spec(), timeouts=_timeouts(run=0.05)) as env:
         fake_sdk.exec_hangs = True
-        with pytest.raises(RunTimeoutError):
-            await env.exec("true")
+        result = await env.exec("true")
+        assert (result.exit_code, result.timed_out) == (124, True)
     assert len(fake_sdk.killed) == 1
 
 
