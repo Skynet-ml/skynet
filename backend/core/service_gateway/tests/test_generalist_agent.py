@@ -2178,3 +2178,14 @@ async def test_hand_off_puts_the_coding_agents_optimize_toml_into_the_draft(monk
 
     assert seen["optimize_toml"] == "version = 1\n"
     assert turn.wizard_patch == {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}
+
+
+def test_hand_off_desc_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
+    """The setup agent shows the returned optimize.toml in full, so the user sees the file (SKY-184)."""
+    state = cast(WizardState, {"wizard_screen": "metric", "artifact_kind": "repo"})
+    (tool,) = generalist_module.coding_agent_tools(
+        state, _TurnAuthoringFlag(), lm=None, emit=lambda _e: None, github_token=None
+    )
+
+    assert "show the user the returned optimize_toml in full" in tool.desc
+    assert "Do not write the same code again with update_wizard_state." in tool.desc

@@ -575,3 +575,10 @@ def test_coding_agent_writes_no_optimize_toml_for_a_dspy_program() -> None:
 
     assert result["wizard_state"] == {"metric_code": _SCORER}
     assert "optimize_toml_error" not in result
+
+
+def test_coder_prompt_marks_the_example_paths_as_placeholders() -> None:
+    """The agent replaces the example's paths with ones it confirmed, not docs/intent.md as is (SKY-184)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "The paths in this example, such as docs/intent.md and docs/rules.md, are placeholders" in prompt

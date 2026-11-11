@@ -179,7 +179,9 @@ you return.
   The errors you must avoid most: "[run] entry is missing", "network entry
   ... must be a host name such as api.example.com, not a URL", "... is not a
   supported setting" and "url must be an https:// address". This file is
-  valid:
+  valid. The paths in this example, such as docs/intent.md and
+  docs/rules.md, are placeholders: replace each one with a path that you
+  confirmed exists or a file that you write.
 
 {OPTIMIZE_TOML_EXAMPLE}
 * Return each file whole. Return a file empty to leave it unchanged.

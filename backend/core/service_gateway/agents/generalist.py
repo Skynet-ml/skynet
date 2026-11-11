@@ -1889,8 +1889,8 @@ def coding_agent_tools(
                 "repository run with GitHub linked, reads the repository. It writes the code into the editor, "
                 "returns optimize.toml for a repository run in its wizard_state, and returns its summary, the "
                 "files it read, its open questions and the parser's optimize_toml_error when that file is not "
-                "valid. Do not write the same code again "
-                "with update_wizard_state."
+                "valid. When it returns optimize_toml, show the user the returned optimize_toml in full. "
+                "Do not write the same code again with update_wizard_state."
             ),
             arg_desc={
                 "request": (

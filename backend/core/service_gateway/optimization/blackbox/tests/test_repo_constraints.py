@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import pickle
 import re
 import tarfile
 from dataclasses import replace
@@ -1542,3 +1543,12 @@ def test_an_mcp_file_error_names_the_role_mcp_setting(tmp_path: Path) -> None:
     with pytest.raises(ConstraintsError, match="server 'm' needs a url") as caught:
         _read_mcp(tmp_path, run=b'{"mcpServers": {"m": {"type": "http"}}}')
     assert (caught.value.section, caught.value.key) == ("run", "mcp")
+
+
+def test_a_constraints_error_keeps_its_section_and_key_through_pickle() -> None:
+    """The section and key survive a pickle round trip, so a worker can pass the error on (SKY-184)."""
+    error = ConstraintsError("[run] entry is missing", section="run", key="entry")
+
+    copy = pickle.loads(pickle.dumps(error))
+
+    assert (str(copy), copy.section, copy.key) == ("[run] entry is missing", "run", "entry")
