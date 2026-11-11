@@ -5,7 +5,7 @@ before this revision gets an empty list, so it goes to no host until the user
 saves it again with a host.
 
 Revision ID: c4d1e8a2f6b3
-Revises: 1b5b259642df
+Revises: 71fa5f622536
 """
 
 import sqlalchemy as sa
@@ -14,7 +14,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from alembic import op
 
 revision = "c4d1e8a2f6b3"
-down_revision = "1b5b259642df"
+down_revision = "71fa5f622536"
 branch_labels = None
 depends_on = None
 
