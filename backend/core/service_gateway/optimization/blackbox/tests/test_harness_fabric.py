@@ -83,7 +83,7 @@ if os.environ.get("FAKE_KILL_PARENT"):
 print("runner progress line")
 result = json.loads(os.environ["FAKE_RESULT"])
 open(args.result, "w").write(json.dumps(result))
-sys.exit(0 if result.get("status") == "succeeded" else 1)
+sys.exit(0 if isinstance(result, dict) and result.get("status") == "succeeded" else 1)
 """
 # Stand-in for uv: ``--version`` answers as the pinned release does, ``venv``
 # makes a real stdlib venv, and ``pip install`` copies the fake Fabric package
@@ -163,7 +163,12 @@ def _install(tmp_path: Path, launch_install: str) -> tuple[dict[str, str], Path]
 
 
 def _run(
-    tmp_path: Path, *, protected: bool, result: dict, extra_env: dict[str, str] | None = None
+    tmp_path: Path,
+    *,
+    protected: bool,
+    result: dict | list,
+    extra_env: dict[str, str] | None = None,
+    relay_env: str = "APP_BUDGET_RELAY_URL",
 ) -> tuple[subprocess.CompletedProcess[str], dict, Path]:
     """Install the stand-in Fabric, then run the built command in a scratch workspace.
 
@@ -173,6 +178,7 @@ def _run(
         protected: Build the protected launch, with the sandbox-local relay set.
         result: The result file the fake runner writes.
         extra_env: More environment for the run command.
+        relay_env: The variable that carries the relay URL in a protected run.
 
     Returns:
         The finished run command, what the fake runner saw, and the workspace.
@@ -199,7 +205,7 @@ def _run(
         **(extra_env or {}),
     }
     if protected:
-        env["APP_BUDGET_RELAY_URL"] = _RELAY
+        env[relay_env] = _RELAY
     finished = subprocess.run(
         launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=60, check=False
     )
@@ -471,6 +477,15 @@ def test_protected_run_points_codex_at_the_relay_and_returns_the_response(tmp_pa
     assert parse_output("plain", finished.stdout) == (_ANSWER, {})
 
 
+def test_protected_run_reads_the_skynet_relay_variable_when_the_app_one_is_unset(tmp_path: Path) -> None:
+    """Point Codex at the relay from ``SKYNET_BUDGET_RELAY_URL`` when ``APP_BUDGET_RELAY_URL`` is not set."""
+    finished, seen, _ = _run(tmp_path, protected=True, result=_RECORDED_RESULT, relay_env="SKYNET_BUDGET_RELAY_URL")
+
+    assert finished.returncode == 0, finished.stderr
+    assert seen["spec"]["config"]["models"]["default"]["base_url"] == _RELAY
+    assert _GATEWAY.url not in json.dumps(seen["spec"])
+
+
 def test_open_run_reads_the_gateway_url_from_the_config(tmp_path: Path) -> None:
     """Without a relay, the runner gets the gateway URL the launch wrote."""
     finished, seen, _ = _run(tmp_path, protected=False, result=_RECORDED_RESULT)
@@ -508,6 +523,17 @@ def test_error_object_without_a_message_fails_the_run_with_the_whole_object(tmp_
     assert finished.stdout == ""
     assert "fabric: None" not in finished.stderr
     assert 'fabric: {"stage": "run", "code": "harness_failed", "retryable": false}' in finished.stderr
+
+
+def test_result_that_is_not_an_object_fails_the_run_cleanly(tmp_path: Path) -> None:
+    """Exit non-zero with a short message, no traceback, and no state folder when the result is valid JSON but no object."""
+    finished, _, _ = _run(tmp_path, protected=False, result=["not", "an", "object"])
+
+    assert finished.returncode == 1
+    assert finished.stdout == ""
+    assert "fabric: the runner wrote a result that is not an object (exit 1)" in finished.stderr
+    assert "Traceback" not in finished.stderr
+    assert list((tmp_path / "tmp").glob("app-fabric-*")) == []
 
 
 @pytest.mark.parametrize("result", [_RECORDED_RESULT, _RECORDED_FAILURE], ids=["succeeded", "runner_error"])
@@ -557,6 +583,21 @@ def test_runner_that_outlives_a_killed_run_keeps_its_folder_locked(tmp_path: Pat
     assert json.loads(probe_log.read_text()) == {"parent_gone": True, "lock_held": True}
     state = Path(seen["spec"]["config_base_dir"])
     assert (state / "owner.lock").exists()
+    # ``subprocess.run`` can return when the pipes close, a moment before the
+    # dead runner's descriptor closes, so wait until the kernel drops the lock.
+    probe = os.open(state / "owner.lock", os.O_RDONLY)
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                assert time.monotonic() < deadline, "the dead runner still holds the lock"
+                time.sleep(0.01)
+        fcntl.flock(probe, fcntl.LOCK_UN)
+    finally:
+        os.close(probe)
     (tmp_path / "next").mkdir()
     # The runner has exited now, so the kernel dropped the lock and the next sweep removes the folder.
     finished, _, _ = _run(

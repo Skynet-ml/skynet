@@ -174,6 +174,9 @@ def main():
         except (OSError, ValueError):
             print(f"fabric: the runner wrote no result (exit {code})", file=sys.stderr)
             return code or 1
+        if not isinstance(result, dict):
+            print(f"fabric: the runner wrote a result that is not an object (exit {code})", file=sys.stderr)
+            return code or 1
         failure = result.get("runner_error") or result.get("error")
         if failure or result.get("status") != "succeeded":
             if isinstance(failure, dict):
