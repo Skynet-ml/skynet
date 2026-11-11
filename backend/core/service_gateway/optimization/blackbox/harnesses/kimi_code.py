@@ -60,9 +60,10 @@ KIMI_CODE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # a repeated id and two agents can reuse one provider call id.
 # The bridge's usage has only input and output tokens, so cache reads and
 # writes count as full input: the count can be high, never low, and a token
-# limit stops a run early rather than late. It runs
-# inline (``python3 -I -c '...'``) for the reasons :data:`.fx.FX_TO_PI` gives,
-# so it must hold no single quote.
+# limit stops a run early rather than late. A script in ``files`` would land in
+# the working directory that the harness can edit and would go through a
+# protected run's relay rewrite, so it runs inline (``python3 -I -c '...'``)
+# and must hold no single quote.
 KIMI_CODE_TO_PI = """import json
 import os
 import sys
@@ -276,6 +277,9 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     # mode has no prompt-file option and does not read stdin. So, unlike Pi's
     # ``@file``, the prompt is one argv string, and Linux refuses a single
     # argument over 128 KiB (MAX_ARG_STRLEN) with E2BIG before Kimi Code starts.
+    # The ``--prompt=`` form keeps the prompt in the option's argv item, so
+    # Kimi Code's Commander parser never reads a prompt that starts with ``-``
+    # as an option.
     run_command = (
         '_kc_dir="$(mktemp -d)" || exit 1; '
         """trap 'rm -rf "$_kc_dir"' EXIT; """
@@ -289,7 +293,7 @@ def _kimi_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
         '_kc_prompt="${_kc_prompt%x}"; '
         f"python3 -I -c '{_PLAIN_PROMPT_CHECK}' \"${ENV_PROMPT_FILE}\" || "
         '_kc_prompt="Task request:\n$_kc_prompt"; '
-        'kimi --prompt "$_kc_prompt" --output-format stream-json < /dev/null > /dev/null; '
+        'kimi --prompt="$_kc_prompt" --output-format stream-json < /dev/null > /dev/null; '
         "_kc_status=$?; "
         f"python3 -I -c '{KIMI_CODE_TO_PI}' \"$KIMI_CODE_HOME/sessions\" "
         '|| [ "$_kc_status" -ne 0 ] || _kc_status=1; '

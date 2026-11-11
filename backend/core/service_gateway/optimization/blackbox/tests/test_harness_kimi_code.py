@@ -222,7 +222,7 @@ def test_open_launch_installs_the_checked_tarball_and_sends_model_calls_only_to_
     assert launch.files == {KIMI_CODE_BASE_URL_FILE: _GATEWAY.url}
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
-    assert 'kimi --prompt "$_kc_prompt" --output-format stream-json < /dev/null > /dev/null' in launch.run_command
+    assert 'kimi --prompt="$_kc_prompt" --output-format stream-json < /dev/null > /dev/null' in launch.run_command
     assert "config.toml" not in launch.run_command
     assert launch.env["KIMI_MODEL_NAME"] == "target-model"
     assert launch.env["KIMI_MODEL_API_KEY"] == _GATEWAY.api_key
@@ -302,7 +302,7 @@ def test_run_points_kimi_code_at_the_gateway_and_returns_answer_usage_and_tool_c
     result, calls, workspace = _run_with_fake_kimi(tmp_path, protected=protected)
 
     assert result.returncode == 0, result.stderr
-    assert "ARGS [--prompt] [Fix `main.py` and say $(echo done).] [--output-format] [stream-json]\n" in calls
+    assert "ARGS [--prompt=Fix `main.py` and say $(echo done).] [--output-format] [stream-json]\n" in calls
     assert f"KIMI_MODEL_BASE_URL={base_url}\n" in calls
     assert "KIMI_MODEL_API_KEY=gateway-token\n" in calls
     assert "KIMI_MODEL_NAME=target-model\n" in calls
@@ -357,20 +357,32 @@ def test_goal_command_prompt_is_framed_so_it_reaches_the_model(tmp_path: Path, p
     result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, prompt=prompt)
 
     assert result.returncode == 0, result.stderr
-    assert f"ARGS [--prompt] [Task request:\n{prompt}] [--output-format] [stream-json]\n" in calls
+    assert f"ARGS [--prompt=Task request:\n{prompt}] [--output-format] [stream-json]\n" in calls
 
 
 @pytest.mark.parametrize(
     "prompt",
     # Python's ``\\s`` matches U+001C and U+0085, but JavaScript's ``trim()`` keeps them.
-    ["/goals ship it", "/help", "Use /goal later.", "!ls", "Fix it.\n\n", "x\n", "\x1c/goal ship it", "\x85/goal"],
+    [
+        "/goals ship it",
+        "/help",
+        "Use /goal later.",
+        "!ls",
+        "-h",
+        "--output-format=text",
+        "-- Fix it.",
+        "Fix it.\n\n",
+        "x\n",
+        "\x1c/goal ship it",
+        "\x85/goal",
+    ],
 )
 def test_other_prompts_reach_kimi_code_unchanged(tmp_path: Path, prompt: str) -> None:
     """Leave every prompt that the ``/goal`` parser does not take byte-identical."""
     result, calls, _ = _run_with_fake_kimi(tmp_path, protected=False, prompt=prompt)
 
     assert result.returncode == 0, result.stderr
-    assert f"ARGS [--prompt] [{prompt}] [--output-format] [stream-json]\n" in calls
+    assert f"ARGS [--prompt={prompt}] [--output-format] [stream-json]\n" in calls
 
 
 def test_unreadable_prompt_file_stops_the_run_before_kimi_code(tmp_path: Path) -> None:
