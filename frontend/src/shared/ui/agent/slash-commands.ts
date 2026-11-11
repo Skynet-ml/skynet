@@ -28,6 +28,12 @@ export interface SlashCommand {
   current?: string;
   /** Shown before the name in the menu. */
   icon?: ComponentType<{ className?: string }>;
+  /**
+   * Left out of the menu because the chat cannot run it now (a model without
+   * effort levels, a chat not saved yet). A typed call still matches, so the
+   * composer shows an error and does not send it to the agent as text.
+   */
+  hidden?: boolean;
 }
 
 /** What the slash menu lists for a draft. */
@@ -68,11 +74,11 @@ export function slashMenu(text: string, commands: readonly SlashCommand[]): Slas
   const space = text.search(/\s/);
   if (space < 0) {
     const typed = text.slice(1).toLowerCase();
-    const items = commands.filter((c) => c.name.startsWith(typed));
+    const items = commands.filter((c) => !c.hidden && c.name.startsWith(typed));
     return items.length ? { kind: "commands", items } : null;
   }
   const command = commands.find((c) => c.name === text.slice(1, space).toLowerCase());
-  if (!command?.options?.length) return null;
+  if (!command?.options?.length || command.hidden) return null;
   const typed = text.slice(space).trim().toLowerCase();
   const items = command.options.filter(
     (o) => o.value.toLowerCase().includes(typed) || o.label.toLowerCase().includes(typed),
@@ -99,6 +105,16 @@ export function resolveSlashOption(arg: string, options: readonly SlashOption[])
     (o) => o.value.toLowerCase().includes(typed) || o.label.toLowerCase().includes(typed),
   );
   return partial.length === 1 ? partial[0]!.value : null;
+}
+
+/**
+ * Whether Enter on a menu row runs it: an option, or a command whose full
+ * name is typed. Enter on a partial name only completes it, as Tab does, so
+ * "/n" never runs /new by accident.
+ */
+export function enterRunsSlash(menu: SlashMenu, index: number, text: string): boolean {
+  if (menu.kind === "options") return true;
+  return menu.items[index]?.name === text.trim().slice(1).toLowerCase();
 }
 
 /** The menu row a key moves the highlight to, wrapping at both ends; `undefined` for other keys. */

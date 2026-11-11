@@ -31,6 +31,7 @@ import { appendToDraft, midTurnKeyAction, type MidTurnQueue } from "./steer-queu
 import { SuggestionGhost } from "./suggestion-ghost";
 import {
   completeSlash,
+  enterRunsSlash,
   parseSlashCommand,
   slashMenu,
   stepSlashMenu,
@@ -99,6 +100,7 @@ interface ComposerProps {
 function SlashRow({
   id,
   active,
+  checked,
   icon,
   onPick,
   onHover,
@@ -106,6 +108,8 @@ function SlashRow({
 }: {
   id: string;
   active: boolean;
+  /** The current value of an option row; screen readers announce it as checked. */
+  checked?: boolean;
   icon?: React.ReactNode;
   onPick: () => void;
   onHover: () => void;
@@ -116,6 +120,7 @@ function SlashRow({
       id={id}
       role="option"
       aria-selected={active}
+      aria-checked={checked}
       // Keeps focus in the textarea, so typing goes on after a click.
       onMouseDown={(e) => {
         e.preventDefault();
@@ -223,9 +228,12 @@ export function Composer({
   // Escape hides the menu for this exact draft; typing shows it again.
   const [slashDismissed, setSlashDismissed] = React.useState<string | null>(null);
   const slashListId = React.useId();
+  // The menu shows only while the textarea has focus, so it never stays
+  // open next to the model menu or another popup.
+  const [focused, setFocused] = React.useState(false);
   const plainDraft = !draft.pastes.length && !draft.files.length;
   const menu =
-    slash && plainDraft && !disabled && !dictating && slashDismissed !== draft.text
+    slash && focused && plainDraft && !disabled && !dictating && slashDismissed !== draft.text
       ? slashMenu(draft.text, slash.commands)
       : null;
   const slashRow = menu ? Math.min(slashIndex, menu.items.length - 1) : 0;
@@ -300,7 +308,9 @@ export function Composer({
     if (!slash || !plainDraft) return false;
     const call = parseSlashCommand(text, slash.commands);
     if (!call) return false;
-    slash.run(call.command, call.arg);
+    if (call.command.hidden)
+      toast.error(msg("agent.slash.unavailable", { command: `/${call.command.name}` }));
+    else slash.run(call.command, call.arg);
     onChange("");
     setSlashIndex(0);
     resetHeight();
@@ -379,7 +389,7 @@ export function Composer({
       }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
         e.preventDefault();
-        pickSlash(slashRow, e.key === "Enter");
+        pickSlash(slashRow, e.key === "Enter" && enterRunsSlash(menu, slashRow, draft.text));
         return;
       }
     }
@@ -474,22 +484,25 @@ export function Composer({
           <div
             id={slashListId}
             role="listbox"
-            aria-label={msg("agent.slash.menu")}
+            aria-label={menu.kind === "commands" ? msg("agent.slash.menu") : `/${menu.command.name}`}
             data-state="open"
             className={cn(
               "bui-menu origin-bottom absolute inset-x-0 bottom-full z-20 mb-2",
               "flex max-h-72 flex-col gap-0.5 overflow-y-auto overscroll-contain rounded-2xl border border-border bg-card p-1.5 shadow-[var(--shadow-float)]",
             )}
           >
+            {/* The listbox label already names this, so screen readers skip it. */}
             <div
-              role="presentation"
+              aria-hidden
               className="flex items-baseline gap-2 px-2.5 pb-1 pt-1 text-xs font-medium text-muted-foreground"
             >
               {menu.kind === "commands" ? (
                 msg("agent.slash.menu")
               ) : (
                 <>
-                  <span dir="ltr" className="font-mono text-foreground">/{menu.command.name}</span>
+                  <span className="font-mono text-foreground">
+                    <bdi dir="ltr">/{menu.command.name}</bdi>
+                  </span>
                   <span className="min-w-0 truncate font-normal">{menu.command.description}</span>
                 </>
               )}
@@ -506,10 +519,12 @@ export function Composer({
                       onHover={() => setSlashIndex(i)}
                       icon={Icon ? <Icon className="size-4" /> : null}
                     >
-                      {/* Command names read left to right in an RTL page too. */}
-                      <span dir="ltr" className="w-36 shrink-0 truncate text-start font-mono text-[0.8125rem] text-foreground">
-                        /{c.name}
-                        {c.argHint && <span className="text-muted-foreground"> {c.argHint}</span>}
+                      {/* The column follows the page direction; the name inside reads left to right. */}
+                      <span className="w-36 shrink-0 truncate text-start font-mono text-[0.8125rem] text-foreground">
+                        <bdi dir="ltr">
+                          /{c.name}
+                          {c.argHint && <span className="text-muted-foreground"> {c.argHint}</span>}
+                        </bdi>
                       </span>
                       <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                         {c.description}
@@ -524,6 +539,7 @@ export function Composer({
                       key={o.value}
                       id={`${slashListId}-${i}`}
                       active={i === slashRow}
+                      checked={current}
                       onPick={() => pickSlash(i, true)}
                       onHover={() => setSlashIndex(i)}
                       icon={o.icon}
@@ -533,12 +549,12 @@ export function Composer({
                           {o.label}
                         </span>
                         {o.label !== o.value && (
-                          <span dir="ltr" className="truncate text-start text-xs text-muted-foreground">
-                            {o.value}
+                          <span className="truncate text-start text-xs text-muted-foreground">
+                            <bdi dir="ltr">{o.value}</bdi>
                           </span>
                         )}
                       </span>
-                      <Check className={cn("size-4 shrink-0 text-primary", !current && "invisible")} />
+                      <Check aria-hidden className={cn("size-4 shrink-0 text-primary", !current && "invisible")} />
                     </SlashRow>
                   );
                 })}
@@ -586,6 +602,8 @@ export function Composer({
               }}
               onPaste={inline || !attachments ? undefined : handlePaste}
               onKeyDown={handleKeyDown}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
               disabled={disabled || locked}
               rows={1}
               placeholder={suggestion ? undefined : placeholder}

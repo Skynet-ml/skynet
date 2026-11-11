@@ -52,11 +52,23 @@ after(() => dom.window.close());
 const commands: SlashCommand[] = [
   { name: "name", argHint: "<name>", description: "Rename" },
   { name: "new", description: "New chat" },
+  // A model without effort levels hides /thinking.
+  { name: "thinking", argHint: "<level>", description: "Effort", hidden: true },
 ];
 
-async function pressDuringReply(draft: string, key: string) {
+interface Mounted {
+  textarea: HTMLTextAreaElement;
+  ran: string[];
+  sent: string[];
+  drafts: string[];
+  press: (key: string) => Promise<void>;
+  unmount: () => Promise<void>;
+}
+
+async function mount(draft: string, streaming: boolean): Promise<Mounted> {
   const ran: string[] = [];
   const sent: string[] = [];
+  const drafts: string[] = [];
   const store = new SteerQueue();
   const midTurn = {
     ...midTurnOf(() => store, store.getSnapshot()),
@@ -73,10 +85,10 @@ async function pressDuringReply(draft: string, key: string) {
         <UserPrefsProvider>
           <Composer
             value={draft}
-            onChange={() => {}}
+            onChange={(text) => drafts.push(text)}
             onSubmit={() => sent.push("submit")}
             onStop={() => {}}
-            streaming
+            streaming={streaming}
             midTurn={midTurn}
             slash={{ commands, run: (c, arg) => ran.push(`${c.name}:${arg}`) }}
           />
@@ -85,13 +97,31 @@ async function pressDuringReply(draft: string, key: string) {
     );
   });
   const textarea = container.querySelector("textarea")!;
-  await React.act(async () => {
-    textarea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true }));
-  });
-  await React.act(async () => root.unmount());
-  container.remove();
-  return { ran, sent };
+  return {
+    textarea,
+    ran,
+    sent,
+    drafts,
+    press: async (key) => {
+      await React.act(async () => {
+        textarea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true }));
+      });
+    },
+    unmount: async () => {
+      await React.act(async () => root.unmount());
+      container.remove();
+    },
+  };
 }
+
+async function pressDuringReply(draft: string, key: string) {
+  const composer = await mount(draft, true);
+  await composer.press(key);
+  await composer.unmount();
+  return { ran: composer.ran, sent: composer.sent };
+}
+
+const listbox = () => document.querySelector('[role="listbox"]');
 
 void test("Enter during a reply runs a slash command instead of steering it", async () => {
   assert.deepEqual(await pressDuringReply("/name Release notes", "Enter"), {
@@ -112,4 +142,45 @@ void test("Enter during a reply still steers a normal message", async () => {
     ran: [],
     sent: ["steer:/new idea for later"],
   });
+});
+
+void test("a hidden command neither runs nor goes to the agent as text", async () => {
+  const idle = await mount("/thinking high", false);
+  await idle.press("Enter");
+  await idle.unmount();
+  assert.deepEqual({ ran: idle.ran, sent: idle.sent, drafts: idle.drafts }, {
+    ran: [],
+    sent: [],
+    drafts: [""],
+  });
+  assert.deepEqual(await pressDuringReply("/thinking high", "Enter"), { ran: [], sent: [] });
+});
+
+void test("the menu shows only while the textarea has focus", async () => {
+  const composer = await mount("/", false);
+  assert.equal(listbox(), null);
+  await React.act(async () => composer.textarea.focus());
+  assert.ok(listbox());
+  // A hidden command stays out of the list.
+  assert.deepEqual(
+    [...document.querySelectorAll('[role="option"]')].map((o) => o.textContent),
+    ["/name <name>Rename", "/newNew chat"],
+  );
+  await React.act(async () => composer.textarea.blur());
+  assert.equal(listbox(), null);
+  await composer.unmount();
+});
+
+void test("Enter on a partial command name completes it and does not run it", async () => {
+  const partial = await mount("/ne", false);
+  await React.act(async () => partial.textarea.focus());
+  await partial.press("Enter");
+  await partial.unmount();
+  assert.deepEqual({ ran: partial.ran, drafts: partial.drafts }, { ran: [], drafts: ["/new"] });
+
+  const full = await mount("/new", false);
+  await React.act(async () => full.textarea.focus());
+  await full.press("Enter");
+  await full.unmount();
+  assert.deepEqual(full.ran, ["new:"]);
 });

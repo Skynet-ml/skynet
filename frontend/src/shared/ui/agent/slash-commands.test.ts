@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { completeSlash, parseSlashCommand, resolveSlashOption, slashMenu, stepSlashMenu } =
-  await import("./slash-commands.ts");
+const {
+  completeSlash,
+  enterRunsSlash,
+  parseSlashCommand,
+  resolveSlashOption,
+  slashMenu,
+  stepSlashMenu,
+} = await import("./slash-commands.ts");
 
 const models = [
   { value: "anthropic/claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -111,4 +117,30 @@ test("completeSlash fills a command or its picked option", () => {
   assert.equal(completeSlash(slashMenu("/mo", commands)!, 0), "/model ");
   assert.equal(completeSlash(slashMenu("/ne", commands)!, 0), "/new");
   assert.equal(completeSlash(slashMenu("/thinking h", commands)!, 0), "/thinking high");
+});
+
+test("a hidden command stays out of the menu but still parses", () => {
+  // A model without effort levels hides /thinking; a chat not saved yet hides /name.
+  const hidden = [
+    { ...commands[0]! },
+    { ...commands[1]!, hidden: true },
+    { ...commands[2]! },
+    { ...commands[3]!, hidden: true },
+  ];
+  assert.equal(parseSlashCommand("/thinking high", hidden)?.command.hidden, true);
+  assert.equal(parseSlashCommand("/name Release notes", hidden)?.command.hidden, true);
+  assert.deepEqual(
+    slashMenu("/", hidden)?.items.map((c) => ("name" in c ? c.name : c.value)),
+    ["model", "new"],
+  );
+  assert.equal(slashMenu("/thinking ", hidden), null);
+  assert.equal(slashMenu("/na", hidden), null);
+});
+
+test("Enter runs only a fully typed command name", () => {
+  const partial = slashMenu("/n", commands)!;
+  assert.equal(enterRunsSlash(partial, 0, "/n"), false);
+  assert.equal(enterRunsSlash(slashMenu("/new", commands)!, 0, "/new"), true);
+  assert.equal(enterRunsSlash(slashMenu("/NEW", commands)!, 0, "/NEW"), true);
+  assert.equal(enterRunsSlash(slashMenu("/thinking h", commands)!, 0, "/thinking h"), true);
 });

@@ -36,7 +36,7 @@ import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
 import { resolveSlashOption, type SlashCommand } from "@/shared/ui/agent/slash-commands";
 import { chatToMarkdown } from "@/shared/lib/chat-export";
-import { liveEffort } from "@/shared/lib/effort-slider";
+import { cliEffort, liveEffort } from "@/shared/lib/effort-slider";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
 import { effortLabel, effortsFor } from "@/shared/lib/model-efforts";
 import {
@@ -55,7 +55,12 @@ import { SETUP_CHAT_KEPT_EVENT, SETUP_SUBMITTED_EVENT } from "@/shared/lib/setup
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { formatMsg } from "@/shared/lib/messages";
 
-import { useLocalAgentMenuModels } from "@/features/local-runtime";
+import {
+  menuModelGroup,
+  menuPickState,
+  RETIRED_AUTO_MODEL,
+  useLocalAgentMenuModels,
+} from "@/features/local-runtime";
 import {
   SETTINGS_TABS,
   parseAgentPreferencePatch,
@@ -954,22 +959,36 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // Pi runs its built-in slash commands only in its own terminal, so the
   // composer runs the ones that fit a hosted chat on this panel's controls
   // (SKY-604). /model and /thinking list what the model menu lists.
-  const [catalogModels, setCatalogModels] = React.useState<CatalogModel[]>([]);
+  const [catalogAll, setCatalogAll] = React.useState<CatalogModel[] | undefined>(undefined);
   React.useEffect(() => {
     let cancelled = false;
-    const available = (models: CatalogModel[]) => models.filter((m) => m.available);
     const cached = cachedCatalog();
-    if (cached) setCatalogModels(available(cached.models));
+    if (cached) setCatalogAll(cached.models);
     getModelCatalog()
       .then((c) => {
-        if (!cancelled) setCatalogModels(available(c.models));
+        if (!cancelled) setCatalogAll(c.models);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, []);
+  const catalogModels = React.useMemo(
+    () => (catalogAll ?? []).filter((m) => m.available),
+    [catalogAll],
+  );
   const slashModels = localMenu.models ?? catalogModels;
+  // The model menu's pick rule: a retired "auto" pick, or one the list does
+  // not show, counts as no pick.
+  const savedModel = agent.model === RETIRED_AUTO_MODEL ? null : agent.model;
+  const slashPick = menuPickState(
+    savedModel,
+    localMenu.models ?? catalogAll,
+    localMenu.models,
+    localMenu.openRouterEngine,
+  ).unlisted
+    ? null
+    : savedModel;
   // /model offers what the model menu lists: its featured shortlist (the
   // first 50 when the catalog flags none) and a current pick outside it.
   const slashMenuModels = React.useMemo(() => {
@@ -977,20 +996,26 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const featured = catalogModels.filter((m) => m.featured);
     const rows = featured.length ? featured : catalogModels.slice(0, 50);
     const extra =
-      agent.model && !rows.some((m) => m.value === agent.model)
-        ? catalogModels.find((m) => m.value === agent.model)
+      slashPick && !rows.some((m) => m.value === slashPick)
+        ? catalogModels.find((m) => m.value === slashPick)
         : undefined;
     return extra ? [extra, ...rows] : rows;
-  }, [localMenu.models, catalogModels, agent.model]);
+  }, [localMenu.models, catalogModels, slashPick]);
   const canShareChat =
     !inSetup && canShare && !webChat && !!agent.conversationId && agent.messages.length > 0;
   const slashCommands = React.useMemo(() => {
     const effective =
-      agent.model ??
+      slashPick ??
       (localMenu.models ? localMenu.models[0] : catalogFallbackModel(slashModels))?.value ??
       null;
     const current = slashModels.find((m) => m.value === effective);
     const efforts = current?.supports_thinking ? effortsFor(effective, slashModels) : [];
+    // As the model menu shows it: a local CLI model checks the level it runs,
+    // so a saved level above the model's top checks the top.
+    const shownEffort =
+      current && menuModelGroup(current) === "local"
+        ? cliEffort(agent.reasoningEffort, efforts)
+        : liveEffort(agent.reasoningEffort);
     const commands: SlashCommand[] = [
       {
         name: "model",
@@ -1005,47 +1030,58 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         })),
       },
     ];
-    if (efforts.length)
-      commands.push({
-        name: "thinking",
-        argHint: "<level>",
-        description: msg("agent.slash.thinking"),
-        icon: Brain,
-        current: liveEffort(agent.reasoningEffort) ?? "default",
-        options: [
+    // A command the chat cannot run now is hidden, not left out: a typed
+    // call then shows an error instead of going to the agent as text.
+    commands.push({
+      name: "thinking",
+      argHint: "<level>",
+      description: msg("agent.slash.thinking"),
+      icon: Brain,
+      hidden: !efforts.length,
+      current: shownEffort ?? "default",
+      options: [
           { value: "default", label: msg("agent.model_menu.effort_default") },
-          ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
-        ],
-      });
-    if (!inSetup) {
-      commands.push({ name: "new", description: msg("agent.slash.new"), icon: Plus });
-      commands.push({
+        ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
+      ],
+    });
+    commands.push(
+      { name: "new", description: msg("agent.slash.new"), icon: Plus, hidden: inSetup },
+      {
         name: "resume",
         description: msg("agent.slash.resume"),
         icon: ClockCounterClockwise,
-      });
-      if (agent.conversationId)
-        commands.push({
-          name: "name",
-          argHint: "<name>",
-          description: msg("agent.slash.name"),
-          icon: PencilSimple,
-        });
-    }
-    if (canShareChat)
-      commands.push({ name: "share", description: msg("agent.slash.share"), icon: ShareNetwork });
-    if (agent.messages.length) {
-      commands.push({ name: "copy", description: msg("agent.slash.copy"), icon: Copy });
-      commands.push({
+        hidden: inSetup,
+      },
+      {
+        name: "name",
+        argHint: "<name>",
+        description: msg("agent.slash.name"),
+        icon: PencilSimple,
+        hidden: inSetup || !agent.conversationId,
+      },
+      {
+        name: "share",
+        description: msg("agent.slash.share"),
+        icon: ShareNetwork,
+        hidden: !canShareChat,
+      },
+      {
+        name: "copy",
+        description: msg("agent.slash.copy"),
+        icon: Copy,
+        hidden: !agent.messages.length,
+      },
+      {
         name: "export",
         description: msg("agent.slash.export"),
         icon: DownloadSimple,
-      });
-    }
+        hidden: !agent.messages.length,
+      },
+    );
     commands.push({ name: "settings", description: msg("agent.slash.settings"), icon: Gear });
     return commands;
   }, [
-    agent.model,
+    slashPick,
     agent.reasoningEffort,
     agent.conversationId,
     agent.messages.length,
@@ -1092,7 +1128,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           return;
         case "name":
           if (!arg || !agent.conversationId) {
-            toast.error(formatMsg("agent.slash.pick_value", { command: "/name" }));
+            toast.error(msg("agent.slash.name_needed"));
             return;
           }
           void store.rename(agent.conversationId, arg);
