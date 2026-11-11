@@ -313,6 +313,48 @@ def test_runner_error_fails_the_run_with_its_message(tmp_path: Path) -> None:
     assert "fabric: codex exited 2" in finished.stderr
 
 
+def test_string_error_fails_the_run_with_that_string(tmp_path: Path) -> None:
+    """Print a plain-string ``error`` as the failure message instead of only the status."""
+    result = {"status": "failed", "error": "model route refused"}
+    finished, _, _ = _run(tmp_path, protected=False, result=result)
+
+    assert finished.returncode == 1
+    assert finished.stdout == ""
+    assert "fabric: model route refused" in finished.stderr
+
+
+def test_failed_relay_rewrite_stops_the_run_before_fabric_starts(tmp_path: Path) -> None:
+    """Stop the protected command when the relay rewrite fails, so Fabric never runs with the parent gateway URL."""
+    env, _ = _install(tmp_path, build_launch(_target(), _GATEWAY).install_command or "")
+    launch = build_launch(_target(), _GATEWAY, protected=True)
+    workspace = tmp_path / "work"
+    config = workspace / FABRIC_CONFIG_FILE
+    config.parent.mkdir(parents=True)
+    config.write_text(launch.files[FABRIC_CONFIG_FILE])
+    # A read-only config makes the rewrite fail while the file stays readable to Fabric.
+    config.chmod(0o444)
+    (workspace / "task").mkdir()
+    (workspace / "task" / "PROMPT.md").write_text("Fix `solution.py`.")
+    runner_log = tmp_path / "runner.json"
+    env = {
+        **env,
+        **launch.env,
+        # Fabric already on PATH, as in an image that ships it, so only the command's
+        # own chaining can keep it from running after the failed rewrite.
+        "PATH": f"{env['HOME']}/.local/bin{os.pathsep}{env['PATH']}",
+        "APP_BUDGET_RELAY_URL": _RELAY,
+        "FAKE_RUNNER_LOG": str(runner_log),
+        "FAKE_RESULT": json.dumps(_RECORDED_RESULT),
+    }
+    finished = subprocess.run(
+        launch.run_command, shell=True, cwd=workspace, env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+
+    assert finished.returncode != 0
+    assert finished.stdout == ""
+    assert not runner_log.exists()
+
+
 def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_parser() -> None:
     """Parse a recorded run-script stdout to its stripped text, and serialize the launch with the plain parser."""
     assert parse_plain_output(_RECORDED_RESULT["output"]["response"]) == (_ANSWER, {})

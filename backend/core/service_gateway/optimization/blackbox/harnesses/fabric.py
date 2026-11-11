@@ -101,7 +101,7 @@ def main():
         return code or 1
     failure = result.get("runner_error") or result.get("error")
     if failure or result.get("status") != "succeeded":
-        message = failure.get("message") if isinstance(failure, dict) else result.get("status")
+        message = failure.get("message") if isinstance(failure, dict) else failure or result.get("status")
         print(f"fabric: {message}", file=sys.stderr)
         return code or 1
     output = result.get("output")
@@ -193,7 +193,9 @@ def _fabric_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str 
         install_command=_fabric_install(),
         files={FABRIC_CONFIG_FILE: _fabric_config(model, gateway, reasoning_effort)},
         run_command=(
-            f'{_FABRIC_PATH}; {FABRIC_KEY_ENV}="$APP_API_KEY" OPENAI_API_KEY= '
+            # ``&&`` and not ``;``: the protected relay rewrite goes in front with
+            # ``&&``, and a failed rewrite must stop the run before Fabric starts.
+            f'{_FABRIC_PATH} && {FABRIC_KEY_ENV}="$APP_API_KEY" OPENAI_API_KEY= '
             f"fabric -I -c {shlex.quote(_FABRIC_RUN_SCRIPT)} {FABRIC_CONFIG_FILE}"
         ),
         env=_base_env(model, gateway),
