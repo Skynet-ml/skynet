@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  listJobs,
-  getOptimizationCounts,
-  hostedRunsAvailable,
-  type OptimizationCounts,
-} from "@/shared/lib/api";
-import { loadRuns, sumCounts, useHostedRetry } from "@/features/sidebar";
+import { listJobs, getOptimizationCounts, type OptimizationCounts } from "@/shared/lib/api";
+import { loadRuns, useHostedRetry } from "@/features/sidebar";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
 import type { PaginatedJobsResponse } from "@/shared/types/api";
 import { msg } from "@/shared/lib/messages";
 import { FETCH_PAGE_SIZE } from "../constants";
@@ -20,6 +17,8 @@ export type UseJobsListReturn = {
   setData: React.Dispatch<React.SetStateAction<PaginatedJobsResponse | null>>;
   loading: boolean;
   initialLoad: boolean;
+  /** A Local/Web switch is in progress: the rows on hand belong to the other side. */
+  swapping: boolean;
   error: string | null;
   pageOffset: number;
   setPageOffset: React.Dispatch<React.SetStateAction<number>>;
@@ -36,6 +35,15 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
   const [counts, setCounts] = useState<OptimizationCounts | null>(null);
 
   const hostedRetry = useHostedRetry();
+  const { web } = useResourceMode();
+  // A new side starts on its first page.
+  const [pagedSide, setPagedSide] = useState(web);
+  if (pagedSide !== web) {
+    setPagedSide(web);
+    setPageOffset(0);
+  }
+  const [dataSide, setDataSide] = useState(web);
+  const swapping = useSourceSwap(web);
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -48,10 +56,8 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
       // frontend suppressed the flag while the backend scoped the caller to
       // owner-only — silently hiding every shared run.
       const includeShared = true;
-      // The Mac app with a linked account lists hosted runs too. Each side
-      // pages with the same offset, so a merged page is approximate.
-      const withHosted = hostedRunsAvailable();
-      const [result, countsResult, hostedCounts] = await Promise.all([
+      // A linked Mac lists only the side picked in the header.
+      const [result, countsResult] = await Promise.all([
         loadRuns(
           (source) =>
             listJobs({
@@ -61,24 +67,27 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
               include_shared: includeShared,
               source,
             }),
-          withHosted,
+          web,
+          !web,
         ),
-        getOptimizationCounts(username, includeShared).catch(() => null),
-        withHosted
-          ? getOptimizationCounts(undefined, includeShared, "hosted").catch(() => null)
-          : null,
+        (web
+          ? getOptimizationCounts(undefined, includeShared, "hosted")
+          : getOptimizationCounts(username, includeShared)
+        ).catch(() => null),
       ]);
       hostedRetry.failed(result.hostedFailed);
       setData(result);
-      if (countsResult) setCounts(sumCounts(countsResult, hostedCounts));
+      if (countsResult) setCounts(countsResult);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : msg("dashboard.load_error"));
     } finally {
+      // Also after a failure, so a failed load never leaves the skeleton up.
+      setDataSide(web);
       setLoading(false);
       setInitialLoad(false);
     }
-  }, [sessionUser, isAdmin, pageOffset, hostedRetry.failed]);
+  }, [sessionUser, isAdmin, pageOffset, hostedRetry.failed, web]);
 
   useEffect(() => {
     if (!data) setLoading(true);
@@ -94,6 +103,7 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
     // not show "no runs"; a list with rows keeps its pager usable.
     loading: loading || (hostedRetry.pending && !data?.total),
     initialLoad,
+    swapping: swapping || dataSide !== web,
     error,
     pageOffset,
     setPageOffset,

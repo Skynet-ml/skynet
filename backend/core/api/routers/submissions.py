@@ -509,11 +509,7 @@ def _enforce_submission_admission(job_store, username: str) -> None:
     if settings.submissions_paused:
         raise DomainError("submission.capacity_reached", status=503)
     _enforce_global_daily_spend_ceiling(job_store)
-    has_pro_plan = getattr(job_store, "has_pro_plan", None)
-    if callable(has_pro_plan) and has_pro_plan(username):
-        limit = settings.pro_max_concurrent_jobs_per_user
-    else:
-        limit = settings.max_concurrent_jobs_per_user
+    limit = settings.max_concurrent_jobs_per_user
     if limit <= 0:
         return
     counter = getattr(job_store, "count_jobs_by_status", None)

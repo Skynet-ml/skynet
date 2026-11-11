@@ -79,7 +79,7 @@ Auto پیش‌فرض همهٔ اجراهاست. در دو مرحله کار می
 
 | تنظیم                                   | پیش‌فرض | بازه                                                   |
 | --------------------------------------- | ------- | ------------------------------------------------------ |
-| عامل برنامه‌نویس                        | Codex   | Pi، Codex، OpenCode، Prime Agent، دستور سفارشی          |
+| عامل برنامه‌نویس                        | Codex   | Pi، Codex، OpenCode، OpenCode V2، Prime Agent، Aider، OpenHands، OpenHands SDK، Antigravity SDK، Goose، Hermes Agent، eve، DeerFlow، Cline، Code Puppy، دستور سفارشی          |
 | نامزدها در هر تکرار                     | ۳       | ۱ تا ۸. |
 | حداکثر فراخوانی ابزار برای هر نامزد     | ۱۰۰     | ۱ تا ۱۰۰۰                                              |
 
