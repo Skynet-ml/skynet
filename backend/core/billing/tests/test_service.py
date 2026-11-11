@@ -1281,6 +1281,49 @@ def test_webhook_clawback_drains_free_grant_before_recording_debt(engine: object
     assert (row.delta_cents, row.uncollected_cents) == (-150, 350)
 
 
+def _close_wallet(engine: object, username: str) -> None:
+    """Forfeit the purchased balance the way account deletion closes a wallet (SKY-567).
+
+    Args:
+        engine: The SQLite engine holding the seeded wallet.
+        username: The wallet owner whose balance and free grant go to zero.
+    """
+    with Session(engine) as session:
+        customer = session.get(BillingCustomerModel, username)
+        session.add(
+            WalletLedgerModel(
+                username=username,
+                delta_cents=-int(customer.balance_cents),
+                kind="closure",
+                description="Account deleted",
+            )
+        )
+        customer.balance_cents = 0
+        customer.grant_remaining = 0
+        session.commit()
+
+
+def test_webhook_refund_after_wallet_closure_reverses_the_forfeit(engine: object, webhook_ready: None) -> None:
+    """A refund of forfeited cents reverses the closure instead of recording debt on the closed wallet."""
+    _seed_customer(engine, "u@x.com")
+    service = StripeBillingService(engine=engine)
+    _deliver(service, _checkout_event("evt_pay", "u@x.com", 500, payment_intent="pi_1"))
+    _spend_all_but(engine, "u@x.com", 300)
+    _close_wallet(engine, "u@x.com")
+
+    with patch("core.billing.service.send_alert") as alert:
+        _deliver(service, _refund_event("evt_ref1", "pi_1", 200))
+        _deliver(service, _refund_event("evt_ref2", "pi_1", 500))
+
+    assert [r.delta_cents for r in _ledger_rows(engine, "u@x.com", "closure")] == [-300, 200, 100]
+    refunds = _ledger_rows(engine, "u@x.com", "refund")
+    assert [(r.delta_cents, r.uncollected_cents) for r in refunds] == [(-200, None), (-100, 200)]
+    assert (_balance(engine, "u@x.com"), _grant_remaining(engine, "u@x.com")) == (0, 0)
+    # Only the 200 cents the buyer had already spent remain owed.
+    assert _debt(engine, "u@x.com") == 200
+    alert.assert_called_once()
+
+
 def test_webhook_topup_repays_debt_before_crediting(engine: object, webhook_ready: None) -> None:
     """A top-up clears outstanding debt first; only the remainder becomes spendable."""
     _seed_customer(engine, "u@x.com")

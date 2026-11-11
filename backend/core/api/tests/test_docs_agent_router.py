@@ -29,6 +29,7 @@ from ...service_gateway.agents.docs_retrieval import (
     split_page,
     tokenize,
 )
+from ...service_gateway.tests.test_pi_react import _simulated_pi
 from .. import platform_budget
 from ..auth import AuthenticatedUser
 from ..errors import DomainError
@@ -129,6 +130,16 @@ class _ScriptedLM(_FakeLM):
         }
         self.history.append({"usage": usage})
         return [self.outputs[min(len(self.calls), len(self.outputs)) - 1]]
+
+
+@pytest.fixture(autouse=True)
+def _simulated_pi_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run each docs answer on the in-process Pi stand-in, so no ``pi`` binary is needed.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    monkeypatch.setattr(docs_agent, "run_pi_turn", _simulated_pi)
 
 
 @pytest.fixture

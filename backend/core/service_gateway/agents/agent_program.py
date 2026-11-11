@@ -1,14 +1,16 @@
-"""Conversation-grade ReActV2 loop: cache-stable prompts and stored native history.
+"""Agent program definitions and their cache-stable prompt rendering (SKY-327).
 
-Stock ReActV2 under DSPy's text ``ChatAdapter`` rewrites the start of the prompt
-on every loop call: the tool roster and the output-format reminder sit in the
-first user message on call one and move behind the history afterwards. Provider
-prompt caches match on the prefix, so nearly every input token is billed fresh.
+The Pi harness runs every agent loop. This module holds what Pi does not
+own: the program definition (tools, ``submit`` and the step signature), the
+adapter that renders its prompt, and the replay of earlier turns as history.
 
-This module keeps the message list append-only instead. Tools travel on the
-provider's native ``tools=`` channel, the format reminder never sits inside a
-message that later calls replay, and a whole conversation is carried as the
-loop's own ``dspy.History`` so turn N+1 extends the exact prompt turn N ended on.
+Stock DSPy's text ``ChatAdapter`` rewrites the start of the prompt on every
+call: the tool roster and the output-format reminder sit in the first user
+message and move behind the history later. Provider prompt caches match on
+the prefix, so nearly every input token is billed fresh. The adapter here
+keeps the message list append-only instead: tools travel on the provider's
+native ``tools=`` channel, and the format reminder never sits inside a
+message that later calls replay.
 """
 
 from __future__ import annotations
@@ -22,8 +24,6 @@ from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.types.tool import ToolCallResults, ToolCalls
 from dspy.adapters.utils import get_field_description_string
 from dspy.utils.exceptions import AdapterParseError
-
-from ..optimization.retrying_react import PARSE_RETRY_ATTEMPTS, RetryingReActV2
 
 SUBMIT_TOOL = "submit"
 _DELIVERED = "Delivered to the user."
@@ -146,49 +146,47 @@ class AppendOnlyChatAdapter(ChatAdapter):
                 raise err from None
 
 
-class ConversationReAct(RetryingReActV2):
-    """``RetryingReActV2`` that always runs under :class:`AppendOnlyChatAdapter`.
+class AgentProgram:
+    """The tools, step signature and loop budget of one agent; Pi runs the loop.
 
-    Pass the ``history`` of the previous turn's prediction back in as the
-    ``history`` input to continue a conversation natively.
+    ``dspy.ReActV2`` builds the program definition (the ``submit`` tool and
+    the step signature with its instructions). Nothing here runs a loop:
+    :class:`~.pi_react.ReactOnPi` renders the prompt and runs the tools.
     """
 
     def __init__(
         self,
-        signature,
-        tools,
+        signature: type[dspy.Signature] | str,
+        tools: list[Any],
         max_iters: int = 20,
         *,
-        parse_retries: int = PARSE_RETRY_ATTEMPTS,
-        serial_tool_calls: bool = True,
         submit_guard: Callable[[dict[str, Any]], str | None] | None = None,
-    ):
-        """Build the loop.
+    ) -> None:
+        """Build the program definition.
 
         Args:
-            signature: Task signature, as for the base ReAct program.
-            tools: Tool roster, as for the base ReAct program.
-            max_iters: Loop budget per user turn.
-            parse_retries: Extra resample attempts per inner-predict call.
-            serial_tool_calls: Ask the provider for one tool call per step.
+            signature: Task signature, as for ``dspy.ReActV2``.
+            tools: Tool roster, as for ``dspy.ReActV2``.
+            max_iters: Model calls per user turn before ``submit`` is forced.
             submit_guard: Reads a ``submit`` call's outputs and returns why the
                 turn may not end yet, or ``None`` to let it end. A refusal is
-                the submit's tool result, so the loop goes on and the model
-                reads it. The forced submit at the loop's budget is never refused.
+                the submit's tool result, so the model reads it and goes on.
+                The forced submit at the loop budget is never refused.
         """
-        super().__init__(
-            signature, tools, max_iters=max_iters, parse_retries=parse_retries, serial_tool_calls=serial_tool_calls
-        )
-        self._adapter = AppendOnlyChatAdapter()
+        definition = dspy.ReActV2(signature, tools, max_iters=max_iters)
+        self.signature = definition.signature
+        self.tools = definition.tools
+        self.react = definition.react
+        self.max_iters = max_iters
         self._forcing = False
         if submit_guard is not None:
             self._guard_submit(submit_guard)
 
     def _guard_submit(self, guard: Callable[[dict[str, Any]], str | None]) -> None:
-        """Run ``guard`` before every ``submit`` the loop executes.
+        """Run ``guard`` before every ``submit`` call.
 
-        ReActV2 ends the loop only when ``submit`` returns a dict, so a refusal
-        returned as text reads to the model as an ordinary tool result.
+        Only a dict return ends the turn, so a refusal returned as text reads
+        to the model as an ordinary tool result.
 
         Args:
             guard: As for ``submit_guard`` in :meth:`__init__`.
@@ -210,34 +208,6 @@ class ConversationReAct(RetryingReActV2):
             return submit(**kwargs)
 
         tool.func = guarded
-
-    def _forced_submit(self, *args: Any, **kwargs: Any) -> dspy.Prediction:
-        """Run ReActV2's last-chance submit with the guard off.
-
-        Args:
-            *args: As for the base method.
-            **kwargs: As for the base method.
-
-        Returns:
-            The base method's prediction.
-        """
-        self._forcing = True
-        try:
-            return super()._forced_submit(*args, **kwargs)
-        finally:
-            self._forcing = False
-
-    def forward(self, **input_args):
-        """Run one user turn under the append-only adapter.
-
-        Args:
-            **input_args: The signature's inputs, plus an optional ``history``.
-
-        Returns:
-            The prediction; its ``history`` holds the whole conversation so far.
-        """
-        with dspy.context(adapter=self._adapter):
-            return super().forward(**input_args)
 
 
 def history_from_turns(
@@ -305,46 +275,4 @@ def _replayed_call(call_id: str, name: str, args: dict[str, Any], result: str, i
     return calls.model_copy(update={"tool_call_results": results})
 
 
-def dump_history(history: dspy.History) -> list[dict[str, Any]]:
-    """Serialize loop history to JSON-safe data for storage.
-
-    Args:
-        history: The ``history`` of a finished turn's prediction.
-
-    Returns:
-        One plain dict per loop event; :func:`load_history` reverses it.
-    """
-    events = []
-    for message in history.messages:
-        event = {}
-        for name, value in message.items():
-            if isinstance(value, dspy.Reasoning):
-                value = value.content
-            elif isinstance(value, ToolCalls):
-                # ToolCalls' own serializer drops the call ids that tie results to calls.
-                calls = [{"id": call.id, "name": call.name, "args": call.args} for call in value.tool_calls]
-                value = {**value.model_dump(mode="json"), "tool_calls": calls}
-            event[name] = value
-        events.append(event)
-    return events
-
-
-def load_history(events: list[dict[str, Any]]) -> dspy.History:
-    """Rebuild loop history from :func:`dump_history` output.
-
-    Args:
-        events: The stored events.
-
-    Returns:
-        History that renders to the same messages as the original.
-    """
-    return dspy.History(messages=[dict(event) for event in events])
-
-
-__all__ = [
-    "AppendOnlyChatAdapter",
-    "ConversationReAct",
-    "dump_history",
-    "history_from_turns",
-    "load_history",
-]
+__all__ = ["SUBMIT_TOOL", "AgentProgram", "AppendOnlyChatAdapter", "history_from_turns"]

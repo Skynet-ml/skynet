@@ -1,8 +1,7 @@
-"""Tests for delivering mid-turn user messages in :mod:`...agents.steering`.
+"""Tests for the mid-turn user message store in :mod:`...agents.steering`.
 
-Pins that a message posted while a turn runs reaches the model at the loop's
-next step as the newest user message, is recorded in the loop history where it
-was read, and goes either to the loop or back to the client, never both.
+Pins the store's caps, its hand-out and withdraw rules and the turn bound. The
+Pi turn's steer delivery is in ``test_pi_react.py``.
 """
 
 from __future__ import annotations
@@ -11,16 +10,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import Mock
 
-import dspy
 import pytest
 from sqlalchemy import create_engine
 
 from ...storage.models import AgentSteerMessageModel, AgentSteerTurnModel
 from ..agents import steering as steering_mod
-from ..agents.acting_react import ActingReActV2
-from ..agents.conversation_react import ConversationReAct
-from ..agents.steering import STEER_APPLIED_EVENT, SteerInbox, SteerStore, attach_steering
-from .test_conversation_react import _ScriptedLM
+from ..agents.steering import SteerStore
 
 _OWNER = "alice"
 _KEY = "turn-1"
@@ -118,57 +113,6 @@ def test_withdraw_distinguishes_delivered_and_is_idempotent(database: bool) -> N
     assert store.withdraw(_OWNER, _KEY, []) == ([], [])
 
 
-def _user_texts(messages: list[dict[str, Any]]) -> list[str]:
-    """Return the text of every user message in one request.
-
-    Args:
-        messages: The rendered chat messages.
-
-    Returns:
-        Each user message's content, in order.
-    """
-    return [str(m["content"]) for m in messages if m["role"] == "user"]
-
-
-def _steered_program(
-    store: SteerStore, events: list[dict[str, Any]], *, posts: dict[str, str], conversation: bool
-) -> dspy.Module:
-    """Build a one-tool loop whose tool posts a steer message when called.
-
-    Args:
-        store: Where steer messages are kept.
-        events: Receives every event the inbox emits.
-        posts: Maps a tool argument to the steer text posted when it is used.
-        conversation: Build a :class:`ConversationReAct` instead of an
-            :class:`ActingReActV2`.
-
-    Returns:
-        The program, with steering attached.
-    """
-
-    def lookup(name: str) -> str:
-        """Look a name up.
-
-        Args:
-            name: The thing to look up.
-
-        Returns:
-            A constant string.
-        """
-        if name in posts:
-            store.post(_OWNER, _KEY, posts[name])
-        return f"value of {name}"
-
-    signature = dspy.Signature("user_message: str -> reply: str", "Be helpful.")
-    loop_cls = ConversationReAct if conversation else ActingReActV2
-    program = loop_cls(signature, tools=[lookup], max_iters=5)
-    attach_steering(
-        program,
-        SteerInbox(owner=_OWNER, steer_key=_KEY, input_field="user_message", emit=events.append, store=store),
-    )
-    return program
-
-
 def test_store_hands_each_message_out_once() -> None:
     """A taken message is gone, and keys and owners do not mix."""
     store = SteerStore()
@@ -192,168 +136,6 @@ def test_store_takes_back_only_the_named_messages() -> None:
     assert store.take(_OWNER, _KEY) == [(first, "one")]
 
 
-def test_steer_reaches_the_next_step_as_the_newest_user_message() -> None:
-    """A message posted during a tool call is read by the very next step."""
-    store = SteerStore()
-    events: list[dict[str, Any]] = []
-    lm = _ScriptedLM([("lookup", {"name": "a"}), ("lookup", {"name": "b"}), ("submit", {"reply": "done"})])
-    program = _steered_program(store, events, posts={"a": "use blue instead"}, conversation=False)
-
-    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
-        result = program(user_message="make it red")
-
-    assert result.reply == "done"
-    second_request = lm.requests[1]["messages"]
-    assert second_request[-1]["role"] == "user"
-    assert "use blue instead" in second_request[-1]["content"]
-    assert [e["event"] for e in events] == [STEER_APPLIED_EVENT]
-    assert events[0]["data"]["text"] == "use blue instead"
-    assert len(events[0]["data"]["ids"]) == 1
-    assert store.withdraw(_OWNER, _KEY, events[0]["data"]["ids"]) == ([], events[0]["data"]["ids"])
-    third_users = _user_texts(lm.requests[2]["messages"])
-    assert sum("use blue instead" in text for text in third_users) == 1
-    assert not any(m["role"] == "assistant" and not m.get("tool_calls") for m in lm.requests[2]["messages"])
-
-
-def test_two_quick_steers_reach_the_next_step_in_order() -> None:
-    """Two messages posted during one tool call both reach the next step, oldest first."""
-    store = SteerStore()
-    events: list[dict[str, Any]] = []
-
-    def lookup(name: str) -> str:
-        """Post two steers in a row, as a user who sends twice quickly.
-
-        Args:
-            name: The thing to look up.
-
-        Returns:
-            A constant string.
-        """
-        if name == "a":
-            store.post(_OWNER, _KEY, "use blue instead")
-            store.post(_OWNER, _KEY, "and add a title")
-        return f"value of {name}"
-
-    signature = dspy.Signature("user_message: str -> reply: str", "Be helpful.")
-    program = ActingReActV2(signature, tools=[lookup], max_iters=5)
-    attach_steering(
-        program,
-        SteerInbox(owner=_OWNER, steer_key=_KEY, input_field="user_message", emit=events.append, store=store),
-    )
-    lm = _ScriptedLM([("lookup", {"name": "a"}), ("submit", {"reply": "done"})])
-
-    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
-        program(user_message="make it red")
-
-    newest = str(lm.requests[1]["messages"][-1]["content"])
-    assert newest.index("use blue instead") < newest.index("and add a title")
-    assert [e["event"] for e in events] == [STEER_APPLIED_EVENT]
-    assert len(events[0]["data"]["ids"]) == 2
-    assert store.take(_OWNER, _KEY) == []
-
-
-class _SteerableLM(_ScriptedLM):
-    """A scripted LM whose second step follows the newest user message."""
-
-    def forward(self, prompt=None, messages=None, **kwargs):
-        """Pick the second step's tool call from the newest user message, then answer.
-
-        Args:
-            prompt: Unused legacy prompt.
-            messages: The rendered chat messages.
-            **kwargs: Provider kwargs, including ``tools``.
-
-        Returns:
-            An OpenAI-shaped response carrying one tool call.
-        """
-        if len(self.requests) == 1:
-            newest = _user_texts(messages or [])[-1]
-            color = "blue" if "use blue instead" in newest else "red"
-            self._script.insert(0, ("lookup", {"name": color}))
-        return super().forward(prompt=prompt, messages=messages, **kwargs)
-
-
-@pytest.mark.parametrize("steer", [None, "use blue instead"])
-def test_steer_changes_what_the_agent_does_next(steer: str | None) -> None:
-    """A message sent mid-turn changes the agent's next tool call, not only its prompt."""
-    store = SteerStore()
-    events: list[dict[str, Any]] = []
-    lm = _SteerableLM([("lookup", {"name": "a"}), ("submit", {"reply": "done"})])
-    program = _steered_program(store, events, posts={"a": steer} if steer else {}, conversation=False)
-
-    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
-        program(user_message="make it red")
-
-    tool_results = [str(m["content"]) for m in lm.requests[2]["messages"] if m["role"] == "tool"]
-    expected = "blue" if steer else "red"
-    assert tool_results[-1] == f"value of {expected}"
-    assert [e["event"] for e in events] == ([STEER_APPLIED_EVENT] if steer else [])
-
-
-def test_steered_calls_keep_extending_the_previous_prompt() -> None:
-    """Steering keeps the append-only prompt shape the prompt cache relies on."""
-    store = SteerStore()
-    lm = _ScriptedLM([("lookup", {"name": "a"}), ("lookup", {"name": "b"}), ("submit", {"reply": "done"})])
-    program = _steered_program(store, [], posts={"a": "use blue instead"}, conversation=True)
-
-    with dspy.context(lm=lm):
-        program(user_message="make it red")
-
-    for earlier, later in zip(lm.requests, lm.requests[1:], strict=False):
-        assert later["messages"][: len(earlier["messages"])] == earlier["messages"]
-
-
-def test_steer_read_by_the_final_step_is_kept_in_history() -> None:
-    """A steer the submitting step read is recorded on that step's event."""
-    store = SteerStore()
-    lm = _ScriptedLM([("lookup", {"name": "a"}), ("submit", {"reply": "done"})])
-    program = _steered_program(store, [], posts={"a": "also add a title"}, conversation=True)
-
-    with dspy.context(lm=lm):
-        result = program(user_message="make it red")
-
-    steered = [event for event in result.history.messages if event.get("user_message") == "also add a title"]
-    assert len(steered) == 1
-    assert "tool_calls" in steered[0]
-
-
-def test_unread_steer_stays_for_the_client_to_withdraw() -> None:
-    """A message posted after the last step is never applied and can be withdrawn."""
-    store = SteerStore()
-    events: list[dict[str, Any]] = []
-    lm = _ScriptedLM([("submit", {"reply": "done"})])
-    program = _steered_program(store, events, posts={}, conversation=False)
-    store.post(_OWNER, _KEY, "too late")
-
-    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
-        program(user_message="make it red")
-
-    assert events == []
-    assert [text for _, text in store.take(_OWNER, _KEY)] == ["too late"]
-
-
-def test_steer_stays_unread_when_delivery_cannot_be_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A steer the store cannot mark delivered skips the step and goes back to the mailbox."""
-    store = SteerStore()
-    events: list[dict[str, Any]] = []
-
-    def fail(*args: Any, **kwargs: Any) -> None:
-        """Simulate a database error while the steer is marked delivered."""
-        raise RuntimeError("database unavailable")
-
-    monkeypatch.setattr(store, "mark_delivered", fail)
-    lm = _ScriptedLM([("lookup", {"name": "a"}), ("lookup", {"name": "b"}), ("submit", {"reply": "done"})])
-    program = _steered_program(store, events, posts={"a": "use blue instead"}, conversation=False)
-
-    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
-        result = program(user_message="make it red")
-
-    assert result.reply == "done"
-    assert events == []
-    assert not any("use blue instead" in str(request["messages"]) for request in lm.requests)
-    assert [text for _, text in store.take(_OWNER, _KEY)] == ["use blue instead"]
-
-
 async def test_open_steer_inbox_returns_none_when_registration_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """A turn whose bound cannot be stored runs without steering instead of failing."""
     store = SteerStore()
@@ -374,15 +156,3 @@ async def test_open_steer_inbox_registers_the_turn_bound() -> None:
     assert inbox is not None
     with pytest.raises(steering_mod.SteerInputError):
         store.post(_OWNER, _KEY, "x" * 6)
-
-
-def test_loop_without_an_inbox_is_unchanged() -> None:
-    """Attaching no inbox leaves the loop exactly as it was."""
-    signature = dspy.Signature("user_message: str -> reply: str", "Be helpful.")
-    program = ConversationReAct(signature, tools=[], max_iters=2)
-    attach_steering(program, None)
-    lm = _ScriptedLM([("submit", {"reply": "done"})])
-
-    with dspy.context(lm=lm):
-        assert program(user_message="hi").reply == "done"
-    assert not hasattr(program.react, "steer_inbox")

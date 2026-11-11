@@ -13,14 +13,18 @@ import csv
 import io
 import json
 import pickle
+import runpy
 import zipfile
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pyarrow.feather as feather
 import pyarrow.parquet as pq
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -361,3 +365,69 @@ def test_delete_removes_channels_and_connectors(harness: SimpleNamespace) -> Non
             owners = set(session.scalars(select(model.username)))
             assert _EMAIL not in owners
             assert _OTHER in owners
+
+
+def _open_wallets(engine: Any) -> None:
+    """Give both seeded wallets a spendable balance and an unspent free grant.
+
+    Args:
+        engine: The SQLite engine holding the seeded wallets.
+    """
+    with Session(engine) as session:
+        for customer in session.scalars(select(BillingCustomerModel)):
+            customer.balance_cents = 200
+            customer.grant_remaining = 300
+        session.commit()
+
+
+def test_delete_closes_the_wallet_and_records_the_forfeited_balance(harness: SimpleNamespace) -> None:
+    """Deletion leaves no open wallet: balance and grant go to zero, and a closure row explains it."""
+    _open_wallets(harness.engine)
+    assert harness.client.post("/account/delete", json={"password": _PASSWORD}).status_code == 200
+
+    tombstone = _anonymized_username(_EMAIL)
+    with Session(harness.engine) as session:
+        assert session.get(BillingCustomerModel, _EMAIL) is None
+        wallet = session.get(BillingCustomerModel, tombstone)
+        assert (wallet.balance_cents, wallet.grant_remaining) == (0, 0)
+        assert wallet.stripe_customer_id == "cus_owner"
+        closure = session.scalars(
+            select(WalletLedgerModel).where(
+                WalletLedgerModel.username == tombstone, WalletLedgerModel.kind == "closure"
+            )
+        ).one()
+        assert closure.delta_cents == -200
+
+        other = session.get(BillingCustomerModel, _OTHER)
+        assert (other.balance_cents, other.grant_remaining) == (200, 300)
+
+
+def test_migration_closes_wallets_deleted_before_the_fix(harness: SimpleNamespace) -> None:
+    """The one-time migration closes old tombstone wallets and spares live ones."""
+    _open_wallets(harness.engine)
+    tombstone = _anonymized_username(_EMAIL)
+    with Session(harness.engine) as session:
+        session.get(BillingCustomerModel, _EMAIL).username = tombstone
+        session.add(
+            BillingCustomerModel(
+                username="deleted-user-look@example.com", stripe_customer_id="cus_look", balance_cents=50
+            )
+        )
+        session.commit()
+    migration = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "alembic/versions/1b5b259642df_close_deleted_account_wallets.py")
+    )
+    for _ in range(2):
+        with harness.engine.begin() as connection, Operations.context(MigrationContext.configure(connection)):
+            migration["upgrade"]()
+
+    with Session(harness.engine) as session:
+        wallet = session.get(BillingCustomerModel, tombstone)
+        assert (wallet.balance_cents, wallet.grant_remaining) == (0, 0)
+        closures = session.scalars(
+            select(WalletLedgerModel.delta_cents).where(WalletLedgerModel.kind == "closure")
+        ).all()
+        assert closures == [-200]
+        other = session.get(BillingCustomerModel, _OTHER)
+        assert (other.balance_cents, other.grant_remaining) == (200, 300)
+        assert session.get(BillingCustomerModel, "deleted-user-look@example.com").balance_cents == 50
