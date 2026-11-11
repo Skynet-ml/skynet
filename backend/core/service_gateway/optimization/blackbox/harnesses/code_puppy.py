@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import shlex
 
+from .....exceptions import ServiceError
 from .....models.blackbox import BLACKBOX_HARNESS_CODE_PUPPY
 from ..harness_bridge import parse_pi_output
 from . import HarnessSpec, register
@@ -109,12 +110,19 @@ sys.stdout.write("\\n".join(lines) + "\\n")
 # the placeholder to it in the XDG copy. The token never goes into a file, and
 # a repo ``.env`` cannot know the name.
 _CUSTOM_API_KEY_ENV = "CODE_PUPPY_API_KEY"
+# The pipeline's status is ``tr``'s, so a missing ``od`` or ``/dev/urandom``
+# would leave the fixed name ``CP_KEY_`` that a repo ``.env`` can know. The
+# length check (7 + 16 hex digits) fails the run instead.
 _RANDOM_KEY_ENV = (
-    f'_cp_key="CP_KEY_$(od -An -N8 -tx1 /dev/urandom | tr -d \' \\n\')" && export "$_cp_key=${ENV_API_KEY}"'
+    f"_cp_key=\"CP_KEY_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \\n')\" && "
+    '{ [ "${#_cp_key}" -eq 23 ] || '
+    "{ echo 'code-puppy: could not make a random key name (od or /dev/urandom is missing)' >&2; exit 1; }; } && "
+    f'export "$_cp_key=${ENV_API_KEY}"'
 )
 # Code Puppy's effort names (model_utils._OPENAI_REASONING_EFFORT_ORDER in
-# 0.0.967), written to puppy.cfg; anything else gets no setting.
-_CODE_PUPPY_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+# 0.0.967). Each passes unchanged; the launch refuses any other effort, so a run
+# never gets an effort the user did not pick.
+CODE_PUPPY_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # ``uv tool install`` and the uv installer both put their binaries here.
 _CODE_PUPPY_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
 # Code Puppy reads these keys for its native providers. Every launch blanks
@@ -128,11 +136,19 @@ _PROTECTED_ENV = {
 }
 # Code Puppy treats a leading ``!`` as a shell pass-through and a leading
 # ``/`` as a slash command, so such a prompt never reaches the model. Harbor
-# frames those prompts and leaves every other prompt byte-identical.
+# frames those prompts and leaves every other prompt byte-identical. Code Puppy
+# finds the leading character after Python's ``str.strip()``, which also strips
+# Unicode whitespace such as a non-breaking space, so the check runs in Python
+# too. It exits 0 only for a plain prompt, so a failed check frames the prompt.
+_PLAIN_PROMPT_CHECK = (
+    "import sys; "
+    'text = open(sys.argv[1], encoding="utf-8", errors="replace").read().lstrip(); '
+    'sys.exit(text.startswith(("!", "/")))'
+)
 _FRAMED_PROMPT = (
     f'_cp_prompt="$(cat "${ENV_PROMPT_FILE}")"; '
-    'case "${_cp_prompt#"${_cp_prompt%%[![:space:]]*}"}" in '
-    "'!'*|/*) _cp_prompt=\"Task request:\n$_cp_prompt\" ;; esac; "
+    f"python3 -I -c '{_PLAIN_PROMPT_CHECK}' \"${ENV_PROMPT_FILE}\" || "
+    '_cp_prompt="Task request:\n$_cp_prompt"; '
 )
 
 
@@ -155,6 +171,22 @@ def _code_puppy_install() -> str:
     )
 
 
+def _check_effort(reasoning_effort: str) -> None:
+    """Refuse an effort that Code Puppy does not know.
+
+    Args:
+        reasoning_effort: The user's effort for the model.
+
+    Raises:
+        ServiceError: When the effort is not in :data:`CODE_PUPPY_EFFORTS`.
+    """
+    if reasoning_effort not in CODE_PUPPY_EFFORTS:
+        raise ServiceError(
+            f"The Code Puppy harness does not support the effort '{reasoning_effort}'. "
+            f"Pick one of: {', '.join(CODE_PUPPY_EFFORTS)}."
+        )
+
+
 def _puppy_cfg(reasoning_effort: str | None) -> str:
     """Build ``puppy.cfg`` for an unattended run.
 
@@ -163,6 +195,9 @@ def _puppy_cfg(reasoning_effort: str | None) -> str:
 
     Returns:
         The INI text.
+
+    Raises:
+        ServiceError: When Code Puppy has no effort with that name.
     """
     lines = [
         "[puppy]",
@@ -173,7 +208,8 @@ def _puppy_cfg(reasoning_effort: str | None) -> str:
         # 0.0.967 has no --yolo argument (Harbor 0.25.0 passes one); this key skips shell-command approval.
         "yolo_mode = true",
     ]
-    if reasoning_effort in _CODE_PUPPY_EFFORTS:
+    if reasoning_effort:
+        _check_effort(reasoning_effort)
         lines.append(f"model_settings_{PROVIDER}_reasoning_effort = {reasoning_effort}")
     return "\n".join(lines) + "\n"
 
@@ -188,13 +224,17 @@ def _extra_models(model: str, gateway: GatewayConfig, reasoning_effort: str | No
 
     Returns:
         The JSON text.
+
+    Raises:
+        ServiceError: When Code Puppy has no effort with that name.
     """
     entry: dict[str, object] = {
         "type": "custom_openai",
         "name": model,
         "custom_endpoint": {"url": gateway.url, "api_key": f"${_CUSTOM_API_KEY_ENV}"},
     }
-    if reasoning_effort in _CODE_PUPPY_EFFORTS:
+    if reasoning_effort:
+        _check_effort(reasoning_effort)
         # 0.0.967 drops the puppy.cfg effort for a custom_openai model unless the
         # model advertises it (config.model_supports_setting) or its name looks
         # like a GPT-5 or o-series id, so a gateway id such as a Claude model
@@ -220,6 +260,9 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
 
     Returns:
         The launch.
+
+    Raises:
+        ServiceError: When Code Puppy has no effort with that name.
     """
     xdg_exports = " ".join(f'{name}="$_cp_dir/{folder}"' for name, folder in _XDG_DIRS.items())
     run_command = (

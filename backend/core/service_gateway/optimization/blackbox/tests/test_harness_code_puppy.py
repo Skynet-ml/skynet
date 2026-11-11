@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESS_CODE_PUPPY, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
 from .. import repo_tree
@@ -105,6 +106,7 @@ def _run_with_fake_code_puppy(
     gateway: GatewayConfig = _GATEWAY,
     repo_env: str | None = None,
     snapshot: Path | None = None,
+    extra_bins: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Code Puppy command in a scratch workspace against a fake ``code-puppy`` binary.
 
@@ -118,6 +120,7 @@ def _run_with_fake_code_puppy(
         gateway: Gateway URL and token for the launch.
         repo_env: Text of a ``.env`` file the candidate repo ships, or ``None`` for no file.
         snapshot: Where the fake copies the run's temporary folder, or ``None`` for no copy.
+        extra_bins: Other fake binaries (name to script) that go in front of the system ``PATH``.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
@@ -140,7 +143,12 @@ def _run_with_fake_code_puppy(
     fake = bin_dir / "code-puppy"
     fake.write_text(_FAKE_CODE_PUPPY)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    for name, script in (extra_bins or {}).items():
+        extra = bin_dir / name
+        extra.write_text(script)
+        extra.chmod(extra.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "calls.log"
+    log.touch()
     env = {
         **launch.env,
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
@@ -206,7 +214,6 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     ("effort", "line"),
     [
         (None, None),
-        ("auto", None),
         ("none", "model_settings_app_reasoning_effort = none"),
         ("high", "model_settings_app_reasoning_effort = high"),
         ("max", "model_settings_app_reasoning_effort = max"),
@@ -231,6 +238,13 @@ def test_reasoning_effort_goes_to_the_config_only_when_code_puppy_knows_it(
     else:
         assert f"\n{line}\n" in cfg
         assert model_entry["setting_choices"] == {"reasoning_effort": [effort]}
+
+
+@pytest.mark.parametrize("effort", ["auto", "HIGH", "extreme"])
+def test_unknown_reasoning_effort_is_refused_at_launch_build(effort: str) -> None:
+    """Refuse an effort that Code Puppy does not know, instead of a silent drop or remap."""
+    with pytest.raises(ServiceError, match=f"does not support the effort '{effort}'"):
+        build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:
@@ -326,12 +340,34 @@ def test_open_run_keeps_the_gateway_url(tmp_path: Path) -> None:
     assert f'MODEL_URL="url": "{_GATEWAY.url}"' in calls
 
 
-@pytest.mark.parametrize("prompt", ["/help me fix it", "  !rm -rf build"])
+@pytest.mark.parametrize(
+    "prompt", ["/help me fix it", "  !rm -rf build", "\u00a0!rm -rf build", "\u2003\u00a0/help", "\u3000\n!ls"]
+)
 def test_command_like_prompts_are_framed_as_a_task(tmp_path: Path, prompt: str) -> None:
     """Prefix a prompt that Code Puppy would read as a slash or shell command, so it reaches the model."""
     _, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=False, prompt=prompt)
 
     assert f"[--prompt] [Task request:\n{prompt}]" in calls
+
+
+@pytest.mark.parametrize("prompt", ["Fix it! Then run /tmp/check.sh", "\u00a0Fix it"])
+def test_plain_prompts_pass_unchanged(tmp_path: Path, prompt: str) -> None:
+    """Leave a prompt byte-identical when it does not start with ``!`` or ``/`` after any whitespace."""
+    _, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=False, prompt=prompt)
+
+    assert f"[--prompt] [{prompt}]" in calls
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_run_fails_when_no_random_key_name_can_be_made(tmp_path: Path, protected: bool) -> None:
+    """Fail the run, before Code Puppy starts, when ``od`` gives no random digits."""
+    result, calls, _ = _run_with_fake_code_puppy(
+        tmp_path, protected=protected, extra_bins={"od": "#!/bin/sh\nexit 127\n"}
+    )
+
+    assert result.returncode == 1
+    assert "could not make a random key name" in result.stderr
+    assert calls == ""
 
 
 def test_run_fails_when_code_puppy_writes_no_usage_file(tmp_path: Path) -> None:
