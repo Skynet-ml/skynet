@@ -62,6 +62,7 @@ _BUILT_INS = (
     "grok_build",
     "deerflow",
     "cline",
+    "kimi_code",
     "code_puppy",
 )
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
@@ -327,6 +328,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "deerflow": (DEERFLOW_SPEC.binary, DEERFLOW_REF),
         "cline": ("cline", "3.0.74"),
         "fabric": ("fabric", "0.5.0"),
+        "kimi_code": ("kimi", "2.5.3"),
         "code_puppy": ("code-puppy", "0.0.967"),
     }
 
