@@ -98,14 +98,19 @@ def offered_providers(settings: Settings) -> list[dict[str, str]]:
 def provider_offered(settings: Settings, provider: object) -> bool:
     """Check a run's requested provider against the offered list.
 
+    The default provider always passes: a stored run names it, and the
+    deployment's own availability check reports a missing default instead.
+
     Args:
         settings: Trusted deployment configuration.
         provider: The requested provider id, or ``None`` for the default.
 
     Returns:
-        True when the run names no provider or an offered one.
+        True when the run names no provider, the default or an offered one.
     """
-    return provider is None or provider in {entry["id"] for entry in offered_providers(settings)}
+    if provider is None or provider == default_provider(settings):
+        return True
+    return provider in {entry["id"] for entry in offered_providers(settings)}
 
 
 def protected_unavailable_reason(settings: Settings) -> str | None:

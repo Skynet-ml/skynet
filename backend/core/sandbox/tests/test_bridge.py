@@ -533,3 +533,11 @@ def test_runtime_refuses_a_provider_the_deployment_does_not_offer(
     _vercel_credentials(monkeypatch)
     with pytest.raises(SandboxFatalError, match="not offered"):
         bridge.protected_runtime(_hosted(), image=_DIGEST, budget=_BUDGET, provider=provider)
+
+
+def test_gate_passes_the_stored_default_provider_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A replayed run that stores the default provider passes; the availability check reports a missing default."""
+    monkeypatch.setattr(global_settings, "vercel_token", None)
+    assert bridge.offered_providers(_hosted()) == []
+    assert bridge.provider_offered(_hosted(), "vercel")
+    assert not bridge.provider_offered(_hosted(), "docker")
