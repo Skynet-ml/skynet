@@ -181,18 +181,21 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
 def test_reasoning_effort_goes_to_the_config_only_when_code_puppy_knows_it(
     tmp_path: Path, effort: str | None, line: str | None
 ) -> None:
-    """Write the user's effort to ``puppy.cfg`` for Code Puppy's effort names, and nothing otherwise."""
-    result, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=False, reasoning_effort=effort)
+    """Write the user's effort to ``puppy.cfg`` and advertise it on the model for Code Puppy's effort names only."""
+    result, calls, workspace = _run_with_fake_code_puppy(tmp_path, protected=False, reasoning_effort=effort)
 
     assert result.returncode == 0, result.stderr
     cfg = calls.split("CFG_BEGIN\n", 1)[1].split("CFG_END\n", 1)[0]
     assert cfg.startswith(
         "[puppy]\npuppy_name = Puppy\nowner_name = User\nauto_save_session = false\nyolo_mode = true\n"
     )
+    model_entry = json.loads((workspace / CODE_PUPPY_MODELS_FILE).read_text())["app"]
     if line is None:
         assert "reasoning_effort" not in cfg
+        assert "setting_choices" not in model_entry
     else:
         assert cfg.endswith(f"{line}\n")
+        assert model_entry["setting_choices"] == {"reasoning_effort": [effort]}
 
 
 def test_protected_launch_checks_the_pin_offline_and_blocks_other_providers() -> None:

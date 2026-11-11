@@ -110,21 +110,29 @@ def _puppy_cfg(reasoning_effort: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _extra_models(model: str, gateway: GatewayConfig) -> str:
+def _extra_models(model: str, gateway: GatewayConfig, reasoning_effort: str | None) -> str:
     """Build ``extra_models.json`` with one gateway-backed model under the alias :data:`PROVIDER`.
 
     Args:
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; only the URL is written.
+        reasoning_effort: The user's effort for the model, or ``None`` for Code Puppy's default.
 
     Returns:
         The JSON text.
     """
-    entry = {
+    entry: dict[str, object] = {
         "type": "custom_openai",
         "name": model,
         "custom_endpoint": {"url": gateway.url, "api_key": f"${_CUSTOM_API_KEY_ENV}"},
     }
+    if reasoning_effort in _CODE_PUPPY_EFFORTS:
+        # 0.0.967 drops the puppy.cfg effort for a custom_openai model unless the
+        # model advertises it (config.model_supports_setting) or its name looks
+        # like a GPT-5 or o-series id, so a gateway id such as a Claude model
+        # would silently lose it. Advertising the one chosen effort makes
+        # make_model_settings send it as ``reasoning_effort``.
+        entry["setting_choices"] = {"reasoning_effort": [reasoning_effort]}
     return json.dumps({PROVIDER: entry}, indent=2) + "\n"
 
 
@@ -164,7 +172,7 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_code_puppy_install(),
-        files={CODE_PUPPY_MODELS_FILE: _extra_models(model, gateway)},
+        files={CODE_PUPPY_MODELS_FILE: _extra_models(model, gateway, reasoning_effort)},
         run_command=run_command,
         env={**_base_env(model, gateway), **_BLANK_PROVIDER_KEYS},
         parse_output=parse_plain_output,
