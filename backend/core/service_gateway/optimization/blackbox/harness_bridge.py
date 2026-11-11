@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import hashlib
 import json
 import os
@@ -407,8 +408,18 @@ _GUARD_MAX_LINK_DEPTH = 40
 _GUARD_DEADLINE_SECONDS = 5.0
 # Options of these commands that name the folder the command works in.
 _GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
-# One check function shared by the Pi extension and the OpenCode plugin. It
-# asks this module for the verdict, so the matching lives in one place.
+# Linux prctl option that makes a process adopt the orphans of its descendants.
+_PR_SET_CHILD_SUBREAPER = 36
+# The reaper stops sweeping after this many rounds, so a descendant that keeps
+# forking cannot hold the session open.
+_REAPER_SWEEPS = 50
+# After a stop signal, the reaper gives the shell this long to finish its EXIT
+# trap, then kills the tree, so a shell that ignores SIGTERM cannot hold the
+# session open when the bridge has no timeout.
+_REAPER_STOP_GRACE_SECONDS = 5.0
+# One check function shared by the Pi extension, the OpenCode plugin and the
+# eve sandbox. It asks this module for the verdict, so the matching lives in
+# one place.
 _GUARD_JS_CHECK = """import {{ execFileSync }} from "node:child_process";
 
 const APP_GUARD_REFUSAL = {refusal};
@@ -446,6 +457,11 @@ export const AppGuard = async () => ({
     if (reason) throw new Error(reason);
   },
 });
+"""
+# The eve workspace sandbox imports this module and asks the check before each
+# tool call, because eve has no hook that the bridge can configure.
+_GUARD_EVE_MODULE = """
+export { appGuardReason };
 """
 
 
@@ -983,11 +999,14 @@ def install_guard(
     pi_extension = guard_dir / "pi-guard.ts"
     pi_extension.write_text(check + _GUARD_PI_EXTENSION, encoding="utf-8")
     (guard_dir / "plugin" / "app-guard.js").write_text(check + _GUARD_OPENCODE_PLUGIN, encoding="utf-8")
+    eve_module = guard_dir / "eve-guard.mjs"
+    eve_module.write_text(check + _GUARD_EVE_MODULE, encoding="utf-8")
     codex_file = guard_dir / "codex-hooks.json"
     codex_file.write_text(json.dumps(codex_hooks(policy_file, digest)), encoding="utf-8")
     return {
         "APP_GUARD_PI": str(pi_extension),
         "APP_GUARD_CODEX": str(codex_file),
+        "APP_GUARD_EVE": str(eve_module),
         "OPENCODE_CONFIG_DIR": str(guard_dir),
     }
 
@@ -1078,6 +1097,7 @@ class _Monitor:
     price: dict[str, float] | None
     max_cost_usd: float | None
     max_tool_calls: int | None = None
+    root_start: int | None = None
     chunks: list[str] = field(default_factory=list)
     budget_exceeded: bool = False
     tool_calls: int = 0
@@ -1105,7 +1125,7 @@ class _Monitor:
             _, usage = parse_output(self.output_format, "".join(self.chunks))
             if cost_usd(usage, self.price) > self.max_cost_usd:
                 self.budget_exceeded = True
-                _stop_group(self.process, signal.SIGTERM)
+                _stop_group(self.process, signal.SIGTERM, self.root_start)
 
     def _count_tool_calls(self, line: str) -> None:
         """Count the tool calls one output line starts and stop the harness past the cap.
@@ -1122,19 +1142,173 @@ class _Monitor:
                 self.tool_calls += 1
         if self.max_tool_calls is not None and self.tool_calls > self.max_tool_calls and not self.tool_cap_reached:
             self.tool_cap_reached = True
-            _stop_group(self.process, signal.SIGTERM)
+            _stop_group(self.process, signal.SIGTERM, self.root_start)
 
 
-def _stop_group(process: subprocess.Popen[str], signum: int) -> None:
-    """Signal the harness shell and every child it spawned.
+def _stop_group(process: subprocess.Popen[str], signum: int, root_start: int | None) -> None:
+    """Signal the harness shell and every child it spawned, once each.
 
     Args:
         process: The shell running the harness command, started in its own session.
-        signum: Signal to deliver to the whole process group.
+        signum: Signal to deliver to the process group and to every descendant outside it.
+        root_start: Start time of the shell from ``/proc``, or ``None`` where ``/proc`` is absent.
     """
+    stats = _proc_stats() if root_start is not None else None
+    if stats is not None and process.pid in stats and stats[process.pid][2] != root_start:
+        # The shell was reaped and an unrelated process took its pid. That
+        # process can lead its own group, so neither the group nor the tree is ours.
+        return
+    # eve's sandbox starts each tool command detached, in its own session and
+    # group, so the group signal misses it. The tree is read first: once a
+    # parent dies, its children move to init and leave the tree.
+    descendants = []
+    if stats and process.pid in stats:
+        # killpg already reaches the members of the shell's group.
+        descendants = [pid for pid in _descendants(stats, process.pid) if stats[pid][1] != process.pid]
     # Signalling only the shell would leave a child holding the stdout pipe open.
     with contextlib.suppress(ProcessLookupError):
         os.killpg(process.pid, signum)
+    for pid in descendants:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signum)
+
+
+def _stat_fields(pid: int | str) -> list[str]:
+    """Read the ``/proc/<pid>/stat`` fields that follow the command name.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        Fields 3 onward: state, parent pid, process group, and so on; the start time is index 19.
+    """
+    # The command name in field 2 can hold spaces and parentheses, so the
+    # fields are read after its closing parenthesis.
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+
+
+def _start_time(pid: int) -> int | None:
+    """Return the start time of a process, which tells it apart from a later process with the same pid.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        The start time in clock ticks after boot, or ``None`` where ``/proc`` is absent (macOS).
+    """
+    try:
+        return int(_stat_fields(pid)[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _proc_stats() -> dict[int, tuple[int, int, int]] | None:
+    """Read the parent pid, process group and start time of every process.
+
+    Returns:
+        ``(parent, group, start)`` for each pid, or ``None`` where ``/proc`` is absent (macOS).
+    """
+    try:
+        entries = list(Path("/proc").iterdir())
+    except FileNotFoundError:
+        return None
+    stats: dict[int, tuple[int, int, int]] = {}
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = _stat_fields(entry.name)
+            stats[int(entry.name)] = (int(fields[1]), int(fields[2]), int(fields[19]))
+        except (OSError, IndexError, ValueError):
+            continue
+    return stats
+
+
+def _descendants(stats: dict[int, tuple[int, int, int]], root: int) -> list[int]:
+    """List the descendants of a process.
+
+    Args:
+        stats: The process table from ``_proc_stats``.
+        root: Pid whose tree to walk.
+
+    Returns:
+        The pids under ``root`` at any depth.
+    """
+    children: dict[int, list[int]] = {}
+    for pid, (parent, _, _) in stats.items():
+        children.setdefault(parent, []).append(pid)
+    found: list[int] = []
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.append(child)
+            pending.append(child)
+    return found
+
+
+def reaper_main(command: list[str]) -> int:
+    """Run the harness command as a child subreaper, then kill every process it left behind.
+
+    The bridge starts the harness shell through this entry point on Linux. A
+    background job that outlives its parent, for example ``sleep 300 &`` in a
+    detached eve tool command, moves to this process instead of to init, so
+    the bridge's stop sweep finds it in the tree, and this process kills it
+    when the shell ends normally. The native runtime runs many sessions in one
+    box, so a leftover job would otherwise outlive its session.
+
+    Args:
+        command: The harness shell and its arguments.
+
+    Returns:
+        The shell's exit code, or 128 plus the signal number when a signal ended it.
+    """
+    ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    # restore_signals (the default) puts SIGPIPE and SIGXFSZ back to their
+    # default action, which CPython ignores; an ignored SIGPIPE would leave
+    # ``producer | head -1`` writing forever.
+    # The bridge's stop signals the whole group, this process included. Wait
+    # for the shell instead of dying, so the bridge's wait still covers the
+    # shell's EXIT trap. A Python handler, unlike SIG_IGN, resets to the
+    # default in the shell at exec.
+    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(signum, _arm_stop_grace)
+    signal.signal(signal.SIGALRM, _kill_descendants)
+    returncode = subprocess.Popen(command, restore_signals=True).wait()
+    for _ in range(_REAPER_SWEEPS):
+        left = _descendants(_proc_stats() or {}, os.getpid())
+        if not left:
+            break
+        for pid in left:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        _reap_children()
+        time.sleep(0.05)
+    _reap_children()
+    return returncode if returncode >= 0 else 128 - returncode
+
+
+def _arm_stop_grace(*_: Any) -> None:
+    """Start the reaper's stop grace once; ``_kill_descendants`` runs when it ends."""
+    if signal.getitimer(signal.ITIMER_REAL)[0] == 0:
+        signal.setitimer(signal.ITIMER_REAL, _REAPER_STOP_GRACE_SECONDS)
+
+
+def _kill_descendants(*_: Any) -> None:
+    """Kill every descendant of this process, so the reaper's wait for the shell ends."""
+    for pid in _descendants(_proc_stats() or {}, os.getpid()):
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _reap_children() -> None:
+    """Collect every finished child, including the orphans this subreaper adopted."""
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
 
 
 def run_session(
@@ -1203,11 +1377,14 @@ def run_session(
     ):
         env[f"APP_{name}"] = env[_LEGACY_PREFIX + name] = value
     shell = shutil.which("bash") or "/bin/sh"
+    command = [shell, "-c", _with_key(proposer["run_command"], api_key)]
+    if sys.platform == "linux" and sys.executable:
+        command = [sys.executable, "-I", str(Path(__file__).resolve()), "reaper", *command]
     started = time.monotonic()
     stderr_file = session_dir / f"run-{attempt}.stderr"
     with stderr_file.open("w", encoding="utf-8") as stderr:
         process = subprocess.Popen(
-            [shell, "-c", _with_key(proposer["run_command"], api_key)],
+            command,
             cwd=workspace,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -1224,6 +1401,7 @@ def run_session(
             proposer.get("price"),
             max_cost_usd,
             int(max_tool_calls) if max_tool_calls else None,
+            _start_time(process.pid),
         )
         reader = threading.Thread(target=monitor.pump, daemon=True)
         reader.start()
@@ -1232,13 +1410,19 @@ def run_session(
             process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _stop_group(process, signal.SIGKILL)
+            _stop_group(process, signal.SIGKILL, monitor.root_start)
             process.wait()
+        else:
+            # A job the shell left in its group would outlive the session, and
+            # the native runtime runs many sessions in one box. Without /proc
+            # (macOS) nothing proves the reaped pid is still ours, so skip it.
+            if monitor.root_start is not None:
+                _stop_group(process, signal.SIGKILL, monitor.root_start)
         # A child forked while the first signal landed can outlive the shell and
         # keep the pipe open, so keep sweeping the group until the reader sees EOF.
         deadline = time.monotonic() + 5.0
         while (timed_out or monitor.stopped) and reader.is_alive() and time.monotonic() < deadline:
-            _stop_group(process, signal.SIGKILL)
+            _stop_group(process, signal.SIGKILL, monitor.root_start)
             reader.join(timeout=0.2)
         reader.join(timeout=30)
     stdout = "".join(monitor.chunks)
@@ -1470,6 +1654,8 @@ def main(argv: list[str]) -> int:
     """
     if argv[:1] == ["guard"]:
         return guard_main(argv[1:])
+    if argv[:1] == ["reaper"]:
+        return reaper_main(argv[1:])
     args, unknown = _cli_parser().parse_known_args(argv)
     if args.output_format not in (None, "json"):
         print(f"claude bridge: unsupported --output-format {args.output_format}", file=sys.stderr)
