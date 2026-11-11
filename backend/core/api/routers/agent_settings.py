@@ -88,7 +88,9 @@ _SECRET_VALUE = re.compile(
     r"|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
     r"|\b(?i:bearer)\s+(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}"
 )
-_SAFE_PATH = re.compile(r"^/(?!/)[A-Za-z0-9/_-]{0,200}$")
+# An optional query string carries only ids and flags (SKY-631: /tagger?dataset=<id>).
+# It has no "/", ":", "@", backslash, "#" or "%", so a value cannot hold a URL.
+_SAFE_PATH = re.compile(r"^/(?!/)[A-Za-z0-9/_-]{0,200}(?:\?[A-Za-z0-9_=&.-]{1,200})?\Z")
 _THEMES = frozenset({"system", "light", "dark"})
 _LOCALE = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z0-9]{2,4})?$")
 # The nested request is in process; the host only has to pass the app's
@@ -206,7 +208,7 @@ class OpenPageRequest(BaseModel):
     path: str | None = Field(
         default=None,
         max_length=200,
-        description="An in-app route such as /optimizations or /tagger, when no tab is given.",
+        description="An in-app route such as /optimizations or /tagger?dataset=<id>, when no tab is given.",
     )
 
 

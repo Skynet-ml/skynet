@@ -1067,9 +1067,9 @@ _ALWAYS_TOOLS = frozenset(
         "get_test_results_optimizations",
         "get_grid_search_result_optimizations",
         "get_pair_test_results_optimizations",
-        # Read-only tagger reach: list the caller's tagging sessions so the agent
-        # can answer questions about them and point the user at /tagger/{id}. The
-        # tagger has its own assist agent; the generalist only reads here.
+        # Tagger reach: list the caller's tagging sessions and point the user at
+        # /tagger/{id}; a new tagging opens through open_page (SKY-631). The
+        # tagger's own assist agent still labels the rows.
         "list_tagging_sessions_for_agent",
         # Built-in demo datasets: a user with no file of their own can still
         # reach a submittable run. Staging returns a wizard patch, never rows.
@@ -2090,6 +2090,12 @@ The wizard screen on view:
   it, and its first screen gives you a turn of its own, so write no
   wizard field in this turn. End the turn with one short line that the
   setup is open.
+* Starting tagging: when the user asks to tag or label a dataset, call
+  ``open_page`` with ``path`` ``/tagger?dataset=<id>``, with the id from
+  ``list_datasets_for_agent``. When no saved dataset fits, use
+  ``/tagger?new=1``, where the user uploads a file. The tagger opens with
+  this same chat beside it, on its setup with the dataset loaded. End the
+  turn with one short line that tells the user to pick the task there.
 * Say only what a tool result confirms. A refused write changed
   nothing, and the screen moves only when a navigation tool returns
   ``screen_nav``; never tell the user a field is set or that you moved

@@ -299,6 +299,15 @@ def test_chat_outside_the_wizard_opens_the_setup_in_the_same_chat() -> None:
     assert "or from the chat in which the user asked for this setup" in screen_prompt
 
 
+def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
+    """A tagging request opens the tagger setup with this chat beside it (SKY-631)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+    assert "call ``open_page`` with ``path`` ``/tagger?dataset=<id>``" in prompt
+    assert "``/tagger?new=1``" in prompt
+    assert "The tagger opens with this same chat beside it" in prompt
+    assert {"open_page", "list_datasets_for_agent"} <= set(tools_for({}))
+
+
 _FULL_SNAPSHOT: dict[str, Any] = {
     "job_name": "Tickets",
     "job_description": "d",

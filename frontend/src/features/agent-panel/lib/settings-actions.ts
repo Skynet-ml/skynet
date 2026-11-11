@@ -15,8 +15,10 @@ export interface AppearancePatch {
   locale?: string;
 }
 
-// Same rule as the backend: one leading slash, no scheme, host, query or "..".
-const SAFE_PATH = /^\/(?!\/)[A-Za-z0-9/_-]{0,200}$/;
+// Same rule as the backend: one leading slash, no scheme, host or "..". An
+// optional query string holds only ids and flags (SKY-631: /tagger?dataset=<id>),
+// with no "/", ":", "@", backslash, "#" or "%", so a value cannot hold a URL.
+const SAFE_PATH = /^\/(?!\/)[A-Za-z0-9/_-]{0,200}(?:\?[A-Za-z0-9_=&.-]{1,200})?$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

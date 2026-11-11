@@ -302,9 +302,30 @@ def test_open_page_returns_navigation() -> None:
     assert client.post("/agent/open-page", json={"path": "/optimizations"}).json() == {
         "navigate": {"kind": "route", "path": "/optimizations"}
     }
-    for path in ("//evil.example", "https://evil.example", "/a?b=1", "javascript:alert(1)", ""):
+    for path in ("//evil.example", "https://evil.example", "javascript:alert(1)", ""):
         assert client.post("/agent/open-page", json={"path": path}).status_code == 422
     assert client.post("/agent/open-page", json={"tab": "secret"}).status_code == 422
+
+
+def test_open_page_keeps_a_narrow_query_string() -> None:
+    """A plain query string opens, an open-redirect shape does not (SKY-631)."""
+    client, _ = _client()
+    assert client.post("/agent/open-page", json={"path": "/tagger?dataset=abc-123"}).json() == {
+        "navigate": {"kind": "route", "path": "/tagger?dataset=abc-123"}
+    }
+    for path in (
+        "//evil.com",
+        "/tagger?next=https://x",
+        "/tagger?next=//evil.com",
+        "/tagger?a=b\\c",
+        "/tagger?a=user@evil.com",
+        "/tagger?a=b#frag",
+        "/tagger#frag",
+        "/tagger?",
+        "/tagger?a=1?b=2",
+        "/tagger?a=%2F%2Fevil.com",
+    ):
+        assert client.post("/agent/open-page", json={"path": path}).status_code == 422, path
 
 
 def test_mask_secrets_keeps_flags_and_masks_shapes() -> None:

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { unhideSharedItem, type TaggerSessionDetail } from "@/shared/lib/api";
 import { DataHubTabs } from "@/shared/ui/data-hub-tabs";
 import { PageContainer } from "@/shared/layout/page-container";
@@ -9,6 +10,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/
 import { Check, PencilSimple } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 import { useTagger } from "../hooks/use-tagger";
+import { opensTaggerSetup } from "../lib/deep-link";
 import { TaggerResultsTable } from "./TaggerResultsTable";
 import { TaggerBackLink } from "./TaggerBackLink";
 import { TaggerSetup } from "./TaggerSetup";
@@ -21,6 +23,14 @@ import { TaggerAutotagProgress } from "./TaggerAutotagProgress";
 import { TaggerResultsSummary } from "./TaggerResultsSummary";
 import { TaggerMoveToDatasets } from "./TaggerMoveToDatasets";
 import { TaggingSessionsPanel } from "./TaggingSessionsPanel";
+
+/** Report the URL's tagger deep link: the dataset id, "" for ?new=1, or null. */
+function TaggerDeepLink({ onChange }: { onChange: (link: string | null) => void }) {
+  const params = useSearchParams();
+  const link = opensTaggerSetup(params) ? (params.get("dataset") ?? "") : null;
+  useEffect(() => onChange(link), [link, onChange]);
+  return null;
+}
 
 export function TaggerView({ initialSession }: { initialSession?: TaggerSessionDetail | null }) {
   const [startingNew, setStartingNew] = useState(false);
@@ -46,12 +56,22 @@ export function TaggerView({ initialSession }: { initialSession?: TaggerSessionD
     if (tagger.phase === "complete") setFocusRow(false);
   }
 
-  // "Tag this dataset" deep links (/tagger?dataset=…) skip the session chooser
-  // straight into setup, which loads the referenced dataset itself. Applied in
-  // an effect (not the state initializer) so SSR and first client paint agree.
+  // "Tag this dataset" deep links (/tagger?dataset=…) and the chat's tagging
+  // requests (?dataset=… or ?new=1) skip the session chooser straight into
+  // setup, which loads the referenced dataset itself. Applied in an effect (not
+  // the state initializer) so SSR and first client paint agree. The chat may
+  // open the link while /tagger is already on view, so it follows the URL, and
+  // a new dataset id remounts the setup so it loads that dataset.
+  const [deepLink, setDeepLink] = useState<string | null>(null);
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).has("dataset")) setStartingNew(true);
-  }, []);
+    if (deepLink !== null) setStartingNew(true);
+  }, [deepLink]);
+  // Only this leaf reads the URL, so the chooser still prerenders around it.
+  const deepLinkReader = initialSession ? null : (
+    <Suspense fallback={null}>
+      <TaggerDeepLink onChange={setDeepLink} />
+    </Suspense>
+  );
 
   // Opening a session shared with the caller shows it in their list again if
   // they hid it there.
@@ -67,6 +87,7 @@ export function TaggerView({ initialSession }: { initialSession?: TaggerSessionD
     // shell gives /datasets — identical geometry, no hop between hub tabs.
     return (
       <PageContainer>
+        {deepLinkReader}
         <DataHubTabs active="sessions" />
         <TaggingSessionsPanel onStartNew={() => setStartingNew(true)} />
       </PageContainer>
@@ -94,8 +115,9 @@ export function TaggerView({ initialSession }: { initialSession?: TaggerSessionD
   if (tagger.phase === "setup") {
     return (
       <PageContainer full>
+        {deepLinkReader}
         {backBar}
-        <TaggerSetup onStart={tagger.startAnnotating} />
+        <TaggerSetup key={deepLink ?? ""} onStart={tagger.startAnnotating} />
       </PageContainer>
     );
   }

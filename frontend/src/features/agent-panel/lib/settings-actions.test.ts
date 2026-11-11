@@ -15,12 +15,34 @@ test("open_page results become a settings tab or an in-app route", () => {
 });
 
 test("unsafe or malformed navigation is ignored", () => {
-  for (const path of ["//evil.example", "https://evil.example", "/a?b=1", "/../x", "javascript:alert(1)"]) {
+  for (const path of ["//evil.example", "https://evil.example", "/../x", "javascript:alert(1)"]) {
     assert.equal(parseAgentNavigation({ navigate: { kind: "route", path } }), null);
   }
   assert.equal(parseAgentNavigation({ navigate: { kind: "settings", tab: "" } }), null);
   assert.equal(parseAgentNavigation("not json"), null);
   assert.equal(parseAgentNavigation(null), null);
+});
+
+// SKY-631: the chat opens the tagger on a dataset with a narrow query string.
+test("a route keeps a narrow query string and rejects open-redirect shapes", () => {
+  assert.deepEqual(parseAgentNavigation({ navigate: { kind: "route", path: "/tagger?dataset=abc-123" } }), {
+    kind: "route",
+    path: "/tagger?dataset=abc-123",
+  });
+  for (const path of [
+    "//evil.com",
+    "/tagger?next=https://x",
+    "/tagger?next=//evil.com",
+    "/tagger?a=b\\c",
+    "/tagger?a=user@evil.com",
+    "/tagger?a=b#frag",
+    "/tagger#frag",
+    "/tagger?",
+    "/tagger?a=1?b=2",
+    "/tagger?a=%2F%2Fevil.com",
+  ]) {
+    assert.equal(parseAgentNavigation({ navigate: { kind: "route", path } }), null, path);
+  }
 });
 
 test("appearance patches keep only string theme and locale", () => {
