@@ -11,7 +11,6 @@ import binascii
 import contextlib
 import json
 import logging
-import string
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping
@@ -46,7 +45,9 @@ from ..service_gateway.optimization.blackbox.repo_scorer import (
     _AnswerTooLargeError,
     _json_object,
     _streamed,
+    _under,
     _UnreachableError,
+    _unsafe_path,
 )
 from ..service_gateway.optimization.blackbox.repo_services import RoleRelayError, mcp_endpoint, service_endpoint
 from ..storage.run_call_store import call_candidate_key
@@ -75,8 +76,6 @@ _SERVICE_DROPPED_HEADERS = (
 )
 # The answer's content type travels on its own, and each server on the way back sets its own date and name.
 _SERVICE_ANSWER_DROPPED = frozenset({"content-type", "date", "server"})
-# A server may decode a path again, so a fully decoded service path may hold only plain URL path characters.
-_SERVICE_PATH_CHARS = frozenset(string.ascii_letters + string.digits + "-._~!$&'()*+,=:@/")
 
 
 class RunCallSink(Protocol):
@@ -695,60 +694,6 @@ def _service_path_safe(path: str) -> bool:
     """
     name, _, rest = path[len(SERVICE_PATH) :].partition("/")
     return bool(name) and not any(mark in name for mark in "?#") and not _unsafe_path(f"{name}/{rest}")
-
-
-def _decoded(path: str) -> str:
-    """Return a path without its query, percent-decoded until nothing changes.
-
-    A server may decode ``%252e`` to ``%2e`` and then to ``.``, so one pass is not enough.
-
-    Args:
-        path: A path, with or without a query.
-
-    Returns:
-        The fully decoded path.
-    """
-    path = path.partition("?")[0]
-    while (decoded := unquote(path)) != path:
-        path = decoded
-    return path
-
-
-def _unsafe_path(path: str) -> bool:
-    """Check a relative service path for anything a server could read as a way out of the service.
-
-    Only the characters of ``_SERVICE_PATH_CHARS`` may stay after full
-    decoding. So ``?``, ``#``, ``\\``, ``;``, ``%``, spaces, control
-    characters and all non-ASCII characters fail: a server that decodes
-    again could read them as a query, a separator or a dot.
-
-    Args:
-        path: The path after the service name, with its query.
-
-    Returns:
-        True when the decoded path has a character outside the allowlist,
-        or a ``.`` or ``..`` segment.
-    """
-    path = _decoded(path)
-    return not _SERVICE_PATH_CHARS.issuperset(path) or bool({".", ".."} & set(path.split("/")))
-
-
-def _under(target: httpx.URL, base: httpx.URL) -> bool:
-    """Check that a request url stays under the service's declared path, as a directory.
-
-    It compares the paths as :func:`_unsafe_path` reads them, fully decoded.
-
-    Args:
-        target: The url the relay is about to call.
-        base: The service's declared url.
-
-    Returns:
-        True when the target path is the base path or below it: base
-        ``/api`` allows ``/api`` and ``/api/x``, not ``/apix``.
-    """
-    root = _decoded(base.raw_path.decode("ascii")).rstrip("/")
-    path = _decoded(target.raw_path.decode("ascii"))
-    return path == root or path.startswith(root + "/")
 
 
 def model_forwarder(payload: dict[str, Any]) -> Any:
