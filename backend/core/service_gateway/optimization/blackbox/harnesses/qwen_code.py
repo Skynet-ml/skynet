@@ -6,7 +6,8 @@ one-shot run with ``--prompt``. Harbor installs through nvm, passes a direct
 provider key with ``--openai-api-key`` and records the chat under
 ``~/.qwen``; Skynet pins one release, gives Qwen Code the gateway token only
 through ``OPENAI_API_KEY``, points ``OPENAI_BASE_URL`` at the model gateway,
-keeps Qwen Code's home in a per-run temp folder, and loads a fixed system
+keeps Qwen Code's home in a per-run temp folder, moves the candidate repo's
+Qwen Code settings and agents aside for the run, and loads a fixed system
 settings file that pins the model provider to the gateway.
 """
 
@@ -26,18 +27,30 @@ QWEN_CODE_PACKAGE = "@qwen-code/qwen-code"
 # protected run's relay rewrite of generated files reaches it.
 QWEN_CODE_BASE_URL_FILE = ".app/qwen/base_url"
 # Qwen Code 0.27.2 takes the base URL of the ``modelProviders`` entry it picks
-# for the model over OPENAI_BASE_URL, and loads entries from the workspace
-# ``.qwen/settings.json`` too. With ``--model`` it picks the first entry whose id
-# matches, in JS key order, so an integer-like workspace provider key such as
-# ``"1"`` comes before ``openai`` and could send the gateway token to another
-# host. The run copies this file into its temp folder and loads the copy as the
-# system scope, which merges last. Its ``model.name`` and ``model.baseUrl`` win
-# over any workspace value, and with no ``--model`` Qwen Code picks the entry
-# whose id and base URL both match them (``resolveCliGenerationConfig``). Only
-# an entry at the gateway URL can match, whatever its provider key. The file
-# holds the gateway URL as text, like the base URL file, so a protected run's
-# relay rewrite reaches it and both base URLs stay the same.
+# for a model over OPENAI_BASE_URL. The main model is not the only one: the
+# ``fastModel``, ``compactionModel``, ``visionModel``, ``imageModel``,
+# ``modelFallbacks`` and agent model settings each pick an entry too, and
+# ``buildAgentContentGeneratorConfig`` sends that entry's ``envKey`` value (the
+# gateway token) to its ``baseUrl``. The run copies this file into its temp
+# folder and loads the copy as the system scope, the only scope with model
+# providers: the run moves the workspace settings aside (see
+# :data:`_WORKSPACE_QWEN_FILES`) and the user scope is the empty temp home. So
+# every provider entry is at the gateway URL. Its ``model.name`` and
+# ``model.baseUrl`` pick the gateway entry for the main model
+# (``resolveCliGenerationConfig``). The blank helper models fall back to the
+# main model, so no helper model can name another entry. The file holds the
+# gateway URL as text, like the base URL file, so a protected run's relay
+# rewrite reaches it and both base URLs stay the same.
 QWEN_CODE_SETTINGS_FILE = ".app/qwen/settings.json"
+# The candidate repo's Qwen Code files that can add a model provider or pick a
+# model. Qwen Code 0.27.2 has no flag that skips workspace settings and keeps
+# ``--yolo``: an untrusted folder forces the ``default`` approval mode, and
+# ``--bare`` also drops the system settings and the AGENTS.md context. So the
+# run moves these paths into its temp folder before it starts Qwen Code, and
+# puts them back when its shell exits. A file the agent writes at one of these
+# paths during the run is replaced by the original. The other ``.qwen`` files
+# (``.env``, commands, skills, QWEN.md) stay in place.
+_WORKSPACE_QWEN_FILES = ("settings.json", "agents")
 # Qwen Code's own ``model.reasoningEffort`` values (``normalizeReasoningEffort``
 # plus ``none``); Skynet sends no effort for any other name.
 _QWEN_CODE_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
@@ -58,11 +71,19 @@ def _qwen_code_settings(base_url: str, reasoning_effort: str | None) -> str:
         model["reasoningEffort"] = reasoning_effort
     # ``$version`` 4 is the current settings schema, so Qwen Code does not
     # write a migrated copy back to the file.
+    # Empty helper models fall back to the main model, and ``inherit`` gives
+    # the Explore agent the main model. They also win over a user scope value.
     settings = {
         "$version": 4,
         "modelProviders": {"openai": [{"id": f"${{{ENV_MODEL}}}", "baseUrl": base_url, "envKey": "OPENAI_API_KEY"}]},
         "providerProtocol": {"openai": "openai"},
         "model": model,
+        "fastModel": "",
+        "compactionModel": "",
+        "visionModel": "",
+        "imageModel": "",
+        "modelFallbacks": "",
+        "agents": {"builtin": {"exploreModel": "inherit"}},
     }
     return json.dumps(settings, indent=2)
 
@@ -99,9 +120,10 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
 
     Each run gets a fresh ``QWEN_HOME`` outside the workspace, so the settings,
     chat history and installation id never land in the files the run hands
-    back. An EXIT trap removes it when the run's shell exits and keeps Qwen
-    Code's exit status. The plain text that ``--prompt`` mode prints is the
-    answer.
+    back. The run moves the workspace :data:`_WORKSPACE_QWEN_FILES` into it
+    before Qwen Code starts. An EXIT trap puts them back, removes the folder
+    and keeps Qwen Code's exit status. The plain text that ``--prompt`` mode
+    prints is the answer.
 
     Args:
         model: Target model id.
@@ -126,9 +148,19 @@ def _qwen_code_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: s
     # ``--yolo``. ``--allowed-mcp-server-names`` replaces the settings allow
     # list with a name no server has, and ``--disable-mcp-server '*'`` marks
     # every server disabled, so discovery starts none.
+    files = " ".join(_WORKSPACE_QWEN_FILES)
+    restore = (
+        f"for f in {files}; do "
+        'if [ -e "$QWEN_HOME/workspace/$f" ] || [ -L "$QWEN_HOME/workspace/$f" ]; then '
+        'mkdir -p .qwen && rm -rf ".qwen/$f" && mv "$QWEN_HOME/workspace/$f" ".qwen/$f"; fi; done'
+    )
     run_command = (
         'export QWEN_HOME="$(mktemp -d)" && '
-        "trap 'rm -rf \"$QWEN_HOME\"' EXIT && "
+        'mkdir "$QWEN_HOME/workspace" && '
+        f"trap '{restore}; rm -rf \"$QWEN_HOME\"' EXIT && "
+        f"for f in {files}; do "
+        'if [ -e ".qwen/$f" ] || [ -L ".qwen/$f" ]; then mv ".qwen/$f" "$QWEN_HOME/workspace/$f" || exit 1; fi; '
+        "done && "
         f'cp {QWEN_CODE_SETTINGS_FILE} "$QWEN_HOME/system-settings.json" && '
         'QWEN_CODE_SYSTEM_SETTINGS_PATH="$QWEN_HOME/system-settings.json" '
         "NO_PROXY='*' no_proxy='*' "
