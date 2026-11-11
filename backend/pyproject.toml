@@ -181,6 +181,12 @@ sbx = [
     # The factory refuses this provider in production.
     "python-multipart>=0.0.31",
 ]
+ec2 = [
+    # AWS EC2 sandbox provider (SKY-458). Imported lazily by
+    # core.sandbox.providers.ec2; the factory refuses it in production.
+    # The floor is Harbor 0.25.0's. litellm already pulls boto3 into the lock.
+    "boto3>=1.41.5",
+]
 smol = [
     # smolmachines microVM sandbox provider (SKY-477). Imported lazily by
     # core.sandbox.providers.smol; the default legacy backend never needs it.

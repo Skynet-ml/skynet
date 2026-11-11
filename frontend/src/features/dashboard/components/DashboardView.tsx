@@ -7,7 +7,9 @@ import { useSession } from "next-auth/react";
 import { motion, useReducedMotion } from "framer-motion";
 import { toast } from "react-toastify";
 import { ChartBar, Table } from "@/shared/ui/icons";
-import { DashboardSkeleton } from "./DashboardSkeleton";
+import { InlineErrorRow } from "@/shared/ui/inline-error-row";
+import { RetryIconButton } from "@/shared/ui/retry-icon-button";
+import { DashboardSkeleton, JobsTabSkeleton } from "./DashboardSkeleton";
 import { Card } from "@/shared/ui/primitives/card";
 import {
   UNDERLINE_TABS_LIST_CLASS,
@@ -44,6 +46,7 @@ import { DeleteDialogs } from "./DeleteDialogs";
 import { JobsTab } from "./JobsTab";
 import { AnalyticsTab } from "./AnalyticsTab";
 import { isVisible, useExperienceLevel } from "@/features/experience";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 
 function getJobField(job: OptimizationSummaryResponse, key: string): unknown {
   return (job as unknown as Record<string, unknown>)[key];
@@ -96,12 +99,14 @@ export function DashboardView() {
     [router, searchParams],
   );
   const analyticsFilters = useAnalyticsFilters();
+  const { web } = useResourceMode();
 
   const {
     data,
     setData,
     loading,
     initialLoad,
+    swapping,
     error,
     pageOffset,
     setPageOffset,
@@ -109,7 +114,8 @@ export function DashboardView() {
     fetchJobs,
   } = useJobsList({ sessionUser, isAdmin });
 
-  const { analyticsData, setAnalyticsData, analyticsLoading } = useDashboardAnalytics({
+  const { analyticsData, analyticsLoading, analyticsError, fetchDashboardAnalytics } = useDashboardAnalytics({
+    source: web ? "hosted" : "local",
     sessionUser,
     isAdmin,
     activeTab,
@@ -128,17 +134,15 @@ export function DashboardView() {
 
   const queueStatus = useQueueStatus();
 
-  // Cross-component sync (sidebar delete/rename, etc.): refetch the
-  // current jobs page and invalidate the analytics cache so the next
-  // analytics-tab visit re-pulls.
+  // Refresh visible analytics without removing the current charts.
   useEffect(() => {
     const onJobsChanged = () => {
       void fetchJobs();
-      setAnalyticsData(null);
+      if (activeTab === "analytics") void fetchDashboardAnalytics();
     };
     window.addEventListener("optimizations-changed", onJobsChanged);
     return () => window.removeEventListener("optimizations-changed", onJobsChanged);
-  }, [fetchJobs, setAnalyticsData]);
+  }, [fetchJobs, activeTab, fetchDashboardAnalytics]);
 
   useJobsRealtime({ data, fetchJobs });
 
@@ -481,45 +485,63 @@ export function DashboardView() {
               )}
 
               <TabsContent value="jobs">
-                <JobsTab
-                  data={data}
-                  loading={loading}
-                  error={error}
-                  filteredItems={filteredItems}
-                  activeCount={activeCount}
-                  clearAllFilters={clearAll}
-                  colResize={colResize}
-                  sortKey={sortKey}
-                  sortDir={sortDir}
-                  toggleSort={toggleSort}
-                  filters={filters}
-                  setColumnFilter={setColumnFilter}
-                  openFilter={openFilter}
-                  setOpenFilter={setOpenFilter}
-                  filterOptions={filterOptions}
-                  showSharedColumns={hasShared}
-                  sessionUser={sessionUser}
-                  selectedIds={selectedIds}
-                  toggleRowSelected={toggleRowSelected}
-                  selectablePageIds={selectablePageIds}
-                  pageAllSelected={pageAllSelected}
-                  pageSomeSelected={pageSomeSelected}
-                  togglePageSelection={togglePageSelection}
-                  pageOffset={pageOffset}
-                  setPageOffset={setPageOffset}
-                  onOpenJob={(id, source) => router.push(runHref(id, source))}
-                />
+                {swapping ? (
+                  <JobsTabSkeleton />
+                ) : (
+                  <JobsTab
+                    data={data}
+                    loading={loading}
+                    error={error}
+                    filteredItems={filteredItems}
+                    activeCount={activeCount}
+                    clearAllFilters={clearAll}
+                    colResize={colResize}
+                    sortKey={sortKey}
+                    sortDir={sortDir}
+                    toggleSort={toggleSort}
+                    filters={filters}
+                    setColumnFilter={setColumnFilter}
+                    openFilter={openFilter}
+                    setOpenFilter={setOpenFilter}
+                    filterOptions={filterOptions}
+                    showSharedColumns={hasShared}
+                    sessionUser={sessionUser}
+                    selectedIds={selectedIds}
+                    toggleRowSelected={toggleRowSelected}
+                    selectablePageIds={selectablePageIds}
+                    pageAllSelected={pageAllSelected}
+                    pageSomeSelected={pageSomeSelected}
+                    togglePageSelection={togglePageSelection}
+                    pageOffset={pageOffset}
+                    setPageOffset={setPageOffset}
+                    onOpenJob={(id, source) => router.push(runHref(id, source))}
+                  />
+                )}
               </TabsContent>
 
               <TabsContent value="analytics">
+                {analyticsError && (
+                  <InlineErrorRow
+                    message={msg("dashboard.load_error")}
+                    action={
+                      <RetryIconButton
+                        label={msg("billing.wallet.retry")}
+                        loading={analyticsLoading}
+                        onClick={() => void fetchDashboardAnalytics()}
+                      />
+                    }
+                  />
+                )}
+                {(!analyticsError || analyticsData !== null) && (
                 <AnalyticsTab
                   analyticsLoading={analyticsLoading}
                   analyticsData={analyticsData}
                   chartData={chartData}
                   filters={analyticsFilters}
                   sessionUser={sessionUser}
-                  onOpenJob={(id) => router.push(`/optimizations/${id}`)}
+                  onOpenJob={(id) => router.push(runHref(id, web ? "hosted" : "local"))}
                 />
+                )}
               </TabsContent>
             </Tabs>
           )}

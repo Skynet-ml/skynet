@@ -13,7 +13,8 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
-import { getServeInfo, serveProgram, setServingEnabled } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
+import { apiUrl, getServeInfo, serveProgram, setServingEnabled } from "@/shared/lib/api";
 import { formatBudgetUsd } from "@/features/billing";
 import { cn } from "@/shared/lib/utils";
 import { formatOutputs, parseInputs } from "../lib/serve-playground";
@@ -31,6 +32,7 @@ export interface ServeCall {
 /** Props of the presentational Serve tab: state in, user actions out. */
 export interface ServeTabBodyProps {
   optimizationId: string;
+  endpointUrl?: string;
   enabled: boolean;
   toggling: boolean;
   onToggle: (enabled: boolean) => void;
@@ -46,8 +48,15 @@ export interface ServeTabBodyProps {
  * until the owner turns it on, because each call runs the best version in a
  * billed sandbox.
  */
-export function ServeTab({ optimizationId }: { optimizationId: string }) {
+export function ServeTab({
+  optimizationId,
+  source,
+}: {
+  optimizationId: string;
+  source?: ApiSource;
+}) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [endpointUrl, setEndpointUrl] = useState<string>();
   const [loadError, setLoadError] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
   const [draft, setDraft] = useState("");
@@ -57,18 +66,22 @@ export function ServeTab({ optimizationId }: { optimizationId: string }) {
 
   useEffect(() => {
     let live = true;
-    getServeInfo(optimizationId)
-      .then((info) => live && setEnabled(info.serving_enabled === true))
+    getServeInfo(optimizationId, source)
+      .then((info) => {
+        if (!live) return;
+        setEnabled(info.serving_enabled === true);
+        setEndpointUrl(info.endpoint_url ?? apiUrl(`/serve/${optimizationId}`, source));
+      })
       .catch((err: unknown) => live && setLoadError(userErrorMessage(err)));
     return () => {
       live = false;
     };
-  }, [optimizationId]);
+  }, [optimizationId, source]);
 
   const toggle = async (next: boolean) => {
     setToggling(true);
     try {
-      const res = await setServingEnabled(optimizationId, next);
+      const res = await setServingEnabled(optimizationId, next, source);
       setEnabled(res.serving_enabled);
     } catch (err) {
       toast.error(userErrorMessage(err));
@@ -84,7 +97,7 @@ export function ServeTab({ optimizationId }: { optimizationId: string }) {
     setRunning(true);
     const id = crypto.randomUUID();
     try {
-      const res = await serveProgram(optimizationId, parseInputs(text), id);
+      const res = await serveProgram(optimizationId, parseInputs(text), id, source);
       setHistory((h) => [
         { id, input: text, output: formatOutputs(res.outputs), centsCharged: res.cents_charged },
         ...h,
@@ -111,6 +124,7 @@ export function ServeTab({ optimizationId }: { optimizationId: string }) {
   return (
     <ServeTabBody
       optimizationId={optimizationId}
+      endpointUrl={endpointUrl}
       enabled={enabled}
       toggling={toggling}
       onToggle={(next) => void toggle(next)}
@@ -141,7 +155,7 @@ function ServeTabSkeleton() {
 /** The Serve tab without data loading, so render tests can draw each state. */
 export function ServeTabBody(props: ServeTabBodyProps) {
   const { optimizationId, enabled, toggling, onToggle } = props;
-  const url = `${getRuntimeEnv().apiUrl}/serve/${optimizationId}`;
+  const url = props.endpointUrl ?? `${getRuntimeEnv().apiUrl}/serve/${optimizationId}`;
   return (
     <div className="mt-4 space-y-4">
       <Card className="overflow-hidden py-0">

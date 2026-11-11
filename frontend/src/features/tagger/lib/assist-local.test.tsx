@@ -15,7 +15,8 @@ const { LOCAL_MODEL_REFUSED_CODE } = await import(
   "@/features/local-runtime/lib/subscription-model"
 );
 const { streamPredictions } = await import("./assist-stream");
-const { assistFailureKind, assistModelPatch } = await import("./assist");
+const { assistFailureKind, assistModelPatch, rememberInterviewPick } = await import("./assist");
+const { composerSeed, rememberComposerPick } = await import("@/features/settings");
 
 interface Sent {
   url: string;
@@ -100,5 +101,27 @@ void describe("local tagging requests", () => {
         modelParams: { token_source: "byok", byok_provider: "openai" },
       },
     );
+  });
+
+  void it("an interview with a cleared pick keeps the agent panel's saved model", () => {
+    const store = new Map<string, string>();
+    const g = globalThis as { window?: unknown };
+    g.window = {
+      __APP_ENV__: { localMode: true },
+      localStorage: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => store.set(k, v),
+        removeItem: (k: string) => store.delete(k),
+      },
+    };
+    try {
+      rememberComposerPick(true, "anthropic/claude-sonnet-5", "high");
+      rememberInterviewPick({ interviewModel: null, interviewEffort: null });
+      assert.deepEqual(composerSeed(true), { model: "anthropic/claude-sonnet-5", effort: "high" });
+      rememberInterviewPick({ interviewModel: "openrouter/openai/gpt-5.5", interviewEffort: "low" });
+      assert.deepEqual(composerSeed(true), { model: "openrouter/openai/gpt-5.5", effort: "low" });
+    } finally {
+      delete g.window;
+    }
   });
 });

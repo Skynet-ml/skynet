@@ -79,7 +79,7 @@ These settings apply to AutoResearch, Meta-Harness and AutoSaddler.
 
 | Setting                      | Default | Range                                            |
 | ---------------------------- | ------- | ------------------------------------------------ |
-| Coding agent                 | Codex   | Pi, Codex, OpenCode, Prime Agent, Custom command |
+| Coding agent                 | Codex   | Pi, Codex, OpenCode, OpenCode V2, Prime Agent, Aider, OpenHands, OpenHands SDK, Antigravity SDK, Goose, Hermes Agent, eve, DeerFlow, Cline, Code Puppy, Custom command |
 | Candidates per iteration     | 3       | 1 to 8. |
 | Max tool calls per candidate | 100     | 1 to 1000                                        |
 

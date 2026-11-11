@@ -41,7 +41,6 @@ test("the setup never covers the sign-in or public pages", () => {
     "/login",
     "/terms",
     "/privacy",
-    "/download",
     "/share/abc",
     "/docs",
     "/docs/he/start",
@@ -50,7 +49,7 @@ test("the setup never covers the sign-in or public pages", () => {
   ]) {
     assert.equal(setupCoversPath(path), false, path);
   }
-  for (const path of ["/", "/jobs", "/settings", "/docsearch", "/download/history"]) {
+  for (const path of ["/", "/jobs", "/settings", "/docsearch", "/download", "/download/history"]) {
     assert.equal(setupCoversPath(path), true, path);
   }
 });

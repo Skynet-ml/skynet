@@ -952,8 +952,9 @@ def test_native_model_controls_are_rejected_without_restricting_direct_engines(
         (("low", "high"), None, True),
         (("low", "high"), "", True),
         (None, "max", True),
+        (None, "", True),
     ],
-    ids=["unsupported", "supported", "default", "empty", "undeclared"],
+    ids=["unsupported", "supported", "default", "empty", "undeclared", "empty-undeclared"],
 )
 def test_submit_checks_the_effort_against_the_proposer_harness(
     monkeypatch: pytest.MonkeyPatch,

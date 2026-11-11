@@ -18,6 +18,7 @@ from ...api.tests.conftest import bypass_auth
 from ...config import app_env
 from ...storage.models import AgentSteerMessageModel, AgentSteerTurnModel, Base
 from ..agents.steering import SteerInbox, SteerLimitError, SteerStore
+from .test_pi_react import _simulated_pi
 
 
 @pytest.fixture(params=["local", "sqlite", "postgres"])
@@ -168,6 +169,7 @@ def test_stop_during_docs_mailbox_read_restores_unread_text(monkeypatch: pytest.
     calls = []
     monkeypatch.setattr(store, "take", blocked)
     monkeypatch.setattr(from_module, "_record_spend", lambda lm: None)
+    monkeypatch.setattr(from_module, "run_pi_turn", _simulated_pi)
     inbox = SteerInbox("alice", "turn", "question", lambda ev: None, store, 8000)
     from_module._run_answer(lambda **kw: calls.append(kw) or [{"text": "answer"}], [], lambda q: {},
                             lambda n, d: None, stop, inbox)

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from mcp import ClientSession, types
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from .budgets import BudgetError
 from .credential_safety import credential_fragments, redact_secret_value
@@ -61,7 +61,7 @@ def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint
             raise ValueError(f"The {label} resolves to a blocked metadata-service address.")
         if not allow_private and not address.is_global:
             raise ValueError(f"This deployment does not permit a private {label}.")
-    return infos[0][4][0]
+    return str(infos[0][4][0])
 
 
 class _PinnedTransport(httpx.AsyncBaseTransport, httpx.BaseTransport):
@@ -165,7 +165,6 @@ class McpToolsBroker:
         allow_private: bool = False,
         timeout_seconds: float = 30,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
-        on_tool_event: Callable[[dict[str, Any]], None] | None = None,
         headers: Mapping[str, str] | None = None,
         meter: Callable[[str, Mapping[str, Any], ToolCall], dict[str, Any]] | None = None,
         token_source: Callable[[], str] | None = None,
@@ -180,7 +179,6 @@ class McpToolsBroker:
             allow_private: Deployment's existing private-discovery policy.
             timeout_seconds: Per-request timeout without tool-call retries.
             authorize_tool: Optional blocking approval gate for a live chat call.
-            on_tool_event: Optional sink for tool lifecycle events.
             headers: Optional parent-held credential headers, such as a provider API key header.
             meter: Optional hook that pays for one tool call; it gets the tool name, the
                 arguments and the physical call, and returns the call's result. The call's
@@ -203,7 +201,6 @@ class McpToolsBroker:
         self.check_admission = check_admission
         self.timeout_seconds = timeout_seconds
         self.authorize_tool = authorize_tool
-        self.on_tool_event = on_tool_event
         self._tool_names: set[str] | None = None
         self._roster_lock = threading.Lock()
 
@@ -256,14 +253,12 @@ class McpToolsBroker:
         """
         headers, redactions = credentials or (self.headers, self._redactions)
         self.check_admission()
+        client = self._client_factory(
+            headers=headers, timeout=httpx.Timeout(self.timeout_seconds, read=self.timeout_seconds)
+        )
         async with (
-            streamablehttp_client(
-                self.url,
-                headers=headers,
-                timeout=self.timeout_seconds,
-                sse_read_timeout=self.timeout_seconds,
-                httpx_client_factory=self._client_factory,
-            ) as (read, write, _),
+            client,
+            streamable_http_client(self.url, http_client=client) as (read, write, _),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -356,50 +351,16 @@ class McpToolsBroker:
                 raise ValueError("MCP tool arguments must be a JSON object.")
             arguments = dict(params.get("arguments") or {})
             call_id = uuid.uuid4().hex[:12]
-            if self.on_tool_event is not None:
-                self.on_tool_event(
-                    {
-                        "event": "tool_start",
-                        "data": {"id": call_id, "tool": tool_name, "reason": "", "arguments": arguments},
-                    }
-                )
             approved = self.authorize_tool is None or self.authorize_tool(call_id, tool_name, arguments)
             if approved:
-                try:
-                    if self.meter is None:
-                        result = self._run_request(method, params)
-                    else:
-                        result = self.meter(
-                            tool_name, arguments, ToolCall(lambda call: self._run_request(method, params, call))
-                        )
-                except Exception as error:
-                    if self.on_tool_event is not None:
-                        self.on_tool_event(
-                            {
-                                "event": "tool_end",
-                                "data": {
-                                    "id": call_id,
-                                    "tool": tool_name,
-                                    "status": "error",
-                                    "result": str(error),
-                                },
-                            }
-                        )
-                    raise
+                if self.meter is None:
+                    result = self._run_request(method, params)
+                else:
+                    result = self.meter(
+                        tool_name, arguments, ToolCall(lambda call: self._run_request(method, params, call))
+                    )
             else:
                 result = {"content": [{"type": "text", "text": "User declined"}], "isError": True}
-            if self.on_tool_event is not None:
-                self.on_tool_event(
-                    {
-                        "event": "tool_end",
-                        "data": {
-                            "id": call_id,
-                            "tool": tool_name,
-                            "status": "ok" if approved else "error",
-                            "result": result,
-                        },
-                    }
-                )
         else:
             raise ValueError("The scoped tool relay does not permit this MCP method.")
         return ModelHTTPResult(

@@ -223,6 +223,65 @@ class ModelCatalogResponse(BaseModel):
     models: list[CatalogModel]
 
 
+def supports_effort_control(model: CatalogModel) -> bool:
+    """Check whether a model supports the shared effort control.
+
+    Args:
+        model: Catalog metadata, including an optional provider effort ladder.
+
+    Returns:
+        Whether thinking and a usable effort level are available. Unknown
+        ladders retain the client's existing family fallback.
+    """
+    return model.supports_thinking and (
+        model.reasoning_efforts is None
+        or any(level in REASONING_EFFORTS and level != "none" for level in model.reasoning_efforts)
+    )
+
+
+def with_effort_controls(catalog: ModelCatalogResponse) -> ModelCatalogResponse:
+    """Keep selectable models without changing the source metadata snapshot.
+
+    Args:
+        catalog: The raw provider catalog.
+
+    Returns:
+        A catalog containing only models with effort controls.
+    """
+    models = [model for model in catalog.models if supports_effort_control(model)]
+    if len(models) == len(catalog.models):
+        return catalog
+    if models and any(model.is_default for model in catalog.models) and not any(model.is_default for model in models):
+        default = min(
+            models,
+            key=lambda model: (
+                not model.featured,
+                model.lab_tier,
+                model.input_cost_per_token / model.intelligence_index
+                if model.input_cost_per_token and model.intelligence_index
+                else float("inf"),
+                model.value,
+            ),
+        )
+        models = [model.model_copy(update={"is_default": model.value == default.value}) for model in models]
+    if (
+        models
+        and any(model.is_strongest for model in catalog.models)
+        and not any(model.is_strongest for model in models)
+    ):
+        strongest = max(models, key=lambda model: model.intelligence_index or 0)
+        models = [model.model_copy(update={"is_strongest": model.value == strongest.value}) for model in models]
+    providers = {(model.provider, model.data_center) for model in models}
+    return catalog.model_copy(
+        update={
+            "models": models,
+            "providers": [
+                provider for provider in catalog.providers if (provider.slug, provider.data_center) in providers
+            ],
+        }
+    )
+
+
 class _DataCenter(BaseModel):
     """One reachable endpoint for a provider.
 
@@ -501,9 +560,40 @@ def is_removed_model(name: str) -> bool:
         name: Catalog model id, e.g. ``openrouter/x-ai/grok-build``.
 
     Returns:
-        ``True`` when the id matches the removed-model pattern.
+        ``True`` when the id matches the removed-model pattern, or names a
+        catalog model without an effort control, which the menus no longer
+        offer.
     """
-    return bool(_REMOVED_MODEL_RE.search(name))
+    return bool(_REMOVED_MODEL_RE.search(name)) or is_effortless_model(name)
+
+
+def is_effortless_model(name: str) -> bool:
+    """Return whether a model id is a real catalog model without an effort control.
+
+    The menus offer only models with an effort control. Saved prefs, stored
+    conversations, tagging sessions and hardening jobs may still name one of
+    the others; they must not fail validation on every turn.
+
+    Args:
+        name: Catalog model id.
+
+    Returns:
+        ``True`` when the last catalog build listed or hid the id and the
+        model has no usable effort control.
+    """
+    if _cached_response is None:
+        # Before the boot prewarm lands, wait for its build (or start one):
+        # otherwise a stored effortless pick fails validation once with a 422.
+        # Joining the shared refresh thread keeps it to one build at a time.
+        refresh = _kick_background_refresh()
+        if refresh is not None:
+            refresh.join()
+    if name in _hidden_effortless_values:
+        return True
+    snapshot = _cached_response
+    return snapshot is not None and any(
+        model.value == name and not supports_effort_control(model) for model in snapshot.models
+    )
 
 
 # D50: TypeSafe Jev is a router, so the removed-model rule hides it, but its
@@ -559,6 +649,11 @@ _LAB_TIERS: dict[str, int] = {
 # never offer them, but a session or saved pick made before they dropped out
 # keeps running rather than failing validation.
 _hidden_model_values: frozenset[str] = frozenset()
+
+# Real models the last build hid as impractical that also lack an effort
+# control. Like the listed models without one, a stored pick of them is
+# treated as withdrawn (see :func:`is_effortless_model`).
+_hidden_effortless_values: frozenset[str] = frozenset()
 
 # Benchmark score of each featured model, from the last catalog build. The
 # interview-model pick ranks on it without the catalog exposing the score.
@@ -1500,7 +1595,7 @@ def get_catalog() -> ModelCatalogResponse:
                 )
             )
 
-    global _hidden_model_values, _featured_scores
+    global _hidden_model_values, _hidden_effortless_values, _featured_scores
     featured_values: set[str] = set()
     practical_by_dc: dict[tuple[str, str | None], set[str]] = {}
     best_value: tuple[str, tuple[int, float]] | None = None
@@ -1542,7 +1637,17 @@ def get_catalog() -> ModelCatalogResponse:
         return allowed is None or m.value in allowed
 
     _hidden_model_values = frozenset(
-        m.value for m in models if m.available and not _REMOVED_MODEL_RE.search(m.value) and not _practical(m)
+        m.value
+        for m in models
+        if m.available and supports_effort_control(m) and not _REMOVED_MODEL_RE.search(m.value) and not _practical(m)
+    )
+    _hidden_effortless_values = frozenset(
+        m.value
+        for m in models
+        if m.available
+        and not supports_effort_control(m)
+        and not _REMOVED_MODEL_RE.search(m.value)
+        and not _practical(m)
     )
     models = [m for m in models if _practical(m) and not excluded_from_managed(m.value)]
     models = [
@@ -1582,6 +1687,7 @@ _cached_response: ModelCatalogResponse | None = None
 _cached_at_monotonic: float = 0.0
 _cache_lock = Lock()
 _refresh_in_flight = False
+_refresh_thread: Thread | None = None
 
 
 def catalog_snapshot() -> ModelCatalogResponse | None:
@@ -1590,7 +1696,7 @@ def catalog_snapshot() -> ModelCatalogResponse | None:
     Returns:
         The cached catalog, or ``None`` before the boot prewarm lands.
     """
-    return _cached_response
+    return with_effort_controls(_cached_response) if _cached_response is not None else None
 
 
 def lowest_effort_from_low(entry: CatalogModel) -> str | None:
@@ -1667,7 +1773,7 @@ def agent_model_id(configured: str = "") -> str:
     """
     if configured.strip():
         return configured.strip()
-    snapshot = _cached_response
+    snapshot = catalog_snapshot()
     default = next((m.value for m in snapshot.models if m.is_default), None) if snapshot else None
     return default or DEFAULT_AGENT_MODEL_ID
 
@@ -1687,7 +1793,7 @@ def strongest_model_id(configured: str = "") -> str:
     """
     if configured.strip():
         return configured.strip()
-    snapshot = _cached_response
+    snapshot = catalog_snapshot()
     strongest = next((m.value for m in snapshot.models if m.is_strongest), None) if snapshot else None
     return strongest or agent_model_id()
 
@@ -1724,14 +1830,25 @@ def _refresh_catalog_in_background() -> None:
         )
 
 
-def _kick_background_refresh() -> None:
-    """Spawn the background refresh thread if one isn't already running."""
-    global _refresh_in_flight
+def _kick_background_refresh() -> Thread | None:
+    """Spawn the background refresh thread if one isn't already running.
+
+    Returns:
+        The current refresh thread, read under the cache lock, so it has
+        started; ``None`` only when no thread was ever recorded.
+    """
+    global _refresh_in_flight, _refresh_thread
     with _cache_lock:
         if _refresh_in_flight:
-            return
+            return _refresh_thread
         _refresh_in_flight = True
-    Thread(target=_refresh_catalog_in_background, name="catalog-refresh", daemon=True).start()
+        # Set with the flag, so a caller that sees the flag can join this thread.
+        thread = _refresh_thread = Thread(target=_refresh_catalog_in_background, name="catalog-refresh", daemon=True)
+        # Start under the lock: a caller that sees the flag joins this thread,
+        # and joining an unstarted thread raises. The thread takes the lock
+        # only in its finally, so this cannot deadlock.
+        thread.start()
+        return thread
 
 
 def with_zero_retention(catalog: ModelCatalogResponse) -> ModelCatalogResponse:
@@ -1780,18 +1897,18 @@ def get_catalog_cached() -> ModelCatalogResponse:
     now = time.monotonic()
     fresh = ttl > 0.0 and _cached_response is not None and (now - _cached_at_monotonic) < ttl
     if fresh:
-        return _cached_response  # type: ignore[return-value]
+        return with_effort_controls(_cached_response)  # type: ignore[arg-type]
     if _cached_response is not None:
         # Stale but usable — serve it now, refresh in the background.
         if ttl > 0.0:
             _kick_background_refresh()
-        return _cached_response
+        return with_effort_controls(_cached_response)
 
     with _cache_lock:
         # Re-check under the lock so we don't rebuild twice when callers
         # race in during the first cold-start miss.
         if _cached_response is not None:
-            return _cached_response
+            return with_effort_controls(_cached_response)
         _cached_response = get_catalog()
         _cached_at_monotonic = time.monotonic()
         logger.info(
@@ -1799,7 +1916,7 @@ def get_catalog_cached() -> ModelCatalogResponse:
             len(_cached_response.providers),
             len(_cached_response.models),
         )
-        return _cached_response
+        return with_effort_controls(_cached_response)
 
 
 def prewarm_catalog() -> None:
@@ -1906,11 +2023,11 @@ def get_byok_catalog_cached() -> ModelCatalogResponse:
         _byok_cached = get_byok_catalog()
     snapshot = _cached_response
     if snapshot is None:
-        return _byok_cached
+        return with_effort_controls(_byok_cached)
     if _byok_enriched is None or _byok_enriched[0] is not snapshot:
         enriched = _byok_cached.model_copy(update={"models": with_platform_reasoning(_byok_cached.models)})
         _byok_enriched = (snapshot, enriched)
-    return _byok_enriched[1]
+    return with_effort_controls(_byok_enriched[1])
 
 
 def probe_byok_provider_models(provider_slug: str, api_key: str) -> dict[str, dict] | None:
@@ -1986,7 +2103,9 @@ def narrow_models_to_served(
     for model in static_models:
         bare = model.value.removeprefix(f"{provider_slug}/")
         if bare in deployed or model.value in deployed:
-            kept.append(model.model_copy(update={"byok_provider": byok_provider}))
+            item = deployed.get(bare, deployed.get(model.value, {}))
+            reasoning = _probe_item_reasoning(item) if "reasoning" in item else {}
+            kept.append(model.model_copy(update={"byok_provider": byok_provider, **reasoning}))
             seen.add(bare)
     for model_id, item in deployed.items():
         bare = model_id.removeprefix(f"{provider_slug}/")
@@ -2000,13 +2119,14 @@ def narrow_models_to_served(
                 provider=provider_slug,
                 byok_provider=byok_provider,
                 supports_thinking=_probe_item_supports_thinking(item),
+                **(_probe_item_reasoning(item) if "reasoning" in item else {}),
                 supports_vision=_probe_item_supports_vision(item),
                 available=True,
                 max_input_tokens=_probe_item_max_input_tokens(item),
             )
         )
     kept.sort(key=lambda m: m.value)
-    return with_platform_reasoning(kept)
+    return [model for model in with_platform_reasoning(kept) if supports_effort_control(model)]
 
 
 def is_hidden_model(name: str) -> bool:
@@ -2060,5 +2180,10 @@ def require_known_model(model: str | None, *, role: str | None = None) -> None:
     name = str(model or "").strip()
     if role in CLASSIFIER_ROLES and name in CLASSIFIER_ONLY_MODELS:
         return
-    if name and not is_hidden_model(name) and all(entry.value != name for entry in get_catalog_cached().models):
+    if (
+        name
+        and not is_hidden_model(name)
+        and not is_effortless_model(name)
+        and all(entry.value != name for entry in get_catalog_cached().models)
+    ):
         raise DomainError("models.unknown_model", status=422)
