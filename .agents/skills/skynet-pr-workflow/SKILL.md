@@ -36,7 +36,8 @@ bugs before you push. Follow this order for every PR:
 2. Review the full diff locally. Use two reviewers with fresh context (for
    example, two subagents). Verify each finding with a failing test, then
    fix it. Repeat until a review finds nothing new.
-3. Push once. Let CI, the preview build and the automated review gate run.
+3. Push once. Let the PR checks, the preview build and the automated review
+   gate run. The full CI runs later on the batch (section 7).
 4. Run the acceptance checks on the PR preview. A visual-only change may use
    the section 4 exemption.
 
@@ -58,14 +59,15 @@ locally, check them again, and then push them together in one push.
   reports them. Link the CI run or saved output.
 - State material coverage gaps and the reason for any skipped required check.
   Never invent a result or evidence.
-- Run checks that fit the change and the repository's required checks. Avoid
-  tests that only copy the implementation.
+- Run checks that fit the change, locally. The full CI runs on the batch
+  (section 7). Avoid tests that only copy the implementation.
 - Keep one coherent change per PR. Explain why the approach fits, and the
   consequential tradeoffs. Do not list abandoned attempts.
 - Explain affected users, compatibility, data changes, rollout and rollback
   only when they matter. Link long logs; do not paste them.
 - Keep the description current when the scope changes.
-- Keep the PR draft while required checks fail or review evidence is missing.
+- Keep the PR draft while its PR checks or local tests fail, or review
+  evidence is missing.
 
 ### Description structure
 
@@ -196,10 +198,10 @@ for review until the evidence is there.
   and fix (sections 1a and 3). The acceptance checks in section 4 still
   apply.
 - A UI PR is ready for review when three conditions are true. The Opus 5.5
-  review gate (section 3) approves the current head. CI passes. The
-  acceptance checks pass, or a section 4 exemption applies. Then the
-  orchestrator marks the PR ready for review (not draft). It does not merge
-  it. Gilad reviews the finished UI PRs. He approves them (in chat, on GitHub
+  review gate (section 3) approves the current head. The PR checks and local
+  tests pass. The acceptance checks pass, or a section 4 exemption applies.
+  Then the orchestrator marks the PR ready for review (not draft). It does
+  not merge it. Gilad reviews the finished UI PRs. He approves them (in chat, on GitHub
   or with `Approved for merge` on the Linear issue), or tells the orchestrator
   to merge them.
 
@@ -232,10 +234,12 @@ gates pass:
 1. Agent code review is clean.
 2. Tests and the Linear issue's acceptance checks pass in the PR environment.
 3. The diff touches only the files in the issue's `## Files` list.
-4. Up to date: the branch includes the latest `staging` (one merge commit from
-   `staging`, never a force-push), then tests pass again.
+4. Batch CI: the PR's approved head goes into a batch branch made from the
+   latest `staging`, and the full CI passes on the batch (see "PR tests and
+   batch CI").
 5. After the merge, the staging smoke test passes. If it fails, revert that
-   PR's merge right away and reopen its issue with the failure.
+   PR's merge commit from the batch right away and reopen its issue with the
+   failure.
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) follow
 section 5. A UI PR is ready for review when the section 5 conditions are
@@ -262,10 +266,11 @@ A manual hold on a change or on a promotion still stops it.
 
 ### Backend-only merges (2026-10-19)
 
-- The orchestrator may merge a backend-only PR into `staging` without another
-  human approval, in the daily merge window below. Gates: one current Opus
-  5.5 medium-effort approval of the current head and base, required checks
-  and staging evidence pass, and the review confirms no visible UI change.
+- The orchestrator may put a backend-only PR into the batch (see "PR tests
+  and batch CI") without another human approval. Gates: one current Opus
+  5.5 medium-effort approval of the current head and base, the PR's own
+  checks and its local test evidence pass, and the review confirms no
+  visible UI change. The full CI runs on the batch, not on the PR.
 - Automatic scope: `backend/**`, plus optional Markdown under `docs/**`. At
   least one backend file. UI, mixed, unknown and other-repository changes
   keep the human approval.
@@ -274,12 +279,13 @@ A manual hold on a change or on a promotion still stops it.
   example payload or data-cleanup fixes for stale states, internal refactors,
   tests, i18n-only string moves). The PR body must say why the change is
   not visible. If the reviewer is unsure, keep the human approval.
-- Just before the merge, check the full changed-file list, the current
-  revision, base, evidence and review policy. Use a merge command that
-  requires the reviewed head commit. Never bypass branch protection or queue
-  an unchecked future merge.
-- **Among agents, only the orchestrator merges** (through its cloud merger
-  routine, in the daily merge window below). Gilad can also merge.
+- Just before a PR goes into the batch, check the full changed-file list,
+  the current revision, base, evidence and review policy. Merge the reviewed
+  head commit into the batch. Merge the batch PR with a command that requires
+  its reviewed head commit (`gh pr merge <n> --merge --match-head-commit
+  <sha>`). Never bypass branch protection or queue an unchecked future merge.
+- **Among agents, only the orchestrator merges** (through the batch, in the
+  daily merge window below). Gilad can also merge.
   Implementation and review agents leave the final action to the orchestrator.
 
 ### Linear approval and revisions (2026-10-19)
@@ -312,23 +318,39 @@ A manual hold on a change or on a promotion still stops it.
   results in the PR body.
 - The small PR workflows (gitleaks, i18n, pr files scope, pr kind label,
   preview) still run on every PR.
-- The full CI runs once for each batch:
+- An individual PR never merges on its own. The orchestrator merges approved
+  PRs into `staging` through one batch PR. GitHub marks each included PR as
+  merged when the batch merges.
+- **Only the orchestrator creates `batch/` branches.** The `scope` check
+  passes for any `batch/` branch in this repository, because it trusts the
+  name. Never use the `batch/` prefix for other work.
+- The orchestrator builds each batch:
   1. Create `batch/<date>` from current `staging`.
-  2. Merge every approved PR branch into it with merge commits. Resolve the
-     conflicts in the batch branch. Never force-push.
+  2. Merge the approved head of each PR branch into it with a merge commit.
+     Never force-push.
   3. Run `gh workflow run ci.yml --ref batch/<date>`. Wait for the run to
-     pass. If it fails, fix the cause or remove that PR, then run it again.
+     pass.
   4. Open one PR from `batch/<date>` to `staging`. List the included PRs
-     and link the CI run. The `scope` check passes for a `batch/` branch,
-     because each included PR passed it on its own PR.
-  5. Merge it with a merge commit (`gh pr merge <n> --merge`). GitHub then
-     marks each included PR as merged.
+     and their merged heads, and link the CI run.
+  5. Merge it with a merge commit (`gh pr merge <n> --merge
+     --match-head-commit <sha>`).
 - Required checks match by commit. The dispatched CI run reports the `ci`
   checks on the batch head commit, so the batch PR meets the `staging merge
-  gates` ruleset. An individual PR never merges on its own.
+  gates` ruleset. A new batch commit needs a new dispatched run.
+- **No unreviewed code on the batch branch.**
+  - A CI failure or a bug: fix it in the PR's own branch. That PR gets a new
+    review, then its new head goes into the batch again. Or remove the PR
+    from the batch: build the batch again without it.
+  - A merge conflict between PRs: the orchestrator may resolve it in the
+    batch merge commit. Then the batch head needs a fresh Opus 5.5
+    medium-effort review before the merge. If the resolution changes a UI
+    PR's visible UI, stop and wait for Gilad.
 - The push to `staging` runs the full CI again.
+- Bootstrap (SKY-570): the PR that adds this flow merges the same way.
+  Dispatch `ci` on its own branch (`gh workflow run ci.yml --ref <branch>`),
+  wait for the run to pass, then merge the PR.
 
-### Daily merge window (2026-10-20)
+### Daily merge window (2026-10-20, batch flow 2026-11-10)
 
 - Merges into `staging` happen only in the daily window at 03:00
   America/Los_Angeles, or when Gilad asks for a merge.
@@ -337,15 +359,16 @@ A manual hold on a change or on a promotion still stops it.
   `agent-review/ready-to-merge` status on the approved head.
 - The approval stays valid when only `staging` moves. A new PR commit, a move
   back to draft or a Linear move withdraws it.
-- A cloud merger routine runs the window. It merges PRs one at a time and
-  requires the approved head. It fixes an out-of-date branch or a conflict
-  with one merge commit from `staging`, then needs a full Opus 5.5
-  medium-effort re-review of the new head. If a UI PR's visible UI changes
-  in that update, it stops and waits for Gilad.
-- A PR it cannot fix waits for the next window, with the reason in the PR
-  and in Linear.
-- After GitHub confirms the merge, move the issue to Done and attach the
-  merge commit. The merger never merges into `main` or touches production.
+- A cloud merger routine runs the window. It builds one batch from every
+  PR in **Ready to Merge** (see "PR tests and batch CI"). A PR branch does
+  not need a merge from `staging`, because the batch starts from current
+  `staging`.
+- A PR that the batch cannot take (a conflict it cannot resolve, a CI
+  failure) leaves the batch. It waits for the next window, with the reason
+  in the PR and in Linear.
+- After GitHub confirms the batch merge, move each included issue to Done
+  and attach the batch merge commit. The merger never merges into `main` or
+  touches production.
 
 ## Sources
 
