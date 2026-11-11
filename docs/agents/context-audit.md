@@ -8,8 +8,8 @@ and list what to cut.
 
 - A Claude Code session in this repo loads about **121k tokens before the
   first action**. About 60k of it is the desktop app's own tool schemas.
-- The user controls about **22–28k tokens** of the rest. The biggest parts are
-  unused MCP servers and connectors (about 12–18k), duplicated global
+- The user controls about **24–28k tokens** of the rest. The biggest parts are
+  unused MCP servers and connectors (about 14–18k), duplicated global
   instructions (about 7.3k), unused plugin skills (about 2k) and MCP server
   instructions (about 1.1k).
 - Each PR task also reads two overlapping 20 KB policy files (about 11k
@@ -47,7 +47,7 @@ says otherwise.
 | --- | --- | --- | --- | --- | --- | --- |
 | System prompt (harness) | 35 KB | 35 KB | Claude Code rules | Keep | Not user-controlled | 0 |
 | Loaded tool schemas (desktop built-ins) | 195 KB | 195 KB | Artifact (59 KB), Browser (32 KB), Workflow, Agent, iOS Simulator (8 KB), ScheduleWakeup and others | Keep (gap) | No known switch; iOS Simulator is unused in Skynet | 0 |
-| Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 12–18k |
+| Deferred tool names | 62 KB, 1348 names | about 8–20 KB | Names of MCP and connector tools | Trim | Many sources are unused in Skynet (see §6) | 14–18k |
 | Global user instruction file | 17.6 KB | 1.1 KB | Global rules | Trim | 9.4 KB repeats the shared conventions file; 6.4 KB workflow table; Skynet-only rules | 4.6k, every repo |
 | Shared conventions file (also read by Codex) | 21.7 KB | 16.5 KB | Shared rules | Trim | Skynet-only sections; a stale section for another project | 1.4k, every repo |
 | CLI design rules file | 2.1 KB | 0 (on demand) | CLI design rules | Move | Needed only when you design a CLI | 0.6k, every repo |
@@ -101,7 +101,7 @@ keeps more recent context after each compaction.
 ## 5. Ranked wins
 
 1. **Turn off unused MCP servers and connectors in Skynet sessions.**
-   About 12–14k tokens (about 16–18k with Vercel). See §6.
+   About 14k tokens (about 18k with Vercel). See §6.
 2. **Apply the global instruction trims.** About 6.6k tokens on every session
    in every repo, plus about 0.6k in Skynet. See §7.
 3. **Make the per-PR policy file defer to the repo skill for Skynet.** About
