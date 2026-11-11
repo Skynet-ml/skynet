@@ -10,8 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from vercel.sandbox import SandboxApiError
 
+from core.billing.model_gateway import _sandbox_failure_kind
+from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import proposer_hosts
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.service_gateway.optimization.blackbox import remote_sandbox
@@ -313,6 +317,70 @@ def test_guest_crash_names_its_cause(
     assert event["failure_kind"] == kind
     assert "Traceback (most recent call last):" in caplog.text
     assert events.empty()
+
+
+class BudgetStoppedSession(FakeSession):
+    """Pass the probe, then lose the box because the budget refused its next slice."""
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Answer the probe, then raise the error frame the parent sends for a budget stop.
+
+        Args:
+            command: The probe or the optimizer command.
+            **kwargs: The run options, which this fake ignores.
+
+        Returns:
+            The probe answer. The optimizer command never returns.
+
+        Raises:
+            BudgetReached: The guest-side error for the budget stop. The parent
+                error chains to the 410 that reported the stopped session, as
+                the provider raises it.
+        """
+        if command == vercel_dspy.PROTOCOL_PROBE:
+            return CommandResult(0, stdout=f"{SANDBOX_PROTOCOL}\n")
+        try:
+            raise BudgetReached("budget gone") from SandboxApiError(
+                httpx.Response(410), "gone", data={"error": {"code": "sandbox_stopped"}}
+            )
+        except BudgetReached as error:
+            stop = error
+        remote_sandbox._raise_remote_error(
+            {
+                "type": "error",
+                "error_type": type(stop).__name__,
+                "failure_kind": _sandbox_failure_kind(stop),
+                "message": str(stop),
+            }
+        )
+        raise AssertionError("unreachable")
+
+
+def test_a_guest_box_that_stops_for_budget_ends_the_run_budget_reached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A box that Vercel ends after the budget refused its next slice ends the run as a budget stop (SKY-587)."""
+    session = BudgetStoppedSession()
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+    vercel_dspy.run_vercel_dspy(
+        {
+            "_budget_gateway_descriptor": {
+                "url": "http://127.0.0.1:9876",
+                "control_token": "control",
+                "image": "backend@sha256:" + "a" * 64,
+                "lifetime_seconds": 600,
+            },
+        },
+        "job-budget",
+        events,
+        "spawn",
+    )
+    assert session.closed
+    event = events.get_nowait()
+    assert events.empty()
+    assert event["type"] == "terminal"
+    assert event["outcome"]["status"] == "stopped"
+    assert event["outcome"]["stop_reason"] == "budget_reached"
+    assert event["outcome"]["message"] == "budget gone"
 
 
 class ProbedSession(FakeSession):
