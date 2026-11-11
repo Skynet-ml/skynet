@@ -371,15 +371,16 @@ def test_every_grok_effort_passes_unchanged(effort: str) -> None:
     assert config["model"][_MODEL]["reasoning_efforts"] == [{"value": effort}]
 
 
-def test_no_effort_sends_no_flag() -> None:
-    """Leave the effort to Grok's default when the user sets none."""
-    launch = build_launch(_target(), _GATEWAY)
+@pytest.mark.parametrize("effort", [None, ""])
+def test_no_effort_sends_no_flag(effort: str | None) -> None:
+    """Leave the effort to Grok's default when the user sets none or an empty string."""
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
 
     assert "--reasoning-effort" not in launch.run_command
     assert "reasoning_efforts" not in launch.files[GROK_CONFIG_FILE]
 
 
-@pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH", ""])
+@pytest.mark.parametrize("effort", ["turbo", "auto", "HIGH"])
 def test_an_unsupported_effort_stops_the_launch(effort: str) -> None:
     """Refuse a level Grok Build does not know, rather than drop or remap it."""
     with pytest.raises(ServiceError, match="reasoning effort"):

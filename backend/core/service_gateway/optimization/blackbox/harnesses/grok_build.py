@@ -177,7 +177,7 @@ def _effort_flag(reasoning_effort: str | None) -> str:
     """Return the ``--reasoning-effort`` argument for the user's level.
 
     Args:
-        reasoning_effort: The user's effort for the model, or ``None`` for Grok's default.
+        reasoning_effort: The user's effort for the model, or ``None`` or an empty string for Grok's default.
 
     Returns:
         The argument with a leading space, or an empty string for no effort.
@@ -185,7 +185,7 @@ def _effort_flag(reasoning_effort: str | None) -> str:
     Raises:
         ServiceError: When Grok Build does not know the level.
     """
-    if reasoning_effort is None:
+    if not reasoning_effort:
         return ""
     if reasoning_effort not in GROK_EFFORTS:
         raise ServiceError(
@@ -204,7 +204,7 @@ def _config_toml(model: str, gateway_url: str, reasoning_effort: str | None) -> 
     Args:
         model: Target model id as the gateway knows it.
         gateway_url: Validated gateway base URL.
-        reasoning_effort: A level from :data:`GROK_EFFORTS`, or ``None`` for Grok's default.
+        reasoning_effort: A level from :data:`GROK_EFFORTS`, or ``None`` or an empty string for Grok's default.
 
     Returns:
         The TOML text.
@@ -281,7 +281,7 @@ def _grok_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | 
     Args:
         model: Target model id as the gateway knows it.
         gateway: Gateway URL and key; Grok sends every model call there.
-        reasoning_effort: The user's effort for the model, or ``None`` for Grok's default.
+        reasoning_effort: The user's effort for the model, or ``None`` or an empty string for Grok's default.
 
     Returns:
         The launch.
