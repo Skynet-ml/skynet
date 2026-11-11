@@ -14,6 +14,7 @@ import pytest
 
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.usage_tags import box_tag, current_tags
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
@@ -266,6 +267,36 @@ def test_broker_rejects_host_paths_and_closes_every_session_after_failure() -> N
     assert [session.close_calls for session in runtime.sessions] == [1, 1]
     with pytest.raises(ServiceError, match="closed"):
         broker.handle("open", {**_open_payload(), "request_id": "three"})
+
+
+def test_each_box_mailbox_tags_its_model_calls_with_its_own_box() -> None:
+    """A guest box and a parent box run their mailbox under the tag of the box the run pinned (SKY-647)."""
+    seen: list[str | None] = []
+
+    def command_runner(session: FakeSession, command: str, **kwargs: Any) -> CommandResult:
+        """Capture the tags that the mailbox would send over the box's own tags."""
+        seen.append(current_tags().get("box"))
+        return session.run(command, **kwargs)
+
+    runtime = FakeRuntime()
+    broker = SandboxBroker(
+        runtime,
+        image=IMAGE,
+        max_lifetime_seconds=120,
+        command_runner=command_runner,
+        parent_command_runner=command_runner,
+    )
+    guest = broker.handle("open", _open_payload())["sandbox_id"]
+    broker.run({"sandbox_id": guest, "command": "echo guest"})
+    parent = broker.parent_runtime(("pypi.org",)).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), operation_key="scorer:k")
+    )
+    parent.run("echo parent")
+
+    assert [spec.operation_key for spec in runtime.specs] == ["sandbox:one", "scorer:k"]
+    assert seen == [box_tag("sandbox:one"), box_tag("scorer:k")]
+    assert current_tags() == {}
+    broker.close()
 
 
 def test_remote_round_trip_streams_output_and_supports_callback_file_actions() -> None:

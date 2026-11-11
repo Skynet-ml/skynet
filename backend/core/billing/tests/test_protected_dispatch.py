@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -697,6 +698,39 @@ def test_dispatch_sends_and_reserves_the_marked_body(database: Engine) -> None:
         result = dispatcher.dispatch("/chat/completions", request)
     assert result.status == 200
     assert sent[0]["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_dispatch_passes_the_box_tag_to_admission(database: Engine) -> None:
+    """The ``box`` usage tag tells the runtime which pinned box the call waits for (SKY-647)."""
+    runtime = _runtime(database)
+    boxes: list[str | None] = []
+    execute = runtime.execute
+
+    def admitted(*args: Any, **kwargs: Any) -> Any:
+        """Record the box that admission sees, then admit as usual."""
+        boxes.append(kwargs.get("box"))
+        return execute(*args, **kwargs)
+
+    runtime.execute = admitted  # type: ignore[method-assign]
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Answer with measured usage."""
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": CATALOG})
+        return httpx.Response(200, json={"id": "gen-box", "usage": {"cost": "0.001"}, "choices": []})
+
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            runtime,
+            api_key="private",
+            model="fixture/text",
+            role="task",
+            policy=ChargePolicy("managed_model"),
+            client=client,
+        )
+        dispatcher.dispatch("/chat/completions", REQUEST, protocol_headers={"x-app-usage-tags": '{"box":"b1"}'})
+        dispatcher.dispatch("/chat/completions", REQUEST)
+    assert boxes == ["b1", None]
 
 
 def test_dispatch_records_usage_tags_and_latency_without_forwarding_them(database: Engine) -> None:

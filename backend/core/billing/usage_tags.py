@@ -2,15 +2,18 @@
 
 Tags travel with the request as one header, so they cross every boundary a
 call can take: a worker child's HTTP call to the gateway, a sandbox command's
-mailbox document, and the guest proxy. They are display attribution only. The
-money a call costs and the role it is billed under come from the trusted
-route, never from a tag, so a forged tag can only mislabel its own run's rows.
+mailbox document, and the guest proxy. They are display attribution only,
+except ``box``. The money a call costs and the role it is billed under come
+from the trusted route, never from a tag, so a forged tag can only mislabel
+its own run's rows. A forged ``box`` tag can at most stop its own run early
+(see ``BudgetRuntime.pin``).
 """
 
 from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import json
 import re
 import threading
@@ -21,7 +24,7 @@ USAGE_TAGS_HEADER = "x-app-usage-tags"
 # Still sent by the pinned sandbox image and older clients; read, never written.
 LEGACY_USAGE_TAGS_HEADER = "x-skynet-usage-tags"
 USAGE_TAGS_HEADERS = frozenset({USAGE_TAGS_HEADER, LEGACY_USAGE_TAGS_HEADER})
-TAG_KEYS = ("stage", "pair", "candidate", "case", "caller", "kind", "lane")
+TAG_KEYS = ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box")
 # ``caller`` values: which optimizer drove an optimization-route call.
 CALLER_PROPOSER = "proposer"
 CALLER_REFLECTION = "reflection"
@@ -34,11 +37,29 @@ KIND_EMBEDDING = "embedding"
 # other keys it follows the call into threads started inside the lane, because
 # engines score and reflect on their own pools where the lane's context is gone.
 LANE_KEY = "lane"
+# ``box`` names the pinned sandbox whose work made a call. The parent sets it
+# over the guest's tags for every call that a box's mailbox relays, so the
+# budget runtime can tell when every pinned box waits on its own model calls.
+BOX_KEY = "box"
 _MAX_VALUE_CHARS = 64
 _MAX_HEADER_CHARS = 512
 _VALUE = re.compile(r"[A-Za-z0-9_.:@/+ -]+")
 
 _scope: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("usage_tags", default=None)
+
+
+def box_tag(operation_key: str) -> str:
+    """Name a sandbox in the ``box`` tag by its admitted operation key.
+
+    A digest keeps the tag short and printable for any key.
+
+    Args:
+        operation_key: The logical operation key the box was reserved under.
+
+    Returns:
+        A 32-character hex tag.
+    """
+    return hashlib.sha256(operation_key.encode()).hexdigest()[:32]
 
 
 def clean_tags(tags: Mapping[str, Any] | None) -> dict[str, str]:
@@ -125,7 +146,8 @@ def usage_scope(**tags: Any) -> Iterator[None]:
     Scopes nest: an inner one keeps the outer's tags and overrides those it sets.
 
     Args:
-        **tags: ``stage``, ``pair``, ``candidate``, ``case``, ``caller``, ``kind`` or ``lane``; ``None`` keeps the outer value.
+        **tags: ``stage``, ``pair``, ``candidate``, ``case``, ``caller``, ``kind``, ``lane`` or ``box``;
+            ``None`` keeps the outer value.
 
     Yields:
         Nothing; the scope ends when the block does.

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
+from ....billing.usage_tags import box_tag, usage_scope
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, quote_vercel_sandbox
 from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
@@ -63,6 +64,8 @@ class _OwnedSession:
 
     session: SandboxSession
     lifetime_seconds: float
+    # The ``box`` usage tag of the box's own model calls (SKY-647).
+    box: str
 
 
 def _duration(value: Any, maximum: float) -> float:
@@ -128,6 +131,7 @@ class ParentSandboxSession:
         session: SandboxSession,
         command_runner: SandboxCommandRunner | None,
         on_close: Callable[[ParentSandboxSession], None] | None = None,
+        box: str | None = None,
     ) -> None:
         """Wrap a box with the run's model mailbox, as guest commands get.
 
@@ -135,9 +139,11 @@ class ParentSandboxSession:
             session: The provider session.
             command_runner: Optional model mailbox command wrapper.
             on_close: Called once with this box after it closes.
+            box: The ``box`` usage tag that the box's model calls carry.
         """
         self._session = session
         self._command_runner = command_runner
+        self._box = box
         self._on_close = on_close
         self._closed = False
 
@@ -186,7 +192,8 @@ class ParentSandboxSession:
             # A root setup command needs no model route, so it skips the mailbox.
             return self._session.run(command, **options, sudo=True)
         if self._command_runner is not None:
-            return self._command_runner(self._session, command, **options)
+            with usage_scope(box=self._box):
+                return self._command_runner(self._session, command, **options)
         return self._session.run(command, **options)
 
     def snapshot(self, cache: SnapshotCache, cache_key: str) -> str | None:
@@ -446,6 +453,7 @@ class SandboxBroker:
             if request_id in self._opening:
                 raise ServiceError("This sandbox creation is already in progress.")
             self._opening.add(request_id)
+        operation_key = f"sandbox:{request_id}"
         try:
             session = self._runtime.open(
                 SandboxSpec(
@@ -456,14 +464,14 @@ class SandboxBroker:
                     tags=self._tags,
                     network_disabled=not hosts,
                     allowed_hosts=tuple(hosts),
-                    operation_key=f"sandbox:{request_id}",
+                    operation_key=operation_key,
                 )
             )
             identity = uuid.uuid4().hex
             with self._lock:
                 closing = self._closed
                 if not closing:
-                    self._sessions[identity] = _OwnedSession(session, lifetime)
+                    self._sessions[identity] = _OwnedSession(session, lifetime, box_tag(operation_key))
                     self._opened[request_id] = (requested, identity)
             if closing:
                 session.close()
@@ -544,6 +552,7 @@ class SandboxBroker:
             ),
             self._parent_command_runner,
             self._forget_parent,
+            box_tag(spec.operation_key),
         )
         with self._lock:
             closing = self._closed
@@ -680,7 +689,10 @@ class SandboxBroker:
         timeout = owned.lifetime_seconds if timeout is None else _duration(timeout, owned.lifetime_seconds)
         options = {"env": _environment(payload.get("env")), "timeout_seconds": timeout, "on_output": on_output}
         if self._command_runner is not None:
-            return self._command_runner(owned.session, command, **options)
+            # The mailbox sends its caller's tags over the guest's, so a guest
+            # cannot name another box for its calls.
+            with usage_scope(box=owned.box):
+                return self._command_runner(owned.session, command, **options)
         return owned.session.run(command, **options)
 
     def close(self) -> None:
