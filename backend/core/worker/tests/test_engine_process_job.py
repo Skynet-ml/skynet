@@ -44,6 +44,7 @@ from .mocks import (
     make_mp_context,
     make_progress_event,
     make_result_event,
+    stopped_box_event,
 )
 from .test_budget_lifecycle import _checkpoint
 
@@ -252,6 +253,38 @@ def test_process_job_fails_classified_infrastructure_event(
 
     assert store._jobs["opt-transient"]["status"] == "failed"
     assert store._jobs["opt-transient"]["stop_reason"] == "interrupted"
+    assert store.requeue_calls == []
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "stop_reason"),
+    [(181, "interrupted"), (120, None)],
+)
+def test_process_job_gives_a_guest_box_deadline_stop_the_interrupted_stop_reason(
+    worker: BackgroundWorker,
+    store: FakeJobStore,
+    monkeypatch: pytest.MonkeyPatch,
+    elapsed: float,
+    stop_reason: str | None,
+) -> None:
+    """A guest box that stops at its 180 s deadline ends the run interrupted; an earlier stop stays failed (SKY-586)."""
+    event = stopped_box_event(monkeypatch, lifetime=180, elapsed=elapsed)
+    store.seed_job("opt-deadline", payload=REAL_RUN_PAYLOAD, attempts=0)
+    store.engine = MagicMock()
+    worker.enqueue_job("opt-deadline")
+    ctx, _proc = make_mp_context(exitcode=0, result_events=[event])
+    worker._mp_ctx = ctx
+    worker._mp_start_method = "spawn"
+
+    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
+        mock_svc.return_value.validate_payload = MagicMock()
+        worker._process_job("opt-deadline", 0)
+
+    job = store._jobs["opt-deadline"]
+    assert job["status"] == "failed"
+    assert job.get("stop_reason") == stop_reason
+    assert job["attempts"] == 0
+    assert job.get("recovery") is None
     assert store.requeue_calls == []
 
 

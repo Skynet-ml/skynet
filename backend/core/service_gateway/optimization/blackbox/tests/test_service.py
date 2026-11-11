@@ -950,9 +950,10 @@ def test_native_model_controls_are_rejected_without_restricting_direct_engines(
         (("low", "high"), "max", False),
         (("low", "high"), "high", True),
         (("low", "high"), None, True),
+        (("low", "high"), "", True),
         (None, "max", True),
     ],
-    ids=["unsupported", "supported", "default", "undeclared"],
+    ids=["unsupported", "supported", "default", "empty", "undeclared"],
 )
 def test_submit_checks_the_effort_against_the_proposer_harness(
     monkeypatch: pytest.MonkeyPatch,
@@ -967,13 +968,13 @@ def test_submit_checks_the_effort_against_the_proposer_harness(
         monkeypatch: Pytest fixture that swaps the registry entry and runtime capabilities.
         strategy: Auto or a single native engine; both run the proposer harness.
         declared: The harness's supported levels; ``None`` declares no list.
-        effort: The chosen effort level; ``None`` keeps the harness default.
+        effort: The chosen effort level; ``None`` or an empty string keeps the harness default.
         accepted: Whether the submission passes validation.
     """
     monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
     monkeypatch.setitem(REGISTRY, "fake", replace(REGISTRY["codex"], id="fake", supported_efforts=declared))
     monkeypatch.setattr(blackbox_models, "BLACKBOX_HARNESSES", (*BLACKBOX_HARNESSES, "fake"))
-    extra = {"reasoning_effort": effort} if effort else {}
+    extra = {"reasoning_effort": effort} if effort is not None else {}
     payload = _payload(
         strategy=strategy,
         max_cost_cents=100,
@@ -986,6 +987,46 @@ def test_submit_checks_the_effort_against_the_proposer_harness(
         validate_blackbox_payload(payload)
     else:
         with pytest.raises(ServiceError, match="fake proposer does not support the 'max' effort level"):
+            validate_blackbox_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("harness", "effort", "accepted"),
+    [
+        ("antigravity_sdk", "none", False),
+        ("antigravity_sdk", "max", False),
+        ("antigravity_sdk", "minimal", True),
+        ("antigravity_sdk", "xhigh", True),
+        ("pi", "max", True),
+        ("prime", "xhigh", True),
+        ("code_puppy", "minimal", True),
+        ("openhands_sdk", "none", True),
+    ],
+)
+def test_submit_checks_the_effort_against_the_real_harness_spec(
+    monkeypatch: pytest.MonkeyPatch, harness: str, effort: str, accepted: bool
+) -> None:
+    """Refuse at submit a level the built-in harness spec does not declare (SKY-590).
+
+    Args:
+        monkeypatch: Pytest fixture that swaps the runtime capabilities.
+        harness: A built-in proposer harness.
+        effort: The chosen effort level.
+        accepted: Whether the submission passes validation.
+    """
+    monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
+    payload = _payload(
+        strategy={"mode": "auto"},
+        max_cost_cents=100,
+        scorer={"kind": "remote", "url": "https://scorer.example"},
+        reflection_model_config={"name": "fake/model", "extra": {"reasoning_effort": effort}},
+        proposer={"harness": harness},
+    )
+
+    if accepted:
+        validate_blackbox_payload(payload)
+    else:
+        with pytest.raises(ServiceError, match=f"{harness} proposer does not support the '{effort}' effort level"):
             validate_blackbox_payload(payload)
 
 

@@ -53,9 +53,10 @@ _USAGE_FILE = '"$_cp_dir/usage.json"'
 # ``$XDG_CACHE_HOME/code_puppy/autosaves``; the usage file gives the tokens and
 # one Pi ``tool_execution_start`` line per tool call, so the bridge's cost and
 # tool-call stops read them. The answer line comes first, because a stop
-# signals the whole group while the script prints. It runs inline
-# (``python3 -I -c '...'``) for the reasons :data:`.fx.FX_TO_PI` gives, so it
-# must hold no single quote.
+# signals the whole group while the script prints. A script in ``files`` would
+# land in the working directory that the harness can edit and would go through
+# a protected run's relay rewrite, so it runs inline (``python3 -I -c '...'``)
+# and must hold no single quote.
 CODE_PUPPY_TO_PI = """import glob
 import json
 import os
@@ -120,8 +121,8 @@ _RANDOM_KEY_ENV = (
     f'export "$_cp_key=${ENV_API_KEY}"'
 )
 # Code Puppy's effort names (model_utils._OPENAI_REASONING_EFFORT_ORDER in
-# 0.0.967). Each passes unchanged; the launch refuses any other effort, so a run
-# never gets an effort the user did not pick.
+# 0.0.967). Each passes unchanged. Submit refuses any other effort through the
+# spec, and the launch refuses it again as a backstop.
 CODE_PUPPY_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # ``uv tool install`` and the uv installer both put their binaries here.
 _CODE_PUPPY_PATH = 'export PATH="$HOME/.local/bin:$PATH"'
@@ -303,5 +304,6 @@ SPEC = register(
         output_format="pi",
         protected_env=_PROTECTED_ENV,
         position=90,
+        supported_efforts=CODE_PUPPY_EFFORTS,
     )
 )
