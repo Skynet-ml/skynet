@@ -1,4 +1,5 @@
 FROM docker.io/node:22.22.0-bookworm-slim AS node-runtime
+FROM docker.io/node:24.21.0-bookworm-slim AS node24-runtime
 
 FROM node-runtime AS harness-deps
 
@@ -66,6 +67,9 @@ COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+# eve needs Node >=24. Keep the other harnesses on Node 22 and give eve its
+# own binary; the eve launch puts /opt/node24/bin first on PATH.
+COPY --from=node24-runtime /usr/local/bin/node /opt/node24/bin/node
 
 # VCR limits compressed OCI layers to 500 MB. Keep each pinned harness in its
 # own layer and omit musl binaries because this Debian image uses glibc.
@@ -79,7 +83,11 @@ RUN for CLI in pi codex opencode prime-agent; do \
         if [ -e "/usr/local/lib/skynet-harnesses/node_modules/.bin/$CLI" ]; then \
             ln -s "/usr/local/lib/skynet-harnesses/node_modules/.bin/$CLI" "/usr/local/bin/$CLI"; \
         fi; \
-    done
+    done \
+    && printf '#!/bin/sh\nexec /opt/node24/bin/node /usr/local/lib/skynet-harnesses/node_modules/eve/bin/eve.js "$@"\n' \
+        > /usr/local/bin/eve \
+    && chmod 0755 /usr/local/bin/eve \
+    && eve --version | grep -Eq '(^| )1[.]0[.]0-rc[.]6( |$)'
 
 COPY pyproject.toml uv.lock requirements.txt ./
 

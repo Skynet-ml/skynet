@@ -22,12 +22,17 @@ from ..harness_bridge import _Monitor, parse_output, parse_pi_output, tool_call_
 from ..harnesses import REGISTRY
 from ..harnesses.eve import (
     AI_SDK_VERSION,
+    EVE_CHANNEL,
+    EVE_IMAGE_DEPS,
     EVE_INSTRUCTIONS_FILE,
     EVE_RUNNER,
+    EVE_SANDBOX,
     EVE_VERSION,
     OPENAI_COMPATIBLE_VERSION,
     ZOD_VERSION,
 )
+
+_SANDBOX_RUNTIME = Path(__file__).resolve().parents[5] / "sandbox-runtime"
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 _PROVIDER_KEYS = (
@@ -86,6 +91,7 @@ def test_eve_is_registered_after_prime_and_before_cline() -> None:
 # lockfile in its cwd, ``eve build`` leaves build output, and the runner copies
 # the project it got to $RECORD_DIR, then edits main.py as the agent would.
 _FAKE_NPM = """#!/bin/sh
+if [ -n "$FAKE_NPM_FAILS" ]; then exit 1; fi
 mkdir -p node_modules/.bin node_modules/eve
 echo '{}' > package-lock.json
 echo 'module.exports = {}' > node_modules/eve/index.js
@@ -95,6 +101,7 @@ chmod +x node_modules/.bin/eve
 _FAKE_NODE = """#!/bin/sh
 cp -R "$EVE_PROJECT_DIR/." "$RECORD_DIR/"
 echo "$EVE_PROJECT_DIR" > "$RECORD_DIR/.project_dir"
+echo "$EVE_WORKSPACE" > "$RECORD_DIR/.workspace"
 if [ -f main.py ]; then echo 'print(2)' > main.py; fi
 """
 
@@ -176,10 +183,15 @@ def test_launch_generates_a_pinned_eve_project(tmp_path: Path) -> None:
     assert (record / "runner.mjs").read_text() == EVE_RUNNER
     assert (record / "agent/agent.ts").read_text() == agent
     assert (record / "agent/instructions.md").read_text() == "instructions\n"
+    assert (record / "agent/sandbox.ts").read_text() == EVE_SANDBOX
+    assert (record / "agent/channels/eve.ts").read_text() == EVE_CHANNEL
     assert (record / ".eve/server.mjs").is_file()
     project_dir = Path((record / ".project_dir").read_text().strip())
     assert project_dir.is_absolute()
     assert workspace.resolve() not in project_dir.resolve().parents
+    assert Path((record / ".workspace").read_text().strip()).resolve() == workspace.resolve()
+    assert not project_dir.exists()
+    assert list((tmp_path / "tmp").iterdir()) == []
     assert sorted(str(path.relative_to(workspace)) for path in workspace.rglob("*") if path.is_file()) == [
         ".app/eve/agent/agent.ts",
         ".app/eve/agent/instructions.md",
@@ -192,11 +204,78 @@ def test_launch_installs_the_pinned_cli_and_runs_the_runner() -> None:
     assert launch.install_command == (
         "eve --version 2>/dev/null | grep -Eq '(^| )1[.]0[.]0-rc[.]6( |$)' || npm install -g eve@1.0.0-rc.6"
     )
-    assert launch.run_command.startswith('EVE_DIR="$(mktemp -d)" && ')
-    assert ' && (cd "$EVE_DIR" && npm install ' in launch.run_command
+    assert launch.run_command.startswith(
+        'export EVE_WORKSPACE="$PWD" && EVE_DIR="$(mktemp -d)" && trap \'rm -rf "$EVE_DIR"\' EXIT && '
+    )
+    assert f'if [ -d "{EVE_IMAGE_DEPS}/eve" ]; then ' in launch.run_command
+    assert "else npm install " in launch.run_command
     assert "node_modules/.bin/eve build) >&2 && " in launch.run_command
     assert launch.run_command.endswith('EVE_PROJECT_DIR="$EVE_DIR" node "$EVE_DIR/runner.mjs"')
     assert launch_payload(launch)["output_format"] == "pi"
+
+
+def test_launch_links_the_preinstalled_image_packages_instead_of_installing(tmp_path: Path) -> None:
+    """Link each preinstalled package into the project's own node_modules and never call npm."""
+    deps = tmp_path / "image-deps"
+    (deps / "eve").mkdir(parents=True)
+    (deps / "@ai-sdk/openai-compatible").mkdir(parents=True)
+    (deps / ".bin").mkdir()
+    (deps / ".bin/eve").write_text("#!/bin/sh\nmkdir -p .eve && echo built > .eve/server.mjs\n")
+    (deps / ".bin/eve").chmod(0o755)
+    launch = build_launch(_target(), _GATEWAY)
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    _write_launch_files(launch.files, launch.instructions_file, workspace)
+    run_command = launch.run_command.replace(EVE_IMAGE_DEPS, str(deps))
+    record = _run_with_fakes(run_command, workspace, tmp_path, FAKE_NPM_FAILS="1")
+    modules = record / "node_modules"
+    assert sorted(path.name for path in modules.iterdir()) == [".bin", "@ai-sdk", "eve"]
+    assert (record / ".eve/server.mjs").is_file()
+    assert not (deps / ".eve").exists()
+
+
+def test_image_lock_pins_the_same_eve_packages_as_the_harness() -> None:
+    """Preinstall eve and its peers in the sandbox image at the harness's exact pins."""
+    package = json.loads((_SANDBOX_RUNTIME / "package.json").read_text())
+    pins = {
+        "@ai-sdk/openai-compatible": OPENAI_COMPATIBLE_VERSION,
+        "ai": AI_SDK_VERSION,
+        "eve": EVE_VERSION,
+        "zod": ZOD_VERSION,
+    }
+    assert {name: package["dependencies"][name] for name in pins} == pins
+    lock = json.loads((_SANDBOX_RUNTIME / "package-lock.json").read_text())["packages"]
+    assert {name: lock[f"node_modules/{name}"]["version"] for name in pins} == pins
+    assert all(lock[f"node_modules/{name}"].get("integrity") for name in pins)
+
+
+@pytest.mark.parametrize(
+    ("effort", "level"),
+    [(None, None), ("none", "none"), ("minimal", "minimal"), ("high", "high"), ("max", "xhigh"), ("turbo", None)],
+)
+def test_reasoning_effort_reaches_the_agent_config(effort: str | None, level: str | None) -> None:
+    """Pass the user's effort as eve's ``reasoning`` level, or leave the model's default."""
+    agent = build_launch(_target(), _GATEWAY, reasoning_effort=effort).files[".app/eve/agent/agent.ts"]
+    assert "modelContextWindowTokens: 200_000" in agent
+    if level is None:
+        assert "reasoning:" not in agent
+    else:
+        assert f'reasoning: "{level}"' in agent
+
+
+def test_sandbox_runs_tools_in_the_run_workspace_without_the_gateway_key() -> None:
+    """Give eve's tools a host sandbox rooted at the run workspace that hides the key and runner token."""
+    assert 'defineSandboxProvider({ name: "skynet-workspace"' in EVE_SANDBOX
+    assert "process.env.EVE_WORKSPACE" in EVE_SANDBOX
+    assert "export const environment = " in EVE_SANDBOX
+    assert "export default defineSandbox(" in EVE_SANDBOX
+    for name in ("APP_API_KEY", "EVE_RUNNER_TOKEN"):
+        assert f'"{name}"' in EVE_SANDBOX
+    assert "eveChannel({ auth: [runnerToken] })" in EVE_CHANNEL
+    assert "process.env.EVE_RUNNER_TOKEN" in EVE_CHANNEL
+    assert "timingSafeEqual" in EVE_CHANNEL
+    assert "env.EVE_RUNNER_TOKEN = runnerToken;" in EVE_RUNNER
+    assert "auth: { bearer: runnerToken }" in EVE_RUNNER
 
 
 def test_env_carries_only_the_gateway_and_turns_telemetry_off() -> None:
@@ -311,17 +390,24 @@ const SCENARIOS = {
 };
 const hang = () => new Promise(() => setInterval(() => {}, 1000));
 export class Client {
-  session() {
+  constructor(options) {
+    if (!options?.baseUrl || !options?.auth?.bearer) throw new Error("missing baseUrl or bearer");
+  }
+  get sessions() {
     return {
-      async send() {
+      async create({ message }) {
+        if (message !== "the prompt") throw new Error("wrong prompt");
         const scenario = process.env.FAKE_EVE_SCENARIO;
         return {
-          async *stream() {
-            for (const event of SCENARIOS[scenario]) yield event;
-            if (scenario !== "done") await hang();
-          },
-          async result() {
-            return { status: "completed", message: "done", events: [] };
+          session: { id: "s1" },
+          delivery: {
+            async *stream() {
+              for (const event of SCENARIOS[scenario]) yield event;
+              if (scenario !== "done") await hang();
+            },
+            async result() {
+              return { status: "completed", reply: "done" };
+            },
           },
         };
       },
