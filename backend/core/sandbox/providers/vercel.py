@@ -397,6 +397,7 @@ class VercelEnvironment(SandboxEnvironment):
         self._settle_error: Exception | None = None
         self._halted = False
         self._funded_until: float | None = None
+        self._budget_stop: BudgetReached | None = None
         self.snapshot_id = snapshot_id
         self._snapshot_usage_factory = snapshot_usage_factory
         self._secret_exposed = False
@@ -707,6 +708,8 @@ class VercelEnvironment(SandboxEnvironment):
                 # Without funding the box keeps its funded limit and Vercel ends
                 # it there; _funded_until stays put, so later work is refused.
                 logger.warning("Sandbox %s slice was not funded: %s", self.name, type(error).__name__)
+                if isinstance(error, BudgetReached):
+                    self._budget_stop = error
                 return
             try:
                 updated = await session.extend_execution_time_limit(timedelta(milliseconds=target - funded_ms))
@@ -834,23 +837,31 @@ class VercelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The box is not running, its session stopped, or
                 its funded lifetime is over.
+            BudgetReached: The funded lifetime is over because the budget
+                refused the next slice.
         """
         if self._box is None or self._session is None or self._stop_task is not None or self._halted:
             raise SandboxInfraError("The Vercel sandbox is not running.")
         if self._funded_until is not None and self._clock.monotonic() >= self._funded_until:
+            if self._budget_stop is not None:
+                raise BudgetReached(str(self._budget_stop))
             raise SandboxInfraError("The Vercel sandbox has no funded lifetime left.")
         return self._session
 
-    def _session_stopped(self, error: BaseException) -> SandboxInfraError:
+    def _session_stopped(self, error: BaseException) -> SandboxInfraError | BudgetReached:
         """Mark the box halted after its session ended under a call.
 
         Args:
             error: The SDK error that reported the stop.
 
         Returns:
-            The infra error to raise.
+            The error to raise: a budget stop when the budget refused the next
+            slice, so Vercel ended the box at its funded limit (SKY-587), else
+            an infra error.
         """
         self._halted = True
+        if self._budget_stop is not None:
+            return BudgetReached(str(self._budget_stop))
         return SandboxInfraError(f"The Vercel sandbox session stopped: {type(error).__name__}")
 
     @contextlib.contextmanager

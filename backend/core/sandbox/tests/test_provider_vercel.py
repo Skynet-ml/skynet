@@ -1079,13 +1079,45 @@ async def test_exec_after_unconfirmed_extension_fails_without_resume(log: list[s
 
 
 async def test_exec_after_unfunded_slice_fails_at_funded_end(log: list[str]) -> None:
-    """Check that work runs until the funded lifetime ends, then fails closed."""
+    """Check that work runs until the funded lifetime ends, then stops for budget (SKY-587)."""
     client = FakeClient(log)
     env = make_env(client, log, lifetime=1500)
     await env.start()
-    env.usage.extend_error = BudgetReached()
+    env.usage.extend_error = BudgetReached("budget gone")
     await asyncio.wait_for(env._renewer, 5)
     assert (await env.exec("echo still-funded")).exit_code == 0
+    env._clock.now = 600
+    with pytest.raises(BudgetReached, match="budget gone"):
+        await env.exec("echo more")
+    await env.stop()
+
+
+async def test_box_that_stops_after_an_unfunded_slice_is_a_budget_stop(log: list[str]) -> None:
+    """Check that Vercel ending the box at its funded limit after a budget refusal is a budget stop (SKY-587)."""
+    client = FakeClient(log)
+    env = make_env(client, log, lifetime=1500)
+    await env.start()
+    env.usage.extend_error = BudgetReached("budget gone")
+    await asyncio.wait_for(env._renewer, 5)
+    client.boxes[env.name].outcomes = [_gone()]
+    with pytest.raises(BudgetReached, match="budget gone"):
+        await env.exec("python optimize.py")
+    assert env._halted is True
+    await env.stop()
+
+
+async def test_box_that_stops_after_an_unfunded_slice_for_another_reason_stays_an_infra_error(
+    log: list[str],
+) -> None:
+    """Check that a funding failure that is not a budget stop keeps the infra error."""
+    client = FakeClient(log)
+    env = make_env(client, log, lifetime=1500)
+    await env.start()
+    env.usage.extend_error = RuntimeError("usage pending")
+    await asyncio.wait_for(env._renewer, 5)
+    client.boxes[env.name].outcomes = [_gone()]
+    with pytest.raises(SandboxInfraError):
+        await env.exec("python optimize.py")
     env._clock.now = 600
     with pytest.raises(SandboxInfraError):
         await env.exec("echo more")
