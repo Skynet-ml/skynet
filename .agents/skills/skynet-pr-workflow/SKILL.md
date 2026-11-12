@@ -102,8 +102,9 @@ for review until the evidence is there.
 ## 3. Automated review gate (RevEngine)
 
 - One review by Claude Opus 5.5 (`claude-opus-5-5`) at medium effort must
-  approve the current head commit and its base commit with 0 findings. Do not substitute
-  another model silently. Do not add a GPT review or a paid review service.
+  approve the current head commit and its base commit with 0 findings. Do
+  not substitute another model silently. Do not add a GPT review or a paid
+  review service.
 - The orchestrator starts a fresh reviewer subagent after implementation
   stops. **The implementer never reviews its own work as the final gate.**
 - RevEngine steps: **Review, Verify, Rank.**
@@ -201,12 +202,13 @@ for review until the evidence is there.
   staging test-credit grant command in the `skynet-test-accounts` skill
   ("Grant test credit"). Use it only for a check account you created for
   this check, only after Gilad approves that grant in chat, and within the
-  one $50 UTC-day cap on the staging database. Amounts depend on the check. Before each grant, ask Gilad
-  in chat for a specific dollar amount: the smallest amount the check needs,
-  with a short cost estimate. Gilad approves that amount, or a larger one if
-  he thinks the check needs more. Record his approval text. Spend as little
-  as possible. Never grant on production, to real customers or to manual
-  accounts. Never use a raw wallet INSERT, Stripe or any other path.
+  one $50 UTC-day cap on the staging database. Amounts depend on the
+  check. Before each grant, ask Gilad in chat for a specific dollar amount:
+  the smallest amount the check needs, with a short cost estimate. Gilad
+  approves that amount, or a larger one if he thinks the check needs more.
+  Record his approval text. Spend as little as possible. Never grant on
+  production, to real customers or to manual accounts. Never use a raw
+  wallet INSERT, Stripe or any other path.
 - Mocks are allowed for focused unit tests or unavailable dependencies.
   Explain the reason, boundary and coverage gap.
 - Costly or rare workflows (for example expensive scheduled runs): backend

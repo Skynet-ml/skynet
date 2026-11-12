@@ -1,8 +1,8 @@
 # Account-wide resources shared by staging and production:
 # - ECR repositories (one image is built once and promoted by tag).
 # - The GitHub Actions OIDC provider and its roles (no static AWS keys): one
-#   deploy role per environment, a read-only plan role for
-#   pull requests and an apply role limited to the staging and main branches.
+#   deploy role per environment, a read-only plan role for pull requests
+#   and an apply role limited to the staging and main branches.
 
 terraform {
   required_version = ">= 1.11.0"
