@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from ...billing.protected_credentials import scrub_execution_credentials
 from ...constants import (
-    OPTIMIZATION_TYPE_RUN,
+    OPTIMIZATION_TYPE_BLACKBOX,
     PAYLOAD_OVERVIEW_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
 )
@@ -65,8 +65,8 @@ def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     The stored submission payload echoes whatever the caller posted, including
     inline ``model_settings.extra.api_key`` values that the operator never
     intended to surface back through the read API. This sanitiser walks every
-    well-known ``ModelConfig`` slot — single-run model fields, grid-search
-    model lists and a black-box scorer's ``llm()`` model — and runs each one
+    well-known ``ModelConfig`` slot — single-run model fields, the model
+    lists of older stored payloads and a black-box scorer's ``llm()`` model — and runs each one
     through :func:`strip_api_key`. A remote scorer's shared ``secret`` is
     dropped for the same reason.
 
@@ -221,7 +221,7 @@ def create_optimizations_meta_router(*, job_store) -> APIRouter:
             raise DomainError("optimization.payload_unavailable", status=404)
 
         overview = parse_overview(job_data)
-        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
+        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_BLACKBOX)
         return OptimizationPayloadResponse(
             optimization_id=optimization_id,
             optimization_type=optimization_type,

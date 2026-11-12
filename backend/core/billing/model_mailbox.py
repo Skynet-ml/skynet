@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import hashlib
 import json
+import logging
 import secrets
 import shlex
 import threading
@@ -20,6 +23,25 @@ from .operation_pricing import UnpricedOperationError
 from .runtime import ProviderFailedError, UsagePendingError
 from .signals import BudgetReached
 from .usage_tags import current_tags, with_tags_header
+
+logger = logging.getLogger(__name__)
+
+# The image's root-owned interpreter. The box user can write a python3 that PATH
+# finds first (for example in /app/.venv/bin), so a root proxy never uses PATH.
+ROOT_PYTHON = "/usr/local/bin/python3"
+# The box user can rewrite the proxy and config files, so a root proxy runs only
+# the bytes whose digests the parent sent, from memory and a root-only copy.
+ROOT_PROXY_BOOT = (
+    "import hashlib,os,sys,tempfile\n"
+    "source,config=(open(path,'rb').read() for path in sys.argv[3:5])\n"
+    "if [hashlib.sha256(data).hexdigest() for data in (source,config)]!=sys.argv[1:3]:\n"
+    " sys.exit('The model proxy files changed before they ran.')\n"
+    "handle,copy=tempfile.mkstemp()\n"
+    "os.write(handle,config)\n"
+    "os.close(handle)\n"
+    "sys.argv=[sys.argv[3],copy,*sys.argv[5:]]\n"
+    "exec(compile(source,sys.argv[0],'exec'),{'__name__':'__main__'})\n"
+)
 
 
 class ModelMailbox:
@@ -43,6 +65,7 @@ class ModelMailbox:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: Callable[[str, str], None] | None = None,
+        sudo: bool = False,
     ) -> Any:
         """Wrap one sandbox command and service its model mailbox alongside output.
 
@@ -52,6 +75,8 @@ class ModelMailbox:
             env: Guest environment containing only scoped route credentials.
             timeout_seconds: Command limit already covered by the sandbox reservation.
             on_output: Existing progress or upstream evaluator mailbox callback.
+            sudo: Run the proxy and the command as root, as the scorer's supervisor needs (SKY-398).
+                The root proxy starts from the image's interpreter and runs only the bytes the parent wrote.
 
         Returns:
             The sandbox's original command result.
@@ -64,12 +89,17 @@ class ModelMailbox:
         source_path = f"{directory}/proxy.py"
         config_path = f"{directory}/config.json"
         response_directory = f"{directory}/responses"
+        source = Path(guest_model_proxy.__file__).read_text(encoding="utf-8")
+        config = json.dumps(
+            {"prefix": prefix, "response_dir": response_directory, "timeout_seconds": timeout_seconds or 600}
+        )
         session.write_files(
             {
-                source_path: Path(guest_model_proxy.__file__).read_text(encoding="utf-8"),
-                config_path: json.dumps(
-                    {"prefix": prefix, "response_dir": response_directory, "timeout_seconds": timeout_seconds or 600}
-                ),
+                source_path: source,
+                config_path: config,
+                # A root proxy would make this folder, and the parent could not write
+                # its answers into a root-owned folder. So the parent makes it first.
+                **({f"{response_directory}/.keep": ""} if sudo else {}),
             }
         )
         pending = {"stdout": "", "stderr": ""}
@@ -77,6 +107,9 @@ class ModelMailbox:
         seen: set[str] = set()
         guard = threading.Lock()
         errors: list[BaseException] = []
+        # MCP event streams whose box reader left, and a flag for the end of the command.
+        abandoned: set[str] = set()
+        finished = threading.Event()
 
         def respond(document: dict[str, Any]) -> None:
             """Write one trusted response while preserving a paid attempt on transport failure."""
@@ -86,33 +119,83 @@ class ModelMailbox:
                 )
                 headers[MODEL_ATTEMPT_HEADER] = document["id"]
                 token = headers.get("authorization", "").removeprefix("Bearer ") or headers.get("x-api-key", "")
-                response = self._dispatch(
-                    token, document["path"], json.loads(base64.b64decode(document["body"])), headers
-                )
+                body = base64.b64decode(document["body"])
+                # An MCP server or a service takes the client's bytes as they are; a model request is one JSON object.
+                if not str(document["path"]).startswith((guest_model_proxy.MCP_PATH, guest_model_proxy.SERVICE_PATH)):
+                    body = json.loads(body)
+                response = self._dispatch(token, document["path"], body, headers)
             except BudgetReached as error:
                 response = failure(402, "budget_reached", str(error))
             except BudgetInsufficientError as error:
                 response = failure(402, "budget_insufficient", str(error))
             except ProviderFailedError as error:
                 response = failure(502, "provider_failed", str(error))
-            except (BudgetError, UsagePendingError):
+            except BudgetError:
                 response = failure(424, "usage_pending", "Previous model usage is awaiting confirmation.")
+            except UsagePendingError as error:
+                # The runtime names whose usage is pending: this call's, or earlier work that blocks admission.
+                response = failure(424, "usage_pending", str(error))
             except (UnpricedOperationError, ValueError, TypeError) as error:
                 response = failure(422, "unpriced_operation", str(error))
             except BaseException as error:
                 errors.append(error)
                 response = failure(502, "provider_unavailable", "The model transport was interrupted.")
-            session.write_files(
-                {
-                    f"{response_directory}/{document['id']}.json": json.dumps(
-                        {
-                            "status": response.status,
-                            "content_type": response.content_type,
-                            "body": base64.b64encode(response.body).decode(),
-                        }
+            answer: dict[str, Any] = {
+                "status": response.status,
+                "content_type": response.content_type,
+                "body": base64.b64encode(response.body).decode(),
+                "headers": [list(pair) for pair in response.headers],
+            }
+            if response.stream is None:
+                session.write_files({f"{response_directory}/{document['id']}.json": json.dumps(answer)})
+                return
+            try:
+                session.write_files(
+                    {f"{response_directory}/{document['id']}.json": json.dumps({**answer, "more": True})}
+                )
+            except BaseException:
+                response.stream.close()
+                raise
+            # An event stream can stay open for the whole command, so it gets its own thread, not a pool worker.
+            threading.Thread(
+                target=pump,
+                args=(document["id"], response.stream),
+                daemon=True,
+                name="sandbox-mcp-stream",
+            ).start()
+
+        def pump(identity: str, stream: Any) -> None:
+            """Write each part of an MCP event stream as its own response file, then an end part.
+
+            Part ``n`` goes to ``<id>.<n>.json``. The last part has ``"more": false``.
+            The stream stops with no last part when the box's reader left or the
+            command ended, so a server that keeps it alive with pings cannot hold
+            its place.
+
+            Args:
+                identity: The request's id.
+                stream: The relay's event stream.
+            """
+            base = f"{response_directory}/{identity}"
+            part = 0
+            try:
+                for chunk in stream:
+                    if identity in abandoned or finished.is_set():
+                        return
+                    part += 1
+                    session.write_files(
+                        {f"{base}.{part}.json": json.dumps({"body": base64.b64encode(chunk).decode(), "more": True})}
                     )
-                }
-            )
+            except Exception as error:
+                # Only the type: the relay already recorded the call, and a message could hold a body.
+                logger.warning("An MCP event stream ended early in the sandbox mailbox: %s", type(error).__name__)
+            finally:
+                stream.close()
+            if finished.is_set():
+                return
+            # A box that went away cannot take the end part; the guest proxy is gone with it.
+            with contextlib.suppress(Exception):
+                session.write_files({f"{base}.{part + 1}.json": json.dumps({"more": False})})
 
         def failure(status: int, code: str, message: str) -> ModelHTTPResult:
             """Return an admission error understood by both supported model protocols."""
@@ -150,14 +233,39 @@ class ModelMailbox:
                                 raise ValueError("Invalid model mailbox identity.")
                             if identity not in seen:
                                 seen.add(identity)
-                                futures.append(executor.submit(respond, document))
+                                if "stop" in document:
+                                    abandoned.add(str(document["stop"]))
+                                else:
+                                    futures.append(executor.submit(respond, document))
                         else:
                             visible.setdefault(stream, []).append(line + "\n")
                             if on_output is not None:
                                 on_output(stream, line + "\n")
 
-            wrapped = f"python3 {shlex.quote(source_path)} {shlex.quote(config_path)} bash -lc {shlex.quote(command)}"
-            result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
+            # A version can write ~/.bash_profile, ~/.profile or a .pth file in user
+            # site-packages under $HOME. A login shell runs the first two, and a
+            # python3 without -I runs the .pth (E38). The proxy needs only the stdlib.
+            wrapped = (
+                f"python3 -I {shlex.quote(source_path)} {shlex.quote(config_path)}"
+                f" bash --noprofile --norc -c {shlex.quote(command)}"
+            )
+            if sudo:
+                digests = " ".join(hashlib.sha256(text.encode()).hexdigest() for text in (source, config))
+                wrapped = (
+                    f"{ROOT_PYTHON} -I -S -c {shlex.quote(ROOT_PROXY_BOOT)} {digests}"
+                    f" {shlex.quote(source_path)} {shlex.quote(config_path)}"
+                    f" /bin/bash --noprofile --norc -c {shlex.quote(command)}"
+                )
+            try:
+                result = session.run(
+                    wrapped,
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                    on_output=output,
+                    **({"sudo": True} if sudo else {}),
+                )
+            finally:
+                finished.set()
             for future in futures:
                 future.result()
             for stream, data in pending.items():

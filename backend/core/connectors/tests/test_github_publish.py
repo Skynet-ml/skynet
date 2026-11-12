@@ -12,7 +12,7 @@ import pytest
 from ...api.errors import DomainError
 from ...brand import APP_NAME
 from .. import github_publish
-from ..github_publish import RepoPublishError, open_pull_request, push_version
+from ..github_publish import HardeningSummary, RepoPublishError, open_pull_request, push_version
 
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
 
@@ -143,3 +143,52 @@ def test_pull_request_falls_back_when_drafts_are_unavailable(monkeypatch: pytest
     assert [body.get("draft") for body in sent] == [True, None]
     assert sent[1]["base"] == "main"
     assert change.draft is False
+
+
+def test_pull_request_reports_a_finished_hardening_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run with a finished hardening job adds the attack and fix counts to the body."""
+    sent = _github(monkeypatch)
+    hardening = HardeningSummary(attacks=12, exploits_fixed=3)
+
+    open_pull_request("tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B", hardening=hardening)
+
+    assert sent[0]["body"] == "B\n\nMetric survived 12 attacks, 3 exploits fixed"
+
+
+def test_hardening_line_survives_the_draft_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The regular pull request opened after a refused draft keeps the hardening line."""
+    sent = _github(monkeypatch, refuse_draft=True)
+    hardening = HardeningSummary(attacks=1, exploits_fixed=1)
+
+    open_pull_request("tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="", hardening=hardening)
+
+    assert [body["body"] for body in sent] == ["Metric survived 1 attack, 1 exploit fixed"] * 2
+
+
+def test_pull_request_without_hardening_keeps_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run with no hardening job publishes the body exactly as given."""
+    sent = _github(monkeypatch)
+
+    open_pull_request("tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B\n", hardening=None)
+
+    assert sent[0]["body"] == "B\n"
+
+
+@pytest.mark.parametrize(("attacks", "fixed"), [(-1, 0), (0, -1), (True, 0), (0, False), (1.0, 0), ("3", 0)])
+def test_hardening_summary_refuses_bad_counts(attacks: Any, fixed: Any) -> None:
+    """Refuse negative, bool and non-int counts, so the body never reports a wrong number."""
+    with pytest.raises(ValueError, match="whole numbers of zero or more"):
+        HardeningSummary(attacks=attacks, exploits_fixed=fixed)
+
+
+def test_hardening_summary_refuses_more_fixes_than_attacks() -> None:
+    """Refuse a summary that fixed more exploits than it ran attacks."""
+    with pytest.raises(ValueError, match="more exploits than"):
+        HardeningSummary(attacks=2, exploits_fixed=3)
+
+
+def test_hardening_summary_takes_zero_counts() -> None:
+    """Accept a job that ran no attacks and fixed nothing."""
+    assert github_publish.hardening_line(HardeningSummary(attacks=0, exploits_fixed=0)) == (
+        "Metric survived 0 attacks, 0 exploits fixed"
+    )

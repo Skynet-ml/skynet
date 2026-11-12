@@ -6,7 +6,7 @@
  */
 
 /** Same cutoff ChatGPT uses before a paste becomes an attachment. */
-export const PASTE_ATTACHMENT_MIN_CHARS = 5000;
+const PASTE_ATTACHMENT_MIN_CHARS = 5000;
 
 const BLOCK_RE =
   /<pasted_text>\n?([\s\S]*?)\n?<\/pasted_text>\n*|<attached_file name="([^"]*)">\n?([\s\S]*?)\n?<\/attached_file>\n*/g;

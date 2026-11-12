@@ -134,11 +134,13 @@ def list_grants_for_user_all(session: Session, username: str) -> dict[str, str]:
         username: Grantee username (compared case-insensitively).
 
     Returns:
-        ``{dataset_id: role}`` for every grant the user holds.
+        ``{dataset_id: role}`` for every grant the user holds and did not hide
+        from their own view.
     """
     rows = session.scalars(
         select(DatasetShareGrantModel).where(
             DatasetShareGrantModel.grantee_username == _normalize_username(username),
+            DatasetShareGrantModel.hidden_at.is_(None),
         )
     )
     return {grant.dataset_id: grant.role for grant in rows}

@@ -98,7 +98,7 @@ Una ejecución debe saber qué columnas son entradas y qué columna es la salida
 
 En el asistente de envío, el paso «Cómo leer los datos» muestra cada columna con tres opciones:
 
-- **Entrada**: el programa recibe este valor.
+- **Entrada**: tu evaluador recibe este valor en `case["input"]`.
 - **Salida**: la respuesta esperada con la que compara el evaluador.
 - **Omitir**: la ejecución no tiene en cuenta esta columna.
 

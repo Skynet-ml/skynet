@@ -16,26 +16,19 @@ from typing import cast
 import pytest
 from gepa.core.state import GEPAState, ValsetEvaluation
 
-from core.constants import (
-    OPTIMIZATION_TYPE_BLACKBOX,
-    OPTIMIZATION_TYPE_GRID_SEARCH,
-    OPTIMIZATION_TYPE_RUN,
-    PROGRESS_CANDIDATE,
-)
+from core.constants import OPTIMIZATION_TYPE_BLACKBOX, OPTIMIZATION_TYPE_TAGGING, PROGRESS_CANDIDATE
 from core.service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
 from core.storage import JobStore
 from core.worker import checkpoint_compat
 from core.worker.checkpoint_compat import (
     CheckpointCompatibilityError,
-    checkpoint_incumbent,
     checkpoint_manifest,
-    supports_checkpoint,
     validate_checkpoint,
 )
 from core.worker.constants import EVENT_PROGRESS
 from core.worker.engine import BackgroundWorker
 
-_PAYLOAD = {"optimizer_name": "GEPA", "dataset": [{"input": "a"}]}
+_PAYLOAD = {"strategy": {"mode": "single", "engine": "gepa"}, "cases": [{"input": "a"}]}
 
 
 def _state(iteration: int) -> bytes:
@@ -93,10 +86,6 @@ class _CheckpointStore:
             manifest=self.manifests.get(pair_index) or checkpoint_manifest(row[0], _PAYLOAD, None),
         )
 
-    def list_gepa_checkpoints(self, optimization_id: str):
-        """Return every stored checkpoint record."""
-        return [self.get_gepa_checkpoint(optimization_id, idx) for idx in self.checkpoints]
-
     def delete_gepa_checkpoint(self, optimization_id: str, pair_index: int = -1) -> None:
         """Drop one run/pair's checkpoint."""
         self.checkpoints.pop(pair_index, None)
@@ -108,12 +97,12 @@ def _worker(store: object) -> BackgroundWorker:
 
 
 def test_checkpoints_enabled_for_runs_on_capable_store() -> None:
-    """Enabled for single and black-box runs on a capable store; never for a retired grid."""
+    """Enabled for black-box runs on a capable store; never for other job kinds or stores."""
     worker = _worker(_CheckpointStore())
-    assert worker._checkpoints_enabled(OPTIMIZATION_TYPE_RUN) is True
     assert worker._checkpoints_enabled(OPTIMIZATION_TYPE_BLACKBOX) is True
-    assert worker._checkpoints_enabled(OPTIMIZATION_TYPE_GRID_SEARCH) is False
-    assert _worker(object())._checkpoints_enabled(OPTIMIZATION_TYPE_RUN) is False
+    assert worker._checkpoints_enabled(OPTIMIZATION_TYPE_TAGGING) is False
+    assert worker._checkpoints_enabled("run") is False
+    assert _worker(object())._checkpoints_enabled(OPTIMIZATION_TYPE_BLACKBOX) is False
 
 
 def test_single_run_persist_is_mtime_gated_and_prepare_restores() -> None:
@@ -124,9 +113,10 @@ def test_single_run_persist_is_mtime_gated_and_prepare_restores() -> None:
     base = worker._prepare_gepa_dir("w1")
     try:
         assert base.exists()
-        assert not (base / GEPA_STATE_FILENAME).exists()
+        assert not (base / "gepa" / GEPA_STATE_FILENAME).exists()
 
-        (base / GEPA_STATE_FILENAME).write_bytes(_state(1))
+        (base / "gepa").mkdir()
+        (base / "gepa" / GEPA_STATE_FILENAME).write_bytes(_state(1))
         tracker: dict = {"payload": _PAYLOAD}
         worker._persist_gepa_checkpoint("w1", base, tracker)
         assert store.checkpoints[-1] == (_state(1), 1)
@@ -139,7 +129,7 @@ def test_single_run_persist_is_mtime_gated_and_prepare_restores() -> None:
 
     base2 = worker._prepare_gepa_dir("w1")
     try:
-        assert (base2 / GEPA_STATE_FILENAME).read_bytes() == _state(1)
+        assert (base2 / "gepa" / GEPA_STATE_FILENAME).read_bytes() == _state(1)
     finally:
         shutil.rmtree(base2, ignore_errors=True)
 
@@ -173,12 +163,13 @@ def test_checkpoint_persists_best_json_safe_evaluated_incumbent() -> None:
 
     base = worker._prepare_gepa_dir("incumbent")
     try:
-        (base / GEPA_STATE_FILENAME).write_bytes(_state(2))
+        (base / "gepa").mkdir()
+        (base / "gepa" / GEPA_STATE_FILENAME).write_bytes(_state(2))
         worker._persist_gepa_checkpoint("incumbent", base, tracker)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
-    incumbent = checkpoint_incumbent(store.manifests[-1])
+    incumbent = store.manifests[-1]["evaluated_incumbent"]
     assert incumbent is not None
     assert incumbent["candidate"] == {"predict": "better"}
     assert incumbent["selection_score"] == 0.75
@@ -206,30 +197,3 @@ def test_image_checkpoint_refuses_another_image() -> None:
         validate_checkpoint(data, manifest, _PAYLOAD, None, sandbox_image="registry.example/b@sha256:" + "b" * 64)
     with pytest.raises(CheckpointCompatibilityError, match="sandbox_image"):
         validate_checkpoint(data, manifest, _PAYLOAD, None)
-
-
-@pytest.mark.parametrize(
-    ("choice", "kind", "expected"),
-    [
-        ("gepa", "prompt", True),
-        ("best_of_n", "prompt", False),
-        ("auto", "prompt", False),
-        ("dspy_gepa", "dspy_program", False),
-        ("auto", "dspy_program", False),
-    ],
-)
-def test_unified_payload_checkpoints_only_for_blackbox_gepa(choice: str, kind: str, expected: bool) -> None:
-    """A unified run keeps checkpoints only when its optimizer resolves to the gepa engine.
-
-    Args:
-        choice: The optimizer the wizard picked.
-        kind: The artifact kind, which fixes what Auto resolves to.
-        expected: Whether a checkpoint restore contract exists.
-    """
-    payload = {"payload_kind": "unified_v1", "optimizer": {"choice": choice}, "task": {"artifact": {"kind": kind}}}
-    assert supports_checkpoint(payload) is expected
-
-
-def test_malformed_unified_payload_has_no_checkpoint_support() -> None:
-    """A unified payload without a readable artifact kind never claims checkpoint support."""
-    assert supports_checkpoint({"payload_kind": "unified_v1", "optimizer": {"choice": "gepa"}}) is False

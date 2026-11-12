@@ -47,12 +47,8 @@ from .. import agent_engine, interview_model, model_catalog, model_router
 from .. import auth as auth_mod
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..routers import agent_engine as engine_router_mod
-from ..routers import code_agent as code_router_mod
 from ..routers import generalist_agent as agent_mod
-from ..routers.agent_engine import create_agent_engine_router
 from ..routers.billing import create_billing_router
-from ..routers.code_agent import create_code_agent_router
 from ..routers.generalist_agent import create_generalist_agent_router
 from .test_generalist_persistence import _SECRET, _fund, _session_token
 
@@ -108,10 +104,10 @@ def _probe(status_code: int) -> httpx.Response:
 
 
 def _client(store: object) -> TestClient:
-    """Mount the billing and agent-engine routers for one caller, rendering domain errors with their code.
+    """Mount the billing router for one caller, rendering domain errors with their code.
 
     Args:
-        store: The job store both routers use.
+        store: The job store the router uses.
 
     Returns:
         A test client.
@@ -124,7 +120,6 @@ def _client(store: object) -> TestClient:
         return JSONResponse(status_code=exc.status_code, content={"code": exc.code})
 
     app.include_router(create_billing_router(job_store=store))
-    app.include_router(create_agent_engine_router(job_store=store))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(username=_USER, role="user", groups=())
     return TestClient(app)
 
@@ -161,8 +156,6 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[obje
     for module in (
         config,
         agent_engine,
-        engine_router_mod,
-        code_router_mod,
         model_router,
         language_models,
         byok_vault,
@@ -171,8 +164,20 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[obje
     ):
         monkeypatch.setattr(module, "settings", current)
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status(cli) for cli in CLI_MODELS])
+    # An empty cache makes the effortless-model check build a real catalog, which reaches OpenRouter.
+    monkeypatch.setattr(model_catalog, "_cached_response", model_catalog.ModelCatalogResponse(providers=[], models=[]))
     monkeypatch.setattr(model_router, "get_catalog_cached", lambda: SimpleNamespace(models=[]))
     monkeypatch.setattr(model_router, "require_known_model", _require_catalog_model)
+    monkeypatch.setattr(
+        model_router,
+        "get_byok_catalog_cached",
+        lambda: SimpleNamespace(
+            models=[
+                model_catalog.CatalogModel(value=name, label=name, provider="openrouter", supports_thinking=True)
+                for name in {_MODEL, config.DEFAULT_AGENT_MODEL_ID, "openrouter/anthropic/claude-sonnet-4.5"}
+            ]
+        ),
+    )
     monkeypatch.setattr(model_router, "default_model_id", lambda: _MODEL)
     monkeypatch.setattr(model_router, "interview_model_id", lambda: _MODEL)
     remote: list[object] = []
@@ -227,7 +232,7 @@ def test_hosted_mode_never_reads_the_vault(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_without_a_verified_key_local_turns_stay_refused(local: list[object]) -> None:
-    """Refuse managed turns and the OpenRouter engine with no key, or with a key OpenRouter rejected.
+    """Refuse managed turns with no key, and route nothing on a key OpenRouter rejected.
 
     Args:
         local: The blocked remote addresses.
@@ -238,12 +243,9 @@ def test_without_a_verified_key_local_turns_stay_refused(local: list[object]) ->
     with pytest.raises(DomainError) as caught:
         model_router.route_agent_model(None)
     assert caught.value.code == "models.managed_unavailable_local"
-    refused = client.put("/account/agent-engine", json={"engine": "openrouter"})
-    assert (refused.status_code, refused.json()) == (422, {"code": "models.managed_unavailable_local"})
 
     assert _save(client, status_code=401)["status"] == "invalid"
     assert model_router.route_local_byok_model(_MODEL, job_store=store, username=_USER) is None
-    assert client.put("/account/agent-engine", json={"engine": "openrouter"}).status_code == 422
 
 
 def test_save_route_and_clear_the_key(local: list[object]) -> None:
@@ -278,10 +280,6 @@ def test_save_route_and_clear_the_key(local: list[object]) -> None:
         model_router.route_local_byok_model("anthropic/not-an-openrouter-id", job_store=store, username=_USER)
     assert caught.value.status_code == 422
 
-    chosen = client.put("/account/agent-engine", json={"engine": "openrouter"})
-    assert (chosen.status_code, chosen.json()) == (200, {"engine": "openrouter", "stored": True})
-    with Session(engine) as session:
-        assert session.get(AgentEnginePreferenceModel, _USER).engine == "openrouter"
     assert agent_engine.engine_agent_model(store, _USER, None) is None
 
     assert client.delete("/billing/byok/keys/openrouter").json()["keys"] == []
@@ -291,13 +289,13 @@ def test_save_route_and_clear_the_key(local: list[object]) -> None:
     assert caught.value.code == "models.managed_unavailable_local"
 
 
-@pytest.mark.parametrize("stored", [None, "droid"])
-def test_get_engine_reports_openrouter_when_turns_run_on_the_saved_key(local: list[object], stored: str | None) -> None:
-    """Report ``openrouter`` when no CLI is ready and turns run on the saved key.
+@pytest.mark.parametrize("stored", [None, "openrouter", "droid"])
+def test_empty_pick_with_no_ready_cli_runs_on_the_saved_key(local: list[object], stored: str | None) -> None:
+    """Keep an empty pick empty with no ready CLI, so the router runs it on the saved key.
 
     Args:
         local: The blocked remote addresses.
-        stored: The saved engine row: none, or a ``droid`` row this build no longer knows.
+        stored: An old engine row, which the engine ignores, or ``None`` for no row.
     """
     engine = _engine()
     store = SimpleNamespace(engine=engine)
@@ -306,23 +304,23 @@ def test_get_engine_reports_openrouter_when_turns_run_on_the_saved_key(local: li
         with Session(engine) as session:
             session.add(AgentEnginePreferenceModel(username=_USER, engine=stored))
             session.commit()
-    assert client.get("/account/agent-engine").json() == {"engine": None, "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) is None
+    assert agent_engine.engine_agent_model(store, _USER, None) is None
     assert model_router.route_local_byok_model(None, job_store=store, username=_USER) is None
 
     _save(client)
-    assert client.get("/account/agent-engine").json() == {"engine": "openrouter", "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) is None
     picked = agent_engine.engine_agent_model(store, _USER, None)
+    assert picked is None
     routed = model_router.route_local_byok_model(picked, job_store=store, username=_USER)
     assert routed is not None
     assert (routed.token_source, routed.byok_provider) == (TOKEN_SOURCE_BYOK, "openrouter")
 
     client.delete("/billing/byok/keys/openrouter")
-    assert client.get("/account/agent-engine").json() == {"engine": None, "stored": False}
+    assert model_router.route_local_byok_model(None, job_store=store, username=_USER) is None
 
 
-def test_get_engine_prefers_a_ready_cli_over_the_saved_key(
-    local: list[object], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_engine_prefers_a_ready_cli_over_the_saved_key(local: list[object], monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the first ready CLI as the default when a verified key is also saved.
 
     Args:
@@ -334,7 +332,7 @@ def test_get_engine_prefers_a_ready_cli_over_the_saved_key(
     store = SimpleNamespace(engine=_engine())
     client = _client(store)
     _save(client)
-    assert client.get("/account/agent-engine").json() == {"engine": "codex", "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) == "codex"
     assert (
         agent_engine.engine_agent_model(store, _USER, None) == f"subscription/codex/{next(iter(CLI_MODELS['codex']))}"
     )
@@ -523,115 +521,6 @@ def test_local_chat_turn_runs_on_the_saved_key(
     assert _FAKE_KEY not in response.text
     assert _FAKE_KEY not in caplog.text
     assert _FAKE_KEY[-12:] not in caplog.text
-
-
-def _edit_code(store: object, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any], list[str]]:
-    """Call ``POST /optimizations/edit-code`` with the code agent replaced by a recorder.
-
-    Args:
-        store: The job store the router uses.
-        monkeypatch: Swaps the code agent and the metering wrapper.
-
-    Returns:
-        The response, the code agent's keyword arguments, and the metered billing sources.
-    """
-    seen: dict[str, Any] = {}
-
-    async def record_agent(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
-        """Record the code agent's arguments and finish the turn."""
-        seen.update(kwargs)
-        yield {"event": "done", "data": {"signature_code": "sig", "metric_code": "metric"}}
-
-    monkeypatch.setattr(code_router_mod, "run_code_agent", record_agent)
-    real_metering = code_router_mod.stream_with_llm_metering
-    metered: list[str] = []
-
-    def record_metering(source: Any, **kwargs: Any) -> Any:
-        """Record the billing source the turn is metered under."""
-        metered.append(kwargs.get("token_source", TOKEN_SOURCE_MANAGED))
-        return real_metering(source, **kwargs)
-
-    monkeypatch.setattr(code_router_mod, "stream_with_llm_metering", record_metering)
-    app = FastAPI()
-
-    @app.exception_handler(DomainError)
-    async def _domain_error(request: Request, exc: DomainError) -> JSONResponse:
-        """Render a domain error with its i18n code."""
-        return JSONResponse(status_code=exc.status_code, content={"code": exc.code})
-
-    app.include_router(create_code_agent_router(job_store=store))
-    app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(username=_USER, role="user", groups=())
-    response = TestClient(app).post(
-        "/optimizations/edit-code",
-        json={
-            "goal": "tighten the metric",
-            "dataset_columns": ["q", "a"],
-            "column_roles": {"q": "input", "a": "output"},
-        },
-    )
-    return response, seen, metered
-
-
-def test_local_edit_code_runs_on_the_saved_key(local: list[object], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run the agent's edit_code tool on the saved key, metered as BYOK, never on the managed default.
-
-    Args:
-        local: The blocked remote addresses.
-        monkeypatch: Swaps the code agent.
-    """
-    engine = _engine()
-    _fund(engine)
-    store = SimpleNamespace(engine=engine)
-    _save(_client(store))
-    response, seen, metered = _edit_code(store, monkeypatch)
-    assert response.status_code == 200, response.text
-    config_ = seen["model_config"]
-    assert config_ is not None
-    assert (seen["model"], config_.token_source, config_.byok_provider) == (_MODEL, TOKEN_SOURCE_BYOK, "openrouter")
-    assert metered == [TOKEN_SOURCE_BYOK]
-    lm = code_agent._build_agent_lm(seen["model"], "low", 512, model_config=config_)
-    assert lm.kwargs.get("api_key") == _FAKE_KEY
-    assert "base_url" not in lm.kwargs
-    assert _FAKE_KEY not in response.text
-
-
-def test_local_edit_code_without_a_verified_key_is_refused(
-    local: list[object], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Refuse the edit_code tool with no key, and with a key OpenRouter rejected; never run it on a managed key.
-
-    Args:
-        local: The blocked remote addresses.
-        monkeypatch: Swaps the code agent.
-    """
-    engine = _engine()
-    _fund(engine)
-    store = SimpleNamespace(engine=engine)
-    response, seen, _ = _edit_code(store, monkeypatch)
-    assert (response.status_code, response.json()) == (422, {"code": "models.managed_unavailable_local"})
-    assert seen == {}
-
-    _save(_client(store), status_code=401)
-    response, seen, _ = _edit_code(store, monkeypatch)
-    assert (response.status_code, response.json()) == (422, {"code": "models.managed_unavailable_local"})
-    assert seen == {}
-
-
-def test_hosted_edit_code_keeps_the_code_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Leave the hosted edit_code tool on the code agent's own default model, metered as managed.
-
-    Args:
-        monkeypatch: Turns local mode off and swaps the code agent.
-    """
-    hosted = config.settings.model_copy(update={"local_mode": False})
-    for module in (agent_engine, code_router_mod, model_router):
-        monkeypatch.setattr(module, "settings", hosted)
-    engine = _engine()
-    _fund(engine)
-    response, seen, metered = _edit_code(SimpleNamespace(engine=engine), monkeypatch)
-    assert response.status_code == 200, response.text
-    assert (seen["model"], seen["model_config"]) == (None, None)
-    assert metered == [TOKEN_SOURCE_MANAGED]
 
 
 @pytest.mark.parametrize(

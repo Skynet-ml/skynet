@@ -59,7 +59,7 @@ export interface ContinuousCycle {
   created_at: string;
 }
 
-export interface ContinuousUsage {
+interface ContinuousUsage {
   month: string;
   /** Null when the plan has no monthly limit; only the wallet gates a run. */
   limit_cents: number | null;

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 
 from ....billing.run_usage import aggregate, billed_cents, from_result, load_records, serialize, with_rounding
 from ....constants import (
@@ -25,13 +25,12 @@ from ..constants import TERMINAL_STATUSES
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
 
-def run_usage(job_store: Any, job_data: dict[str, Any], pair_index: int | None) -> dict[str, Any]:
+def run_usage(job_store: Any, job_data: dict[str, Any]) -> dict[str, Any]:
     """Build the usage breakdown of one run.
 
     Args:
         job_store: Job store whose ``engine`` holds the billing tables.
         job_data: The run's job row.
-        pair_index: Grid pair to narrow to, or ``None`` for the whole run.
 
     Returns:
         ``{"rows", "settling", "proposer"}``; a run without a budget is read from its own result.
@@ -48,7 +47,6 @@ def run_usage(job_store: Any, job_data: dict[str, Any], pair_index: int | None) 
         records,
         proposer=blackbox,
         direct_usage=direct if isinstance(direct, list) else (),
-        pair=None if pair_index is None else str(pair_index),
     )
     if not budget_id:
         rows = [
@@ -58,14 +56,12 @@ def run_usage(job_store: Any, job_data: dict[str, Any], pair_index: int | None) 
                 reflection_model=overview.get(PAYLOAD_OVERVIEW_REFLECTION_MODEL),
                 proposer=blackbox,
                 byok=overview.get(PAYLOAD_OVERVIEW_TOKEN_SOURCE) == TOKEN_SOURCE_BYOK,
-                pair=None if pair_index is None else str(pair_index),
             ),
             *rows,
         ]
     finished = job_data.get("status") in TERMINAL_STATUSES
     settling = finished and any(row.pending_calls for row in rows)
-    # Rounding is per budget, so a single grid pair's view can't carry it.
-    if finished and not settling and pair_index is None and records:
+    if finished and not settling and records:
         rows = with_rounding(rows, billed_cents(engine, budget_id))
     return {
         "rows": serialize(rows),
@@ -90,16 +86,14 @@ def register_usage_routes(router: APIRouter, *, job_store) -> None:
     async def get_usage(
         optimization_id: str,
         current_user: AuthenticatedUserDep,
-        pair_index: int | None = Query(default=None, ge=0, description="Narrow to one grid pair."),
     ) -> dict:
-        """Return a run's charges and model activity, pre-aggregated per role, model, stage, pair and candidate.
+        """Return a run's charges and model activity, pre-aggregated per role, model, stage and candidate.
 
         The rows add up to what the run charged. Open to anyone the run is shared with.
 
         Args:
             optimization_id: Optimization id.
             current_user: Authenticated caller resolved from the bearer token.
-            pair_index: Grid pair to narrow to.
 
         Returns:
             ``{"rows": [...], "settling": bool, "proposer": bool}``.
@@ -109,4 +103,4 @@ def register_usage_routes(router: APIRouter, *, job_store) -> None:
         """
         loop = asyncio.get_running_loop()
         job_data = await loop.run_in_executor(None, load_job_for_user, job_store, optimization_id, current_user)
-        return await loop.run_in_executor(None, run_usage, job_store, job_data, pair_index)
+        return await loop.run_in_executor(None, run_usage, job_store, job_data)

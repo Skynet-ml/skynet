@@ -33,6 +33,7 @@ import { cn } from "@/shared/lib/utils";
 import { DatasetRenameDialog } from "./DatasetRenameDialog";
 import { DatasetShareDialog } from "./DatasetShareDialog";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
+import { SharedItemMenu } from "@/shared/ui/shared-item-menu";
 
 /**
  * One library dataset rendered as a clickable card: name, row/column
@@ -215,25 +216,31 @@ export function DatasetCard({
               </Button>
             </>
           ) : (
-            <TooltipButton tooltip={msg("datasets.action.clone")}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="text-muted-foreground hover:text-foreground"
-                onClick={handleClone}
-                disabled={cloning}
-                aria-label={msg("datasets.action.clone")}
-              >
-                {cloning ? (
-                  <CircleNotch
-                    className="animate-spin motion-reduce:animate-none"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <Copy className="size-4" />
-                )}
-              </Button>
-            </TooltipButton>
+            <>
+              <TooltipButton tooltip={msg("datasets.action.clone")}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={handleClone}
+                  disabled={cloning}
+                  aria-label={msg("datasets.action.clone")}
+                >
+                  {cloning ? (
+                    <CircleNotch
+                      className="animate-spin motion-reduce:animate-none"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <Copy className="size-4" />
+                  )}
+                </Button>
+              </TooltipButton>
+              <SharedItemMenu
+                item={{ kind: "datasets", id: dataset.id, name: dataset.name, role: dataset.role }}
+                onChanged={onChanged}
+              />
+            </>
           )}
         </div>
       </div>

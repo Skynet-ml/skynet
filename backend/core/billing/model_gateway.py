@@ -11,9 +11,10 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Protocol
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -22,7 +23,8 @@ from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, app_env
 from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n_en import t_en
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
-from .budgets import BudgetError, BudgetInsufficientError
+from ..storage.run_call_store import call_candidate_key
+from .budgets import BudgetError, BudgetInsufficientError, settled_charges
 from .byok_upstreams import (
     OPENROUTER,
     ProviderUpstream,
@@ -32,10 +34,13 @@ from .byok_upstreams import (
     validate_custom_base,
 )
 from .cli_dispatch import CliDispatcher
-from .credential_safety import scrub_model_config
+from .credential_safety import credential_fragments, scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
+from .env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS_KEY
+from .guest_model_proxy import MCP_PATH, METHOD_HEADER, SERVICE_PATH
 from .mcp_broker import McpToolsBroker, _pinned_address, _PinnedTransport
+from .mcp_oauth_client import McpOAuthError, access_token, connected_server_url
 from .model_batch import BatchCollector
 from .model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, OpenRouterDispatcher
 from .openrouter_quotes import resolve_model_slug
@@ -54,11 +59,17 @@ from .protected_credentials import (
 from .remote_evaluator import RemoteEvaluatorBroker, RemoteEvaluatorTransportError
 from .runtime import BudgetRuntime, ProviderFailedError, UsagePendingError
 from .signals import BudgetReached
-from .usage_tags import USAGE_TAGS_HEADERS
+from .usage_tags import LANE_KEY, USAGE_TAGS_HEADERS, header_tags, usage_scope
+
+if TYPE_CHECKING:
+    # Type-only: the worker relay imports billing modules, so a runtime import could cycle.
+    from ..worker.scoped_relay import CallRecorder
 
 logger = logging.getLogger(__name__)
 
 ROUTE_KEY = "_skynet_budget_route"
+# Payload key of the route a role box's MCP servers go through (``bind_mcp_relay``).
+MCP_RELAY_ROUTE_KEY = "_skynet_mcp_route"
 # Key, inside a model config's ``extra``, of that model's own economy choice.
 ECONOMY_KEY = "economy_mode"
 # Key, inside the first optimization model's route, of the embeddings route
@@ -84,6 +95,48 @@ _TRANSIENT_SANDBOX_ERROR_TYPES = frozenset(
         "SandboxTimeoutError",
     }
 )
+
+
+def _tool_target(server: str, url: str, body: Mapping[str, Any]) -> str:
+    """Name the server and the tool a JSON-RPC tool request calls, for its run-call target.
+
+    Two servers can expose a tool of the same name, even on one host, so the
+    server label and host come first (E49 item 4). Only the host and port are
+    kept: a server path or query can hold a key.
+
+    Args:
+        server: The connector name, or ``roster`` for the run's tool roster.
+        url: The MCP endpoint the broker sends to.
+        body: The MCP JSON-RPC request.
+
+    Returns:
+        ``server@host/tool`` for ``tools/call``, otherwise ``server@host/method``.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    params = body.get("params")
+    if body.get("method") == "tools/call" and isinstance(params, Mapping) and params.get("name"):
+        return f"{server}@{host}/{params['name']}"
+    return f"{server}@{host}/{body.get('method') or ''}"
+
+
+def _call_cost(route: OpenRouterDispatcher | CliDispatcher | None, charges: Mapping[str, Decimal]) -> float | None:
+    """Return what one model call cost the run, in dollars, for its run-call record (E28).
+
+    Args:
+        route: The model route, or None for a tool or evaluator call.
+        charges: The charge each operation of the call settled, in cents.
+
+    Returns:
+        The settled total, or None for a tool or evaluator call, a BYOK call
+        (the provider bills the user's own key) and a call that settled nothing.
+    """
+    # A tool or evaluator call settles the nested model calls it makes, which have records of their own.
+    if route is None or not charges or route.policy.kind == "byok_model":
+        return None
+    return float(sum(charges.values(), Decimal(0)) / 100)
 
 
 def _unbound_capability(path: str, capabilities: Mapping[str, Any]) -> bool:
@@ -155,6 +208,28 @@ class EvaluatorEndpoint(Protocol):
         ...
 
 
+class McpRelayEndpoint(Protocol):
+    """Send a role box's MCP requests to its own servers; ``scoped_relay.McpRelay`` is the real one."""
+
+    def dispatch(
+        self, name: str, method: str, body: bytes, headers: Mapping[str, str], recorder: CallRecorder | None
+    ) -> ModelHTTPResult:
+        """Send one MCP request and return the masked answer."""
+        ...
+
+    def service(
+        self,
+        name: str,
+        path: str,
+        method: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        recorder: CallRecorder | None,
+    ) -> ModelHTTPResult:
+        """Send one request to a service the role lists and return the masked answer."""
+        ...
+
+
 class SandboxControl(Protocol):
     """Describe the parent-owned sandbox boundary without importing optimizer code."""
 
@@ -168,6 +243,10 @@ class SandboxControl(Protocol):
 
     def parent_runtime(self, allowed_hosts: tuple[str, ...]) -> Any:
         """Return a runtime for the parent's own boxes, never reachable by the guest."""
+        ...
+
+    def allow_guest_hosts(self, allowed_hosts: tuple[str, ...]) -> None:
+        """Set the most a guest-opened box may reach besides the relay."""
         ...
 
     def close(self) -> None:
@@ -236,7 +315,11 @@ class ModelGateway:
         self._parent_only: set[str] = set()
         self._sandbox: SandboxControl | None = None
         self._tools: McpToolsBroker | None = None
+        # Catalog connectors: each holds its own broker behind its own scoped token.
+        self._connectors: dict[str, McpToolsBroker] = {}
+        self._connector_tokens: dict[str, str] = {}
         self._evaluator: EvaluatorEndpoint | None = None
+        self._mcp_relays: dict[str, McpRelayEndpoint] = {}
         self._packages: PackageBroker | None = None
         self._package_token = secrets.token_urlsafe(32)
         self._evaluator_token = secrets.token_urlsafe(32)
@@ -246,6 +329,9 @@ class ModelGateway:
         # Set once the job's event queue exists, so an economy batch's polling
         # keeps the stall watchdog from mistaking a long wait for a hang.
         self.heartbeat: Callable[[], None] | None = None
+        # Set by the run's sandbox bind; setup work keeps it None and writes no run calls (E28).
+        self.recorder: CallRecorder | None = None
+        self._route_keys: dict[str, str] = {}
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -265,9 +351,29 @@ class ModelGateway:
                 """Write a bounded protocol response with no credential-bearing headers."""
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.content_type)
-                self.send_header("Content-Length", str(len(response.body)))
+                for name, value in response.headers:
+                    self.send_header(name, value)
+                if response.stream is None:
+                    self.send_header("Content-Length", str(len(response.body)))
+                    self.end_headers()
+                    self.wfile.write(response.body)
+                    return
+                # An MCP event stream has no length; it ends when the connection closes.
+                self.close_connection = True
                 self.end_headers()
-                self.wfile.write(response.body)
+                try:
+                    self.wfile.write(response.body)
+                    self.wfile.flush()
+                    for chunk in response.stream:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except OSError:
+                    pass  # The reader closed its event stream.
+                except Exception as error:
+                    # A quiet or broken upstream ends the stream; only the type, as a message could hold a body.
+                    logger.warning("An MCP event stream ended early in the gateway: %s", type(error).__name__)
+                finally:
+                    response.stream.close()
 
             def _error(self, status: int, code: str, message: str) -> None:
                 """Report a machine-readable admission result to every guest protocol."""
@@ -302,9 +408,12 @@ class ModelGateway:
 
             def do_GET(self) -> None:
                 """Return state only to a token already bound to this spending authority."""
+                if self.path.startswith((MCP_PATH, SERVICE_PATH)):
+                    self._mcp_request()
+                    return
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 if self._route() is None and not (
-                    (gateway._tools is not None and secrets.compare_digest(token, gateway._tool_token))
+                    gateway._tool_broker(token) is not None
                     or (gateway._evaluator is not None and secrets.compare_digest(token, gateway._evaluator_token))
                 ):
                     self._error(401, "unauthorized", "Unknown scoped model route.")
@@ -315,8 +424,58 @@ class ModelGateway:
                 body = gateway._budget_state()
                 self._reply(ModelHTTPResult(200, "application/json", json.dumps(body, default=str).encode()))
 
+            def do_DELETE(self) -> None:
+                """End an MCP session, or relay a service DELETE; no other path takes DELETE."""
+                if not self.path.startswith((MCP_PATH, SERVICE_PATH)):
+                    self._error(405, "method_not_allowed", "Only an MCP or service relay path takes DELETE.")
+                    return
+                self._mcp_request()
+
+            def do_PUT(self) -> None:
+                """Relay a service PUT; no other path takes PUT."""
+                self._service_request()
+
+            def do_PATCH(self) -> None:
+                """Relay a service PATCH; no other path takes PATCH."""
+                self._service_request()
+
+            def _service_request(self) -> None:
+                """Relay a request whose method only a service relay path takes."""
+                if not self.path.startswith(SERVICE_PATH):
+                    self._error(405, "method_not_allowed", f"Only a service relay path takes {self.command}.")
+                    return
+                self._mcp_request()
+
+            def _mcp_request(self) -> None:
+                """Send one MCP or service request of a role box through its bound relay."""
+                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                if gateway._mcp_relay(token) is None:
+                    self._error(401, "unauthorized", "Unknown scoped MCP relay route.")
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= _MAX_REQUEST_BYTES:
+                    self._error(413, "request_too_large", "The MCP request exceeds the supported size.")
+                    return
+                headers = {name.lower(): value for name, value in self.headers.items()}
+                # The real method wins over any header a caller set.
+                headers[METHOD_HEADER] = self.command
+                try:
+                    body = self.rfile.read(length) if length else b""
+                    self._reply(gateway.dispatch_guest(token, self.path, body, headers))
+                except BudgetReached:
+                    self._error(402, "budget_reached", "The remaining budget cannot cover the next operation.")
+                except BudgetInsufficientError:
+                    self._error(402, "budget_insufficient", "Increase the total budget or add funds to continue.")
+                except (UsagePendingError, BudgetError):
+                    self._error(424, "usage_pending", "Previous work must settle before another attempt is admitted.")
+                except (UnpricedOperationError, ValueError, TypeError) as error:
+                    self._unpriced(error)
+
             def do_POST(self) -> None:
                 """Admit the fully resolved SDK body before forwarding any provider request."""
+                if self.path.startswith((MCP_PATH, SERVICE_PATH)):
+                    self._mcp_request()
+                    return
                 if self.path == "/v1/_sandbox":
                     self._sandbox_request()
                     return
@@ -328,11 +487,8 @@ class ModelGateway:
                     self._capability_request(gateway._capability_refusal(self.path, token))
                     return
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
-                is_tools = (
-                    self.path == "/v1/_mcp"
-                    and gateway._tools is not None
-                    and secrets.compare_digest(token, gateway._tool_token)
-                )
+                tools = gateway._tool_broker(token) if self.path == "/v1/_mcp" else None
+                is_tools = tools is not None
                 is_evaluator = (
                     self.path == "/v1/_evaluator"
                     and gateway._evaluator is not None
@@ -360,21 +516,31 @@ class ModelGateway:
                     response = (
                         gateway._packages.dispatch(body)
                         if is_packages
-                        else gateway._evaluator.dispatch(body)
+                        else gateway._recorded(
+                            token, None, body, lambda: gateway._evaluate(body, self.headers), headers=self.headers
+                        )
                         if is_evaluator
-                        else gateway._tools.dispatch(body)
-                        if is_tools
-                        else route.dispatch(
-                            self.path.removeprefix("/v1"),
+                        else gateway._recorded(
+                            token, None, body, lambda: tools.dispatch(body), tools=tools, headers=self.headers
+                        )
+                        if tools is not None
+                        else gateway._recorded(
+                            token or self.headers.get("x-api-key", ""),
+                            route,
                             body,
-                            operation_key=_model_attempt_key(
-                                {name.lower(): value for name, value in self.headers.items()}
+                            lambda: route.dispatch(
+                                self.path.removeprefix("/v1"),
+                                body,
+                                operation_key=_model_attempt_key(
+                                    {name.lower(): value for name, value in self.headers.items()}
+                                ),
+                                protocol_headers={
+                                    name: value
+                                    for name, value in self.headers.items()
+                                    if name.lower() in {"anthropic-version", "anthropic-beta"} | USAGE_TAGS_HEADERS
+                                },
                             ),
-                            protocol_headers={
-                                name: value
-                                for name, value in self.headers.items()
-                                if name.lower() in {"anthropic-version", "anthropic-beta"} | USAGE_TAGS_HEADERS
-                            },
+                            headers=self.headers,
                         )
                     )
                     self._reply(response)
@@ -561,6 +727,7 @@ class ModelGateway:
         )
         if parent_only:
             self._parent_only.add(token)
+        self._route_keys[token] = api_key
         return {"url": self.url, "token": token, "model": model, "role": role}
 
     def register_subscription(self, model: str, cli: CliProvider, role: str) -> dict[str, str]:
@@ -673,6 +840,73 @@ class ModelGateway:
         self._evaluator = evaluator
         return {"url": self.url, "token": self._evaluator_token}
 
+    def bind_mcp_relay(self, relay: McpRelayEndpoint) -> dict[str, str]:
+        """Serve one role box's MCP servers at ``/v1/mcp/<name>`` and services at ``/v1/service/<name>/``.
+
+        Both sit behind one token. Write the box's ``.mcp.json`` with
+        ``repo_services.box_mcp_config`` and the box's relay url; the box's
+        proxy adds the token to each request and gives the command each
+        service's url (SKY-612).
+
+        Args:
+            relay: Sends the role's MCP requests to its own servers.
+
+        Returns:
+            The opaque route: this gateway's url and the relay's token.
+        """
+        token = secrets.token_urlsafe(32)
+        self._mcp_relays[token] = relay
+        return {"url": self.url, "token": token}
+
+    def _mcp_relay(self, token: str) -> McpRelayEndpoint | None:
+        """Find the MCP relay a scoped token opens.
+
+        Args:
+            token: Bearer token from the guest request.
+
+        Returns:
+            The relay this gateway bound to that token, or None. A token from
+            another run's gateway opens nothing here.
+        """
+        for relay_token, relay in list(self._mcp_relays.items()):
+            # Bytes, because compare_digest refuses non-ASCII str from a hostile header.
+            if secrets.compare_digest(token.encode(), relay_token.encode()):
+                return relay
+        return None
+
+    def _mcp_relay_call(
+        self, token: str, path: str, body: Mapping[str, Any] | bytes, headers: Mapping[str, str]
+    ) -> ModelHTTPResult:
+        """Send one MCP or service relay request and write it under this run and the candidate its usage tags name.
+
+        Args:
+            token: The MCP relay token.
+            path: ``/v1/mcp/<name>`` or ``/v1/service/<name>/<path>``, with the name percent-encoded.
+            body: The client's raw body; a mapping from an in-process caller.
+            headers: The request headers, with the HTTP method in ``METHOD_HEADER``.
+
+        Returns:
+            The relay's answer.
+
+        Raises:
+            ValueError: When the token opens no MCP relay of this gateway.
+        """
+        relay = self._mcp_relay(token)
+        if relay is None:
+            raise ValueError("Unknown scoped MCP relay route.")
+        lowered = {name.lower(): value for name, value in headers.items()}
+        recorder = self.recorder
+        candidate = header_tags(lowered).get("candidate")
+        if recorder is not None and candidate:
+            recorder = recorder.bind(candidate_id=call_candidate_key(candidate, header_tags(lowered).get(LANE_KEY)))
+        method = lowered.get(METHOD_HEADER, "POST").upper()
+        raw = body if isinstance(body, bytes) else json.dumps(dict(body)).encode()
+        if path.startswith(SERVICE_PATH):
+            name, _, rest = path[len(SERVICE_PATH) :].partition("/")
+            return relay.service(unquote(name), rest, method, raw, lowered, recorder)
+        name = unquote(path[len(MCP_PATH) :].partition("?")[0])
+        return relay.dispatch(name, method, raw, lowered, recorder)
+
     def bind_sandbox(
         self, broker: SandboxControl, *, image: str, lifetime_seconds: float, allowed_hosts: tuple[str, ...] = ()
     ) -> None:
@@ -696,6 +930,18 @@ class ModelGateway:
             **({"allowed_hosts": sorted(allowed_hosts)} if allowed_hosts else {}),
         }
 
+    def detach_sandbox(self) -> SandboxControl | None:
+        """Take the bound sandbox broker out of this gateway, so ``close`` does not stop its boxes.
+
+        The caller then owns the broker and must close it, which stops the
+        boxes and settles their usage.
+
+        Returns:
+            The bound broker, or ``None`` when no broker is bound.
+        """
+        broker, self._sandbox = self._sandbox, None
+        return broker
+
     def fund_parent_sandbox(self, allowed_hosts: tuple[str, ...]) -> None:
         """Count one more parent-owned box reaching ``allowed_hosts`` in this run's recovery bound.
 
@@ -708,6 +954,22 @@ class ModelGateway:
         if self._descriptor is None:
             raise ValueError("This gateway has no sandbox broker to open a parent box with.")
         self._descriptor[PARENT_HOSTS_KEY] = sorted(set(allowed_hosts))
+
+    def allow_guest_hosts(self, allowed_hosts: tuple[str, ...]) -> None:
+        """Let the guest's boxes reach ``allowed_hosts``, such as the proposer's registries.
+
+        The guest asks for these hosts when it opens a box; the broker refuses
+        any host outside this grant, so the guest can never widen it.
+
+        Args:
+            allowed_hosts: Named hosts; empty keeps every guest box offline.
+
+        Raises:
+            ValueError: When no sandbox broker is bound yet.
+        """
+        if self._sandbox is None:
+            raise ValueError("This gateway has no sandbox broker to grant hosts on.")
+        self._sandbox.allow_guest_hosts(tuple(sorted(set(allowed_hosts))))
 
     def parent_sandbox_runtime(self) -> Any:
         """Return the runtime the parent opens its own scoring box with.
@@ -724,19 +986,26 @@ class ModelGateway:
         return self._sandbox.parent_runtime(tuple(hosts))
 
     def dispatch_guest(
-        self, token: str, path: str, body: Mapping[str, Any], headers: Mapping[str, str]
+        self, token: str, path: str, body: Mapping[str, Any] | bytes, headers: Mapping[str, str]
     ) -> ModelHTTPResult:
         """Serve a sandbox mailbox request under its original fixed model role.
 
         Args:
             token: Short-lived scoped role credential registered by this parent.
-            path: Supported model protocol path or own-budget state endpoint.
-            body: Exact model request emitted by the guest SDK.
+            path: Supported model protocol path, own-budget state endpoint, or MCP or service relay path.
+            body: Exact model request emitted by the guest SDK; raw bytes for an MCP or service relay path.
             headers: Permitted protocol headers, never upstream credentials.
 
         Returns:
             Model response after authoritative admission and settlement.
+
+        Raises:
+            TypeError: When a path other than an MCP or service relay path gets raw bytes.
         """
+        if path.startswith((MCP_PATH, SERVICE_PATH)):
+            return self._mcp_relay_call(token, path, body, headers)
+        if isinstance(body, bytes):
+            raise TypeError("A JSON object is required.")
         route = self._routes.get(token)
         if path in self._capabilities:
             refusal = self._capability_refusal(path, token)
@@ -746,7 +1015,8 @@ class ModelGateway:
                 return refusal
             body_bytes = json.dumps(dict(body)).encode()
             return self._capabilities[path](body_bytes, {name.lower(): value for name, value in headers.items()})
-        is_tools = self._tools is not None and secrets.compare_digest(token, self._tool_token)
+        tools = self._tool_broker(token)
+        is_tools = tools is not None
         is_evaluator = self._evaluator is not None and secrets.compare_digest(token, self._evaluator_token)
         is_packages = self._packages is not None and secrets.compare_digest(token, self._package_token)
         if route is None and not is_tools and not is_evaluator and not is_packages:
@@ -764,23 +1034,55 @@ class ModelGateway:
         if is_evaluator:
             if path != "/v1/_evaluator":
                 raise ValueError("The evaluator capability cannot dispatch models, tools, or sandbox commands.")
-            return self._evaluator.dispatch(body)
+            return self._recorded(token, None, body, lambda: self._evaluate(body, headers), headers=headers)
         if is_tools:
             if path != "/v1/_mcp":
                 raise ValueError("The tool capability cannot dispatch models or sandbox commands.")
-            return self._tools.dispatch(body)
+            return self._recorded(token, None, body, lambda: tools.dispatch(body), tools=tools, headers=headers)
         try:
-            response = route.dispatch(
-                path.removeprefix("/v1"),
+            response = self._recorded(
+                token,
+                route,
                 body,
-                operation_key=_model_attempt_key(headers),
-                protocol_headers=headers,
+                lambda: route.dispatch(
+                    path.removeprefix("/v1"),
+                    body,
+                    operation_key=_model_attempt_key(headers),
+                    protocol_headers=headers,
+                ),
+                headers=headers,
             )
         except BudgetInsufficientError as error:
             self.budget_refusal = error
             raise
         self._observe(route, body, response)
         return response
+
+    def dispatch_route(
+        self, token: str, path: str, body: Mapping[str, Any], headers: Mapping[str, str]
+    ) -> ModelHTTPResult:
+        """Serve a model request from a parent box, which may reach only its model routes.
+
+        The parent's own boxes run untrusted repository code, so they get no
+        evaluator, package, tool, control or other capability, even when that
+        code learns one of their tokens. Refusing here, before the evaluator,
+        also keeps a version from calling back into the scorer that runs it.
+
+        Args:
+            token: Scoped model route credential registered by this parent.
+            path: Model protocol path.
+            body: Exact model request emitted by the box's SDK.
+            headers: Permitted protocol headers.
+
+        Returns:
+            Model response after authoritative admission and settlement.
+
+        Raises:
+            ValueError: When the token is not a model route or the path is a capability.
+        """
+        if token not in self._routes or path.startswith("/v1/_") or path in self._capabilities:
+            raise ValueError("A parent box reaches only its scoped model route.")
+        return self.dispatch_guest(token, path, body, headers)
 
     def observe_role(self, role: str, observer: Callable[[Mapping[str, Any]], None]) -> None:
         """Show every answered model call of one role to a parent-side observer.
@@ -808,6 +1110,183 @@ class ModelGateway:
                 observer(body)
             except Exception:  # isolation boundary: an observer must never fail the model call it watched
                 logger.warning("A model-call observer failed.", exc_info=True)
+
+    def _evaluate(self, body: Mapping[str, Any], headers: Mapping[str, str]) -> ModelHTTPResult:
+        """Score one guest version under the candidate and lane its usage tags name.
+
+        The scorer's relayed service and MCP calls read the candidate from the
+        open usage scope, and the guest's tags header is the only place it is.
+
+        Args:
+            body: The guest's scoring request.
+            headers: The request headers, read only for the usage tags.
+
+        Returns:
+            The evaluator's answer, unchanged.
+        """
+        with usage_scope(**header_tags(headers)):
+            return self._evaluator.dispatch(body)
+
+    def _recorded(
+        self,
+        token: str,
+        route: OpenRouterDispatcher | CliDispatcher | None,
+        body: Mapping[str, Any],
+        dispatch: Callable[[], ModelHTTPResult],
+        *,
+        tools: McpToolsBroker | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> ModelHTTPResult:
+        """Run one model, tool or evaluator call and write it as a run call.
+
+        The call is written under the candidate its usage tags name: the
+        request's tags header from a box, or the parent's open usage scope for
+        an in-process call. A call that serves no candidate, such as a
+        proposer call, goes to the recorder fallback, ``NO_CANDIDATE_ID``.
+
+        Args:
+            token: The scoped token the caller sent; it is a secret for the record.
+            route: The model route, or None for a tool or evaluator call.
+            body: The request body.
+            dispatch: Serves the call.
+            tools: The tool broker the call goes to, whose bound header and
+                URL query values are secrets for the record.
+            headers: The request headers, read only for the usage tags.
+
+        Returns:
+            The call's answer, unchanged.
+        """
+        recorder = self.recorder
+        if recorder is None:
+            return dispatch()
+        tags = header_tags(headers)
+        candidate = tags.get("candidate")
+        if candidate:
+            recorder = recorder.bind(candidate_id=call_candidate_key(candidate, tags.get(LANE_KEY)))
+        secret_values = [token, self._route_keys.get(token, "")]
+        if route is not None:
+            kind, target, recorder = "model", route.model, recorder.bind(role=route.role)
+        elif tools is not None:
+            server = next((name for name, value in self._connector_tokens.items() if value == token), "roster")
+            kind, target = "mcp", _tool_target(server, tools.url, body)
+            # A bound header is often "Bearer <key>", and a tool may echo the bare key.
+            for value in (tools.headers or {}).values():
+                secret_values += credential_fragments(value)
+            secret_values += credential_fragments(None, endpoint=tools.url)
+            # A tool that echoes its request line shows the query values still percent-encoded.
+            secret_values += [part.partition("=")[2] for part in urlsplit(tools.url).query.split("&")]
+        else:
+            kind, target = "evaluator", "evaluator"
+        request = json.dumps(dict(body), default=str)
+        started = recorder.start()
+        with settled_charges() as charges:
+            try:
+                response = dispatch()
+            except (BudgetReached, BudgetInsufficientError) as error:
+                recorder.record(
+                    started,
+                    kind=kind,
+                    target=target,
+                    status="refused",
+                    request=request,
+                    failure_reason=type(error).__name__,
+                    cost_usd=_call_cost(route, charges),
+                    secrets=secret_values,
+                )
+                raise
+            except BaseException as error:  # a worker stop or cancel must still leave the call in the record
+                recorder.record(
+                    started,
+                    kind=kind,
+                    target=target,
+                    status="failed",
+                    request=request,
+                    failure_reason=f"{type(error).__name__}: {error}",
+                    cost_usd=_call_cost(route, charges),
+                    secrets=secret_values,
+                )
+                raise
+        ok = 200 <= response.status < 300
+        recorder.record(
+            started,
+            kind=kind,
+            target=target,
+            status="ok" if ok else str(response.status),
+            request=request,
+            response=response.body,
+            failure_reason=None if ok else f"HTTP {response.status}",
+            cost_usd=_call_cost(route, charges),
+            secrets=secret_values,
+        )
+        return response
+
+    def _tool_broker(self, token: str) -> McpToolsBroker | None:
+        """Find the tool roster a scoped token opens.
+
+        Args:
+            token: Bearer token from the guest request.
+
+        Returns:
+            The live MCP or connector broker for that token, or None.
+        """
+        if self._tools is not None and secrets.compare_digest(token, self._tool_token):
+            return self._tools
+        for connector_token, broker in list(self._connectors.items()):
+            if secrets.compare_digest(token, connector_token):
+                return broker
+        return None
+
+    def _connector_routes(
+        self,
+        names: Any,
+        *,
+        authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None,
+        allow_private: bool = False,
+    ) -> dict[str, dict[str, str]]:
+        """Open one parent-keyed broker for each of the owner's OAuth MCP connections.
+
+        Each name must be the owner's OAuth MCP server connection; its broker
+        adds the owner's token on the parent and has no meter, because the
+        owner's account pays the service, as for BYOK. Catalog hosts get no
+        route here: a role reaches them only through its own ``.mcp.json`` and
+        a ``managed`` secret binding (E49/E50).
+
+        Args:
+            names: OAuth connection names from the run's tool list.
+            authorize_tool: Optional blocking approval gate for protected chat tools.
+            allow_private: Deployment opt-in for private MCP destinations.
+
+        Returns:
+            Each connector's scoped route: this gateway's URL and its own token.
+
+        Raises:
+            ValueError: When the list is malformed.
+            McpOAuthError: When a name is not one of the owner's connections, or
+                its connection needs a new sign-in.
+        """
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise ValueError("The connector list must be a list of connector names.")
+        oauth_urls: dict[str, str] = {}
+        for name in dict.fromkeys(names):
+            url = connected_server_url(self.runtime.username, name)
+            if url is None:
+                raise McpOAuthError("mcp_connection.unknown_connector", 404, name=name)
+            oauth_urls[name] = url
+        routes: dict[str, dict[str, str]] = {}
+        for name, url in oauth_urls.items():
+            token = self._connector_tokens.get(name)
+            if token is None:
+                token = secrets.token_urlsafe(32)
+                self._connectors[token] = McpToolsBroker(
+                    url,
+                    token_source=lambda name=name: access_token(self.runtime.username, name),
+                    allow_private=allow_private,
+                    check_admission=self.runtime.check_admission,
+                    authorize_tool=authorize_tool,
+                )
+                self._connector_tokens[name] = token
+            routes[name] = {"url": self.url, "token": token}
+        return routes
 
     def _budget_state(self) -> dict[str, Any]:
         """Expose only the owning run's state and mark replaced capabilities as fenced."""
@@ -837,7 +1316,6 @@ class ModelGateway:
         managed_key: str,
         allow_private_tools: bool = False,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
-        on_tool_event: Callable[[dict[str, Any]], None] | None = None,
         allow_batch: bool = True,
     ) -> dict[str, Any]:
         """Replace resolved provider credentials with fixed, metered model-role routes.
@@ -847,7 +1325,6 @@ class ModelGateway:
             managed_key: Platform OpenRouter credential used only for managed roles.
             allow_private_tools: Explicit deployment opt-in for private MCP destinations.
             authorize_tool: Optional blocking approval gate for protected chat tools.
-            on_tool_event: Optional lifecycle event receiver for protected chat tools.
             allow_batch: Whether economy choices may route managed models through batches.
 
         Returns:
@@ -860,6 +1337,7 @@ class ModelGateway:
         for key in (
             "_skynet_target_route",
             "_skynet_tools_route",
+            CONNECTOR_ROUTES_KEY,
             "_skynet_evaluator_route",
             "_skynet_packages_route",
             "_budget_gateway_descriptor",
@@ -886,10 +1364,15 @@ class ModelGateway:
                 allow_private=allow_private_tools,
                 check_admission=self.runtime.check_admission,
                 authorize_tool=authorize_tool,
-                on_tool_event=on_tool_event,
             )
             source["mcp_url"] = "https://scoped-tools.invalid/mcp"
             result["_skynet_tools_route"] = {"url": self.url, "token": self._tool_token}
+        if result.get(CONNECTORS_KEY):
+            result[CONNECTOR_ROUTES_KEY] = self._connector_routes(
+                result[CONNECTORS_KEY],
+                authorize_tool=authorize_tool,
+                allow_private=allow_private_tools,
+            )
         if self._descriptor is not None:
             result["_budget_gateway_descriptor"] = {
                 key: value for key, value in self._descriptor.items() if key != PARENT_HOSTS_KEY
@@ -1094,5 +1577,7 @@ class ModelGateway:
             self._routes.clear()
             self._capabilities.clear()
             self._tools = None
+            self._connectors.clear()
+            self._connector_tokens.clear()
             self._evaluator = None
             self._packages = None

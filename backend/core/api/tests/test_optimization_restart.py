@@ -9,19 +9,39 @@ endpoint's preconditions and the in-place reset.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ...constants import OPTIMIZATION_TYPE_BLACKBOX
 from ..routers.optimizations import create_optimizations_router
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
 
 
+class _RepoJobStore(_BaseFakeJobStore):
+    """Seed repository runs by default: a stored DSPy run can no longer be re-queued (SKY-316)."""
+
+    def seed_job(self, optimization_id: str, **fields: Any) -> dict:
+        """Insert a job row whose overview marks a repository run unless the test sets one.
+
+        Args:
+            optimization_id: Identifier for the synthesised job.
+            **fields: Overrides applied on top of the default row.
+
+        Returns:
+            The stored job row.
+        """
+        fields.setdefault("payload_overview", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
+        return super().seed_job(optimization_id, **fields)
+
+
 @pytest.fixture
 def store() -> _BaseFakeJobStore:
     """Provide a fresh fake job store per test."""
-    return _BaseFakeJobStore()
+    return _RepoJobStore()
 
 
 @pytest.fixture
@@ -85,3 +105,20 @@ def test_restart_unknown_id_is_404(client: TestClient) -> None:
     """Restarting a missing optimization is a 404."""
     resp = client.post("/optimizations/nope/restart")
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("optimization_type", ["run", "grid_search"])
+def test_restart_of_a_stored_dspy_row_is_404(
+    client: TestClient, store: _BaseFakeJobStore, optimization_type: str
+) -> None:
+    """A leftover DSPy run or grid row is not a user-facing run, so it reads as not found.
+
+    Args:
+        client: Test client over the optimizations router.
+        store: Fake job store.
+        optimization_type: A retired DSPy job kind.
+    """
+    store.seed_job("d1", status="failed", username="alice", payload_overview={"optimization_type": optimization_type})
+    resp = client.post("/optimizations/d1/restart")
+    assert resp.status_code == 404
+    assert store.get_job("d1")["status"] == "failed"

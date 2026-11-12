@@ -88,8 +88,8 @@ def _add(session: Session, event_type: str, minutes: int, *, user: str = _USER, 
 
 
 def test_tabs_split_focused_from_everything(session: Session) -> None:
-    """Focused holds needs-input, near-budget, failed and finished; Everything holds all."""
-    for minutes, event in enumerate(["finished", "new_best", "stuck", "needs_input", "shared", "failed"]):
+    """Focused holds near-budget, failed and finished; Everything holds all."""
+    for minutes, event in enumerate(["finished", "new_best", "stuck", "budget_near", "shared", "failed"]):
         _add(session, event, minutes)
     _add(session, "finished", 9, in_inbox=False)
     _add(session, "finished", 9, user="bob@example.com")
@@ -97,9 +97,20 @@ def test_tabs_split_focused_from_everything(session: Session) -> None:
     focused, _ = list_page(session, _USER, "focused", None, 50)
     everything, _ = list_page(session, _USER, "everything", None, 50)
 
-    assert [row.event_type for row in focused] == ["failed", "needs_input", "finished"]
+    assert [row.event_type for row in focused] == ["failed", "budget_near", "finished"]
     assert len(everything) == 6
     assert unread_counts(session, _USER) == {"focused": 3, "everything": 6}
+
+
+def test_retired_event_rows_stay_out_of_the_inbox(session: Session) -> None:
+    """A stored row of a retired event type (``needs_input``) is neither listed nor counted."""
+    _add(session, "needs_input", 0)
+    _add(session, "finished", 1)
+
+    everything, _ = list_page(session, _USER, "everything", None, 50)
+
+    assert [row.event_type for row in everything] == ["finished"]
+    assert unread_counts(session, _USER) == {"focused": 1, "everything": 1}
 
 
 def test_cursor_pages_walk_older_items_without_overlap(session: Session) -> None:

@@ -7,23 +7,39 @@ eval server is the single scoring path, exactly like upstream ``gepa.oa``.
 
 from __future__ import annotations
 
+import functools
 import logging
+import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from gepa.core.result import GEPAResult
 from gepa.core.state import GEPAState
 from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, TrackingConfig, optimize_anything
-from gepa.utils.stop_condition import ScoreThresholdStopper
 
-from ....constants import OPTIMIZER_NAME_GEPA
+from ....billing.usage_tags import usage_scope
+from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
+from ....sandbox.timeouts import Phase
 from ..budget_stop import BudgetReached
-from ..trajectory import capture_proposal_prompts, trajectory_watch
+from ..trajectory import capture_proposal_prompts, current_proposal_iteration, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
+from .native_engines import ScoredThresholdStopper
 from .native_runtime import run_native_engine
-from .protocol import BudgetExhaustedError, Candidate, EngineContext, EvalServer, Result, Task
+from .protocol import (
+    BudgetExhaustedError,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    Task,
+    engine_score,
+    fill_unscored,
+    score_batch,
+)
 from .upstream import GEPA_SOURCE
+from .workspace_scorer import run_on_pool
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +56,53 @@ class _JobLogger:
             **kwargs: Ignored; kept for protocol tolerance.
         """
         logger.info("%s", message)
+
+
+def _version(candidate: Any, str_mode: bool) -> Any:
+    """Return the version the server keyed for a GEPA program candidate.
+
+    Args:
+        candidate: A GEPA program candidate.
+        str_mode: Whether the task optimizes one text.
+
+    Returns:
+        The text in text mode, else the components mapping.
+    """
+    return candidate[STR_CANDIDATE_KEY] if str_mode and isinstance(candidate, dict) else candidate
+
+
+def _scored_progress(
+    callback: Callable[[str, dict[str, Any]], None] | None, server: EvalServer, str_mode: bool
+) -> Callable[[str, dict[str, Any]], None] | None:
+    """Wrap a progress callback so a crashed version's live event shows no score.
+
+    GEPA ranks by filled means, so its state holds a filled mean for a
+    version that crashed on a case. Final selection drops that version
+    (SKY-350), so the live tree must not show the filled mean (SKY-367).
+
+    Args:
+        callback: The job's progress callback, or ``None``.
+        server: The server that records each version's metric error.
+        str_mode: Whether the task optimizes one text.
+
+    Returns:
+        The wrapped callback, or ``None`` when there is no callback.
+    """
+    if callback is None:
+        return None
+
+    def forward(event: str, metrics: dict[str, Any]) -> None:
+        """Forward one event, with no score for a candidate that crashed on a case.
+
+        Args:
+            event: The progress event name.
+            metrics: The event payload.
+        """
+        if event == PROGRESS_CANDIDATE and server.metric_error(_version(metrics.get("prompt"), str_mode)) is not None:
+            metrics = {**metrics, "score": None, "per_example": []}
+        callback(event, metrics)
+
+    return forward
 
 
 class GepaEngine:
@@ -69,16 +132,21 @@ class GepaEngine:
         Path(run_dir).mkdir(parents=True, exist_ok=True)
         stop_callbacks: list[Any] = []
         if ctx.stop_at_score is not None:
-            stop_callbacks.append(ScoreThresholdStopper(ctx.stop_at_score))
+            stop_callbacks.append(
+                ScoredThresholdStopper(
+                    ctx.stop_at_score,
+                    lambda candidate: server.metric_error(_version(candidate, task.str_mode)) is not None,
+                )
+            )
         config = GEPAConfig(
             engine=EngineConfig(
                 run_dir=run_dir,
                 seed=ctx.seed,
                 max_metric_calls=server.remaining,
                 max_reflection_cost=ctx.proposer_token_budget_usd,
-                # Scorers may be user code or a remote endpoint with no
-                # concurrency guarantees, and a serial loop keeps the budget
-                # accounting exact.
+                # ``batch_evaluator`` is GEPA's only scoring path here, and it
+                # fans a batch out itself up to ``ctx.concurrency``. GEPA's own
+                # pool would only nest a second pool over it.
                 parallel=False,
                 display_progress_bar=False,
             ),
@@ -92,7 +160,7 @@ class GepaEngine:
         # so the tree drawer can pair the scorer's notes with a case's score cell.
         example_ids = {id(example): str(index) for index, example in enumerate([*task.cases, *task.valset])}
 
-        def evaluator(candidate: Candidate, example: Any = None) -> tuple[float, dict[str, Any]]:
+        def score_one(candidate: Candidate, example: Any = None) -> tuple[float | None, dict[str, Any]]:
             """Route one GEPA evaluation through the budgeted server and report its feedback.
 
             Args:
@@ -100,12 +168,16 @@ class GepaEngine:
                 example: The case, or ``None`` in single-task mode.
 
             Returns:
-                The score and side information, named scores as plain numbers
-                for GEPA's objective frontier and their feedback beside them.
+                The score (``None`` after a metric error) and side information,
+                named scores as plain numbers for GEPA's objective frontier and
+                their feedback beside them.
             """
             if ctx.check_budget is not None:
                 ctx.check_budget()
-            score, side_info = server.evaluate(candidate, example)
+            # The run record keys a GEPA version's calls by the iteration that proposed it,
+            # as its candidate event does; seed and valset sweeps have none and stay run-wide.
+            with usage_scope(candidate=current_proposal_iteration()):
+                score, side_info = server.evaluate(candidate, example)
             if ctx.check_budget is not None:
                 ctx.check_budget()
             emit_scorer_feedback(
@@ -116,7 +188,48 @@ class GepaEngine:
             )
             return score, gepa_side_info(side_info)
 
-        kwargs: dict[str, Any] = {"seed_candidate": task.seed_candidate, "evaluator": evaluator, "config": config}
+        def evaluator(candidate: Candidate, example: Any = None) -> tuple[float, dict[str, Any]]:
+            """Score one case alone, as GEPA's single-pair calls do.
+
+            Args:
+                candidate: The version GEPA wants scored.
+                example: The case, or ``None`` in single-task mode.
+
+            Returns:
+                The score, :data:`UNSCORED` after a metric error, and side information.
+            """
+            score, side_info = score_one(candidate, example)
+            return engine_score(score), side_info
+
+        def batch_evaluator(pairs: list[tuple[Candidate, Any]]) -> list[tuple[float, dict[str, Any]]]:
+            """Score one GEPA batch and fill each null case with its version's scored mean.
+
+            GEPA averages a version's batch itself. A filled case leaves that
+            mean at the scored cases' mean, so a case that always crashes does
+            not hide which version is better (SKY-367).
+
+            Args:
+                pairs: The ``(candidate, case)`` pairs of one GEPA batch.
+
+            Returns:
+                One ``(score, side_info)`` per pair, in order.
+            """
+            # Text targets keep the serial loop. Agent targets run each case in
+            # its own sandbox, so their batch runs ``ctx.concurrency`` wide on the
+            # sandbox pool.
+            if ctx.concurrency <= 1:
+                return score_batch(score_one, pairs, 1)
+            calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]
+            results = run_on_pool(Phase.SCORE, calls, ctx.concurrency)
+            filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+            return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
+
+        kwargs: dict[str, Any] = {
+            "seed_candidate": task.seed_candidate,
+            "evaluator": evaluator,
+            "batch_evaluator": batch_evaluator,
+            "config": config,
+        }
         # Train cases drive reflection and the validation cases rank versions.
         # Without a validation split GEPA ranks on the train cases; the test
         # split never reaches GEPA, the service's final run scores it.
@@ -129,18 +242,20 @@ class GepaEngine:
             kwargs["background"] = task.background
 
         # The watcher tails run_dir/gepa_state.bin and forwards each accepted
-        # candidate as a live progress event — the same channel DSPy runs
-        # stream their trajectory tree through. The proposal capture pins
-        # scorer feedback to the iteration that asked for it and snapshots
-        # rejected proposals' text, again exactly as the DSPy path does.
-        with capture_proposal_prompts(OPTIMIZER_NAME_GEPA), trajectory_watch(run_dir, ctx.progress_callback):
+        # candidate as a live progress event, the channel the trajectory tree
+        # streams through. The proposal capture pins scorer feedback to the
+        # iteration that asked for it and snapshots rejected proposals' text.
+        with (
+            capture_proposal_prompts(OPTIMIZER_NAME_GEPA),
+            trajectory_watch(run_dir, _scored_progress(ctx.progress_callback, server, task.str_mode)),
+        ):
             try:
                 gepa_result: GEPAResult[Any, Any] | None = optimize_anything(**kwargs)
             except BudgetReached as exc:
                 recovered = _load_result_from_state(run_dir, seed=ctx.seed, str_mode=task.str_mode)
                 if recovered is not None:
                     candidate = recovered.best_candidate
-                    score = float(recovered.val_aggregate_scores[recovered.best_idx])
+                    score = _val_score(recovered.val_aggregate_scores[recovered.best_idx])
                     exc.result = Result(
                         best_candidate=candidate,
                         best_score=score,
@@ -166,7 +281,7 @@ class GepaEngine:
             best = next(iter(best.values()), "")
         return Result(
             best_candidate=best,
-            best_score=float(gepa_result.val_aggregate_scores[gepa_result.best_idx]),
+            best_score=_val_score(gepa_result.val_aggregate_scores[gepa_result.best_idx]),
             total_evals=server.used,
             metadata={
                 "upstream_source": GEPA_SOURCE,
@@ -185,7 +300,7 @@ class _LaneReflection:
 
         Args:
             reflection_lm: Metered model callable.
-            check_budget: Direct run-wide guard outside DSPy's callback wrapper.
+            check_budget: Run-wide budget guard, checked before and after each model call.
         """
         self.reflection_lm = reflection_lm
         self.check_budget = check_budget
@@ -207,7 +322,8 @@ class _LaneReflection:
         """
         if self.check_budget is not None:
             self.check_budget()
-        result = self.reflection_lm(prompt)
+        with usage_scope(candidate=current_proposal_iteration()):
+            result = self.reflection_lm(prompt)
         if self.check_budget is not None:
             self.check_budget()
         return result
@@ -235,11 +351,25 @@ def _candidate_tree(gepa_result: GEPAResult[Any, Any], *, str_mode: bool) -> lis
             {
                 "candidate": unwrapped,
                 "parents": [None if parent is None else int(parent) for parent in gepa_result.parents[index]],
-                "val_score": None if score is None else float(score),
+                "val_score": _val_score(score),
                 "discovery_evals": int(gepa_result.discovery_eval_counts[index]),
             }
         )
     return nodes
+
+
+def _val_score(score: float | None) -> float | None:
+    """Turn GEPA's validation mean into a reported score.
+
+    Args:
+        score: GEPA's mean, ``-inf`` when a case of it had a metric error.
+
+    Returns:
+        The mean, or ``None`` when it is missing or not finite.
+    """
+    if score is None or not math.isfinite(score):
+        return None
+    return float(score)
 
 
 def _load_result_from_state(run_dir: str, *, seed: int, str_mode: bool) -> GEPAResult[Any, Any] | None:

@@ -110,7 +110,7 @@ export interface EnableForm {
 export type EnableProblem = "continuous_tab.form.need_permission";
 
 export function enableProblem(form: EnableForm): EnableProblem | null {
-  const { task_model, reflection_model } = form.permitted;
-  if (!task_model && !reflection_model) return "continuous_tab.form.need_permission";
+  // Repository runs switch only the reflection model, so a plan without it never changes.
+  if (!form.permitted.reflection_model) return "continuous_tab.form.need_permission";
   return null;
 }

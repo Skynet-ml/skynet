@@ -32,7 +32,7 @@ from ..config import settings
 from ..constants import TOKEN_SOURCE_MANAGED
 from ..service_gateway.optimization.blackbox import package_setup
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
-from ..service_gateway.optimization.blackbox.sandbox import SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import _raise_control
 from ..storage.models import ExecutionBudgetModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 from ..storage.preflights import PreflightStore
@@ -66,6 +66,8 @@ class _PreviewRuntime(BudgetRuntime):
         cost_kind: str,
         role: str | None = None,
         attempt: int = 0,
+        box: str | None = None,
+        for_box: str | None = None,
     ) -> OperationSnapshot:
         """Reserve normally while binding opaque operation keys to this preview's receipts.
 
@@ -75,6 +77,8 @@ class _PreviewRuntime(BudgetRuntime):
             cost_kind: Model or sandbox attribution.
             role: Optional model role.
             attempt: Physical retry counter supplied by the transport.
+            box: Box id of the sandbox that makes the call, if any.
+            for_box: Box id of the sandbox that waits for that box, if any.
 
         Returns:
             The real ledger reservation, with recovered owners kept distinct.
@@ -85,6 +89,8 @@ class _PreviewRuntime(BudgetRuntime):
             cost_kind=cost_kind,
             role=role,
             attempt=attempt,
+            box=box,
+            for_box=for_box,
         )
 
 
@@ -341,7 +347,6 @@ def run_protected_preview(
                     bind_protected_sandbox(
                         gateway,
                         settings,
-                        workflow="anything" if kind == "dependencies" else "dspy",
                         owner_id=document["id"],
                     )
                     protected = gateway.protect_payload(

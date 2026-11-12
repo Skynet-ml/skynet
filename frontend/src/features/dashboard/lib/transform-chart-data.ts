@@ -5,7 +5,6 @@ import type {
   DashboardAnalyticsRangeBucket,
 } from "@/shared/lib/api";
 import { getStatusLabel } from "@/shared/constants/job-status";
-import { msg } from "@/shared/lib/messages";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { STATUS_COLORS } from "../constants";
 
@@ -60,8 +59,6 @@ export type ChartData = {
     totalRows: number;
   };
   status: ShareBar[];
-  jobTypes: ShareBar[];
-  modules: ShareBar[];
   optimizerStats: OptimizerRow[];
   modelStats: ModelRow[];
   ownerUsage: Array<{ name: string; count: number }>;
@@ -78,8 +75,6 @@ export type ChartData = {
 const EMPTY_CHART_DATA: ChartData = {
   kpis: null,
   status: [],
-  jobTypes: [],
-  modules: [],
   optimizerStats: [],
   modelStats: [],
   ownerUsage: [],
@@ -93,32 +88,6 @@ const EMPTY_CHART_DATA: ChartData = {
   truncated: false,
 };
 
-function shareBars(counts: Record<string, number>, label: (key: string) => string): ShareBar[] {
-  const entries = Object.entries(counts);
-  const total = entries.reduce((sum, [, value]) => sum + value, 0);
-  return entries
-    .map(([key, value]) => ({
-      key,
-      name: label(key),
-      value,
-      pct: total > 0 ? (value / total) * 100 : 0,
-    }))
-    .sort((a, b) => b.value - a.value);
-}
-
-export function jobTypeLabel(key: string): string {
-  switch (key) {
-    case "grid_search":
-      return msg("auto.features.dashboard.lib.transform.chart.data.literal.1");
-    case "blackbox":
-      return msg("optimization.blackbox.badge");
-    case "workflow":
-      return msg("dashboard.analytics.type_workflow");
-    default:
-      return msg("auto.features.dashboard.lib.transform.chart.data.literal.2");
-  }
-}
-
 /**
  * Turn `[lower, upper)` edges into a compact axis label: "<5", "5–10", "30+".
  * Open ends come from the backend as `null`.
@@ -130,7 +99,10 @@ function bucketLabel(bucket: DashboardAnalyticsRangeBucket, fmt: Intl.NumberForm
   return `${fmt.format(bucket.lower)}–${fmt.format(bucket.upper)}`;
 }
 
-function histogram(buckets: DashboardAnalyticsRangeBucket[], fmt: Intl.NumberFormat): HistogramBar[] {
+function histogram(
+  buckets: DashboardAnalyticsRangeBucket[],
+  fmt: Intl.NumberFormat,
+): HistogramBar[] {
   // An all-zero histogram means no run had the measurement at all (e.g. no
   // successful run yet); the chart renders its empty state instead of flat bars.
   if (buckets.every((b) => b.count === 0)) return [];
@@ -213,8 +185,6 @@ export function transformChartData(analyticsData: DashboardAnalytics | null): Ch
   return {
     kpis,
     status,
-    jobTypes: shareBars(analyticsData.job_type_counts, jobTypeLabel),
-    modules: shareBars(analyticsData.module_counts, (key) => key),
     optimizerStats,
     modelStats,
     ownerUsage: analyticsData.owner_usage.map((o) => ({ name: o.name, count: o.value })),
@@ -228,4 +198,3 @@ export function transformChartData(analyticsData: DashboardAnalytics | null): Ch
     truncated: analyticsData.truncated,
   };
 }
-

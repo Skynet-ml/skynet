@@ -46,12 +46,6 @@ void describe("formatScore", () => {
     assert.equal(scoreText("blackbox", 0.84, null), "0.84");
   });
 
-  void it("keeps DSPy and grid 0–100 scores as percentages", () => {
-    assert.equal(scoreText("run", 40, 82.5), "82.5% (+42.5%)");
-    assert.equal(scoreText("grid_search", 60, 55), "55.0% (-5.0%)");
-    assert.equal(scoreText("run", null, 82.5), "82.5%");
-  });
-
   void it("puts the baseline and the optimized score in the hover title", () => {
     const job = {
       optimization_type: "blackbox",

@@ -1,13 +1,8 @@
 import type {
   BlackboxShinkaParentSelection,
   BlackboxShinkaSettings,
-  ModelConfig,
 } from "@/shared/types/api";
-import {
-  resolveOptimizer,
-  type ArtifactKind,
-  type OptimizerChoice,
-} from "@/shared/types/unified-run";
+import type { OptimizerChoice } from "@/shared/types/unified-run";
 
 /**
  * ShinkaEvolve's defaults, mirroring `BlackboxShinkaSettings` on the backend.
@@ -44,7 +39,7 @@ export const DEFAULT_SHINKA_SETTINGS: Readonly<BlackboxShinkaSettings> = {
   max_parallel_proposals: 2,
 };
 
-export type ShinkaNumberField = {
+type ShinkaNumberField = {
   [K in keyof BlackboxShinkaSettings]: BlackboxShinkaSettings[K] extends number ? K : never;
 }[keyof BlackboxShinkaSettings];
 
@@ -132,41 +127,7 @@ export function patchPercent(share: number): number {
   return Math.round(share * 100);
 }
 
-/**
- * The settings block to submit. A ShinkaEvolve run always sends it, with the
- * defaults when the panel was never touched; black-box Auto, where
- * ShinkaEvolve is one lane, sends it only once the user edited it (`settings`
- * non-null), so an untouched Auto run keeps the server's defaults.
- */
-export function submittedShinka(
-  settings: BlackboxShinkaSettings | null,
-  choice: OptimizerChoice,
-  kind: ArtifactKind,
-): BlackboxShinkaSettings | undefined {
-  const resolved = resolveOptimizer(choice, kind);
-  if (resolved === "shinka_evolve") return { ...(settings ?? DEFAULT_SHINKA_SETTINGS) };
-  if (resolved === "auto") return settings ? { ...settings } : undefined;
-  return undefined;
-}
-
 /** Whether the choice takes extra optimization models: only ShinkaEvolve samples from a pool. */
 export function takesExtraModels(choice: OptimizerChoice): boolean {
   return choice === "shinka_evolve";
-}
-
-/** The extra optimization models to submit: chosen ones only, and only for ShinkaEvolve. */
-export function submittedExtraModels(
-  models: readonly ModelConfig[],
-  choice: OptimizerChoice,
-): ModelConfig[] | undefined {
-  if (!takesExtraModels(choice)) return undefined;
-  const chosen = models.filter((model) => model.name.trim());
-  return chosen.length > 0 ? chosen.slice(0, MAX_EXTRA_OPTIMIZATION_MODELS) : undefined;
-}
-
-/** A stored run's settings over the defaults, so a clone of an older run still fills every field. */
-export function shinkaSettingsFrom(
-  stored: Partial<BlackboxShinkaSettings> | null | undefined,
-): BlackboxShinkaSettings {
-  return { ...DEFAULT_SHINKA_SETTINGS, ...(stored ?? {}) };
 }

@@ -6,10 +6,10 @@ import json
 import logging
 import re
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
@@ -30,7 +30,7 @@ from .operation_pricing import (
 )
 from .responses_adapter import price_responses_request, responses_failure, responses_receipt
 from .runtime import BudgetRuntime, PaidResult
-from .usage_tags import header_tags
+from .usage_tags import BOX_KEY, FOR_BOX_KEY, header_tags
 
 MODEL_ATTEMPT_HEADER = "x-app-model-attempt-id"
 
@@ -41,6 +41,27 @@ _BYOK_DEFAULT_MAX_TOKENS = 4000
 # again. The SDK retries every failure, and a drained account refuses each
 # retry the same way, so the retries are cut off here rather than re-sent.
 FUNDS_REFUSAL_HOLD_SECONDS = 60.0
+
+# OpenRouter can answer a generation lookup with 404 for a short time after the
+# answer ends, while it still indexes the bill, and a Responses stream can carry
+# no cost. settle() asks again after each delay before it holds the call for the
+# reconciler (SKY-657). The lookup has its own short httpx timeout, because the
+# dispatch client allows a long model answer. httpx applies it to each connect
+# and each read step, not to the whole lookup: four lookups that time out on
+# read add about 44 seconds with the delays, and a slow connect plus a slow
+# read, or a slow-drip answer, can take longer.
+GENERATION_LOOKUP_DELAYS = (0.5, 1.0, 2.0)
+GENERATION_LOOKUP_TIMEOUT_SECONDS = 10.0
+
+# OpenRouter's /generation accepts only this id shape (API reference,
+# getGeneration). A Responses answer names itself ``resp_...``, so a lookup by
+# that id can never find a bill, and asking again only delays the hold (SKY-664).
+_GENERATION_ID = re.compile(r"gen-[0-9A-Za-z-]{1,124}")
+
+# Responses usage may omit ``is_byok``, and then a cost with an upstream share
+# is ambiguous. This opt-in adds ``openrouter_metadata``, whose ``is_byok`` the
+# API reference marks as required (SKY-664).
+_METADATA_HEADER = {"X-OpenRouter-Metadata": "enabled"}
 
 FUNDS_BUSY = "provider_budget_busy"
 MANAGED_FUNDS_EXHAUSTED = "managed_funds_exhausted"
@@ -53,6 +74,18 @@ BYOK_FUNDS_EXHAUSTED = "byok_funds_exhausted"
 _EPHEMERAL = {"type": "ephemeral"}
 
 
+class ByteStream(Protocol):
+    """Yield the rest of an answer; ``close`` frees it even when nothing was read."""
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Return the iterator over the chunks."""
+        ...
+
+    def close(self) -> None:
+        """Free the stream and its upstream connection."""
+        ...
+
+
 @dataclass(frozen=True)
 class ModelHTTPResult:
     """Retain the protocol response without putting generated text in the billing ledger."""
@@ -60,6 +93,10 @@ class ModelHTTPResult:
     status: int
     content_type: str
     body: bytes
+    # Only an MCP relay answer carries these: its session header, and a GET
+    # event stream that goes on after ``body``.
+    headers: tuple[tuple[str, str], ...] = ()
+    stream: ByteStream | None = field(default=None, compare=False)
 
 
 def funds_refusal(managed: bool, retry_after: str | None) -> tuple[bytes, float]:
@@ -179,8 +216,19 @@ def usage_charge(usage: Mapping[str, Any]) -> Decimal | None:
     )
 
 
-def response_complete(body: bytes, content_type: str) -> bool:
-    """Require a terminal protocol marker before treating streamed usage as final."""
+def response_complete(body: bytes, content_type: str, finish_reason_ends: bool = False) -> bool:
+    """Require a terminal protocol marker before treating streamed usage as final.
+
+    Args:
+        body: Raw provider response.
+        content_type: Provider response content type.
+        finish_reason_ends: Also accept a chunk with a ``finish_reason``. BYOK
+            providers bill the user directly, and not every OpenAI-compatible
+            provider promises a closing ``[DONE]`` line.
+
+    Returns:
+        Whether the response reached its end.
+    """
     if "text/event-stream" not in content_type:
         return True
     for line in body.decode("utf-8", errors="replace").splitlines():
@@ -194,6 +242,13 @@ def response_complete(body: bytes, content_type: str) -> bool:
         except ValueError:
             continue
         if isinstance(event, dict) and event.get("type") == "message_stop":
+            return True
+        if (
+            finish_reason_ends
+            and isinstance(event, dict)
+            and isinstance(event.get("choices"), list)
+            and any(isinstance(choice, dict) and choice.get("finish_reason") for choice in event["choices"])
+        ):
             return True
     return False
 
@@ -396,9 +451,15 @@ class ProviderDispatcher:
                         and routed["max_tokens"] != routed["max_completion_tokens"]
                     ):
                         raise UnpricedOperationError("Conflicting output token limits cannot authorize work.")
+                    if path == "/messages" and "max_completion_tokens" in routed:
+                        # Anthropic's Messages API rejects unknown top-level fields, so carry the
+                        # caller's limit over to the one field it accepts.
+                        routed["max_tokens"] = routed.pop("max_completion_tokens")
                     field = (
                         "max_output_tokens"
                         if path == "/responses"
+                        else "max_tokens"
+                        if path == "/messages"
                         else "max_completion_tokens"
                         if "max_completion_tokens" in routed
                         else "max_tokens"
@@ -434,6 +495,8 @@ class ProviderDispatcher:
             headers["x-api-key"] = self._api_key
         else:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        if self.upstream == OPENROUTER and path == "/responses":
+            headers.update(_METADATA_HEADER)
         headers.update(
             {
                 name: value
@@ -493,7 +556,9 @@ class ProviderDispatcher:
                 interrupted = interrupted or not complete
                 failure = responses_failure(content, content_type)
             else:
-                interrupted = interrupted or not response_complete(content, content_type)
+                interrupted = interrupted or not response_complete(
+                    content, content_type, finish_reason_ends=self.policy.kind == "byok_model"
+                )
                 identity, usage = response_usage(content, content_type)
             evidence: dict[str, Any] = {
                 "provider": self.upstream.slug,
@@ -521,10 +586,36 @@ class ProviderDispatcher:
             ):
                 amount = usage_charge(usage)
             if self.policy.kind != "byok_model" and self.upstream == OPENROUTER and amount is None and identity:
-                reconciled = self.reconcile(identity)
+                reconciled, reason, retry = (
+                    self._lookup_generation(identity)
+                    if _GENERATION_ID.fullmatch(identity)
+                    else (None, "nothing, because /generation does not accept this id", False)
+                )
+                for delay in GENERATION_LOOKUP_DELAYS:
+                    if not retry:
+                        break
+                    time.sleep(delay)
+                    reconciled, reason, retry = self._lookup_generation(identity)
                 if reconciled is not None:
                     amount, record = reconciled
                     evidence["generation"] = record
+                else:
+                    receipt = (
+                        "an interrupted answer"
+                        if interrupted
+                        else "an answer with no usage"
+                        if usage is None
+                        else "an answer with no cost"
+                        if usage.get("cost") is None
+                        else "an answer with an unusable cost"
+                    )
+                    logger.warning(
+                        "No confirmed cost for a %s call (%s): the provider sent %s, and the generation lookup gave %s.",
+                        self.model,
+                        identity,
+                        receipt,
+                        reason,
+                    )
             # An error answer that names no generation and reports no usage is the provider
             # refusing the request before anything billable existed (rate limits, moderation,
             # malformed bodies); holding its coverage would wait on a receipt never written.
@@ -576,6 +667,8 @@ class ProviderDispatcher:
             cost_kind="model",
             role=self.role,
             attempt=attempt,
+            box=tags.get(BOX_KEY),
+            for_box=tags.get(FOR_BOX_KEY),
         )
 
     def stop_batch(self) -> None:
@@ -592,43 +685,71 @@ class ProviderDispatcher:
         Returns:
             Measured USD and usage-only evidence, or None while the bill is unavailable.
         """
+        reconciled, reason, _ = self._lookup_generation(generation_id)
+        if reconciled is None:
+            logger.info(
+                "No confirmed cost for %s generation %s yet: the lookup gave %s.", self.model, generation_id, reason
+            )
+        return reconciled
+
+    def _lookup_generation(self, generation_id: str) -> tuple[tuple[Decimal, dict[str, Any]] | None, str, bool]:
+        """Ask OpenRouter once for a generation's final bill, and say why it gave none.
+
+        Args:
+            generation_id: Identity returned by the original paid request.
+
+        Returns:
+            Measured USD and usage-only evidence, or None; a short reason that
+            holds no secret or prompt text; and whether a later lookup can help.
+        """
         if self.upstream != OPENROUTER:
-            return None
+            return None, "no lookup for this provider", False
         try:
             response = self._client.get(
                 "https://openrouter.ai/api/v1/generation",
                 params={"id": generation_id},
                 headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=GENERATION_LOOKUP_TIMEOUT_SECONDS,
             )
-            response.raise_for_status()
+            status = response.status_code
+            if not response.is_success:
+                return None, f"HTTP {status}", status in {404, 408, 425, 429} or status >= 500
             record = response.json().get("data")
-            if (
-                not isinstance(record, dict)
-                or record.get("id") != generation_id
-                or record.get("model") != self.model
-                or record.get("total_cost") is None
-            ):
-                return None
-            safe = {
-                key: record[key]
-                for key in (
-                    "id",
-                    "model",
-                    "provider_name",
-                    "total_cost",
-                    "upstream_inference_cost",
-                    "native_tokens_prompt",
-                    "native_tokens_completion",
-                    "native_tokens_reasoning",
-                    "num_search_results",
-                    "is_byok",
-                )
-                if key in record
-            }
+        except httpx.HTTPError as error:
+            return None, f"a transport error ({type(error).__name__})", True
+        except ValueError:
+            return None, "a response that is not JSON", False
+        if not isinstance(record, dict):
+            return None, "no generation record", False
+        if record.get("id") != generation_id:
+            return None, "an id mismatch", False
+        if record.get("model") != self.model:
+            return None, f"a model mismatch ({str(record.get('model'))[:128]!r})", False
+        if record.get("total_cost") is None:
+            return None, "no total_cost", True
+        safe = {
+            key: record[key]
+            for key in (
+                "id",
+                "model",
+                "provider_name",
+                "total_cost",
+                "upstream_inference_cost",
+                "native_tokens_prompt",
+                "native_tokens_completion",
+                "native_tokens_reasoning",
+                "num_search_results",
+                "is_byok",
+            )
+            if key in record
+        }
+        try:
             amount = generation_charge(record)
-            return (amount, safe) if amount is not None else None
-        except (httpx.HTTPError, ValueError):
-            return None
+        except UnpricedOperationError:
+            return None, "an invalid total_cost", False
+        if amount is None:
+            return None, "an ambiguous billing scope", False
+        return (amount, safe), "a confirmed cost", False
 
 
 OpenRouterDispatcher = ProviderDispatcher

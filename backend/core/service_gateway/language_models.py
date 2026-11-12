@@ -26,6 +26,7 @@ from ..billing.signals import BudgetReached
 from ..config import app_env, settings
 from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..local.cli_catalog import parse_subscription_model_id
+from ..local.managed_models import HOSTED_INFERENCE_KEY
 from ..models import ModelConfig
 
 try:
@@ -353,9 +354,9 @@ _job_lm_gate: threading.BoundedSemaphore | None = None
 def activate_job_lm_budget(max_concurrency: int) -> None:
     """Install a process-wide ceiling on concurrent LM calls.
 
-    Called once per job child (``run_service_in_subprocess``) so grid pair
-    threads times GEPA eval threads — plus any user-supplied ``num_threads``
-    — can never put more than ``max_concurrency`` LM calls in flight at once.
+    Called once per job child (``run_service_in_subprocess``) so the engine's
+    eval threads can never put more than ``max_concurrency`` LM calls in
+    flight at once.
     Excess callers block in ``MeteredLM.forward`` until a permit frees; the
     per-call timeout still bounds each held permit, so the gate cannot wedge
     a run. Only the sync path is gated: optimizers evaluate on threads, and
@@ -515,26 +516,6 @@ class MeteredLM(dspy.LM):
                 totals.add_split(usage, split, subscription=self.subscription)
 
 
-def lm_call_count(language_model: object) -> int | None:
-    """Count the LM calls ``language_model`` has made.
-
-    Prefers the ``MeteredLM`` aggregate; falls back to ``len(history)`` for
-    plain/mocked LMs (and for a dspy line whose LM never invokes the
-    ``update_history`` hook, where history still accumulates).
-
-    Args:
-        language_model: The LM whose calls to count.
-
-    Returns:
-        The call count, or ``None`` when the object tracks neither form.
-    """
-    totals = getattr(language_model, "usage_totals", None)
-    if isinstance(totals, LmUsageTotals) and totals.calls:
-        return totals.calls
-    history = getattr(language_model, "history", None)
-    return len(history) if isinstance(history, list) else None
-
-
 def _apply_subscription_route(lm_kwargs: dict[str, object], config: ModelConfig, role: str) -> None:
     """Point an API-side subscription model at the local CLI endpoint.
 
@@ -614,6 +595,10 @@ def build_language_model(config: ModelConfig, *, disable_cache: bool = False) ->
     if config.max_tokens is not None:
         lm_kwargs["max_tokens"] = config.max_tokens
     lm_kwargs.update(config.extra)
+    hosted_inference = bool(lm_kwargs.pop(HOSTED_INFERENCE_KEY, False))
+    if hosted_inference:
+        lm_kwargs["model"] = f"litellm_proxy/{model_name.removeprefix('openrouter/')}"
+        lm_kwargs.setdefault("max_tokens", _OPENAI_REASONING_MAX_TOKENS)
     extra_body = lm_kwargs.get("extra_body")
     reasoning_off = (
         isinstance(extra_body, dict)
@@ -672,6 +657,7 @@ def build_language_model(config: ModelConfig, *, disable_cache: bool = False) ->
     # LiteLLM rebuilds a streamed call's usage and drops the gateway's
     # ``token_source`` mark, so the LM itself carries the zero-cost flag.
     language_model.subscription = config.token_source == "subscription"
+    language_model.hosted_inference = hosted_inference
     return language_model
 
 

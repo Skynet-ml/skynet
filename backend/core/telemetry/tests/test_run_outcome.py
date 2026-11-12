@@ -36,37 +36,6 @@ _SAMPLES = {
 }
 
 
-def test_dspy_result_reads_test_metrics_and_split() -> None:
-    """A DSPy result is held out when it has test rows and both test metrics."""
-    facts = score_facts(
-        {
-            "baseline_test_metric": 0.5,
-            "optimized_test_metric": 0.75,
-            "split_counts": {"train": 30, "val": 10, "test": 25},
-        }
-    )
-    assert facts == {
-        "baseline": 0.5,
-        "optimized": 0.75,
-        "lift": pytest.approx(0.25),
-        "held_out": True,
-        "held_out_rows": 25,
-    }
-
-
-def test_dspy_result_without_test_rows_is_not_held_out() -> None:
-    """A DSPy run with an empty test split reports no held-out evidence."""
-    facts = score_facts(
-        {
-            "baseline_test_metric": 0.5,
-            "optimized_test_metric": 0.6,
-            "split_counts": {"train": 30, "val": 10, "test": 0},
-        }
-    )
-    assert facts["held_out"] is False
-    assert facts["held_out_rows"] == 0
-
-
 def test_blackbox_result_uses_report_held_out_flag() -> None:
     """A unified black-box result takes held_out from its split report."""
     split = {"train": 20, "val": 5, "test": 22, "selection_split": "val", "report_split": "test"}
@@ -89,30 +58,12 @@ def test_legacy_blackbox_result_has_no_held_out_evidence() -> None:
     assert facts["held_out_rows"] is None
 
 
-def test_grid_result_reads_best_pair() -> None:
-    """A grid result reads the best pair's scores with the grid's split."""
-    facts = score_facts(
-        {
-            "split_counts": {"train": 40, "val": 10, "test": 30},
-            "pair_results": [],
-            "best_pair": {"baseline_test_metric": 0.2, "optimized_test_metric": 0.45},
-        }
-    )
-    assert facts["baseline"] == 0.2
-    assert facts["optimized"] == 0.45
-    assert facts["lift"] == pytest.approx(0.25)
-    assert facts["held_out"] is True
-    assert facts["held_out_rows"] == 30
-
-
 @pytest.mark.parametrize(
     "result",
     [
         {},
-        {"baseline_test_metric": 0.5},
         {"best_score": 0.9},
         {"baseline_score": None, "best_score": None},
-        {"best_pair": None},
         None,
     ],
 )
@@ -126,25 +77,18 @@ def test_boolean_scores_are_not_numbers() -> None:
     assert score_facts({"baseline_score": True, "best_score": 0.5})["lift"] is None
 
 
-def test_sample_rows_match_in_every_payload_shape() -> None:
-    """A bundled sample is recognised whether staged as DSPy rows, cases or unified cases."""
+def test_sample_rows_match_as_cases() -> None:
+    """A bundled sample staged as black-box cases is recognised."""
     rows = _SAMPLES["sentiment"]["rows"]
-    dspy_payload = {"dataset": [dict(row) for row in rows]}
-    blackbox_payload = {"cases": [dict(row) for row in rows[:2]]}
-    unified_payload = {
-        "data": {
-            "cases": [{"input": {"text": row["text"]}, "expected": {"label": row["label"]}} for row in rows],
-        }
-    }
-    for payload in (dspy_payload, blackbox_payload, unified_payload):
-        assert is_sample_dataset(payload_rows(payload), _SAMPLES) is True
+    payload = {"cases": [dict(row) for row in rows[:2]]}
+    assert is_sample_dataset(payload_rows(payload), _SAMPLES) is True
 
 
 def test_user_upload_is_not_a_sample() -> None:
     """A user dataset, or one that only partly overlaps a sample, is not a sample."""
-    upload = {"dataset": [{"text": "my own row", "label": "positive"}]}
+    upload = {"cases": [{"text": "my own row", "label": "positive"}]}
     assert is_sample_dataset(payload_rows(upload), _SAMPLES) is False
-    mixed = {"dataset": [*_SAMPLES["sentiment"]["rows"], {"text": "extra row", "label": "neutral"}]}
+    mixed = {"cases": [*_SAMPLES["sentiment"]["rows"], {"text": "extra row", "label": "neutral"}]}
     assert is_sample_dataset(payload_rows(mixed), _SAMPLES) is False
     assert is_sample_dataset(payload_rows({}), _SAMPLES) is False
 
@@ -153,7 +97,7 @@ def test_completed_properties_merge_scores_and_sample_flag() -> None:
     """``completed_properties`` carries every run_completed fact."""
     props = completed_properties(
         {"baseline_score": 0.5, "best_score": 0.6},
-        {"dataset": _SAMPLES["qa"]["rows"]},
+        {"cases": _SAMPLES["qa"]["rows"]},
         _SAMPLES,
     )
     assert props["from_sample"] is True

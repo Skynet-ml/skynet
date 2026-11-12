@@ -190,6 +190,26 @@ def test_require_admin_user_accepts_signed_role_claim(monkeypatch: pytest.Monkey
     assert require_admin_user(user) is user
 
 
+def test_desktop_user_is_never_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Mac link caller gets no admin rights from any admin source."""
+    monkeypatch.setattr(auth_mod.settings, "admin_usernames", "alice@example.com")
+    monkeypatch.setattr(auth_mod.settings, "admin_groups", "skynet-admins")
+    user = AuthenticatedUser(username="alice@example.com", role="admin", groups=("skynet-admins",), desktop=True)
+
+    with pytest.raises(DomainError):
+        require_admin_user(user)
+
+
+def test_desktop_token_without_a_route_is_refused() -> None:
+    """A ``skyl_`` token outside a matched route fails closed."""
+    request = cast(Any, SimpleNamespace(scope={}, method="GET", state=SimpleNamespace()))
+
+    with pytest.raises(DomainError) as excinfo:
+        get_authenticated_user(request, authorization="Bearer skyl_at_example")
+
+    assert excinfo.value.code == "auth.desktop_token_not_allowed"
+
+
 def _pat_request(username: str = "alice@example.com") -> tuple[Any, str]:
     """Build a request stand-in whose store holds one active PAT.
 

@@ -8,9 +8,6 @@ For deeper engineering conventions (commenting style, docstrings, import
 rules), read [`AGENTS.md`](AGENTS.md) — it is the canonical reference and
 applies to every file you touch.
 
-For what support to expect and how quickly issues and PRs get a response,
-see [`MAINTENANCE.md`](MAINTENANCE.md).
-
 ## Dev setup
 
 ```bash

@@ -72,7 +72,6 @@ class SQLiteJobStore(RemoteDBJobStore):
         Base.metadata.create_all(self._engine)
         self._session_factory = sessionmaker(bind=self._engine)
         self._checkpoints = remote_mod.PostgresCheckpointBlobStore(self._engine)
-        self._grid_pair_results = remote_mod.PostgresGridPairResultStore(self._engine)
         self._agent_runs = remote_mod.PostgresAgentRunStore(self._engine)
 
 
@@ -90,7 +89,6 @@ def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: p
     Returns:
         Authoritative budget service for resume admission and generation fencing.
     """
-    monkeypatch.setattr(remote_mod.settings, "dspy_sandbox_image", _RECOVERY_IMAGE)
     monkeypatch.setattr(remote_mod.settings, "vercel_sandbox_max_lifetime_seconds", 60.0)
     with Session(store.engine) as session:
         session.add(
@@ -103,7 +101,7 @@ def _fund_checkpoint(store: SQLiteJobStore, optimization_id: str, monkeypatch: p
     budget = service.create("resume-owner", 20, idempotency_key=optimization_id)
     service.attach_to_job(budget.id, "resume-owner", optimization_id, expected_revision=budget.revision)
     payload = {
-        "optimizer_name": "GEPA",
+        "strategy": {"mode": "single", "engine": "gepa"},
         "dataset": [{"x": "sample"}],
         "execution_runtime": "vercel",
         "execution_budget_id": budget.id,
@@ -578,20 +576,6 @@ def test_append_log_makes_entry_retrievable(store: SQLiteJobStore) -> None:
     assert logs[0]["logger"] == "mylogger"
 
 
-def test_append_log_pair_index_stored(store: SQLiteJobStore) -> None:
-    """Append log pair index stored."""
-    store.create_job("l2")
-    store.append_log("l2", level="DEBUG", logger_name="lg", message="msg", pair_index=42)
-    assert store.get_logs("l2")[0]["pair_index"] == 42
-
-
-def test_append_log_pair_index_null_when_absent(store: SQLiteJobStore) -> None:
-    """Append log pair index null when absent."""
-    store.create_job("l3")
-    store.append_log("l3", level="INFO", logger_name="lg", message="no pair")
-    assert store.get_logs("l3")[0]["pair_index"] is None
-
-
 def test_append_log_warns_for_deleted_job(store: SQLiteJobStore, caplog: pytest.LogCaptureFixture) -> None:
     """Append log warns and skips the entry for deleted jobs."""
     store.create_job("l-del")
@@ -701,13 +685,13 @@ def test_set_payload_overview_without_username_preserves_column(store: SQLiteJob
 def test_set_payload_overview_hoists_composition_column(store: SQLiteJobStore) -> None:
     """The ``composition`` overview key is hoisted to the indexed job column."""
     store.create_job("o5")
-    store.set_payload_overview("o5", {"composition": "workflow"})
+    store.set_payload_overview("o5", {"composition": "single"})
     session = store._get_session()
     try:
         composition = session.query(JobModel.composition).filter(JobModel.optimization_id == "o5").scalar()
     finally:
         session.close()
-    assert composition == "workflow"
+    assert composition == "single"
 
 
 def test_list_jobs_no_filter_returns_all(store: SQLiteJobStore) -> None:
@@ -823,43 +807,6 @@ def test_list_jobs_prunes_result_to_summary_scalars(store: SQLiteJobStore) -> No
     assert by_id["lr-run"]["payload"] is None
     assert by_id["lr-pending"]["result"] is None
     assert store.get_job("lr-run")["result"] == full_result
-
-
-def test_list_jobs_grid_result_keeps_best_pair_label_fields(store: SQLiteJobStore) -> None:
-    """A grid row keeps the pair counters and best_pair metrics plus its model names."""
-    store.create_job("lr-grid", username="alice")
-    store.set_payload_overview("lr-grid", {"optimization_type": "grid_search", "total_pairs": 4})
-    store.update_job(
-        "lr-grid",
-        status="success",
-        result={
-            "completed_pairs": 3,
-            "failed_pairs": 1,
-            "best_pair": {
-                "baseline_test_metric": 0.4,
-                "optimized_test_metric": 0.9,
-                "runtime_seconds": 30.0,
-                "generation_model": "openai/gpt-4o",
-                "reflection_model": "openai/o3",
-                "pair_index": 2,
-                "per_example_outputs": ["z" * 500] * 20,
-            },
-            "pairs": [{"pair_index": i, "outputs": ["z" * 500] * 20} for i in range(4)],
-        },
-    )
-
-    [row] = store.list_jobs()
-    assert row["result"] == {
-        "completed_pairs": 3,
-        "failed_pairs": 1,
-        "best_pair": {
-            "baseline_test_metric": 0.4,
-            "optimized_test_metric": 0.9,
-            "runtime_seconds": 30.0,
-            "generation_model": "openai/gpt-4o",
-            "reflection_model": "openai/o3",
-        },
-    }
 
 
 def test_shared_list_surfaces_prune_result_the_same_way(store: SQLiteJobStore) -> None:
@@ -1097,25 +1044,6 @@ def test_recover_orphaned_jobs_restarts_funded_run_without_checkpoint(store: SQL
     assert job["status"] == "pending"
     assert job["attempts"] == 1
     assert job["message"] == "Starting again after a worker restart"
-
-
-def test_recover_orphaned_jobs_fails_child_run_without_checkpoint(store: SQLiteJobStore) -> None:
-    """A child run with no checkpoint cannot start again alone, so it fails with a retryable message.
-
-    Args:
-        store: Disposable job store.
-    """
-    store.create_job("parent")
-    store.update_job("parent", status="success")
-    store.create_job("child")
-    store.update_job("child", status="running", parent_optimization_id="parent")
-    _fund_without_checkpoint(store, "child")
-    assert store.recover_orphaned_jobs() == 1
-    job = store.get_job("child")
-    assert job["status"] == "failed"
-    assert job["stop_reason"] == "interrupted"
-    assert job["message"].startswith(remote_mod.ORPHANED_RUN_RECOVERY_FAILED_MESSAGE)
-    assert "No completed compatible checkpoint" in job["message"]
 
 
 def test_recover_orphaned_jobs_fails_run_at_its_attempt_limit(
@@ -1861,110 +1789,6 @@ def test_claim_next_job_stays_fifo_within_one_user(store: SQLiteJobStore) -> Non
     assert claimed == ["fifo-0", "fifo-1", "fifo-2"]
 
 
-def _seed_grid_parent_with_children(store: SQLiteJobStore, parent_id: str = "grid-p") -> list[str]:
-    """Create a grid parent with payload/overview and fan out two pair children."""
-    store.create_job(parent_id, username="alice")
-    store.set_payload_overview(parent_id, {"optimization_type": "grid_search", "username": "alice"})
-    store.update_job(
-        parent_id,
-        payload={"generation_models": [{"name": "g"}], "reflection_models": [{"name": "r1"}, {"name": "r2"}]},
-    )
-    return store.create_grid_pair_jobs(
-        parent_id, 2, username="alice", payload_overview={"optimization_type": "grid_search"}
-    )
-
-
-def test_create_grid_pair_jobs_parks_parent_and_is_idempotent(store: SQLiteJobStore) -> None:
-    """Fan-out creates claimable children once and parks the parent unclaimed."""
-    child_ids = _seed_grid_parent_with_children(store)
-
-    parent = store.get_job("grid-p")
-    assert parent["status"] == "running"
-    children = store.get_grid_pair_children("grid-p")
-    assert [c["pair_index"] for c in children] == [0, 1]
-    assert all(c["status"] == "pending" for c in children)
-
-    again = store.create_grid_pair_jobs("grid-p", 2, username="alice", payload_overview={})
-    assert again == child_ids
-    assert len(store.get_grid_pair_children("grid-p")) == 2
-
-
-def test_grid_pair_children_hidden_from_listings_and_counts(store: SQLiteJobStore) -> None:
-    """Child rows never surface in user-facing lists or counts, typed or not."""
-    _seed_grid_parent_with_children(store)
-
-    listed = {j["optimization_id"] for j in store.list_jobs(username="alice")}
-    assert listed == {"grid-p"}
-    typed = {j["optimization_id"] for j in store.list_jobs(username="alice", optimization_type="grid_search")}
-    assert typed == {"grid-p"}
-    assert store.count_jobs(username="alice") == 1
-    assert store.count_jobs(username="alice", optimization_type="grid_search") == 1
-
-
-def test_recover_orphaned_jobs_skips_distributed_parent(store: SQLiteJobStore) -> None:
-    """The lease-less running parent is never swept; its children still are."""
-    child_ids = _seed_grid_parent_with_children(store)
-    claimed = store.claim_next_job("pod", lease_seconds=0.001)
-    assert claimed is not None
-    assert claimed["optimization_id"] in child_ids
-    time.sleep(0.01)
-
-    recovered = store.recover_orphaned_jobs()
-
-    assert recovered == 1
-    assert store.get_job("grid-p")["status"] == "running"
-    assert store.get_job(claimed["optimization_id"])["status"] == "failed"
-
-
-def test_requeue_for_rerun_drops_pair_children(store: SQLiteJobStore) -> None:
-    """A from-scratch re-run discards the previous attempt's pair rows."""
-    _seed_grid_parent_with_children(store)
-    store.update_job("grid-p", status="failed")
-
-    assert store.requeue_for_rerun("grid-p") is True
-
-    assert store.get_grid_pair_children("grid-p") == []
-    assert store.get_job("grid-p")["status"] == "pending"
-
-
-def test_delete_job_removes_pair_children(store: SQLiteJobStore) -> None:
-    """Deleting a grid parent removes its child rows and their stores."""
-    child_ids = _seed_grid_parent_with_children(store)
-    store.save_grid_pair_result(child_ids[0], 0, {"pair_index": 0})
-
-    store.delete_job("grid-p")
-
-    assert not store.job_exists("grid-p")
-    for child_id in child_ids:
-        assert not store.job_exists(child_id)
-    assert store.get_grid_pair_results(child_ids[0]) == {}
-
-
-def test_list_finalizable_grid_parents(store: SQLiteJobStore) -> None:
-    """Only running parents whose children are ALL terminal are listed."""
-    child_ids = _seed_grid_parent_with_children(store)
-    store.update_job(child_ids[0], status="success")
-
-    assert store.list_finalizable_grid_parents() == []
-
-    store.update_job(child_ids[1], status="failed")
-    assert store.list_finalizable_grid_parents() == ["grid-p"]
-
-    store.update_job("grid-p", status="success")
-    assert store.list_finalizable_grid_parents() == []
-
-
-def test_delete_grid_pair_result_drops_single_row(store: SQLiteJobStore) -> None:
-    """The targeted per-pair delete leaves sibling results in place."""
-    store.create_job("grid-single", username="alice")
-    store.save_grid_pair_result("grid-single", 0, {"pair_index": 0})
-    store.save_grid_pair_result("grid-single", 1, {"pair_index": 1})
-
-    store.delete_grid_pair_result("grid-single", 0)
-
-    assert set(store.get_grid_pair_results("grid-single")) == {1}
-
-
 def test_update_job_unknown_field_raises_value_error(store: SQLiteJobStore) -> None:
     """Update job unknown field raises value error."""
     store.create_job("uf-1")
@@ -2083,17 +1907,17 @@ def test_progress_eviction_preserves_structural_events(store: SQLiteJobStore, mo
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
 
     store.create_job("evict-prog-3")
-    store.record_progress("evict-prog-3", "grid_pair_started", {"pair_index": 0})
+    store.record_progress("evict-prog-3", "lane_started", {"lane": 0})
     store.record_progress("evict-prog-3", "optimizer_progress", {"step": 0})
     store.record_progress("evict-prog-3", "optimizer_progress", {"step": 1})
     # Adding a 4th entry should evict the oldest optimizer_progress, not the
-    # structural grid_pair_started marker.
-    store.record_progress("evict-prog-3", "grid_pair_completed", {"pair_index": 0})
+    # structural lane_started marker.
+    store.record_progress("evict-prog-3", "lane_completed", {"lane": 0})
 
     events = store.get_progress_events("evict-prog-3")
     names = [e["event"] for e in events]
-    assert "grid_pair_started" in names
-    assert "grid_pair_completed" in names
+    assert "lane_started" in names
+    assert "lane_completed" in names
     # Exactly one optimizer_progress survived — the newer one.
     assert names.count("optimizer_progress") == 1
     surviving = next(e for e in events if e["event"] == "optimizer_progress")
@@ -2108,14 +1932,14 @@ def test_progress_eviction_structural_dropped_only_as_last_resort(
     monkeypatch.setattr(remote_mod, "PROGRESS_TRIM_SAMPLE_RATE", 1)
 
     store.create_job("evict-prog-4")
-    store.record_progress("evict-prog-4", "grid_pair_started", {"pair_index": 0})
-    store.record_progress("evict-prog-4", "baseline_evaluated", {"pair_index": 0})
+    store.record_progress("evict-prog-4", "lane_started", {"lane": 0})
+    store.record_progress("evict-prog-4", "baseline_evaluated", {"lane": 0})
     # Cap is full and no non-structural rows exist — oldest structural gets evicted.
-    store.record_progress("evict-prog-4", "optimized_evaluated", {"pair_index": 0})
+    store.record_progress("evict-prog-4", "optimized_evaluated", {"lane": 0})
 
     events = store.get_progress_events("evict-prog-4")
     names = [e["event"] for e in events]
-    assert "grid_pair_started" not in names
+    assert "lane_started" not in names
     assert "baseline_evaluated" in names
     assert "optimized_evaluated" in names
 
@@ -2405,47 +2229,28 @@ def test_requeue_for_resume_banks_finished_leg_runtime(store: SQLiteJobStore, mo
     assert job["accumulated_runtime_seconds"] == 95.0  # 65 + 30, the pause is never counted
 
 
-def test_gepa_checkpoints_are_isolated_per_grid_pair(store: SQLiteJobStore) -> None:
-    """A grid keeps an independent checkpoint per pair index; delete-all clears them."""
+def test_gepa_checkpoints_are_isolated_per_key(store: SQLiteJobStore) -> None:
+    """A job keeps an independent checkpoint per ``pair_index`` key."""
     store.create_job("g1")
     store.save_gepa_checkpoint("g1", b"P0", iteration=1, pair_index=0)
     store.save_gepa_checkpoint("g1", b"P1", iteration=2, pair_index=1)
-    assert {c.pair_index for c in store.list_gepa_checkpoints("g1")} == {0, 1}
+    assert store.get_gepa_checkpoint("g1", 0).data == b"P0"
     assert store.get_gepa_checkpoint("g1", 1).data == b"P1"
 
     store.delete_gepa_checkpoint("g1", 0)
-    assert {c.pair_index for c in store.list_gepa_checkpoints("g1")} == {1}
+    assert store.get_gepa_checkpoint("g1", 0) is None
     assert store.has_gepa_checkpoint("g1") is True
 
-    store.delete_all_gepa_checkpoints("g1")
-    assert store.list_gepa_checkpoints("g1") == []
+    store.delete_gepa_checkpoint("g1", 1)
     assert store.has_gepa_checkpoint("g1") is False
 
 
-def test_grid_pair_results_roundtrip(store: SQLiteJobStore) -> None:
-    """Completed grid pairs are stored, read as ``{index: result}``, and cleared."""
-    store.create_job("g2")
-    assert store.has_grid_pair_results("g2") is False
-    store.save_grid_pair_result("g2", 0, {"pair_index": 0, "optimized_test_metric": 0.8})
-    store.save_grid_pair_result("g2", 3, {"pair_index": 3})
-    assert store.has_grid_pair_results("g2") is True
-
-    results = store.get_grid_pair_results("g2")
-    assert set(results) == {0, 3}
-    assert results[0]["optimized_test_metric"] == 0.8
-
-    store.delete_grid_pair_results("g2")
-    assert store.has_grid_pair_results("g2") is False
-
-
-def test_delete_job_removes_grid_pair_results_and_pair_checkpoints(store: SQLiteJobStore) -> None:
-    """Deleting a grid job drops its per-pair checkpoints and stored pair results."""
+def test_delete_job_removes_checkpoints(store: SQLiteJobStore) -> None:
+    """Deleting a job drops its checkpoints."""
     store.create_job("g3")
-    store.save_gepa_checkpoint("g3", b"P0", iteration=1, pair_index=0)
-    store.save_grid_pair_result("g3", 1, {"pair_index": 1})
+    store.save_gepa_checkpoint("g3", b"P0", iteration=1)
     store.delete_job("g3")
     assert store.has_gepa_checkpoint("g3") is False
-    assert store.has_grid_pair_results("g3") is False
 
 
 def test_scan_jobs_for_analytics_trims_run_result(store: SQLiteJobStore) -> None:
@@ -2486,43 +2291,6 @@ def test_scan_jobs_for_analytics_trims_run_result(store: SQLiteJobStore) -> None
         "baseline_test_metric": 0.5,
         "optimized_test_metric": 0.75,
         "runtime_seconds": 12.5,
-    }
-
-
-def test_scan_jobs_for_analytics_grid_best_pair_subset(store: SQLiteJobStore) -> None:
-    """A grid row carries pair counters plus the trimmed best_pair metrics."""
-    store.create_job("an-grid", username="alice")
-    store.set_payload_overview(
-        "an-grid",
-        {"optimizer_name": "gepa", "optimization_type": "grid_search", "total_pairs": 4},
-    )
-    store.update_job(
-        "an-grid",
-        status="success",
-        result={
-            "completed_pairs": 3,
-            "failed_pairs": 1,
-            "best_pair": {
-                "baseline_test_metric": 0.4,
-                "optimized_test_metric": 0.9,
-                "runtime_seconds": 30.0,
-                "pair_index": 2,
-                "per_example_outputs": ["y" * 500] * 20,
-            },
-        },
-    )
-
-    [row] = store.scan_jobs_for_analytics()
-
-    assert row["payload_overview"]["total_pairs"] == 4
-    assert row["result"] == {
-        "completed_pairs": 3,
-        "failed_pairs": 1,
-        "best_pair": {
-            "baseline_test_metric": 0.4,
-            "optimized_test_metric": 0.9,
-            "runtime_seconds": 30.0,
-        },
     }
 
 

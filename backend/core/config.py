@@ -171,10 +171,6 @@ class Settings(BaseSettings):
     remote_db_url: SecretStr | None = Field(default=None, description="PostgreSQL connection string for remote storage")
 
     openai_api_key: SecretStr | None = Field(default=None, description="OpenAI API key for model access")
-    openai_api_base: str | None = Field(
-        default=None,
-        description=("Base URL of the OpenAI-compatible LLM gateway (LiteLLM reads the same env var for serving)."),
-    )
     transcription_api_key: SecretStr | None = Field(
         default=None,
         description=(
@@ -183,7 +179,6 @@ class Settings(BaseSettings):
             "dictation with a typed 503."
         ),
     )
-    anthropic_api_key: SecretStr | None = Field(default=None, description="Anthropic API key for Claude models")
 
     stripe_secret_key: SecretStr | None = Field(
         default=None,
@@ -205,11 +200,6 @@ class Settings(BaseSettings):
     )
     stripe_price_pack_pro: str = Field(
         default="", alias="STRIPE_PRICE_PACK_PRO", description="Stripe price id for the 'pro' one-time top-up pack."
-    )
-    stripe_price_pro_monthly: str = Field(
-        default="",
-        alias="STRIPE_PRICE_PRO_MONTHLY",
-        description="Stripe recurring price id for the Skynet Pro monthly plan. Unset hides the upgrade.",
     )
     app_public_url: str = Field(
         default="http://localhost:3000",
@@ -439,6 +429,36 @@ class Settings(BaseSettings):
         alias="GITHUB_OAUTH_REDIRECT_URI",
         description="Absolute URL of this backend's /connectors/github/oauth/callback as registered on the GitHub app. Unset derives it from the incoming request.",
     )
+    gitlab_oauth_client_id: str | None = Field(
+        default=None,
+        alias="GITLAB_OAUTH_CLIENT_ID",
+        description="Application id of the gitlab.com OAuth application used by the GitLab connector. Unset hides 'Continue with GitLab'; users can still paste a personal access token.",
+    )
+    gitlab_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        alias="GITLAB_OAUTH_CLIENT_SECRET",
+        description="Secret of the gitlab.com OAuth application. The worker also needs it, because GitLab access tokens expire after two hours and the worker refreshes them.",
+    )
+    gitlab_oauth_redirect_uri: str | None = Field(
+        default=None,
+        alias="GITLAB_OAUTH_REDIRECT_URI",
+        description="Absolute URL of this backend's /connectors/gitlab/oauth/callback as registered on the GitLab application. Unset derives it from the incoming request.",
+    )
+    bitbucket_oauth_client_id: str | None = Field(
+        default=None,
+        alias="BITBUCKET_OAUTH_CLIENT_ID",
+        description="Key of the Bitbucket Cloud OAuth consumer used by the Bitbucket connector. Unset hides 'Continue with Bitbucket'; users can still paste a Bitbucket OAuth access token.",
+    )
+    bitbucket_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        alias="BITBUCKET_OAUTH_CLIENT_SECRET",
+        description="Secret of the Bitbucket Cloud OAuth consumer. The worker also needs it, because Bitbucket access tokens expire after two hours and the worker refreshes them.",
+    )
+    bitbucket_oauth_redirect_uri: str | None = Field(
+        default=None,
+        alias="BITBUCKET_OAUTH_REDIRECT_URI",
+        description="Absolute URL of this backend's /connectors/bitbucket/oauth/callback as registered on the Bitbucket consumer. Unset derives it from the incoming request.",
+    )
     microsoft_oauth_client_id: str | None = Field(
         default=None,
         alias="MICROSOFT_OAUTH_CLIENT_ID",
@@ -517,11 +537,6 @@ class Settings(BaseSettings):
         alias="VERCEL_SANDBOX_IMAGE",
         description="Immutable container image the protected optimization sandbox boots from. The SDK's universal default does not contain Skynet's pinned optimizer, harness, and offline dependency set.",
     )
-    dspy_sandbox_image: str | None = Field(
-        default=None,
-        alias="DSPY_SANDBOX_IMAGE",
-        description="Immutable prebuilt backend image, addressed by @sha256, containing the exact deployed Python and optimizer dependencies for protected DSPy execution.",
-    )
     vercel_sandbox_max_lifetime_seconds: float = Field(
         default=2_700.0,
         alias="VERCEL_SANDBOX_MAX_LIFETIME_SECONDS",
@@ -559,6 +574,21 @@ class Settings(BaseSettings):
         default=None,
         alias="FIRECRAWL_API_KEY",
         description="Firecrawl API key. When set, the wizard agent gets web_search, fetch_url and crawl_site tools so it can search the web and read links the user gives it. Unset leaves the agent without web access.",
+    )
+    google_maps_api_key: SecretStr | None = Field(
+        default=None,
+        alias="GOOGLE_MAPS_API_KEY",
+        description="Google Maps Platform key with the Maps Grounding Lite API enabled. When set, runs can use the `maps` connector; the parent gateway holds the key and meters each call. Unset leaves the connector unavailable.",
+    )
+    browserbase_api_key: SecretStr | None = Field(
+        default=None,
+        alias="BROWSERBASE_API_KEY",
+        description="Browserbase API key. When set, runs can use the `browser` connector; the parent gateway holds the key and meters each call. Unset leaves the connector unavailable.",
+    )
+    browserbase_project_id: str | None = Field(
+        default=None,
+        alias="BROWSERBASE_PROJECT_ID",
+        description="Optional Browserbase project ID sent with the `browser` connector's requests.",
     )
     # Every *_CENTS variable still reads its pre-rename *_CREDITS name so existing deployments keep their values.
     openrouter_balance_floor_cents: int = Field(
@@ -727,18 +757,11 @@ class Settings(BaseSettings):
         alias="CONNECTOR_IMPORT_MAX_ROWS",
         description="Row cap for connectors that import records rather than files (database tables, LLM traces, Notion databases).",
     )
-    # Free and Pro budgets match ChatGPT Free (500 MB) and Plus (20 GB) storage
-    # (SKY-289). Binary units because formatStorageSize divides by 1024, so the
-    # meter shows a round "500 MB" and "20 GB".
+    # Binary units match formatStorageSize, so the meter shows a round "500 MB".
     user_storage_quota_bytes: int = Field(
         default=500 * 1024 * 1024,
         ge=1,
         description="Per-user unified storage budget in bytes across all of their Skynet data",
-    )
-    pro_storage_quota_bytes: int = Field(
-        default=20 * 1024 * 1024 * 1024,
-        ge=1,
-        description="Unified storage budget in bytes for an account on the Skynet Pro plan",
     )
     cancel_poll_interval: float = Field(
         default=1.0, ge=0.1, le=10.0, description="Seconds between cancel signal checks"
@@ -779,47 +802,6 @@ class Settings(BaseSettings):
         ),
         alias="JOB_STALL_TIMEOUT",
     )
-    gepa_eval_num_threads: int = Field(
-        default=8,
-        ge=1,
-        le=64,
-        description=(
-            "Eval/rollout thread count injected into GEPA when the submission "
-            "doesn't set num_threads. GEPA's own default is sequential "
-            "candidate evaluation, and runs are LM-latency-bound, so parallel "
-            "eval cuts wall-clock roughly linearly. An explicit user-supplied "
-            "num_threads always wins; job_lm_max_concurrency bounds the "
-            "multiplied total either way."
-        ),
-        alias="GEPA_EVAL_NUM_THREADS",
-    )
-    gepa_pxn_parents: int = Field(
-        default=1,
-        ge=1,
-        le=16,
-        description=(
-            "GEPA PxN batched sampling — parent count (p). Each reflective "
-            "iteration mutates p distinct parent candidates, drawing "
-            "gepa_pxn_proposals (n) proposals from each, and evaluates all p*n "
-            "as one batch. The default of 1 reproduces GEPA's classic "
-            "single-mutation sampling; raising p (or n) above 1 switches GEPA to "
-            "PxNSampling(p, n) — better wall-clock and generalization at higher "
-            "LM cost, bounded per job by job_lm_max_concurrency. A submission "
-            "that supplies its own gepa_kwargs.sampling_strategy always wins."
-        ),
-        alias="GEPA_PXN_PARENTS",
-    )
-    gepa_pxn_proposals: int = Field(
-        default=1,
-        ge=1,
-        le=16,
-        description=(
-            "GEPA PxN batched sampling — proposals per parent (n); see "
-            "gepa_pxn_parents. Raising n (or p) above 1 activates "
-            "PxNSampling(p, n). Defaults to 1 (classic single-mutation GEPA)."
-        ),
-        alias="GEPA_PXN_PROPOSALS",
-    )
     react_native_tool_calling: bool = Field(
         default=False,
         description=(
@@ -842,38 +824,12 @@ class Settings(BaseSettings):
         ge=0,
         le=256,
         description=(
-            "Per-job-child ceiling on concurrent LM calls. Grid pair threads "
-            "times GEPA eval threads multiply, and a user can pass any "
+            "Per-job-child ceiling on concurrent LM calls. A user can pass any "
             "num_threads in optimizer kwargs; this gate keeps one job from "
             "spraying the provider with enough parallel calls to trip rate "
             "limits and fail the run. 0 disables the gate."
         ),
         alias="JOB_LM_MAX_CONCURRENCY",
-    )
-    grid_pair_max_workers: int = Field(
-        default=4,
-        ge=1,
-        le=16,
-        description=(
-            "Concurrent (generation, reflection) pairs per grid-search job "
-            "child. Total LM concurrency in the child is still capped by "
-            "job_lm_max_concurrency regardless of this value."
-        ),
-        alias="GRID_PAIR_MAX_WORKERS",
-    )
-    grid_distributed_pairs: bool = Field(
-        default=True,
-        description=(
-            "Fan a multi-pair grid search out as one claimable job row per "
-            "pair so pairs spread across the whole worker fleet instead of "
-            "sharing one child process. Off = classic all-pairs-in-one-child "
-            "execution; flipping the flag never re-shapes a grid already in "
-            "flight."
-        ),
-        alias="GRID_DISTRIBUTED_PAIRS",
-    )
-    job_run_start_method: Literal["fork", "spawn", "forkserver"] = Field(
-        default="fork", description="Multiprocessing start method for job execution"
     )
     # Ceiling (pool_size + max_overflow = 20 + 20 = 40) is aligned with
     # Starlette's anyio threadpool width (40) so a burst of concurrent sync DB
@@ -941,7 +897,6 @@ class Settings(BaseSettings):
         description="Server port",
         validation_alias=AliasChoices("API_PORT", "PORT"),
     )
-    reload: bool = Field(default=False, description="Enable auto-reload on code changes (dev only)")
 
     cors_origins: str = Field(
         default="http://localhost:3000,http://localhost:3001",
@@ -964,18 +919,6 @@ class Settings(BaseSettings):
             "fd00:ec2::254) are blocked unconditionally regardless."
         ),
     )
-    program_cache_max_entries: int = Field(
-        # 32 (was 128): each entry is a full deserialized program (MBs), the
-        # cache lives in the fork-parent API process, and beta traffic serves
-        # far fewer distinct programs than 32 at a time.
-        default=32,
-        ge=1,
-        description=(
-            "Maximum number of compiled DSPy programs held in the in-process "
-            "LRU cache. Each entry is roughly the size of one optimized "
-            "program; set to bound the API process resident set."
-        ),
-    )
     model_catalog_ttl_seconds: float = Field(
         default=1800.0,
         ge=0.0,
@@ -984,8 +927,6 @@ class Settings(BaseSettings):
             "re-evaluating provider key availability. 0 disables caching."
         ),
     )
-
-    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
 
     alert_webhook_url: str = Field(
         default="",
@@ -1097,6 +1038,11 @@ class Settings(BaseSettings):
         default="",
         description="Optional custom base URL for the generalist agent LM (an OpenAI-compatible gateway)",
     )
+    pi_binary: str = Field(default="pi", description="Name or path of the Pi agent harness executable")
+    github_mcp_binary: str = Field(
+        default="github-mcp-server",
+        description="Name or path of the github-mcp-server executable that serves the setup agent's GitHub tools",
+    )
 
     interview_agent_model: str = Field(
         default="",
@@ -1110,17 +1056,24 @@ class Settings(BaseSettings):
     rule_watch_model: str = Field(
         default="",
         description=(
-            "Model id of the fast judge that watches a repository run's recent "
-            "actions against its plain-language rules. Empty follows the model "
-            "catalog's best-value default."
+            "Model id of the watch hook that reads a repository run's recent "
+            "steps against its intent and plain-language rules. Empty follows "
+            "the model catalog's best-value default. A run may name its own."
         ),
     )
-    rule_judge_model: str = Field(
-        default="",
+
+    # The watch hook defaults (SKY-349); a run's own setting overrides them.
+    rule_watch_enabled: bool = Field(
+        default=False,
+        description="Whether a repository run's watch hook is on when the run does not say.",
+    )
+    rule_watch_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
         description=(
-            "Model id of the judge that reads each repository version's full diff "
-            "against its plain-language rules before it is scored. Empty follows "
-            "the model catalog's strongest model."
+            "Lowest confidence at which a watch hook verdict other than ok "
+            "warns the agent, when the run does not set its own."
         ),
     )
 
@@ -1272,11 +1225,6 @@ class Settings(BaseSettings):
         return self
 
     max_jobs_per_user: int = Field(default=100, ge=1, description="Default per-user job cap")
-    pro_max_jobs_per_user: int = Field(
-        default=1000,
-        ge=1,
-        description="Saved-job cap for an account on the Skynet Pro plan (admin overrides still win)",
-    )
     max_total_users: int = Field(
         default=0,
         ge=0,
@@ -1300,19 +1248,6 @@ class Settings(BaseSettings):
         description=(
             "Cap on a single user's concurrently active runs (pending/validating/running/"
             "paused); further submissions are refused until one finishes. 0 disables the cap."
-        ),
-    )
-    pro_max_concurrent_jobs_per_user: int = Field(
-        default=20,
-        ge=0,
-        description="Concurrent active-run cap for an account on the Skynet Pro plan. 0 disables the cap.",
-    )
-    pro_past_due_grace_days: int = Field(
-        default=7,
-        ge=0,
-        description=(
-            "Days a Pro subscription keeps its limits after Stripe marks it past_due (a failed renewal). "
-            "Past the grace the account falls back to the free limits until payment succeeds."
         ),
     )
     global_daily_spend_ceiling_cents: int = Field(
@@ -1348,7 +1283,7 @@ class Settings(BaseSettings):
     submissions_paused: bool = Field(
         default=False,
         description=(
-            "Operator kill-switch: when true, all new run/grid-search submissions are refused "
+            "Operator kill-switch: when true, all new run submissions are refused "
             "(in-flight runs continue). An instant emergency brake independent of spend."
         ),
     )
@@ -1364,7 +1299,7 @@ class Settings(BaseSettings):
         default=30,
         ge=0,
         description=(
-            "Per-account cap on run/grid-search submissions per rolling minute, enforced across "
+            "Per-account cap on run submissions per rolling minute, enforced across "
             "replicas via Redis. Bounds a runaway script or abusive key. 0 disables the cap."
         ),
     )
@@ -1614,6 +1549,21 @@ class Settings(BaseSettings):
         """
         if self.local_mode and self.byok_vault_key is None and self.local_state_dir:
             self.byok_vault_key = SecretStr(load_or_create_vault_key(self.local_state_dir))
+        return self
+
+    @model_validator(mode="after")
+    def _local_mcp_url(self) -> Settings:
+        """Serve the remote MCP server on the Mac app's own loopback port.
+
+        The internal agent already uses ``/mcp`` on this host, so the local
+        server takes ``/remote-mcp``. An explicit ``MCP_RESOURCE_URL`` wins.
+
+        Returns:
+            The settings instance, with ``mcp_resource_url`` set in local mode
+            when a state directory is configured.
+        """
+        if self.local_mode and not self.mcp_resource_url.strip() and self.local_state_dir:
+            self.mcp_resource_url = f"http://{self.api_host}:{self.port}/remote-mcp"
         return self
 
     @property

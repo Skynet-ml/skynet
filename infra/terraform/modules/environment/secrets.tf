@@ -38,7 +38,6 @@ locals {
     "NOTION_OAUTH_CLIENT_SECRET",
     "NOTION_OAUTH_REDIRECT_URI",
     "OPENROUTER_BALANCE_FLOOR_CREDITS",
-    "STRIPE_PRICE_PRO_MONTHLY",
     "SUPABASE_OAUTH_CLIENT_ID",
     "SUPABASE_OAUTH_CLIENT_SECRET",
     "SUPABASE_OAUTH_REDIRECT_URI",
@@ -50,13 +49,18 @@ locals {
     "ALERT_EMAIL",
     "ALERT_ENVIRONMENT",
     "BACKEND_AUTH_SECRET",
+    "BITBUCKET_OAUTH_CLIENT_ID",
+    "BITBUCKET_OAUTH_CLIENT_SECRET",
+    "BITBUCKET_OAUTH_REDIRECT_URI",
     "BYOK_VAULT_KEY",
-    "DSPY_SANDBOX_IMAGE",
     "EMBEDDINGS_API_KEY",
     "EMBEDDINGS_BASE_URL",
     "EMBEDDINGS_DIM",
     "EMBEDDINGS_MODEL",
     "GENERALIST_AGENT_MCP_URL",
+    "GITLAB_OAUTH_CLIENT_ID",
+    "GITLAB_OAUTH_CLIENT_SECRET",
+    "GITLAB_OAUTH_REDIRECT_URI",
     "GLOBAL_DAILY_SPEND_CEILING_CREDITS",
     "LITELLM_PROXY_API_KEY",
     "MAX_MONTHLY_ACTIVE_USERS",
@@ -89,8 +93,6 @@ locals {
     "VERCEL_TOKEN",
   ]
 
-  worker_only_secret_keys = ["JOB_RUN_START_METHOD"]
-
   backend_secret_keys = sort(distinct(concat(
     local.shared_app_secret_keys,
     local.backend_only_secret_keys,
@@ -99,7 +101,6 @@ locals {
 
   worker_secret_keys = sort(distinct(concat(
     local.shared_app_secret_keys,
-    local.worker_only_secret_keys,
     var.worker_secret_keys_extra,
   )))
 

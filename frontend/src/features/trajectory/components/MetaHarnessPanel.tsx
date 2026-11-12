@@ -12,8 +12,6 @@ import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import {
   extractCandidates,
   extractMinibatch,
-  extractValset,
-  extractValsetOutputs,
 } from "../lib/extract-events";
 import { layoutTrajectory } from "../lib/layout";
 import {
@@ -29,18 +27,13 @@ import {
 } from "../lib/meta-harness";
 import { displayCandidateId, type BlackboxTrajectoryContext } from "../lib/types";
 import { rememberTrajectoryView } from "../lib/climb-view-hint";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { AgentRunViewer } from "./AgentRunViewer";
 import { MetaHarnessClimb } from "./MetaHarnessClimb";
 import { TimelineScrubber } from "./TimelineScrubber";
 import { TrajectoryDrawer, type DrawerSelection } from "./TrajectoryDrawer";
 
 const NEWEST_HIGHLIGHT_MS = 2200;
-
-const BLACKBOX_FALLBACK: BlackboxTrajectoryContext = {
-  recipe: null,
-  hasCases: false,
-  rendersByText: new Map(),
-};
 
 function versionText(index: number): string {
   return formatMsg("meta_harness.version", { id: displayCandidateId(String(index)) });
@@ -68,7 +61,9 @@ export interface MetaHarnessPanelProps {
   engine: string;
   // Run configuration of the black-box run, forwarded to the drawer so it
   // names versions by kind and shows per-case scores only when cases exist.
-  blackbox?: BlackboxTrajectoryContext | null;
+  blackbox: BlackboxTrajectoryContext;
+  // Where the run lives; the agent-run drawer reads from the same backend.
+  source?: ApiSource;
 }
 
 /**
@@ -79,21 +74,18 @@ export interface MetaHarnessPanelProps {
  * with the best so far as a staircase, and a version's drawer shows how it did
  * case by case, each score opening the agent run behind it.
  */
-export function MetaHarnessPanel({ job, engine, blackbox }: MetaHarnessPanelProps) {
+export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessPanelProps) {
   const live = isLive(job);
   const optimizationId = job.optimization_id;
 
-  const blackboxCtx = blackbox ?? BLACKBOX_FALLBACK;
-  const { candidates, caseScores, valsetRows, minibatch, valsetOutputs, agentRuns } =
+  const { candidates, caseScores, minibatch, agentRuns } =
     useMemo(() => {
       const events = job.progress_events ?? [];
       const scoped = scopeToVersionLane(events);
       return {
         candidates: extractCandidates(scoped),
         caseScores: extractCaseScores(scoped),
-        valsetRows: extractValset(events),
         minibatch: extractMinibatch(scoped),
-        valsetOutputs: extractValsetOutputs(scoped),
         agentRuns: extractAgentRuns(scoped),
       };
     }, [job.progress_events]);
@@ -288,15 +280,14 @@ export function MetaHarnessPanel({ job, engine, blackbox }: MetaHarnessPanelProp
             run={openRun}
             open={runOpen}
             onOpenChange={setRunOpen}
+            source={source}
           />
           <TrajectoryDrawer
             selection={drawerSelection}
             open={drawerOpen}
             onOpenChange={setDrawerOpen}
-            valsetRows={valsetRows}
             minibatch={minibatch}
-            blackbox={blackboxCtx}
-            valsetOutputs={valsetOutputs}
+            blackbox={blackbox}
             caseRuns={caseRuns}
             onOpenRun={handleOpenRun}
           />

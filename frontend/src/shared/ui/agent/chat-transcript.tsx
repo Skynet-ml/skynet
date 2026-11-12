@@ -7,19 +7,17 @@ import type { ActivityKind } from "@/shared/lib/activity-summary";
 
 import { formatMsg } from "@/shared/lib/messages";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { cn } from "@/shared/lib/utils";
 
 import { AgentBubble } from "./agent-bubble";
 import { MessageActions } from "./message-actions";
 import { startsTimeGroup, timeDividerLabel } from "./message-time";
+import { pairMessages, type Pair as TranscriptPair } from "./transcript-pairs";
 import { TtftIndicator } from "./ttft-indicator";
 import { UserBubble, UserBubbleEditor } from "./user-bubble";
 import type { AgentMessage, AgentThinking, AgentToolCall } from "./types";
 
-type Pair = {
-  key: string;
-  user: { msg: AgentMessage; index: number } | null;
-  agent: AgentMessage | null;
-};
+type Pair = TranscriptPair<AgentMessage>;
 
 interface ChatTranscriptState {
   isEditingAny: boolean;
@@ -34,6 +32,8 @@ interface ChatTranscriptProps {
   thinking?: AgentThinking;
   renderToolCall?: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   isStepCall?: (call: AgentToolCall) => boolean;
+  /** Cards that stay shown when a block's history folds; without it, every card does. */
+  isPinnedCall?: (call: AgentToolCall) => boolean;
   stepKind?: (call: AgentToolCall) => ActivityKind;
   toolCallsBeforeContent?: boolean;
   onRunCode?: (code: string, language: string) => void;
@@ -56,6 +56,7 @@ export function ChatTranscript({
   thinking,
   renderToolCall,
   isStepCall,
+  isPinnedCall,
   stepKind,
   toolCallsBeforeContent,
   onRunCode,
@@ -70,26 +71,7 @@ export function ChatTranscript({
   const [editDraft, setEditDraft] = React.useState("");
   const isEditingAny = editingIndex !== null;
 
-  const pairs = React.useMemo<Pair[]>(() => {
-    const result: Pair[] = [];
-    let currentUser: { msg: AgentMessage; index: number } | null = null;
-    let seq = 0;
-    messages.forEach((m, idx) => {
-      if (m.role === "user") {
-        if (currentUser) {
-          result.push({ key: `t-${seq++}`, user: currentUser, agent: null });
-        }
-        currentUser = m.hidden ? null : { msg: m, index: idx };
-      } else {
-        result.push({ key: `t-${seq++}`, user: currentUser, agent: m });
-        currentUser = null;
-      }
-    });
-    if (currentUser) {
-      result.push({ key: `t-${seq++}`, user: currentUser, agent: null });
-    }
-    return result;
-  }, [messages]);
+  const pairs = React.useMemo(() => pairMessages(messages), [messages]);
 
   const latestAgentKey = React.useMemo(() => {
     for (let i = pairs.length - 1; i >= 0; i--) {
@@ -194,15 +176,17 @@ export function ChatTranscript({
           ))}
 
         {agentMsg && !isEditing && (
-          <div className="flex">
+          <div className="flex group/turn">
             <div className="flex w-full min-w-0 flex-col items-start gap-1.5 pt-1">
               {isWaitingFirstToken && <TtftIndicator />}
               <AgentBubble
                 msg={agentMsg}
+                earlier={pair.earlier}
                 thinking={pair.key === latestAgentKey ? thinking : undefined}
                 streaming={isStreamingThisPair}
                 renderToolCall={renderToolCall}
                 isStepCall={isStepCall}
+                isPinnedCall={isPinnedCall}
                 stepKind={stepKind}
                 toolCallsBeforeContent={toolCallsBeforeContent}
                 onRunCode={onRunCode}
@@ -224,6 +208,12 @@ export function ChatTranscript({
                           handleRegenerate(pair.user.index, pair.user.msg.content)
                       : undefined
                   }
+                  className={cn(
+                    "opacity-0 transition-opacity group-hover/turn:opacity-100 focus-within:opacity-100",
+                    // Tailwind's `hover:` media query covers the `group-hover:`
+                    // spelling, so touch screens (iPad) need their own.
+                    "any-pointer-coarse:opacity-100",
+                  )}
                 />
               )}
             </div>
@@ -247,11 +237,10 @@ export function ChatTranscript({
     (latest, p) => Math.max(latest, p.user?.msg.createdAt ?? p.agent?.createdAt ?? 0),
     now,
   );
-  let prevTime: number | undefined;
-  const dividers = visiblePairs.map((pair) => {
-    const time = pair.user?.msg.createdAt ?? pair.agent?.createdAt;
+  const times = visiblePairs.map((pair) => pair.user?.msg.createdAt ?? pair.agent?.createdAt);
+  const dividers = times.map((time, i) => {
+    const prevTime = times.slice(0, i).findLast((t) => t != null);
     const opens = startsTimeGroup(prevTime, time);
-    if (time != null) prevTime = time;
     return opens && time != null
       ? timeDividerLabel(time, today, locale, {
           today: (t) => formatMsg("shared.agent.today_at", { time: t }),

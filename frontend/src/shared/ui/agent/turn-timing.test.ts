@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  blockWorkMs,
   earliestStart,
   finishedTurnMs,
   nextTurnClock,
@@ -44,6 +45,44 @@ test("a retried turn's clock starts at the retry, not at the failed attempt", ()
     finishedTurnMs(retried.start, [], [{ call: { startedAt: 346_000, endedAt: 367_000 } }]),
     21_000,
   );
+});
+
+// The setup agent's turn: thinking, a fetch_url call, more thinking, then a
+// question for the user. The backend measured 15.6s.
+const asked = {
+  thinking: [
+    { startedAt: 1_000, endedAt: 7_000 },
+    { startedAt: 7_600, endedAt: 13_000 },
+  ],
+  steps: [{ call: { startedAt: 7_000, endedAt: 7_600 } }],
+  durationMs: 15_600,
+};
+const HOUR = 3_600_000;
+
+test("a finished turn that asked the user shows its own work", () => {
+  const turn = { ...asked, start: turnStart(asked.thinking, asked.steps) };
+  assert.equal(blockWorkMs([], turn, null), 15_600);
+});
+
+test("a work block counts each turn's own work, not the wait between them", () => {
+  // The user answers on the wizard's next screen 57 minutes later; that
+  // screen's turn joins the block.
+  const later = 57 * 60_000;
+  const next = {
+    thinking: [{ startedAt: later, endedAt: later + 4_000 }],
+    steps: [{ call: { startedAt: later + 4_000, endedAt: later + 5_000 } }],
+    durationMs: 6_000,
+  };
+  assert.equal(blockWorkMs([asked], { ...next, start: later }, null), 21_600);
+});
+
+test("the hour the user took before the next turn never shows on its live timer", () => {
+  const start = HOUR;
+  const live = { thinking: [{ startedAt: start, endedAt: null }], steps: [], start };
+  assert.equal(blockWorkMs([asked], live, start + 3_000), 18_600);
+  assert.equal(blockWorkMs([], live, start + 3_000), 3_000);
+  // A clock that reads before the start (a stale tick) shows no negative time.
+  assert.equal(blockWorkMs([asked], live, start - 500), 15_600);
 });
 
 test("a running turn's clock keeps its earliest start", () => {

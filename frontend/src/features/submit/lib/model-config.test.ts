@@ -13,8 +13,36 @@ registerHooks({
   },
 });
 
-const { economyEligible, keepEconomy, prepareModelConfig } = await import("./model-config.ts");
+const { economyEligible, keepEconomy, prepareModelConfig, runnableEffort, usesEffortSlider } =
+  await import("./model-config.ts");
 
+void test("only a local CLI model gets the effort slider", () => {
+  assert.equal(usesEffortSlider("subscription", true), true);
+  // With no default level, the slider's default stop would turn thinking off.
+  assert.equal(usesEffortSlider("subscription", false), false);
+  assert.equal(usesEffortSlider("byok", true), false);
+  assert.equal(usesEffortSlider("managed", true), false);
+  assert.equal(usesEffortSlider(undefined, true), false);
+});
+
+void test("a saved level becomes the level the backend runs for the CLI", () => {
+  const opus45 = ["low", "medium", "high"];
+  // The backend runs Max and a retired level at the model's top level.
+  assert.equal(runnableEffort("max", opus45), "high");
+  assert.equal(runnableEffort("ultracode", opus45), "high");
+  assert.equal(runnableEffort("ultra", [...opus45, "xhigh", "max"]), "max");
+  assert.equal(runnableEffort("max", [...opus45, "xhigh", "max"]), "max");
+  assert.equal(runnableEffort("medium", opus45), "medium");
+  // A level saved for another model runs the CLI default.
+  assert.equal(runnableEffort("xhigh", opus45), undefined);
+  // A model with no levels runs no saved level.
+  assert.equal(runnableEffort("high", []), undefined);
+  // No CLI has an off level; the backend drops "none" and runs the CLI default.
+  assert.equal(runnableEffort("none", opus45), undefined);
+  assert.equal(runnableEffort(undefined, opus45), undefined);
+  // Before the CLI list loads, and for other sources, the saved level stays.
+  assert.equal(runnableEffort("max", undefined), "max");
+});
 const managed = { name: "openai/gpt-default", economy_mode: true };
 const globals = globalThis as { window?: unknown };
 

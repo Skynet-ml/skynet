@@ -61,29 +61,3 @@ export function CanvasControlButton({
     </TooltipButton>
   );
 }
-
-/** Current zoom percentage; clicking it resets the zoom to 100%. */
-export function CanvasZoomReadout({
-  zoom,
-  label,
-  onClick,
-}: {
-  zoom: number;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <TooltipButton tooltip={label}>
-      <button
-        type="button"
-        onClick={onClick}
-        className={cn(
-          "h-8 min-w-12 cursor-pointer px-1 text-center text-[0.6875rem] font-medium tabular-nums text-muted-foreground transition-colors hover:text-foreground",
-          CANVAS_FOCUS_RING,
-        )}
-      >
-        {Math.round(zoom * 100)}%
-      </button>
-    </TooltipButton>
-  );
-}

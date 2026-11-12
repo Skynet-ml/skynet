@@ -42,19 +42,6 @@ interface ByokContextValue {
 
 const ByokContext = React.createContext<ByokContextValue | null>(null);
 
-type ByokKeysSnapshot = Pick<ByokContextValue, "keys" | "loading" | "failed">;
-
-let snapshot: ByokKeysSnapshot | null = null;
-
-/**
- * The mounted provider's key state, for code outside React (agent requests),
- * so a request decides from the same keys the composer menu shows. Null when
- * no provider is mounted.
- */
-export function peekByokKeys(): ByokKeysSnapshot | null {
-  return snapshot;
-}
-
 /** Map a backend masked-connection response onto the UI's ProviderKey shape. */
 function toProviderKey(r: ProviderKeyResponse): ProviderKey {
   return {
@@ -107,16 +94,6 @@ export function ByokKeysProvider({
   // Bumped when a save, verify, or remove sets the keys: a list fetch that
   // started before then may hold the older server list, so it is dropped.
   const keysGen = React.useRef(0);
-
-  React.useEffect(() => {
-    snapshot = { keys, loading, failed };
-  }, [keys, loading, failed]);
-  React.useEffect(
-    () => () => {
-      snapshot = null;
-    },
-    [],
-  );
 
   const mounted = React.useRef(true);
   React.useEffect(() => {

@@ -2,15 +2,15 @@
 
 import * as React from "react";
 import dynamic from "next/dynamic";
-import { PencilSimple } from "@/shared/ui/icons";
+import { ChatText, ListChecks, PencilSimple } from "@/shared/ui/icons";
 
 import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
 
 import { autoResizeTextarea } from "./auto-resize";
+import { automaticTurnBody } from "./automatic-turn";
 import { Textarea } from "@/shared/ui/primitives/textarea";
 import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 
@@ -18,6 +18,40 @@ import { CollapsibleMessage } from "./collapsible-message";
 import { MessageTime } from "./message-actions";
 import { PastedTextCard } from "./pasted-text-card";
 import { joinPastes, shouldAttachPaste, splitPastes, type SplitMessage } from "./pasted-text";
+import { joinLineComments, splitLineComments, type LineComment } from "./line-comments";
+
+/** Opens a file in the Changes pane; null where no pane shows the draft. */
+export const LineCommentLinkContext = React.createContext<((path: string) => void) | null>(null);
+
+// A sent line comment: its file and line link to the diff, and its text sits below.
+function SentLineComment({ comment }: { comment: LineComment }) {
+  const open = React.useContext(LineCommentLinkContext);
+  const where = `${comment.path}:${comment.line}`;
+  return (
+    <div className="max-w-full rounded-xl border border-border bg-card px-3 py-2 text-xs">
+      <div className="flex items-center gap-1.5 text-muted-foreground">
+        <ChatText className="size-3.5 shrink-0" aria-hidden />
+        {open ? (
+          <button
+            type="button"
+            dir="ltr"
+            onClick={() => open(comment.path)}
+            className="min-w-0 cursor-pointer truncate font-mono hover:text-foreground hover:underline"
+          >
+            {where}
+          </button>
+        ) : (
+          <span dir="ltr" className="min-w-0 truncate font-mono">
+            {where}
+          </span>
+        )}
+      </div>
+      <p dir="auto" className="mt-1 whitespace-pre-wrap text-foreground">
+        {comment.text}
+      </p>
+    </div>
+  );
+}
 
 /** Messages sent before cards existed show a long body as a card too. */
 function splitSent(content: string): SplitMessage {
@@ -34,9 +68,9 @@ const MessageMarkdown = dynamic(() => import("./message-markdown").then((m) => m
 });
 
 /** Pill button styles for the edit-and-resend row under a user message. */
-export const USER_BUBBLE_EDIT_CANCEL_CLASS =
+const USER_BUBBLE_EDIT_CANCEL_CLASS =
   "text-[0.75rem] font-medium text-foreground/80 hover:text-foreground bg-card border border-border hover:bg-muted px-3.5 py-1.5 rounded-full transition-all duration-150 cursor-pointer active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 focus-visible:ring-offset-1";
-export const USER_BUBBLE_EDIT_SEND_CLASS =
+const USER_BUBBLE_EDIT_SEND_CLASS =
   "text-[0.75rem] font-medium text-primary-foreground bg-primary-fill hover:bg-primary-hover px-4 py-1.5 rounded-full transition-all duration-150 cursor-pointer active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100";
 
 interface UserBubbleProps {
@@ -50,7 +84,10 @@ interface UserBubbleProps {
 // The user's turns sit at the end side as bubbles; the agent's answers sit
 // at the start side with no bubble. Logical classes mirror both in RTL.
 export function UserBubble({ content, onEdit, editable = true, createdAt }: UserBubbleProps) {
-  const { text, pastes, files } = splitSent(content);
+  const automatic = automaticTurnBody(content);
+  if (automatic !== null) return <AutomaticBubble body={automatic} createdAt={createdAt} />;
+  const { rest, comments } = splitLineComments(content);
+  const { text, pastes, files } = splitSent(rest);
 
   return (
     <div className="flex justify-end group/user">
@@ -65,6 +102,9 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
             ))}
           </div>
         )}
+        {comments.map((comment, i) => (
+          <SentLineComment key={`comment-${i}`} comment={comment} />
+        ))}
         {text && (
           <div
             className="max-w-full rounded-[22px] rounded-ee-[4px] bg-primary-fill text-primary-foreground px-4 py-2.5 text-sm leading-[1.45]"
@@ -77,38 +117,73 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
             </CollapsibleMessage>
           </div>
         )}
-        <div className="flex items-center gap-0.5 -me-1">
-          {/* Copy (always) + edit (when editable) show on hover, like the
-              assistant reply's actions; the send time stays visible. */}
-          <div
-            className={cn(
-              "flex items-center gap-0.5",
-              "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
-              // The global coarse-pointer reveal only matches the unnamed
-              // `group-hover:` spelling, so touch screens (iPad) need their own.
-              "any-pointer-coarse:opacity-100",
-            )}
-          >
+        {/* Copy, edit and the send time show on hover, like the assistant
+            reply's actions. */}
+        <div
+          className={cn(
+            "flex items-center gap-0.5 -me-1",
+            "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
+            // The global coarse-pointer reveal only matches the unnamed
+            // `group-hover:` spelling, so touch screens (iPad) need their own.
+            "any-pointer-coarse:opacity-100",
+          )}
+        >
+          <div className="flex items-center gap-0.5">
             <CopyButton
               text={content}
               ariaLabel={msg("shared.agent.copy")}
               copiedAriaLabel={msg("shared.agent.copied")}
             />
             {editable && onEdit && (
-              <TooltipButton tooltip={msg("shared.agent.edit_and_resend")} side="top">
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={onEdit}
-                  aria-label={msg("shared.agent.edit_and_resend")}
-                >
-                  <PencilSimple className="size-3.5" />
-                </Button>
-              </TooltipButton>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                onClick={onEdit}
+                aria-label={msg("shared.agent.edit_and_resend")}
+                autoTooltip={false}
+              >
+                <PencilSimple className="size-3.5" />
+              </Button>
             )}
           </div>
           <MessageTime createdAt={createdAt} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A turn the app sent by itself (a failed setup check): it sits where the
+ * user's turns sit, but as an outlined card with an "Automatic" label, and the
+ * user cannot edit it.
+ */
+function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number }) {
+  return (
+    <div className="flex justify-end group/user">
+      <div className="flex max-w-[80%] flex-col items-end gap-1.5">
+        <div
+          className="max-w-full rounded-2xl rounded-ee-[4px] border border-dashed border-border bg-muted/40 px-4 py-2.5 text-sm leading-[1.45] text-foreground"
+          dir="auto"
+        >
+          <p className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <ListChecks className="size-3.5 shrink-0" aria-hidden="true" />
+            {msg("shared.agent.automatic")}
+          </p>
+          <CollapsibleMessage>
+            <React.Suspense fallback={<span className="whitespace-pre-wrap">{body}</span>}>
+              <MessageMarkdown content={body} />
+            </React.Suspense>
+          </CollapsibleMessage>
+        </div>
+        <span
+          className={cn(
+            "opacity-0 group-hover/user:opacity-100 transition-opacity",
+            "any-pointer-coarse:opacity-100",
+          )}
+        >
+          <MessageTime createdAt={createdAt} />
+        </span>
       </div>
     </div>
   );
@@ -130,7 +205,10 @@ export function UserBubbleEditor({
   disabled,
 }: UserBubbleEditorProps) {
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
-  const draft = splitPastes(value);
+  // Line comments stay on the message while the user edits its text.
+  const { rest, comments } = splitLineComments(value);
+  const draft = splitPastes(rest);
+  const change = (next: SplitMessage) => onChange(joinLineComments(joinPastes(next), comments));
 
   React.useEffect(() => {
     autoResizeTextarea(textareaRef.current);
@@ -146,9 +224,7 @@ export function UserBubbleEditor({
                 key={`file-${i}`}
                 name={file.name}
                 text={file.text}
-                onRemove={() =>
-                  onChange(joinPastes({ ...draft, files: draft.files.filter((_, j) => j !== i) }))
-                }
+                onRemove={() => change({ ...draft, files: draft.files.filter((_, j) => j !== i) })}
               />
             ))}
             {draft.pastes.map((paste, i) => (
@@ -156,12 +232,10 @@ export function UserBubbleEditor({
                 key={i}
                 text={paste}
                 onRemove={() =>
-                  onChange(
-                    joinPastes({
-                      ...draft,
-                      pastes: draft.pastes.filter((_, j) => j !== i),
-                    }),
-                  )
+                  change({
+                    ...draft,
+                    pastes: draft.pastes.filter((_, j) => j !== i),
+                  })
                 }
               />
             ))}
@@ -172,7 +246,7 @@ export function UserBubbleEditor({
             ref={textareaRef}
             value={draft.text}
             onChange={(e) => {
-              onChange(joinPastes({ ...draft, text: e.target.value }));
+              change({ ...draft, text: e.target.value });
               autoResizeTextarea(e.target);
             }}
             onKeyDown={(e) => {

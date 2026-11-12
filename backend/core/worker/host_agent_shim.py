@@ -278,6 +278,25 @@ def _fail(code: str, message: str, reset_at: str | None = None) -> int:
     return 3 if code == RATE_LIMITED_CODE else 2
 
 
+def reply_refusals(document: dict[str, Any]) -> list[dict[str, str]]:
+    """Keep only the tool and the path kind of each refusal the parent reports.
+
+    Args:
+        document: The parent's reply.
+
+    Returns:
+        One ``{"tool", "kind"}`` entry per well-formed refusal.
+    """
+    refusals = document.get("refusals")
+    if not isinstance(refusals, list):
+        return []
+    return [
+        {"tool": entry["tool"], "kind": entry["kind"]}
+        for entry in refusals
+        if isinstance(entry, dict) and isinstance(entry.get("tool"), str) and isinstance(entry.get("kind"), str)
+    ]
+
+
 def main() -> int:
     """Run one host-CLI proposer turn for the current workspace.
 
@@ -326,6 +345,7 @@ def main() -> int:
                     "input_tokens": int(usage.get("prompt_tokens") or 0),
                     "output_tokens": int(usage.get("completion_tokens") or 0),
                 },
+                "refusals": reply_refusals(document),
             }
         ),
         flush=True,

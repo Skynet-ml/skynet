@@ -8,7 +8,6 @@ Each test works in its own schema and drops it afterwards.
 
 from __future__ import annotations
 
-import base64
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -33,9 +32,6 @@ pytestmark = pytest.mark.skipif(
     reason="Set APP_BUDGET_TEST_DB_URL to an explicitly disposable PostgreSQL database.",
 )
 
-_SIGNATURE_CODE = "class QA(dspy.Signature):\n    question = dspy.InputField()\n    answer = dspy.OutputField()"
-_PROGRAM_STATE = {"predict": {"signature": {"instructions": "Answer briefly."}, "demos": []}}
-
 
 class _SchemaJobStore(RemoteDBJobStore):
     """RemoteDBJobStore bound to one throwaway schema, without pgvector tables."""
@@ -55,7 +51,6 @@ class _SchemaJobStore(RemoteDBJobStore):
         Base.metadata.create_all(engine, tables=tables)
         self._session_factory = sessionmaker(bind=engine)
         self._checkpoints = remote_mod.PostgresCheckpointBlobStore(engine)
-        self._grid_pair_results = remote_mod.PostgresGridPairResultStore(engine)
         self._agent_runs = remote_mod.PostgresAgentRunStore(engine)
 
 
@@ -82,22 +77,19 @@ def _bundle() -> dict[str, Any]:
     Returns:
         The bundle mapping.
     """
-    artifact = {"program_state_json": _PROGRAM_STATE, "optimized_prompt": None}
     return {
         "schema": run_sync.SCHEMA_VERSION,
         "source": {"app_version": "test", "local_mode": True},
         "optimization": {
             "source_optimization_id": "local-run-1",
-            "optimization_type": "run",
+            "optimization_type": "blackbox",
             "name": "Desk run",
             "description": "Support triage",
             "payload_overview": {
                 "name": "Desk run",
-                "optimization_type": "run",
-                "module_name": "predict",
+                "optimization_type": "blackbox",
                 "optimizer_name": "gepa",
                 "model_name": "openai/gpt-4o-mini",
-                "signature_code": _SIGNATURE_CODE,
             },
         },
         "job": {
@@ -108,19 +100,19 @@ def _bundle() -> dict[str, Any]:
             "completed_at": "2026-10-01T10:04:00+00:00",
             "latest_metrics": {"baseline_test_metric": 0.41, "optimized_test_metric": 0.82},
             "result": {
-                "module_name": "predict",
                 "optimizer_name": "gepa",
-                "metric_name": "accuracy",
-                "split_counts": {"train": 6, "val": 2, "test": 2},
-                "baseline_test_metric": 0.41,
-                "optimized_test_metric": 0.82,
+                "strategy_mode": "single",
+                "engine_used": "gepa",
+                "baseline_score": 0.41,
+                "best_score": 0.82,
                 "metric_improvement": 0.41,
+                "best_candidate": "Answer briefly.",
+                "runtime_seconds": 12.0,
             },
         },
         "events": [
             {"timestamp": "2026-10-01T10:01:00+00:00", "event": "baseline", "metrics": {"baseline_test_metric": 0.41}},
         ],
-        "artifacts": {run_sync.PROGRAM_ARTIFACT_NAME: base64.b64encode(json.dumps(artifact).encode()).decode()},
     }
 
 
@@ -131,8 +123,7 @@ def test_import_stores_jsonb_that_reads_back(store: _SchemaJobStore) -> None:
     assert job["username"] == "bob"
     assert job["status"] == "success"
     assert job["payload"] is None
-    assert job["result"]["optimized_test_metric"] == 0.82
-    assert job["result"]["program_artifact"]["program_state_json"] == _PROGRAM_STATE
+    assert job["result"]["best_score"] == 0.82
     assert job["latest_metrics"] == {"baseline_test_metric": 0.41, "optimized_test_metric": 0.82}
     with store.engine.connect() as connection:
         kinds = connection.execute(

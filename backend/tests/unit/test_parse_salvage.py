@@ -1,11 +1,13 @@
 """Unit tests for ``core.service_gateway.agents.parse_salvage``."""
 
 import dspy
+import pytest
 from dspy.utils.exceptions import AdapterParseError
 
 from core.service_gateway.agents.parse_salvage import (
     find_adapter_parse_error,
     salvage_prediction,
+    strip_adapter_debris,
 )
 
 
@@ -69,3 +71,17 @@ def test_returns_none_for_unrelated_errors():
     """Non-parse failures (network, auth, …) are left to the retry path."""
     assert salvage_prediction(RuntimeError("connection reset")) is None
     assert salvage_prediction(BaseExceptionGroup("g", [ValueError("x")])) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("code = 1\n[[ ## completed ## ]]", "code = 1"),
+        ("code = 1\n[[ ## completed ## ]", "code = 1"),
+        ("code = 1\n[[ ## completed ##", "code = 1"),
+        ("x = a[b[0]]", "x = a[b[0]]"),
+    ],
+)
+def test_strip_adapter_debris(raw: str, expected: str) -> None:
+    """Trailing field markers are dropped, well-formed or malformed; real code survives."""
+    assert strip_adapter_debris(raw) == expected

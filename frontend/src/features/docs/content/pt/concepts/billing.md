@@ -91,15 +91,26 @@ Quando uma chamada de modelo usa a sua chave:
 
 Quaisquer taxas de um avaliador externo ou de um provedor MCP vão diretamente para esse provedor. Elas não fazem parte do limite de gastos da execução.
 
+## Chamadas de modelo a partir do seu código
+
+O código do seu repositório e o seu avaliador podem chamar um modelo pelo gateway de modelos do Skynet. Leia [Como a otimização funciona](/docs/concepts/optimization).
+
+- Uma chamada com as chaves do Skynet é medida no orçamento da execução, como qualquer outra chamada de modelo. O acréscimo sobre o uso se aplica.
+- Uma chamada com a sua própria chave (BYOK) vai para a chave do seu provedor. O Skynet não cobra taxa de modelo por ela.
+
 ## Uso da sandbox
 
-O seu código de execução e a sua métrica rodam em uma sandbox. O Skynet mede a computação da sandbox:
+O código do seu repositório e o seu avaliador rodam em uma sandbox. O Skynet mede a computação da sandbox:
 
 1. Antes de uma sandbox iniciar, o Skynet reserva um valor do limite da execução.
 2. Quando a sandbox termina, o Skynet cobra o uso final que o provedor da sandbox informa.
 3. O acréscimo sobre o uso se aplica à computação da sandbox.
 
 A computação da sandbox faz parte do limite de gastos da execução, mesmo quando as chamadas de modelo usam a sua própria chave.
+
+## Serviço
+
+Cada chamada ao endpoint de serviço de uma execução concluída é cobrada separadamente. Quem chama paga com o próprio saldo. Defina `max_cost_cents` na requisição para limitar uma chamada. Leia [Resultados](/docs/guides/results).
 
 ## Planos
 

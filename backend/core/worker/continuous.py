@@ -1,17 +1,16 @@
 """Continuous optimization: scheduled checks that try a better model when one comes out.
 
-A plan is enabled from one successful unified run. On each scheduled check the
-plan looks for a better model for each role its owner switched on (the task
-model, the reflection model), starting from the current version's own models.
-A better model is rated higher and costs no more for input or output. When no
-role has one, the check is recorded as skipped and nothing is spent. When one
-does, the check starts exactly one run through the same admission, preflight
-and protected budget path as ``/optimize``: the current version's exact
-request and cases, with every better model swapped in. Its split seed is
-copied too, so it holds out the same test cases, and its test score compares
-with the current version's saved test score. A candidate that beats the
-current version waits for the customer's approval; nothing is ever deployed
-automatically.
+A plan is enabled from one successful repository run. On each scheduled
+check the plan looks for a better reflection model, starting from the current
+version's own model. A better model is rated higher and costs no more for
+input or output. When there is none, the check is recorded as skipped and
+nothing is spent. When there is one, the check starts exactly one run through
+the same admission, preflight and protected budget path as ``/blackbox/run``:
+the current version's best patch on the same pinned commit, with its cases,
+scorer and split seed, so it holds out the same test cases and its test score
+compares with the current version's saved test score. A candidate that beats
+the current version waits for the customer's approval; nothing is ever
+deployed automatically.
 
 Each check spends against a monthly allowance and the existing wallet only.
 A new month resets the allowance, keeps every recorded cycle and its spend,
@@ -37,7 +36,7 @@ from ..api.errors import DomainError
 from ..api.model_catalog import CatalogModel, _reasoning_match_key, get_catalog_cached
 from ..api.observability import advisory_lock
 from ..api.routers.billing import _byok_catalog_for_user
-from ..api.routers.submissions import UNIFIED_WORKFLOW, submit_unified_payload
+from ..api.routers.submissions import _BLACKBOX_WORKFLOW, submit_repo_payload
 from ..api.submission_idempotency import resolve_submission_replay_keys
 from ..billing import ProviderKeyVault, byok_provider_for_litellm, provider_slug_for_model
 from ..billing.budget_amounts import budget_wallet_hold
@@ -46,12 +45,12 @@ from ..billing.operation_pricing import json_fingerprint
 from ..billing.protected_credentials import scrub_execution_credentials
 from ..billing.service import StripeBillingService
 from ..constants import PAYLOAD_OVERVIEW_NAME
-from ..models import UnifiedRunRequest
-from ..models.common import OptimizationStatus, SplitFractions
-from ..models.unified import MIN_PAIRS_FOR_HELD_OUT
-from ..service_gateway.optimization.unified.split import split_cases, split_seed
+from ..models import BlackboxRunRequest
+from ..models.common import OptimizationStatus
+from ..service_gateway.optimization.blackbox.service import legacy_case_splits
 from ..storage.models import ContinuousCycleModel, ContinuousPlanModel, ExecutionBudgetModel
 from .continuous_schedule import ScheduleRule, legacy_rule, next_runs
+from .repo_staging import is_repo_payload
 
 logger = logging.getLogger(__name__)
 
@@ -322,8 +321,30 @@ def _mixed_billing(models: dict[str, Any]) -> bool:
     return False
 
 
+# A repository request names its models at the top level; these map them onto the plan's roles.
+_REPO_MODEL_FIELDS = {"reflection_model": "reflection_model_config"}
+
+
+def run_models(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read a stored repository request's models as one ``models`` block.
+
+    A repository run has no task model: the code under optimization picks its
+    own models, so only the reflection model can be switched.
+
+    Args:
+        payload: A stored repository request.
+
+    Returns:
+        The model blocks by role, with the other models kept for the billing check.
+    """
+    models: dict[str, Any] = {role: payload.get(field) for role, field in _REPO_MODEL_FIELDS.items()}
+    models["extra_reflection_models"] = payload.get("extra_reflection_model_configs") or []
+    models["metric_model"] = (payload.get("scorer") or {}).get("model")
+    return models
+
+
 def _request_copy(stored: dict[str, Any]) -> dict[str, Any]:
-    """Drop the fields of a stored request that belong to that run's funding alone.
+    """Drop the fields of a stored request that belong to that run alone: its funding and deadline.
 
     Args:
         stored: A stored unified request, with credentials scrubbed.
@@ -336,7 +357,15 @@ def _request_copy(stored: dict[str, Any]) -> dict[str, Any]:
         for key, value in stored.items()
         if not key.startswith("_budget")
         and not key.startswith("execution_budget_")
-        and key not in {"preflight_id", "preflight_fingerprint", "estimated_cents_low", "estimated_cents_high"}
+        and key
+        not in {
+            "preflight_id",
+            "preflight_fingerprint",
+            "estimated_cents_low",
+            "estimated_cents_high",
+            # A deadline override shortens only the run that asked for it (SKY-572).
+            "deadline_seconds",
+        }
     }
 
 
@@ -346,23 +375,46 @@ def held_out_fingerprint(payload: dict[str, Any] | None) -> str | None:
     Two test scores compare only when this matches: equal counts are not
     enough, the cases must be the very same.
 
+    A repository request also needs the same pinned commit and scorer code,
+    since either one changes what a test score measures.
+
     Args:
-        payload: A stored unified request.
+        payload: A stored request.
 
     Returns:
-        The fingerprint, or ``None`` when the request has no inline cases or no test cases.
+        The fingerprint, or ``None`` for a request that is not a repository
+        request, or that has no pinned commit, inline cases or test cases.
     """
-    if not payload or not (payload.get("data") or {}).get("cases"):
+    if payload and is_repo_payload(payload):
+        return _repo_held_out_fingerprint(payload)
+    return None
+
+
+def _repo_held_out_fingerprint(payload: dict[str, Any]) -> str | None:
+    """Fingerprint a repository request's commit, scorer code and held-out test cases.
+
+    Args:
+        payload: A stored repository request.
+
+    Returns:
+        The fingerprint, or ``None`` without a pinned commit, inline cases or test cases.
+    """
+    repo = payload["target"]["repo"]
+    cases = payload.get("cases")
+    if not repo.get("commit") or not cases:
         return None
-    try:
-        request = UnifiedRunRequest.model_validate(_request_copy(scrub_execution_credentials(payload)))
-    except ValidationError:
+    test = legacy_case_splits(list(cases), payload.get("seed")).test
+    if not test:
         return None
-    data = request.data
-    splits = split_cases(data.cases or [], data.mode, data.split, shuffle=data.shuffle, seed=split_seed(request))
-    if not splits.test:
-        return None
-    return json_fingerprint(sorted(json_fingerprint(case.model_dump(mode="json")) for case in splits.test))
+    scorer = payload.get("scorer") or {}
+    return json_fingerprint(
+        {
+            "repository": repo.get("repository"),
+            "commit": repo["commit"],
+            "scorer": {key: scorer.get(key) for key in ("kind", "metric_code", "install_command", "dependency_lock")},
+            "test": sorted(json_fingerprint(case) for case in test),
+        }
+    )
 
 
 def has_held_out(job: dict[str, Any]) -> bool:
@@ -381,11 +433,11 @@ def has_held_out(job: dict[str, Any]) -> bool:
     split = (job.get("result") or {}).get("split_counts")
     if isinstance(split, dict):
         return bool(split.get("test")) and split.get("held_out") is True
-    data = (job.get("payload") or {}).get("data") or {}
-    if data.get("mode") != "pairs" or SplitFractions(**(data.get("split") or {})).test <= 0:
+    payload = job.get("payload") or {}
+    if not is_repo_payload(payload):
         return False
-    cases = data.get("cases")
-    return cases is None or len(cases) >= MIN_PAIRS_FOR_HELD_OUT
+    cases = payload.get("cases")
+    return bool(cases) and bool(legacy_case_splits(list(cases), payload.get("seed")).test)
 
 
 def _incumbent(job_store: Any, optimization_id: str) -> dict[str, Any]:
@@ -461,37 +513,92 @@ def _cycle_payload(
     incumbent: dict[str, Any],
     new_models: dict[str, dict[str, Any]],
     sequence: int,
-) -> UnifiedRunRequest:
-    """Copy the incumbent's request with the better models swapped in.
-
-    Everything else stays the incumbent's own: its cases (never re-read from
-    a source), objective, metric, optimizer, constraints, split fractions and
-    seed, so the new run holds out the same test cases.
+) -> BlackboxRunRequest:
+    """Copy the incumbent's repository request with the better models swapped in.
 
     Args:
         plan: The plan.
-        incumbent: The incumbent run record.
+        incumbent: The incumbent repository run record.
         new_models: ``{role: {"name", "byok_provider"}}`` to swap in.
         sequence: Cycle number shown in the run name.
 
     Returns:
-        A new, unfunded unified request.
+        A new, unfunded repository request.
     """
     copy = _request_copy(scrub_execution_credentials(incumbent["payload"]))
-    if copy["data"].get("cases"):
-        # The cases travel inline, so a staged upload that later expires cannot change them.
-        copy["data"] = {**copy["data"], "staged_dataset_id": None}
-    models = dict(copy["models"])
+    return _repo_cycle_payload(plan, incumbent, copy, new_models, sequence)
+
+
+def _repo_cycle_payload(
+    plan: ContinuousPlanModel,
+    incumbent: dict[str, Any],
+    copy: dict[str, Any],
+    new_models: dict[str, dict[str, Any]],
+    sequence: int,
+) -> BlackboxRunRequest:
+    """Build a repository check's request: the incumbent's run, started from its best patch.
+
+    The pinned commit, cases, scorer and split seed stay the incumbent's own,
+    so the new run holds out the same test cases on the same tree. Its seed
+    patch is the incumbent's best version, so the check improves on the
+    current version instead of starting again from the bare commit.
+
+    Args:
+        plan: The plan.
+        incumbent: The incumbent run record.
+        copy: The incumbent's request, scrubbed and stripped of its funding.
+        new_models: ``{role: {"name", "byok_provider"}}`` to swap in.
+        sequence: Cycle number shown in the run name.
+
+    Returns:
+        A new, unfunded repository request.
+    """
+    # The cases travel inline, so a staged upload that later expires cannot change them.
+    copy["staged_dataset_id"] = None
+    best = (incumbent.get("result") or {}).get("best_candidate")
+    if isinstance(best, str):
+        copy["seed_candidate"] = best
     for role, better in new_models.items():
-        block = {**models[role], "name": better["name"]}
-        if block.get("token_source") == "byok":
-            block["byok_provider"] = better.get("byok_provider")
-        models[role] = block
-    copy["models"] = models
+        field = _REPO_MODEL_FIELDS[role]
+        copy[field] = _swapped(copy[field], better)
+    repo = (copy.get("target") or {}).get("repo")
+    if isinstance(repo, dict):
+        # A check must not move ``skynet/best`` before the owner approves it,
+        # and a check with no gain would reset it to the bare commit. Checks
+        # publish a draft pull request instead, as on any other repository.
+        repo["created_by_skynet"] = False
+    _name_and_fund(copy, plan, incumbent, sequence)
+    return BlackboxRunRequest.model_validate(copy)
+
+
+def _swapped(block: dict[str, Any], better: dict[str, Any]) -> dict[str, Any]:
+    """Swap a better model into one role's model block.
+
+    Args:
+        block: The role's current model block.
+        better: ``{"name", "byok_provider"}`` of the better model.
+
+    Returns:
+        The new block, billed the same way.
+    """
+    swapped = {**block, "name": better["name"]}
+    if swapped.get("token_source") == "byok":
+        swapped["byok_provider"] = better.get("byok_provider")
+    return swapped
+
+
+def _name_and_fund(copy: dict[str, Any], plan: ContinuousPlanModel, incumbent: dict[str, Any], sequence: int) -> None:
+    """Name a check's run after the incumbent and cap it at the plan's cycle budget.
+
+    Args:
+        copy: The new request, mutated in place.
+        plan: The plan.
+        incumbent: The incumbent run record.
+        sequence: Cycle number shown in the run name.
+    """
     base_name = (incumbent.get("payload_overview") or {}).get(PAYLOAD_OVERVIEW_NAME) or copy.get("name") or ""
     copy["name"] = f"{base_name} · #{sequence}".strip(" ·")
     copy["max_cost_cents"] = plan.cycle_budget_cents
-    return UnifiedRunRequest.model_validate(copy)
 
 
 def _finish_cycle(session: Session, cycle: ContinuousCycleModel, status: str, code: str | None, **params: Any) -> None:
@@ -633,7 +740,6 @@ def _link_accepted(job_store: Any, session: Session, username: str, cycle: Conti
 
 def process_cycle(
     job_store: Any,
-    service: Any,
     cycle_id: str,
     *,
     now: datetime | None = None,
@@ -647,7 +753,6 @@ def process_cycle(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         cycle_id: The claimed cycle.
         now: Clock override for tests.
         pick_model: Finds a better model for one role.
@@ -687,7 +792,7 @@ def process_cycle(
             _fail_cycle(session, plan, cycle, "continuous.run_rejected", reason="the incumbent run was deleted")
             return
         previous = cycle.snapshot or {}
-        current_models = incumbent["payload"].get("models") or {}
+        current_models = run_models(incumbent["payload"])
         if "new_models" in previous:
             # A retry replays the first attempt's run, so its idempotency key meets the same request.
             new_models = previous["new_models"]
@@ -745,14 +850,30 @@ def process_cycle(
             "old_models": old_models,
             # Kept before submitting, so a crash recovery finds a budget the preflight already charged.
             "budget_key": resolve_submission_replay_keys(
-                payload, username=plan_username, workflow=UNIFIED_WORKFLOW, supplied_key=_run_key(cycle_id)
+                payload, username=plan_username, workflow=_workflow(payload), supplied_key=_run_key(cycle_id)
             ).budget,
         }
-    _submit_run(job_store, service, cycle_id, plan_username, payload, lease)
+    _submit_run(job_store, cycle_id, plan_username, payload, lease)
+
+
+def _workflow(payload: BlackboxRunRequest) -> str:
+    """Name the submission workflow a check's request goes through.
+
+    Args:
+        payload: The check's request.
+
+    Returns:
+        The workflow its replay and budget keys are derived under.
+    """
+    return _BLACKBOX_WORKFLOW
 
 
 def _submit_run(
-    job_store: Any, service: Any, cycle_id: str, username: str, payload: UnifiedRunRequest, lease: datetime | None
+    job_store: Any,
+    cycle_id: str,
+    username: str,
+    payload: BlackboxRunRequest,
+    lease: datetime | None,
 ) -> None:
     """Submit a check's run, then record whether it started.
 
@@ -763,7 +884,6 @@ def _submit_run(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         cycle_id: The check.
         username: Plan owner.
         payload: The run's request.
@@ -776,9 +896,8 @@ def _submit_run(
             return
     refused: DomainError | None = None
     try:
-        response = submit_unified_payload(
+        response = submit_repo_payload(
             payload,
-            service=service,
             job_store=job_store,
             current_user=AuthenticatedUser(username, "user", ()),
             idempotency_key=_run_key(cycle_id),
@@ -1091,7 +1210,6 @@ def _reclaim_stale(job_store: Any, now: datetime) -> list[str]:
 
 def run_due_checks(
     job_store: Any,
-    service: Any,
     *,
     now: datetime | None = None,
     pick_model: ModelPicker = better_model,
@@ -1100,7 +1218,6 @@ def run_due_checks(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         now: Clock override for tests.
         pick_model: Finds a better model for one role.
 
@@ -1119,7 +1236,7 @@ def run_due_checks(
     checked = _reclaim_stale(job_store, now) + _claim_due(engine, now)
     for cycle_id in checked:
         try:
-            process_cycle(job_store, service, cycle_id, now=now, pick_model=pick_model)
+            process_cycle(job_store, cycle_id, now=now, pick_model=pick_model)
         except Exception:
             # The lease expires and a later sweep retries; the idempotency key
             # keeps that retry from starting or funding a second run.
@@ -1130,16 +1247,14 @@ def run_due_checks(
 class ContinuousSweeper:
     """Run :func:`run_due_checks` on a timer on one replica at a time."""
 
-    def __init__(self, job_store: Any, service: Any, interval_seconds: float = SWEEP_INTERVAL_SECONDS) -> None:
-        """Bind the sweeper to its store and service.
+    def __init__(self, job_store: Any, interval_seconds: float = SWEEP_INTERVAL_SECONDS) -> None:
+        """Bind the sweeper to its store.
 
         Args:
             job_store: Job store.
-            service: Optimization service handed to the in-process worker.
             interval_seconds: Seconds between sweeps.
         """
         self._job_store = job_store
-        self._service = service
         self._interval_seconds = interval_seconds
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1160,7 +1275,7 @@ class ContinuousSweeper:
         try:
             with advisory_lock(self._job_store.engine, CONTINUOUS_SWEEP_LOCK_KEY) as leader:
                 if leader:
-                    run_due_checks(self._job_store, self._service)
+                    run_due_checks(self._job_store)
         except Exception:
             logger.warning("Continuous sweep failed", exc_info=True)
 
@@ -1170,18 +1285,17 @@ class ContinuousSweeper:
             self.sweep_once()
 
 
-def start_continuous_sweeper(job_store: Any, service: Any) -> ContinuousSweeper | None:
+def start_continuous_sweeper(job_store: Any) -> ContinuousSweeper | None:
     """Start the continuous-optimization sweeper when the store has a database.
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
 
     Returns:
         The started sweeper, or ``None`` for a store without an engine.
     """
     if getattr(job_store, "engine", None) is None:
         return None
-    sweeper = ContinuousSweeper(job_store, service)
+    sweeper = ContinuousSweeper(job_store)
     sweeper.start()
     return sweeper

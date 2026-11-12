@@ -61,7 +61,7 @@ Hiçbir araç bakiye yüklemez, bakiyenizi değiştirmez veya faturalandırma ay
 4. Ajan, çalıştırma bitene kadar `get_run` çağrısı yapar. Nihai durumlar `success`, `failed`, `cancelled` ve `stopped`'dur.
 
 > [!TIP]
-> Harcama limitinizi isteminizde ajana söyleyin, örneğin "Bu istemi optimize et. En fazla 10 $ harca." Ajan bu limiti `start_run` içinde kullanır.
+> Harcama limitinizi isteminizde ajana söyleyin, örneğin "Bu depoyu optimize et. En fazla 10 $ harca." Ajan bu limiti `start_run` içinde kullanır.
 
 Çalıştırma, harcama limitine ulaştığında durur. Skynet'in bir çalıştırma için nasıl ücret aldığını öğrenmek için [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
 

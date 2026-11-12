@@ -1,5 +1,7 @@
 import { isLocalModelRefusal, localAgentEffort, localAgentModel } from "@/features/local-runtime";
-import { agentSubscriptionFor, readPref } from "@/features/settings";
+import { composerSeed, rememberComposerPick } from "@/features/settings";
+import { webPicked } from "@/shared/lib/api";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { ModelConfig } from "@/shared/types/api";
 import type {
   Annotation,
@@ -186,20 +188,23 @@ export function assistModelPatch(
 /**
  * The interview composer's effective model: an explicit per-session pick
  * (including ``null`` — the auto router) wins; a session that never picked
- * follows the app-wide composer default from settings.
+ * follows the composer seed (the Mac app's last pick, else the default).
  */
 export function interviewComposerModel(assist: Pick<AssistState, "interviewModel">): string | null {
-  return assist.interviewModel === undefined ? readPref("composerModel") : assist.interviewModel;
+  return assist.interviewModel === undefined
+    ? composerSeed(isLocalMode()).model
+    : assist.interviewModel;
 }
 
 /**
- * The model an interview request sends: the composer's, or the local CLI's
- * when the tagger runs on one.
+ * The model an interview request sends: the composer's, resolved in the local
+ * build for the side picked in the header (a CLI model, or an OpenRouter
+ * model of the web account).
  */
 export function interviewRequestModel(
   assist: Pick<AssistState, "interviewModel">,
 ): Promise<string | null> {
-  return localAgentModel(interviewComposerModel(assist), agentSubscriptionFor("tagger"));
+  return localAgentModel(interviewComposerModel(assist), webPicked(), true);
 }
 
 /** The effort an interview request sends with `sent`, the model it resolved. */
@@ -207,14 +212,32 @@ export function interviewRequestEffort(
   assist: Pick<AssistState, "interviewModel" | "interviewEffort">,
   sent: string | null,
 ): string | null {
-  return localAgentEffort(interviewComposerModel(assist), interviewComposerEffort(assist), sent);
+  return localAgentEffort(
+    interviewComposerModel(assist),
+    interviewComposerEffort(assist),
+    sent,
+    webPicked(),
+  );
 }
 
 /** Effective reasoning effort for the interview composer; same fallback split. */
 export function interviewComposerEffort(
   assist: Pick<AssistState, "interviewEffort">,
 ): string | null {
-  return assist.interviewEffort === undefined ? readPref("composerEffort") : assist.interviewEffort;
+  return assist.interviewEffort === undefined
+    ? composerSeed(isLocalMode()).effort
+    : assist.interviewEffort;
+}
+
+/** Keep the interview's composer pick as the next conversation's seed. */
+export function rememberInterviewPick(
+  assist: Pick<AssistState, "interviewModel" | "interviewEffort">,
+): void {
+  const model = interviewComposerModel(assist);
+  // The interview menu clears a pick it does not list (a BYOK panel pick on
+  // the Web side); that null must not erase the panel's saved pick.
+  if (model === null) return;
+  rememberComposerPick(isLocalMode(), model, interviewComposerEffort(assist));
 }
 
 /** A fresh assist state for a session starting in the interview phase. */

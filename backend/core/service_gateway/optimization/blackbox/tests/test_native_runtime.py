@@ -7,6 +7,8 @@ import io
 import json
 import logging
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -22,13 +24,16 @@ import pytest
 from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.task import Task as UpstreamTask
 
+from core.billing.guest_model_proxy import MCP_TOKEN_ENV, SERVICES_ENV
+from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.pricing import model_token_costs
 from core.billing.runtime import UsagePendingError
-from core.billing.usage_tags import USAGE_TAGS_HEADER
-from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.billing.usage_tags import USAGE_TAGS_HEADER, current_tags
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxProposer, BlackboxTarget
+from core.models.unified import UnifiedCase
 from core.service_gateway.language_models import total_tokens_from_history, usage_by_model_from_history
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
 
@@ -36,16 +41,32 @@ from .. import (
     autosaddler_runner,
     best_of_n,
     gepa_engine,
+    harness,
     harness_bridge,
+    native_engines,
     native_runner,
     native_runtime,
     repo_tree,
     sandbox_log,
 )
 from ..harness import GatewayConfig, build_launch, launch_payload
-from ..native_runtime import NativeOptions, _bootstrap_command, check_native_runtime, run_native_engine
+from ..native_runtime import (
+    NativeOptions,
+    _bootstrap_command,
+    check_native_runtime,
+    native_task_payload,
+    run_native_engine,
+)
 from ..protocol import EvalServer, Result, ScorerAbortError, Task
-from ..sandbox import CommandResult, SandboxSpec
+from ..sandbox import (
+    _CODEX_REQUIREMENTS_CHECK,
+    _CODEX_REQUIREMENTS_COMMAND,
+    _CODEX_REQUIREMENTS_READBACK,
+    CODEX_REQUIREMENTS,
+    CODEX_REQUIREMENTS_PATH,
+    CommandResult,
+    SandboxSpec,
+)
 
 
 class FakeSession:
@@ -65,6 +86,9 @@ class FakeSession:
         self.incomplete_usage = incomplete_usage
         self.no_incumbent = False
         self.candidate: Any = "better"
+        self.requirements: list[tuple[str, dict[str, Any]]] = []
+        self.readback = _CODEX_REQUIREMENTS_READBACK
+        self.root_write_readback = _CODEX_REQUIREMENTS_READBACK
 
     def write_files(self, files: dict[str, str]) -> None:
         """Persist files as an in-memory child filesystem.
@@ -95,12 +119,18 @@ class FakeSession:
         Returns:
             The scripted process outcome.
         """
+        if CODEX_REQUIREMENTS_PATH in command:
+            self.requirements.append((command, kwargs))
+            if kwargs.get("sudo"):
+                self.readback = self.root_write_readback
+            return CommandResult(exit_code=0, stdout=self.readback)
         self.calls.append((command, kwargs))
         if len(self.calls) == 1:
             return CommandResult(exit_code=0)
         payload = json.loads(self.files["native_input.json"])
         request_id = "a" * 32
-        request = {"id": request_id, "candidate": self.candidate, "example": {"id": "case"}}
+        example = (payload["task"]["train_set"] or [None])[0]
+        request = {"id": request_id, "candidate": self.candidate, "example": example}
         line = f"APP_NATIVE_RPC {payload['nonce']} {json.dumps(request)}\n"
         sink = kwargs["on_output"]
         sink("stdout", "unrelated upstream log\n" + line[:17])
@@ -390,7 +420,7 @@ def test_protected_managed_runtime_does_not_nest_upstream_jail(tmp_path: Path, m
 def test_repository_tree_and_rules_reach_every_repository_engine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine_id: str
 ) -> None:
-    """Upload the packed tree chunk by chunk with its rules; the guest never gets registry network."""
+    """Upload the packed tree chunk by chunk with its rules; with no proposer hosts the box gets no registry."""
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     chunks = [tmp_path / "tree.0000.b64", tmp_path / "tree.0001.b64"]
     for index, chunk in enumerate(chunks):
@@ -408,7 +438,7 @@ def test_repository_tree_and_rules_reach_every_repository_engine(
     task = Task("", cases=[{"id": "a"}, {"id": "b"}])
     run_native_engine(engine_id, task, EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
 
-    assert ctx.native_options.sandbox_runtime.spec.allowed_hosts == ()
+    assert ctx.native_options.sandbox_runtime.spec.allowed_hosts == ("gateway.example",)
     assert not set(ctx.native_options.sandbox_runtime.spec.allowed_hosts) & set(PACKAGE_REGISTRY_HOSTS)
     assert (session.files["repo-tree/tree.0000.b64"], session.files["repo-tree/tree.0001.b64"]) == ("chunk0", "chunk1")
     assert json.loads(session.files["native_input.json"])["repo"] == {
@@ -416,8 +446,116 @@ def test_repository_tree_and_rules_reach_every_repository_engine(
         "editable_paths": ["src"],
         "readonly_paths": ["vendor/lib"],
         "constrained": True,
+        "hidden_hashes": {},
     }
     assert session.files["repo_tree.py"] == Path(repo_tree.__file__).read_text()
+
+
+@pytest.mark.parametrize(
+    ("protected", "proposer_hosts", "expected"),
+    [
+        (True, list(PROPOSER_REGISTRY_HOSTS), PROPOSER_REGISTRY_HOSTS),
+        (False, list(PROPOSER_REGISTRY_HOSTS), tuple(sorted((*PROPOSER_REGISTRY_HOSTS, "gateway.example")))),
+        (True, [], ()),
+        (True, None, ()),
+        (False, None, ("gateway.example",)),
+    ],
+)
+def test_the_proposer_box_reaches_only_its_staged_hosts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected: bool,
+    proposer_hosts: list[str] | None,
+    expected: tuple[str, ...],
+) -> None:
+    """Open the proposer box on the staged hosts only, offline when there are none (E57).
+
+    A missing ``proposer_hosts`` key keeps the box offline except the model
+    route; it never falls back to open egress.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture.
+        protected: Whether the model goes through the parent's mailbox.
+        proposer_hosts: The staged hosts, or ``None`` for a snapshot without the key.
+        expected: The hosts the opened box may reach.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = ""
+    runtime = FakeRuntime(session)
+    runtime.injects_headers = not protected
+    ctx = _context(tmp_path, runtime)
+    repo: dict[str, Any] = {"chunks": [], "editable_paths": ["."], "readonly_paths": []}
+    if proposer_hosts is not None:
+        repo["proposer_hosts"] = proposer_hosts
+    ctx.native_options = replace(ctx.native_options, repo=repo)
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    assert runtime.spec is not None
+    assert runtime.spec.allowed_hosts == expected
+    assert runtime.spec.network_disabled is (not expected)
+    assert "raw.githubusercontent.com" not in runtime.spec.allowed_hosts
+
+
+# Names no shipped source file holds, so a scan of the box's files finds only a leak.
+_HIDDEN_NAMES = ["zq_hidden.toml", "eval/zq_scorer.py", "zq_exploits"]
+
+
+def _assert_no_hidden_name(files: dict[str, str]) -> None:
+    """Assert that no file the agent can read names a hidden path (E61).
+
+    Args:
+        files: File paths mapped to their contents.
+    """
+    for path, content in files.items():
+        for name in _HIDDEN_NAMES:
+            assert name not in path
+            assert name not in content, f"{path} names {name}"
+
+
+@pytest.mark.parametrize("staged", [True, False])
+def test_the_proposer_gets_hidden_path_hashes_and_never_their_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged: bool
+) -> None:
+    """The guest guard refuses the staged hidden paths from hashes alone; no box file names them (E61, E62, SKY-395).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture, working folder and home folder.
+        staged: Whether staging recorded hidden paths.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = ""
+    ctx = _context(tmp_path, FakeRuntime(session))
+    repo: dict[str, Any] = {"chunks": [], "editable_paths": ["."], "readonly_paths": []}
+    if staged:
+        repo["hidden_hashes"] = harness_bridge.hidden_hashes(_HIDDEN_NAMES)
+    ctx.native_options = replace(ctx.native_options, repo=repo)
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    proposer = json.loads(session.files["native_input.json"])["proposer"]
+    assert proposer["hidden_hashes"] == (harness_bridge.hidden_hashes(_HIDDEN_NAMES) if staged else {})
+    _assert_no_hidden_name(session.files)
+    # The guest writes its proposer block to proposer.json, which any harness with a shell can read.
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    monkeypatch.chdir(guest)
+    monkeypatch.setenv("HOME", str(guest / "home"))
+    monkeypatch.setenv(harness_bridge.CONFIG_ENV, "")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    native_runner._install_proposer(proposer)
+    if not staged:
+        return
+    guard_env = harness_bridge.install_guard(guest / "session", guest / "work", proposer["hidden_hashes"])
+    box_files = [guest / "proposer.json", *(path for path in (guest / "session").rglob("*") if path.is_file())]
+    _assert_no_hidden_name({str(path): path.read_text(encoding="utf-8") for path in box_files})
+    _assert_no_hidden_name(guard_env)
+    policy = json.loads((guest / "session" / harness_bridge.GUARD_DIR / "policy.json").read_text())
+    assert harness_bridge.guard_check(policy, "read", {"file_path": "eval/zq_scorer.py"}) == "scoring"
+    assert harness_bridge.guard_check(policy, "bash", {"command": "cat zq_exploits/a.py"}) == "scoring"
+    assert harness_bridge.guard_check(policy, "read", {"file_path": "src/app.py"}) is None
 
 
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])
@@ -623,6 +761,29 @@ def test_supervisor_stop_is_not_reported_as_a_reply_timeout(
     with pytest.raises(runner.EvaluationStopped, match="stopped this run"):
         mailbox.evaluate("candidate")
     assert mailbox.error is None
+
+
+@pytest.mark.parametrize(("sent", "expected"), [(None, float("-inf")), (0.5, 0.5)])
+def test_box_mailbox_turns_a_null_parent_score_into_no_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sent: float | None, expected: float
+) -> None:
+    """A metric error reaches the box as null and the upstream engine sees its own no-score value (SKY-367)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rpc").mkdir()
+    mailbox = native_runner.EvaluatorMailbox("nonce", 5.0)
+
+    def reply(prefix: str, payload: dict[str, Any]) -> None:
+        """Answer the request at once, as the parent does.
+
+        Args:
+            prefix: Event family, ignored.
+            payload: The evaluation request.
+        """
+        (tmp_path / "rpc" / f"{payload['id']}.json").write_text(json.dumps({"score": sent, "info": {"x": 1}}))
+
+    monkeypatch.setattr(mailbox, "emit", reply)
+
+    assert mailbox.evaluate("candidate") == (expected, {"x": 1})
 
 
 def test_native_usage_ledger_survives_lane_replacement() -> None:
@@ -866,6 +1027,77 @@ def test_real_native_runner_drives_upstream_with_fake_cli(tmp_path: Path, engine
     assert (tmp_path / "native_artifacts.tar.gz.b64").stat().st_size > 0
 
 
+@pytest.mark.parametrize(("stop", "stop_at"), [("budget", 3), ("error", 3), ("budget", 5)])
+def test_real_native_runner_keeps_a_gepa_repo_stop_reason(tmp_path: Path, stop: str, stop_at: int) -> None:
+    """A parent stop ends GEPA's repository run with its own reason and its fully scored best (SKY-529)."""
+    source = tmp_path / "source" / "src"
+    source.mkdir(parents=True)
+    (source / "app.py").write_text("x = 1\n")
+    archive = tmp_path / "tree.tgz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(tmp_path / "source"), "."], check=True)
+    chunks = []
+    for index, chunk in enumerate(repo_tree.archive_chunks(archive)):
+        chunks.append(f"tree.{index}.b64")
+        (tmp_path / chunks[-1]).write_text(chunk)
+    (tmp_path / "rpc").mkdir()
+    payload = {
+        "nonce": "testnonce",
+        "engine_id": "gepa_repo",
+        "model": "claude-test",
+        "sandbox": False,
+        "max_token_cost": 0.05,
+        "max_evals": 8,
+        "max_concurrency": 1,
+        "timeout_seconds": 20,
+        "repo": {"chunks": chunks, "editable_paths": ["src"], "readonly_paths": []},
+        "task": {"name": "repo", "seed_candidate": "", "train_set": [{"id": i} for i in range(4)]},
+    }
+    (tmp_path / "input.json").write_text(json.dumps(payload))
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUNBUFFERED": "1"}
+    process = subprocess.Popen(
+        [sys.executable, native_runner.__file__, "input.json"],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    requests = 0
+    try:
+        for line in process.stdout:
+            if not line.startswith("APP_NATIVE_RPC testnonce "):
+                continue
+            request = json.loads(line.split(" ", 2)[2])
+            requests += 1
+            # Staging job e5121995 stopped after two of the seed's four scorer
+            # runs; a stop at the fifth comes after the seed's full sweep.
+            response: dict[str, Any] = {"score": 0.5, "info": {}}
+            if requests == stop_at:
+                response = {"error": "The parent evaluator stopped this run."}
+                if stop == "budget":
+                    response["stop_reason"] = "budget_reached"
+            (tmp_path / "rpc" / f"{request['id']}.json").write_text(json.dumps(response))
+        stderr = process.stderr.read()
+        assert process.wait(timeout=25) == int(stop == "error"), stderr
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    result = json.loads((tmp_path / "native_result.json").read_text())
+    assert requests == stop_at
+    assert "AttributeError" not in json.dumps(result)
+    if stop == "budget":
+        assert result["stop_reason"] == "budget_reached"
+        assert "error" not in result
+    else:
+        assert result["error"] == "The parent evaluator stopped this run."
+        assert result["interrupted_incumbent"] == {}
+    if stop_at > 4:
+        assert (result["best_candidate"], result["best_score"]) == ("", 0.5)
+    else:
+        assert "best_candidate" not in result
+
+
 def test_autosaddler_bootstrap_pins_upstream_into_a_python_312_venv() -> None:
     """Install the pinned AutoSaddler revision on its own interpreter instead of the GEPA archive."""
     command = _bootstrap_command("vercel", engine_id="autosaddler")
@@ -879,6 +1111,24 @@ def test_autosaddler_bootstrap_pins_upstream_into_a_python_312_venv() -> None:
     assert "uv venv" not in protected
     assert f"sys.version_info >= {native_runtime.AUTOSADDLER_PYTHON_FLOOR!r}" in protected
     assert "import autosaddler.v2.core.engine" in protected
+    assert f"if [ -x {native_runtime.AUTOSADDLER_IMAGE_PYTHON} ]" in protected
+
+
+def test_autosaddler_pins_come_from_the_requirements_file_at_the_pinned_revision() -> None:
+    """Read the AutoSaddler pins from the file the image build installs, at the backend's pinned revision."""
+    assert native_runtime._AUTOSADDLER_PINS[0] == (
+        f"autosaddler @ https://github.com/microsoft/AutoSaddler/archive/{native_runtime.AUTOSADDLER_REVISION}.tar.gz"
+    )
+    assert all("==" in pin for pin in native_runtime._AUTOSADDLER_PINS[1:])
+
+
+def test_dockerfile_bakes_autosaddler_into_the_venv_the_runtime_uses() -> None:
+    """Bake the AutoSaddler venv at the runtime's path from the same pinned requirements (SKY-645)."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    venv = native_runtime.AUTOSADDLER_IMAGE_PYTHON.removesuffix("/bin/python")
+    assert f"python -m venv {venv}" in dockerfile
+    assert "core/service_gateway/optimization/blackbox/autosaddler_requirements.txt" in dockerfile
+    assert f'{native_runtime.AUTOSADDLER_IMAGE_PYTHON} -c "import autosaddler.v2.core.engine"' in dockerfile
 
 
 def test_shinka_bootstrap_installs_the_pinned_requirements_into_a_python_312_venv() -> None:
@@ -906,6 +1156,19 @@ def test_dockerfile_bakes_shinka_into_the_venv_the_runtime_uses() -> None:
     assert f'{native_runtime.SHINKA_IMAGE_PYTHON} -c "import shinka.core.async_runner"' in dockerfile
 
 
+def test_dockerfile_ships_the_codex_requirements_file_root_owned_and_no_sudo() -> None:
+    """Bake the exact requirements file as root before ``USER 1001``, and give the image user no root path (SKY-389)."""
+    dockerfile = (Path(__file__).resolve().parents[5] / "Dockerfile").read_text()
+    bake = dockerfile.index(f"> {CODEX_REQUIREMENTS_PATH}")
+    assert "install -d -o root -g root -m 0755 /etc/codex" in dockerfile
+    assert "printf '" + CODEX_REQUIREMENTS.replace("\n", "\\n") + "'" in dockerfile
+    assert f"chown root:root {CODEX_REQUIREMENTS_PATH}" in dockerfile
+    assert f"chmod 0644 {CODEX_REQUIREMENTS_PATH}" in dockerfile
+    assert bake < dockerfile.index("\nUSER 1001\n")
+    assert "sudoers" not in dockerfile
+    assert not re.search(r"apt-get install[^\n]*\bsudo\b", dockerfile)
+
+
 def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.MonkeyPatch) -> None:
     """Report ShinkaEvolve readiness from the image's own venv rather than the backend interpreter.
 
@@ -927,6 +1190,33 @@ def test_native_readiness_probes_shinka_in_the_image_venv(monkeypatch: pytest.Mo
     assert native_runtime.SHINKA_IMAGE_PYTHON in probe
     assert "os.X_OK" in probe
     assert "find_spec(" in probe
+    assert native_runtime.AUTOSADDLER_IMAGE_PYTHON in probe
+
+
+def test_native_readiness_probe_runs_and_reports_both_own_venv_engines(tmp_path: Path) -> None:
+    """Run the real probe script so a syntax slip cannot hide behind the scripted session.
+
+    Args:
+        tmp_path: Directory holding stub runner modules the probe imports.
+    """
+    session = ReadinessSession()
+    options = NativeOptions(
+        runtime="vercel",
+        model="test/model",
+        gateway=GatewayConfig(url="http://127.0.0.1:9000/v1", api_key="scoped"),
+        budget_route={"url": "http://127.0.0.1:9000/v1", "token": "scoped"},
+        sandbox_runtime=FakeRuntime(session),
+        max_token_cost=1,
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(native_runtime, "_source_archive", lambda: "verified-source")
+        check_native_runtime(options)
+    script = shlex.split(session.calls[1][0])[-1]
+    for name in ("native_runner", "autosaddler_runner", "shinka_runner"):
+        (tmp_path / f"{name}.py").write_text("")
+    (tmp_path / "native_engines.py").write_text("def check_assets():\n    pass\n")
+    result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {"ready": True, "autosaddler": False, "shinka": False}
 
 
 def test_shinka_runner_files_carry_the_pinned_requirements() -> None:
@@ -1033,6 +1323,37 @@ def test_shinka_agent_editor_ships_a_tagged_pi_launch_per_model(
     assert "node -e" in session.calls[0][0]
 
 
+def test_shinka_agent_editor_applies_the_effort_only_to_the_reflection_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reflection model's Pi editor runs at the chosen effort; the extra models keep the default.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = "better"
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="pi"),
+        shinka={"editor": "agent"},
+        shinka_models=(
+            {"model": "claude-test", "url": "https://gateway.example/v1", "token": "route-a"},
+            {"model": "gpt-test", "url": "https://gateway.example/v1", "token": "route-b"},
+        ),
+        reasoning_effort="high",
+    )
+    run_native_engine("shinka_evolve", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    main, extra = json.loads(session.files["native_input.json"])["shinka_editor"]["launches"]
+    assert '--model "$APP_MODEL:high"' in main["run_command"]
+    assert '--model "$APP_MODEL"' in extra["run_command"]
+    assert "thinkingLevelMap" not in json.loads(extra["files"][".app/pi/models.json"])["providers"]["app"]["models"][0]
+
+
 def test_shinka_bootstrap_prepares_pi_only_for_the_agent_editor() -> None:
     """Install Pi and check Node for the agent editor, and skip both for single-call ShinkaEvolve."""
     plain = _bootstrap_command("vercel", engine_id="shinka_evolve", harness="pi", install_command="npm i -g pi@1")
@@ -1084,7 +1405,7 @@ def test_shinka_novelty_hands_the_judge_and_embeddings_their_own_tokens(
 def test_shinka_ships_a_repository_checkout_with_its_bundle_helpers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Ship the repository tree and the bundle and tree helpers the runner loads beside itself.
+    """Ship the repository tree, its hidden path hashes, and the bundle and tree helpers the runner loads beside itself.
 
     Args:
         tmp_path: Artifact destination.
@@ -1098,7 +1419,12 @@ def test_shinka_ships_a_repository_checkout_with_its_bundle_helpers(
     ctx = _context(tmp_path, FakeRuntime(session))
     ctx.native_options = replace(
         ctx.native_options,
-        repo={"chunks": [str(chunk)], "editable_paths": ["src"], "readonly_paths": ["vendor"]},
+        repo={
+            "chunks": [str(chunk)],
+            "editable_paths": ["src"],
+            "readonly_paths": ["vendor"],
+            "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN_NAMES),
+        },
         shinka_models=({"model": "m", "url": "https://gateway.example/v1", "token": "t"},),
     )
     run_native_engine("shinka_evolve", Task(""), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
@@ -1109,7 +1435,13 @@ def test_shinka_ships_a_repository_checkout_with_its_bundle_helpers(
         "editable_paths": ["src"],
         "readonly_paths": ["vendor"],
         "constrained": False,
+        # The bundle arms its open and edit guard from these hashes (E62, SKY-395).
+        "hidden_hashes": harness_bridge.hidden_hashes(_HIDDEN_NAMES),
     }
+    assert harness_bridge.hashed_kind(payload["repo"]["hidden_hashes"], "eval/zq_scorer.py") == "scoring"
+    assert harness_bridge.hashed_kind(payload["repo"]["hidden_hashes"], "zq_exploits/a.py") == "scoring"
+    assert harness_bridge.hashed_kind(payload["repo"]["hidden_hashes"], "src/a.py") is None
+    _assert_no_hidden_name(session.files)
     assert {"shinka_runner.py", "shinka_bundle.py", "repo_tree.py"} <= set(session.files)
 
 
@@ -1165,7 +1497,7 @@ def test_autosaddler_transport_scores_named_parts_without_the_gepa_archive(
     task = Task({"system": "seed", "user": "ask"}, cases=[{"id": "a"}, {"id": "b"}])
     result = run_native_engine("autosaddler", task, EvalServer(score, max_evals=3), _context(tmp_path, runtime))
 
-    assert calls == [({"system": "better", "user": "ask"}, {"id": "case"})]
+    assert calls == [({"system": "better", "user": "ask"}, {"id": "a"})]
     assert result.best_candidate == {"system": "better", "user": "ask"}
     assert result.metadata["upstream_source"] == native_runtime.AUTOSADDLER_SOURCE
     assert result.metadata["upstream_revision"] == native_runtime.AUTOSADDLER_REVISION
@@ -1218,8 +1550,43 @@ def test_autosaddler_transport_runs_with_zero_one_or_many_cases(
     assert result.best_candidate == "better"
     sent = json.loads(session.files["native_input.json"])["task"]
     assert sent["seed_candidate"] == (task.seed_candidate or "")
-    assert sent["train_set"] == (task.cases or None)
+    assert sent["train_set"] == ([{"id": index, "input": case} for index, case in enumerate(task.cases)] or None)
     assert "val_set" not in sent
+
+
+def test_a_bare_case_reaches_the_guest_whole_without_expected() -> None:
+    """A case with no ``input`` key is its own input in the parent, so the guest gets the same input."""
+    task = Task("seed", cases=[{"question": "2+2?", "answer": "4"}, {"question": "3+3?", "expected": "6"}])
+
+    sent = native_task_payload("autosaddler", task)["train_set"]
+
+    assert sent == [
+        {"id": 0, "input": {"question": "2+2?", "answer": "4"}},
+        {"id": 1, "input": {"question": "3+3?"}},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "guest_input"),
+    [
+        ({"question": "2+2?", "expected": "4"}, {"question": "2+2?"}),
+        ({"question": "2+2?"}, {"question": "2+2?"}),
+        ({"input": None, "expected": "4"}, {}),
+        ({"input": {"question": "2+2?"}, "expected": "4"}, {"question": "2+2?"}),
+    ],
+)
+def test_the_guest_gets_the_input_and_no_expected_key(case: dict[str, Any], guest_input: dict[str, Any]) -> None:
+    """The guest gets the case's input without ``expected``, and an empty input becomes ``{}``.
+
+    Args:
+        case: A train case.
+        guest_input: The input the guest must get.
+    """
+    [sent] = native_task_payload("autosaddler", Task("seed", cases=[case]))["train_set"]
+
+    assert sent == {"id": 0, "input": guest_input}
+    assert "expected" not in sent
+    assert "expected" not in sent["input"]
 
 
 @pytest.mark.parametrize("engine_id", ["autoresearch", "meta_harness"])
@@ -1352,6 +1719,21 @@ def test_run_native_engine_serializes_the_proposer_without_the_gateway_key(
     assert "codex --version" in session.calls[0][0]
 
 
+def test_run_native_engine_hands_the_reasoning_effort_to_the_proposer_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The optimization model's effort reaches the config the proposer CLI reads in the sandbox."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="codex"), reasoning_effort="high"
+    )
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda c, e: (0.5, {}), max_evals=3), ctx)
+    payload = json.loads(session.files["native_input.json"])
+    assert 'model_reasoning_effort = "high"' in payload["proposer"]["files"][".app/codex/config.toml"]
+
+
 class _RecordingMailbox:
     """Child-side mailbox stand-in that scores by vowel density and records progress lines."""
 
@@ -1440,6 +1822,45 @@ def test_mailbox_relays_case_scores_and_per_case_versions() -> None:
     assert candidate["per_example"] == [{"id": "0", "score": 1.0}, {"id": "1", "score": 0.5}]
 
 
+def test_mailbox_shows_no_score_for_a_version_with_a_crashed_case() -> None:
+    """The child's filled mean for a version with a crashed case never reaches the candidate tree (SKY-367)."""
+
+    def crash_on_case_two(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise on case 2, else score 1.0.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            A full score and no side information.
+
+        Raises:
+            RuntimeError: On case 2.
+        """
+        if case == {"id": "2"}:
+            raise RuntimeError("scorer bug")
+        return 1.0, {}
+
+    sink: list[tuple[str, dict[str, Any]]] = []
+    server = EvalServer(crash_on_case_two, max_evals=3)
+    server.evaluate("seed", {"id": "2"})
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), server, "nonce", progress_callback=lambda event, metrics: sink.append((event, metrics))
+    )
+
+    mailbox.on_output(
+        "stdout",
+        'APP_NATIVE_PROGRESS nonce {"candidate_id": 0, "candidate": "seed", "score": 0.75, "total_evals": 2, '
+        '"per_example": [["0", 1.0], ["1", 0.5], ["2", 0.75]]}\n',
+    )
+
+    assert mailbox.error is None
+    [(event, candidate)] = sink
+    assert event == PROGRESS_CANDIDATE
+    assert (candidate["score"], candidate["per_example"]) == (None, [])
+
+
 def test_mailbox_relays_the_lineage_an_engine_reports() -> None:
     """A version's parent and generation reach the candidate event; engines that omit them keep the defaults."""
     sink: list[tuple[str, dict[str, Any]]] = []
@@ -1501,8 +1922,10 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
         seen.append(sandbox_log._scope.get())
         return 1.0, {}
 
-    mailbox = native_runtime._EvaluatorMailbox(FakeSession(), EvalServer(evaluator, max_evals=3), "nonce")
-    request = {"candidate": "seed", "example": {"q": 1}, "candidate_id": 4, "case": "2"}
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), EvalServer(evaluator, max_evals=3), "nonce", cases=[{"input": {"q": 1}}]
+    )
+    request = {"candidate": "seed", "example": {"id": 0}, "candidate_id": 4, "case": "2"}
     mailbox.on_output(
         "stdout",
         f"APP_NATIVE_RPC nonce {json.dumps({**request, 'id': '0' * 32})}\n"
@@ -1510,6 +1933,108 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
     )
     assert mailbox.error is None
     assert seen == [{"candidate": "4", "case": "2"}, {}]
+
+
+_EXPECTED = "EXPECTED_SENTINEL_9c41"
+_DATA_CASES = [{"input": {"q": "a"}, "expected": _EXPECTED}, {"input": {"q": "b"}}]
+_UPLOADED_CASES = [UnifiedCase(input={"q": "a"}, expected=_EXPECTED), UnifiedCase(input={"q": "b"})]
+
+
+@pytest.mark.parametrize("cases", [_DATA_CASES, _UPLOADED_CASES], ids=["data-cases", "uploaded-cases"])
+def test_the_guest_train_set_has_no_expected_but_the_parent_scores_the_full_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cases: list[Any]
+) -> None:
+    """The guest holds each case's id and input only; the parent metric gets the case with ``expected`` (E61).
+
+    Args:
+        tmp_path: Workspace.
+        monkeypatch: Skips packing the GEPA archive.
+        cases: ``[data] cases`` rows (plain dicts) or uploaded cases (models).
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", MagicMock(side_effect=AssertionError("unused")))
+    session = FakeSession()
+    scored: list[Any] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the case the parent scored."""
+        scored.append(example)
+        return 0.5, {}
+
+    run_native_engine(
+        "autosaddler",
+        Task("seed", cases=cases),
+        EvalServer(score, max_evals=3),
+        _context(tmp_path, FakeRuntime(session)),
+    )
+
+    sent = json.loads(session.files["native_input.json"])["task"]["train_set"]
+    assert sent == [{"id": 0, "input": {"q": "a"}}, {"id": 1, "input": {"q": "b"}}]
+    assert all("expected" not in case for case in sent)
+    for path, text in session.files.items():
+        assert _EXPECTED not in text, path
+    assert scored == [{"input": {"q": "a"}, "expected": _EXPECTED}]
+
+
+@pytest.mark.parametrize("example", [{"id": 2}, {"id": "0"}, {"id": True}, {"input": {"q": "a"}}, "0"])
+def test_the_parent_refuses_an_example_that_names_no_known_case(example: Any) -> None:
+    """A guest cannot make the parent score a case it invents; the run stops instead.
+
+    Args:
+        example: A guest example with an unknown, mistyped or missing id.
+    """
+    scorer = MagicMock(return_value=(1.0, {}))
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), EvalServer(scorer, max_evals=3), "nonce", cases=_DATA_CASES
+    )
+    request = {"id": "0" * 32, "candidate": "seed", "example": example}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert isinstance(mailbox.error, ServiceError)
+    scorer.assert_not_called()
+
+
+def test_the_parent_restores_cases_from_the_list_it_started_with() -> None:
+    """A case list that changes after the run starts cannot make an id restore another case."""
+    cases = [{"input": {"q": "a"}, "expected": "A"}, {"input": {"q": "b"}, "expected": "B"}]
+    scored: list[Any] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the case the parent scored."""
+        scored.append(example)
+        return 1.0, {}
+
+    mailbox = native_runtime._EvaluatorMailbox(FakeSession(), EvalServer(score, max_evals=3), "nonce", cases=cases)
+    cases.reverse()
+    cases.append({"input": {"q": "c"}, "expected": "C"})
+    request = {"id": "0" * 32, "candidate": "seed", "example": {"id": 1}}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert mailbox.error is None
+    assert scored == [{"input": {"q": "b"}, "expected": "B"}]
+
+
+def test_the_parent_scores_each_request_in_the_engine_box_scope() -> None:
+    """The scorer's calls name the engine box, so the parent knows that box waits on them (SKY-647)."""
+    boxes: list[str | None] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the box tag that the scorer's calls carry."""
+        boxes.append(current_tags().get("box"))
+        return 1.0, {}
+
+    session = FakeSession()
+    session.box = "e" * 32  # type: ignore[attr-defined]
+    cases = [{"input": {"q": "a"}, "expected": "A"}]
+    mailbox = native_runtime._EvaluatorMailbox(session, EvalServer(score, max_evals=3), "nonce", cases=cases)
+    request = {"id": "0" * 32, "candidate": "seed", "example": {"id": 0}}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert mailbox.error is None
+    assert boxes == ["e" * 32]
+    assert current_tags().get("box") is None
 
 
 def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) -> None:
@@ -1533,9 +2058,711 @@ def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) 
     assert labels == [(0, "1"), (None, None)]
 
 
+def test_a_sweep_fills_a_null_case_with_the_scored_mean(tmp_path: Path) -> None:
+    """A case that always crashes leaves a sweep at the scored cases' mean, so versions still rank (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score by vowel density, and give the parent's null on case ``c``."""
+        if example == {"id": "c"}:
+            return float("-inf"), {}
+        return sum(ch in "aeiou" for ch in candidate) / len(candidate), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    task = UpstreamTask("seed", train_set=[{"id": "a"}, {"id": "b"}, {"id": "c"}])
+    server = native_runner.ProgressEvalServer(
+        task, mailbox, OptimizeAnythingConfig(max_evals=20, max_concurrency=1), tmp_path
+    )
+
+    good, good_info = server.evaluate_examples("aeiou", split="train")
+    poor, poor_info = server.evaluate_examples("axyz", split="train")
+    only_null, only_null_info = server.evaluate_examples("aeiou", example_ids=["c"])
+
+    assert good == 1.0
+    assert good_info["scores"] == {"a": 1.0, "b": 1.0, "c": 1.0}
+    assert poor == 0.25
+    assert poor_info["scores"]["c"] == 0.25
+    assert good_info[native_engines.UNSCORED_CASES_KEY] == ["c"]
+    assert good > poor
+    assert only_null == float("-inf")
+    assert only_null_info["scores"] == {"c": float("-inf")}
+
+
+def _null_on(nulls: dict[str, set[str]]) -> _RecordingMailbox:
+    """Build a mailbox that gives the parent's null on chosen cases of chosen versions.
+
+    Args:
+        nulls: Case ids that get a null score, keyed by version text.
+
+    Returns:
+        A recording mailbox that scores every other case by vowel density.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Give negative infinity, as the mailbox does for a parent null, on the chosen cases."""
+        if example is not None and example["id"] in nulls.get(candidate, set()):
+            return float("-inf"), {}
+        return sum(ch in "aeiou" for ch in candidate) / max(1, len(candidate)), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    return mailbox
+
+
+def _child_server(mailbox: _RecordingMailbox, tmp_path: Path, max_evals: int = 20) -> Any:
+    """Build the child-side evaluation server over cases ``a`` and ``b``.
+
+    Args:
+        mailbox: Mailbox the server scores through.
+        tmp_path: Upstream evaluation artifacts.
+        max_evals: Evaluation budget.
+
+    Returns:
+        The child's progress evaluation server.
+    """
+    task = UpstreamTask("seed", train_set=[{"id": "a"}, {"id": "b"}])
+    config = OptimizeAnythingConfig(max_evals=max_evals, max_concurrency=1)
+    return native_runner.ProgressEvalServer(task, mailbox, config, tmp_path)
+
+
+def test_native_fill_unscored_fills_per_version() -> None:
+    """A null case takes its own version's scored mean; a version with no scored case stays negative infinity."""
+    inf = float("-inf")
+
+    assert native_engines.fill_unscored(["x", "x", "y", "y"], [0.2, inf, inf, inf]) == [0.2, 0.2, inf, inf]
+
+
+def test_best_logged_version_skips_a_version_with_no_scored_case(tmp_path: Path) -> None:
+    """The logged-aggregate fallback never picks a crashed version and ranks the rest by scored cases (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_null_on({"zzzz": {"a", "b"}, "aeio": {"b"}}), tmp_path)
+    for candidate in ("zzzz", "aeio", "axyz"):
+        score, _ = server.evaluate_examples(candidate, split="train")
+        server.log_progress(score, candidate=candidate)
+
+    assert native_engines.best_aggregate_candidate(server) == ("aeio", 1.0)
+
+
+def test_best_valset_version_skips_a_version_with_no_scored_case() -> None:
+    """GEPA's budget-stop fallback keeps only finite full-valset averages (SKY-367)."""
+    tracker = native_engines.BestValsetVersion()
+
+    for text, score in (("crashed", float("-inf")), ("ok", 0.25), ("partial", 0.9)):
+        tracker.on_valset_evaluated(
+            {
+                "candidate": {"candidate": text},
+                "average_score": score,
+                "num_examples_evaluated": 1 if text == "partial" else 2,
+                "total_valset_size": 2,
+            }
+        )
+
+    assert tracker.best == ("ok", 0.25)
+
+
+def test_best_of_n_repo_marks_a_partly_crashed_sample_and_ranks_the_rest(tmp_path: Path) -> None:
+    """A sample with any null case is a metric_error sample, so its filled mean cannot stop the run (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_null_on({"zzzz": {"a", "b"}, "aeio": {"b"}}), tmp_path, max_evals=6)
+    patches = iter(["zzzz", "aeio", "axyz"])
+    engine = native_engines.BestOfNRepoEngine.__new__(native_engines.BestOfNRepoEngine)
+    engine.proposer = lambda *_: {"candidate": next(patches)}  # type: ignore[assignment]
+    engine.proposer.total_cost = 0.0  # type: ignore[attr-defined]
+    engine.proposer.session_ids = []  # type: ignore[attr-defined]
+    engine.max_token_cost = None
+    engine.stop_at_score = 0.9
+    engine.samples = []
+    engine.best = None
+
+    result = engine.run(server.task, server)
+
+    assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["metric_error", "metric_error", None]
+    assert [sample.get("score") for sample in result.metadata["samples"]] == [None, None, 0.25]
+    assert (result.best_candidate, result.best_score) == ("axyz", 0.25)
+
+
+def test_meta_harness_stop_ignores_a_filled_mean(tmp_path: Path) -> None:
+    """A Meta-Harness version with a crashed case cannot reach ``stop_at_score`` (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "crashed", "aeio")
+    engine._benchmark(server, "ok", "axyz")
+
+    assert engine._best() == ("aeio", 1.0)
+    assert engine._best(scored=True) == ("axyz", 0.25)
+    assert not native_engines._reached(0.9, engine._best(scored=True)[1])
+    assert engine.incumbent(server) == ("axyz", 0.25)
+
+    engine._write_frontier()
+    frontier = json.loads((engine.logs_dir / "frontier_val.json").read_text(encoding="utf-8"))
+    assert frontier["_pareto"] == [{"system": "ok", "val_accuracy": 0.25}]
+    assert {frontier[eid]["system"] for eid in engine.example_ids} == {"ok"}
+
+
+def test_meta_harness_falls_back_to_the_seed_when_every_version_crashed(tmp_path: Path) -> None:
+    """With no fully scored version, Meta-Harness returns the seed, not the best filled average (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}, "eexx": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "seed", "eexx")
+    engine._benchmark(server, "crashed", "aeio")
+
+    assert engine.incumbent(server) == ("eexx", 0.5)
+
+
+def test_meta_harness_prefers_a_partly_crashed_seed_over_a_fully_crashed_version(tmp_path: Path) -> None:
+    """A version with no scored case counts as crashed, so the seed leads and the frontier leaves it out (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"eexx": {"b"}, "zzzz": {"a", "b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+    engine.session_ids = []
+    engine.cost_usd = 0.0
+    engine.work_dir = tmp_path / "work"
+
+    engine._benchmark(server, "seed", "eexx")
+    engine._benchmark(server, "broken", "zzzz")
+
+    assert engine.results["broken"]["crashed"]
+    assert engine._best(scored=True) is None
+    assert engine.incumbent(server) == ("eexx", 0.5)
+    result = engine._result(server, 1, "budget")
+    assert (result.best_candidate, result.best_score) == ("eexx", 0.5)
+
+    engine._write_frontier()
+    frontier = json.loads((engine.logs_dir / "frontier_val.json").read_text(encoding="utf-8"))
+    assert "broken" not in {row["system"] for row in frontier["_pareto"]}
+    assert "broken" not in {frontier[eid]["system"] for eid in engine.example_ids if eid in frontier}
+
+
+def _autoresearch(server: Any, tmp_path: Path, seed: str) -> Any:
+    """Build an AutoResearch engine that records the server's sweeps.
+
+    Args:
+        server: Child evaluation server.
+        tmp_path: Folder for the engine's lab.
+        seed: The run's seed text.
+
+    Returns:
+        The engine, already recording.
+    """
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.seed = seed
+    engine._record(server)
+    return engine
+
+
+def test_autoresearch_does_not_count_a_fully_crashed_sweep_as_full(tmp_path: Path) -> None:
+    """A sweep with no scored case does not rank, so the incumbent falls back to the seed (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"eexx": {"b"}, "zzzz": {"a", "b"}}), tmp_path)
+    engine = _autoresearch(server, tmp_path, "eexx")
+
+    for candidate in ("eexx", "zzzz"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine._ranking() == {}
+    assert engine.incumbent(server) == ("eexx", 0.5)
+
+
+def test_autoresearch_incumbent_ignores_a_crashed_resweep_of_a_ranked_version(tmp_path: Path) -> None:
+    """A ranked version's crashed re-sweep logs a higher filled mean, but the incumbent keeps the full score (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    mailbox = _RecordingMailbox()
+    sweeps: dict[str, int] = {}
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score case ``a`` 0.2 and ``b`` 0.8, with a null on ``a`` in the version's second sweep."""
+        if example["id"] == "a":
+            sweeps[candidate] = sweeps.get(candidate, 0) + 1
+            return (float("-inf"), {}) if sweeps[candidate] == 2 else (0.2, {})
+        return 0.8, {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    server = _child_server(mailbox, tmp_path)
+    engine = _autoresearch(server, tmp_path, "seed")
+
+    for _ in range(2):
+        score, _ = server.evaluate_examples("ab")
+        server.log_progress(score, candidate="ab")
+
+    assert native_engines.best_aggregate_candidate(server, only={"ab"}) == ("ab", 0.8)
+    assert engine.incumbent(server) == ("ab", 0.5)
+
+
+def test_autoresearch_leader_ignores_a_filled_mean(tmp_path: Path) -> None:
+    """An AutoResearch version with a crashed case does not rank or stop the run (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine._record(server)
+
+    for candidate in ("aeio", "axyz"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine._ranking() == {"axyz": 0.25}
+    assert not native_engines._reached(0.9, engine._leader_score())
+    engine.seed = "eexx"
+    assert engine.incumbent(server) == ("axyz", 0.25)
+
+
+def test_autoresearch_falls_back_to_the_seed_when_every_version_crashed(tmp_path: Path) -> None:
+    """With no fully scored version, AutoResearch returns the seed, not the best filled mean (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}, "eexx": {"b"}}), tmp_path)
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.seed = "eexx"
+    engine._record(server)
+
+    for candidate in ("eexx", "aeio"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine.incumbent(server) == ("eexx", 0.5)
+
+
+def test_scored_threshold_stopper_ignores_a_crashed_version() -> None:
+    """Only a version with no crashed case can reach ``stop_at_score`` (SKY-367)."""
+    state = SimpleNamespace(
+        program_candidates=[{"current_candidate": "crashed"}, {"current_candidate": "ok"}],
+        program_full_scores_val_set=[1.0, 0.5],
+    )
+    crashed = lambda candidate: native_engines.unwrap_text_candidate(candidate) == "crashed"  # noqa: E731
+
+    assert not native_engines.ScoredThresholdStopper(0.9, crashed)(state)
+    assert native_engines.ScoredThresholdStopper(0.5, crashed)(state)
+
+
 def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> None:
     """Keep the sandbox vendor out of the reason a user sees for an unsupported runtime."""
     reason = native_runtime.native_runtime_unavailable_reason("docker", SimpleNamespace(local_mode=False))
 
     assert reason == "Production optimizations run in the managed cloud sandbox."
     assert "vercel" not in reason.lower()
+
+
+class _OrderedSession(FakeSession):
+    """Record how many runner commands ran before the requirements step."""
+
+    def __init__(self, *, own_writer: bool = False, readback: str = _CODEX_REQUIREMENTS_READBACK) -> None:
+        """Optionally give the session its own requirements writer, as a remote child session has."""
+        super().__init__()
+        self.readback = readback
+        self.before: list[int] = []
+        self.writer_calls = 0
+        if own_writer:
+            self.write_codex_requirements = self._write
+
+    def _write(self) -> None:
+        """Stand in for the broker action of a remote child session."""
+        self.before.append(len(self.calls))
+        self.writer_calls += 1
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Note the position of the requirements step, then run the scripted dialogue."""
+        if CODEX_REQUIREMENTS_PATH in command:
+            self.before.append(len(self.calls))
+        return super().run(command, **kwargs)
+
+
+_CHECK_CALL = (_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})
+_ROOT_WRITE_CALL = (_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})
+
+
+@pytest.mark.parametrize(
+    ("contained", "own_writer", "readback", "expected"),
+    [
+        (True, False, _CODEX_REQUIREMENTS_READBACK, [_CHECK_CALL]),
+        (False, False, _CODEX_REQUIREMENTS_READBACK, [_CHECK_CALL]),
+        (False, False, "", [_CHECK_CALL, _ROOT_WRITE_CALL]),
+        (False, True, _CODEX_REQUIREMENTS_READBACK, []),
+    ],
+    ids=[
+        "outer-box-check-only",
+        "image-ships-file-no-root",
+        "docker-empty-mount-root-write",
+        "remote-child-broker-action",
+    ],
+)
+def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contained: bool,
+    own_writer: bool,
+    readback: str,
+    expected: list[Any],
+) -> None:
+    """Each box kind has the root-owned file in place after setup and before the Codex runner starts.
+
+    A box whose image ships the file needs no root command at all (SKY-389).
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = _OrderedSession(own_writer=own_writer, readback=readback)
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == expected
+    assert session.writer_calls == (1 if own_writer else 0)
+    assert session.before == [1] * max(len(expected), 1)
+    assert len(session.calls) == 2
+
+
+@pytest.mark.parametrize("contained", [True, False], ids=["outer-box", "docker-or-vercel"])
+@pytest.mark.parametrize(
+    "readback",
+    ["", _CODEX_REQUIREMENTS_READBACK.replace("root:root:644", "user:user:644")],
+    ids=["missing", "user-owned"],
+)
+def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, readback: str
+) -> None:
+    """A bad read-back fails closed: the runner command never runs and the box closes."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.readback = readback
+    session.root_write_readback = readback
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex"))
+
+    with pytest.raises(ServiceError, match="Codex cannot start"):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements[0][0] == _CODEX_REQUIREMENTS_CHECK
+    assert len(session.requirements) == (1 if contained else 2)
+    assert len(session.calls) == 1
+    assert session.closed
+
+
+@pytest.mark.parametrize("contained", [True, False], ids=["outer-box", "docker-or-vercel"])
+def test_a_host_cli_codex_proposer_skips_the_codex_requirements_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool
+) -> None:
+    """A host_cli proposer runs the host-agent shim, so no box checks or writes the file."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    monkeypatch.setattr(harness, "settings", harness.settings.model_copy(update={"local_mode": True}))
+    real_launch = harness.host_cli_launch
+    # The parent mints the host token only for a protected run; this unit run is unprotected.
+    monkeypatch.setattr(
+        harness, "host_cli_launch", lambda model, gateway, cli, _token: real_launch(model, gateway, cli, "t")
+    )
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex", host_cli="codex"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == []
+
+
+def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a Codex proposer needs the file, so a Pi run never asks for root."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="pi"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == []
+
+
+def test_a_codex_proposer_loads_the_routed_proposer_mcp_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give Codex the routed [proposer] servers by relay url, and the relay token only in the box env (SKY-610)."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    # The parent's budget authority is not part of this unit run.
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:3210/v1")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    route = {
+        "url": "https://gateway.example/v1",
+        "token": "scoped",
+        MCP_RELAY_ROUTE_KEY: {"token": "mcp-relay-token", "servers": ["search"]},
+    }
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex"), budget_route=route)
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    proposer = json.loads(session.files["native_input.json"])["proposer"]
+    config = tomllib.loads(next(text for path, text in proposer["files"].items() if path.endswith("config.toml")))
+    # The run command swaps the gateway url for the box proxy's url before Codex starts.
+    assert config["mcp_servers"]["search"]["url"] == "https://gateway.example/v1/mcp/search"
+    assert "APP_BUDGET_RELAY_URL" in proposer["run_command"]
+    assert "mcp-relay-token" not in session.files["native_input.json"]
+    assert session.calls[-1][1]["env"][MCP_TOKEN_ENV] == "mcp-relay-token"
+
+
+_MCP_ROUTE = {
+    "url": "https://gateway.example/v1",
+    "token": "scoped",
+    MCP_RELAY_ROUTE_KEY: {"token": "mcp-relay-token", "servers": ["search"]},
+}
+
+
+def test_shinka_refuses_routed_proposer_mcp_servers_before_a_box_opens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse ShinkaEvolve with [proposer] mcp, since its runner never loads the proposer launch (SKY-610).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:3210/v1")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options,
+        budget_route=_MCP_ROUTE,
+        shinka_models=({"model": "claude-test", "url": "https://gateway.example/v1", "token": "route-a"},),
+    )
+
+    with pytest.raises(ServiceError, match="ShinkaEvolve cannot load the \\[proposer\\] mcp servers"):
+        run_native_engine("shinka_evolve", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    assert session.calls == []
+
+
+def test_a_routed_proposer_mcp_server_needs_the_mailbox_relay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse the run when the box has no mailbox relay, instead of starting Codex without its tools (SKY-610).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.delenv("APP_BUDGET_RELAY_URL", raising=False)
+    monkeypatch.delenv("SKYNET_BUDGET_RELAY_URL", raising=False)
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="codex"), budget_route=_MCP_ROUTE
+    )
+
+    with pytest.raises(ServiceError, match="require the box's mailbox relay"):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.calls == []
+
+
+_SERVICE_ROUTE = {
+    "url": "https://gateway.example/v1",
+    "token": "scoped",
+    MCP_RELAY_ROUTE_KEY: {"token": "mcp-relay-token", "servers": [], "services": ["maps"]},
+}
+
+
+def test_a_proposer_gets_its_routed_service_names_in_the_box_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass the [proposer] service names and the relay token only in the box env, for any harness (SKY-612).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive, the budget stop and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    # The parent's budget authority is not part of this unit run.
+    monkeypatch.setattr(native_runtime, "raise_gateway_stop", lambda _route: None)
+    monkeypatch.setenv("APP_BUDGET_RELAY_URL", "http://127.0.0.1:3210/v1")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="pi"), budget_route=_SERVICE_ROUTE
+    )
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    env = session.calls[-1][1]["env"]
+    assert json.loads(env[SERVICES_ENV]) == ["maps"]
+    assert env[MCP_TOKEN_ENV] == "mcp-relay-token"
+    assert "mcp-relay-token" not in session.files["native_input.json"]
+
+
+def test_routed_proposer_services_need_the_mailbox_relay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse the run when the box has no mailbox relay, instead of starting a proposer that cannot reach them.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive and the relay url.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    monkeypatch.delenv("APP_BUDGET_RELAY_URL", raising=False)
+    monkeypatch.delenv("SKYNET_BUDGET_RELAY_URL", raising=False)
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="pi"), budget_route=_SERVICE_ROUTE
+    )
+
+    with pytest.raises(ServiceError, match="services require the box's mailbox relay"):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.calls == []
+
+
+class ProtectedRuntime(FakeRuntime):
+    """Stand in for the worker child's runtime, which opens boxes through the parent broker."""
+
+    protected = True
+
+
+def test_protected_native_box_opens_with_no_box_permit_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A protected engine box carries no request identity, because no parent permit counts it (SKY-540).
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    runtime = ProtectedRuntime(FakeSession())
+
+    run_native_engine(
+        "autoresearch", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=2), _context(tmp_path, runtime)
+    )
+
+    assert runtime.spec is not None
+    assert runtime.spec.operation_key is None
+
+
+def test_cancelled_native_run_closes_its_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel that ends the engine command closes the box.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+
+    class CancelledError(Exception):
+        """Stand in for the run's cancel signal."""
+
+    class CancelledSession(FakeSession):
+        """Raise a cancel during the engine command."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Pass the install, then raise the cancel."""
+            if self.calls:
+                raise CancelledError("cancelled")
+            return super().run(command, **kwargs)
+
+    session = CancelledSession()
+    with pytest.raises(CancelledError):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=3),
+            _context(tmp_path, ProtectedRuntime(session)),
+        )
+
+    assert session.closed
+
+
+def test_a_mailbox_setup_failure_still_closes_the_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box opens before the evaluator mailbox, so a mailbox failure must not leak the paid box.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the source archive and the mailbox.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+
+    def broken_mailbox(*_args: Any, **_kwargs: Any) -> None:
+        """Fail like a mailbox that cannot start."""
+        raise RuntimeError("mailbox setup failed")
+
+    monkeypatch.setattr(native_runtime, "_EvaluatorMailbox", broken_mailbox)
+    session = FakeSession()
+    with pytest.raises(RuntimeError, match="mailbox setup failed"):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=2),
+            _context(tmp_path, ProtectedRuntime(session)),
+        )
+
+    assert session.closed

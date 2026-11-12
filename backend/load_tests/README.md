@@ -16,7 +16,7 @@ provider credits.
 `mixed_realistic` ramps 200 distinct authenticated users over 20 seconds, then
 holds all users for a 60-second soak. In parallel it drives:
 
-- `/run` and `/grid-search` submissions through the worker queue;
+- `/run` submissions through the worker queue;
 - dashboard list, counts, sidebar, and job-summary reads;
 - dashboard analytics aggregation;
 - dataset profile and split validation;

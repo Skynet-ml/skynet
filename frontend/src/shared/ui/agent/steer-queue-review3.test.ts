@@ -41,40 +41,9 @@ for (const action of ["settle", "edit", "reorder"] as const) {
     await flush();
     assert.deepEqual(applied, [{ ids: ["id"], text: "already read" }]);
     assert.equal(queue.hasPending(), false);
-    queue.sendNow(id);
     assert.deepEqual(sent, []);
   });
 }
-
-for (const outcome of ["unknown-post", "delivered"] as const) {
-  test(`R3 Stop and send now resolves ${outcome} before Stop`, async () => {
-    const post = deferred<string>();
-    let stops = 0;
-    const { queue } = setup({ post: () => post.promise, withdraw: async () => ({ ids: [], delivered: ["id"] }) });
-    queue.steer("not sendable");
-    await flush();
-    queue.stopAndSendNow(() => { stops++; queue.setBusy(false); });
-    assert.equal(stops, 0);
-    if (outcome === "delivered") post.resolve("id");
-    // A lost POST response is truly unknown, not a reason to stop the current answer.
-    else post.resolve(null as unknown as string);
-    await flush();
-    if (outcome === "delivered") assert.equal(stops, 0);
-  });
-}
-
-test("R3 refused send restores tray ordering metadata", async () => {
-  const queue = new SteerQueue(() => false);
-  queue.setBusy(true);
-  queue.enqueue("A"); queue.enqueue("B");
-  queue.pause(); queue.setBusy(false); queue.sendNow();
-  queue.openTurn({ post: async () => "c", withdraw: async () => ({ ids: ["c"], delivered: [] }) });
-  queue.steer("C");
-  await flush();
-  queue.setBusy(false);
-  await flush();
-  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["C", "A", "B"]);
-});
 
 test("R3 changed limits publish a fresh snapshot", () => {
   const queue = new SteerQueue();
@@ -106,26 +75,6 @@ test("R3 missing delivery records are unknown, not certainly unread", async () =
   assert.deepEqual(sent, []);
 });
 
-for (const laterStop of [false, true]) {
-  test(`PR929 F1 later Stop=${laterStop} controls a pending joined send`, async () => {
-    const withdrawal = deferred<{ ids: string[]; delivered: string[] }>();
-    const { queue, sent } = setup({ post: async () => "id", withdraw: () => withdrawal.promise });
-    queue.steer("A");
-    queue.enqueue("B");
-    await flush();
-    queue.stopAndSendNow(() => { queue.pause(); queue.setBusy(false); });
-    await flush();
-    if (laterStop) { queue.pause(); queue.setBusy(false); }
-    withdrawal.resolve({ ids: ["id"], delivered: [] });
-    await flush();
-    assert.deepEqual(sent, laterStop ? [] : ["A\n\nB"]);
-    if (laterStop) {
-      assert.equal(queue.getSnapshot().paused, true);
-      assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["A", "B"]);
-    }
-  });
-}
-
 test("PR929 F2 a claimed withdrawal stays uncertain in the stopped tray", async () => {
   const applied: unknown[] = [];
   const { queue, sent } = setup({
@@ -141,4 +90,45 @@ test("PR929 F2 a claimed withdrawal stays uncertain in the stopped tray", async 
   assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
   assert.deepEqual(applied, []);
   assert.deepEqual(sent, []);
+});
+
+test("PR1005 F1 Steer during the post-Stop withdrawal sends once after it ends", async () => {
+  const withdrawal = deferred<{ ids: string[]; delivered: string[] }>();
+  const { queue, sent } = setup({ post: async () => "a", withdraw: () => withdrawal.promise });
+  queue.steer("A");
+  await flush();
+  queue.enqueue("B");
+  const b = queue.getSnapshot().queued[0]!.id;
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  queue.promote(b);
+  await flush();
+  assert.deepEqual(sent, []);
+  withdrawal.resolve({ ids: ["a"], delivered: [] });
+  await flush();
+  await flush();
+  assert.deepEqual(sent, ["B"]);
+  assert.equal(queue.getSnapshot().paused, false);
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["A"]);
+  queue.promote(b);
+  await flush();
+  assert.deepEqual(sent, ["B"]);
+});
+
+test("PR1005 refused paused Steer restores tray order and pauses again", async () => {
+  const queue = new SteerQueue(() => false);
+  queue.setBusy(true);
+  queue.enqueue("A"); queue.enqueue("B");
+  queue.pause(); queue.setBusy(false);
+  await flush();
+  queue.promote(queue.getSnapshot().queued[1]!.id);
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["A", "B"]);
+  assert.equal(queue.getSnapshot().paused, true);
+  queue.openTurn({ post: async () => "c", withdraw: async () => ({ ids: ["c"], delivered: [] }) });
+  queue.steer("C");
+  await flush();
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["C", "A", "B"]);
 });

@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, Text, cast, func, literal, select
+from sqlalchemy import Engine, Text, cast, exists, func, literal, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -33,11 +33,12 @@ from .models import (
     ConversationEmbeddingModel,
     DatasetModel,
     GepaCheckpointModel,
-    GridPairResultModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
     ProgressEventModel,
+    RunCallModel,
+    SetupDraftModel,
     TaggingSessionModel,
 )
 
@@ -166,6 +167,26 @@ def _log_entry_bytes(dialect_name: str):
     return _byte_size(LogEntryModel.message, dialect_name) + _byte_size(LogEntryModel.fields, dialect_name)
 
 
+def _run_call_bytes(dialect_name: str):
+    """Return a SQL expression for one run-call row's footprint: its stored bodies, target and failure text.
+
+    The stored bodies are the cut ones, so this sizes what the row holds, not
+    the ``request_bytes``/``response_bytes`` of the original call.
+
+    Args:
+        dialect_name: ``engine.dialect.name``, see :func:`_byte_size`.
+
+    Returns:
+        A SQLAlchemy expression yielding the row's byte count.
+    """
+    return (
+        _byte_size(RunCallModel.request, dialect_name)
+        + _byte_size(RunCallModel.response, dialect_name)
+        + _byte_size(RunCallModel.target, dialect_name)
+        + _byte_size(RunCallModel.failure_reason, dialect_name)
+    )
+
+
 def _tagging_session_bytes(dialect_name: str):
     """Return a SQL expression for one labeling session's footprint: its rows, labels and AI-assist state.
 
@@ -235,14 +256,14 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                 GepaCheckpointModel.optimization_id.in_(user_job_ids)
             )
         )
-        grid_pairs = scalar(
-            select(func.coalesce(func.sum(GridPairResultModel.stored_bytes), 0)).where(
-                GridPairResultModel.optimization_id.in_(user_job_ids)
-            )
-        )
         agent_runs = scalar(
             select(func.coalesce(func.sum(BlackboxAgentRunModel.stored_bytes), 0)).where(
                 BlackboxAgentRunModel.optimization_id.in_(user_job_ids)
+            )
+        )
+        run_calls = scalar(
+            select(func.coalesce(func.sum(_run_call_bytes(dialect)), 0)).where(
+                RunCallModel.optimization_id.in_(user_job_ids)
             )
         )
         agent_chats = scalar(
@@ -260,6 +281,18 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
             select(func.coalesce(func.sum(_byte_size(AgentStagedDatasetModel.rows, dialect)), 0)).where(
                 AgentStagedDatasetModel.username == normalized
             )
+        )
+        # A left setup is wizard state like a staged upload, so it counts in that
+        # category; it has no cleanup item, as submit or Start new deletes it.
+        setup_draft = scalar(
+            select(
+                func.coalesce(
+                    func.sum(
+                        _byte_size(SetupDraftModel.draft_values, dialect) + _byte_size(SetupDraftModel.chat, dialect)
+                    ),
+                    0,
+                )
+            ).where(SetupDraftModel.username == normalized)
         )
         tagging_sessions = scalar(
             select(func.coalesce(func.sum(_tagging_session_bytes(dialect)), 0)).where(
@@ -302,13 +335,13 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
         + logs
         + progress_events
         + checkpoints
-        + grid_pairs
         + agent_runs
+        + run_calls
         + optimization_embeddings,
         "datasets": datasets,
         "tagging_sessions": tagging_sessions,
         "agent_chats": agent_chats + chat_embeddings,
-        "staged_uploads": staged_uploads,
+        "staged_uploads": staged_uploads + setup_draft,
     }
     return StorageUsage(total=sum(breakdown.values()), breakdown=breakdown, counts=counts)
 
@@ -321,7 +354,8 @@ def purge_expired_staged_datasets(engine: Engine, *, max_age_seconds: int) -> in
     orphaned forever. The human submit path never reads a staged row back — it
     posts the rows inline — and an agent submit-by-id consumes one within
     seconds of staging, so a short TTL reclaims abandoned rows without any risk
-    to an in-flight submit.
+    to an in-flight submit. A row the owner's setup draft names stays until the
+    draft drops it, so a left setup keeps its upload.
 
     Args:
         engine: SQLAlchemy engine the ``agent_staged_datasets`` table is on.
@@ -335,7 +369,13 @@ def purge_expired_staged_datasets(engine: Engine, *, max_age_seconds: int) -> in
     with Session(engine) as session:
         deleted = (
             session.query(AgentStagedDatasetModel)
-            .filter(AgentStagedDatasetModel.created_at < cutoff)
+            .filter(
+                AgentStagedDatasetModel.created_at < cutoff,
+                ~exists().where(
+                    SetupDraftModel.staged_dataset_id == AgentStagedDatasetModel.id,
+                    SetupDraftModel.username == AgentStagedDatasetModel.username,
+                ),
+            )
             .delete(synchronize_session=False)
         )
         session.commit()
@@ -499,14 +539,14 @@ def compute_user_storage_category_items(
                 .where(GepaCheckpointModel.optimization_id == JobModel.optimization_id)
                 .scalar_subquery()
             )
-            grid_pair_bytes = (
-                select(func.coalesce(func.sum(GridPairResultModel.stored_bytes), 0))
-                .where(GridPairResultModel.optimization_id == JobModel.optimization_id)
-                .scalar_subquery()
-            )
             agent_run_bytes = (
                 select(func.coalesce(func.sum(BlackboxAgentRunModel.stored_bytes), 0))
                 .where(BlackboxAgentRunModel.optimization_id == JobModel.optimization_id)
+                .scalar_subquery()
+            )
+            run_call_bytes = (
+                select(func.coalesce(func.sum(_run_call_bytes(dialect)), 0))
+                .where(RunCallModel.optimization_id == JobModel.optimization_id)
                 .scalar_subquery()
             )
             footprint = (
@@ -514,8 +554,8 @@ def compute_user_storage_category_items(
                 + logs_bytes
                 + progress_bytes
                 + checkpoint_bytes
-                + grid_pair_bytes
                 + agent_run_bytes
+                + run_call_bytes
                 + embedding_bytes
             ).label("footprint")
             optimization_rows = session.execute(

@@ -1,27 +1,20 @@
 ---
 name: skynet-test-accounts
-description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, video evidence or API calls with a user token. It says which target to use, how to confirm the served commit with /api/version and /health, how Devin signs in with SKYNET_DEVIN_<n> or SKYNET_PR_<n> secrets, how local agents use the orchestrator's account pool, the DNS-over-HTTPS fallback, and the rules for secrets and test data.
+description: Use this skill before any signed-in check on Skynet shared staging (staging.skynetml.com), for acceptance checks or API calls with a user token. It holds the target, the served-commit check, the DNS fallback, the create, sign-in and delete steps for each check's test account, and the rules for secrets and test data.
 ---
 
 # Skynet test accounts and targets
 
-Read this before you run any acceptance check on Skynet staging or on a PR
-preview. The PR rules that use these checks are in the `skynet-pr-workflow`
-skill.
+Read this before you run any acceptance check on Skynet staging. The PR rules
+that use these checks are in the `skynet-pr-workflow` skill.
 
-## 1. Pick the right target
+## 1. The target
 
-| Your check needs | Use |
-| --- | --- |
-| The PR's own code (new behavior) | The PR preview: `https://pr-<n>.staging.skynetml.com`, API `https://api-pr-<n>.staging.skynetml.com` |
-| The current product (baseline checks, unrelated flows) | Shared staging: `https://staging.skynetml.com`, API `https://api-staging.skynetml.com` |
+Run every check on shared staging: `https://staging.skynetml.com`, API
+`https://api-staging.skynetml.com`.
 
-- Before and After videos: record both on the PR preview, the Before first.
-  Use staging for the Before only when the preview cannot show the baseline.
-  See section 5 of the `skynet-pr-workflow` skill.
-- Shared staging runs merged code only. It does not hold your PR's change.
-- A preview has its own empty database. Staging accounts do not exist there.
-  It needs its own account.
+- Shared staging runs merged code only. The orchestrator runs the acceptance
+  checks after the merge reaches staging.
 - Never test against production. Railway is deleted; never use it.
 
 ## 2. Confirm the served commit
@@ -35,11 +28,10 @@ curl -s "${DOH[@]}" "$APP/api/version"   # frontend: {"commit": "<sha>"}
 curl -s "${DOH[@]}" "$API/health"        # backend:  {"commit": "<sha>", "status": ...}
 ```
 
-- Compare `commit` with the full SHA of the PR head (preview) or of
-  `origin/staging` (staging).
-- If the preview serves an older SHA, the deploy is not done. Wait for the
-  `preview` workflow, or report it. Never record evidence on a stale
-  deployment.
+- Compare `commit` with the full SHA of the merged commit or a later
+  `origin/staging` commit.
+- If staging serves an older SHA, the deploy is not done. Wait for the
+  staging deploy, or report it. Never record evidence on a stale deployment.
 - An unchanged service may run an older SHA only with proof that it misses
   no relevant change.
 
@@ -50,57 +42,46 @@ The DNS lookup for `skynetml.com` can time out on some networks. Add
 sign-in script does this). For a browser, turn on secure DNS, or report the
 failure.
 
-## 4. Sign in: Devin and other cloud agents
+## 4. Create a fresh account for each check
 
-- Slots: `devin-1` to `devin-4`. Secrets: `SKYNET_DEVIN_<n>_EMAIL` and
-  `SKYNET_DEVIN_<n>_PASSWORD`. Use one slot per parallel session.
-- Sign in through the normal login page or the script below. No email code
-  is needed for these accounts.
-- **Never sign up on shared staging** for a normal check (see the
-  exceptions below).
-- Preview databases are empty, so a preview needs its own account. Setup
-  provisions it, and it then appears as the secrets `SKYNET_PR_<n>_EMAIL` /
-  `SKYNET_PR_<n>_PASSWORD`.
-- If an account or its secrets are missing, report the exact setup failure in
-  the PR handoff. Record the signed-in check as a coverage gap. **Do not ask
-  Gilad to create an account.**
-- **Do not sign up on a preview yourself.** This is a capability limit, not a
-  policy exception: sign-up needs an email code, and Devin cannot read it.
+Test accounts are ephemeral. Each signed-in check creates its own account
+and deletes it when the check ends, also after a failure. No check uses a
+fixed, shared or long-lived account. A fixed account collects data from
+many agents, and its access can get lost.
 
-### Sign-up exceptions
-
-The sign-up ban covers normal checks. It has two exceptions:
-
-1. **Acceptance checks of an authentication change** (sign-up, email
-   verification, login). These need fresh accounts and real email codes, so
-   a sign-up is part of the test. Do it only when the issue covers an auth
-   change. Put the issue label in the account name, and record each account
-   you create in the PR.
-2. **Sign-ups by the orchestrator's tools**: its account-pool tools
-   (section 5) and the preview merger, which signs up and runs a real
-   optimization in each preview (`docs/agents/pr-previews.md`).
-
-Devin cannot use either exception: it has no access to these tools and
-cannot read email codes. When Devin needs an account that setup did not
-provide, it reports the setup failure and the coverage gap, as above.
-
-Use `devin-login.sh` in this folder. It reads the credentials from
-environment variables, sets `TOKEN` (and no other variable), and prints only
-the HTTP status. Export the variables first, then source the script in bash
-or zsh. Do not put them on the same line as the `.` command: the shell drops
-them after the script returns, and the next API call fails.
+- Check your AWS login first: `aws sts get-caller-identity --profile skynet`.
+  If it fails, report it and record the signed-in check as a coverage gap.
+- Create the account on staging with `--target staging`. `--label` is your
+  issue or PR, for example `SKY-123`:
 
 ```bash
-# Staging, slot devin-1:
-export N=1 APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
-. .agents/skills/skynet-test-accounts/devin-login.sh
-# PR preview 812, with the preview account (PREFIX wins over N; unset it to go back):
-export PREFIX=SKYNET_PR_812 APP=https://pr-812.staging.skynetml.com API=https://api-pr-812.staging.skynetml.com
-. .agents/skills/skynet-test-accounts/devin-login.sh
+python3 .agents/skills/skynet-test-accounts/account.py create --target staging --label SKY-123
 ```
 
-If `APP`, `API`, or both `N` and `PREFIX` are empty, the script stops with
-an error and makes no request.
+`account.py` first writes the secret `skynet/staging/check-account/<id>`
+(account 669242775630, region `us-east-2`, profile `skynet`) with the email,
+password, app, API and status `pending`. Then it signs up through the normal
+app flow: `POST /api/register`, then it reads the 6-digit code from the owned
+Resend receiving inbox, then `POST /api/email-verify/confirm`. Then it sets
+the status to `ready`. It prints only HTTP status codes and the lines
+`id=<id> status=pending` and `id=<id> status=ready`. Keep the id for the
+delete step. If `create` fails or stops after the first line, the secret
+stays `pending`: run the delete step for that id.
+
+- Sign in with `login.sh`. `account.py env` prints the exports for it; use
+  it only inside `eval`, never print its output:
+
+```bash
+eval "$(python3 .agents/skills/skynet-test-accounts/account.py env <id>)"
+. .agents/skills/skynet-test-accounts/login.sh
+```
+
+`login.sh` reads `<PREFIX>_EMAIL` and `<PREFIX>_PASSWORD`, sets `TOKEN` (and
+no other variable), and prints only the HTTP status. Export the variables
+first, then source the script in bash or zsh. Do not put them on the same
+line as the `.` command: the shell drops them after the script returns, and
+the next API call fails. If `APP`, `API` or `PREFIX` is empty, the script
+stops with an error and makes no request.
 
 Expect `login check: HTTP 200`. Then call the API with the token in a header
 that curl reads from stdin, so the token stays out of the process list:
@@ -113,65 +94,172 @@ printf 'authorization: Bearer %s\n' "$TOKEN" | curl -s --doh-url https://cloudfl
 is not 200, run the script once more. If it still fails, stop and report the
 exact status.
 
-## 5. Sign in: local agents with the orchestrator's account pool
+### Delete the account when the check ends
 
-Cloud agents such as Devin skip this section.
+1. Cancel the account's running optimizations, or wait until they end.
+   The delete removes job rows but does not stop a running job or sandbox.
+2. Run the delete, also after a failed check:
 
-- The orchestrator claims an account for you and gives you: the target
-  (`staging` or `preview <n>`), the slot (`pool-1` to `pool-4` for staging,
-  or `pr-<n>` for a preview), a secret access-file path, a context-file
-  path, and the tools to use. Read the context file first.
-- If you did not get these and your task needs a signed-in check, stop and
-  report "no test account was handed over". Do not claim a slot yourself
-  unless the orchestrator tells you to.
-- Use the orchestrator's tools to confirm the served commit and to check or
-  refresh the login. The tool paths are machine-local; they are never in
-  this repository.
-- `STALE_DEPLOYMENT` means the target does not run your head yet. Wait, or
-  report it.
-- `PR preview <n> is not running.` means the preview is down or deleted.
-  Report it. Do not create previews yourself.
-- When you finish, also after a failed check, tell the orchestrator. It
-  releases the slot (`release <slot> <claimId>`). A forgotten claim blocks
-  other agents for up to 6 hours.
+```bash
+python3 .agents/skills/skynet-test-accounts/account.py delete <id>
+```
 
-## 6. Secrets
+It signs in first. A `pending` secret can belong to a verified account,
+because `create` or an earlier `delete` can stop after the confirm. If
+sign-in fails and the status is `pending`, it confirms the email, because
+an unverified account cannot sign in. It uses the sign-up code in the
+inbox. If that code fails, it waits out the 60-second resend cooldown and
+asks for a new code. After a good confirm it sets the status to `ready` and
+signs in again. Then it calls `POST $API/account/delete` with the password,
+and force-deletes the secret. Expect `account delete: HTTP 200` and
+`secret removed`. If it fails, it keeps the secret. Report the account id
+to the orchestrator.
+
+"No new email code arrived" does not prove that the account is gone. A
+verified account gets no new code. Use `forget` only when `create` printed
+no `register: HTTP 2xx` line, or when an earlier `delete` printed
+`account delete: HTTP 200` but kept the secret. A `delete` of an id with no
+secret changes nothing and exits 0.
+
+- `account.py list` prints the id, target, status and creation date of every
+  check account that still has a secret. The orchestrator runs it after each
+  batch and deletes the leftovers. A deleted secret can still show for about
+  a minute.
+- `account.py forget <id>` removes only the secret. Use it only when the
+  account does not exist in the app: `register` never succeeded, or an
+  earlier `delete` printed `account delete: HTTP 200`. The `delete` error
+  says when to use it. Never use `forget` while the account still exists.
+- **Do not ask Gilad to create an account.** Never borrow a personal
+  session or another agent's account.
+
+### What the delete does not remove
+
+- The delete makes no call to an upstream provider. A Stripe customer (made
+  only by a checkout) and an OpenRouter runtime key (made only when the
+  environment sets `OPENROUTER_PROVISIONING_KEY`) stay at the provider.
+  Do not start a checkout for a normal check.
+- Billing, ledger and audit rows stay as anonymized records, by design.
+- The confirmation email stays in the Resend receiving inbox.
+
+### Credit on new accounts
+
+- A new staging account gets no credit. For a check that needs a paid run,
+  get Gilad's approval in chat and fund the check account with "Grant test
+  credit" below. Or record the gap.
+- Never add funds except through "Grant test credit" below.
+- Staging keeps the setup intake for new accounts.
+
+### Grant test credit (staging only)
+
+A staging check that needs a paid run can fund its own check account with
+the grant command `python -m core.billing.grant_test_credit`. All of these
+rules apply:
+
+- Use it only for a check account you created for this check with
+  `account.py`. Never grant on production, to real customers or to manual
+  accounts.
+- Amounts depend on the check. Before each grant, ask Gilad in chat for a
+  specific dollar amount: the smallest amount the check needs, with a short
+  cost estimate. Gilad approves that amount, or a larger one if he thinks
+  the check needs more. Spend as little as possible.
+- Grant only after Gilad approves that grant in chat. Put his approval text
+  in `--approval`. The command writes it to the task log only. The account
+  sees the ledger row, so the row holds only `Test grant: <reason>`.
+- All grants on all accounts share one $50 cap for each UTC day, kept in the
+  staging database. The command refuses a grant that passes it.
+- Never use a raw wallet INSERT, Stripe or any other path.
+
+The command refuses unless `APP_ENVIRONMENT` is `staging`, the database
+host is the `skynet-staging` RDS instance, and the database is named
+`skynet`. No libpq override (`PGHOSTADDR`, `PGSERVICE`, `PGSERVICEFILE` or a
+`service` query key) may be set. The account id must have the `account.py`
+staging shape. The account must have a user row and no debt. Amounts are
+dollars with at most 2 decimals. A retry with the same `--idempotency-key`
+credits nothing more. Use a new key for each approved grant, for example
+`<account-id>-1`. The key has at most 54 characters. `--reason` has at most
+243 characters.
+
+Run it on staging as a one-off ECS task. It uses the migrate task
+definition, which has the staging database URL and `APP_ENVIRONMENT`.
+The command line holds no email and no secret:
+
+```bash
+export AWS_PROFILE=skynet AWS_REGION=us-east-2
+CFG=$(aws ssm get-parameter --name /skynet/staging/deploy --query Parameter.Value --output text)
+CLUSTER=$(jq -r .cluster <<<"$CFG")
+SUBNETS=$(jq -r '.subnets | join(",")' <<<"$CFG")
+SG=$(jq -r '.security_groups.migrate' <<<"$CFG")
+PUBLIC_IP=$(jq -r 'if .assign_public_ip then "ENABLED" else "DISABLED" end' <<<"$CFG")
+FAMILY=$(jq -r '.families.migrate' <<<"$CFG")
+OVERRIDES=$(jq -nc --arg id "$ACCOUNT_ID" --arg usd "$DOLLARS" --arg reason "$REASON" \
+  --arg approval "$APPROVAL" --arg key "$KEY" \
+  '{containerOverrides: [{name: "migrate", command: ["python", "-m", "core.billing.grant_test_credit",
+    "--account-id", $id, "--dollars", $usd, "--reason", $reason, "--approval", $approval,
+    "--idempotency-key", $key]}]}')
+ARN=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$FAMILY" --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=$PUBLIC_IP}" \
+  --overrides "$OVERRIDES" --query 'tasks[0].taskArn' --output text)
+aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$ARN"
+aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$ARN" --query 'tasks[0].containers[0].exitCode' --output text
+aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migrate/${ARN##*/}"
+```
+
+- Set `ACCOUNT_ID` to the id `account.py` printed, `DOLLARS` to the approved
+  amount, `REASON` to the check, `APPROVAL` to Gilad's words, and `KEY` to a
+  new key.
+- Exit code `0` prints `Granted $X to <id>` or, on a retry, `Already
+  granted`. Exit code `2` prints `Grant refused: <reason>` and writes
+  nothing. Report a refusal; do not work around it.
+- Exit code `1` prints `Grant failed: <error class>`. It usually writes
+  nothing. The command hides the error text, because it can hold the email.
+  Run the same command again with the same `--idempotency-key`; this is safe.
+  `Already granted` means the first run wrote the grant. Report the result.
+- Exit code `2` with usage text and no `Grant refused:` means a missing or
+  bad argument. Fix the command line; nothing was written.
+- Record the grant (account id, dollars, key) on the Linear issue.
+
+### Authentication changes
+
+A check of sign-up, email verification or login uses the same fresh
+account flow. The sign-up and the real email code are part of that test.
+Record on the Linear issue that you used fresh accounts and real codes.
+
+## 5. Secrets
 
 - Read credentials only inside your own script (environment variables or the
-  access file). Never print, `cat` or echo them.
+  Secrets Manager secret). Never print, `cat` or echo them.
 - Never put passwords, tokens, cookies or email codes in prompts, logs,
   screenshots, videos, commits, PR text or Linear.
-- In evidence, name the account by slot (`devin-2`, `pool-2`, `pr-827`) and
-  by email domain only.
+- In evidence, name the account by its target and label (for example
+  `staging SKY-123 check account`) and by email domain only.
 - In a browser, sign in through the normal login page. Keep the password out
   of recordings.
 - A test-account login is access setup, not proof of email verification.
-  Test authentication changes with fresh accounts and real codes (sign-up
-  exception 1 in section 4).
+  Test authentication changes with fresh accounts and real codes (section 4).
 
-## 7. Test data
+## 6. Test data
 
-- Slots keep their data between agents. Put your label (the issue or PR, for
-  example `SKY-123`) in every name you create: projects, runs, files, keys.
-- Do not depend on an empty account. Change or delete only data that your
-  label made. Delete your fixtures when the PR's evidence does not need them.
+- Your account starts empty and is deleted after the check. Put your label
+  (the issue or PR, for example `SKY-123`) in every name you create:
+  projects, runs, files, keys.
 - Create data through normal app flows when you can. Use realistic synthetic
   values, never real personal data.
 - Never add funds, grant credits, change billing or change balances. Use only
-  test allowances that already exist.
+  test allowances that already exist. The one exception is the staging
+  test-credit grant command ("Grant test credit" in section 4), under all of
+  its rules.
 - Do not start expensive or scheduled runs only to see their UI. Follow the
   costly-workflow rule in the `skynet-pr-workflow` skill.
-- Never borrow another agent's slot, Gilad's session or a personal account.
-  Never create extra one-off accounts, except for the sign-up exceptions in
-  section 4.
+- Never borrow another agent's account, Gilad's session or a personal
+  account.
 
-## 8. What to write in the PR
+## 7. What to record
 
-In the test-scope section, add:
+Record the acceptance results on the Linear issue (see the
+`skynet-pr-workflow` skill). Add:
 
-- The target (staging or the `pr-<n>` preview), its URL, and the commit you
-  confirmed.
-- The slot you used. Never the email address or any secret.
+- The target (staging), its URL, and the commit you confirmed.
+- That you used a fresh check account, and that its delete returned
+  HTTP 200. Never the email address or any secret.
 - Each check you ran and its result.
-- Gaps, for example "checked on staging, not on the preview" or "simulated
-  state for the expensive run".
+- Gaps, for example "simulated state for the expensive run".

@@ -204,7 +204,7 @@ const PAGE_TEXT: Record<
     quickstart: ["Quickstart", "Start your first optimization run in about ten minutes."],
     "concepts/optimization": [
       "How optimization works",
-      "The run and score contract, the artifact kinds, and the engines for each kind.",
+      "The repository and scorer contract, model calls from your code, and the engines.",
     ],
     "concepts/engines": [
       "Engines",
@@ -268,7 +268,7 @@ const PAGE_TEXT: Record<
     quickstart: ["התחלה מהירה", "הפעל/י את ריצת האופטימיזציה הראשונה שלך בכעשר דקות."],
     "concepts/optimization": [
       "איך האופטימיזציה עובדת",
-      "חוזה הריצה והציון, סוגי התוצרים, והמנועים לכל סוג.",
+      "חוזה המאגר ופונקציית הניקוד, קריאות למודל מהקוד שלך, והמנועים.",
     ],
     "concepts/engines": [
       "מנועים",
@@ -314,7 +314,7 @@ const PAGE_TEXT: Record<
     quickstart: ["البدء السريع", "ابدأ أول عملية تشغيل للتحسين في نحو عشر دقائق."],
     "concepts/optimization": [
       "كيف يعمل التحسين",
-      "عقد التشغيل والتقييم، وأنواع العناصر، والمحركات المناسبة لكل نوع.",
+      "عقد المستودع والمُقيِّم، واستدعاءات النموذج من شيفرتك، والمحركات.",
     ],
     "concepts/engines": [
       "المحركات",
@@ -381,7 +381,7 @@ const PAGE_TEXT: Record<
     ],
     "concepts/optimization": [
       "So funktioniert die Optimierung",
-      "Der Vertrag aus Ausführung und Bewertung, die Artefaktarten und die Engines für jede Art.",
+      "Der Vertrag aus Repository und Scorer, Modellaufrufe aus Ihrem Code und die Engines.",
     ],
     "concepts/engines": [
       "Engines",
@@ -457,7 +457,7 @@ const PAGE_TEXT: Record<
     ],
     "concepts/optimization": [
       "Cómo funciona la optimización",
-      "El contrato de ejecución y puntuación, los tipos de artefacto y los motores para cada tipo.",
+      "El contrato del repositorio y el evaluador, las llamadas al modelo desde tu código y los motores.",
     ],
     "concepts/engines": [
       "Motores",
@@ -527,7 +527,7 @@ const PAGE_TEXT: Record<
     quickstart: ["شروع سریع", "اولین اجرای بهینه‌سازی خود را در حدود ده دقیقه شروع کنید."],
     "concepts/optimization": [
       "بهینه‌سازی چگونه کار می‌کند",
-      "قرارداد اجرا و امتیاز، انواع آرتیفکت و موتورهای هر نوع.",
+      "قرارداد مخزن و امتیازدهنده، فراخوانی مدل از کد شما و موتورها.",
     ],
     "concepts/engines": [
       "موتورها",
@@ -600,7 +600,7 @@ const PAGE_TEXT: Record<
     ],
     "concepts/optimization": [
       "Fonctionnement de l'optimisation",
-      "Le contrat d'exécution et de score, les types d'artefacts et les moteurs pour chaque type.",
+      "Le contrat du dépôt et de l'évaluateur, les appels de modèle depuis votre code et les moteurs.",
     ],
     "concepts/engines": [
       "Moteurs",
@@ -670,7 +670,7 @@ const PAGE_TEXT: Record<
     quickstart: ["क्विकस्टार्ट", "लगभग दस मिनट में अपना पहला ऑप्टिमाइज़ेशन रन शुरू करें।"],
     "concepts/optimization": [
       "ऑप्टिमाइज़ेशन कैसे काम करता है",
-      "रन और स्कोर का अनुबंध, आर्टिफ़ैक्ट के प्रकार, और हर प्रकार के लिए इंजन।",
+      "रिपॉज़िटरी और स्कोरर का अनुबंध, आपके कोड से मॉडल कॉल, और इंजन।",
     ],
     "concepts/engines": [
       "इंजन",
@@ -737,7 +737,7 @@ const PAGE_TEXT: Record<
     ],
     "concepts/optimization": [
       "Come funziona l'ottimizzazione",
-      "Il contratto di esecuzione e punteggio, i tipi di artefatto e i motori per ogni tipo.",
+      "Il contratto del repository e dello scorer, le chiamate al modello dal tuo codice e i motori.",
     ],
     "concepts/engines": [
       "Motori",
@@ -804,7 +804,7 @@ const PAGE_TEXT: Record<
     quickstart: ["クイックスタート", "約 10 分で最初の最適化の実行を開始します。"],
     "concepts/optimization": [
       "最適化の仕組み",
-      "実行とスコアのコントラクト、アーティファクトの種類、種類ごとのエンジン。",
+      "リポジトリとスコアラーのコントラクト、コードからのモデル呼び出し、エンジン。",
     ],
     "concepts/engines": [
       "エンジン",
@@ -859,7 +859,7 @@ const PAGE_TEXT: Record<
     quickstart: ["빠른 시작", "약 10분 만에 첫 최적화 실행을 시작합니다."],
     "concepts/optimization": [
       "최적화의 작동 방식",
-      "실행 및 점수 계약, 아티팩트 유형, 유형별 엔진.",
+      "리포지토리와 채점기 계약, 코드에서의 모델 호출, 엔진.",
     ],
     "concepts/engines": [
       "엔진",
@@ -908,7 +908,7 @@ const PAGE_TEXT: Record<
     ],
     "concepts/optimization": [
       "Como a otimização funciona",
-      "O contrato de execução e pontuação, os tipos de artefato e os motores de cada tipo.",
+      "O contrato do repositório e do avaliador, as chamadas de modelo a partir do seu código e os motores.",
     ],
     "concepts/engines": [
       "Motores",
@@ -978,7 +978,7 @@ const PAGE_TEXT: Record<
     quickstart: ["Быстрый старт", "Запустите первую оптимизацию примерно за десять минут."],
     "concepts/optimization": [
       "Как работает оптимизация",
-      "Контракт запуска и оценки, виды артефактов и движки для каждого вида.",
+      "Контракт репозитория и оценщика, вызовы модели из вашего кода и движки.",
     ],
     "concepts/engines": [
       "Движки",
@@ -1051,7 +1051,7 @@ const PAGE_TEXT: Record<
     ],
     "concepts/optimization": [
       "Optimizasyon nasıl çalışır",
-      "Çalıştırma ve puan sözleşmesi, yapıt türleri ve her tür için motorlar.",
+      "Depo ve puanlayıcı sözleşmesi, kodunuzdan model çağrıları ve motorlar.",
     ],
     "concepts/engines": [
       "Motorlar",
@@ -1121,7 +1121,7 @@ const PAGE_TEXT: Record<
     quickstart: ["Швидкий старт", "Запустіть першу оптимізацію приблизно за десять хвилин."],
     "concepts/optimization": [
       "Як працює оптимізація",
-      "Контракт запуску й оцінювання, види артефактів і рушії для кожного виду.",
+      "Контракт репозиторію й оцінювача, виклики моделі з вашого коду та рушії.",
     ],
     "concepts/engines": [
       "Рушії",
@@ -1191,7 +1191,7 @@ const PAGE_TEXT: Record<
     quickstart: ["快速入門", "大約十分鐘開始你第一次最佳化運行。"],
     "concepts/optimization": [
       "最佳化點樣運作",
-      "運行同評分嘅合約、成品類型，同埋每種類型用嘅引擎。",
+      "倉庫同評分器嘅合約、由你嘅代碼調用模型，同埋引擎。",
     ],
     "concepts/engines": [
       "引擎",
@@ -1222,7 +1222,7 @@ const PAGE_TEXT: Record<
     quickstart: ["快速开始", "大约十分钟内启动你的第一次优化运行。"],
     "concepts/optimization": [
       "优化的工作原理",
-      "运行与评分契约、制品类型，以及每种类型适用的引擎。",
+      "仓库与评分器契约、从你的代码调用模型，以及引擎。",
     ],
     "concepts/engines": [
       "引擎",

@@ -75,11 +75,6 @@ export function measureOverview(root: HTMLElement): RunShape["overview"] | undef
 const STORAGE_PREFIX = "app-run-kind:";
 const shapes = new Map<string, RunShape>();
 
-/** The storage key of a run's view: the pair view of a grid has its own shape. */
-export function runShapeKey(id: string, pair: boolean): string {
-  return pair ? `${id}#pair` : id;
-}
-
 function parse(stored: string): RunShape {
   // Hints written before shapes were stored hold the bare kind.
   if (!stored.startsWith("{")) return { kind: stored as OptimizationType };
@@ -141,22 +136,9 @@ export function runShapeHint(key: string | undefined): RunShape | undefined {
   return key ? read(key) : undefined;
 }
 
-export function runKindHint(id: string | undefined): OptimizationType | undefined {
-  return runShapeHint(id)?.kind;
-}
-
 // The skeleton reads hints once per mount; nothing needs to re-render when a
 // loaded page records a newer shape, since the skeleton is gone by then.
 const subscribeNever = () => () => {};
-
-/** The remembered kind of a run; undefined on the server so hydration matches. */
-export function useRunKindHint(id: string | undefined): OptimizationType | undefined {
-  return useSyncExternalStore(
-    subscribeNever,
-    () => runKindHint(id),
-    () => undefined,
-  );
-}
 
 /** The remembered page shape of a run's view; undefined on the server so hydration matches. */
 export function useRunShapeHint(key: string | undefined): RunShape | undefined {

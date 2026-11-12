@@ -137,7 +137,7 @@ def _seed_run(
     optimization_id = str(uuid4())
     store.create_job(optimization_id, username=username)
     overview: dict[str, Any] = {
-        PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE: "run",
+        PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE: "blackbox",
         PAYLOAD_OVERVIEW_NAME: name,
         PAYLOAD_OVERVIEW_USERNAME: username,
         PAYLOAD_OVERVIEW_DATASET_FILENAME: "math.csv",
@@ -164,7 +164,7 @@ def test_reverse_link_lists_runs_that_used_dataset() -> None:
     refs = listing.json()["optimizations"]
     assert [r["optimization_id"] for r in refs] == [optimization_id]
     assert refs[0]["name"] == "ref-run"
-    assert refs[0]["optimization_type"] == "run"
+    assert refs[0]["optimization_type"] == "blackbox"
 
 
 def test_reverse_link_excludes_runs_that_used_other_datasets() -> None:

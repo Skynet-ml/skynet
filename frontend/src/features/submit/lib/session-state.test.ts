@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import { decodeScheduledRun, decodeWizardSession, encodeWizardSession } from "./session-state.ts";
-
 const srcUrl = new URL("../../../", import.meta.url).href;
 
 registerHooks({
@@ -11,11 +9,16 @@ registerHooks({
     if (specifier.startsWith("@/")) {
       return { shortCircuit: true, url: new URL(`${specifier.slice(2)}.ts`, srcUrl).href };
     }
+    if (specifier.startsWith("./") && !specifier.endsWith(".ts") && context.parentURL) {
+      return { shortCircuit: true, url: new URL(`${specifier}.ts`, context.parentURL).href };
+    }
     return nextResolve(specifier, context);
   },
 });
 
-const { WIZARD_V2_STEPS, initialWizardV2State } = await import("./wizard-v2.ts");
+const { WIZARD_V2_STEPS, emptyRepoDraft, initialWizardV2State, wizardSteps } = await import("./wizard-v2.ts");
+const { decodeWizardSession, encodeWizardSession, offersLeftSetup, setupWorthKeeping } =
+  await import("./session-state.ts");
 
 const STEPS = WIZARD_V2_STEPS as readonly string[];
 
@@ -49,6 +52,52 @@ test("missing, broken or older setups are ignored", () => {
     decodeWizardSession(JSON.stringify({ account: "a", state: withoutInputs }), "a", STEPS),
     null,
   );
+});
+
+test("a DSPy program draft from before that target was retired moves onto a repository", () => {
+  const good = initialWizardV2State("guided");
+  const old = {
+    ...good,
+    task: { ...good.task, objective: "Answer refund questions", background: "Support desk", repo: null },
+    inputs: { ...good.inputs, mode: "pairs" },
+    optimizer: { ...good.optimizer, choice: "unknown_engine" },
+    workspace: { ...good.workspace, metricCode: "def metric(x):\n    return 1.0\n" },
+    meta: { ...good.meta, name: "Refund bot" },
+  };
+  const restored = decodeWizardSession(JSON.stringify({ account: "a", state: old }), "a", STEPS);
+
+  assert.ok(restored);
+  assert.deepEqual(restored.task.repo, emptyRepoDraft());
+  assert.equal(restored.inputs.mode, "single");
+  assert.equal(restored.optimizer.choice, "auto");
+  assert.equal(restored.task.objective, "Answer refund questions");
+  assert.equal(restored.task.background, "Support desk");
+  assert.equal(restored.workspace.metricCode, "def metric(x):\n    return 1.0\n");
+  assert.equal(restored.meta.name, "Refund bot");
+});
+
+test("a DSPy program draft left on Inputs reopens on the next step of the repository flow", () => {
+  const good = initialWizardV2State("guided");
+  const old = { ...good, step: "inputs", furthestStep: "inputs", task: { ...good.task, repo: null } };
+  const restored = decodeWizardSession(JSON.stringify({ account: "a", state: old }), "a", STEPS);
+
+  assert.ok(restored);
+  assert.equal(restored.step, "optimizer");
+  assert.equal(restored.furthestStep, "optimizer");
+  assert.ok(wizardSteps(restored, true).includes(restored.step));
+
+  const further = { ...old, furthestStep: "metric" };
+  const kept = decodeWizardSession(JSON.stringify({ account: "a", state: further }), "a", STEPS);
+  assert.equal(kept?.step, "optimizer");
+  assert.equal(kept?.furthestStep, "metric");
+});
+
+test("a repository draft keeps its optimizer and data mode", () => {
+  const good = initialWizardV2State("guided");
+  const state = { ...good, optimizer: { ...good.optimizer, choice: "gepa" as const } };
+  const restored = decodeWizardSession(encodeWizardSession("a", state), "a", STEPS);
+
+  assert.deepEqual(restored, state);
 });
 
 test("a draft with the retired metric picker still loads", () => {
@@ -130,30 +179,59 @@ test("a saved spending limit survives any number of reloads", async () => {
   }
 });
 
-test("a saved scheduled run reads back after a reload", () => {
-  const plan = {
-    schedule: { kind: "daily", time: "09:00", timezone: "UTC" },
-    permitted: { task_model: true, reflection_model: false },
-  };
-  assert.deepEqual(decodeScheduledRun(JSON.stringify(plan)), plan);
+test("only a setup with an answer, data or a later step is worth offering back", () => {
+  const fresh = initialWizardV2State();
+  assert.equal(setupWorthKeeping(fresh), false);
+  assert.equal(setupWorthKeeping({ ...fresh, task: { ...fresh.task, objective: "Shorter replies" } }), true);
+  assert.equal(setupWorthKeeping({ ...fresh, meta: { ...fresh.meta, name: "Replies" } }), true);
+  assert.equal(setupWorthKeeping({ ...fresh, furthestStep: WIZARD_V2_STEPS[1] }), true);
+  assert.equal(
+    setupWorthKeeping({ ...fresh, task: { ...fresh.task, repo: { ...fresh.task.repo, repository: "acme/agent" } } }),
+    true,
+  );
 });
 
-test("a missing, malformed or older scheduled run reads back as none", () => {
-  assert.equal(decodeScheduledRun(null), null);
-  assert.equal(decodeScheduledRun("{not json"), null);
-  assert.equal(
-    decodeScheduledRun(JSON.stringify({ permitted: { task_model: true, reflection_model: true } })),
-    null,
-  );
-  assert.equal(decodeScheduledRun(JSON.stringify({ schedule: {} })), null);
-  assert.equal(
-    decodeScheduledRun(
-      JSON.stringify({
-        schedule: { kind: "daily", time: "09:00", timezone: "UTC" },
-        permitted: { data: true, models: false, optimizers: false },
-        source: null,
-      }),
-    ),
-    null,
-  );
+test("a saved setup keeps its repository secrets without their values", () => {
+  const state = initialWizardV2State("guided");
+  state.task = {
+    ...state.task,
+    repo: {
+      repository: "example/site",
+      branch: "",
+      commit: "",
+      editablePaths: ["."],
+      setupCommand: "",
+      secrets: [
+        {
+          name: "API_KEY",
+          value: "do-not-store",
+          allowedHosts: "api.example.com",
+          hostIssue: "API_KEY has no allowed hosts.",
+        },
+      ],
+    },
+  };
+  const raw = encodeWizardSession("a@x.io", state);
+  assert.equal(raw.includes("do-not-store"), false);
+  const restored = decodeWizardSession(raw, "a@x.io", STEPS);
+  assert.deepEqual(restored?.task.repo?.secrets, [
+    { name: "API_KEY", value: "", allowedHosts: "api.example.com" },
+  ]);
+  assert.equal(state.task.repo?.secrets?.[0].value, "do-not-store");
+});
+
+test("the left setup is offered only when no clone or readable tab setup takes its place", () => {
+  const left = encodeWizardSession("a@x.io", initialWizardV2State("guided"));
+  const tab = encodeWizardSession("a@x.io", initialWizardV2State("guided"));
+  const otherAccount = encodeWizardSession("b@x.io", initialWizardV2State("guided"));
+  const leftReadable = decodeWizardSession(left, "a@x.io", STEPS) !== null;
+  const base = { tab: null, leftReadable, account: "a@x.io", steps: STEPS, cloning: false };
+
+  assert.equal(offersLeftSetup(base), true);
+  assert.equal(offersLeftSetup({ ...base, cloning: true }), false);
+  assert.equal(offersLeftSetup({ ...base, tab }), false);
+  assert.equal(offersLeftSetup({ ...base, tab: "{not json" }), true);
+  assert.equal(offersLeftSetup({ ...base, tab: otherAccount }), true);
+  assert.equal(offersLeftSetup({ ...base, leftReadable: false }), false);
+  assert.equal(offersLeftSetup({ ...base, tab, leftReadable: false }), false);
 });

@@ -32,7 +32,7 @@ import httpx
 
 from .. import config
 from ..config import Settings
-from ..local.cli_catalog import CliProvider, RetiredEffort, cli_efforts, cli_fast, cli_model_arg
+from ..local.cli_catalog import CliProvider, RetiredEffort, cli_efforts, cli_fast, cli_model_arg, current_cli_slug
 from ..local.cli_probe import read_cli_limits, write_cli_limit
 from .cli_runners import RUNNERS, CliCompletion, CliRunError, SubscriptionRateLimitedError
 from .model_dispatch import ModelHTTPResult
@@ -454,6 +454,20 @@ def _held_from(text: str, start: int) -> int:
     return len(text)
 
 
+def _note_capped_runs(evidence: dict[str, Any], capped_runs: list[str]) -> None:
+    """Record the fallback CLIs that ran and hit a cap before the CLI the evidence names.
+
+    One operation keeps one evidence row, so without this list the local usage
+    panel would miss those calls (SKY-341).
+
+    Args:
+        evidence: The call's evidence, changed in place.
+        capped_runs: The CLIs that started and answered with a usage cap.
+    """
+    if capped_runs:
+        evidence["capped_runs"] = list(capped_runs)
+
+
 def _error(status: int, code: str, message: str, **fields: Any) -> ModelHTTPResult:
     """Build a JSON error answer in the gateway's error shape.
 
@@ -585,13 +599,18 @@ class CliDispatcher:
         """
         if not settings.local_mode:
             raise UnpricedOperationError("Subscription models run only in local mode.")
+        internal = role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE)
         try:
-            cli_model_arg(cli, model)
+            cli_model_arg(cli, model, internal=internal)
         except ValueError as error:
             raise UnpricedOperationError(str(error)) from error
         self.runtime = runtime
         self.cli = cli
-        self.model = model
+        self.guest_model = model
+        # A stored removed slug runs the CLI default, so its effort levels, fast
+        # mode and usage records follow that default. Side calls keep the fixed
+        # label model, which is a removed slug.
+        self.model = model if internal else current_cli_slug(cli, model) or model
         self.role = role
         self.settings = settings
         self.policy = ChargePolicy("subscription_model")
@@ -629,7 +648,7 @@ class CliDispatcher:
             return _error(
                 422, "subscription.unsupported_path", "Subscription models serve only chat completions and messages."
             )
-        if path not in (_CHAT_PATH, _MESSAGES_PATH) or request.get("model") != self.model:
+        if path not in (_CHAT_PATH, _MESSAGES_PATH) or request.get("model") not in (self.model, self.guest_model):
             raise UnpricedOperationError("This scoped route cannot dispatch a different model or API operation.")
         if self.runtime is None:
             return self._answer(path, request, stream)[0]
@@ -690,13 +709,17 @@ class CliDispatcher:
         effort = request.get(CLI_EFFORT_KEY)
         fast = request.get(CLI_FAST_KEY) is True
         capped: SubscriptionRateLimitedError | None = None
+        ran: str | None = None
+        capped_runs: list[str] = []
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
         for provider in self._providers():
             if stream is not None and stream.started:
                 # The client already has one CLI's text; another CLI's would mix into it.
                 break
             try:
-                model_arg = cli_model_arg(provider, self.model)  # type: ignore[arg-type]
+                model_arg = cli_model_arg(
+                    provider, self.model, internal=self.role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE)
+                )  # type: ignore[arg-type]
             except ValueError:
                 continue
             reset = _future_reset(self.settings, provider)
@@ -706,10 +729,12 @@ class CliDispatcher:
                 )
                 continue
             started = time.monotonic()
+            ran = provider
             try:
                 completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast)
             except SubscriptionRateLimitedError as error:
                 capped = error
+                capped_runs.append(provider)
                 if error.reset_at is not None:
                     # Without a state directory the cap still answers 429; only the UI hint is lost.
                     with contextlib.suppress(OSError, ValueError):
@@ -717,8 +742,13 @@ class CliDispatcher:
                 continue
             except CliRunError as error:
                 evidence.update(cli=provider, status=502, failure=error.message)
+                if not error.started:
+                    # The local usage panel must not count a CLI that never started (SKY-341).
+                    evidence["dispatched"] = False
+                _note_capped_runs(evidence, capped_runs)
                 return _error(502, "subscription.cli_failed", error.message, provider=provider), evidence
             usage = self._usage(provider, completion)
+            _note_capped_runs(evidence, capped_runs)
             evidence.update(
                 cli=provider,
                 status=200,
@@ -734,7 +764,12 @@ class CliDispatcher:
         provider = capped.provider if capped else self.cli
         reset_at = capped.reset_at.isoformat() if capped and capped.reset_at else None
         message = capped.message if capped else "No subscription CLI can serve this model."
-        evidence.update(cli=provider, status=429, failure=message)
+        # A later fallback can be skipped for its saved cap; the call belongs to the CLI that ran.
+        evidence.update(cli=ran or provider, status=429, failure=message)
+        _note_capped_runs(evidence, capped_runs[:-1])
+        if ran is None:
+            # The local usage panel must not count a call that no CLI started (SKY-341).
+            evidence["dispatched"] = False
         return (
             _error(429, "subscription.rate_limited", message, provider=provider, reset_at=reset_at),
             evidence,
@@ -829,7 +864,9 @@ class CliDispatcher:
         if self.role != NEXT_PROMPT_ROLE:
             slot = _semaphore(pool, 1)
             if not slot.acquire(blocking=False):
-                raise CliRunError(provider, f"{provider} is already running a {self.role} call", transient=False)
+                raise CliRunError(
+                    provider, f"{provider} is already running a {self.role} call", transient=False, started=False
+                )
             try:
                 return self._run_side_call(provider, model_arg, prompt, schema, _LABEL_CLI_TIMEOUT_SECONDS, {})
             finally:
@@ -838,10 +875,12 @@ class CliDispatcher:
         slot = _semaphore(pool, _NEXT_PROMPT_POOL_SIZE)
         try:
             if not slot.acquire(timeout=_NEXT_PROMPT_SLOT_WAIT_SECONDS):
-                raise CliRunError(provider, f"{provider} is still running older suggestions", transient=False)
+                raise CliRunError(
+                    provider, f"{provider} is still running older suggestions", transient=False, started=False
+                )
             try:
                 if replaced.is_set():
-                    raise CliRunError(provider, "a newer suggestion replaced this one", transient=False)
+                    raise CliRunError(provider, "a newer suggestion replaced this one", transient=False, started=False)
                 stop = {"on_delta": _stop_when_replaced(replaced, provider)}
                 return self._run_side_call(provider, model_arg, prompt, schema, _NEXT_PROMPT_CLI_TIMEOUT_SECONDS, stop)
             finally:

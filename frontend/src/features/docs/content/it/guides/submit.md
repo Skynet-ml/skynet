@@ -1,4 +1,4 @@
-La procedura guidata di invio configura e avvia un'esecuzione. Ha quattro passaggi: **Attività**, **Input**, **Ottimizzatore** e **Metrica ed esecuzione**. Ogni passaggio ha una o più schermate. Questa guida spiega ogni schermata, dall'attività fino al controllo del contratto e all'avvio dell'esecuzione.
+La procedura guidata di invio configura e avvia un'esecuzione. Ha quattro passaggi: **Attività**, **Input**, **Ottimizzatore** e **Metrica ed esecuzione**. Ogni passaggio ha una o più schermate. Questa guida spiega ogni schermata, dall'attività fino al controllo e all'avvio dell'esecuzione.
 
 > [!NOTE]
 > La procedura guidata mostra più o meno impostazioni a seconda del livello di esperienza: **Guidato**, **Standard** o **Esperto**. Guidato è il livello predefinito. Cambia il livello in **Impostazioni → Account**, in **Quanto mostrare**. Al livello Guidato alcune etichette sono più semplici. Questa guida usa le etichette dei livelli Standard ed Esperto e indica tra parentesi l'etichetta del livello Guidato quando è diversa.
@@ -9,32 +9,37 @@ La procedura guidata di invio configura e avvia un'esecuzione. Ha quattro passag
 
 Descrivi la tua attività all'assistente nella chat **Intervista sull'attività**. L'assistente compila due campi per te:
 
-- **Obiettivo** (Guidato: **Scopo**): che cosa deve fare bene l'artefatto ottimizzato.
+- **Obiettivo** (Guidato: **Scopo**): che cosa deve fare bene il codice ottimizzato.
 - **Contesto** (Guidato: **Contesto aggiuntivo**): contesto, vincoli e com'è un buon risultato.
 
 Puoi modificare entrambi i campi. L'assistente non sovrascrive le tue modifiche.
 
-### Che cosa verrà ottimizzato
+### Da dove viene il codice
 
-Seleziona il **Tipo di artefatto**:
+Skynet è Optimize Anything: ogni esecuzione ottimizza un repository. Seleziona una delle due scelte:
 
-| Tipo di artefatto | Che cosa cambia                                              |
-| ----------------- | ------------------------------------------------------------ |
-| Prompt            | Le istruzioni inviate a un modello linguistico               |
-| Codice            | Il sorgente di un programma                                  |
-| Programma DSPy    | Le istruzioni dei predictor di un modulo DSPy                |
-| Testo             | Qualsiasi altro testo, come un documento o un template       |
+- **Usa un repository**: ottimizza il codice di un repository GitHub che hai collegato.
+- **Crea un nuovo repository**: Skynet crea un nuovo repository GitHub nel tuo account. L'assistente scrive una prima soluzione a partire dalla tua attività e dai tuoi dati. Questa soluzione è la versione iniziale.
 
-Poi fornisci la **Versione iniziale** (Guidato: **Da dove partiamo**). Incolla la versione attuale, oppure lascia che l'assistente scriva una bozza.
+Collega GitHub in **Impostazioni → Connettori** prima di iniziare.
 
-### Ottimizzare un repository
+### Usa un repository
 
-Puoi anche ottimizzare il codice di un repository. Imposta questi campi:
+Imposta questi campi:
 
 - **Repository**: scegli un repository, oppure scrivilo come `owner/name`.
 - **Commit**: uno SHA di 40 caratteri. Lascialo vuoto per usare l'ultimo commit del branch.
 - **Percorsi che l'ottimizzatore può modificare**: un file o una cartella per riga. Un punto indica l'intero repository.
 - **Comando di setup**: viene eseguito in ogni nuovo checkout prima della valutazione. Lascialo vuoto e Skynet troverà il comando.
+
+### Crea un nuovo repository
+
+Imposta questi campi:
+
+- **Nome**: il nome del nuovo repository. Il tuo account GitHub non deve avere già un repository con questo nome.
+- **Privato** o **Pubblico**: chi può vedere il repository su GitHub.
+
+Skynet invia ogni candidato a un proprio branch. Il branch `skynet/best` punta alla versione migliore.
 
 ## Passaggio 2: Input
 
@@ -68,8 +73,8 @@ La procedura guidata elenca solo gli ottimizzatori adatti alla tua attività e a
 
 ### Modelli
 
-- **Modello dell'attività**: il modello chiamato dal tuo codice di esecuzione. Lascialo vuoto se il codice di esecuzione non chiama un modello. Un programma DSPy deve avere un modello dell'attività.
 - **Modello di riflessione**: il modello che legge i punteggi e il feedback e scrive i candidati successivi. Con un ottimizzatore basato su un agente di programmazione, è il modello dell'agente.
+- **Modello dell'attività**: il modello che il codice del tuo repository e il tuo scorer possono chiamare tramite il gateway dei modelli di Skynet. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization).
 
 ### Budget
 
@@ -84,44 +89,38 @@ La procedura guidata non ti fa proseguire se il limite o il tuo saldo è inferio
 
 ## Passaggio 4: Metrica ed esecuzione
 
-### Codice e metrica
+### Scorer
 
-Scrivi due file:
+Scrivi `scorer.py`. Definisce `score(repo_path, case)` e restituisce un punteggio con un feedback. L'assistente può scriverlo per te. Leggi [Metriche e scorer](/docs/concepts/scorers).
 
-- `run.py`: il codice di esecuzione che esegue il tuo artefatto su un caso.
-- `metric.py`: la metrica che assegna un punteggio all'output e scrive il feedback.
+Il repository può avere un file `serve.py` con `def serve(input)`. Skynet lo usa per servire la versione migliore dopo l'esecuzione. Leggi [Leggere i risultati](/docs/guides/results).
 
-L'**Agente di programmazione** può scrivere e modificare qualsiasi file per te. Controlla il proprio codice e corregge ciò che non funziona. Puoi aggiungere fino a 20 file aggiuntivi. Leggi [Metriche e scorer](/docs/concepts/scorers).
+### Secret
 
-La metrica imposta il proprio modello nella sua chiamata a `llm()`. Senza `model=`, la metrica usa il modello di riflessione.
+Aggiungi i secret, come le chiavi API di cui ha bisogno il tuo codice. Ogni segreto arriva al tuo codice e al tuo scorer come variabile d'ambiente con lo stesso nome. L'agente di programmazione non può vederli. Skynet nasconde i loro valori nei log.
 
-### Controllo del contratto
+### Controllo
 
-Il **Controllo del contratto** (Guidato: **Esecuzione di prova**) esegue il tuo codice e la tua metrica nella sandbox su 3 casi di esempio. Verifica:
+Il controllo (Guidato: **Esecuzione di prova**) esegue il setup e il tuo scorer sulla versione iniziale nella sandbox. Verifica:
 
-- la firma del codice di esecuzione,
-- la firma della metrica,
-- il modello della metrica,
-- il codice di esecuzione sui campioni,
-- il valore restituito dalla metrica.
+- la firma dello scorer,
+- il comando di setup,
+- il valore restituito dallo scorer sui casi di esempio.
 
-Seleziona **Controlla** (Guidato: **Provalo**). Non puoi avviare l'esecuzione finché il controllo non è superato. Se modifichi il codice o la configurazione dopo un controllo superato, esegui di nuovo il controllo.
+Seleziona **Controlla** (Guidato: **Provalo**). Non puoi avviare l'esecuzione finché il controllo non è superato. Se modifichi lo scorer o la configurazione dopo un controllo superato, esegui di nuovo il controllo.
 
 > [!TIP]
-> Apri ogni campione per vederne input, output e feedback. Un buon feedback dà all'ottimizzatore molte più informazioni del solo punteggio.
+> Apri ogni campione per vederne il punteggio e il feedback. Un buon feedback dà all'ottimizzatore molte più informazioni del solo punteggio.
 
 ### Esecuzione pianificata
 
-Puoi eseguire di nuovo l'ottimizzazione secondo una pianificazione dopo che è riuscita. Il valore predefinito è **Disattivata**.
+Puoi eseguire di nuovo l'ottimizzazione secondo una pianificazione dopo che è riuscita. Ogni ciclo pianificato parte dalla versione migliore attuale del repository. Il valore predefinito è **Disattivata**.
 
 ### Pronto per l'avvio
 
 L'ultima schermata mostra un riepilogo in cinque schede: **Generale**, **Dati**, **Modelli**, **Budget** e **Ricompensa**. Controlla la configurazione, poi avvia l'ottimizzazione.
 
 Il riepilogo mostra anche la visibilità dell'esecuzione. Le nuove esecuzioni sono pubbliche per impostazione predefinita. Puoi cambiarla in seguito nella finestra **Condivisione e privacy** della pagina dell'esecuzione. Leggi [Condividere e pubblicare](/docs/guides/sharing).
-
-> [!NOTE]
-> Un'esecuzione su repository ha in questo passaggio solo la schermata **Codice e metrica** e il riepilogo. Skynet controlla la configurazione rispetto al repository quando avvii l'esecuzione.
 
 ## Dopo l'avvio
 

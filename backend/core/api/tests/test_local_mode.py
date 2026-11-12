@@ -33,7 +33,7 @@ from ..app import create_app
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources
-from ..preflight_execution import WizardPreflightRequest, _canonical_execution_payload
+from ..preflight_execution import WizardPreflightCheck, WizardPreflightRequest, _canonical_execution_payload
 from ..routers import submissions as _sub_mod
 from ..routers import wizard_preflight
 from ..routers.accounts import create_accounts_router
@@ -47,7 +47,6 @@ from .test_submissions_router import (
     _FakeJobStore,
     _verified_byok_row,
     make_client,
-    unified_payload,
 )
 
 harness = _harness_fixture
@@ -62,6 +61,22 @@ _SUBSCRIPTION_MODELS = {
         "cli_provider": "claude",
     }
 }
+_SUBSCRIPTION_RUN = {
+    "token_source": "subscription",
+    "reflection_model_config": _SUBSCRIPTION_MODELS["reflection_model"],
+}
+
+
+def _run_payload(**overrides: Any) -> dict[str, Any]:
+    """Build a ``/blackbox/run`` repository body.
+
+    Args:
+        **overrides: Top-level keys replacing the defaults.
+
+    Returns:
+        A dict matching ``BlackboxRunRequest``.
+    """
+    return {**_payload(), "username": "alice", **overrides}
 
 
 class _Store:
@@ -192,7 +207,6 @@ def test_app_hides_local_routes_from_openapi() -> None:
     with (
         patch("core.api.app.get_job_store"),
         patch("core.api.app.get_worker"),
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=ServiceRegistry())
 
@@ -217,7 +231,6 @@ def _full_app(monkeypatch: pytest.MonkeyPatch, *, local_mode: bool) -> FastAPI:
     with (
         patch("core.api.app.get_job_store"),
         patch("core.api.app.get_worker"),
-        patch("core.api.app.DspyService"),
     ):
         return create_app(registry=ServiceRegistry())
 
@@ -261,11 +274,12 @@ def test_hosted_mode_does_not_check_the_host(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def _local_submit_client(monkeypatch: pytest.MonkeyPatch, *, local_mode: bool) -> tuple[TestClient, _FakeJobStore]:
-    """Build an ``/optimize`` client that runs the real budget step.
+    """Build a ``/blackbox/run`` client that runs the real budget step.
 
     The billing database has no wallet for ``alice``, so the account has a $0
     Stripe balance. The setup check itself is replaced; its behavior is
-    covered by ``test_protected_submissions.py``.
+    covered by ``test_protected_submissions.py``. The payload's code check is
+    replaced too.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the stubs.
@@ -288,6 +302,9 @@ def _local_submit_client(monkeypatch: pytest.MonkeyPatch, *, local_mode: bool) -
             pending_reason=None, status="succeeded", id="preflight-fixture", fingerprint="fixture"
         ),
     )
+    # The real check runs the metric in a subprocess with a 30s limit, which a
+    # busy machine can miss; test_repo_submit.py covers that check.
+    monkeypatch.setattr(_sub_mod, "validate_blackbox_payload", lambda payload: None)
     return client, store
 
 
@@ -299,7 +316,7 @@ def test_local_subscription_run_creates_an_uncapped_budget(monkeypatch: pytest.M
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
 
-    resp = client.post("/optimize", json=unified_payload(token_source="subscription", models=_SUBSCRIPTION_MODELS))
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
 
     assert resp.status_code == 201, resp.text
     with Session(store.engine) as session:
@@ -314,6 +331,73 @@ def test_local_subscription_run_creates_an_uncapped_budget(monkeypatch: pytest.M
     assert payload["execution_budget_id"] == budget.id
 
 
+def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run the repository gate refuses gets a 409 that lists each failure (SKY-372, SKY-646).
+
+    Args:
+        monkeypatch: Pytest fixture used to set local mode and the failed setup check.
+    """
+    client, store = _local_submit_client(monkeypatch, local_mode=True)
+    checks = [
+        WizardPreflightCheck(
+            key="setup",
+            status="failed",
+            message="The service jira in optimize.toml is not a connector.",
+            message_code="repo_gate.unknown_connector",
+            message_params={"service": "jira", "known": "github, linear"},
+        ),
+        WizardPreflightCheck(
+            key="setup",
+            status="failed",
+            message="optimize.toml sets proposer.network.",
+            message_code="repo_gate.unenforced_local",
+            message_params={"key": "proposer.network"},
+        ),
+        WizardPreflightCheck(key="setup", status="failed", message="Traceback: raw internal text"),
+        WizardPreflightCheck(key="usage", status="succeeded"),
+    ]
+    monkeypatch.setattr(
+        _sub_mod,
+        "run_preflight",
+        lambda *args, **kwargs: SimpleNamespace(pending_reason=None, status="failed", checks=checks),
+    )
+
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
+
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["code"] == "submission.validation_failed"
+    assert body["params"]["failures"] == [
+        {"key": "repo_gate.unknown_connector", "params": {"service": "jira", "known": "github, linear"}},
+        {"key": "repo_gate.unenforced_local", "params": {"key": "proposer.network"}},
+        {"key": "workflow.validation_failed", "params": {"error": "Traceback: raw internal text"}},
+    ]
+    assert store.created_ids() == []
+
+
+def test_uncoded_setup_failure_is_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A setup failure without a catalog code still names its cause in the 409 (SKY-646).
+
+    Args:
+        monkeypatch: Pytest fixture used to set local mode and the failed setup check.
+    """
+    client, store = _local_submit_client(monkeypatch, local_mode=True)
+    checks = [WizardPreflightCheck(key="setup", status="failed", message="Auto needs at least 6 scorer runs.")]
+    monkeypatch.setattr(
+        _sub_mod,
+        "run_preflight",
+        lambda *args, **kwargs: SimpleNamespace(pending_reason=None, status="failed", checks=checks),
+    )
+
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["params"]["failures"] == [
+        {"key": "workflow.validation_failed", "params": {"error": "Auto needs at least 6 scorer runs."}}
+    ]
+    assert store.created_ids() == []
+
+
 def test_local_subscription_run_naming_droid_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A run that names Droid gets 422 with a clear message and creates no job.
 
@@ -321,9 +405,11 @@ def test_local_subscription_run_naming_droid_is_refused(monkeypatch: pytest.Monk
         monkeypatch: Pytest fixture used to set local mode.
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
-    models = {"reflection_model": {**_SUBSCRIPTION_MODELS["reflection_model"], "cli_provider": "droid"}}
+    reflection = {**_SUBSCRIPTION_MODELS["reflection_model"], "cli_provider": "droid"}
 
-    resp = client.post("/optimize", json=unified_payload(token_source="subscription", models=models))
+    resp = client.post(
+        "/blackbox/run", json=_run_payload(token_source="subscription", reflection_model_config=reflection)
+    )
 
     assert resp.status_code == 422, resp.text
     assert "Droid is no longer supported" in resp.text
@@ -338,7 +424,7 @@ def test_subscription_run_is_refused_outside_local_mode(monkeypatch: pytest.Monk
     """
     client, store = _local_submit_client(monkeypatch, local_mode=False)
 
-    resp = client.post("/optimize", json=unified_payload(token_source="subscription", models=_SUBSCRIPTION_MODELS))
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
 
     assert resp.status_code == 422
     assert resp.json()["code"] == "models.subscription_local_only"
@@ -353,9 +439,7 @@ def test_host_cli_proposer_is_refused_outside_local_mode(monkeypatch: pytest.Mon
     """
     client, store = _local_submit_client(monkeypatch, local_mode=False)
 
-    resp = client.post(
-        "/optimize", json=unified_payload(optimizer={"choice": "gepa", "proposer": {"host_cli": "codex"}})
-    )
+    resp = client.post("/blackbox/run", json=_run_payload(proposer={"host_cli": "codex"}))
 
     assert resp.status_code == 422
     assert resp.json()["code"] == "models.subscription_local_only"
@@ -370,18 +454,11 @@ def test_droid_is_not_a_host_cli_option(monkeypatch: pytest.MonkeyPatch) -> None
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
 
-    resp = client.post(
-        "/optimize",
-        json=unified_payload(
-            token_source="subscription",
-            models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": {"host_cli": "droid"}},
-        ),
-    )
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN, proposer={"host_cli": "droid"}))
 
     assert resp.status_code == 422, resp.text
     [issue] = [issue for issue in resp.json()["detail"] if issue["loc"][-1] == "host_cli"]
-    assert issue["loc"] == ["body", "optimizer", "proposer", "host_cli"]
+    assert issue["loc"] == ["body", "proposer", "host_cli"]
     assert "Droid is no longer supported" in issue["msg"]
     assert store.created_ids() == []
     schema = client.get("/openapi.json").json()["components"]["schemas"]["BlackboxProposer"]
@@ -416,7 +493,7 @@ def test_managed_run_is_refused_in_local_mode(monkeypatch: pytest.MonkeyPatch) -
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
 
-    resp = client.post("/optimize", json=unified_payload())
+    resp = client.post("/blackbox/run", json=_run_payload())
 
     assert resp.status_code == 422
     assert resp.json()["code"] == "models.managed_unavailable_local"
@@ -435,8 +512,8 @@ def test_own_key_run_is_accepted_in_local_mode(monkeypatch: pytest.MonkeyPatch) 
         session.commit()
 
     resp = client.post(
-        "/optimize",
-        json=unified_payload(token_source="byok", models={"reflection_model": {"name": "openrouter/openai/gpt-4o"}}),
+        "/blackbox/run",
+        json=_run_payload(token_source="byok", reflection_model_config={"name": "openrouter/openai/gpt-4o"}),
     )
 
     assert resp.status_code == 201, resp.text
@@ -471,7 +548,7 @@ def test_local_mode_grants_the_local_credit(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def _execution_request(**overrides: Any) -> WizardPreflightRequest:
-    """Build a unified execution setup check around ``unified_payload``.
+    """Build a repository execution setup check around ``_run_payload``.
 
     Args:
         **overrides: Top-level payload keys replacing the defaults.
@@ -481,8 +558,8 @@ def _execution_request(**overrides: Any) -> WizardPreflightRequest:
     """
     return WizardPreflightRequest(
         scope="execution",
-        workflow="unified",
-        payload=unified_payload(**overrides),
+        workflow="anything",
+        payload=_run_payload(**overrides),
         execution_budget_id="draft",
         execution_budget_revision=1,
     )
@@ -497,7 +574,7 @@ def test_hosted_execution_check_refuses_a_subscription_model(monkeypatch: pytest
     monkeypatch.setattr(settings, "local_mode", False)
 
     with pytest.raises(DomainError) as refused:
-        _canonical_execution_payload(_execution_request(models=_SUBSCRIPTION_MODELS), "alice", None)
+        _canonical_execution_payload(_execution_request(**_SUBSCRIPTION_RUN), "alice", None)
 
     assert refused.value.status_code == 422
     assert refused.value.code == "models.subscription_local_only"
@@ -510,9 +587,12 @@ def test_hosted_execution_checks_local_mode_before_byok_admission(monkeypatch: p
     app = FastAPI()
     app.include_router(wizard_preflight.create_wizard_preflight_router(job_store=object()))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser("alice", "user", ())
-    models = {**_SUBSCRIPTION_MODELS, "task_model": {"name": "bare-model", "token_source": "byok"}}
+    scorer = {**_payload()["scorer"], "model": {"name": "bare-model", "token_source": "byok"}}
     with TestClient(app) as client:
-        response = client.post("/wizard/preflight", json=_execution_request(models=models).model_dump(mode="json"))
+        response = client.post(
+            "/wizard/preflight",
+            json=_execution_request(**_SUBSCRIPTION_RUN, scorer=scorer).model_dump(mode="json"),
+        )
     assert response.status_code == 422
     assert response.json()["detail"] == DomainError("models.subscription_local_only").detail
 
@@ -525,7 +605,7 @@ def test_local_execution_check_keeps_a_subscription_model(monkeypatch: pytest.Mo
     """
     monkeypatch.setattr(settings, "local_mode", True)
 
-    payload = _canonical_execution_payload(_execution_request(models=_SUBSCRIPTION_MODELS), "alice", None)
+    payload = _canonical_execution_payload(_execution_request(**_SUBSCRIPTION_RUN), "alice", None)
 
     assert payload["token_source"] == "subscription"
 
@@ -605,13 +685,14 @@ def test_local_wizard_check_passes_the_raw_gate(monkeypatch: pytest.MonkeyPatch)
 
 
 def _engine_setup(monkeypatch: pytest.MonkeyPatch, store: Any, *, ready: tuple[str, ...], stored: str | None) -> None:
-    """Make CLIs look ready and store the caller's engine choice.
+    """Make CLIs look ready and write an old engine row for the caller.
 
     Args:
         monkeypatch: Pytest fixture used to replace the CLI probe.
-        store: Job store whose engine holds the engine setting.
+        store: Job store whose database receives the row.
         ready: The CLIs the probe reports as ready, in probe order.
-        stored: The engine ``alice`` chose in Settings, or ``None`` for no row.
+        stored: The engine an old ``alice`` row names, or ``None`` for no row.
+            The engine ignores these rows.
     """
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status(cli) for cli in ready])
     if stored is not None:
@@ -625,34 +706,34 @@ def _stored_proposer(store: _FakeJobStore, resp: Any) -> dict[str, Any]:
 
     Args:
         store: The fake job store.
-        resp: The accepted ``/optimize`` response.
+        resp: The accepted ``/blackbox/run`` response.
 
     Returns:
-        The stored ``optimizer.proposer`` object.
+        The stored ``proposer`` object.
     """
     assert resp.status_code == 201, resp.text
-    return store._jobs[resp.json()["optimization_id"]]["payload"]["optimizer"]["proposer"]
+    return store._jobs[resp.json()["optimization_id"]]["payload"]["proposer"]
 
 
 @pytest.mark.parametrize(
     ("ready", "stored", "expected"),
-    [(("codex", "claude"), None, "codex"), (("codex",), "claude", "claude")],
+    [(("codex", "claude"), None, "codex"), (("claude",), None, "claude"), (("codex", "claude"), "claude", "codex")],
 )
 def test_local_proposer_follows_the_agent_engine(
     monkeypatch: pytest.MonkeyPatch, ready: tuple[str, ...], stored: str | None, expected: str
 ) -> None:
-    """A local run with no proposer CLI pick runs its proposer on the engine CLI.
+    """A local run with no proposer CLI pick runs its proposer on the first ready CLI.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
         ready: The CLIs the probe reports as ready.
-        stored: The engine stored in Settings, if any.
+        stored: The engine an old row names, if any; it must not apply.
         expected: The proposer CLI the stored run must name.
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
     _engine_setup(monkeypatch, store, ready=ready, stored=stored)
 
-    resp = client.post("/optimize", json=unified_payload(token_source="subscription", models=_SUBSCRIPTION_MODELS))
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
 
     assert _stored_proposer(store, resp)["host_cli"] == expected
 
@@ -669,16 +750,9 @@ def test_explicit_proposer_pick_overrides_the_agent_engine(
         expected: The proposer CLI the stored run must name.
     """
     client, store = _local_submit_client(monkeypatch, local_mode=True)
-    _engine_setup(monkeypatch, store, ready=("codex", "claude"), stored="codex")
+    _engine_setup(monkeypatch, store, ready=("codex", "claude"), stored=None)
 
-    resp = client.post(
-        "/optimize",
-        json=unified_payload(
-            token_source="subscription",
-            models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": {"host_cli": pick}},
-        ),
-    )
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN, proposer={"host_cli": pick}))
 
     assert _stored_proposer(store, resp)["host_cli"] == expected
 
@@ -700,14 +774,9 @@ def _save_openrouter_key(monkeypatch: pytest.MonkeyPatch, store: Any, status: st
         session.commit()
 
 
-@pytest.mark.parametrize("key", [None, "unverified", "invalid"])
-def test_local_proposer_follows_the_default_cli_when_the_openrouter_key_is_gone(
-    monkeypatch: pytest.MonkeyPatch, key: str | None
-) -> None:
-    """A stored OpenRouter engine with no verified key runs the proposer on the default CLI.
-
-    Settings shows that CLI in this state ("agents run on Codex"), so the
-    proposer must not stay in the sandbox.
+@pytest.mark.parametrize("key", [None, "unverified", "invalid", "verified"])
+def test_local_proposer_ignores_a_stored_openrouter_engine(monkeypatch: pytest.MonkeyPatch, key: str | None) -> None:
+    """An old OpenRouter engine row runs the proposer on the first ready CLI, with or without a key.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
@@ -717,7 +786,7 @@ def test_local_proposer_follows_the_default_cli_when_the_openrouter_key_is_gone(
     _engine_setup(monkeypatch, store, ready=("codex", "claude"), stored="openrouter")
     _save_openrouter_key(monkeypatch, store, key)
 
-    resp = client.post("/optimize", json=unified_payload(token_source="subscription", models=_SUBSCRIPTION_MODELS))
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
 
     assert _stored_proposer(store, resp)["host_cli"] == "codex"
 
@@ -727,17 +796,18 @@ def test_local_proposer_follows_the_default_cli_when_the_openrouter_key_is_gone(
     [
         (("codex", "claude"), None, _CODEX_ID),
         (("codex", "claude"), "unverified", _CODEX_ID),
-        (("codex", "claude"), "verified", None),
+        (("codex", "claude"), "verified", _CODEX_ID),
         ((), None, None),
+        ((), "verified", None),
     ],
 )
-def test_local_agent_turn_with_no_model_follows_the_default_cli_when_the_openrouter_key_is_gone(
+def test_local_agent_turn_with_no_model_ignores_a_stored_openrouter_engine(
     monkeypatch: pytest.MonkeyPatch, ready: tuple[str, ...], key: str | None, expected: str | None
 ) -> None:
-    """A stored OpenRouter engine with no verified key fills an empty agent pick from the default CLI.
+    """An old OpenRouter engine row does not stop the first ready CLI from filling an empty agent pick.
 
-    With the verified key the pick stays empty, so the router runs it on the
-    key. With no ready CLI it also stays empty, and the router refuses it.
+    With no ready CLI the pick stays empty, so the router runs it on a
+    verified key or refuses it.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
@@ -755,7 +825,7 @@ def test_local_agent_turn_with_no_model_follows_the_default_cli_when_the_openrou
 @pytest.mark.parametrize(
     ("ready", "stored", "key", "proposer"),
     [
-        (("codex",), "openrouter", "verified", {}),
+        ((), "openrouter", "verified", {}),
         ((), "openrouter", None, {}),
         ((), None, None, {}),
         (("codex",), None, None, {"harness": "custom", "run_command": "my-agent --model {model}"}),
@@ -768,12 +838,12 @@ def test_local_proposer_stays_in_the_sandbox_without_an_engine_cli(
     key: str | None,
     proposer: dict[str, Any],
 ) -> None:
-    """The OpenRouter engine with its key, no ready CLI, or a custom harness leaves ``host_cli`` unset.
+    """No ready CLI, also with a saved key, or a custom harness leaves ``host_cli`` unset.
 
     Args:
         monkeypatch: Pytest fixture used to set local mode and the probe.
         ready: The CLIs the probe reports as ready.
-        stored: The engine stored in Settings, if any.
+        stored: The engine an old row names, if any; it must not apply.
         key: The status of the caller's saved OpenRouter key, or ``None`` for no key.
         proposer: The run's proposer settings.
     """
@@ -781,20 +851,13 @@ def test_local_proposer_stays_in_the_sandbox_without_an_engine_cli(
     _engine_setup(monkeypatch, store, ready=ready, stored=stored)
     _save_openrouter_key(monkeypatch, store, key)
 
-    resp = client.post(
-        "/optimize",
-        json=unified_payload(
-            token_source="subscription",
-            models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": proposer},
-        ),
-    )
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN, proposer=proposer))
 
     assert _stored_proposer(store, resp)["host_cli"] is None
 
 
 def test_hosted_proposer_ignores_the_agent_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hosted mode never probes a CLI or reads the setting for a proposer.
+    """Hosted mode never probes a CLI for a proposer.
 
     Args:
         monkeypatch: Pytest fixture used to keep local mode off.
@@ -809,7 +872,7 @@ def test_hosted_proposer_ignores_the_agent_engine(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(agent_engine, "probe_clis", _no_probe)
 
-    resp = client.post("/optimize", json=unified_payload())
+    resp = client.post("/blackbox/run", json=_run_payload())
 
     assert _stored_proposer(store, resp)["host_cli"] is None
 
@@ -822,11 +885,11 @@ def test_local_execution_check_fills_the_proposer_cli(monkeypatch: pytest.Monkey
     """
     monkeypatch.setattr(settings, "local_mode", True)
     store = SimpleNamespace(engine=_billing_engine())
-    _engine_setup(monkeypatch, store, ready=("codex", "claude"), stored="claude")
+    _engine_setup(monkeypatch, store, ready=("claude", "codex"), stored=None)
 
-    payload = _canonical_execution_payload(_execution_request(models=_SUBSCRIPTION_MODELS), "alice", store)
+    payload = _canonical_execution_payload(_execution_request(**_SUBSCRIPTION_RUN), "alice", store)
 
-    assert payload["optimizer"]["proposer"]["host_cli"] == "claude"
+    assert payload["proposer"]["host_cli"] == "claude"
 
 
 def test_blackbox_proposer_follows_the_agent_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -859,9 +922,7 @@ def test_local_wizard_check_evidence_starts_a_run_on_the_engine_cli(
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
     budget = harness.budgets.create(harness.username, 20, idempotency_key="engine")
     payload = {
-        **_payload(),
-        "token_source": "subscription",
-        "models": _SUBSCRIPTION_MODELS,
+        **_run_payload(**_SUBSCRIPTION_RUN),
         "execution_budget_id": budget.id,
         "execution_budget_revision": budget.revision,
     }
@@ -870,7 +931,7 @@ def test_local_wizard_check_evidence_starts_a_run_on_the_engine_cli(
         route,
         json={
             "scope": "execution",
-            "workflow": "unified",
+            "workflow": "anything",
             "payload": payload,
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -882,10 +943,10 @@ def test_local_wizard_check_evidence_starts_a_run_on_the_engine_cli(
     ]
     checked = frames[-1] if route.endswith("/stream") else response.json()
     assert checked["status"] == "succeeded", checked
-    assert harness.calls[0]["payload"]["optimizer"]["proposer"]["host_cli"] == "claude"
+    assert harness.calls[0]["payload"]["proposer"]["host_cli"] == "claude"
 
     submitted = harness.client.post(
-        "/optimize",
+        "/blackbox/run",
         json={
             **payload,
             "execution_budget_revision": checked["budget"]["revision"],
@@ -896,7 +957,7 @@ def test_local_wizard_check_evidence_starts_a_run_on_the_engine_cli(
 
     assert submitted.status_code == 201, submitted.text
     job = harness.store.get_job(submitted.json()["optimization_id"], include_payload=True)
-    assert job["payload"]["optimizer"]["proposer"]["host_cli"] == "claude"
+    assert job["payload"]["proposer"]["host_cli"] == "claude"
 
 
 def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
@@ -916,9 +977,7 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("codex"), _status("claude")])
     budget = harness.budgets.create(harness.username, 20, idempotency_key="engine-change")
     payload = {
-        **_payload(),
-        "token_source": "subscription",
-        "models": _SUBSCRIPTION_MODELS,
+        **_run_payload(**_SUBSCRIPTION_RUN),
         "execution_budget_id": budget.id,
         "execution_budget_revision": budget.revision,
     }
@@ -926,7 +985,7 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
         "/wizard/preflight",
         json={
             "scope": "execution",
-            "workflow": "unified",
+            "workflow": "anything",
             "payload": payload,
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -936,14 +995,13 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
     checked = response.json()
     assert checked["status"] == "succeeded", checked
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("claude")])
-    optimizer = payload["optimizer"]
-    proposer = {**optimizer.get("proposer", {}), "host_cli": checked.get("proposer_host_cli")}
+    proposer = {**payload.get("proposer", {}), "host_cli": checked.get("proposer_host_cli")}
 
     submitted = harness.client.post(
-        "/optimize",
+        "/blackbox/run",
         json={
             **payload,
-            "optimizer": {**optimizer, "proposer": proposer},
+            "proposer": proposer,
             "execution_budget_revision": checked["budget"]["revision"],
             "preflight_id": checked["id"],
             "preflight_fingerprint": checked["fingerprint"],
@@ -952,7 +1010,7 @@ def test_local_wizard_check_evidence_survives_a_cli_readiness_change(
 
     assert submitted.status_code == 201, submitted.text
     job = harness.store.get_job(submitted.json()["optimization_id"], include_payload=True)
-    assert job["payload"]["optimizer"]["proposer"]["host_cli"] == "codex"
+    assert job["payload"]["proposer"]["host_cli"] == "codex"
 
 
 @pytest.mark.parametrize("route", ["/wizard/preflight", "/wizard/preflight/stream"])
@@ -974,9 +1032,7 @@ def test_local_wizard_check_without_a_cli_survives_a_new_engine_cli(
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [])
     budget = harness.budgets.create(harness.username, 20, idempotency_key="no-cli")
     payload = {
-        **_payload(),
-        "token_source": "subscription",
-        "models": _SUBSCRIPTION_MODELS,
+        **_run_payload(**_SUBSCRIPTION_RUN),
         "execution_budget_id": budget.id,
         "execution_budget_revision": budget.revision,
     }
@@ -985,7 +1041,7 @@ def test_local_wizard_check_without_a_cli_survives_a_new_engine_cli(
         route,
         json={
             "scope": "execution",
-            "workflow": "unified",
+            "workflow": "anything",
             "payload": payload,
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -1000,14 +1056,13 @@ def test_local_wizard_check_without_a_cli_survives_a_new_engine_cli(
     assert checked["proposer_host_cli"] is None
     assert "pending_reason" not in checked
     monkeypatch.setattr(agent_engine, "probe_clis", lambda _settings: [_status("codex")])
-    optimizer = payload["optimizer"]
-    proposer = {**optimizer.get("proposer", {}), "host_cli": checked["proposer_host_cli"]}
+    proposer = {**payload.get("proposer", {}), "host_cli": checked["proposer_host_cli"]}
 
     submitted = harness.client.post(
-        "/optimize",
+        "/blackbox/run",
         json={
             **payload,
-            "optimizer": {**optimizer, "proposer": proposer},
+            "proposer": proposer,
             "execution_budget_revision": checked["budget"]["revision"],
             "preflight_id": checked["id"],
             "preflight_fingerprint": checked["fingerprint"],
@@ -1016,4 +1071,4 @@ def test_local_wizard_check_without_a_cli_survives_a_new_engine_cli(
 
     assert submitted.status_code == 201, submitted.text
     job = harness.store.get_job(submitted.json()["optimization_id"], include_payload=True)
-    assert job["payload"]["optimizer"]["proposer"].get("host_cli") is None
+    assert job["payload"]["proposer"].get("host_cli") is None

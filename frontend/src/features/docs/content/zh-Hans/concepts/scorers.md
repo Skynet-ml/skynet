@@ -1,146 +1,131 @@
-指标告诉 Skynet 一个输出有多好。它是 `metric.py` 中的一个 Python 函数。每个引擎都调用同一个函数。本页给出契约、返回值和示例。
+评分器告诉 Skynet 你仓库的某个版本有多好。它是 `scorer.py` 中的一个 Python 函数。每个引擎都调用同一个函数。本页给出契约、返回值和示例。
 
 ## 契约
 
 ```python
-def score(input, output, expected=None):
+def score(repo_path, case):
     ...
     return score_value, {"feedback": "..."}
 ```
 
-| 参数       | 包含的内容                                           |
-| ---------- | ---------------------------------------------------- |
-| `input`    | 一个 dict，包含该用例的输入字段                      |
-| `output`   | 你的 `run(artifact, input)` 为该用例返回的内容       |
-| `expected` | 该用例的期望值；如果用例没有期望值，则为 `None`      |
+| 参数        | 包含的内容                                                                       |
+| ----------- | -------------------------------------------------------------------------------- |
+| `repo_path` | 仓库某个版本的文件夹，安装命令已经在其中运行过                                   |
+| `case`      | 一个 dict。`case["input"]` 包含输入字段。`case["expected"]` 包含期望值，或为 `None` |
 
-如果你的函数只接受两个参数，Skynet 会调用 `score(input, output)`。
+如果你的函数只接受一个参数，Skynet 会调用 `score(repo_path)`。当评分器运行自己的测试、不需要用例时，请使用这种形式。
 
-对于 DSPy 程序，Skynet 会把 DSPy 的指标调用适配到这同一个函数。你只需为每种产物类型编写一个指标。请阅读[优化的工作原理](/docs/concepts/optimization)。
+评分器在沙箱中、在该版本的文件夹里运行。它可以从仓库导入代码、运行命令，或者调用 `serve.py` 中的 `serve()`。请阅读[优化的工作原理](/docs/concepts/optimization)。
 
 ## 返回值
 
-`score` 必须返回一对值（一个包含两个元素的 tuple 或 list）：
+`score` 必须返回一个分数和反馈。以下结构有效：
 
-1. **分数。** 一个数字。优化器会尽量让它变高。
-2. **附加信息。** 一个 dict。它必须有一个 `"feedback"` 键，其值为字符串。
+1. 一对值：一个数字，以及一个反馈字符串或一个带 `"feedback"` 键的 dict。
+2. 一个 dict，`"score"` 下是一个数字，`"feedback"` 下是一个字符串。
 
-附加信息还可以有一个 `"scores"` 键。它把名称映射到数字，例如 `{"format": 1.0, "accuracy": 0.5}`。
+反馈必须是非空字符串。
 
-如果返回值的结构不同，契约检查会在 **指标返回值** 处失败。
+附加信息还可以有一个 `"scores"` 键。它把名称映射到命名分数。每个命名分数都有自己的分数和反馈，例如 `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`。
 
-| 返回值                                                 | 是否有效                     |
-| ------------------------------------------------------ | ---------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`      | 是                           |
-| `[1.0, {"feedback": "OK", "scores": {"format": 1.0}}]` | 是                           |
-| `0.8`                                                  | 否。没有附加信息。           |
-| `(0.8, "Close.")`                                      | 否。附加信息不是 dict。      |
-| `(0.8, {})`                                            | 否。没有反馈字符串。         |
-| `("0.8", {"feedback": "OK"})`                          | 否。分数是字符串。           |
-| `(0.8, {"feedback": "OK", "scores": {"a": "high"}})`   | 否。某个命名分数不是数字。   |
+附加信息还可以有一个结构相同的 `"cases"` 键。每一项是一个用例的结果。每个引擎都把每个用例当作一个单独的目标。
+
+如果返回值的结构不同，检查会失败并显示原因。
+
+| 返回值 | 是否有效 |
+| --- | --- |
+| `(0.8, {"feedback": "Close. Missing the date."})`                               | 是 |
+| `(0.8, "Close. Missing the date.")`                                             | 是 |
+| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | 是 |
+| `0.8`                                                                           | 否。没有反馈。 |
+| `(0.8, {})`                                                                     | 否。没有反馈字符串。 |
+| `("0.8", {"feedback": "OK"})`                                                   | 否。分数是字符串。 |
+| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | 否。某个命名分数不是数字。 |
 
 ## 编写有用的反馈
 
-GEPA、DSPy GEPA 和 Auto 会读取反馈文本来编写下一个版本。请说明哪里错了，以及正确的输出是什么样子。
+GEPA 和 Auto 会读取反馈文本来编写下一个版本。请说明哪里错了，以及正确的输出是什么样子。
 
-| 薄弱的反馈    | 有用的反馈                                                            |
-| ------------- | --------------------------------------------------------------------- |
-| “Wrong.”      | “Expected 'billing', got 'other'. The message mentions a charge.”     |
+| 薄弱的反馈   | 有用的反馈                                               |
+| ------------ | -------------------------------------------------------- |
+| “Wrong.”     | “Expected 'billing', got 'other'. The message mentions a charge.” |
 | “Bad format.” | “The output is not valid JSON. It has a trailing comma after the last field.” |
 
 > [!NOTE]
-> 优化器永远看不到你的指标源代码。使用 DSPy 优化器时，反思模型只能看到反馈文本。你的期望值只留在指标中。
+> 编码智能体永远看不到你的评分器源代码、期望值或运行密钥。它只能看到分数和反馈文本。
 
 ## 示例
 
 ### 精确匹配
 
-```python tab="metric.py"
-def score(input, output, expected=None):
-    want = expected["label"]
-    if output == want:
+```python tab="scorer.py"
+import importlib.util
+
+
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    got = module.serve(case["input"])
+    want = case["expected"]["label"]
+    if got == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
-`expected` 是一个以输出列名称为键的 dict。请阅读[数据集与划分](/docs/concepts/datasets)。
+`case["expected"]` 是一个以输出列名称为键的 dict。请阅读[数据集与划分](/docs/concepts/datasets)。
 
-### 多项检查
+### 运行仓库的测试
 
-```python tab="metric.py"
-import json
+```python tab="scorer.py"
+import subprocess
 
 
-def score(input, output, expected=None):
-    try:
-        data = json.loads(output)
-    except ValueError as exc:
-        return 0.0, {"feedback": f"Output is not valid JSON: {exc}", "scores": {"format": 0.0, "fields": 0.0}}
-    want = expected["fields"]
-    found = [key for key in want if key in data]
-    fields = len(found) / len(want) if want else 1.0
-    missing = [key for key in want if key not in data]
-    feedback = "All fields present." if not missing else f"Missing fields: {', '.join(missing)}."
-    return 0.5 + 0.5 * fields, {"feedback": feedback, "scores": {"format": 1.0, "fields": fields}}
+def score(repo_path):
+    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
+    if result.returncode == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": result.stdout[-2000:]}
 ```
 
 ### 用模型作为评判
 
-指标可以调用模型。从 `skynet` 辅助模块导入 `llm`。从指标发出的调用会使用指标模型。
+评分器可以调用模型。从 `skynet` 辅助模块导入 `llm`。调用会通过 Skynet 的模型网关，发送到本次运行的评分器模型。
 
-```python tab="metric.py"
+```python tab="scorer.py"
+import importlib.util
+
 from skynet import llm
 
 
-def score(input, output, expected=None):
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    answer = module.serve(case["input"])
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {input['question']}\nAnswer: {output}",
-        model="openai/gpt-4.1-mini",
+        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
         temperature=0,
         max_tokens=512,
-        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-指标在自己的 `llm()` 调用中设置模型。示例中的四个参数均为可选参数。省略 `model=` 时，指标使用反思模型。
+评分器也可以使用任何兼容 OpenAI 的客户端，配合 `OPENAI_BASE_URL`、`APP_API_KEY` 和 `APP_MODEL` 环境变量。网关只接受本次运行的评分器模型。
 
-## 准确率、速度和成本
+## 模型调用和密钥
 
-指标可以把准确率与测得的运行时间和模型成本结合起来。在模块级定义 `REWARD_SPEC`，并返回 `reward` 的值。
-
-```python tab="metric.py"
-from skynet import reward
-
-REWARD_SPEC = {
-    "weights": {"accuracy": 0.7, "speed": 0.2, "cost": 0.1},
-    "accuracy": {},
-    "speed": {"reference": 2000},
-    "cost": {"reference": 0.01},
-}
-
-
-def score(input, output, expected=None):
-    ok = output == expected["label"]
-    return reward(REWARD_SPEC, 1.0 if ok else 0.0, "Correct." if ok else "Wrong label.")
-```
-
-- `weights` 必须包含 `accuracy`、`speed` 和 `cost`。每个权重都为 0 或更大，且不能全部为 0。Skynet 会把它们缩放到总和为 1。
-- `speed.reference` 的单位是毫秒。`cost.reference` 的单位是美元。两者都必须为正数。
-- 没有 `accuracy.reference` 时，准确率是 0 到 1 之间的分数。有它时，准确率是一个误差，越低越好。
-
-Skynet 自己测量时间和成本。运行代码无法更改它们。如果 Skynet 无法测量时间或成本，那一部分记为 0 分，反馈中也会说明。
-
-指标也可以用 `skynet` 中的 `observation()` 和 `service_cost()` 直接读取这些测量值。
+- 使用 Skynet 密钥的调用会计入运行预算。使用你自己的密钥（BYOK）时，调用计到你的提供商密钥上，Skynet 不收取模型费用。请阅读[计费](/docs/concepts/billing)。
+- 运行密钥以环境变量的形式传给评分器。变量名就是密钥名，例如 `os.environ["SEARCH_API_KEY"]`。
+- Skynet 会在评分器输出和日志中隐藏密钥的值。
 
 ## 限制
 
-| 项目           | 值                               |
-| -------------- | -------------------------------- |
-| 指标超时       | 默认 60 秒，最多 600 秒          |
-| 契约检查样例   | 3 个用例                         |
+| 项目       | 值                      |
+| ---------- | ----------------------- |
+| 评分器超时 | 默认 60 秒，最多 600 秒 |
 
 ## 相关页面
 

@@ -9,14 +9,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import {
-  Code,
-  DotsThree,
-  Eye,
-  File,
-  Folders,
-  MagnifyingGlass,
-} from "@/shared/ui/icons";
+import { Code, DotsThree, Eye, File, Folders, MagnifyingGlass } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { Segmented } from "@/shared/ui/segmented";
@@ -26,6 +19,7 @@ import { TOUCH_FIELD_SM } from "@/shared/ui/touch";
 import { RenderedText } from "@/shared/ui/rendered-text";
 import { FileTreeList, type FileTreeRowLook } from "@/shared/ui/file-tree";
 import { getRepositoryFile, getRepositoryTree } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { CODE_HIGHLIGHT_SPECS } from "@/shared/ui/code-highlight-style";
@@ -588,8 +582,10 @@ function FileView({
   onSelect,
   onText,
   toolbar,
+  source,
 }: {
   optimizationId: string;
+  source?: ApiSource;
   path: string;
   files: FilePatch[];
   onSelect: (path: string) => void;
@@ -603,8 +599,8 @@ function FileView({
   const [showPatch, setShowPatch] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const loadFile = useCallback(
-    (p: string) => getRepositoryFile(optimizationId, p),
-    [optimizationId],
+    (p: string) => getRepositoryFile(optimizationId, p, source),
+    [optimizationId, source],
   );
 
   const sides = sidesOf(path, files);
@@ -734,8 +730,6 @@ function FileView({
 
 /* ── Browser ──────────────────────────────────────────────────────────── */
 
-const loadTree = (optimizationId: string) => getRepositoryTree(optimizationId);
-
 function TreeToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   const label = msg(
     open
@@ -751,7 +745,10 @@ function TreeToggle({ open, onToggle }: { open: boolean; onToggle: () => void })
       aria-pressed={open}
       aria-label={label}
       title={label}
-      className={cn("rounded-full", open && "bg-primary-fill/10 text-primary hover:bg-primary-fill/15")}
+      className={cn(
+        "rounded-full",
+        open && "bg-primary-fill/10 text-primary hover:bg-primary-fill/15",
+      )}
     >
       <Folders aria-hidden="true" />
     </Button>
@@ -769,8 +766,11 @@ export function RepoVersionBrowser({
   path,
   onPathChange,
   onOpenFile,
+  source,
 }: {
   optimizationId: string;
+  /** Where the run lives; a hosted run reads its repository through the hosted proxy. */
+  source?: ApiSource;
   version: CandidateVersion;
   /** The reader's last pick; kept across versions while the file exists. */
   path: string | null;
@@ -780,6 +780,7 @@ export function RepoVersionBrowser({
 }) {
   const files = useMemo(() => parsePatch(version.text), [version.text]);
   // The changed files alone still browse while the full listing loads or fails.
+  const loadTree = useCallback((runId: string) => getRepositoryTree(runId, source), [source]);
   const tree = useLoaded(optimizationId, loadTree);
   const entries = tree?.status === "ready" ? tree.data.entries : EMPTY_ENTRIES;
   const root = useMemo(() => buildRepoTree(entries, files), [entries, files]);
@@ -841,6 +842,7 @@ export function RepoVersionBrowser({
             <FileView
               key={selected}
               optimizationId={optimizationId}
+              source={source}
               path={selected}
               files={files}
               onSelect={select}

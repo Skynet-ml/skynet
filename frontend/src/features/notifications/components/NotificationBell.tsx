@@ -9,13 +9,13 @@ import { useSettingsModal } from "@/features/settings";
 import type { NotificationItem, NotificationTab } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { formatRelativeTime, formatScore } from "@/shared/lib/formatters";
-import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { Bell, Checks, GearSix, Stack, Target, Trash, X, type Icon } from "@/shared/ui/icons";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { TooltipBody, TooltipButton } from "@/shared/ui/tooltip-button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Sheet, SheetContent, SheetTitle } from "@/shared/ui/primitives/sheet";
 
@@ -158,12 +158,7 @@ function ItemRow({
   );
 }
 
-const CONFIRM_RESET_MS = 4000;
-
-/**
- * Clears the open tab after a second press: the first press arms it and
- * shows the confirm label, which disarms itself on blur, Escape or a pause.
- */
+/** Clears the open tab in one press. */
 function ClearAllButton({
   tab,
   disabled,
@@ -173,42 +168,19 @@ function ClearAllButton({
   disabled: boolean;
   onClear: () => void;
 }) {
-  const [armed, setArmed] = React.useState(false);
-  React.useEffect(() => {
-    if (!armed) return;
-    const timer = setTimeout(() => setArmed(false), CONFIRM_RESET_MS);
-    return () => clearTimeout(timer);
-  }, [armed]);
   const label = msg(
     tab === "focused" ? "notifications.clear.focused" : "notifications.clear.everything",
   );
-  const hint = msg("notifications.clear.confirm_hint");
   return (
-    <TooltipButton tooltip={armed ? hint : label}>
+    <TooltipButton tooltip={label}>
       <button
         type="button"
-        aria-label={armed ? hint : label}
+        aria-label={label}
         disabled={disabled}
-        onClick={() => {
-          if (armed) {
-            setArmed(false);
-            onClear();
-          } else {
-            setArmed(true);
-          }
-        }}
-        onBlur={() => setArmed(false)}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") setArmed(false);
-        }}
-        className={cn(
-          ICON_BUTTON,
-          armed &&
-            "w-auto gap-1 px-2 bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive",
-        )}
+        onClick={onClear}
+        className={ICON_BUTTON}
       >
         <Trash className="size-4" aria-hidden="true" />
-        {armed && <span className="text-xs font-medium">{msg("notifications.clear.confirm")}</span>}
       </button>
     </TooltipButton>
   );
@@ -275,7 +247,11 @@ function PanelBody({
             const active = value === tab;
             const unread = value === "focused" ? inbox.counts.focused : inbox.counts.everything;
             return (
-              <TooltipButton key={value} tooltip={msg(tip)}>
+              <TooltipButton
+                key={value}
+                dir={getActiveDir()}
+                tooltip={<TooltipBody title={msg(label)} detail={msg(tip)} centered />}
+              >
                 <button
                   type="button"
                   role="tab"

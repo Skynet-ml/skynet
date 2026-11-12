@@ -235,7 +235,7 @@ def create_notifications_router(*, job_store) -> APIRouter:
 
         Args:
             user: Authenticated caller.
-            tab: ``focused`` (needs-input, near-budget, failed, finished) or ``everything``.
+            tab: ``focused`` (near-budget, failed, finished) or ``everything``.
             cursor: ``next_cursor`` from the previous page.
             limit: Page size.
 

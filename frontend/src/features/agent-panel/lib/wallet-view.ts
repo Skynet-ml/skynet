@@ -1,9 +1,9 @@
-export interface FreeGrant {
+interface FreeGrant {
   cents_remaining?: number;
   cents_total?: number;
 }
 
-export interface UsageEntry {
+interface UsageEntry {
   id?: string;
   label?: string;
   model?: string | null;

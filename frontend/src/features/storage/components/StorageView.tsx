@@ -12,6 +12,8 @@ import { StackedUsageBar } from "./StackedUsageBar";
 import { StorageSkeleton } from "./StorageSkeleton";
 import { CATEGORY_META, STORAGE_CATEGORY_ORDER } from "../lib/categories";
 import { cn } from "@/shared/lib/utils";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useSourceSwap } from "@/shared/hooks/use-source-swap";
 
 /**
  * Top-level /storage page: the account-wide cleanup surface. A usage gauge over
@@ -27,20 +29,34 @@ export function StorageView() {
   const [openCategory, setOpenCategory] = React.useState<string | null>(null);
 
   const OpenIcon = getActiveDir() === "rtl" ? CaretLeft : CaretRight;
+  const resources = useResourceMode();
+  const source = resources.mode;
+  // Deletes from this page act on this Mac's data only, so web rows stay read-only here.
+  const remote = resources.switchable && source === "hosted";
+  const swapping = useSourceSwap(source);
 
+  // The newest request wins, so a late answer for the other mode never
+  // replaces the figures on screen.
+  const reqId = React.useRef(0);
   const refreshUsage = React.useCallback(() => {
-    getStorageUsage()
-      .then(setUsage)
+    const id = ++reqId.current;
+    getStorageUsage(source)
+      .then((res) => {
+        if (id === reqId.current) setUsage(res);
+      })
       .catch(() => {
         /* keep the last figure rather than blanking the gauge */
       });
-  }, []);
+  }, [source]);
 
   React.useEffect(() => {
     let cancelled = false;
-    getStorageUsage()
+    const id = ++reqId.current;
+    setLoading(true);
+    setError(false);
+    getStorageUsage(source)
       .then((res) => {
-        if (!cancelled) setUsage(res);
+        if (!cancelled && id === reqId.current) setUsage(res);
       })
       .catch(() => {
         if (!cancelled) setError(true);
@@ -51,7 +67,7 @@ export function StorageView() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [source]);
 
   // Every category is listed, so the user sees each kind of data the app keeps
   // even before it holds anything; the biggest come first, empty ones last.
@@ -64,7 +80,7 @@ export function StorageView() {
     })).sort((a, b) => b.bytes - a.bytes);
   }, [usage]);
 
-  if (loading) return <StorageSkeleton />;
+  if (loading || swapping) return <StorageSkeleton />;
 
   if (error || !usage) {
     return (
@@ -82,7 +98,7 @@ export function StorageView() {
   const free = Math.max(0, quota - used);
 
   return (
-    <div className="pb-16">
+    <div className="swap-in pb-16">
       <section className="mt-8">
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-foreground">
@@ -114,6 +130,9 @@ export function StorageView() {
           <Database className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           {msg("storage.breakdown.title")}
         </h2>
+        {remote && (
+          <p className="mt-1 text-xs text-muted-foreground">{msg("storage.page.remote_note")}</p>
+        )}
         <ul className="mt-3 flex flex-col divide-y divide-border-subtle/60">
           {rows.map(({ key, bytes, count }) => {
             const meta = CATEGORY_META[key];
@@ -175,8 +194,13 @@ export function StorageView() {
 
             return (
               <li key={key}>
-                {empty ? (
-                  <div className="flex min-h-14 items-center gap-3 px-2 py-2.5 opacity-70">
+                {empty || remote ? (
+                  <div
+                    className={cn(
+                      "flex min-h-14 items-center gap-3 px-2 py-2.5",
+                      empty && "opacity-70",
+                    )}
+                  >
                     {body}
                   </div>
                 ) : (

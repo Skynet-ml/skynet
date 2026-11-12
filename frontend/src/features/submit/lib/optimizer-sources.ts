@@ -17,21 +17,6 @@ const GEPA_PAPER: OptimizerSource = {
 };
 
 export const OPTIMIZER_SOURCES: Partial<Record<OptimizerChoice, readonly OptimizerSource[]>> = {
-  dspy_gepa: [GEPA_PAPER],
-  dspy_miprov2: [
-    {
-      kind: "paper",
-      title: "Optimizing Instructions and Demonstrations for Multi-Stage Language Model Programs",
-      url: "https://arxiv.org/abs/2406.11695",
-    },
-  ],
-  dspy_bootstrap_fewshot: [
-    {
-      kind: "paper",
-      title: "DSPy: Compiling Declarative Language Model Calls into Self-Improving Pipelines",
-      url: "https://arxiv.org/abs/2310.03714",
-    },
-  ],
   gepa: [GEPA_PAPER],
   autoresearch: [
     {

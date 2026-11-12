@@ -61,7 +61,7 @@ No tool adds funds, changes your balance or changes billing settings.
 4. The agent calls `get_run` until the run ends. The final statuses are `success`, `failed`, `cancelled` and `stopped`.
 
 > [!TIP]
-> Tell the agent your spending limit in your prompt, for example "Optimize this prompt. Spend at most $10." The agent then uses that limit in `start_run`.
+> Tell the agent your spending limit in your prompt, for example "Optimize this repository. Spend at most $10." The agent then uses that limit in `start_run`.
 
 The run stops when it reaches its spending limit. Read [Billing](/docs/concepts/billing) for how Skynet charges a run.
 

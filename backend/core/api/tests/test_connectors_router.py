@@ -3,7 +3,7 @@
 Runs the router against an in-memory SQLite store with every Hugging Face
 call mocked at the :mod:`httpx` boundary, so the tests cover the vault
 round-trip (ciphertext only, masked views), the token fallback, the OAuth
-start/callback pair, and the parquet import path through the library's gated
+start/callback/finish steps, and the parquet import path through the library's gated
 save.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
@@ -182,8 +183,63 @@ def test_oauth_start_503_when_unconfigured(vault_key: str) -> None:
     assert response.json()["code"] == "connectors.hf_oauth_not_configured"
 
 
-def test_oauth_start_and_callback_link_the_account(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The authorize URL carries PKCE and encrypted state; the callback stores tokens."""
+_BOB = AuthenticatedUser(username="bob", role="user", groups=())
+
+
+def oauth_fragment(response: httpx.Response) -> dict[str, str]:
+    """Assert a callback redirect that carries the finish values in the fragment.
+
+    Args:
+        response: The callback's response.
+
+    Returns:
+        The fragment values, one per key.
+    """
+    assert response.status_code == 303
+    target = urlparse(response.headers["location"])
+    assert "error" not in target.query, target.query
+    return {key: values[0] for key, values in parse_qs(target.fragment).items()}
+
+
+def _hf_start(client: TestClient) -> str:
+    """Start the Hugging Face sign-in and return the state.
+
+    Args:
+        client: The test client.
+
+    Returns:
+        The encrypted state from the authorize URL.
+    """
+    start = client.post("/connectors/huggingface/oauth/start")
+    assert start.status_code == 200
+    return parse_qs(urlparse(start.json()["authorize_url"]).query)["state"][0]
+
+
+def _hf_finish(client: TestClient, state: str, code: str = "code-xyz") -> tuple[httpx.Response, Any]:
+    """Call the finish route with Hugging Face's token and userinfo calls mocked.
+
+    Args:
+        client: The test client.
+        state: The state from the callback.
+        code: The code from the callback.
+
+    Returns:
+        The finish response and the mock of the token call.
+    """
+    token_body = {"access_token": "at-1", "refresh_token": "rt-1", "expires_in": 28800, "scope": "openid profile"}
+    with (
+        patch("core.connectors.huggingface.httpx.post", return_value=_response(200, token_body)) as post,
+        patch(
+            "core.connectors.huggingface.httpx.get",
+            return_value=_response(200, {"preferred_username": "alice-hf"}),
+        ),
+    ):
+        response = client.post("/connectors/huggingface/oauth/finish", json={"state": state, "code": code})
+    return response, post
+
+
+def test_oauth_start_and_finish_link_the_account(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The callback only forwards the code; the signed-in finish stores the tokens."""
     monkeypatch.setattr(settings, "hf_oauth_client_id", "client-123")
     monkeypatch.setattr(settings, "app_public_url", "https://app.example")
     client, store = _make_client()
@@ -201,21 +257,25 @@ def test_oauth_start_and_callback_link_the_account(vault_key: str, monkeypatch: 
     payload = hf.parse_state(state)
     assert payload["u"] == "alice"
 
-    token_body = {"access_token": "at-1", "refresh_token": "rt-1", "expires_in": 28800, "scope": "openid profile"}
-    with (
-        patch("core.connectors.huggingface.httpx.post", return_value=_response(200, token_body)) as post,
-        patch(
-            "core.connectors.huggingface.httpx.get",
-            return_value=_response(200, {"preferred_username": "alice-hf"}),
-        ),
-    ):
+    with patch("core.connectors.huggingface.httpx.post") as never:
         callback = client.get(
             "/connectors/huggingface/oauth/callback",
             params={"code": "code-xyz", "state": state},
             follow_redirects=False,
         )
-    assert callback.status_code == 303
-    assert callback.headers["location"] == "https://app.example/?settings=connectors"
+    never.assert_not_called()
+    assert callback.headers["location"].startswith("https://app.example/?settings=connectors#")
+    assert oauth_fragment(callback) == {
+        "oauth_flow": "connector:huggingface",
+        "oauth_state": state,
+        "oauth_code": "code-xyz",
+    }
+    assert client.get("/connectors").json()["connectors"][0]["connected"] is False
+    assert ConnectorVault(store.engine).resolve("alice", "huggingface") is None
+
+    finish, post = _hf_finish(client, state)
+    assert finish.status_code == 200, finish.text
+    assert finish.json()["connectors"][0]["connected"] is True
     form = post.call_args.kwargs["data"]
     assert form["code"] == "code-xyz"
     assert form["code_verifier"] == payload["v"]
@@ -232,21 +292,75 @@ def test_oauth_start_and_callback_link_the_account(vault_key: str, monkeypatch: 
     assert secret.expires_at is not None
 
 
-def test_oauth_callback_with_bad_state_redirects_with_error(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A forged state never reaches the token endpoint and reports back to the UI."""
+def test_oauth_finish_by_another_user_is_refused(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A state that Alice started cannot link a Hugging Face account to Bob."""
+    monkeypatch.setattr(settings, "hf_oauth_client_id", "client-123")
+    client, store = _make_client()
+    state = _hf_start(client)
+    client.app.dependency_overrides[get_authenticated_user] = lambda: _BOB
+    finish, post = _hf_finish(client, state)
+    assert finish.status_code == 403
+    assert finish.json()["code"] == "connectors.hf_oauth_state_invalid"
+    post.assert_not_called()
+    vault = ConnectorVault(store.engine)
+    assert vault.resolve("bob", "huggingface") is None
+    assert vault.resolve("alice", "huggingface") is None
+
+
+def test_oauth_finish_needs_a_signed_in_caller(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a bearer token the finish route answers 401 and trades nothing."""
+    monkeypatch.setattr(settings, "hf_oauth_client_id", "client-123")
+    client, store = _make_client()
+    state = _hf_start(client)
+    client.app.dependency_overrides.pop(get_authenticated_user)
+    finish, post = _hf_finish(client, state)
+    assert finish.status_code == 401
+    post.assert_not_called()
+    assert ConnectorVault(store.engine).resolve("alice", "huggingface") is None
+
+
+def test_oauth_finish_refuses_a_bad_expired_or_used_state(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forged or expired state never reaches Hugging Face; a used code is refused there."""
+    monkeypatch.setattr(settings, "hf_oauth_client_id", "client-123")
+    client, store = _make_client()
+
+    forged, post = _hf_finish(client, "garbage")
+    assert forged.status_code == 400
+    assert forged.json()["code"] == "connectors.hf_oauth_state_invalid"
+    post.assert_not_called()
+
+    state = _hf_start(client)
+    with patch("cryptography.fernet.time.time", return_value=time.time() + 3600):
+        expired, post = _hf_finish(client, state)
+    assert expired.status_code == 400
+    assert expired.json()["code"] == "connectors.hf_oauth_state_invalid"
+    post.assert_not_called()
+
+    first, _ = _hf_finish(client, state)
+    assert first.status_code == 200
+    with patch(
+        "core.connectors.huggingface.httpx.post",
+        return_value=_response(400, {"error": "invalid_grant"}),
+    ):
+        reused = client.post("/connectors/huggingface/oauth/finish", json={"state": state, "code": "code-xyz"})
+    assert reused.status_code == 400
+    assert reused.json()["code"] == "connectors.hf_oauth_failed"
+    assert ConnectorVault(store.engine).resolve("alice", "huggingface").access_token == "at-1"
+
+
+def test_oauth_callback_without_a_code_redirects_with_error(vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A declined sign-in bounces back with an error code and no fragment."""
     monkeypatch.setattr(settings, "hf_oauth_client_id", "client-123")
     monkeypatch.setattr(settings, "app_public_url", "https://app.example")
     client, _ = _make_client()
-    with patch("core.connectors.huggingface.httpx.post") as post:
-        callback = client.get(
-            "/connectors/huggingface/oauth/callback",
-            params={"code": "code-xyz", "state": "garbage"},
-            follow_redirects=False,
-        )
-    post.assert_not_called()
+    callback = client.get(
+        "/connectors/huggingface/oauth/callback",
+        params={"error": "access_denied", "state": "s"},
+        follow_redirects=False,
+    )
     assert callback.status_code == 303
     assert callback.headers["location"] == (
-        "https://app.example/?settings=connectors&connector_error=connectors.hf_oauth_state_invalid"
+        "https://app.example/?settings=connectors&connector_error=connectors.hf_oauth_failed"
     )
 
 

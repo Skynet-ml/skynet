@@ -16,7 +16,6 @@ from core.config import Settings, app_env, legacy_env_name, with_legacy_env
 _SETTINGS_ENV_VARS = (
     "REMOTE_DB_URL",
     "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
     "WORKER_CONCURRENCY",
     "WORKER_POLL_INTERVAL",
     "WORKER_STALE_THRESHOLD",
@@ -25,7 +24,6 @@ _SETTINGS_ENV_VARS = (
     "EMBEDDING_INDEX_SWEEP_BATCH_SIZE",
     "PROGRESS_EVENTS_PER_JOB_CAP",
     "CANCEL_POLL_INTERVAL",
-    "JOB_RUN_START_METHOD",
     "DB_POOL_SIZE",
     "DB_POOL_MAX_OVERFLOW",
     "DB_POOL_RECYCLE",
@@ -38,9 +36,7 @@ _SETTINGS_ENV_VARS = (
     "HOST",
     "PORT",
     "API_PORT",
-    "RELOAD",
     "ALLOWED_ORIGINS",
-    "LOG_LEVEL",
     "MAX_JOBS_PER_USER",
     "MAX_TOTAL_USERS",
     "MAX_MONTHLY_ACTIVE_USERS",
@@ -122,13 +118,6 @@ def test_settings_defaults_cancel_poll_interval() -> None:
     assert s.cancel_poll_interval == 1.0
 
 
-def test_settings_defaults_job_run_start_method() -> None:
-    """Default ``job_run_start_method`` is ``"fork"``."""
-    s = Settings(_env_file=None)
-
-    assert s.job_run_start_method == "fork"
-
-
 def test_settings_defaults_db_pool_config() -> None:
     """Default DB pool settings are production-safe single-pod values."""
     s = Settings(_env_file=None)
@@ -167,20 +156,6 @@ def test_settings_defaults_port() -> None:
     assert s.port == 8000
 
 
-def test_settings_defaults_reload() -> None:
-    """Default ``reload`` is ``False``."""
-    s = Settings(_env_file=None)
-
-    assert s.reload is False
-
-
-def test_settings_defaults_log_level() -> None:
-    """Default ``log_level`` is ``"INFO"``."""
-    s = Settings(_env_file=None)
-
-    assert s.log_level == "INFO"
-
-
 def test_settings_defaults_max_jobs_per_user() -> None:
     """Default ``max_jobs_per_user`` is 100."""
     s = Settings(_env_file=None)
@@ -193,7 +168,6 @@ def test_settings_defaults_api_keys_are_none() -> None:
     s = Settings(_env_file=None)
 
     assert s.openai_api_key is None
-    assert s.anthropic_api_key is None
     assert s.remote_db_url is None
 
 
@@ -311,33 +285,6 @@ def test_settings_env_override_port(monkeypatch: pytest.MonkeyPatch) -> None:
     s = Settings(_env_file=None)
 
     assert s.port == 9090
-
-
-def test_settings_env_override_reload_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``RELOAD=true`` parses to ``reload is True``."""
-    monkeypatch.setenv("RELOAD", "true")
-
-    s = Settings(_env_file=None)
-
-    assert s.reload is True
-
-
-def test_settings_env_override_reload_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``RELOAD=false`` parses to ``reload is False``."""
-    monkeypatch.setenv("RELOAD", "false")
-
-    s = Settings(_env_file=None)
-
-    assert s.reload is False
-
-
-def test_settings_env_override_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``LOG_LEVEL`` env var overrides ``log_level``."""
-    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-
-    s = Settings(_env_file=None)
-
-    assert s.log_level == "DEBUG"
 
 
 def test_settings_env_override_cors_origins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -575,16 +522,6 @@ def test_settings_coerces_string_int_for_port(monkeypatch: pytest.MonkeyPatch) -
     assert s.port == 8080
 
 
-def test_settings_coerces_string_bool_reload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``RELOAD=1`` is coerced to ``bool``-typed ``True``."""
-    monkeypatch.setenv("RELOAD", "1")
-
-    s = Settings(_env_file=None)
-
-    assert isinstance(s.reload, bool)
-    assert s.reload is True
-
-
 def test_settings_coerces_string_float_poll_interval(monkeypatch: pytest.MonkeyPatch) -> None:
     """``WORKER_POLL_INTERVAL`` is coerced from string to float."""
     monkeypatch.setenv("WORKER_POLL_INTERVAL", "2.5")
@@ -789,10 +726,10 @@ def test_preview_detection_reads_only_app_environment(
     assert Settings(_env_file=None).is_preview_environment is expected
 
 
-def test_storage_quota_defaults_follow_chatgpt_free_and_plus(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default storage budgets are 500 MB on Free and 20 GB on Pro (ChatGPT Free and Plus)."""
+def test_storage_quota_has_one_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use one 500 MiB storage budget for every account."""
     monkeypatch.delenv("USER_STORAGE_QUOTA_BYTES", raising=False)
-    monkeypatch.delenv("PRO_STORAGE_QUOTA_BYTES", raising=False)
     settings = Settings(_env_file=None)
     assert settings.user_storage_quota_bytes == 500 * 1024 * 1024
-    assert settings.pro_storage_quota_bytes == 20 * 1024 * 1024 * 1024
+    assert "pro_storage_quota_bytes" not in Settings.model_fields
+    assert "stripe_price_pro_monthly" not in Settings.model_fields

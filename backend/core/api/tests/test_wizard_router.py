@@ -49,21 +49,29 @@ def test_model_config_prefixed_accepted(wizard_client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("field", ["run_code", "metric_code"])
-def test_workspace_code_rejected(wizard_client: TestClient, field: str) -> None:
-    """Workspace code cannot be hand-patched — the Metric & run step's coding agent writes it."""
-    resp = wizard_client.post("/wizard/update", json={field: "def run(artifact, input):\n    return input"})
+def test_workspace_code_round_trips_unchanged(wizard_client: TestClient, field: str) -> None:
+    """The wizard's agent writes workspace code; it comes back with its whitespace kept."""
+    code = "def run(artifact, input):\n    return input\n"
+    resp = wizard_client.post("/wizard/update", json={field: code})
+
+    assert resp.status_code == 200
+    assert resp.json()["wizard_state"] == {field: code}
+
+
+@pytest.mark.parametrize("field", ["run_code", "metric_code"])
+def test_blank_workspace_code_rejected(wizard_client: TestClient, field: str) -> None:
+    """Blank code would wipe the file, so the endpoint refuses it."""
+    resp = wizard_client.post("/wizard/update", json={field: "   "})
 
     assert resp.status_code == 422
     assert field in resp.json()["detail"]
 
 
 def test_task_fields_round_trip(wizard_client: TestClient) -> None:
-    """Objective, background, artifact kind and starting version land under their v2 keys."""
+    """Objective and background land under their v2 keys."""
     body = {
         "task_objective": "  Make it shorter  ",
         "task_background": "Support replies.",
-        "artifact_kind": "prompt",
-        "starting_version": "You are a helpful bot.",
     }
     resp = wizard_client.post("/wizard/update", json=body)
 
@@ -71,8 +79,37 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     patch = resp.json()["wizard_state"]
     assert patch["task_objective"] == "Make it shorter"
     assert patch["task_background"] == "Support replies."
-    assert patch["artifact_kind"] == "prompt"
-    assert patch["starting_version"] == "You are a helpful bot."
+
+
+def test_repo_target_round_trips_without_a_starting_version(wizard_client: TestClient) -> None:
+    """A repository run takes an owner/name, with no starting version."""
+    resp = wizard_client.post("/wizard/update", json={"repository": "acme/support-bot"})
+
+    assert resp.status_code == 200
+    patch = resp.json()["wizard_state"]
+    assert patch == {"repository": "acme/support-bot"}
+
+
+@pytest.mark.parametrize("name", ["acme", "acme/bot/extra", "https://github.com/acme/bot", "acme/ bot"])
+def test_malformed_repository_rejected(wizard_client: TestClient, name: str) -> None:
+    """Only a bare owner/name reaches the repository picker."""
+    resp = wizard_client.post("/wizard/update", json={"repository": name})
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("kind", ["repo", "dspy_program"])
+def test_a_stale_artifact_kind_is_ignored(wizard_client: TestClient, kind: str) -> None:
+    """An old tab or draft may still send ``artifact_kind``; the update drops it and keeps the rest.
+
+    Args:
+        wizard_client: The wizard router client.
+        kind: An artifact kind an old client sent.
+    """
+    resp = wizard_client.post("/wizard/update", json={"artifact_kind": kind, "repository": "acme/support-bot"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["wizard_state"] == {"repository": "acme/support-bot"}
 
 
 def test_multi_part_starting_version_round_trips(wizard_client: TestClient) -> None:
@@ -87,6 +124,22 @@ def test_multi_part_starting_version_round_trips(wizard_client: TestClient) -> N
 def test_blank_objective_rejected(wizard_client: TestClient) -> None:
     """A blank objective is refused like every other non-empty string field."""
     resp = wizard_client.post("/wizard/update", json={"task_objective": "   "})
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_job_description_clears_it(wizard_client: TestClient, value: str) -> None:
+    """An empty description is optional, so it clears the field instead of a 422."""
+    resp = wizard_client.post("/wizard/update", json={"job_name": "My run", "job_description": value})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["wizard_state"] == {"job_name": "My run", "job_description": ""}
+
+
+def test_blank_job_name_still_rejected(wizard_client: TestClient) -> None:
+    """The run name stays required."""
+    resp = wizard_client.post("/wizard/update", json={"job_name": "  "})
 
     assert resp.status_code == 422
 
@@ -111,29 +164,35 @@ def test_inputs_fields_round_trip(wizard_client: TestClient) -> None:
     assert patch["shuffle"] is False
 
 
-def test_optimizer_choice_fitting_setup_accepted(wizard_client: TestClient) -> None:
-    """A DSPy optimizer fits a DSPy program with pairs."""
+@pytest.mark.parametrize("choice", ["auto", "gepa", "shinka_evolve"])
+def test_optimizer_choice_fitting_setup_accepted(wizard_client: TestClient, choice: str) -> None:
+    """Auto and the repository engines fit a repository run with pairs."""
     resp = wizard_client.post(
         "/wizard/update",
-        json={"artifact_kind": "dspy_program", "data_mode": "pairs", "optimizer_choice": "dspy_miprov2"},
+        json={"data_mode": "pairs", "optimizer_choice": choice},
     )
 
     assert resp.status_code == 200
-    assert resp.json()["wizard_state"]["optimizer_choice"] == "dspy_miprov2"
+    assert resp.json()["wizard_state"]["optimizer_choice"] == choice
 
 
-def test_optimizer_choice_outside_setup_rejected(wizard_client: TestClient) -> None:
-    """A black-box engine does not fit a DSPy program."""
-    resp = wizard_client.post(
-        "/wizard/update",
-        json={"artifact_kind": "dspy_program", "data_mode": "single", "optimizer_choice": "best_of_n"},
-    )
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"data_mode": "pairs", "optimizer_choice": "grid_search"},
+        {"optimizer_choice": "unknown_engine"},
+        {"optimizer_choice": "dspy_gepa"},
+    ],
+)
+def test_optimizer_choice_outside_setup_rejected(wizard_client: TestClient, body: dict) -> None:
+    """Skynet is repo-only, so unknown and DSPy optimizers are refused."""
+    resp = wizard_client.post("/wizard/update", json=body)
 
     assert resp.status_code == 422
 
 
 def test_optimizer_choice_alone_is_echoed(wizard_client: TestClient) -> None:
-    """Without the artifact and mode in the same patch the choice is echoed as-is."""
+    """A repository engine sent alone is checked against the repo list and echoed."""
     resp = wizard_client.post("/wizard/update", json={"optimizer_choice": "gepa"})
 
     assert resp.status_code == 200
@@ -143,7 +202,6 @@ def test_optimizer_choice_alone_is_echoed(wizard_client: TestClient) -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        {"artifact_kind": "repo"},
         {"data_mode": "many"},
         {"optimizer_choice": "grid_search"},
         {"spending_limit_usd": 0},
@@ -189,3 +247,55 @@ def test_spending_limit_null_removes_the_limit(wizard_client: TestClient) -> Non
     assert "max_cost_cents" in cleared.json()["wizard_state"]
     assert cleared.json()["wizard_state"]["max_cost_cents"] is None
     assert "max_cost_cents" not in untouched.json()["wizard_state"]
+
+
+_VALID_TOML = """
+version = 1
+
+[paths]
+editable = ["src"]
+
+[run]
+entry = "src/run.py:main"
+"""
+
+
+def test_a_valid_optimize_toml_checks_ok(wizard_client: TestClient) -> None:
+    """A file the parser accepts comes back ok with no errors."""
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": _VALID_TOML})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "errors": []}
+
+
+@pytest.mark.parametrize(
+    ("text", "section", "key", "message"),
+    [
+        ('[target.planner]\nentry = "a.py:f"\nvcpus = 3\n', "target.planner", "vcpus", "vcpus must be 1 or an even"),
+        ("[paths]\neditable = []\n", "paths", "editable", "editable is empty"),
+        ("version = 2\n", None, "version", "version 2 is not supported"),
+        ("[paths\n", None, None, "is not valid TOML"),
+    ],
+)
+def test_a_bad_optimize_toml_returns_the_error_and_its_place(
+    wizard_client: TestClient, text: str, section: str | None, key: str | None, message: str
+) -> None:
+    """A parser error comes back with the section and key the editor shows it next to."""
+    resp = wizard_client.post("/wizard/optimize-toml/check", json={"text": text})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    [error] = body["errors"]
+    assert (error["section"], error["key"]) == (section, key)
+    assert message in error["message"]
+
+
+def test_a_lone_surrogate_in_the_text_is_a_parser_error_not_a_crash(wizard_client: TestClient) -> None:
+    """JSON can carry a lone surrogate that UTF-8 cannot encode; the parser refuses it as bad text."""
+    body = '{"text": "instructions = \\"\\ud800\\"\\n"}'
+    resp = wizard_client.post("/wizard/optimize-toml/check", content=body, headers={"content-type": "application/json"})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert "is not valid TOML" in resp.json()["errors"][0]["message"]

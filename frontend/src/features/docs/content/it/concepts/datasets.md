@@ -1,4 +1,4 @@
-Un dataset è una tabella di casi. Ogni riga è un caso. Skynet esegue il tuo artefatto sui casi, assegna un punteggio a ogni output e usa i punteggi per confrontare le versioni. Questa pagina spiega come Skynet legge i casi, a che cosa servono i ruoli delle colonne e come suddivide i casi in set di addestramento, convalida e test.
+Un dataset è una tabella di casi. Ogni riga è un caso. Skynet assegna un punteggio a ogni versione del tuo repository sui casi con il tuo scorer e usa i punteggi per confrontare le versioni. Questa pagina spiega come Skynet legge i casi, a che cosa servono i ruoli delle colonne e come suddivide i casi in set di addestramento, convalida e test.
 
 ## Caricare i dati
 
@@ -17,8 +17,8 @@ In **Come leggere i dati**, assegna un ruolo a ogni colonna:
 
 | Ruolo  | Che cosa fa Skynet con la colonna                                     |
 | ------ | --------------------------------------------------------------------- |
-| Input  | Mette il valore in `input`, che il tuo codice di esecuzione riceve    |
-| Output | Mette il valore in `expected`, che la tua metrica riceve              |
+| Input  | Mette il valore in `case["input"]`, che il tuo scorer riceve    |
+| Output | Mette il valore in `case["expected"]`, che il tuo scorer riceve              |
 | Salta  | Non usa la colonna                                                    |
 
 Ogni colonna ha anche un tipo: **Testo** o **Immagine**.
@@ -49,7 +49,7 @@ con i ruoli `message` = Input, `label` = Output e `id` = Salta, il tuo codice ri
 ```
 
 > [!TIP]
-> Nella tua metrica, leggi il valore atteso tramite il nome della colonna, ad esempio `expected["label"]`.
+> Nel tuo scorer, leggi il valore atteso tramite il nome della colonna, ad esempio `case["expected"]["label"]`.
 
 ## Modalità dei dati
 
@@ -111,7 +111,7 @@ Nella selezione manuale, ogni campo accetta una frazione da 0 a 1, a passi di 0,
 
 ## Campioni del contratto
 
-Il controllo del contratto nel passaggio **Metrica ed esecuzione** esegue il tuo codice su 3 casi di esempio. Skynet prende questi campioni solo dai casi di train e val, mai da test.
+Il controllo del contratto nel passaggio **Metrica ed esecuzione** esegue il tuo setup e il tuo scorer sulla versione iniziale, su 3 casi di esempio. Skynet prende questi campioni solo dai casi di train e val, mai da test.
 
 ## Pagine correlate
 

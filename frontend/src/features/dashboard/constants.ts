@@ -2,6 +2,13 @@ import { STATUS_DOT_COLOR } from "@/shared/constants/job-status";
 
 export const FETCH_PAGE_SIZE = 50;
 
+// The empty Optimizations and Usage cards share these, so both cards are one
+// size and nothing moves when the user switches tabs. The toolbar row keeps
+// its height when a reset button shows, and the empty state has room for a
+// two-line description (the Usage one wraps in English).
+export const CARD_TOOLBAR_HEIGHT = "min-h-[44px] lg:min-h-8";
+export const EMPTY_CARD_STATE = "min-h-[320px] justify-center";
+
 export const STATUS_COLORS = STATUS_DOT_COLOR;
 
 export type StatAccent = "default" | "success" | "warning" | "danger";
@@ -19,9 +26,3 @@ export const ACCENT_TEXT: Record<StatAccent, string> = {
   warning: "text-[var(--status-running)]",
   danger: "text-[var(--status-failed)]",
 };
-
-// Shared by AnalyticsTab and its skeleton. Three columns wait for lg: at md
-// (834 iPad portrait beside the 240px rail) each column would be ~150px, so the
-// third panel spans the row under the first two instead.
-export const BREAKDOWN_GRID_CLASS = "grid gap-6 md:grid-cols-2 lg:grid-cols-3";
-export const BREAKDOWN_WIDE_CELL_CLASS = "md:col-span-2 lg:col-span-1";

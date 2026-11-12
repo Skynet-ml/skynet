@@ -91,15 +91,26 @@ Cuando una llamada al modelo usa tu clave:
 
 Las tarifas de un evaluador externo o de un proveedor MCP van directamente a ese proveedor. No forman parte del límite de gasto de la ejecución.
 
+## Llamadas al modelo desde tu código
+
+El código de tu repositorio y tu evaluador pueden llamar a un modelo a través de la pasarela de modelos de Skynet. Lee [Cómo funciona la optimización](/docs/concepts/optimization).
+
+- Una llamada con las claves de Skynet se mide contra el presupuesto de la ejecución, como cualquier otra llamada al modelo. Se aplica el recargo por uso.
+- Una llamada con tu propia clave (BYOK) va a la clave de tu proveedor. Skynet no cobra ninguna tarifa por el modelo.
+
 ## Uso del sandbox
 
-Tu código de ejecución y tu métrica se ejecutan en un sandbox. Skynet mide el cómputo del sandbox:
+El código de tu repositorio y tu evaluador se ejecutan en un sandbox. Skynet mide el cómputo del sandbox:
 
 1. Antes de que arranque un sandbox, Skynet reserva una cantidad del límite de la ejecución.
 2. Cuando el sandbox termina, Skynet cobra el uso final que informa el proveedor del sandbox.
 3. El recargo por uso se aplica al cómputo del sandbox.
 
 El cómputo del sandbox forma parte del límite de gasto de la ejecución, también cuando las llamadas al modelo usan tu propia clave.
+
+## Servicio
+
+Cada llamada al endpoint de servicio de una ejecución terminada se factura por separado. Quien llama paga con su propio saldo. Define `max_cost_cents` en la solicitud para limitar una llamada. Lee [Resultados](/docs/guides/results).
 
 ## Planes
 

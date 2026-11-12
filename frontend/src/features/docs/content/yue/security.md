@@ -4,7 +4,7 @@
 
 請私下報告安全問題。唔好開公開 issue。
 
-- 喺 GitHub 打開 Skynet 儲存庫，去 **Security** > **Report a vulnerability**。
+- 喺 GitHub 打開 Skynet 倉庫，去 **Security** > **Report a vulnerability**。
 - 或者寄電郵去 `security@skynetml.com`。
 
 團隊目標係喺五個工作天內確認收到每份報告。
@@ -89,7 +89,7 @@ Authorization: Bearer skyd_...
 想停用一個 Token，撳 **撤銷 Token**。完整 API 請睇 [API](/docs/api)。
 
 > [!WARNING]
-> 要好似對待密碼咁對待個 Token。任何人有咗個 Token，都可以經 API 扮你做嘢。唔好將佢 commit 入儲存庫。
+> 要好似對待密碼咁對待個 Token。任何人有咗個 Token，都可以經 API 扮你做嘢。唔好將佢 commit 入倉庫。
 
 ## 模型數據私隱
 

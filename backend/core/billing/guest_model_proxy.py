@@ -11,6 +11,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 RELAY_URL_ENV = "APP_BUDGET_RELAY_URL"
@@ -23,6 +24,33 @@ _PRINT_LOCK = threading.Lock()
 # backend's code, and an older image still sends the legacy header.
 _TAGS_HEADERS = frozenset({"x-app-usage-tags", "x-skynet-usage-tags"})
 _FORWARDED_HEADERS = frozenset({"authorization", "x-api-key", "anthropic-version", "anthropic-beta"}) | _TAGS_HEADERS
+# A role's .mcp.json points each server at <relay url>/mcp/<name> on this proxy.
+MCP_PATH = "/v1/mcp/"
+# The mailbox passes one JSON document per request, so an MCP request's HTTP method travels as this header.
+METHOD_HEADER = "x-app-relay-method"
+# The relay token of the role's MCP servers and services. The box holds no header for them, so the proxy adds it.
+MCP_TOKEN_ENV = "APP_MCP_RELAY_TOKEN"
+_MCP_HEADERS = frozenset({"accept", "content-type", "last-event-id", "mcp-protocol-version", "mcp-session-id"})
+# Each [proposer] service is at <relay url>/service/<name>/ on this proxy, behind the same relay token (SKY-612).
+SERVICE_PATH = "/v1/service/"
+# A JSON list of the role's service names; the proxy gives the command one SKYNET_SERVICE_<NAME>_URL for each.
+SERVICES_ENV = "APP_RELAY_SERVICES"
+# A service takes any header but these: they belong to this connection or carry the box's own credential.
+_SERVICE_DROPPED_HEADERS = frozenset(
+    {
+        "authorization",
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-authorization",
+        "te",
+        "transfer-encoding",
+        "upgrade",
+        METHOD_HEADER,
+    }
+)
+_RAW_PATHS = (MCP_PATH, SERVICE_PATH)
 
 
 def main() -> int:
@@ -48,43 +76,94 @@ def main() -> int:
             self._relay()
 
         def do_GET(self) -> None:
-            """Relay a read-only budget state check through the same supervisor."""
+            """Relay a budget state check or an MCP event stream through the same supervisor."""
+            self._relay()
+
+        def do_DELETE(self) -> None:
+            """Relay the end of an MCP session or a service DELETE; no other path takes DELETE."""
+            if not self.path.startswith(_RAW_PATHS):
+                self.send_error(405)
+                return
+            self._relay()
+
+        def do_PUT(self) -> None:
+            """Relay a service PUT; no other path takes PUT."""
+            self._service_only()
+
+        def do_PATCH(self) -> None:
+            """Relay a service PATCH; no other path takes PATCH."""
+            self._service_only()
+
+        def _service_only(self) -> None:
+            """Relay a request whose method only a service path takes."""
+            if not self.path.startswith(SERVICE_PATH):
+                self.send_error(405)
+                return
             self._relay()
 
         def _relay(self) -> None:
             """Wait for the supervisor's response without contacting the internet."""
+            mcp = self.path.startswith(MCP_PATH)
+            service = self.path.startswith(SERVICE_PATH)
+            raw = mcp or service
             length = int(self.headers.get("Content-Length", "0"))
-            if (self.command == "POST" and length <= 0) or not 0 <= length <= 32 * 1024 * 1024:
+            if (self.command == "POST" and length <= 0 and not service) or not 0 <= length <= 32 * 1024 * 1024:
                 self.send_error(413)
                 return
             identity = uuid4().hex
+            if service:
+                headers = {
+                    key: value for key, value in self.headers.items() if key.lower() not in _SERVICE_DROPPED_HEADERS
+                }
+            else:
+                forwarded = _FORWARDED_HEADERS | _MCP_HEADERS if mcp else _FORWARDED_HEADERS
+                headers = {key: value for key, value in self.headers.items() if key.lower() in forwarded}
+            if raw:
+                headers = {key: value for key, value in headers.items() if key.lower() != METHOD_HEADER}
+                headers[METHOD_HEADER] = self.command
+                if os.environ.get(MCP_TOKEN_ENV):
+                    headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
+                    headers["Authorization"] = f"Bearer {os.environ[MCP_TOKEN_ENV]}"
             request = {
                 "id": identity,
                 "path": self.path,
-                "body": base64.b64encode(self.rfile.read(length) if length else b"{}").decode(),
-                "headers": {key: value for key, value in self.headers.items() if key.lower() in _FORWARDED_HEADERS},
+                "body": base64.b64encode(self.rfile.read(length) if length else b"" if raw else b"{}").decode(),
+                "headers": headers,
             }
             with _PRINT_LOCK:
                 print(prefix + json.dumps(request, separators=(",", ":")), flush=True)
-            response_path = response_dir / f"{identity}.json"
-            deadline = time.monotonic() + timeout
-            document = None
-            while time.monotonic() < deadline:
-                try:
-                    document = json.loads(response_path.read_text())
-                    break
-                except (FileNotFoundError, ValueError):
-                    time.sleep(0.05)
+            document = _wait(response_dir / f"{identity}.json", timeout)
             if document is None:
                 self.send_error(504, "The trusted model response is still pending.")
                 return
-            response_path.unlink(missing_ok=True)
             content = base64.b64decode(document["body"])
             self.send_response(document["status"])
             self.send_header("Content-Type", document["content_type"])
-            self.send_header("Content-Length", str(len(content)))
+            for key, value in document.get("headers", ()):
+                self.send_header(key, value)
+            if not document.get("more"):
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            # An MCP event stream: each part comes as its own file, and the connection ends with the stream.
+            self.close_connection = True
             self.end_headers()
-            self.wfile.write(content)
+            part = 0
+            try:
+                self.wfile.write(content)
+                self.wfile.flush()
+                while document is not None and document.get("more"):
+                    part += 1
+                    document = _wait(response_dir / f"{identity}.{part}.json", timeout)
+                    if document is not None and document.get("body"):
+                        self.wfile.write(base64.b64decode(document["body"]))
+                        self.wfile.flush()
+            except OSError:
+                # The MCP client left. Tell the supervisor, so it stops the stream and frees its place.
+                stop = {"id": uuid4().hex, "stop": identity}
+                with _PRINT_LOCK:
+                    print(prefix + json.dumps(stop, separators=(",", ":")), flush=True)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
@@ -99,6 +178,10 @@ def main() -> int:
         "OPENAI_BASE_URL": f"{endpoint}/v1",
         GATEWAY_URL_ENV: f"{endpoint}/v1",
         _LEGACY_GATEWAY_URL_ENV: f"{endpoint}/v1",
+        **{
+            service_env_name(name): f"{endpoint}{SERVICE_PATH}{quote(name, safe='')}/"
+            for name in json.loads(os.environ.get(SERVICES_ENV) or "[]")
+        },
     }
     try:
         return subprocess.run(sys.argv[2:], env=environment, check=False).returncode
@@ -106,6 +189,43 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def service_env_name(name: str) -> str:
+    """Return the variable that holds one service's loopback address in the box.
+
+    It mirrors ``runner.service_env_name``: this file runs in the box without
+    the backend's code, and a role's code reads the same name in every box.
+
+    Args:
+        name: The ``[services.<name>]`` name.
+
+    Returns:
+        ``SKYNET_SERVICE_<NAME>_URL``, with each character other than a letter or digit as ``_``.
+    """
+    return "SKYNET_SERVICE_" + "".join(char if char.isalnum() else "_" for char in name.upper()) + "_URL"
+
+
+def _wait(path: Path, timeout: float) -> dict | None:
+    """Read and remove one supervisor response file once it is complete.
+
+    Args:
+        path: The response file.
+        timeout: Seconds to wait for it.
+
+    Returns:
+        The response document, or None when it did not come in time.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            document = json.loads(path.read_text())
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+            continue
+        path.unlink(missing_ok=True)
+        return document
+    return None
 
 
 if __name__ == "__main__":

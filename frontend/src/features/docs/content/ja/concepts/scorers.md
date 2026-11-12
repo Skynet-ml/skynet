@@ -1,47 +1,50 @@
-メトリクスは、出力がどれだけ良いかを Skynet に伝えます。メトリクスは `metric.py` 内の Python 関数です。すべてのエンジンが同じ関数を呼び出します。このページでは、コントラクト、戻り値、例を紹介します。
+スコアラーは、リポジトリの 1 つのバージョンがどれだけ良いかを Skynet に伝えます。スコアラーは `scorer.py` 内の Python 関数です。すべてのエンジンが同じ関数を呼び出します。このページでは、コントラクト、戻り値、例を紹介します。
 
 ## コントラクト
 
 ```python
-def score(input, output, expected=None):
+def score(repo_path, case):
     ...
     return score_value, {"feedback": "..."}
 ```
 
-| 引数       | 保持する内容                                                       |
-| ---------- | ------------------------------------------------------------------ |
-| `input`    | ケースの入力フィールドを持つ dict                                  |
-| `output`   | そのケースで `run(artifact, input)` が返したもの                   |
-| `expected` | ケースの期待値。期待値がないケースでは `None`                      |
+| 引数        | 保持する内容                                                                     |
+| ----------- | -------------------------------------------------------------------------------- |
+| `repo_path` | セットアップコマンドの実行後の、リポジトリの 1 つのバージョンのフォルダー        |
+| `case`      | dict。`case["input"]` は入力フィールドを保持します。`case["expected"]` は期待値、または `None` を保持します |
 
-関数が引数を 2 つしか受け取らない場合、Skynet は `score(input, output)` を呼び出します。
+関数が引数を 1 つしか受け取らない場合、Skynet は `score(repo_path)` を呼び出します。スコアラーが独自のテストを実行し、ケースが不要な場合は、この形を使います。
 
-DSPy プログラムの場合、Skynet は DSPy のメトリクス呼び出しをこの同じ関数に適合させます。どのアーティファクトの種類でも、書くメトリクスは 1 つです。[最適化の仕組み](/docs/concepts/optimization) をお読みください。
+スコアラーは、サンドボックス内のバージョンのフォルダーで実行されます。リポジトリのコードをインポートすることも、コマンドを実行することも、`serve.py` の `serve()` を呼び出すこともできます。[最適化の仕組み](/docs/concepts/optimization) をお読みください。
 
 ## 戻り値
 
-`score` はペア（タプル、または 2 要素のリスト）を返す必要があります。
+`score` は、フィードバック付きのスコアを返す必要があります。次の形が有効です。
 
-1. **スコア。** 数値です。オプティマイザーはこれを高くしようとします。
-2. **付加情報。** dict です。文字列値を持つ `"feedback"` キーが必要です。
+1. ペア: 数値と、フィードバックの文字列または `"feedback"` キーを持つ dict。
+2. `"score"` の下に数値、`"feedback"` の下に文字列を持つ dict。
 
-付加情報には `"scores"` キーを含めることもできます。名前を数値に対応付けます。例: `{"format": 1.0, "accuracy": 0.5}`。
+フィードバックは空でない文字列である必要があります。
 
-戻り値の形が異なる場合、コントラクトチェックは **メトリクスの戻り値** で失敗します。
+付加情報には `"scores"` キーを含めることもできます。名前を名前付きスコアに対応付けます。各名前付きスコアは、独自のスコアとフィードバックを持ちます。例: `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`。
 
-| 戻り値                                                 | 有効か                                   |
-| ------------------------------------------------------ | ---------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`      | はい                                     |
-| `[1.0, {"feedback": "OK", "scores": {"format": 1.0}}]` | はい                                     |
-| `0.8`                                                  | いいえ。付加情報がありません。           |
-| `(0.8, "Close.")`                                      | いいえ。付加情報が dict ではありません。 |
-| `(0.8, {})`                                            | いいえ。フィードバックの文字列がありません。 |
-| `("0.8", {"feedback": "OK"})`                          | いいえ。スコアが文字列です。             |
-| `(0.8, {"feedback": "OK", "scores": {"a": "high"}})`   | いいえ。名前付きスコアが数値ではありません。 |
+付加情報には、同じ形の `"cases"` キーを含めることもできます。各エントリは 1 つのケースの結果です。すべてのエンジンは、各ケースをそれぞれ独自の目的として使います。
+
+戻り値の形が異なる場合、チェックは失敗し、その理由を表示します。
+
+| 戻り値                                                                          | 有効か                                       |
+| ------------------------------------------------------------------------------- | -------------------------------------------- |
+| `(0.8, {"feedback": "Close. Missing the date."})`                               | はい                                         |
+| `(0.8, "Close. Missing the date.")`                                             | はい                                         |
+| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | はい                              |
+| `0.8`                                                                           | いいえ。フィードバックがありません。         |
+| `(0.8, {})`                                                                     | いいえ。フィードバックの文字列がありません。 |
+| `("0.8", {"feedback": "OK"})`                                                   | いいえ。スコアが文字列です。                 |
+| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | いいえ。名前付きスコアが数値ではありません。 |
 
 ## 役に立つフィードバックを書く
 
-GEPA、DSPy GEPA、Auto は、フィードバックの文章を読んで次のバージョンを書きます。何が間違っているか、正しい出力はどのようなものかを書いてください。
+GEPA と Auto は、フィードバックの文章を読んで次のバージョンを書きます。何が間違っているか、正しい出力はどのようなものかを書いてください。
 
 | 弱いフィードバック | 役に立つフィードバック                                                            |
 | ------------------ | --------------------------------------------------------------------------------- |
@@ -49,98 +52,80 @@ GEPA、DSPy GEPA、Auto は、フィードバックの文章を読んで次の�
 | "Bad format."      | "The output is not valid JSON. It has a trailing comma after the last field."     |
 
 > [!NOTE]
-> オプティマイザーがメトリクスのソースを見ることはありません。DSPy オプティマイザーでは、リフレクションモデルが見るのはフィードバックの文章だけです。期待値はメトリクスの中にとどまります。
+> コーディングエージェントが、スコアラーのソース、期待値、実行シークレットを見ることはありません。見るのはスコアとフィードバックの文章だけです。
 
 ## 例
 
 ### 完全一致
 
-```python tab="metric.py"
-def score(input, output, expected=None):
-    want = expected["label"]
-    if output == want:
+```python tab="scorer.py"
+import importlib.util
+
+
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    got = module.serve(case["input"])
+    want = case["expected"]["label"]
+    if got == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
-`expected` は、出力列の名前をキーとする dict です。[データセットと分割](/docs/concepts/datasets) をお読みください。
+`case["expected"]` は、出力列の名前をキーとする dict です。[データセットと分割](/docs/concepts/datasets) をお読みください。
 
-### 複数のチェック
+### リポジトリのテストを実行する
 
-```python tab="metric.py"
-import json
+```python tab="scorer.py"
+import subprocess
 
 
-def score(input, output, expected=None):
-    try:
-        data = json.loads(output)
-    except ValueError as exc:
-        return 0.0, {"feedback": f"Output is not valid JSON: {exc}", "scores": {"format": 0.0, "fields": 0.0}}
-    want = expected["fields"]
-    found = [key for key in want if key in data]
-    fields = len(found) / len(want) if want else 1.0
-    missing = [key for key in want if key not in data]
-    feedback = "All fields present." if not missing else f"Missing fields: {', '.join(missing)}."
-    return 0.5 + 0.5 * fields, {"feedback": feedback, "scores": {"format": 1.0, "fields": fields}}
+def score(repo_path):
+    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
+    if result.returncode == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": result.stdout[-2000:]}
 ```
 
 ### 審査員としてのモデル
 
-メトリクスはモデルを呼び出せます。`skynet` ヘルパーモジュールから `llm` をインポートします。メトリクスからの呼び出しは、メトリクスのモデルに送られます。
+スコアラーはモデルを呼び出せます。`skynet` ヘルパーモジュールから `llm` をインポートします。呼び出しは Skynet のモデルゲートウェイを通り、実行のスコアラーモデルに送られます。
 
-```python tab="metric.py"
+```python tab="scorer.py"
+import importlib.util
+
 from skynet import llm
 
 
-def score(input, output, expected=None):
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    answer = module.serve(case["input"])
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {input['question']}\nAnswer: {output}",
-        model="openai/gpt-4.1-mini",
+        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
         temperature=0,
         max_tokens=512,
-        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-メトリクスは自身の `llm()` 呼び出しでモデルを指定します。表示した4つの引数はすべて省略できます。`model=` を省略すると、メトリクスはリフレクションモデルを使います。
+スコアラーは、`OPENAI_BASE_URL`、`APP_API_KEY`、`APP_MODEL` の環境変数を使って、任意の OpenAI 互換クライアントを使うこともできます。ゲートウェイは、実行のスコアラーモデルだけを受け付けます。
 
-## 精度、速度、コスト
+## モデル呼び出しとシークレット
 
-メトリクスでは、精度に、測定された実行時間とモデルのコストを組み合わせることができます。モジュールレベルで `REWARD_SPEC` を定義し、`reward` の値を返します。
-
-```python tab="metric.py"
-from skynet import reward
-
-REWARD_SPEC = {
-    "weights": {"accuracy": 0.7, "speed": 0.2, "cost": 0.1},
-    "accuracy": {},
-    "speed": {"reference": 2000},
-    "cost": {"reference": 0.01},
-}
-
-
-def score(input, output, expected=None):
-    ok = output == expected["label"]
-    return reward(REWARD_SPEC, 1.0 if ok else 0.0, "Correct." if ok else "Wrong label.")
-```
-
-- `weights` には `accuracy`、`speed`、`cost` が必要です。各重みは 0 以上で、すべてを 0 にすることはできません。Skynet は合計が 1 になるように重みを調整します。
-- `speed.reference` の単位はミリ秒です。`cost.reference` の単位は米ドルです。どちらも正の値である必要があります。
-- `accuracy.reference` がない場合、精度は 0〜1 のスコアです。ある場合、精度は誤差となり、低いほど良くなります。
-
-時間とコストは Skynet 自身が測定します。実行コードがそれらを変更することはできません。Skynet が時間またはコストを測定できない場合、その部分のスコアは 0 になり、フィードバックにその旨が示されます。
-
-メトリクスは、`skynet` の `observation()` と `service_cost()` を使って、測定値を直接読み取ることもできます。
+- Skynet のキーによる呼び出しは、実行予算に対して計測されます。独自のキー (BYOK) では、呼び出しはあなたのプロバイダーキーに送られ、Skynet のモデル料金はかかりません。[請求](/docs/concepts/billing) をお読みください。
+- 実行シークレットは、環境変数としてスコアラーに届きます。変数名はシークレット名です。例: `os.environ["SEARCH_API_KEY"]`。
+- Skynet は、スコアラーの出力とログの中のシークレットの値を隠します。
 
 ## 制限
 
 | 項目                       | 値                                  |
 | -------------------------- | ----------------------------------- |
-| メトリクスのタイムアウト   | 既定で 60 秒、最大 600 秒           |
-| コントラクトチェックのサンプル     | 3 ケース                            |
+| スコアラーのタイムアウト   | 既定で 60 秒、最大 600 秒           |
 
 ## 関連ページ
 

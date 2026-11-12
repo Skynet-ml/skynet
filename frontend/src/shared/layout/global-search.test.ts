@@ -22,7 +22,10 @@ function stub(id: string, exports: Record<string, unknown>) {
 
 stub("next/navigation", { useRouter: () => ({ push: () => {} }) });
 stub("next-auth/react", { useSession: () => ({ data: null }) });
-stub("@/features/agent-panel", { useGeneralistPanelStateOptional: () => null });
+stub("@/features/agent-panel", {
+  queueAgentPrompt: () => {},
+  useGeneralistPanelStateOptional: () => null,
+});
 stub("@/features/settings", {
   SETTINGS_TABS: {},
   useSettingsModal: () => ({ open: false, openTo: () => {} }),

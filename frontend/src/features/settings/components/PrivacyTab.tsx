@@ -23,7 +23,7 @@ import {
   User,
 } from "@/shared/ui/icons";
 
-import { msg, formatMsg, type MessageKey } from "@/shared/lib/messages";
+import { msg, type MessageKey } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import {
   deleteAccount,
@@ -62,8 +62,9 @@ import { SETUP_SETTING_EVENT, type SetupSettingDetail } from "@/features/experie
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { useLinkedAccount } from "@/shared/hooks/use-linked-account";
 import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
-import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { SharedChatsSection } from "./SharedChatsSection";
+import { TooltipButton } from "@/shared/ui/tooltip-button";
+import { accountDeletionConfirmed } from "../lib/account-delete-confirmation";
 
 /** Localize a data-action failure: semantic backend codes when present. */
 function describeError(err: unknown, fallback: string): string {
@@ -134,7 +135,7 @@ export function PrivacyTab() {
   const [exporting, setExporting] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [password, setPassword] = React.useState("");
-  const [confirmEmail, setConfirmEmail] = React.useState("");
+  const [confirmation, setConfirmation] = React.useState("");
   const [deleting, setDeleting] = React.useState(false);
   // null until the security probe resolves; OAuth-only identities have no password.
   const [hasPassword, setHasPassword] = React.useState<boolean | null>(null);
@@ -149,7 +150,6 @@ export function PrivacyTab() {
   const local = isLocalMode();
   const linkedAccount = useLinkedAccount();
   const linked = linkedAccount?.linked ? linkedAccount : null;
-  const hostedAvailable = useHostedFeaturesAvailable();
   const copyName = local ? (linked?.name ?? linked?.email ?? "") : (session?.user?.name ?? "");
   const copyEmail = local ? (linked?.email ?? "") : email;
   const copySignedOut = local ? !linked : signedOut;
@@ -234,12 +234,13 @@ export function PrivacyTab() {
 
   function openDeleteDialog() {
     setPassword("");
-    setConfirmEmail("");
+    setConfirmation("");
     setDeleteOpen(true);
   }
 
   async function handleDelete(e: React.FormEvent) {
     e.preventDefault();
+    if (!canDelete || deleting) return;
     setDeleting(true);
     try {
       await deleteAccount(password);
@@ -253,9 +254,8 @@ export function PrivacyTab() {
     }
   }
 
-  // A "type your email to confirm" gate; the backend re-checks the password.
-  const confirmMatches = confirmEmail.trim().toLowerCase() === email.toLowerCase();
-  const canDelete = confirmMatches && (hasPassword === false || password.length > 0);
+  const canDelete =
+    !signedOut && accountDeletionConfirmed(confirmation, hasPassword, password);
 
   return (
     <div className="space-y-4">
@@ -363,8 +363,8 @@ export function PrivacyTab() {
 
       <Separator />
 
-      {/* Hosted: signed-in users. Mac app: only while linked, since links live on the hosted account. */}
-      {hostedAvailable && (local || !signedOut) && (
+      {/* Chat links open hosted Skynet, so only signed-in hosted users share chats. */}
+      {!local && !signedOut && (
         <>
           <SharedChatsSection />
           <Separator />
@@ -435,9 +435,19 @@ export function PrivacyTab() {
           label={msg("settings.privacy.delete.label")}
           description={msg("settings.privacy.delete.description")}
         >
-          <Button variant="destructive" size="sm" disabled={signedOut} onClick={openDeleteDialog}>
-            {msg("settings.privacy.delete.action")}
-          </Button>
+          <TooltipButton tooltip={msg("settings.privacy.delete.action")}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={signedOut}
+              onClick={openDeleteDialog}
+              className="text-destructive hover:text-destructive"
+              aria-label={msg("settings.privacy.delete.action")}
+              autoTooltip={false}
+            >
+              <Trash className="size-4" aria-hidden="true" />
+            </Button>
+          </TooltipButton>
         </SettingsRow>
       </div>
 
@@ -475,13 +485,15 @@ export function PrivacyTab() {
                 htmlFor="delete-confirm"
                 className="mb-1.5 block text-xs font-medium text-muted-foreground"
               >
-                {formatMsg("settings.privacy.delete.dialog.confirm_label", { email })}
+                {msg("settings.privacy.delete.dialog.type_delete")}
               </Label>
               <Input
                 id="delete-confirm"
-                value={confirmEmail}
-                onChange={(e) => setConfirmEmail(e.target.value)}
+                value={confirmation}
+                onChange={(e) => setConfirmation(e.target.value)}
                 autoComplete="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 autoFocus
                 dir="ltr"
                 className={TOUCH_FIELD}

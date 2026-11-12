@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import patch
 
 import litellm
@@ -9,6 +11,7 @@ import pytest
 
 from ...config import settings
 from .. import model_catalog as mc
+from ..errors import DomainError
 from ..model_catalog import (  # type: ignore[attr-defined]
     CatalogModel,
     CatalogProvider,
@@ -994,8 +997,8 @@ def test_practical_keeps_everything_without_benchmarks() -> None:
     assert mc._practical_probe_ids({"gw/model": _listed(_NOW)}) is None
 
 
-def test_get_catalog_hides_impractical_models_but_still_accepts_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A dropped model leaves the menu, yet a pick made before it dropped still validates."""
+def test_get_catalog_treats_impractical_models_without_effort_as_withdrawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an old hidden pick without effort controls valid, but route it as withdrawn."""
     monkeypatch.setattr(litellm, "model_cost", {})
     monkeypatch.setattr(litellm, "get_valid_models", list)
     probe = {
@@ -1010,21 +1013,132 @@ def test_get_catalog_hides_impractical_models_but_still_accepts_them(monkeypatch
     monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)
 
     assert [m.value for m in catalog.models] == ["openrouter/acme/opus-5.5"]
-    assert mc.is_hidden_model("openrouter/hobby/finetune-7")
+    assert not mc.is_hidden_model("openrouter/hobby/finetune-7")
+    assert mc.is_effortless_model("openrouter/hobby/finetune-7")
+    assert mc.is_removed_model("openrouter/hobby/finetune-7")
     mc.require_known_model("openrouter/hobby/finetune-7")
+    with pytest.raises(DomainError):
+        mc.require_known_model("openrouter/hobby/never-listed")
 
 
-def test_the_strongest_model_follows_the_operator_then_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator-set id wins; else the catalog's strongest model; else the best-value agent model."""
-    best = CatalogModel(value="openrouter/vendor/best", label="best", provider="openrouter", is_default=True)
-    strongest = CatalogModel(value="openrouter/vendor/strong", label="strong", provider="openrouter", is_strongest=True)
-    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[best, strongest]))
+def test_a_stored_pick_without_effort_control_still_validates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A listed model without an effort control leaves the menus but passes validation."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    thinker = CatalogModel(
+        value="openrouter/vendor/thinker",
+        label="thinker",
+        provider="openrouter",
+        available=True,
+        supports_thinking=True,
+    )
+    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[plain, thinker]))
+    monkeypatch.setattr(mc, "_cached_at_monotonic", float("inf"))
 
-    assert mc.strongest_model_id(" vendor/picked ") == "vendor/picked"
-    assert mc.strongest_model_id() == "openrouter/vendor/strong"
+    assert [m.value for m in mc.get_catalog_cached().models] == ["openrouter/vendor/thinker"]
+    assert mc.is_effortless_model("openrouter/vendor/plain")
+    assert not mc.is_effortless_model("openrouter/vendor/thinker")
+    mc.require_known_model("openrouter/vendor/plain")
+    mc.require_known_model("openrouter/vendor/plain", role="judge")
 
-    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[best]))
-    assert mc.strongest_model_id() == "openrouter/vendor/best"
+
+def test_a_stored_effortless_pick_validates_before_the_first_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a cold start the effort check builds the catalog, so the pick gets no 422."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "get_catalog", lambda: ModelCatalogResponse(providers=[], models=[plain]))
+
+    assert mc.is_effortless_model("openrouter/vendor/plain")
+    mc.require_known_model("openrouter/vendor/plain")
+
+
+def test_a_cold_effort_check_during_the_prewarm_waits_for_its_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold check while the boot prewarm builds joins that build instead of starting a second one."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    started = threading.Event()
+    release = threading.Event()
+    builds: list[int] = []
+
+    def slow_build() -> ModelCatalogResponse:
+        """Count the build and hold it until the test releases it.
+
+        Returns:
+            A catalog with one model without an effort control.
+        """
+        builds.append(1)
+        started.set()
+        release.wait(5)
+        return ModelCatalogResponse(providers=[], models=[plain])
+
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+    monkeypatch.setattr(mc, "get_catalog", slow_build)
+    monkeypatch.setattr(mc, "zero_retention_models", set)
+
+    mc.prewarm_catalog()
+    assert started.wait(5)
+    answers: list[bool] = []
+    checker = threading.Thread(target=lambda: answers.append(mc.is_effortless_model("openrouter/vendor/plain")))
+    checker.start()
+    release.set()
+    checker.join(5)
+
+    assert answers == [True]
+    assert len(builds) == 1
+
+
+def test_two_cold_effort_checks_at_once_share_one_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second cold check never joins the refresh thread before it starts."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    starting = threading.Event()
+    builds: list[int] = []
+
+    class SlowStartThread(threading.Thread):
+        """Widen the gap between storing the refresh thread and starting it."""
+
+        def start(self) -> None:
+            """Signal the test, wait, then start the thread."""
+            starting.set()
+            time.sleep(0.2)
+            super().start()
+
+    def build() -> ModelCatalogResponse:
+        """Count the build.
+
+        Returns:
+            A catalog with one model without an effort control.
+        """
+        builds.append(1)
+        return ModelCatalogResponse(providers=[], models=[plain])
+
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+    monkeypatch.setattr(mc, "get_catalog", build)
+    monkeypatch.setattr(mc, "zero_retention_models", set)
+    monkeypatch.setattr(mc, "Thread", SlowStartThread)
+
+    answers: list[bool] = []
+    errors: list[BaseException] = []
+
+    def check() -> None:
+        """Run one cold effort check and record its answer or error."""
+        try:
+            answers.append(mc.is_effortless_model("openrouter/vendor/plain"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=check)
+    second = threading.Thread(target=check)
+    first.start()
+    assert starting.wait(5)
+    second.start()
+    first.join(5)
+    second.join(5)
+
+    assert errors == []
+    assert answers == [True, True]
+    assert len(builds) == 1
 
 
 def test_the_lowest_effort_from_low_is_shared_by_the_unpicked_effort() -> None:
@@ -1051,3 +1165,63 @@ def test_the_lowest_effort_from_low_is_shared_by_the_unpicked_effort() -> None:
     )
     assert mc.lowest_effort_from_low(by_default) == "low"
     assert mc.unpicked_effort(by_default) == "high"
+
+
+_JEV = "openrouter/typesafe/jev-router"
+
+
+@pytest.mark.parametrize("role", ["hook", "judge"])
+def test_jev_is_selectable_for_the_classifier_roles(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    """TypeSafe Jev passes validation for the hook and judge roles."""
+    kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
+    catalog = ModelCatalogResponse(providers=[], models=[kept])
+    monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)
+
+    mc.require_known_model(_JEV, role=role)
+
+    assert mc.is_removed_model(_JEV)
+
+
+@pytest.mark.parametrize("role", [None, "agent", "optimizer", "metric"])
+def test_jev_stays_hidden_for_every_other_role(monkeypatch: pytest.MonkeyPatch, role: str | None) -> None:
+    """Every other role, and a call that names no role, refuses Jev."""
+    kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
+    catalog = ModelCatalogResponse(providers=[], models=[kept])
+    monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)
+
+    with pytest.raises(mc.DomainError):
+        mc.require_known_model(_JEV, role=role)
+
+
+def test_classifier_roles_do_not_unlock_other_routers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The classifier exception names Jev only; other routers stay refused for the judge."""
+    empty = ModelCatalogResponse(providers=[], models=[])
+    monkeypatch.setattr(mc, "get_catalog_cached", lambda: empty)
+
+    with pytest.raises(mc.DomainError):
+        mc.require_known_model("openrouter/other/some-router", role="judge")
+
+
+def test_cold_effort_check_joins_the_thread_the_kick_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold check joins the started thread from the kick, not a later global value."""
+    plain = CatalogModel(value="openrouter/vendor/plain", label="plain", provider="openrouter", available=True)
+    real_kick = mc._kick_background_refresh
+
+    def kick_then_replace() -> threading.Thread | None:
+        """Start the refresh, then store an unstarted thread, as a racing new refresh can.
+
+        Returns:
+            The thread the real kick returned.
+        """
+        thread = real_kick()
+        mc._refresh_thread = threading.Thread(target=lambda: None)
+        return thread
+
+    monkeypatch.setattr(mc, "_cached_response", None)
+    monkeypatch.setattr(mc, "_refresh_in_flight", False)
+    monkeypatch.setattr(mc, "_refresh_thread", None)
+    monkeypatch.setattr(mc, "get_catalog", lambda: ModelCatalogResponse(providers=[], models=[plain]))
+    monkeypatch.setattr(mc, "zero_retention_models", set)
+    monkeypatch.setattr(mc, "_kick_background_refresh", kick_then_replace)
+
+    assert mc.is_effortless_model("openrouter/vendor/plain") is True

@@ -1,4 +1,4 @@
-"""Tests for the seeded false-positive measurement of the final rule judge."""
+"""Tests for the seeded false-positive measurement of the rule watch hook."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ import re
 import httpx
 
 from ..rule_judge import JUDGE_ANSWER_TOKENS, JUDGE_REASONING_TOKENS
-from ..rule_judge_eval import SEEDED_EDITS, SEEDED_RULES, measure, openrouter_asker
+from ..rule_judge_eval import SEEDED_EDITS, SEEDED_INTENT, SEEDED_RULES, measure, openrouter_asker
 
-# A stub judge with no model: it flags table lookups, network calls and label
+# A stub hook with no model: it flags table lookups, network calls and label
 # reads by pattern. It stands in for a real model to exercise the harness.
 _SIGNS = {
     1: re.compile(r"KNOWN\s*=\s*\{|hexdigest\(\) =="),
@@ -19,20 +19,34 @@ _SIGNS = {
 }
 
 
-def _pattern_judge(prompt: str) -> str:
-    """Answer a final-judge prompt by pattern.
+def _hook_reply(label: str, confidence: float, reason: str) -> str:
+    """Write a watch hook reply.
 
     Args:
-        prompt: The judge prompt.
+        label: The verdict label.
+        confidence: The verdict confidence.
+        reason: The verdict reason.
 
     Returns:
-        A judge reply.
+        The reply JSON.
     """
-    diff = prompt.split("<diff>", 1)[1]
+    return json.dumps({"label": label, "confidence": confidence, "reason": reason})
+
+
+def _pattern_judge(prompt: str) -> str:
+    """Answer a watch hook prompt by pattern.
+
+    Args:
+        prompt: The hook prompt.
+
+    Returns:
+        A hook reply.
+    """
+    steps = prompt.split("<steps>", 1)[1]
     for rule, sign in _SIGNS.items():
-        if sign.search(diff):
-            return json.dumps({"violation": True, "rule": rule, "reason": f"matches {sign.pattern}"})
-    return json.dumps({"violation": False, "rule": None, "reason": "no sign"})
+        if sign.search(steps):
+            return _hook_reply("breaks_rule", 0.9, f"rule {rule}: matches {sign.pattern}")
+    return _hook_reply("ok", 0.9, "no sign")
 
 
 def test_the_seeded_set_holds_both_kinds_of_edit() -> None:
@@ -58,11 +72,30 @@ def test_a_stub_judge_is_measured_on_the_seeded_set() -> None:
 
 def test_a_judge_that_rejects_everything_shows_its_false_positives() -> None:
     """Flagging every edit keeps recall at 1 but every legal edit is a false positive."""
-    quality = measure(lambda _prompt: json.dumps({"violation": True, "rule": 1, "reason": "all"}))
+    quality = measure(lambda _prompt: _hook_reply("breaks_rule", 0.95, "all"))
 
     assert quality.recall == 1.0
     assert quality.precision == 0.5
     assert quality.false_positive_rate == 1.0
+
+
+def test_a_flag_below_the_threshold_does_not_count() -> None:
+    """A non-ok label under the warning threshold never warns, so it counts as not flagged."""
+    quality = measure(lambda _prompt: _hook_reply("breaks_rule", 0.5, "unsure"))
+
+    assert quality.true_positives == quality.false_positives == 0
+    assert quality.false_negatives == len([edit for edit in SEEDED_EDITS if edit.illegal])
+
+
+def test_the_prompt_holds_the_intent_rules_and_step_but_no_metric() -> None:
+    """Each prompt carries the intent, every rule and the edit, and never the word metric or score."""
+    prompts: list[str] = []
+    measure(lambda prompt: prompts.append(prompt) or _hook_reply("ok", 0.9, "fine"), SEEDED_EDITS[:1])
+
+    assert SEEDED_INTENT in prompts[0]
+    assert all(rule in prompts[0] for rule in SEEDED_RULES)
+    assert "KNOWN = {" in prompts[0].split("<steps>", 1)[1]
+    assert "metric" not in prompts[0].lower()
 
 
 def test_a_silent_judge_counts_as_unavailable_not_as_legal() -> None:

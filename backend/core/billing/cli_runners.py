@@ -125,18 +125,20 @@ class SubscriptionRateLimitedError(Exception):
 class CliRunError(Exception):
     """Report a CLI call that gave no usable answer."""
 
-    def __init__(self, provider: str, message: str, *, transient: bool) -> None:
-        """Keep the provider, a short reason, and whether a retry can help.
+    def __init__(self, provider: str, message: str, *, transient: bool, started: bool = True) -> None:
+        """Keep the provider, a short reason, whether a retry can help, and whether the CLI ran.
 
         Args:
             provider: The CLI that failed.
             message: A short reason, without prompt text.
             transient: True when the same call can succeed on a retry.
+            started: False when no CLI process started, so no subscription use happened.
         """
         super().__init__(message)
         self.provider = provider
         self.message = message
         self.transient = transient
+        self.started = started
 
 
 def parse_reset_at(text: str, *, now: datetime | None = None) -> datetime | None:
@@ -243,7 +245,7 @@ def _start(provider: str, argv: list[str], env: Mapping[str, str], cwd: Path) ->
             start_new_session=True,
         )
     except FileNotFoundError as error:
-        raise CliRunError(provider, f"{provider} is not installed", transient=False) from error
+        raise CliRunError(provider, f"{provider} is not installed", transient=False, started=False) from error
 
 
 def _kill_group(process: subprocess.Popen[str]) -> None:

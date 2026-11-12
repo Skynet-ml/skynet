@@ -1,9 +1,6 @@
-"""Factory for a fully-wired DspyService shared by the API app and the standalone worker.
+"""Alias wiring for the optimizer and module registry that the API app uses.
 
-The optimizer/module alias wiring used to live inline in ``create_app``; the
-standalone worker entrypoint needs the identical registry (a worker whose
-service can't resolve ``gepa``/``predict`` fails every job), so the wiring
-lives here where both bootstrappers can reach it without importing the API.
+The wiring lives outside ``create_app`` so it stays importable without the API.
 """
 
 from __future__ import annotations
@@ -15,7 +12,6 @@ from ..registry.resolvers import (
     resolve_module_factory,
     resolve_optimizer_factory,
 )
-from . import DspyService
 
 
 def wire_registry_aliases(registry: ServiceRegistry) -> ServiceRegistry:
@@ -38,23 +34,3 @@ def wire_registry_aliases(registry: ServiceRegistry) -> ServiceRegistry:
             factory, _ = resolve_module_factory(alias)
             registry.register_module(alias, factory)
     return registry
-
-
-def build_default_service(
-    registry: ServiceRegistry | None = None,
-    *,
-    service_kwargs: dict | None = None,
-) -> DspyService:
-    """Build the standard DspyService with the alias-backed registry wiring.
-
-    Args:
-        registry: Optional pre-built registry; a fresh one is created when
-            omitted. Either way the alias factories are merged in.
-        service_kwargs: Optional kwargs forwarded to :class:`DspyService`.
-
-    Returns:
-        A service whose registry resolves every supported optimizer/module
-        alias.
-    """
-    registry = wire_registry_aliases(registry or ServiceRegistry())
-    return DspyService(registry, **(service_kwargs or {}))

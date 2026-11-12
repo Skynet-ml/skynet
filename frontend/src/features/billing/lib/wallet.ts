@@ -31,6 +31,7 @@ export type WalletStatus = "healthy" | "low" | "empty";
 export type LedgerKind = "run" | "topup" | "grant";
 
 /** Value of one cent, in USD. */
+// Exported for the backend parity test (test_billing_constants_parity.py), which reads it.
 export const CENT_USD_VALUE = 0.01;
 
 /**
@@ -43,7 +44,7 @@ export const CUSTOM_CENTS_MIN = 500;
 export const CUSTOM_CENTS_MAX = 100_000;
 
 /** Below this much spendable value the wallet reads as "running low" (calm, not alarming). */
-export const LOW_BALANCE_USD = 0.5;
+const LOW_BALANCE_USD = 0.5;
 
 /**
  * The backend's live pricing terms, served on the wallet response so estimates
@@ -78,7 +79,7 @@ export const DEFAULT_PRICING_TERMS: PricingTerms = {
  * `purchase_fee_cents`. The buyer pays the top-up amount plus this fee; only the
  * top-up amount is added to the balance.
  */
-export function purchaseFeeUsd(cents: number, terms: PricingTerms = DEFAULT_PRICING_TERMS): number {
+function purchaseFeeUsd(cents: number, terms: PricingTerms = DEFAULT_PRICING_TERMS): number {
   return (Math.ceil(cents * terms.purchaseFeeRate) + terms.purchaseFeeFixedCents) / 100;
 }
 
@@ -91,7 +92,7 @@ export function purchaseTotalUsd(
 }
 
 /** The one-time free grant that lets a new account try the platform. */
-export interface FreeGrant {
+interface FreeGrant {
   centsRemaining: number;
   centsTotal: number;
 }
@@ -119,20 +120,6 @@ export interface TopUpPack {
   popular?: boolean;
 }
 
-/** The caller's platform plan — Pro lifts storage, job, and concurrency limits. */
-export interface PlanState {
-  plan: "free" | "pro";
-  /** ISO end of the current billing period, when subscribed. */
-  renewsAt: string | null;
-  /** True when Pro ends at `renewsAt` instead of renewing. */
-  cancelAtPeriodEnd: boolean;
-  /** Whether this deployment sells Pro at all. */
-  available: boolean;
-}
-
-/** Monthly Skynet Pro price in USD — mirrors `_PRO_MONTHLY` in provision_stripe.py. */
-export const PRO_MONTHLY_USD = 9;
-
 /** The whole wallet as the UI needs it. */
 export interface WalletBalance {
   /** Purchased balance in cents, on top of the free grant. */
@@ -140,7 +127,6 @@ export interface WalletBalance {
   freeGrant: FreeGrant;
   /** Most-recent-first ledger rows. */
   usage: UsageEntry[];
-  plan: PlanState;
   pricing: PricingTerms;
 }
 
@@ -222,6 +208,5 @@ export const EMPTY_WALLET: WalletBalance = {
   paidBalanceCents: 0,
   freeGrant: { centsRemaining: 0, centsTotal: 0 },
   usage: [],
-  plan: { plan: "free", renewsAt: null, cancelAtPeriodEnd: false, available: false },
   pricing: DEFAULT_PRICING_TERMS,
 };

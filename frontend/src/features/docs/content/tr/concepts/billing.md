@@ -91,15 +91,26 @@ Bir model çağrısı anahtarınızı kullandığında:
 
 Harici bir puanlayıcı veya MCP sağlayıcısının ücretleri doğrudan o sağlayıcıya gider. Bunlar çalıştırmanın harcama limitine dahil değildir.
 
+## Kodunuzdan model çağrıları
+
+Depo kodunuz ve puanlayıcınız, Skynet'in model ağ geçidi üzerinden bir model çağırabilir. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
+
+- Skynet'in anahtarlarıyla yapılan bir çağrı, diğer tüm model çağrıları gibi çalıştırma bütçesine göre ölçülür. Kullanım marjı uygulanır.
+- Kendi anahtarınızla (BYOK) yapılan bir çağrı sağlayıcı anahtarınıza gider. Skynet bunun için model ücreti almaz.
+
 ## Sandbox kullanımı
 
-Çalıştırma kodunuz ve metriğiniz bir sandbox içinde çalışır. Skynet sandbox işlem gücünü ölçer:
+Depo kodunuz ve puanlayıcınız bir sandbox içinde çalışır. Skynet sandbox işlem gücünü ölçer:
 
 1. Bir sandbox başlamadan önce Skynet, çalıştırmanın limitinden bir tutar ayırır.
 2. Sandbox bittiğinde Skynet, sandbox sağlayıcısının bildirdiği nihai kullanımı tahsil eder.
 3. Kullanım marjı sandbox işlem gücüne uygulanır.
 
 Sandbox işlem gücü, model çağrıları kendi anahtarınızı kullandığında da çalıştırmanın harcama limitine dahildir.
+
+## Sunum
+
+Tamamlanmış bir çalıştırmanın sunum uç noktasına yapılan her çağrı ayrı faturalandırılır. Çağıran, kendi bakiyesinden öder. Tek bir çağrıya üst sınır koymak için istekte `max_cost_cents` ayarlayın. [Sonuçlar](/docs/guides/results) sayfasını okuyun.
 
 ## Planlar
 

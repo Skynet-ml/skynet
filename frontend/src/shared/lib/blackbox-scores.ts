@@ -43,8 +43,3 @@ export function sideInfoNamedScores(
   }
   return named;
 }
-
-/** Whether a scorer error is the backend's refusal of a result without feedback. */
-export function isMissingFeedbackError(error: string | null | undefined): boolean {
-  return typeof error === "string" && error.includes("must return feedback");
-}

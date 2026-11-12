@@ -1,5 +1,6 @@
 import type { CatalogModel, ModelCatalogResponse } from "@/shared/types/api";
-import { getByokModels } from "@/shared/lib/api";
+import { fetchWithAuthRetry, getByokModels, getHostedModels } from "@/shared/lib/api";
+import { supportsEffortSlider } from "@/shared/lib/model-efforts";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
@@ -15,6 +16,11 @@ function isModelCatalogResponse(value: unknown): value is ModelCatalogResponse {
   return Array.isArray(candidate.providers) && Array.isArray(candidate.models);
 }
 
+/** Exclude retired model choices from both fresh responses and old browser caches. */
+function supportedCatalog(catalog: ModelCatalogResponse): ModelCatalogResponse {
+  return { ...catalog, models: catalog.models.filter(supportsEffortSlider) };
+}
+
 // Stale-while-revalidate: serve whatever the last load stored — no TTL. An
 // expired cache used to leave the model menu empty for the seconds the
 // LiteLLM round-trip takes; a slightly stale list beats a blank one, and the
@@ -25,7 +31,7 @@ try {
   if (raw) {
     const parsed = JSON.parse(raw) as { ts?: unknown; data?: unknown };
     if (isModelCatalogResponse(parsed.data)) {
-      _cache = parsed.data;
+      _cache = supportedCatalog(parsed.data);
     }
   }
 } catch {
@@ -41,17 +47,27 @@ const _ready: Promise<ModelCatalogResponse> =
           if (!res.ok) throw new Error(`Server error: ${res.status}`);
           const data: unknown = await res.json();
           if (!isModelCatalogResponse(data)) throw new Error("Invalid model catalog response");
-          _cache = data;
+          _cache = supportedCatalog(data);
           try {
             localStorage.setItem(LS_KEY, JSON.stringify({ data, ts: Date.now() }));
           } catch {}
-          return data;
+          return supportedCatalog(data);
         } catch {
           if (_cache) return _cache;
           _cache = EMPTY_CATALOG;
           return EMPTY_CATALOG;
         }
       })();
+
+/** Check live priority support for the selected OpenRouter model. */
+export async function getModelFastMode(model: string): Promise<boolean> {
+  const res = await fetchWithAuthRetry(`${apiBase()}/models/fast-mode?model=${encodeURIComponent(model)}`, {});
+  if (!res.ok) return false;
+  const data: unknown = await res.json();
+  return (
+    !!data && typeof data === "object" && "supports_fast" in data && data.supports_fast === true
+  );
+}
 
 export function getModelCatalog(): Promise<ModelCatalogResponse> {
   return _ready;
@@ -60,6 +76,35 @@ export function getModelCatalog(): Promise<ModelCatalogResponse> {
 /** Synchronously inspect the cached catalog (returns null only before first fetch resolves). */
 export function cachedCatalog(): ModelCatalogResponse | null {
   return _cache;
+}
+
+// The web catalog for a Remote run from a linked Mac (SKY-340): hosted prices
+// and offers its own models, so the Mac's local list must not stand in for it.
+let _hostedCache: ModelCatalogResponse | null = null;
+let _hostedReady: Promise<ModelCatalogResponse> | null = null;
+
+export function getHostedModelCatalog(): Promise<ModelCatalogResponse> {
+  if (_hostedReady) return _hostedReady;
+  if (typeof window === "undefined") return Promise.resolve(EMPTY_CATALOG);
+  _hostedReady = (async () => {
+    try {
+      const data: unknown = await getHostedModels();
+      if (!isModelCatalogResponse(data)) throw new Error("Invalid hosted catalog response");
+      _hostedCache = supportedCatalog(data);
+      return supportedCatalog(data);
+    } catch (err) {
+      // Reset and reject, so a caller never keeps an empty list as the web's
+      // catalog and the next ask can retry after a dropped link.
+      _hostedReady = null;
+      throw err;
+    }
+  })();
+  return _hostedReady;
+}
+
+/** Synchronously inspect the cached web catalog (null before its first fetch resolves). */
+export function cachedHostedCatalog(): ModelCatalogResponse | null {
+  return _hostedCache;
 }
 
 // BYOK catalog — every offered provider's models, regardless of platform keys
@@ -75,8 +120,8 @@ export function getByokModelCatalog(): Promise<ModelCatalogResponse> {
     try {
       const data: unknown = await getByokModels();
       if (!isModelCatalogResponse(data)) throw new Error("Invalid BYOK catalog response");
-      _byokCache = data;
-      return data;
+      _byokCache = supportedCatalog(data);
+      return supportedCatalog(data);
     } catch {
       // Reset so a transient failure can retry on the next BYOK switch.
       _byokReady = null;
@@ -134,7 +179,8 @@ function bestFirst(key: (m: CatalogModel) => number) {
 const byScore = bestFirst((m) => m.intelligence_index ?? -1);
 
 /** Top labs first and Chinese labs last (the backend's `lab_tier`), then by score. */
-const byLabThenScore = (a: CatalogModel, b: CatalogModel) => (a.lab_tier ?? 1) - (b.lab_tier ?? 1) || byScore(a, b);
+const byLabThenScore = (a: CatalogModel, b: CatalogModel) =>
+  (a.lab_tier ?? 1) - (b.lab_tier ?? 1) || byScore(a, b);
 
 /**
  * Order models for one picker tab, the best by that tab's measure first.
@@ -151,7 +197,9 @@ export function rankModels(models: CatalogModel[], ranking: ModelRanking): Ranke
     groups = [
       {
         kind: "ranked",
-        models: models.filter((m) => !!m.throughput_tps).sort(bestFirst((m) => m.throughput_tps ?? 0)),
+        models: models
+          .filter((m) => !!m.throughput_tps)
+          .sort(bestFirst((m) => m.throughput_tps ?? 0)),
       },
       { kind: "no_speed", models: models.filter((m) => !m.throughput_tps).sort(byScore) },
     ];

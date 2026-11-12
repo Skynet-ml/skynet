@@ -17,9 +17,7 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
 
-EventTypeValue = Literal[
-    "needs_input", "budget_near", "failed", "finished", "new_best", "stuck", "shared", "product_news"
-]
+EventTypeValue = Literal["budget_near", "failed", "finished", "new_best", "stuck", "shared", "product_news"]
 ChannelValue = Literal["inbox", "email", "chrome", "slack"]
 HeldChannelValue = Literal["email", "chrome", "slack"]
 

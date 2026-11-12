@@ -3,7 +3,7 @@
 Every billed model call and sandbox charge of a run is an execution operation
 on the run's budget, so summing operations adds up exactly to what the run
 charged, for every optimizer alike. Rows are pre-aggregated per role, model,
-stage, pair, candidate and kind; the client regroups them by any of those.
+stage, candidate and kind; the client regroups them by any of those.
 """
 
 from __future__ import annotations
@@ -46,12 +46,11 @@ _UNSETTLED_STATES = ("reserved", "dispatched", "pending")
 
 @dataclass
 class UsageRow:
-    """One aggregate of operations sharing a role, model, stage, pair, candidate, billing and kind."""
+    """One aggregate of operations sharing a role, model, stage, candidate, billing and kind."""
 
     role: str
     model: str | None
     stage: str | None
-    pair: str | None
     candidate: str | None
     billing: str
     kind: str | None = None
@@ -208,7 +207,6 @@ def aggregate(
     *,
     proposer: bool,
     direct_usage: Iterable[Mapping[str, Any]] = (),
-    pair: str | None = None,
 ) -> list[UsageRow]:
     """Group a run's operations into usage rows.
 
@@ -216,7 +214,6 @@ def aggregate(
         records: The run budget's operations.
         proposer: Whether the run's optimization model is a proposer agent.
         direct_usage: Proposer usage paid on the owner's own key, which has no operation.
-        pair: Keep only operations tagged with this grid pair.
 
     Returns:
         Rows in first-seen order.
@@ -225,15 +222,13 @@ def aggregate(
 
     def row_for(role: str, model: str | None, tags: Mapping[str, Any], billing: str) -> UsageRow:
         """Return the row for one grouping key, creating it on first use."""
-        key = (role, model, tags.get("stage"), tags.get("pair"), tags.get("candidate"), billing, tags.get("kind"))
+        key = (role, model, tags.get("stage"), tags.get("candidate"), billing, tags.get("kind"))
         if key not in rows:
-            rows[key] = UsageRow(role, model, *key[2:5], billing, kind=key[6])
+            rows[key] = UsageRow(role, model, *key[2:4], billing, kind=key[5])
         return rows[key]
 
     for record in records:
         tags = record.evidence.get("tags") if isinstance(record.evidence.get("tags"), Mapping) else {}
-        if pair is not None and tags.get("pair") != pair:
-            continue
         model_call = record.cost_kind == "model"
         byok = record.policy.get("kind") == "byok_model"
         subscription = record.policy.get("kind") == "subscription_model"
@@ -267,28 +262,25 @@ def aggregate(
         if isinstance(latency, int) and latency >= 0:
             row.latency_ms_total += latency
             row.latency_calls += 1
-    if pair is None:
-        for usage in direct_usage:
-            model = str(usage.get("model") or "") or None
-            row = row_for(ROLE_PROPOSER, model, {}, BILLING_DIRECT)
-            row.calls += _int(usage.get("calls"))
-            cache_read, cache_write = (
-                _int(usage.get("cache_read_input_tokens")),
-                _int(usage.get("cache_creation_input_tokens")),
+    for usage in direct_usage:
+        model = str(usage.get("model") or "") or None
+        row = row_for(ROLE_PROPOSER, model, {}, BILLING_DIRECT)
+        row.calls += _int(usage.get("calls"))
+        cache_read, cache_write = (
+            _int(usage.get("cache_read_input_tokens")),
+            _int(usage.get("cache_creation_input_tokens")),
+        )
+        prompt, completion = (
+            _int(usage.get("prompt_tokens")) + cache_read + cache_write,
+            _int(usage.get("completion_tokens")),
+        )
+        row.input_tokens += prompt
+        row.output_tokens += completion
+        if model is not None:
+            usd = usage_cost_usd(
+                ModelUsage(model, prompt, completion, cache_read_tokens=cache_read, cache_write_tokens=cache_write)
             )
-            prompt, completion = (
-                _int(usage.get("prompt_tokens")) + cache_read + cache_write,
-                _int(usage.get("completion_tokens")),
-            )
-            row.input_tokens += prompt
-            row.output_tokens += completion
-            if model is not None:
-                usd = usage_cost_usd(
-                    ModelUsage(model, prompt, completion, cache_read_tokens=cache_read, cache_write_tokens=cache_write)
-                )
-                row.provider_cents = (row.provider_cents or Decimal(0)) + Decimal(str(usd)) / Decimal(
-                    str(CENT_USD_VALUE)
-                )
+            row.provider_cents = (row.provider_cents or Decimal(0)) + Decimal(str(usd)) / Decimal(str(CENT_USD_VALUE))
     return list(rows.values())
 
 
@@ -338,17 +330,15 @@ def _leg_rows(
     reflection_model: str | None,
     reflection_role: str,
     billing: str,
-    pair: str | None,
 ) -> list[UsageRow]:
-    """Build the usage rows of one run or grid pair from its recorded result.
+    """Build the usage rows of one run from its recorded result.
 
     Args:
-        leg: A single-run result or one grid pair's result.
+        leg: A single-run result.
         task_model: Model the task program ran on.
         reflection_model: Model the optimizer reflected or proposed with.
         reflection_role: ``ROLE_REFLECTION`` or ``ROLE_PROPOSER``.
         billing: Billing label every row carries.
-        pair: Grid pair tag, or ``None`` for a single run.
 
     Returns:
         One row per role and model, with tokens, calls and latency but no charge yet.
@@ -358,7 +348,7 @@ def _leg_rows(
     def row_for(role: str, model: str | None) -> UsageRow:
         """Return the row for one role and model, creating it on first use."""
         if (role, model) not in rows:
-            rows[(role, model)] = UsageRow(role, model, None, pair, None, billing)
+            rows[(role, model)] = UsageRow(role, model, None, None, billing)
         return rows[(role, model)]
 
     reflection_key = _model_key(reflection_model)
@@ -428,7 +418,6 @@ def from_result(
     reflection_model: str | None,
     proposer: bool,
     byok: bool,
-    pair: str | None = None,
 ) -> list[UsageRow]:
     """Rebuild a run's usage rows from its own result, for runs charged without an execution budget.
 
@@ -438,48 +427,29 @@ def from_result(
     model rows so they add up to exactly what the run header shows.
 
     Args:
-        result: The run's result, single run or grid envelope.
-        task_model: The run's task model, used when the result is a single run.
+        result: The run's result.
+        task_model: The run's task model.
         reflection_model: The run's reflection or proposer model, likewise.
         proposer: Whether the optimizer model is a proposer agent rather than DSPy reflection.
         byok: Whether the run's tokens were paid on the owner's own key.
-        pair: Keep only this grid pair.
 
     Returns:
         Rows in result order; empty when the result recorded no usage.
     """
     reflection_role = ROLE_PROPOSER if proposer else ROLE_REFLECTION
     billing = BILLING_BYOK if byok else BILLING_SKYNET
-    pairs = result.get("pair_results")
-    if isinstance(pairs, list):
-        rows: list[UsageRow] = []
-        for leg in pairs:
-            if not isinstance(leg, Mapping) or (pair is not None and str(leg.get("pair_index")) != pair):
-                continue
-            rows += _leg_rows(
-                leg,
-                task_model=leg.get("generation_model"),
-                reflection_model=leg.get("reflection_model"),
-                reflection_role=reflection_role,
-                billing=billing,
-                pair=str(leg.get("pair_index")),
-            )
-        return rows
-    if pair is not None:
-        return []
     rows = _leg_rows(
         result,
         task_model=task_model,
         reflection_model=reflection_model,
         reflection_role=reflection_role,
         billing=billing,
-        pair=None,
     )
     details = result.get("details") if isinstance(result.get("details"), Mapping) else {}
     stamp = details.get("billing") if isinstance(details.get("billing"), Mapping) else {}
     units = _int(stamp.get("cents")) * CENT_SCALE if stamp.get("outcome") == "billed" else 0
     if units and not rows:
-        rows.append(UsageRow(ROLE_OTHER, None, None, None, None, billing))
+        rows.append(UsageRow(ROLE_OTHER, None, None, None, billing))
     _spread(rows, units)
     if byok:
         for row in rows:
@@ -571,7 +541,6 @@ def with_rounding(rows: list[UsageRow], billed: int | None) -> list[UsageRow]:
             role=ROLE_ROUNDING,
             model=None,
             stage=None,
-            pair=None,
             candidate=None,
             billing=BILLING_SKYNET,
             charged_units=gap,

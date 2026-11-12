@@ -156,7 +156,6 @@ class FakeJobStore:
         logger_name: str,
         message: str,
         timestamp: datetime | None = None,
-        pair_index: int | None = None,
         **run_log_fields: Any,
     ) -> None:
         """Append a log entry to the in-memory log list."""
@@ -166,7 +165,6 @@ class FakeJobStore:
                 "logger_name": logger_name,
                 "message": message,
                 "timestamp": (timestamp or datetime.now(UTC)).isoformat(),
-                "pair_index": pair_index,
                 **run_log_fields,
             }
         )
@@ -343,6 +341,20 @@ class FakeJobStore:
             return False
         del self._staged_datasets[staged_dataset_id]
         return True
+
+    def list_run_calls(
+        self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return no relay calls; this fake has no run-record write path."""
+        return []
+
+    def get_run_candidate(self, optimization_id: str, candidate_id: str) -> dict[str, Any] | None:
+        """Return no candidate; this fake has no run-record write path."""
+        return None
+
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        """Return no candidates; this fake has no run-record write path."""
+        return []
 
 
 @pytest.fixture

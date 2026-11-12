@@ -112,6 +112,28 @@ def test_responses_rejects_unbounded_categories(extra: dict) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("extra", "detail"),
+    [
+        ({"tools": [{"type": "web_search_preview"}]}, "(tool type 'web_search_preview')"),
+        (
+            {"input": [{"type": "additional_tools", "role": "developer", "tools": [{"type": "file_search"}]}]},
+            "(tool type 'file_search')",
+        ),
+        ({"input": [{"type": "additional_tools", "role": "developer"}]}, "(tools is NoneType, not a list)"),
+        ({"tools": ["opaque"]}, "(tool is str, not an object)"),
+    ],
+)
+def test_responses_tool_refusal_names_the_rejected_tool(extra: dict, detail: str) -> None:
+    """Name the rejected tool type so a sandbox CLI 422 shows its cause."""
+    with pytest.raises(UnpricedOperationError) as error:
+        price_responses_request(
+            {"model": "fixture/text", "input": "text", **extra}, _CATALOG, ChargePolicy("managed_model")
+        )
+    assert str(error.value).startswith("Provider-operated Responses tools require separately verified coverage")
+    assert str(error.value).endswith(detail + ".")
+
+
 def test_responses_prices_codex_additional_tools_as_prompt_text() -> None:
     """Accept the tool-schema history item Codex sends under the full-context input bound."""
     tools = [

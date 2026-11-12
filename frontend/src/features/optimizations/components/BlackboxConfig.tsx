@@ -29,6 +29,7 @@ import {
   Wrench,
 } from "@/shared/ui/icons";
 import { harnessLabel } from "@/shared/lib/blackbox-harness";
+import { SandboxProviderIcon, sandboxProviderLabel } from "@/shared/lib/sandbox-provider";
 import { FadeIn } from "@/shared/ui/motion";
 import { HelpTip } from "@/shared/ui/help-tip";
 import type {
@@ -91,12 +92,6 @@ const BLACKBOX_SLIDES = perLocale(() => [
   },
 ]);
 
-const RECIPE_LABELS: Record<string, string> = perLocale(() => ({
-  prompt: msg("optimization.config.recipe.prompt"),
-  code: msg("optimization.config.recipe.code"),
-  anything: msg("optimization.config.recipe.anything"),
-}));
-
 function modelName(cfg: Record<string, unknown> | null): string {
   if (!cfg) return "—";
   const provider = typeof cfg.provider === "string" ? cfg.provider : "";
@@ -131,10 +126,7 @@ type ConfigRow = { label: ReactNode; value: string; icon: ReactNode };
 function MiniGrid({ rows }: { rows: ConfigRow[] }) {
   if (rows.length === 0) return null;
   return (
-    <div
-      className="grid gap-3"
-      style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(11rem, 100%), 1fr))" }}
-    >
+    <div>
       {rows.map((row, index) => (
         <SlideMiniCard key={index} label={row.label} value={row.value} icon={row.icon} />
       ))}
@@ -215,6 +207,8 @@ export function BlackboxConfigCard({
       ? payload.token_source
       : null;
   const runtime = command(payload.proposer_runtime);
+  // Runs stored before SKY-606 name no provider; they show no row.
+  const sandboxProvider = command(payload.sandbox_provider);
   const hasCostCap = "max_cost_cents" in payload || "estimated_cents_low" in payload;
   const costCap = typeof payload.max_cost_cents === "number" ? payload.max_cost_cents : null;
   const estimateLow =
@@ -245,6 +239,13 @@ export function BlackboxConfigCard({
       icon: <RocketLaunch />,
     });
   }
+  if (sandboxProvider) {
+    generalRows.push({
+      label: msg("submit.v2.optimizer.sandbox.label"),
+      value: sandboxProviderLabel(sandboxProvider),
+      icon: <SandboxProviderIcon id={sandboxProvider} />,
+    });
+  }
   if (hasCostCap) {
     generalRows.push({
       label: msg("submit.budget.label"),
@@ -267,7 +268,6 @@ export function BlackboxConfigCard({
     });
   }
 
-  const recipe = typeof payload.recipe === "string" ? payload.recipe : null;
   const seed = payload.seed_candidate;
   const seedValue =
     typeof seed === "string" && seed.trim() !== ""
@@ -303,13 +303,6 @@ export function BlackboxConfigCard({
       label: msg("optimization.blackbox.config.budget_stop_label"),
       value: String(budget.stop_at_score),
       icon: <Target />,
-    });
-  }
-  if (recipe) {
-    optimizationRows.push({
-      label: <HelpTip text={tip("config.recipe")}>{msg("optimization.config.recipe")}</HelpTip>,
-      value: RECIPE_LABELS[recipe] ?? recipe,
-      icon: <Sparkle />,
     });
   }
   optimizationRows.push({
@@ -509,8 +502,8 @@ export function BlackboxConfigCard({
         renderSlide={(activeSlide) => (
           <>
             {activeSlide === 0 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -525,10 +518,10 @@ export function BlackboxConfigCard({
                   <SlideHeroCard
                     index={1}
                     label={
-                      <HelpTip text={tip("submit.optimization_type")}>
+                      <>
                         {msg("auto.features.submit.components.steps.summarystep.4")}
                         {TERMS.optimization}
-                      </HelpTip>
+                      </>
                     }
                     value={msg("submit.recipe.anything.title")}
                     icon={<Stack />}
@@ -542,8 +535,8 @@ export function BlackboxConfigCard({
             )}
 
             {activeSlide === 1 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -592,12 +585,7 @@ export function BlackboxConfigCard({
             {activeSlide === 2 && (
               <div>
                 {reflectionCard || taskCard || scorerModelCard || target.model ? (
-                  <div
-                    className="grid gap-4"
-                    style={{
-                      gridTemplateColumns: "repeat(auto-fit, minmax(min(17rem, 100%), 1fr))",
-                    }}
-                  >
+                  <div className="flex flex-col">
                     {reflectionCard && (
                       <ModelCard
                         label={msg("optimization.blackbox.config.reflection_model")}
@@ -637,8 +625,8 @@ export function BlackboxConfigCard({
             )}
 
             {activeSlide === 3 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -665,8 +653,8 @@ export function BlackboxConfigCard({
             )}
 
             {activeSlide === 4 && (
-              <div className="flex flex-col gap-5">
-                <div className="grid items-stretch gap-3 md:grid-cols-2">
+              <div className="flex flex-col">
+                <div className="flex flex-col">
                   <SlideHeroCard
                     index={0}
                     label={
@@ -684,12 +672,12 @@ export function BlackboxConfigCard({
                 </div>
                 {split &&
                   (holdout ? (
-                    <div className="flex flex-1 flex-col gap-3">
+                    <div className="flex flex-col gap-1 border-b border-border/40 py-2.5">
                       <div className="flex items-center gap-2.5">
-                        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent text-muted-foreground [&_svg]:size-4">
+                        <span className="text-muted-foreground [&_svg]:size-3.5">
                           <Shuffle className="size-4" aria-hidden="true" />
                         </span>
-                        <p className="text-[0.6875rem] font-semibold uppercase tracking-widest text-muted-foreground">
+                        <p className="text-xs text-muted-foreground">
                           <HelpTip text={tip("blackbox.config.split")}>
                             {msg("optimization.blackbox.config.split")}
                           </HelpTip>

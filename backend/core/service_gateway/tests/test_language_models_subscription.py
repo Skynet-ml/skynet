@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,10 +26,8 @@ from core.service_gateway.language_models import (
     apply_model_reasoning_config,
     build_language_model,
 )
-from core.service_gateway.optimization.blackbox.workspace_harness import attempt_record
-from core.service_gateway.optimization.unified.dspy_engine import lm_helper
 
-MODEL = "anthropic/claude-haiku-4.5"
+MODEL = "anthropic/claude-haiku-5.5"
 SUBSCRIPTION_ID = f"subscription/claude/{MODEL}"
 
 
@@ -73,22 +70,6 @@ def test_subscription_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
     assert call["argv"][call["argv"].index("--effort") + 1] == "xhigh"
     unpicked = build_language_model(ModelConfig(name=MODEL, token_source="subscription", cli_provider="claude"))
     assert cli_dispatch.CLI_EFFORT_KEY not in (unpicked.kwargs.get("extra_body") or {})
-
-
-@pytest.mark.usefixtures("local")
-def test_subscription_metric_effort_override_reaches_the_cli(tmp_path: Path) -> None:
-    """Send the per-call effort to the CLI without changing the next call's default."""
-    model = "subscription/claude/anthropic/claude-opus-5.5"
-    lm = build_language_model(
-        ModelConfig(name=model, token_source="subscription", cli_provider="claude", extra={"reasoning_effort": "low"}),
-        disable_cache=True,
-    )
-    helper = lm_helper(lm)
-    assert helper("judge", model=model, reasoning_effort="high") == "pong"
-    assert helper("judge") == "pong"
-    first, second = calls(tmp_path, "claude")
-    assert first["argv"][first["argv"].index("--effort") + 1] == "high"
-    assert second["argv"][second["argv"].index("--effort") + 1] == "low"
 
 
 @pytest.mark.usefixtures("local")
@@ -253,15 +234,6 @@ def test_subscription_usage_bills_nothing() -> None:
     totals.add_split({"cost": 0.5}, (10, 2))
     assert totals.reported_cost_usd == 0.5
     assert totals.model_ms == 40
-
-
-def test_attempt_record_prefers_model_time() -> None:
-    """Use the usage block's ``model_ms`` as the attempt time when it is present."""
-    usage = {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4, "cost": 0.001, "model_ms": 250}
-    body = json.dumps({"usage": usage}).encode()
-    assert attempt_record("task", 200, 9.0, body)["ms"] == 250.0
-    without = json.dumps({"usage": {k: v for k, v in usage.items() if k != "model_ms"}}).encode()
-    assert attempt_record("task", 200, 9.0, without)["ms"] == 9000.0
 
 
 @pytest.mark.usefixtures("local")

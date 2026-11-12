@@ -1,56 +1,21 @@
 import type {
-  ExecutionRuntimeCatalog,
-  WizardPreflightRequest,
-  WizardPreflightResponse,
-} from "@/shared/types/wizard-preflight";
-import type {
   BlackboxAgentRunResponse,
-  BlackboxCandidate,
   BlackboxRunRequest,
-  ScorerDependencyLock,
-  BlackboxEngineCatalogResponse,
-  ColumnMapping,
-  EvalExampleResult,
-  GridSearchResult,
   ModelCatalogResponse,
   ModelPrivacySettings,
-  OptimizationDatasetResponse,
   OptimizationPayloadResponse,
   OptimizationSubmissionResponse,
   OptimizationStatusResponse,
   PaginatedJobsResponse,
-  ProfileDatasetRequest,
-  ProfileDatasetResponse,
   QueueStatusResponse,
   RepositoryFileResponse,
   RepositoryTreeResponse,
   ServeInfoResponse,
   ServeResponse,
-  ValidateCodeResponse,
-  ValidateDatasetRequest,
-  ValidateDatasetResponse,
-  WorkflowDryRunResponse,
-  WorkflowSpec,
 } from "@/shared/types/api";
-import type {
-  ArtifactKind,
-  CheckTerminalEvent,
-  ContractCheckRequest,
-  ContractCheckResponse,
-  DataMode,
-  FileVerification,
-  InputsInferenceRequest,
-  InputsInferenceResponse,
-  OptimizerCatalogResponse,
-  TaskInterviewRequest,
-  TaskInterviewTurnResult,
-  UnifiedAuthoringContext,
-  UnifiedRunRequest,
-} from "@/shared/types/unified-run";
-import { kickoffOpening } from "@/shared/lib/agent-kickoff";
+import type { DataMode, OptimizerCatalogResponse } from "@/shared/types/unified-run";
 import { formatMsg, msg } from "@/shared/lib/messages";
-import type { TurnStats } from "@/shared/ui/agent/types";
-import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
+import { forgetOAuthReturn } from "@/shared/lib/oauth-return";
 import { I18N_KEY, tI18n } from "@/shared/lib/i18n";
 import { reportHandledError } from "@/shared/lib/report-error";
 import {
@@ -60,16 +25,27 @@ import {
 } from "@/shared/lib/account-missing";
 import type { ExecutionBudget } from "@/shared/types/execution-budget";
 import type { RunUsage } from "@/shared/types/run-usage";
+import type { CreateHardeningJobRequest, HardeningJob } from "@/shared/types/hardening";
 import type {
   ContinuousEnableRequest,
   ContinuousPlan,
   ContinuousState,
   ScheduleRule,
 } from "@/shared/types/continuous";
-import { getRuntimeEnv } from "@/shared/lib/runtime-env";
+import { getRuntimeEnv, isLocalMode } from "@/shared/lib/runtime-env";
+import {
+  apiPath,
+  hostedAvailable,
+  hostedRouteOpen,
+  isHostedPath,
+  resolveSource,
+} from "@/shared/lib/api-route";
+import type { ApiSource } from "@/shared/lib/api-route";
+// A cycle (use-linked-account imports this module), safe because both sides
+// only call each other at request time, never while the modules load.
+import { wasLinked } from "@/shared/hooks/use-linked-account";
+import { readResourcePick, resolveResourceMode } from "@/shared/lib/resource-mode";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
-import { readServerSentEvents, type ServerSentEvent } from "@/shared/lib/sse";
-import { streamResumableTurn } from "@/shared/lib/resumable-turn";
 
 // Resolve the runtime API base lazily on every call. Capturing it once at
 // module load races the injected `window.__APP_ENV__` script: the framework
@@ -81,6 +57,61 @@ const apiBase = () => getRuntimeEnv().apiUrl;
 const JOB_CACHE_MS = 1000;
 const QUEUE_CACHE_MS = 5000;
 const SIDEBAR_CACHE_MS = 3000;
+
+/** Whether the Mac app can read its linked hosted account's runs. Always false on the web. */
+export function hostedRunsAvailable(): boolean {
+  return hostedAvailable(isLocalMode(), isLocalMode() && wasLinked());
+}
+
+/**
+ * Whether the app works on the linked web account: a linked Mac with Web
+ * picked in the header. Lists then read only web rows, and new runs and
+ * chats start on the web account.
+ */
+export function webPicked(): boolean {
+  if (!hostedRunsAvailable()) return false;
+  return resolveResourceMode(readResourcePick(), true, true) === "hosted";
+}
+
+/**
+ * The routed path for `source`; hosted falls back to local when not linked.
+ * Closed routes (keys, payments, account actions) never leave the Mac.
+ */
+function routedPath(path: string, source?: ApiSource): string {
+  const asked = source === "hosted" && !hostedRouteOpen(path) ? "local" : source;
+  return apiPath(path, resolveSource(asked, isLocalMode(), isLocalMode() && wasLinked()));
+}
+
+/** Full URL for raw stream callers (SSE, NDJSON) that pass it to {@link fetchWithAuthRetry}. */
+export function apiUrl(path: string, source?: ApiSource): string {
+  return `${apiBase()}${routedPath(path, source)}`;
+}
+
+/** Account data always belongs to the web account; an unlinked Mac must fail closed. */
+function accountRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(isLocalMode() ? apiPath(path, "hosted") : path, init);
+}
+
+/** The side the inbox and its settings live on: the Local/Web pick, local when not linked. */
+function inboxSource(): ApiSource {
+  return webPicked() ? "hosted" : "local";
+}
+
+/**
+ * Inbox and notification-settings calls follow the Local/Web pick: local
+ * runs write their alerts to the Mac's own inbox, and an unlinked Mac has
+ * only that one.
+ */
+function inboxRequest<T>(path: string, init?: RequestInit, source: ApiSource = inboxSource()): Promise<T> {
+  return request<T>(path, init, source);
+}
+
+/** Hosted revoked the Mac's link: let the link state re-read instead of refreshing the local token. */
+const HOSTED_LINK_REVOKED_CODE = "hosted_link.revoked";
+
+function announceHostedLinkChange(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(HOSTED_LINK_CHANGED_EVENT));
+}
 
 const apiUrlAtLoad = apiBase();
 if (
@@ -167,9 +198,19 @@ export async function fetchWithAuthRetry(url: string, init: RequestInit): Promis
     });
   const res = await send(_authToken);
   if (res.status !== 401) return res;
+  // Through the hosted proxy, only `hosted_link.revoked` is about the link;
+  // any other 401 there is the local session expiring, so refresh as usual.
+  if (await isHostedLinkRevoked(url, res)) {
+    announceHostedLinkChange();
+    return res;
+  }
   const fresh = await refreshAuthTokenOn401();
   const final = fresh ? await send(fresh) : res;
   if (final.status === 401) {
+    if (final !== res && (await isHostedLinkRevoked(url, final))) {
+      announceHostedLinkChange();
+      return final;
+    }
     const body = await final
       .clone()
       .text()
@@ -179,8 +220,19 @@ export async function fetchWithAuthRetry(url: string, init: RequestInit): Promis
   return final;
 }
 
-function cachedGet<T>(path: string, maxAge = GET_CACHE_MS): Promise<T> {
-  const key = path;
+/** Whether a 401 came from the hosted proxy for a revoked link; reads a clone so the body stays unread. */
+async function isHostedLinkRevoked(pathOrUrl: string, res: Response): Promise<boolean> {
+  if (!isHostedPath(pathOrUrl)) return false;
+  const body = await res
+    .clone()
+    .text()
+    .catch(() => "");
+  return parseError(body).code === HOSTED_LINK_REVOKED_CODE;
+}
+
+function cachedGet<T>(path: string, maxAge = GET_CACHE_MS, source?: ApiSource): Promise<T> {
+  // The routed path keeps local and hosted answers apart; IDs can repeat across them.
+  const key = routedPath(path, source);
   const startGen = _cacheGen;
 
   const cached = _cache.get(key);
@@ -191,7 +243,7 @@ function cachedGet<T>(path: string, maxAge = GET_CACHE_MS): Promise<T> {
   const existing = _inflight.get(key);
   if (existing) return existing as Promise<T>;
 
-  const promise = request<T>(path)
+  const promise = request<T>(path, undefined, source)
     .then((data) => {
       if (startGen === _cacheGen) _cache.set(key, { data, ts: Date.now() });
       if (_inflight.get(key) === promise) _inflight.delete(key);
@@ -212,9 +264,10 @@ function cachedGet<T>(path: string, maxAge = GET_CACHE_MS): Promise<T> {
  */
 export function invalidateCache(...pathSubstrings: string[]) {
   _cacheGen++;
+  const prefixes = pathSubstrings.flatMap((s) => [s, apiPath(s, "hosted")]);
   const matches = (key: string) =>
-    pathSubstrings.length === 0 ||
-    pathSubstrings.some((s) => key === s || key.startsWith(`${s}/`) || key.startsWith(`${s}?`));
+    prefixes.length === 0 ||
+    prefixes.some((s) => key === s || key.startsWith(`${s}/`) || key.startsWith(`${s}?`));
   for (const [key] of _cache) if (matches(key)) _cache.delete(key);
   for (const [key] of _inflight) if (matches(key)) _inflight.delete(key);
 }
@@ -306,9 +359,11 @@ function endpointTag(path: string): string {
     .join("/");
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, source?: ApiSource): Promise<T> {
+  const routed = routedPath(path, source);
+  const hosted = isHostedPath(routed);
   const send = (token: string | undefined) =>
-    fetch(`${apiBase()}${path}`, {
+    fetch(`${apiBase()}${routed}`, {
       ...init,
       headers: {
         // FormData bodies must keep the browser's own multipart boundary header.
@@ -322,7 +377,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await send(_authToken);
-    if (res.status === 401) {
+    // A revoked link is not cured by a local token refresh; any other 401
+    // (also through the hosted proxy) is the local session expiring.
+    if (res.status === 401 && !(await isHostedLinkRevoked(routed, res))) {
       const fresh = await refreshAuthTokenOn401();
       if (fresh) res = await send(fresh);
     }
@@ -377,12 +434,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (res.status === 401 && parsed.code === ACCOUNT_MISSING_CODE) {
       announceAccountMissing();
     }
+    if (hosted && res.status === 401 && parsed.code === HOSTED_LINK_REVOKED_CODE) {
+      announceHostedLinkChange();
+    }
     // The framework's bare "Not Found" / "Method Not Allowed" means this server
     // has no such route: it runs an older version than the app. Say that
     // instead of echoing the framework's words.
     const missingRoute =
-      (res.status === 404 && parsed.message === "Not Found") ||
-      (res.status === 405 && parsed.message === "Method Not Allowed");
+      !hosted &&
+      ((res.status === 404 && parsed.message === "Not Found") ||
+        (res.status === 405 && parsed.message === "Method Not Allowed"));
     if (missingRoute) {
       const params = { method: init?.method ?? "GET", path: endpointTag(path) };
       throw new ApiError(msg(ROUTE_MISSING_CODE, params), {
@@ -441,11 +502,6 @@ function parseError(text: string): {
   return {};
 }
 
-/** Rendered message from an error body, or ``undefined`` for non-JSON bodies. */
-export function parseErrorMessage(text: string): string | undefined {
-  return parseError(text).message;
-}
-
 /**
  * Fire-and-forget sender for the telemetry SDK. Best-effort by contract: it
  * never throws, never blocks, and never surfaces an error — telemetry must not
@@ -480,90 +536,43 @@ export function postTelemetry(body: unknown): void {
   }
 }
 
-export interface WorkflowDryRunStreamHandlers {
-  onToken: (field: string, chunk: string) => void;
-  onFinal: (result: WorkflowDryRunResponse) => void;
-  onError: (message: string) => void;
-  signal?: AbortSignal;
-}
-
-export function submitUnifiedRun(req: UnifiedRunRequest, opts?: { idempotencyKey?: string }) {
-  return request<OptimizationSubmissionResponse>("/optimize", {
-    method: "POST",
-    body: JSON.stringify(req),
-    ...(opts?.idempotencyKey ? { headers: { "Idempotency-Key": opts.idempotencyKey } } : {}),
-  });
-}
-
-/** Queue a repository run; prompts, code, text and DSPy programs submit to `/optimize`. */
-export function submitRepoRun(req: BlackboxRunRequest, opts?: { idempotencyKey?: string }) {
-  return request<OptimizationSubmissionResponse>("/blackbox/run", {
-    method: "POST",
-    body: JSON.stringify(req),
-    ...(opts?.idempotencyKey ? { headers: { "Idempotency-Key": opts.idempotencyKey } } : {}),
-  });
-}
-
-export function getOptimizerCatalog(kind: ArtifactKind, mode: DataMode, signal?: AbortSignal) {
-  const query = `artifact_kind=${encodeURIComponent(kind)}&data_mode=${encodeURIComponent(mode)}`;
-  return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal });
-}
-
-// The server words each check's `message` in this locale for API readers;
-// the wizard itself renders `message_code`.
-export async function runContractCheck(
-  req: ContractCheckRequest,
-  signal?: AbortSignal,
-  onPhase?: (phase: string) => void,
-  onTerminal?: (event: CheckTerminalEvent) => void,
-): Promise<ContractCheckResponse> {
-  if (!onPhase)
-    return request<ContractCheckResponse>("/optimizations/contract-check", {
+/** Queue a repository run on `/optimize`. */
+export function submitRepoRun(
+  req: BlackboxRunRequest,
+  opts?: { idempotencyKey?: string },
+  source?: ApiSource,
+) {
+  // `request` sends hosted calls to the Mac when the link is gone; a run the
+  // user chose to start on the web must fail instead.
+  if (source === "hosted" && !hostedRunsAvailable())
+    return Promise.reject(new Error(msg("submit.v2.run_on.blocked.unlinked")));
+  return request<OptimizationSubmissionResponse>(
+    "/blackbox/run",
+    {
       method: "POST",
-      body: JSON.stringify({ ...req, locale: getActiveLocale() }),
-      signal,
-    });
-  const response = await fetchWithAuthRetry(`${apiBase()}/optimizations/contract-check/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ ...req, locale: getActiveLocale() }),
-    signal,
-  });
-  if (!response.ok || !response.body)
-    throw new Error(parseErrorMessage(await response.text()) ?? msg("submit.preflight.failed"));
-  let result: ContractCheckResponse | undefined;
-  await readServerSentEvents(response.body, ({ event, data }) => {
-    if (event === "phase" && typeof data.phase === "string") onPhase(data.phase);
-    if (event === "terminal") onTerminal?.(data as unknown as CheckTerminalEvent);
-    if (event === "result") result = data as unknown as ContractCheckResponse;
-    if (event === "error")
-      throw new Error(parseErrorMessage(JSON.stringify(data)) ?? msg("submit.preflight.failed"));
-  });
-  if (!result) throw new Error(msg("submit.preflight.failed"));
-  return result;
-}
-
-export function staticContractCheck(req: ContractCheckRequest, signal?: AbortSignal) {
-  return request<ContractCheckResponse>("/optimizations/contract-check/static", {
-    method: "POST",
-    body: JSON.stringify({ ...req, locale: getActiveLocale() }),
-    signal,
-  });
-}
-
-export function inferInputs(req: InputsInferenceRequest, signal?: AbortSignal) {
-  return request<InputsInferenceResponse>("/optimizations/infer-inputs", {
-    method: "POST",
-    body: JSON.stringify(req),
-    signal,
-  });
-}
-
-export function getExecutionRuntimes(hasImageInputs: boolean, signal?: AbortSignal) {
-  return request<ExecutionRuntimeCatalog>(
-    `/execution-runtimes?has_image_inputs=${hasImageInputs}`,
-    { signal },
+      body: JSON.stringify(req),
+      ...(opts?.idempotencyKey ? { headers: { "Idempotency-Key": opts.idempotencyKey } } : {}),
+    },
+    source,
   );
+}
+
+export function getOptimizerCatalog(mode: DataMode, signal?: AbortSignal, source?: ApiSource) {
+  return request<OptimizerCatalogResponse>(
+    `/optimizers?data_mode=${encodeURIComponent(mode)}`,
+    { signal },
+    source,
+  );
+}
+
+/** The sandbox providers a run may choose on a server, and the one it uses when it names none. */
+export interface SandboxProviderCatalog {
+  providers: Array<{ id: string; label: string }>;
+  default_provider: string;
+}
+
+export function getSandboxProviders(source?: ApiSource, signal?: AbortSignal) {
+  return request<SandboxProviderCatalog>("/sandbox-providers", { signal }, source);
 }
 
 /** Charged cents one call of a model reserves before it is sent; null when unpriced. */
@@ -576,42 +585,13 @@ export interface ModelCallHold {
 export function getModelCallHolds(
   models: Array<{ name: string; token_source: "managed" | "byok" }>,
   signal?: AbortSignal,
+  source?: ApiSource,
 ) {
-  return request<{ holds: ModelCallHold[]; box_hold_cents: number }>("/models/call-holds", {
-    method: "POST",
-    body: JSON.stringify({ models }),
-    signal,
-  });
-}
-
-export async function runWizardPreflight(
-  payload: WizardPreflightRequest,
-  signal?: AbortSignal,
-  onPhase?: (phase: string) => void,
-): Promise<WizardPreflightResponse> {
-  if (!onPhase)
-    return request<WizardPreflightResponse>("/wizard/preflight", {
-      method: "POST",
-      body: JSON.stringify({ ...payload, locale: getActiveLocale() }),
-      signal,
-    });
-  const response = await fetchWithAuthRetry(`${apiBase()}/wizard/preflight/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ ...payload, locale: getActiveLocale() }),
-    signal,
-  });
-  if (!response.ok || !response.body)
-    throw new Error(parseErrorMessage(await response.text()) ?? msg("submit.preflight.failed"));
-  let result: WizardPreflightResponse | undefined;
-  await readServerSentEvents(response.body, ({ event, data }) => {
-    if (event === "phase" && typeof data.phase === "string") onPhase(data.phase);
-    if (event === "result") result = data as unknown as WizardPreflightResponse;
-    if (event === "error")
-      throw new Error(parseErrorMessage(JSON.stringify(data)) ?? msg("submit.preflight.failed"));
-  });
-  if (!result) throw new Error(msg("submit.preflight.failed"));
-  return result;
+  return request<{ holds: ModelCallHold[]; box_hold_cents: number }>(
+    "/models/call-holds",
+    { method: "POST", body: JSON.stringify({ models }), signal },
+    source,
+  );
 }
 
 export function createExecutionBudget(
@@ -638,21 +618,20 @@ export function updateExecutionBudget(
   expectedRevision: number,
   signal?: AbortSignal,
   uncapped = false,
+  source?: ApiSource,
 ) {
-  return request<ExecutionBudget>(`/execution-budgets/${encodeURIComponent(budgetId)}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      total_cents: totalCents,
-      expected_revision: expectedRevision,
-      uncapped,
-    }),
-    signal,
-  });
-}
-
-export function getBlackboxEngines(target: "text" | "agent" | "repo") {
-  return request<BlackboxEngineCatalogResponse>(
-    `/blackbox/engines?target=${encodeURIComponent(target)}`,
+  return request<ExecutionBudget>(
+    `/execution-budgets/${encodeURIComponent(budgetId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        total_cents: totalCents,
+        expected_revision: expectedRevision,
+        uncapped,
+      }),
+      signal,
+    },
+    source,
   );
 }
 
@@ -663,16 +642,22 @@ export function listJobs(params?: {
   limit?: number;
   offset?: number;
   include_shared?: boolean;
+  source?: ApiSource;
 }) {
   const q = new URLSearchParams();
   if (params?.status) q.set("status", params.status);
-  if (params?.username) q.set("username", params.username);
+  // The local username means nothing to hosted, which scopes runs to the linked account.
+  if (params?.username && params.source !== "hosted") q.set("username", params.username);
   if (params?.optimization_type) q.set("optimization_type", params.optimization_type);
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
   if (params?.include_shared) q.set("include_shared", "true");
   const qs = q.toString();
-  return cachedGet<PaginatedJobsResponse>(`/optimizations${qs ? `?${qs}` : ""}`);
+  return cachedGet<PaginatedJobsResponse>(
+    `/optimizations${qs ? `?${qs}` : ""}`,
+    GET_CACHE_MS,
+    params?.source,
+  );
 }
 
 export interface OptimizationCounts {
@@ -688,12 +673,20 @@ export interface OptimizationCounts {
   shared?: number;
 }
 
-export function getOptimizationCounts(username?: string, includeShared?: boolean) {
+export function getOptimizationCounts(
+  username?: string,
+  includeShared?: boolean,
+  source?: ApiSource,
+) {
   const q = new URLSearchParams();
-  if (username) q.set("username", username);
+  if (username && source !== "hosted") q.set("username", username);
   if (includeShared) q.set("include_shared", "true");
   const qs = q.toString();
-  return cachedGet<OptimizationCounts>(`/optimizations/counts${qs ? `?${qs}` : ""}`);
+  return cachedGet<OptimizationCounts>(
+    `/optimizations/counts${qs ? `?${qs}` : ""}`,
+    GET_CACHE_MS,
+    source,
+  );
 }
 
 export interface StorageQuotaOverride {
@@ -730,7 +723,7 @@ export function deleteStorageQuotaOverride(username: string) {
   });
 }
 
-export interface NorthStarFirstLiftsWeek {
+interface NorthStarFirstLiftsWeek {
   /** Monday (UTC, `YYYY-MM-DD`) that starts the signup week. */
   signup_week: string;
   signups: number;
@@ -738,13 +731,13 @@ export interface NorthStarFirstLiftsWeek {
   first_lifts: number;
 }
 
-export interface NorthStarLiftedUsersWeek {
+interface NorthStarLiftedUsersWeek {
   week: string;
   new_lifted: number;
   returning_lifted: number;
 }
 
-export interface NorthStarInUseWeek {
+interface NorthStarInUseWeek {
   week: string;
   users_in_use: number;
 }
@@ -800,7 +793,7 @@ export interface AdminTopProgram {
   errors: number;
 }
 
-export interface AdminEventCount {
+interface AdminEventCount {
   name: string;
   count: number;
   users: number;
@@ -1033,20 +1026,12 @@ export interface AccountDeletionResult {
   anonymized_rows: number;
 }
 
-export function resolveScorerDependencies(input: {
-  code: string;
-  requirements: string[];
-  seed_candidate?: BlackboxCandidate | null;
-  execution_budget_id: string;
-  execution_budget_revision: number;
-}) {
+/** Check an optimize.toml text with the repository parser; it stops at the first error. */
+export function checkOptimizeToml(text: string, signal?: AbortSignal) {
   return request<{
     ok: boolean;
-    dependency_lock?: ScorerDependencyLock;
-    error?: string;
-    budget: ExecutionBudget;
-    preview_status: "succeeded" | "failed" | "pending";
-  }>("/wizard/scorer-dependencies", { method: "POST", body: JSON.stringify(input) });
+    errors: Array<{ section: string | null; key: string | null; message: string }>;
+  }>("/wizard/optimize-toml/check", { method: "POST", body: JSON.stringify({ text }), signal });
 }
 
 export interface PackageRegistryPreference {
@@ -1081,7 +1066,6 @@ export function checkPackageRegistry(indexUrl: string) {
 }
 
 export type NotificationEventType =
-  | "needs_input"
   | "budget_near"
   | "failed"
   | "finished"
@@ -1092,7 +1076,7 @@ export type NotificationEventType =
 export type NotificationChannel = "inbox" | "email" | "chrome" | "slack";
 /** The channels a non-urgent event may wait on before it goes out. */
 export type NotificationHeldChannel = Exclude<NotificationChannel, "inbox">;
-export type NotificationGrid = Record<NotificationEventType, Record<NotificationChannel, boolean>>;
+type NotificationGrid = Record<NotificationEventType, Record<NotificationChannel, boolean>>;
 
 export interface NotificationPreferences {
   /** Event type -> channel -> on. */
@@ -1114,12 +1098,12 @@ export interface NotificationPreferencesPatch {
 
 /** Fetch where each notification event is routed. */
 export function getNotificationPreferences() {
-  return request<NotificationPreferences>("/account/notification-preferences");
+  return inboxRequest<NotificationPreferences>("/account/notification-preferences");
 }
 
 /** Change grid cells and hold settings; untouched fields keep their value. */
 export function updateNotificationPreferences(patch: NotificationPreferencesPatch) {
-  return request<NotificationPreferences>("/account/notification-preferences", {
+  return inboxRequest<NotificationPreferences>("/account/notification-preferences", {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
@@ -1191,11 +1175,13 @@ export function getLocalHostedWhoami() {
   );
 }
 
-/** Read the linked hosted account's balance. Calls hosted through the local API. */
-export function getLocalHostedBalance() {
-  return request<{ available_cents: number; currency: string; low_balance: boolean }>(
-    "/local/hosted-link/balance",
-  );
+/**
+ * Read the linked hosted account's wallet through the local hosted proxy: the
+ * same `/billing/wallet` the web app reads, so both show one balance. Call it
+ * only after the link status says linked.
+ */
+export function getLocalHostedWallet() {
+  return request<BillingWalletResponse>(apiPath("/billing/wallet", "hosted"));
 }
 
 /** Unlink the Mac app from its hosted account. Local runs and settings stay. */
@@ -1235,7 +1221,7 @@ export function confirmNativeNotifications(ids: string[]) {
 
 export type NotificationTab = "focused" | "everything";
 
-export interface NotificationFacts {
+interface NotificationFacts {
   score?: number | null;
   /** Score change versus the run's baseline. */
   delta?: number | null;
@@ -1281,38 +1267,50 @@ export interface NotificationUnreadCounts {
 export function listNotifications(tab: NotificationTab, cursor?: string | null) {
   const q = new URLSearchParams({ tab });
   if (cursor) q.set("cursor", cursor);
-  return request<NotificationPage>(`/notifications?${q.toString()}`);
+  const source = inboxSource();
+  return inboxRequest<NotificationPage>(`/notifications?${q.toString()}`, undefined, source).then((page) => {
+    if (!isLocalMode() || source !== "hosted") return page;
+    return {
+      ...page,
+      items: page.items.map((item) => {
+        if (!item.link?.startsWith("/optimizations/")) return item;
+        const link = new URL(item.link, "https://skynet.invalid");
+        link.searchParams.set("source", "hosted");
+        return { ...item, link: `${link.pathname}${link.search}${link.hash}` };
+      }),
+    };
+  });
 }
 
 export function getNotificationUnreadCount() {
-  return request<NotificationUnreadCounts>("/notifications/unread-count");
+  return inboxRequest<NotificationUnreadCounts>("/notifications/unread-count");
 }
 
 export function markNotificationRead(id: string) {
-  return request<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
+  return inboxRequest<{ marked: number }>(`/notifications/${encodeURIComponent(id)}/read`, {
     method: "POST",
   });
 }
 
 export function markAllNotificationsRead(tab: NotificationTab) {
-  return request<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
+  return inboxRequest<{ marked: number }>(`/notifications/read-all?tab=${tab}`, { method: "POST" });
 }
 
 /** Take one item out of the caller's inbox; held email, Chrome and Slack sends still go out. */
 export function removeNotification(id: string) {
-  return request<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
+  return inboxRequest<{ removed: number }>(`/notifications/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
 /** Take every item on a tab out of the caller's inbox. */
 export function clearNotifications(tab: NotificationTab) {
-  return request<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
+  return inboxRequest<{ removed: number }>(`/notifications?tab=${tab}`, { method: "DELETE" });
 }
 
 /** The VAPID key browsers subscribe with; null while web push is off on the server. */
 export function getPushVapidKey() {
-  return request<{ public_key: string | null }>("/notifications/push/vapid-key");
+  return accountRequest<{ public_key: string | null }>("/notifications/push/vapid-key");
 }
 
 /** Save (or refresh) this browser's web push subscription for the caller. */
@@ -1320,7 +1318,7 @@ export function savePushSubscription(subscription: {
   endpoint: string;
   keys: { p256dh: string; auth: string };
 }) {
-  return request<{ subscribed: boolean }>("/notifications/push/subscriptions", {
+  return accountRequest<{ subscribed: boolean }>("/notifications/push/subscriptions", {
     method: "POST",
     body: JSON.stringify(subscription),
   });
@@ -1328,7 +1326,7 @@ export function savePushSubscription(subscription: {
 
 /** Forget this browser's web push subscription; repeating it is harmless. */
 export function deletePushSubscription(endpoint: string) {
-  return request<{ subscribed: boolean }>("/notifications/push/subscriptions", {
+  return accountRequest<{ subscribed: boolean }>("/notifications/push/subscriptions", {
     method: "DELETE",
     body: JSON.stringify({ endpoint }),
   });
@@ -1358,7 +1356,7 @@ export interface SlackChannelOption {
 
 /** Whether Slack is set up and where the caller's Slack notifications go. */
 export function getSlackConnection() {
-  return request<SlackConnection>("/notifications/slack");
+  return accountRequest<SlackConnection>("/notifications/slack");
 }
 
 /** Mint the "Add to Slack" URL; the page navigates to it. */
@@ -1368,14 +1366,14 @@ export function startSlackOAuth() {
 
 /** The channels the Slack app can see in the caller's workspace. */
 export function listSlackChannels() {
-  return request<{ channels: SlackChannelOption[]; truncated: boolean }>(
+  return accountRequest<{ channels: SlackChannelOption[]; truncated: boolean }>(
     "/notifications/slack/channels",
   );
 }
 
 /** Post to a channel, or (null) as a direct message from the app. */
 export function updateSlackTarget(channelId: string | null) {
-  return request<SlackConnection>("/notifications/slack", {
+  return accountRequest<SlackConnection>("/notifications/slack", {
     method: "PATCH",
     body: JSON.stringify({ channel_id: channelId }),
   });
@@ -1383,10 +1381,10 @@ export function updateSlackTarget(channelId: string | null) {
 
 /** Revoke and forget the caller's Slack install; repeating it is harmless. */
 export function disconnectSlack() {
-  return request<SlackConnection>("/notifications/slack", { method: "DELETE" });
+  return accountRequest<SlackConnection>("/notifications/slack", { method: "DELETE" });
 }
 
-export type ExperienceLevelValue = "guided" | "standard" | "expert";
+type ExperienceLevelValue = "guided" | "standard" | "expert";
 
 export interface AccountExperience {
   level: ExperienceLevelValue | null;
@@ -1423,26 +1421,6 @@ export function updateModelPrivacy(settings: ModelPrivacySettings) {
   return request<ModelPrivacySettings>("/account/model-privacy", {
     method: "PUT",
     body: JSON.stringify(settings),
-  });
-}
-
-/** The caller's agent engine; see `AgentEngine` in the local-runtime feature. */
-export interface AgentEnginePreference {
-  engine: string | null;
-  /** False (or missing) when `engine` is the backend's automatic pick. */
-  stored?: boolean;
-}
-
-/** Fetch which engine runs the caller's agent turns that pick no model. */
-export function getAgentEngine() {
-  return request<AgentEnginePreference>("/account/agent-engine");
-}
-
-/** Persist which engine runs the caller's agent turns that pick no model. */
-export function updateAgentEngine(engine: string) {
-  return request<AgentEnginePreference>("/account/agent-engine", {
-    method: "PUT",
-    body: JSON.stringify({ engine }),
   });
 }
 
@@ -1504,30 +1482,19 @@ export interface BillingUsageEntry {
   kind: string;
 }
 
-/** The caller's wallet as the backend reports it (snake_case mirrors the API). */
-/** The caller's platform plan, mirrored from their Stripe subscription. */
-export interface BillingPlanResponse {
-  plan: "free" | "pro";
-  status: string | null;
-  renews_at: string | null;
-  cancel_at_period_end: boolean;
-  /** Whether this deployment sells Pro at all (a price is configured). */
-  available: boolean;
-}
-
 /** The backend's live pricing terms (markup, BYOK fee, top-up fee). */
-export interface BillingPricingTerms {
+interface BillingPricingTerms {
   usage_markup: number;
   byok_fee_fraction: number;
   purchase_fee_rate: number;
   purchase_fee_fixed_cents: number;
 }
 
+/** The caller's wallet as the backend reports it (snake_case mirrors the API). */
 export interface BillingWalletResponse {
   paid_balance_cents: number;
   free_grant: BillingFreeGrant;
   usage: BillingUsageEntry[];
-  plan: BillingPlanResponse;
   /** Absent from a backend older than the frontend (e.g. mid-deploy). */
   pricing?: BillingPricingTerms;
 }
@@ -1537,10 +1504,14 @@ export function getWallet() {
   return cachedGet<BillingWalletResponse>("/billing/wallet", 0);
 }
 
-/** One day's billed run spend (the usage dashboard's time series). */
+/** One day's billed run spend, calls and tokens (the usage dashboard's time series). */
 interface BillingUsageDay {
   date: string;
   billed_cents: number;
+  // Optional: a backend older than this frontend sends only date and cents.
+  runs?: number;
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 /** One model's share of run spend over the window. */
@@ -1568,13 +1539,18 @@ export interface BillingUsageResponse {
 /**
  * Fetch a date-ranged usage rollup (totals + per-day + per-model + recent rows).
  * `start`/`end` are ISO-8601; omit both for the backend's default 30-day window.
+ * A linked Mac reads the hosted account's usage; otherwise the local backend's.
  */
-export function getUsage(start?: string, end?: string) {
+/** Usage for a time range: the web account's by default, or this server's own with `source` "local". */
+export function getUsage(start?: string, end?: string, source: ApiSource = "hosted") {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingUsageResponse>(`/billing/usage${qs ? `?${qs}` : ""}`);
+  const path = `/billing/usage${qs ? `?${qs}` : ""}`;
+  return source === "hosted"
+    ? accountRequest<BillingUsageResponse>(path)
+    : request<BillingUsageResponse>(path);
 }
 
 /** Display-safe billing address fields stored on the Stripe customer. */
@@ -1630,16 +1606,18 @@ export interface BillingTransactionsResponse {
 
 /** Fetch billing contact details and masked saved payment methods from Stripe. */
 export function getBillingProfile() {
-  return request<BillingProfileResponse>("/billing/profile");
+  return accountRequest<BillingProfileResponse>("/billing/profile");
 }
 
-/** Fetch completed Stripe purchases over an optional ISO-8601 date window. */
+/** Fetch completed Stripe purchases over an optional ISO-8601 date window; a linked Mac reads hosted. */
 export function getBillingTransactions(start?: string, end?: string) {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingTransactionsResponse>(`/billing/transactions${qs ? `?${qs}` : ""}`);
+  return accountRequest<BillingTransactionsResponse>(
+    `/billing/transactions${qs ? `?${qs}` : ""}`,
+  );
 }
 
 /** Start a Stripe Customer Portal session for billing or payment-method management. */
@@ -1683,11 +1661,6 @@ export function createCheckoutSession(purchase: { packId: string } | { cents: nu
   });
 }
 
-/** Start a Stripe Checkout session for the Skynet Pro subscription; redirect to `.url`. */
-export function createSubscriptionCheckout() {
-  return request<{ url: string }>("/billing/subscription/checkout", { method: "POST" });
-}
-
 /** One stored BYOK provider connection as the backend reports it — masked, never the secret. */
 export interface ProviderKeyResponse {
   id: string;
@@ -1719,6 +1692,50 @@ export function getProviderKeys() {
 }
 
 /** List BYOK models available through the caller's verified stored connections. */
+/** The web account's managed model catalog, read through the Mac's hosted proxy (SKY-340). */
+export function getHostedModels() {
+  return request<ModelCatalogResponse>("/models", undefined, "hosted");
+}
+
+/** Start a metric-hardening job for one setup draft (SKY-355). */
+export function createHardeningJob(body: CreateHardeningJobRequest) {
+  return request<HardeningJob>("/hardening/jobs", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Read one metric-hardening job. */
+export function getHardeningJob(jobId: string, signal?: AbortSignal) {
+  return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}`, { signal });
+}
+
+/** The draft's newest metric-hardening job, or null when it has none. */
+export function getLatestHardeningJob(draftId: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ draft_id: draftId });
+  return request<HardeningJob | null>(`/hardening/jobs?${query}`, { signal });
+}
+
+/** Confirm or reject one exploit of the current round. */
+export function setHardeningExploitVerdict(jobId: string, exploitId: string, confirmed: boolean) {
+  return request<HardeningJob>(
+    `/hardening/jobs/${encodeURIComponent(jobId)}/exploits/${encodeURIComponent(exploitId)}/verdict`,
+    { method: "POST", body: JSON.stringify({ confirmed }) },
+  );
+}
+
+/** Approve or reject the drafted metric fix; a rejected fix stops the loop. */
+export function decideHardeningFix(jobId: string, approve: boolean) {
+  return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}/fix`, {
+    method: "POST",
+    body: JSON.stringify({ approve }),
+  });
+}
+
+/** Put a failed, stale or rejected job back to work. */
+export function retryHardeningJob(jobId: string) {
+  return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
+  });
+}
+
 export function getByokModels() {
   return request<ModelCatalogResponse>("/billing/byok/models");
 }
@@ -1809,14 +1826,16 @@ export interface HubPreview {
 }
 
 /** List the caller's connectors (one entry per supported provider). */
-export function getConnectors() {
-  return request<ConnectorListResponse>("/connectors");
+export function getConnectors(source?: ApiSource) {
+  return request<ConnectorListResponse>("/connectors", undefined, source);
 }
 
 /** A secret saved on the account; its value never comes back from the server. */
 export interface SavedSecret {
   id: string;
   name: string;
+  /** The only hosts a run may send this secret to. The server enforces the list; empty means no host. */
+  allowed_hosts: string[];
   created_at: string;
   updated_at: string;
 }
@@ -1825,12 +1844,25 @@ export function listSavedSecrets() {
   return request<{ secrets: SavedSecret[] }>("/secrets");
 }
 
-/** Save a secret under `name`, replacing the value of one already saved under it. */
-export function saveSecret(name: string, value: string) {
-  return request<SavedSecret>("/secrets", {
+/** Browser event fired when a saved secret is saved or deleted, so an open run setup reads the names again. */
+export const SAVED_SECRETS_CHANGED_EVENT = "saved-secrets-changed";
+
+function announceSavedSecretsChange(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(SAVED_SECRETS_CHANGED_EVENT));
+}
+
+/**
+ * Save a secret under `name`, replacing the value and hosts of one already
+ * saved under it. `allowedHosts` are the hosts the user approves; a run may
+ * send the secret to no other host.
+ */
+export async function saveSecret(name: string, value: string, allowedHosts: string[]) {
+  const saved = await request<SavedSecret>("/secrets", {
     method: "PUT",
-    body: JSON.stringify({ name, value }),
+    body: JSON.stringify({ name, value, allowed_hosts: allowedHosts }),
   });
+  announceSavedSecretsChange();
+  return saved;
 }
 
 /** Forget one saved secret. The route returns 204. */
@@ -1845,6 +1877,7 @@ export async function deleteSavedSecret(id: string): Promise<void> {
       { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
+  announceSavedSecretsChange();
 }
 
 /**
@@ -1910,6 +1943,8 @@ export type ConnectorProvider =
   | "google_drive"
   | "onedrive"
   | "github"
+  | "gitlab"
+  | "bitbucket"
   | "s3"
   | "gcs"
   | "azure_blob"
@@ -1923,6 +1958,15 @@ export type ConnectorProvider =
   | "langsmith"
   | "braintrust"
   | "notion";
+
+/** A host that Skynet can read, clone and publish a repository on. */
+export type RepoHost = "github" | "gitlab" | "bitbucket";
+
+/** Every repository host, in the order the picker shows them. */
+export const REPO_HOSTS: readonly RepoHost[] = ["github", "gitlab", "bitbucket"];
+
+/** Each repository host's brand name, the same in every language. */
+export const REPO_HOST_NAMES: Record<RepoHost, string> = { github: "GitHub", gitlab: "GitLab", bitbucket: "Bitbucket" };
 
 /** One row of a connector's browse listing: a folder to descend into or a file to import. */
 export interface ConnectorEntry {
@@ -1958,6 +2002,8 @@ export function removeConnector(provider: ConnectorProvider) {
  * ``fields`` carries what must be named before sign-in (Azure's storage account).
  */
 export function startConnectorOAuth(provider: ConnectorProvider, fields?: Record<string, string>) {
+  // A caller that wants the callback to return to it remembers its path after this resolves.
+  forgetOAuthReturn();
   return request<{ authorize_url: string }>(`/connectors/${provider}/oauth/start`, {
     method: "POST",
     ...(fields ? { body: JSON.stringify({ fields }) } : {}),
@@ -1986,21 +2032,60 @@ export interface GithubRepository {
  * The linked account's repositories, most recently pushed first. A ``search``
  * written as ``owner/name`` also offers that public repository by itself.
  */
-export function listGithubRepositories(search: string) {
+export function listGithubRepositories(search: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ search });
-  return request<{ repositories: GithubRepository[] }>(`/connectors/github/repos?${params}`);
+  return request<{ repositories: GithubRepository[] }>(`/connectors/${host}/repos?${params}`);
+}
+
+/** What a new repository is seeded with: the task as README.md, plus the scorer and cases when given. */
+export interface CreateGithubRepositoryRequest {
+  name: string;
+  private: boolean;
+  description?: string | null;
+  objective: string;
+  scorer_code?: string | null;
+  cases?: Array<Record<string, unknown>> | null;
+}
+
+/** The new repository, its default branch and the commit that seeds it. */
+export interface CreatedGithubRepository {
+  full_name: string;
+  default_branch: string;
+  commit: string;
+}
+
+/** Create a repository in the linked GitHub account and push its first commit. */
+export function createGithubRepository(body: CreateGithubRepositoryRequest) {
+  return request<CreatedGithubRepository>("/connectors/github/repos", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 /** A repository's branch names and its default branch. */
-export function listGithubBranches(repo: string) {
+export function listGithubBranches(repo: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ repo });
   return request<{ default_branch: string | null; branches: string[] }>(
-    `/connectors/github/branches?${params}`,
+    `/connectors/${host}/branches?${params}`,
   );
 }
 
+/** One recent commit of a repository branch, for the commit picker. */
+export interface RepoCommit {
+  sha: string;
+  title: string;
+  date: string | null;
+}
+
+/** List the recent commits of `branch` (the default branch when empty). */
+export function listRepoCommits(repo: string, branch: string, host: RepoHost = "github") {
+  const params = new URLSearchParams({ repo });
+  if (branch) params.set("branch", branch);
+  return request<{ commits: RepoCommit[] }>(`/connectors/${host}/commits?${params}`);
+}
+
 /** One file or folder of a GitHub repository tree. */
-export interface GithubTreeEntry {
+interface GithubTreeEntry {
   path: string;
   type: "file" | "dir";
 }
@@ -2021,15 +2106,15 @@ export interface GithubFileResponse {
 }
 
 /** A repository's whole tree at a branch or commit id (empty for the default branch). */
-export function githubRepoTree(repo: string, ref: string) {
+export function githubRepoTree(repo: string, ref: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ repo, branch: ref });
-  return request<GithubTreeResponse>(`/connectors/github/tree?${params}`);
+  return request<GithubTreeResponse>(`/connectors/${host}/tree?${params}`);
 }
 
 /** One repository file at a branch or commit id (empty for the default branch), read when it is opened. */
-export function githubRepoFile(repo: string, ref: string, path: string) {
+export function githubRepoFile(repo: string, ref: string, path: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ repo, ref, path });
-  return request<GithubFileResponse>(`/connectors/github/file?${params}`);
+  return request<GithubFileResponse>(`/connectors/${host}/file?${params}`);
 }
 
 /** A short-lived token, API key and app id for opening the Google Picker as the caller. */
@@ -2081,11 +2166,10 @@ export interface DashboardAnalyticsJob {
   elapsed_seconds?: number | null;
   dataset_rows?: number | null;
   optimization_type?: string | null;
-  best_pair_label?: string | null;
   created_at?: string | null;
 }
 
-export interface DashboardAnalyticsNameValue {
+interface DashboardAnalyticsNameValue {
   name: string;
   value: number;
 }
@@ -2101,7 +2185,7 @@ export interface DashboardAnalyticsRangeBucket {
   avg_improvement: number | null;
 }
 
-export interface DashboardAnalyticsOptimizerStat {
+interface DashboardAnalyticsOptimizerStat {
   name: string;
   count: number;
   success_count: number;
@@ -2110,7 +2194,7 @@ export interface DashboardAnalyticsOptimizerStat {
   avg_runtime_minutes: number | null;
 }
 
-export interface DashboardAnalyticsModelStat {
+interface DashboardAnalyticsModelStat {
   name: string;
   count: number;
   success_count: number;
@@ -2118,7 +2202,7 @@ export interface DashboardAnalyticsModelStat {
   avg_improvement: number | null;
 }
 
-export interface DashboardAnalyticsTimelineBucket {
+interface DashboardAnalyticsTimelineBucket {
   date: string;
   count: number;
   success_count: number;
@@ -2146,8 +2230,6 @@ export interface DashboardAnalytics {
   best_improvement: number | null;
   avg_runtime_seconds: number | null;
   total_dataset_rows: number;
-  total_pairs_run: number;
-  grid_search_count: number;
   single_run_count: number;
   improvement_histogram: DashboardAnalyticsRangeBucket[];
   runtime_histogram: DashboardAnalyticsRangeBucket[];
@@ -2164,6 +2246,7 @@ export interface DashboardAnalytics {
 
 export function getDashboardAnalytics(params?: {
   username?: string;
+  source?: ApiSource;
   optimizer?: string;
   model?: string;
   status?: string;
@@ -2183,7 +2266,8 @@ export function getDashboardAnalytics(params?: {
   dataset_max?: number | null;
 }) {
   const q = new URLSearchParams();
-  if (params?.username) q.set("username", params.username);
+  // The web account scopes its rows by the linked token, not by the Mac's username.
+  if (params?.username && params.source !== "hosted") q.set("username", params.username);
   if (params?.optimizer) q.set("optimizer", params.optimizer);
   if (params?.model) q.set("model", params.model);
   if (params?.status) q.set("status", params.status);
@@ -2207,12 +2291,17 @@ export function getDashboardAnalytics(params?: {
     if (value != null) q.set(key, String(value));
   }
   const qs = q.toString();
-  return cachedGet<DashboardAnalytics>(`/analytics/dashboard${qs ? `?${qs}` : ""}`);
+  return cachedGet<DashboardAnalytics>(
+    `/analytics/dashboard${qs ? `?${qs}` : ""}`,
+    undefined,
+    params?.source,
+  );
 }
 
 export function getJob(
   optimizationId: string,
   cursor?: { sinceProgress: number; sinceLog: number },
+  source?: ApiSource,
 ) {
   // A delta fetch asks only for stream rows past what the caller already
   // holds. The response is a tail slice (stateful w.r.t. the caller's buffer),
@@ -2224,45 +2313,60 @@ export function getJob(
       since_progress: String(cursor.sinceProgress),
       since_log: String(cursor.sinceLog),
     });
-    return request<OptimizationStatusResponse>(`/optimizations/${optimizationId}?${q.toString()}`);
+    return request<OptimizationStatusResponse>(
+      `/optimizations/${optimizationId}?${q.toString()}`,
+      undefined,
+      source,
+    );
   }
-  return cachedGet<OptimizationStatusResponse>(`/optimizations/${optimizationId}`, JOB_CACHE_MS);
-}
-
-/** A run's charges and model activity, pre-aggregated per role, model, stage, pair and candidate. */
-export function getRunUsage(optimizationId: string, pairIndex?: number | null) {
-  const qs = pairIndex == null ? "" : `?pair_index=${pairIndex}`;
-  return request<RunUsage>(`/optimizations/${encodeURIComponent(optimizationId)}/usage${qs}`);
-}
-
-/** Continuous optimization of one run: its plan (or null) and whether one can start. */
-export function getContinuousState(optimizationId: string) {
-  return request<ContinuousState>(
-    `/optimizations/${encodeURIComponent(optimizationId)}/continuous`,
+  return cachedGet<OptimizationStatusResponse>(
+    `/optimizations/${optimizationId}`,
+    JOB_CACHE_MS,
+    source,
   );
 }
 
-export function enableContinuous(optimizationId: string, body: ContinuousEnableRequest) {
+/** A run's charges and model activity, pre-aggregated per role, model, stage and candidate. */
+export function getRunUsage(optimizationId: string) {
+  return request<RunUsage>(`/optimizations/${encodeURIComponent(optimizationId)}/usage`);
+}
+
+/** Continuous optimization of one run: its plan (or null) and whether one can start. */
+export function getContinuousState(optimizationId: string, source?: ApiSource) {
+  return request<ContinuousState>(
+    `/optimizations/${encodeURIComponent(optimizationId)}/continuous`,
+    undefined,
+    source,
+  );
+}
+
+export function enableContinuous(
+  optimizationId: string,
+  body: ContinuousEnableRequest,
+  source?: ApiSource,
+) {
   return request<ContinuousPlan>(
     `/optimizations/${encodeURIComponent(optimizationId)}/continuous`,
     {
       method: "POST",
       body: JSON.stringify(body),
     },
+    source,
   );
 }
 
 /** Pause or resume a plan. */
-export function setContinuousPaused(planId: string, paused: boolean) {
+export function setContinuousPaused(planId: string, paused: boolean, source?: ApiSource) {
   return request<ContinuousPlan>(
     `/continuous/${encodeURIComponent(planId)}/${paused ? "pause" : "resume"}`,
     { method: "POST" },
+    source,
   );
 }
 
 /** Delete a plan and its check history; the runs it started stay. The route returns 204. */
-export async function deleteContinuous(planId: string): Promise<void> {
-  const res = await fetchWithAuthRetry(`${apiBase()}/continuous/${encodeURIComponent(planId)}`, {
+export async function deleteContinuous(planId: string, source?: ApiSource): Promise<void> {
+  const res = await fetchWithAuthRetry(apiUrl(`/continuous/${encodeURIComponent(planId)}`, source), {
     method: "DELETE",
   });
   if (!res.ok) {
@@ -2275,27 +2379,34 @@ export async function deleteContinuous(planId: string): Promise<void> {
 }
 
 /** Replace when a plan checks; a paused plan stays paused. */
-export function updateContinuousSchedule(planId: string, rule: ScheduleRule) {
-  return request<ContinuousPlan>(`/continuous/${encodeURIComponent(planId)}/schedule`, {
-    method: "PUT",
-    body: JSON.stringify(rule),
-  });
-}
-
-/** Approve (the candidate becomes the incumbent) or reject a candidate in review. */
-export function reviewContinuousCycle(planId: string, cycleId: string, approve: boolean) {
+export function updateContinuousSchedule(planId: string, rule: ScheduleRule, source?: ApiSource) {
   return request<ContinuousPlan>(
-    `/continuous/${encodeURIComponent(planId)}/cycles/${encodeURIComponent(cycleId)}/${approve ? "approve" : "reject"}`,
-    { method: "POST" },
+    `/continuous/${encodeURIComponent(planId)}/schedule`,
+    { method: "PUT", body: JSON.stringify(rule) },
+    source,
   );
 }
 
-export function getOptimizationPayload(optimizationId: string) {
-  return request<OptimizationPayloadResponse>(`/optimizations/${optimizationId}/payload`);
+/** Approve (the candidate becomes the incumbent) or reject a candidate in review. */
+export function reviewContinuousCycle(
+  planId: string,
+  cycleId: string,
+  approve: boolean,
+  source?: ApiSource,
+) {
+  return request<ContinuousPlan>(
+    `/continuous/${encodeURIComponent(planId)}/cycles/${encodeURIComponent(cycleId)}/${approve ? "approve" : "reject"}`,
+    { method: "POST" },
+    source,
+  );
 }
 
-export function getOptimizationDataset(optimizationId: string) {
-  return request<OptimizationDatasetResponse>(`/optimizations/${optimizationId}/dataset`);
+export function getOptimizationPayload(optimizationId: string, source?: ApiSource) {
+  return request<OptimizationPayloadResponse>(
+    `/optimizations/${optimizationId}/payload`,
+    undefined,
+    source,
+  );
 }
 
 // A repository run's pinned commit never changes, so its tree and files are
@@ -2303,37 +2414,39 @@ export function getOptimizationDataset(optimizationId: string) {
 const REPOSITORY_CACHE_MS = Number.POSITIVE_INFINITY;
 
 /** A repository run's file tree at its pinned commit. */
-export function getRepositoryTree(optimizationId: string) {
+export function getRepositoryTree(optimizationId: string, source?: ApiSource) {
   return cachedGet<RepositoryTreeResponse>(
     `/optimizations/${encodeURIComponent(optimizationId)}/repository/tree`,
     REPOSITORY_CACHE_MS,
+    source,
   );
 }
 
 /** One file of a repository run at its pinned commit. */
-export function getRepositoryFile(optimizationId: string, path: string) {
+export function getRepositoryFile(optimizationId: string, path: string, source?: ApiSource) {
   const q = new URLSearchParams({ path });
   return cachedGet<RepositoryFileResponse>(
     `/optimizations/${encodeURIComponent(optimizationId)}/repository/file?${q.toString()}`,
     REPOSITORY_CACHE_MS,
+    source,
   );
-}
-
-export function getTestResults(optimizationId: string) {
-  return request<{
-    baseline: EvalExampleResult[];
-    optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/test-results`);
 }
 
 /**
  * Fetch one sandboxed agent run. ``sinceTranscript`` is a code-point offset
  * into the transcript: a live viewer asks only for what it has not seen.
  */
-export function getAgentRun(optimizationId: string, runId: number, sinceTranscript = 0) {
+export function getAgentRun(
+  optimizationId: string,
+  runId: number,
+  sinceTranscript = 0,
+  source?: ApiSource,
+) {
   const q = new URLSearchParams({ since_transcript: String(sinceTranscript) });
   return request<BlackboxAgentRunResponse>(
     `/optimizations/${optimizationId}/agent-runs/${runId}?${q.toString()}`,
+    undefined,
+    source,
   );
 }
 
@@ -2346,9 +2459,10 @@ export async function downloadRepositoryArchive(
   optimizationId: string,
   patch: string,
   fileName: string,
+  source?: ApiSource,
 ): Promise<void> {
   const res = await fetchWithAuthRetry(
-    `${apiBase()}/optimizations/${optimizationId}/repository/archive`,
+    apiUrl(`/optimizations/${optimizationId}/repository/archive`, source),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2367,40 +2481,6 @@ export async function downloadRepositoryArchive(
   const a = document.createElement("a");
   a.href = url;
   a.download = fileName;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
-
-/**
- * Download the self-contained, runnable DSPy program export as a zip and hand
- * it to the browser. Unlike the other `request`-based calls this returns binary
- * (a `StreamingResponse` attachment), so it goes through `fetchWithAuthRetry`
- * and reads the body as a Blob rather than JSON.
- */
-export async function downloadProgramExport(
-  optimizationId: string,
-  pairIndex?: number,
-): Promise<void> {
-  const pairQuery = pairIndex == null ? "" : `?pair_index=${encodeURIComponent(String(pairIndex))}`;
-  const res = await fetchWithAuthRetry(
-    `${apiBase()}/optimizations/${optimizationId}/program-export${pairQuery}`,
-    {
-      method: "GET",
-    },
-  );
-  if (!res.ok) {
-    const parsed = parseError(await res.text().catch(() => ""));
-    throw new ApiError(
-      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
-      { status: res.status, code: parsed.code, params: parsed.params },
-    );
-  }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  const pairSuffix = pairIndex == null ? "" : `_pair_${pairIndex}`;
-  a.download = `dspy_program_${optimizationId.slice(0, 8)}${pairSuffix}.zip`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
@@ -2469,8 +2549,6 @@ export interface SharedOptimizationData {
   owner: string | null;
   status: OptimizationStatusResponse;
   payload: Record<string, unknown>;
-  dataset: OptimizationDatasetResponse | null;
-  test_results: { baseline: EvalExampleResult[]; optimized: EvalExampleResult[] } | null;
   serve_info: ServeInfoResponse | null;
 }
 
@@ -2908,8 +2986,9 @@ export interface StorageUsageResponse {
 }
 
 /** Fetch the caller's unified storage usage backing the meter and quota modal. */
-export function getStorageUsage() {
-  return cachedGet<StorageUsageResponse>("/usage/storage", 0);
+/** Stored bytes: this server's own by default, or the web account's with `source` "hosted". */
+export function getStorageUsage(source?: ApiSource) {
+  return cachedGet<StorageUsageResponse>("/usage/storage", 0, source);
 }
 
 /**
@@ -3036,11 +3115,6 @@ export function claimSharedDataset(token: string) {
   });
 }
 
-/** Public read — no auth token required; the token in the path is the capability. */
-export function getSharedOptimization(token: string) {
-  return request<SharedOptimizationData>(`/share/${encodeURIComponent(token)}`);
-}
-
 /**
  * Scrubbed read-only composite for a PUBLIC (Explore-corpus) optimization, by id.
  * Returns the same shape as a shared read, so the detail view can render it
@@ -3069,26 +3143,11 @@ export function claimSharedOptimization(token: string) {
   return request<ClaimShareResult>(`/share/${encodeURIComponent(token)}/claim`, { method: "POST" });
 }
 
-/**
- * Run one inference through a shared optimization with a caller-funded budget.
- * Any signed-in viewer may serve; the run owner's wallet and BYOK key remain isolated.
- */
-export function serveSharedOptimization(
-  token: string,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-) {
-  return request<ServeResponse>(`/share/${encodeURIComponent(token)}/serve`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
-}
-
-export async function cancelJob(optimizationId: string) {
+export async function cancelJob(optimizationId: string, source?: ApiSource) {
   const res = await request<{ optimization_id: string; status: string }>(
     `/optimizations/${optimizationId}/cancel`,
     { method: "POST" },
+    source,
   );
   invalidateCache("/optimizations");
   return res;
@@ -3109,10 +3168,11 @@ export async function bulkCancelJobs(optimizationIds: string[]) {
 // Pause suspends a running run at its checkpoint (status → "paused"), keeping it
 // resumable. Like cancel it acts on the SAME run in place, so callers refresh the
 // current view rather than navigating.
-export async function pauseJob(optimizationId: string) {
+export async function pauseJob(optimizationId: string, source?: ApiSource) {
   const res = await request<{ optimization_id: string; status: string }>(
     `/optimizations/${optimizationId}/pause`,
     { method: "POST" },
+    source,
   );
   invalidateCache("/optimizations");
   return res;
@@ -3132,10 +3192,11 @@ export async function restartJob(optimizationId: string) {
 }
 // Resume continues the SAME run from its checkpoint (no new id), so callers
 // refresh the current view rather than navigating.
-export async function resumeJob(optimizationId: string) {
+export async function resumeJob(optimizationId: string, source?: ApiSource) {
   const res = await request<{ optimization_id: string; status: string }>(
     `/optimizations/${optimizationId}/resume`,
     { method: "POST" },
+    source,
   );
   invalidateCache("/optimizations");
   return res;
@@ -3144,15 +3205,6 @@ export async function resumeJob(optimizationId: string) {
 export async function deleteJob(optimizationId: string) {
   const res = await request<{ optimization_id: string; deleted: boolean }>(
     `/optimizations/${optimizationId}`,
-    { method: "DELETE" },
-  );
-  invalidateCache("/optimizations");
-  return res;
-}
-
-export async function deleteGridPair(optimizationId: string, pairIndex: number) {
-  const res = await request<GridSearchResult>(
-    `/optimizations/${optimizationId}/pair/${pairIndex}`,
     { method: "DELETE" },
   );
   invalidateCache("/optimizations");
@@ -3382,13 +3434,6 @@ export async function bulkPinOptimizations(optimizationIds: string[], value: boo
   return res;
 }
 
-export function profileDataset(payload: ProfileDatasetRequest) {
-  return request<ProfileDatasetResponse>("/datasets/profile", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
 export function stageDatasetForAgent(payload: {
   dataset: Array<Record<string, unknown>>;
   dataset_filename: string;
@@ -3415,44 +3460,72 @@ export function getStagedDataset(stagedDatasetId: string) {
   return request<StagedDatasetResponse>(`/datasets/staged/${encodeURIComponent(stagedDatasetId)}`);
 }
 
-export function validateCode(payload: {
-  signature_code?: string;
-  metric_code?: string;
-  column_mapping: ColumnMapping;
-  sample_row?: Record<string, unknown>;
-  optimizer_name?: string;
-  module_name?: string;
-}) {
-  return request<ValidateCodeResponse>("/validate-code", {
+/** The account's one left setup as the server keeps it; the chat travels apart from the keys. */
+export interface ServerSetupDraft {
+  left_at: number;
+  values: Record<string, string>;
+  chat: Record<string, unknown> | null;
+  staged_dataset_id: string | null;
+}
+
+/** The account's draft slot: a save or delete changes it only from its current revision. */
+export interface ServerSetupDraftSlot {
+  revision: number;
+  /** False when the call named a revision that was no longer current. */
+  changed: boolean;
+  draft: ServerSetupDraft | null;
+  /** The page and count of the save that made this revision, when the server still lists it. */
+  writer?: string | null;
+  seq?: number | null;
+}
+
+/** The page and count of a save; a browser copy sent again also names the revision it builds on. */
+export interface SetupDraftSaveMark {
+  writer?: string;
+  seq?: number;
+  copyBase?: number;
+}
+
+/** The caller's left setup calls, in the shape the setup draft sync takes. */
+export const setupDraftApi = {
+  get: (signal?: AbortSignal) => request<ServerSetupDraftSlot>("/wizard/setup-draft", { signal }),
+  put: (
+    draft: ServerSetupDraft,
+    baseRevision: number,
+    keepalive = false,
+    signal?: AbortSignal,
+    mark: SetupDraftSaveMark = {},
+  ) => {
+    const params = new URLSearchParams({ base_revision: String(baseRevision) });
+    if (mark.writer !== undefined && mark.seq !== undefined) {
+      params.set("writer", mark.writer);
+      params.set("seq", String(mark.seq));
+    }
+    if (mark.copyBase !== undefined) params.set("copy_base", String(mark.copyBase));
+    return request<ServerSetupDraftSlot>(`/wizard/setup-draft?${params}`, {
+      method: "PUT",
+      body: JSON.stringify(draft),
+      keepalive,
+      signal,
+    });
+  },
+  delete: (revision: number, signal?: AbortSignal) =>
+    request<ServerSetupDraftSlot>(`/wizard/setup-draft?revision=${revision}`, {
+      method: "DELETE",
+      signal,
+    }),
+};
+
+/**
+ * Finish an OAuth sign-in at ``path`` (from ``oauthFinishPath``) with the state
+ * and code that the callback passed in the URL fragment. The backend links the
+ * account only for the user who started the sign-in. An MCP finish answers
+ * with the server name, and a connector finish with the full connector list.
+ */
+export function finishOAuth(path: string, { state, code }: { state: string; code: string }) {
+  return request<{ name?: string; connectors?: ConnectorStatus[] } | undefined>(path, {
     method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function validateDataset(payload: ValidateDatasetRequest) {
-  return request<ValidateDatasetResponse>("/datasets/validate", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export interface McpProbeTool {
-  name: string;
-  description: string | null;
-}
-
-export interface McpProbeResponse {
-  ok: boolean;
-  tool_count: number;
-  tools: McpProbeTool[];
-  error: string | null;
-}
-
-/** Check that a live MCP server answers and list its tools (wizard preflight). */
-export function probeMcp(payload: { mcp_url: string; auth_header?: string }) {
-  return request<McpProbeResponse>("/mcp/probe", {
-    method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ state, code }),
   });
 }
 
@@ -3471,9 +3544,6 @@ export interface SidebarJobItem {
   created_at?: string | null;
   pinned?: boolean;
   optimization_type?: string | null;
-  total_pairs?: number | null;
-  completed_pairs?: number | null;
-  failed_pairs?: number | null;
   /** True when this run stopped mid-optimization and can be resumed in place; drives Resume vs Restart. */
   resumable?: boolean;
   /** True when this running job has a checkpoint and can pause without losing progress. */
@@ -3484,22 +3554,34 @@ export interface SidebarJobItem {
   folder_id?: string | null;
   /** True when the run belongs to a continuous plan (an automation). */
   automated?: boolean;
+  /** Set by the Mac app's merged lists: which backend owns the run. */
+  source?: ApiSource;
 }
 
-export function listJobsSidebar(params?: { username?: string; limit?: number; offset?: number }) {
+export function listJobsSidebar(params?: {
+  username?: string;
+  limit?: number;
+  offset?: number;
+  source?: ApiSource;
+}) {
   const q = new URLSearchParams();
-  if (params?.username) q.set("username", params.username);
+  if (params?.username && params.source !== "hosted") q.set("username", params.username);
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
   const qs = q.toString();
   return cachedGet<{ items: SidebarJobItem[]; total: number }>(
     `/optimizations/sidebar${qs ? `?${qs}` : ""}`,
     SIDEBAR_CACHE_MS,
+    params?.source,
   );
 }
 
 /** List optimizations another user shared with the caller (Drive-style). */
-export function listJobsSharedWithMe(params?: { limit?: number; offset?: number }) {
+export function listJobsSharedWithMe(params?: {
+  limit?: number;
+  offset?: number;
+  source?: ApiSource;
+}) {
   const q = new URLSearchParams();
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
@@ -3507,6 +3589,7 @@ export function listJobsSharedWithMe(params?: { limit?: number; offset?: number 
   return cachedGet<{ items: SidebarJobItem[]; total: number }>(
     `/optimizations/shared-with-me${qs ? `?${qs}` : ""}`,
     SIDEBAR_CACHE_MS,
+    params?.source,
   );
 }
 
@@ -3526,7 +3609,7 @@ export interface RunFolder {
 }
 
 /** Access a member holds through a parent folder, shown read-only. */
-export interface InheritedFolderMember {
+interface InheritedFolderMember {
   username: string;
   role: MemberRole;
   folder_id: string;
@@ -3589,6 +3672,44 @@ export async function deleteFolder(folderId: string) {
   const result = await request<{ deleted: string[] }>(`/folders/${folderId}`, { method: "DELETE" });
   invalidateFolders();
   return result;
+}
+
+/** A kind of item another user can share with the caller. */
+export type SharedItemKind = "optimizations" | "datasets" | "tagging-sessions" | "folders";
+
+function invalidateSharedLists() {
+  invalidateCache("/folders", "/optimizations", "/datasets/library", "/tagging-sessions");
+}
+
+/** Hide a shared item from the caller's own lists. Access does not change. */
+export async function hideSharedItem(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`, { method: "POST" });
+  invalidateSharedLists();
+}
+
+/** Show a hidden shared item again. A no-op when nothing is hidden. */
+export async function unhideSharedItem(kind: SharedItemKind, id: string, source?: ApiSource) {
+  await request<void>(
+    `/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`,
+    { method: "DELETE" },
+    source,
+  );
+  invalidateSharedLists();
+}
+
+/** Lower the caller's own role on a shared item. The server refuses a raise. */
+export async function lowerSharedRole(kind: SharedItemKind, id: string, role: MemberRole) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+  invalidateSharedLists();
+}
+
+/** Remove the caller's own access to a shared item. */
+export async function removeSharedAccess(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}`, { method: "DELETE" });
+  invalidateSharedLists();
 }
 
 /** Move a folder under another folder, or to the top level with null. */
@@ -3684,547 +3805,52 @@ export async function claimSharedFolder(token: string) {
   return result;
 }
 
-export function getServeInfo(optimizationId: string) {
-  return request<ServeInfoResponse>(`/serve/${optimizationId}/info`);
+export function getServeInfo(optimizationId: string, source?: ApiSource) {
+  return request<ServeInfoResponse>(`/serve/${optimizationId}/info`, undefined, source);
 }
 
-export function getPairServeInfo(optimizationId: string, pairIndex: number) {
-  return request<ServeInfoResponse>(`/serve/${optimizationId}/pair/${pairIndex}/info`);
-}
-
-export function getPairTestResults(optimizationId: string, pairIndex: number) {
-  return request<{
-    baseline: EvalExampleResult[];
-    optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/pair/${pairIndex}/test-results`);
+/** Turn serving on or off for a finished repository run (owner only). */
+export function setServingEnabled(optimizationId: string, enabled: boolean, source?: ApiSource) {
+  return request<{ optimization_id: string; serving_enabled: boolean }>(
+    `/serve/${optimizationId}/enabled`,
+    { method: "PUT", body: JSON.stringify({ enabled }) },
+    source,
+  );
 }
 
 export function serveProgram(
   optimizationId: string,
-  inputs: Record<string, string>,
+  inputs: Record<string, unknown>,
   idempotencyKey: string,
+  source?: ApiSource,
 ) {
-  return request<ServeResponse>(`/serve/${optimizationId}`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
-}
-
-/** Run inference through one grid-search pair (non-streaming). */
-export function servePairProgram(
-  optimizationId: string,
-  pairIndex: number,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-) {
-  return request<ServeResponse>(`/serve/${optimizationId}/pair/${pairIndex}`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
-}
-
-export interface StreamServeHandlers {
-  onToken: (field: string, chunk: string) => void;
-  onFinal: (result: {
-    outputs: Record<string, unknown>;
-    model_used: string;
-    input_fields: string[];
-    output_fields: string[];
-    cents_charged?: string | null;
-    budget?: ExecutionBudget | null;
-  }) => void;
-  onError: (message: string) => void;
-  signal?: AbortSignal;
-}
-
-/** Stream program inference via SSE. Calls handlers as tokens arrive. */
-export async function serveProgramStream(
-  optimizationId: string,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-  handlers: StreamServeHandlers,
-): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetchWithAuthRetry(`${apiBase()}/serve/${optimizationId}/stream`, {
+  return request<ServeResponse>(
+    `/serve/${optimizationId}`,
+    {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        "Idempotency-Key": idempotencyKey,
-      },
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({ inputs }),
-      signal: handlers.signal,
-    });
-  } catch (err) {
-    if ((err as Error)?.name === "AbortError") return;
-    handlers.onError(msg("auto.shared.lib.api.literal.4"));
-    return;
-  }
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    handlers.onError(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.3", { p1: res.status }),
-    );
-    return;
-  }
-  const processEvent = ({ event, data }: ServerSentEvent) => {
-    if (event === "token") {
-      handlers.onToken(String(data.field ?? ""), String(data.chunk ?? ""));
-    } else if (event === "final") {
-      handlers.onFinal({
-        outputs: (data.outputs as Record<string, unknown>) ?? {},
-        model_used: String(data.model_used ?? ""),
-        input_fields: (data.input_fields as string[]) ?? [],
-        output_fields: (data.output_fields as string[]) ?? [],
-        cents_charged: typeof data.cents_charged === "string" ? data.cents_charged : null,
-        budget: (data.budget as ExecutionBudget | null) ?? null,
-      });
-    } else if (event === "error") {
-      handlers.onError(
-        parseErrorMessage(JSON.stringify(data)) ?? msg("auto.shared.lib.api.literal.5"),
-      );
-    }
-  };
-  try {
-    await readServerSentEvents(res.body, processEvent);
-  } catch (err) {
-    if ((err as Error)?.name !== "AbortError") {
-      handlers.onError(err instanceof Error ? err.message : msg("auto.shared.lib.api.literal.6"));
-    }
-  }
-}
-
-/** Stream pair program inference via SSE. Same as serveProgramStream but for a specific grid pair. */
-export async function servePairProgramStream(
-  optimizationId: string,
-  pairIndex: number,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-  handlers: StreamServeHandlers,
-): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetchWithAuthRetry(
-      `${apiBase()}/serve/${optimizationId}/pair/${pairIndex}/stream`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({ inputs }),
-        signal: handlers.signal,
-      },
-    );
-  } catch (err) {
-    if ((err as Error)?.name === "AbortError") return;
-    handlers.onError(msg("auto.shared.lib.api.literal.7"));
-    return;
-  }
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    handlers.onError(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.4", { p1: res.status }),
-    );
-    return;
-  }
-  const processEvent = ({ event, data }: ServerSentEvent) => {
-    if (event === "token") {
-      handlers.onToken(String(data.field ?? ""), String(data.chunk ?? ""));
-    } else if (event === "final") {
-      handlers.onFinal({
-        outputs: (data.outputs as Record<string, unknown>) ?? {},
-        model_used: String(data.model_used ?? ""),
-        input_fields: (data.input_fields as string[]) ?? [],
-        output_fields: (data.output_fields as string[]) ?? [],
-        cents_charged: typeof data.cents_charged === "string" ? data.cents_charged : null,
-        budget: (data.budget as ExecutionBudget | null) ?? null,
-      });
-    } else if (event === "error") {
-      handlers.onError(
-        parseErrorMessage(JSON.stringify(data)) ?? msg("auto.shared.lib.api.literal.8"),
-      );
-    }
-  };
-  try {
-    await readServerSentEvents(res.body, processEvent);
-  } catch (err) {
-    if ((err as Error)?.name !== "AbortError") {
-      handlers.onError(err instanceof Error ? err.message : msg("auto.shared.lib.api.literal.9"));
-    }
-  }
-}
-
-export interface CodeAgentChatTurn {
-  role: "user" | "assistant";
-  content: string;
-}
-
-export interface CodeAgentRequest {
-  dataset_columns: string[];
-  // Plain string roles (input/output/ignore); the code agent only consumes
-  // the input/output roles.
-  column_roles: Record<string, string>;
-  column_kinds?: Record<string, "text" | "image">;
-  sample_rows: Array<Record<string, unknown>>;
-  user_message?: string;
-  chat_history?: CodeAgentChatTurn[];
-  prior_signature?: string;
-  prior_metric?: string;
-  prior_signature_validation?: string;
-  prior_metric_validation?: string;
-  // Unified authoring: the workspace's files besides run.py and metric.py.
-  prior_files?: Record<string, string>;
-  initial_signature?: string;
-  initial_metric?: string;
-  // Workflow graph currently on the canvas. Non-null switches both agent
-  // modes to their graph-aware paths (seed drafts the DAG, chat gets graph
-  // tools).
-  prior_workflow?: WorkflowSpec | null;
-  initial_workflow?: WorkflowSpec | null;
-  // Active UI locale code; the backend derives the agent's reply language
-  // from it (fallback: Hebrew).
-  locale?: string;
-  // Directives confirmed at the end of the Signature & Metric interview;
-  // the seed authors honor every directive. Empty when no interview ran.
-  interview_brief?: string[];
-  // Catalog model id that authors the code (the composer's model menu).
-  // Absent runs the catalog's best-value default.
-  model?: string;
-  // Explicit reasoning-effort level for the chosen model; absent keeps its default.
-  reasoning_effort?: string;
-  // Runs a local CLI model in its fast mode; the backend ignores it elsewhere.
-  fast_mode?: boolean;
-  unified?: UnifiedAuthoringContext;
-  // Unified authoring only: the agent opens the conversation itself; the server
-  // supplies the hidden opening message in place of `user_message`.
-  kickoff?: boolean;
-  // Client-generated id of this turn; messages posted to /agent-steer with
-  // it are delivered into the running turn.
-  steer_key?: string;
-}
-
-export type CodeAgentToolName =
-  | "edit_signature"
-  | "edit_run"
-  | "edit_metric"
-  | "write_file"
-  | "delete_file"
-  | "verify_code"
-  | "open_file"
-  | "edit_seed"
-  | "edit_scorer"
-  | "set_brief"
-  | "list_repo_folder"
-  | "read_repo_file"
-  | "add_node"
-  | "update_node"
-  | "remove_node"
-  | "connect"
-  | "disconnect";
-
-const CODE_AGENT_TOOLS = new Set<CodeAgentToolName>([
-  "edit_signature",
-  "edit_run",
-  "edit_metric",
-  "write_file",
-  "delete_file",
-  "verify_code",
-  "open_file",
-  "edit_seed",
-  "edit_scorer",
-  "set_brief",
-  "list_repo_folder",
-  "read_repo_file",
-  "add_node",
-  "update_node",
-  "remove_node",
-  "connect",
-  "disconnect",
-]);
-
-interface CodeAgentToolStart {
-  id: string;
-  tool: CodeAgentToolName;
-  reason: string;
-  /** The file a write_file / delete_file / open_file call is about. */
-  path?: string;
-}
-
-interface CodeAgentToolEnd {
-  id: string;
-  tool: CodeAgentToolName;
-  status: string;
-  path?: string;
-  /** The 1-based line an open_file call shows. */
-  line?: number;
-}
-
-/** A `verify_code` call's result: one verdict per workspace file. */
-export interface CodeAgentVerification {
-  id: string;
-  ok: boolean;
-  files: FileVerification[];
-}
-
-function parseVerification(data: unknown): CodeAgentVerification | null {
-  if (!data || typeof data !== "object") return null;
-  const raw = data as Record<string, unknown>;
-  const lines = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
-  const files = (Array.isArray(raw.files) ? raw.files : [])
-    .filter((f): f is Record<string, unknown> => !!f && typeof f === "object")
-    .map((f) => ({
-      path: String(f.path ?? ""),
-      ok: f.ok === true,
-      errors: lines(f.errors),
-      warnings: lines(f.warnings),
-    }))
-    .filter((f) => f.path);
-  return { id: String(raw.id ?? ""), ok: raw.ok === true, files };
-}
-
-function parseFiles(data: unknown): Record<string, string> | undefined {
-  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
-  return Object.fromEntries(
-    Object.entries(data as Record<string, unknown>).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
-  );
-}
-
-export interface AgentQuestion {
-  question: string;
-  options: Array<{ label: string; description: string }>;
-}
-
-export interface CodeAgentHandlers {
-  onSignaturePatch: (chunk: string) => void;
-  onMetricPatch: (chunk: string) => void;
-  // `source` names the emitting stream ("signature" | "metric" | "workflow" |
-  // "agent") — seed mode runs two authors in parallel over one SSE stream.
-  onReasoningPatch?: (chunk: string, source: string) => void;
-  // Unified seed: one parallel author ("signature" = run code, or "metric")
-  // finished, its contract check and repair included.
-  onArtifactDone?: (source: string) => void;
-  onMessagePatch?: (chunk: string) => void;
-  onSignatureReplace?: (code: string) => void;
-  onMetricReplace?: (code: string) => void;
-  // Unified chat: the code an edit_run ("signature") / edit_metric ("metric")
-  // call writes, while the model writes it; `reset` starts a new draft. The
-  // finished, checked code still arrives on the matching *Replace.
-  // A write_file draft has `source` "file" and names its `path`.
-  onCodeDraft?: (ev: { source: string; chunk: string; reset: boolean; path?: string }) => void;
-  // Unified chat: an extra workspace file written or deleted.
-  onFileReplace?: (path: string, code: string) => void;
-  onFileDelete?: (path: string) => void;
-  // Unified: a verify_code call's per-file result.
-  onVerifyResult?: (result: CodeAgentVerification) => void;
-  // Full-graph snapshot after a seed draft or a successful graph tool op;
-  // changedNodeId (null for seed/removals) drives the canvas pulse.
-  onWorkflowReplace?: (workflow: WorkflowSpec, changedNodeId: string | null) => void;
-  onToolStart?: (ev: CodeAgentToolStart) => void;
-  onToolEnd?: (ev: CodeAgentToolEnd) => void;
-  // Black-box chat: a question the agent asks with clickable answers.
-  onAsk?: (ask: AgentQuestion) => void;
-  // Black-box chat: objective / background text the agent wrote from the conversation.
-  onBrief?: (fields: { objective?: string; background?: string }) => void;
-  // The agent read these steered messages at a step boundary; `text` joins them.
-  onSteerApplied?: (ev: { ids: string[]; text: string }) => void;
-  onDone: (result: {
-    signature_code: string;
-    metric_code: string;
-    assistant_message: string;
-    model: string | null;
-    /** Concrete model selected by Auto Router, when the route was automatic. */
-    served_model: string | null;
-    stats: TurnStats | null;
-    workflow?: WorkflowSpec | null;
-    workflowValid?: boolean;
-    /**
-     * Seed-path validation outcome. The seed runner validates (and repairs)
-     * the generated code; these flags are absent on the chat path (where
-     * ``edit_signature``/``edit_metric`` already validate every edit), so a
-     * missing flag is treated as valid.
-     */
-    signatureValid?: boolean;
-    metricValid?: boolean;
-    validationError?: string | null;
-    /** Unified paths: the workspace's extra files after the turn. */
-    files?: Record<string, string>;
-    /** Unified paths: the turn's last verify_code result, or null when nothing was checked. */
-    verification?: CodeAgentVerification | null;
-  }) => void;
-  /** `code` is the server's error code when the request was refused (e.g. a quota). */
-  onError: (message: string, code?: string) => void;
-  signal?: AbortSignal;
-}
-
-/** Stream AI-generated signature + metric code via SSE. */
-export async function streamCodeAgent(
-  req: CodeAgentRequest,
-  handlers: CodeAgentHandlers,
-): Promise<void> {
-  const processEvent = ({ event, data }: ServerSentEvent) => {
-    const opening = kickoffOpening(event, data);
-    if (opening !== null) {
-      // Only a chat-mode kickoff gets it, so the empty code never lands.
-      handlers.onDone({
-        signature_code: "",
-        metric_code: "",
-        assistant_message: opening,
-        model: null,
-        served_model: null,
-        stats: null,
-      });
-    } else if (event === "signature_patch") {
-      handlers.onSignaturePatch(String(data.chunk ?? ""));
-    } else if (event === "metric_patch") {
-      handlers.onMetricPatch(String(data.chunk ?? ""));
-    } else if (event === "reasoning_patch") {
-      handlers.onReasoningPatch?.(
-        String(data.chunk ?? ""),
-        typeof data.source === "string" && data.source ? data.source : "agent",
-      );
-    } else if (event === "artifact_done") {
-      handlers.onArtifactDone?.(String(data.source ?? ""));
-    } else if (event === "message_patch") {
-      handlers.onMessagePatch?.(String(data.chunk ?? ""));
-    } else if (event === "code_draft") {
-      handlers.onCodeDraft?.({
-        source: String(data.source ?? ""),
-        chunk: String(data.chunk ?? ""),
-        reset: Boolean(data.reset),
-        ...(typeof data.path === "string" && data.path && { path: data.path }),
-      });
-    } else if (event === "file_replace") {
-      if (typeof data.path === "string" && data.path)
-        handlers.onFileReplace?.(data.path, String(data.code ?? ""));
-    } else if (event === "file_delete") {
-      if (typeof data.path === "string" && data.path) handlers.onFileDelete?.(data.path);
-    } else if (event === "verify_result") {
-      const result = parseVerification(data);
-      if (result) handlers.onVerifyResult?.(result);
-    } else if (event === "signature_replace") {
-      handlers.onSignatureReplace?.(String(data.code ?? ""));
-    } else if (event === "metric_replace") {
-      handlers.onMetricReplace?.(String(data.code ?? ""));
-    } else if (event === "workflow_replace") {
-      if (data.workflow && typeof data.workflow === "object") {
-        handlers.onWorkflowReplace?.(
-          data.workflow as WorkflowSpec,
-          typeof data.changed_node_id === "string" ? data.changed_node_id : null,
-        );
-      }
-    } else if (event === "tool_start") {
-      const tool = String(data.tool ?? "") as CodeAgentToolName;
-      if (CODE_AGENT_TOOLS.has(tool)) {
-        handlers.onToolStart?.({
-          id: String(data.id ?? ""),
-          tool,
-          reason: String(data.reason ?? ""),
-          ...(typeof data.path === "string" && data.path && { path: data.path }),
-        });
-      }
-    } else if (event === "tool_end") {
-      const tool = String(data.tool ?? "") as CodeAgentToolName;
-      if (CODE_AGENT_TOOLS.has(tool)) {
-        handlers.onToolEnd?.({
-          id: String(data.id ?? ""),
-          tool,
-          status: String(data.status ?? "ok"),
-          ...(typeof data.path === "string" && data.path && { path: data.path }),
-          ...(typeof data.line === "number" && data.line > 0 && { line: data.line }),
-        });
-      }
-    } else if (event === "ask") {
-      const options = Array.isArray(data.options) ? data.options : [];
-      handlers.onAsk?.({
-        question: String(data.question ?? ""),
-        options: options
-          .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
-          .map((o) => ({ label: String(o.label ?? ""), description: String(o.description ?? "") }))
-          .filter((o) => o.label.trim().length > 0),
-      });
-    } else if (event === "brief") {
-      handlers.onBrief?.({
-        ...(typeof data.objective === "string" ? { objective: data.objective } : {}),
-        ...(typeof data.background === "string" ? { background: data.background } : {}),
-      });
-    } else if (event === "steer_applied") {
-      handlers.onSteerApplied?.(parseSteerApplied(data));
-    } else if (event === "done") {
-      const rawModel = data.model;
-      const rawServedModel = data.served_model;
-      handlers.onDone({
-        signature_code: String(data.signature_code ?? ""),
-        metric_code: String(data.metric_code ?? ""),
-        assistant_message: String(data.assistant_message ?? ""),
-        model: typeof rawModel === "string" && rawModel.length > 0 ? rawModel : null,
-        served_model:
-          typeof rawServedModel === "string" && rawServedModel.length > 0 ? rawServedModel : null,
-        stats: parseTurnStats(data.stats),
-        workflow:
-          data.workflow && typeof data.workflow === "object"
-            ? (data.workflow as WorkflowSpec)
-            : null,
-        workflowValid: data.workflow_valid !== false,
-        // Absent on the chat path → treat as valid; the seed path sends
-        // explicit booleans after its validate-and-repair pass.
-        signatureValid: data.signature_valid !== false,
-        metricValid: data.metric_valid !== false,
-        validationError: typeof data.validation_error === "string" ? data.validation_error : null,
-        ...("files" in data && { files: parseFiles(data.files) ?? {} }),
-        ...("verification" in data && { verification: parseVerification(data.verification) }),
-      });
-    } else if (event === "error") {
-      handlers.onError(String(data.error ?? msg("auto.shared.lib.api.literal.12")));
-    }
-  };
-  // The turn outlives any one connection (the edge cuts requests at 15 min);
-  // streamResumableTurn reconnects and replays from the last event id.
-  const result = await streamResumableTurn({
-    fetch: fetchWithAuthRetry,
-    read: readServerSentEvents,
-    apiBase: apiBase(),
-    startPath: "/optimizations/ai-generate-code",
-    startInit: {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify(req),
     },
-    onEvent: processEvent,
-    signal: handlers.signal,
-  });
-  if (result.status !== "failed" || result.started) announceWalletChange();
-  if (result.status !== "failed") return;
-  if (result.response) {
-    const res = result.response;
-    const text = await res.text().catch(() => "");
-    const parsed = parseError(text);
-    handlers.onError(
-      parsed.message ?? formatMsg("auto.shared.lib.api.template.5", { p1: res.status }),
-      parsed.code,
-    );
-  } else if (!result.started) {
-    handlers.onError(msg("auto.shared.lib.api.literal.11"));
-  } else {
-    const err = result.error;
-    handlers.onError(err instanceof Error ? err.message : msg("auto.shared.lib.api.literal.10"));
-  }
+    source,
+  );
 }
 
 /** Deliver a message into the running turn opened with `steerKey`; resolves
  *  the message's id, which a later `steer_applied` event or withdraw names. */
-export async function postAgentSteer(steerKey: string, text: string): Promise<string> {
-  const res = await request<{ id: string }>("/optimizations/agent-steer", {
-    method: "POST",
-    signal: AbortSignal.timeout(30_000),
-    body: JSON.stringify({ steer_key: steerKey, text }),
-  });
+export async function postAgentSteer(
+  steerKey: string,
+  text: string,
+  source?: ApiSource,
+): Promise<string> {
+  const res = await request<{ id: string }>(
+    "/optimizations/agent-steer",
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ steer_key: steerKey, text }),
+    },
+    source,
+  );
   return String(res.id);
 }
 
@@ -4248,24 +3874,28 @@ export async function fetchNextPromptSuggestion(
   return typeof res.suggestion === "string" ? res.suggestion : "";
 }
 
-/** Read a `steer_applied` event's payload. */
-export function parseSteerApplied(data: Record<string, unknown>): { ids: string[]; text: string } {
-  return {
-    ids: Array.isArray(data.ids) ? data.ids.map(String) : [],
-    text: String(data.text ?? ""),
-  };
-}
-
 /** Take back explicit ids and report which messages the agent already read. */
-export async function withdrawAgentSteers(steerKey: string, ids: string[]): Promise<{ ids: string[]; delivered?: string[] }> {
-  const res = await request<{ ids: string[]; delivered?: string[] }>("/optimizations/agent-steer/withdraw", {
-    method: "POST",
-    signal: AbortSignal.timeout(30_000),
-    body: JSON.stringify({ steer_key: steerKey, ids }),
-  });
+export async function withdrawAgentSteers(
+  steerKey: string,
+  ids: string[],
+  source?: ApiSource,
+): Promise<{ ids: string[]; delivered?: string[] }> {
+  const res = await request<{ ids: string[]; delivered?: string[] }>(
+    "/optimizations/agent-steer/withdraw",
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ steer_key: steerKey, ids }),
+    },
+    source,
+  );
   if (!Array.isArray(res.ids)) throw new Error("Invalid withdrawal outcome");
-  if (res.delivered !== undefined && !Array.isArray(res.delivered)) throw new Error("Invalid withdrawal outcome");
-  return { ids: res.ids.map(String), ...(res.delivered === undefined ? {} : { delivered: res.delivered.map(String) }) };
+  if (res.delivered !== undefined && !Array.isArray(res.delivered))
+    throw new Error("Invalid withdrawal outcome");
+  return {
+    ids: res.ids.map(String),
+    ...(res.delivered === undefined ? {} : { delivered: res.delivered.map(String) }),
+  };
 }
 
 /**
@@ -4293,98 +3923,6 @@ export function parseInterviewOptions(raw: unknown): InterviewOption[] {
       return { label: String(item ?? "").trim(), description: "" };
     })
     .filter((option) => option.label);
-}
-
-export interface TaskInterviewHandlers {
-  onMessagePatch?: (chunk: string) => void;
-  onReasoning?: (chunk: string) => void;
-  /** The server is retrying a failed attempt; drop streamed partial text. */
-  onReset?: () => void;
-  onDone: (result: TaskInterviewTurnResult) => void;
-  /** `code` is the backend's error code when the turn was refused before it started. */
-  onError: (message: string, code?: string) => void;
-}
-
-function parseCandidate(raw: unknown): string | Record<string, string> | null {
-  if (typeof raw === "string") return raw;
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    return Object.fromEntries(
-      Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]),
-    );
-  }
-  return null;
-}
-
-/**
- * Stream one wizard Task-step interview turn over the resumable SSE
- * transport; the terminal `interview_done` carries the drafted task and
- * artifact.
- */
-export async function streamTaskInterviewTurn(
-  req: TaskInterviewRequest,
-  handlers: TaskInterviewHandlers,
-  signal?: AbortSignal,
-): Promise<TaskInterviewTurnResult | null> {
-  let outcome: TaskInterviewTurnResult | null = null;
-  let failed = false;
-  const result = await streamResumableTurn({
-    fetch: fetchWithAuthRetry,
-    read: readServerSentEvents,
-    apiBase: apiBase(),
-    startPath: "/optimizations/task-interview",
-    startInit: {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify(req),
-    },
-    signal,
-    onEvent: ({ event, data }) => {
-      switch (event) {
-        case "reasoning_patch":
-          handlers.onReasoning?.(String(data.chunk ?? ""));
-          break;
-        case "message_patch":
-          handlers.onMessagePatch?.(String(data.chunk ?? ""));
-          break;
-        case "message_reset":
-          handlers.onReset?.();
-          break;
-        case "interview_done": {
-          const kind = data.artifact_kind;
-          outcome = {
-            message: String(data.message ?? ""),
-            options: parseInterviewOptions(data.options),
-            done: data.done === true,
-            objective: typeof data.objective === "string" ? data.objective : "",
-            background: typeof data.background === "string" ? data.background : "",
-            artifact_kind:
-              kind === "prompt" || kind === "code" || kind === "dspy_program" || kind === "text"
-                ? kind
-                : null,
-            starting_version: parseCandidate(data.starting_version),
-            artifact_rationale:
-              typeof data.artifact_rationale === "string" ? data.artifact_rationale : "",
-            model: typeof data.model === "string" && data.model ? data.model : null,
-            served_model:
-              typeof data.served_model === "string" && data.served_model ? data.served_model : null,
-          };
-          handlers.onDone(outcome);
-          break;
-        }
-        case "error":
-          failed = true;
-          handlers.onError(msg("submit.code.interview.error"));
-          break;
-      }
-    },
-  });
-  if (result.status === "aborted") return null;
-  if (!outcome && !failed) {
-    const refused = result.status === "failed" ? result.response : undefined;
-    const code = refused ? parseError(await refused.text().catch(() => "")).code : undefined;
-    handlers.onError(msg("submit.code.interview.error"), code);
-  }
-  return outcome;
 }
 
 export interface PublicDashboardPoint {
@@ -4435,7 +3973,7 @@ export interface CorpusFacets {
   totals: FacetTotals;
 }
 
-export type FacetDimension = keyof FacetTotals;
+export type FacetDimension = "models" | "optimizers";
 
 /** The active structured filters, echoed back so facet counts are contextual. */
 export interface FacetContext {

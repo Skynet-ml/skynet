@@ -1,4 +1,4 @@
-Un jeu de données est un tableau de cas. Chaque ligne est un cas. Skynet exécute votre artefact sur les cas, note chaque sortie et utilise les scores pour comparer les versions. Cette page explique comment Skynet lit les cas, à quoi servent les rôles de colonnes et comment il répartit les cas en ensembles d'entraînement, de validation et de test.
+Un jeu de données est un tableau de cas. Chaque ligne est un cas. Skynet note chaque version de votre dépôt sur les cas avec votre évaluateur et utilise les scores pour comparer les versions. Cette page explique comment Skynet lit les cas, à quoi servent les rôles de colonnes et comment il répartit les cas en ensembles d'entraînement, de validation et de test.
 
 ## Charger les données
 
@@ -17,8 +17,8 @@ Sous **Comment lire les données**, attribuez un rôle à chaque colonne :
 
 | Rôle     | Ce que Skynet fait de la colonne                                       |
 | -------- | ---------------------------------------------------------------------- |
-| Entrée   | Place la valeur dans `input`, que reçoit votre code d'exécution        |
-| Sortie   | Place la valeur dans `expected`, que reçoit votre métrique             |
+| Entrée   | Place la valeur dans `case["input"]`, que reçoit votre évaluateur        |
+| Sortie   | Place la valeur dans `case["expected"]`, que reçoit votre évaluateur             |
 | Ignorer  | N'utilise pas la colonne                                               |
 
 Chaque colonne a aussi un type : **Texte** ou **Image**.
@@ -49,7 +49,7 @@ avec les rôles `message` = Entrée, `label` = Sortie et `id` = Ignorer, votre c
 ```
 
 > [!TIP]
-> Dans votre métrique, lisez la valeur attendue par le nom de la colonne, par exemple `expected["label"]`.
+> Dans votre évaluateur, lisez la valeur attendue par le nom de la colonne, par exemple `case["expected"]["label"]`.
 
 ## Modes de données
 
@@ -111,7 +111,7 @@ En sélection manuelle, chaque champ accepte une fraction de 0 à 1, par pas de 
 
 ## Exemples du contrat
 
-La vérification du contrat de l'étape **Métrique et exécution** exécute votre code sur 3 cas d'exemple. Skynet prend ces exemples uniquement dans les cas d'entraînement et de validation, jamais dans le test.
+La vérification du contrat de l'étape **Métrique et exécution** exécute votre configuration et votre évaluateur sur la version de départ, sur 3 cas d'exemple. Skynet prend ces exemples uniquement dans les cas d'entraînement et de validation, jamais dans le test.
 
 ## Pages associées
 

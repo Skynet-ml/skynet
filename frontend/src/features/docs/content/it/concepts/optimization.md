@@ -1,108 +1,97 @@
-Skynet è Optimize Anything: un unico prodotto che migliora qualsiasi artefatto sui tuoi dati e sulla tua metrica. Ogni esecuzione usa lo stesso contratto di esecuzione e lo stesso contratto della metrica. Il tipo di artefatto determina quali motori possono lavorarci.
+Skynet è Optimize Anything: ogni esecuzione ottimizza un repository. Un motore propone nuove versioni del repository, il tuo scorer assegna un punteggio a ogni versione e Skynet conserva la migliore.
 
 ## Il contratto comune
 
-Ogni esecuzione ha due file. `run.py` esegue l'artefatto su un caso. `metric.py` assegna un punteggio all'output.
+Ogni esecuzione ha un repository e uno scorer. Lo scorer è una funzione Python che riceve il percorso di una versione del repository e un caso.
 
-```python tab="run.py"
-from skynet import llm
+```python tab="scorer.py"
+import importlib.util
 
 
-def run(artifact, input):
-    return llm(artifact, input=input)
-```
-
-```python tab="metric.py"
-def score(input, output, expected=None):
-    ok = output == expected
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    output = module.serve(case["input"])
+    ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `artifact` è la versione corrente proposta dall'ottimizzatore.
-- `input` è un dict che contiene i campi di input di un caso.
-- `expected` è il valore atteso del caso, oppure `None` se il caso non ne ha uno.
+- `repo_path` è la cartella di una versione del repository, dopo l'esecuzione del comando di configurazione.
+- `case` è un dict. `case["input"]` contiene i campi di input di un caso. `case["expected"]` contiene il valore atteso, oppure `None` quando il caso non ne ha.
 - `score` restituisce una coppia: un numero e un dict con una stringa `"feedback"`.
 
-Il modulo di supporto `skynet` fornisce `llm`, `Image` e `log`. Una chiamata a `llm` dal codice di esecuzione va al modello dell'attività. Una chiamata a `llm` dalla metrica va al modello della metrica.
+Il repository ha un file `serve.py` nella radice con `def serve(input)`. Lo scorer può chiamarlo, e Skynet lo usa per servire la versione migliore dopo l'esecuzione.
 
 > [!NOTE]
-> Il codice di esecuzione gira in un proprio processo nella sandbox. Non può vedere il sorgente della metrica, il valore atteso né la chiave della metrica.
+> L'agente di programmazione che scrive le versioni non può vedere il sorgente dello scorer, i valori attesi né i segreti dell'esecuzione.
 
-Leggi [Metriche e scorer](/docs/concepts/scorers) per il contratto completo della metrica.
+Leggi [Metriche e scorer](/docs/concepts/scorers) per il contratto completo dello scorer.
 
-## Tipi di artefatto e motori
+## Chiamate ai modelli dal tuo codice
 
-| Tipo di artefatto | Motori                                                                       |
-| ----------------- | ---------------------------------------------------------------------------- |
-| Prompt            | Auto, GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
-| Codice            | Come per Prompt                                                              |
-| Testo             | Come per Prompt                                                              |
-| Programma DSPy    | Auto, DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot                         |
+Il codice del tuo repository e il tuo scorer possono chiamare un modello tramite il gateway dei modelli di Skynet. La sandbox fornisce un endpoint compatibile con OpenAI nelle variabili d'ambiente:
 
-I motori si dividono in due famiglie:
+| Variabile            | Che cosa contiene                                                          |
+| -------------------- | -------------------------------------------------------------------------- |
+| `OPENAI_BASE_URL`    | L'URL del gateway. `APP_GATEWAY_URL` contiene lo stesso valore.            |
+| `APP_API_KEY`        | Un token solo per questa esecuzione. Non è una chiave del provider.        |
+| `APP_MODEL`          | Il nome del modello da inviare. È il modello dello scorer dell'esecuzione. |
+| `ANTHROPIC_BASE_URL` | L'URL del gateway per gli SDK di Anthropic.                                |
 
-- I **motori nativi** trattano l'artefatto come una scatola nera. Lavorano sugli artefatti Prompt, Codice e Testo.
-- Gli **ottimizzatori DSPy** lavorano all'interno di un programma DSPy. Lavorano solo sugli artefatti Programma DSPy.
+```python tab="pipeline.py"
+import os
 
-DSPy MIPROv2 e DSPy BootstrapFewShot richiedono coppie (casi con output attesi). Con un singolo input, un programma DSPy può usare solo Auto e DSPy GEPA.
+from openai import OpenAI
 
-## Artefatti Prompt, Codice e Testo
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
 
-I motori nativi trattano l'artefatto come una scatola nera. Un motore propone una nuova versione, esegue `run(artifact, input)` sui casi e legge il punteggio e il feedback.
 
-I sei motori nativi usano metodi di ricerca diversi:
+def label(message):
+    response = client.chat.completions.create(
+        model=os.environ["APP_MODEL"],
+        messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
+    )
+    return response.choices[0].message.content
+```
 
+- Le chiamate con le chiavi di Skynet vengono misurate sul budget dell'esecuzione.
+- Con la tua chiave (BYOK), la chiamata va alla chiave del tuo provider. Skynet non applica costi per il modello.
+- Il gateway rifiuta le richieste per qualsiasi altro modello.
+- I segreti dell'esecuzione arrivano al tuo codice e al tuo scorer come variabili d'ambiente. Il nome della variabile è il nome del segreto. Skynet nasconde i valori dei segreti nell'output.
+
+La sandbox non ha altri accessi alla rete.
+
+## Motori
+
+Ogni motore lavora sui repository:
+
+- **Auto** è il valore predefinito. Prova diversi motori, poi continua GEPA dalla versione migliore.
 - **GEPA** fa evolvere le versioni tramite riflessione e mantiene un fronte di Pareto.
 - **Best-of-N** chiede al modello di riflessione proposte indipendenti e conserva la migliore.
 - **AutoResearch**, **Meta-Harness**, **AutoSaddler** e **ShinkaEvolve** usano un agente di programmazione per proporre versioni.
 
-Leggi [Motori](/docs/concepts/engines) per ogni motore e le sue impostazioni.
-
-## Artefatti Programma DSPy
-
-Un programma DSPy è un tipo di artefatto. Il tuo `run.py` costruisce un `dspy.Module` a livello di modulo e lo chiama dentro `run`. Se il file contiene più di un modulo, chiama `program` quello da ottimizzare.
-
-Che cosa succede quando gira un ottimizzatore DSPy:
-
-1. Skynet trova il tuo modulo e lo avvolge nella tua funzione `run`. Ogni caso passa per la tua `run`.
-2. L'ottimizzatore DSPy compila il programma sui casi di addestramento.
-3. Seleziona sui casi di convalida.
-4. Il vincitore è il testo delle istruzioni di ogni predictor, più lo stato compilato completo del modulo. Lo stato include le demo few-shot.
-
-I punteggi finali misurano lo stesso programma che Skynet salva.
-
-| Ottimizzatore         | Legge il testo del feedback |
-| --------------------- | --------------------------- |
-| DSPy GEPA             | Sì                          |
-| DSPy MIPROv2          | No, solo il punteggio       |
-| DSPy BootstrapFewShot | No, solo il punteggio       |
-
-DSPy BootstrapFewShot non usa un modello di riflessione.
-
-> [!TIP]
-> Il modello di riflessione DSPy vede solo il testo del feedback restituito dalla tua metrica. Non vede mai il sorgente della metrica.
+I motori modificano solo i file nei percorsi che consenti. Leggi [Motori](/docs/concepts/engines) per ogni motore e le sue impostazioni.
 
 ## Auto
 
-**Auto** è la scelta predefinita nella procedura guidata.
+**Auto** è la scelta predefinita nella procedura guidata, per ogni esecuzione.
 
-- Su un artefatto Prompt, Codice o Testo, Auto esplora con cinque motori nativi, poi prosegue con GEPA a partire dalla versione migliore.
-- Su un programma DSPy, Auto esegue DSPy GEPA.
+1. Auto esplora con cinque motori: GEPA, AutoResearch, Meta-Harness, AutoSaddler e ShinkaEvolve.
+2. Sceglie la versione migliore che hanno trovato.
+3. Continua GEPA da quella versione finché il budget non si esaurisce.
 
-Entrambe le forme di Auto leggono il testo del feedback della tua metrica.
+Auto legge il testo del feedback del tuo scorer.
 
-## Quale motore scegliere
+## Da dove viene la versione iniziale
 
-| La tua situazione                                              | Usa                                                                        |
-| -------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Hai un prompt che un modello esegue                            | Un artefatto Prompt. Inizia con Auto.                                      |
-| Hai codice da rendere più veloce, economico o corretto         | Un artefatto Codice. Inizia con Auto.                                      |
-| Hai un documento o una configurazione                          | Un artefatto Testo. Inizia con Auto.                                       |
-| Hai un programma DSPy                                          | Un artefatto Programma DSPy. Inizia con Auto.                              |
-| Vuoi demo few-shot scelte dai tuoi dati                        | Un artefatto Programma DSPy con DSPy BootstrapFewShot o DSPy MIPROv2       |
+| La tua situazione                         | Usa                                                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Hai del codice in un repository GitHub    | **Usa un repository**. Il codice del branch o del commit che scegli è il punto di partenza.   |
+| Hai solo un'attività e dei dati           | **Crea un nuovo repository**. Skynet scrive una prima soluzione. Quella è il punto di partenza. |
 
 > [!WARNING]
-> GEPA, DSPy GEPA e Auto imparano dal testo del feedback. Se il tuo feedback è sempre la stessa stringa, questi ottimizzatori hanno meno informazioni su cui lavorare.
+> GEPA e Auto imparano dal testo del feedback. Se il tuo feedback è sempre la stessa stringa, questi ottimizzatori hanno meno informazioni su cui lavorare.
 
 ## Pagine correlate
 

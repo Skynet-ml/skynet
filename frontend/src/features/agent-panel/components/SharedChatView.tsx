@@ -16,7 +16,6 @@ const REQUEST_TOOLS: ReadonlySet<string> = new Set([
   "request_user_dataset_datasets_request_upload_post",
   "request_user_dataset_from_library",
   "request_user_inference",
-  "request_user_pair_inference",
 ]);
 const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_post"]);
 

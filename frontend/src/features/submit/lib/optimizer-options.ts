@@ -8,7 +8,6 @@ import {
   optimizersFor,
   resolveOptimizer,
   usesFeedback,
-  type ArtifactKind,
   type DataMode,
   type OptimizerCatalogResponse,
   type OptimizerChoice,
@@ -31,40 +30,28 @@ export interface OptimizerOptionView {
 }
 
 /** The catalog, when it was fetched for this exact setup; a stale one says nothing about it. */
-function catalogFor(
-  catalog: OptimizerCatalogResponse | null,
-  kind: ArtifactKind,
-  mode: DataMode,
-): OptimizerCatalogResponse | null {
-  return catalog && catalog.artifact_kind === kind && catalog.data_mode === mode ? catalog : null;
-}
-
-/** The optimizers a setup allows; a repository run has no Auto, which has no repository strategy. */
-function allowedOptimizers(kind: ArtifactKind, mode: DataMode, repo: boolean): OptimizerChoice[] {
-  const ids = optimizersFor(kind, mode);
-  return repo ? ids.filter((id) => id !== "auto") : ids;
+function catalogFor(catalog: OptimizerCatalogResponse | null, mode: DataMode): OptimizerCatalogResponse | null {
+  return catalog && catalog.data_mode === mode ? catalog : null;
 }
 
 /**
- * Every optimizer that fits `kind` and `mode`, Auto first, in the order
+ * Every optimizer that fits `mode`, Auto first, in the order
  * `optimizersFor` gives. Catalog entries for ids outside that list are
  * dropped: the server rejects them anyway. Guided users do not see
  * unavailable options, except the current choice, which stays so its issue
  * has somewhere to show.
  */
 export function optimizerOptions(input: {
-  kind: ArtifactKind;
   mode: DataMode;
   catalog: OptimizerCatalogResponse | null;
   guided: boolean;
   choice: OptimizerChoice;
-  repo?: boolean;
 }): OptimizerOptionView[] {
-  const { kind, mode, guided, choice, repo = false } = input;
-  const catalog = catalogFor(input.catalog, kind, mode);
-  const views = allowedOptimizers(kind, mode, repo).map((id): OptimizerOptionView => {
+  const { mode, guided, choice } = input;
+  const catalog = catalogFor(input.catalog, mode);
+  const views = optimizersFor().map((id): OptimizerOptionView => {
     const entry = catalog?.options.find((option) => option.id === id);
-    const resolved = resolveOptimizer(id, kind);
+    const resolved = resolveOptimizer(id);
     return {
       id,
       family: entry?.family ?? optimizerFamily(resolved),
@@ -72,9 +59,9 @@ export function optimizerOptions(input: {
       unavailableReason: entry && !entry.available ? (entry.unavailable_reason?.trim() || null) : null,
       checking: catalog == null,
       needsReflectionModel: entry?.needs_reflection_model ?? true,
-      usesFeedback: entry?.uses_feedback ?? usesFeedback(id, kind),
-      supportsIterationLimit: entry?.supports_iteration_limit ?? supportsIterationLimit(id, kind),
-      nativeProposer: entry?.native_proposer ?? usesNativeProposer(id, kind),
+      usesFeedback: entry?.uses_feedback ?? usesFeedback(id),
+      supportsIterationLimit: entry?.supports_iteration_limit ?? supportsIterationLimit(id),
+      nativeProposer: entry?.native_proposer ?? usesNativeProposer(id),
     };
   });
   return guided ? views.filter((view) => view.available || view.id === choice) : views;
@@ -90,15 +77,13 @@ export type OptimizerChoiceIssue =
  * back and undoing the upstream edit restores a valid setup untouched.
  */
 export function optimizerChoiceIssue(input: {
-  kind: ArtifactKind;
   mode: DataMode;
   catalog: OptimizerCatalogResponse | null;
   choice: OptimizerChoice;
-  repo?: boolean;
 }): OptimizerChoiceIssue | null {
-  const { kind, mode, choice, repo = false } = input;
-  if (!allowedOptimizers(kind, mode, repo).includes(choice)) return { kind: "not_allowed" };
-  const catalog = catalogFor(input.catalog, kind, mode);
+  const { mode, choice } = input;
+  if (!optimizersFor().includes(choice)) return { kind: "not_allowed" };
+  const catalog = catalogFor(input.catalog, mode);
   const entry = catalog?.options.find((option) => option.id === choice);
   if (entry && !entry.available)
     return { kind: "unavailable", reason: entry.unavailable_reason?.trim() || null };

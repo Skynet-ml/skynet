@@ -1,8 +1,8 @@
-"""Subprocess-side entry point for DSPy optimization jobs.
+"""Subprocess-side entry point for repository optimization jobs.
 
-Houses the code that runs inside the child process forked/spawned by
-``BackgroundWorker`` — the log handler, the event-queue helpers, and
-the ``_run_service_in_subprocess`` function itself. Kept in its own
+Houses the code that runs inside the job's sandbox process, which
+``isolated_runner`` starts — the log handler, the event-queue helpers, and
+the ``run_service_in_subprocess`` function itself. Kept in its own
 module so ``engine.py`` can stay focused on the parent-side worker
 lifecycle.
 """
@@ -20,16 +20,14 @@ import dspy
 
 from .. import run_log
 from ..config import settings
-from ..constants import OPTIMIZATION_TYPE_BLACKBOX, OPTIMIZATION_TYPE_RUN
-from ..models import UNIFIED_PAYLOAD_KIND, BlackboxRunRequest, RunRequest, UnifiedRunRequest
+from ..constants import OPTIMIZATION_TYPE_BLACKBOX
+from ..models import BlackboxRunRequest
 from ..models.results import TerminalOutcome
-from ..registry import ServiceRegistry
-from ..service_gateway import DspyService
 from ..service_gateway.language_models import activate_job_lm_budget, activate_job_usage_registry, job_usage_snapshot
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from ..service_gateway.optimization.blackbox.sandbox import sandbox_runtime_context
 from ..service_gateway.optimization.blackbox.sandbox_log import stream_logger as sandbox_stream_logger
+from ..service_gateway.optimization.blackbox.sandbox_runtime import sandbox_runtime_context
 from ..service_gateway.optimization.blackbox.service import run_blackbox_optimization
 from ..service_gateway.optimization.budget_stop import BudgetReached
 from ..service_gateway.optimization.llm_error import (
@@ -37,25 +35,9 @@ from ..service_gateway.optimization.llm_error import (
     enrich_error_message,
     reset_llm_error,
 )
-from ..service_gateway.optimization.unified.service import run_unified_optimization
 from ..service_gateway.react_compat import configure_native_tool_calling
 from .constants import EVENT_AGENT_RUN, EVENT_LOG, EVENT_PROGRESS, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
-from .log_handler import get_current_pair_index
-
-# Populated by the parent via ``set_fork_service`` before forking so
-# child processes can reuse the same registry-backed service.
-_FORK_SERVICE: DspyService | None = None
-
-
-def set_fork_service(service: DspyService | None) -> None:
-    """Store a service instance that child processes may reuse after fork (or clear with None).
-
-    Args:
-        service: The service to share with forked children, or ``None`` to clear.
-    """
-    global _FORK_SERVICE
-    _FORK_SERVICE = service
 
 
 def safe_queue_put(event_queue: Any, event: dict[str, Any]) -> None:
@@ -140,7 +122,6 @@ class SubprocessLogHandler(logging.Handler):
                 "level": record.levelname,
                 "logger": record.name,
                 "message": message,
-                "pair_index": get_current_pair_index(),
                 **run_log.entry_fields(record),
             },
         )
@@ -150,11 +131,10 @@ def run_service_in_subprocess(
     payload_dict: dict[str, Any],
     artifact_id: str,
     event_queue: Any,
-    start_method: str,
 ) -> None:
-    """Execute a DSPy optimization in the child process, streaming events back to the parent.
+    """Execute a repository optimization in the child process, streaming events back to the parent.
 
-    This is the ``target`` function passed to ``mp.Process``.  It emits four event
+    ``isolated_runner`` calls it inside the sandbox process.  It emits four event
     types onto ``event_queue``:
 
     - ``EVENT_LOG`` — every record from the ``dspy`` logger and the
@@ -163,20 +143,16 @@ def run_service_in_subprocess(
     - ``EVENT_PROGRESS`` — one event per ``progress_callback`` invocation from the
       optimizer, carrying ``event`` (phase name) and ``metrics`` (dict).
     - ``EVENT_RESULT`` — emitted once on success, containing the serialised
-      ``RunResponse`` or ``BlackboxRunResponse``.
+      ``BlackboxRunResponse``.
     - ``EVENT_ERROR`` — emitted on any ``BaseException``, containing the error
-      string and formatted traceback.
-
-    When ``start_method == "fork"`` and ``_FORK_SERVICE`` is set, the pre-built
-    service from the parent is reused directly; otherwise a fresh ``DspyService``
-    is constructed.
+      string and formatted traceback. A payload that names a job kind other
+      than a repository run ends here too; nothing is raised to the caller.
 
     Args:
         payload_dict: Submission payload plus the ``_optimization_type`` key and,
             for resumable runs, the ``_gepa_log_dir`` path the worker owns.
         artifact_id: ID used to attach progress and logs to the right job.
         event_queue: Shared multiprocessing queue back to the parent.
-        start_method: The active multiprocessing start method (e.g. ``"fork"``).
     """
     payload_dict = dict(payload_dict)
     stable_job_id = payload_dict.pop("_job_id", artifact_id)
@@ -200,7 +176,6 @@ def run_service_in_subprocess(
     # without a ceiling a single job can spray the provider hard enough to trip rate limits and fail the run.
     activate_job_lm_budget(settings.job_lm_max_concurrency)
     activate_job_usage_registry()
-    service = _FORK_SERVICE if start_method == "fork" and _FORK_SERVICE is not None else DspyService(ServiceRegistry())
     log_handler = SubprocessLogHandler(event_queue)
     log_handler.setLevel(logging.DEBUG)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
@@ -235,7 +210,7 @@ def run_service_in_subprocess(
 
     try:
         payload_dict = dict(payload_dict)
-        optimization_type = payload_dict.pop("_optimization_type", OPTIMIZATION_TYPE_RUN)
+        optimization_type = payload_dict.pop("_optimization_type", OPTIMIZATION_TYPE_BLACKBOX)
         gepa_log_dir_path = payload_dict.pop("_gepa_log_dir", None)
         target_route = payload_dict.pop("_skynet_target_route", None)
         evaluator_route = payload_dict.pop("_skynet_evaluator_route", None)
@@ -249,39 +224,19 @@ def run_service_in_subprocess(
             )
         progress_callback = partial(_emit_progress_event, event_queue)
 
-        result: Any
-        if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and payload_dict.get("payload_kind") == UNIFIED_PAYLOAD_KIND:
-            unified_payload = UnifiedRunRequest.model_validate(payload_dict)
-            result = run_unified_optimization(
-                unified_payload,
-                artifact_id=stable_job_id,
-                progress_callback=progress_callback,
-                gepa_log_dir_path=gepa_log_dir_path,
-                agent_run_sink=partial(_emit_agent_run_event, event_queue),
-                target_route=target_route,
-                evaluator_route=evaluator_route,
-                repo_snapshot=repo_snapshot,
-            )
-        elif optimization_type == OPTIMIZATION_TYPE_BLACKBOX:
-            blackbox_payload = BlackboxRunRequest.model_validate(payload_dict)
-            result = run_blackbox_optimization(
-                blackbox_payload,
-                artifact_id=stable_job_id,
-                progress_callback=progress_callback,
-                gepa_log_dir_path=gepa_log_dir_path,
-                agent_run_sink=partial(_emit_agent_run_event, event_queue),
-                target_route=target_route,
-                evaluator_route=evaluator_route,
-                repo_snapshot=repo_snapshot,
-            )
-        else:
-            run_payload = RunRequest.model_validate(payload_dict)
-            result = service.run(
-                run_payload,
-                artifact_id=artifact_id,
-                progress_callback=progress_callback,
-                gepa_log_dir_path=gepa_log_dir_path,
-            )
+        if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
+            raise ValueError(f"Unsupported optimization type: {optimization_type}")
+        blackbox_payload = BlackboxRunRequest.model_validate(payload_dict)
+        result = run_blackbox_optimization(
+            blackbox_payload,
+            artifact_id=stable_job_id,
+            progress_callback=progress_callback,
+            gepa_log_dir_path=gepa_log_dir_path,
+            agent_run_sink=partial(_emit_agent_run_event, event_queue),
+            target_route=target_route,
+            evaluator_route=evaluator_route,
+            repo_snapshot=repo_snapshot,
+        )
         safe_queue_put(
             event_queue,
             {

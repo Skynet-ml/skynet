@@ -235,6 +235,27 @@ def test_validate_code_reports_static_metric_interface_errors(cv_client: TestCli
     assert any(error in item for item in response.json()["errors"])
 
 
+def test_validate_code_prefers_metric_over_a_helper_named_score(cv_client: TestClient) -> None:
+    """A ``metric`` beside a helper named ``score`` still validates, as it did before ``score`` became an entry point."""
+    metric = "def score(a, b):\n    return float(a == b)\n\ndef metric(example, pred, trace=None):\n    return score(example, pred)\n"
+    mapping = {"inputs": {"q": "question"}, "outputs": {"a": "answer"}}
+    response = cv_client.post("/validate-code", json={"metric_code": metric, "column_mapping": mapping})
+
+    assert response.status_code == 200
+    assert response.json()["valid"] is True
+
+
+def test_validate_code_accepts_a_score_entry_point_beside_helpers(cv_client: TestClient) -> None:
+    """A repository scorer's ``score`` with a helper validates with the mapping the setup agent's wrapper fills."""
+    scorer = "def _run(path):\n    return 1.0\n\ndef score(repo_path, case=None):\n    return _run(repo_path), 'ok'\n"
+    mapping = {"inputs": {"repo_path": "repo_path"}, "outputs": {}}
+    response = cv_client.post("/validate-code", json={"metric_code": scorer, "column_mapping": mapping})
+
+    assert response.status_code == 200
+    assert response.json()["valid"] is True
+    assert response.json()["errors"] == []
+
+
 def test_validate_code_missing_input_column_mapping_reports_error(cv_client: TestClient) -> None:
     """A signature input not present in ``column_mapping.inputs`` is an error."""
     sig = (

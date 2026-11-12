@@ -3,9 +3,7 @@ export { DatasetsSkeleton } from "./components/DatasetsSkeleton";
 export { DatasetEditorSkeleton } from "./components/DatasetEditorSkeleton";
 export { DatasetPickerDialog } from "./components/DatasetPickerDialog";
 export { DatasetEditorView } from "./components/DatasetEditorView";
-export { DatasetRowsView } from "./components/DatasetRowsView";
-export { DatasetPreviewPanel, ExpandTableButton } from "./components/DatasetPreviewPanel";
-export { DatasetRowReader } from "./components/DatasetRowReader";
+export { DatasetPreviewPanel } from "./components/DatasetPreviewPanel";
 export {
   InvitePeople,
   ROLE_OPTIONS,

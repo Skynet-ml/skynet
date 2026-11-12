@@ -7,7 +7,7 @@ Frontend-only (hidden from public docs):
 
 Every version of a repository run is a patch against one pinned commit; the
 run page applies the patches itself and only needs the base tree and files.
-GitHub is read with the run owner's connection, since the commit belongs to
+The repository host is read with the run owner's connection, since the commit belongs to
 the run rather than to whoever is viewing it, and anonymously when the owner
 has none, so public repositories still open.
 """
@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from ....connectors import github
+from ....connectors import repo_hosts
 from ....connectors.github_repo import RepoFetchError, github_token, patched_repo_zip
 from ....models import (
     BlackboxRepoArchiveRequest,
@@ -161,27 +161,58 @@ def _repo_target(job_data: dict[str, Any], optimization_id: str) -> tuple[str, s
     return repo["repository"], commit
 
 
-def _read_as_owner(engine: Any, owner: str | None, read: Callable[[str | None], T]) -> T:
-    """Run a GitHub read with the owner's connection, falling back to an anonymous read.
+def _repo_provider(job_data: dict[str, Any]) -> str:
+    """Return the host of a repository run's repository.
+
+    Args:
+        job_data: The stored job row, already checked by :func:`_repo_target`.
+
+    Returns:
+        ``github``, ``gitlab`` or ``bitbucket``.
+    """
+    return repo_hosts.provider_of(job_data["payload"]["target"]["repo"])
+
+
+def _owner_token(engine: Any, owner: str | None, provider: str) -> str | None:
+    """Return the owner's token for a repository host, or ``None`` without a usable connection.
+
+    Args:
+        engine: SQLAlchemy engine holding the connector vault, or ``None``.
+        owner: The run's owner.
+        provider: The repository host.
+
+    Returns:
+        The token, or ``None``.
+    """
+    if engine is None or not owner:
+        return None
+    try:
+        if provider == repo_hosts.DEFAULT_PROVIDER:
+            return github_token(engine, owner)
+        return repo_hosts.host_token(engine, owner, provider)
+    except RepoFetchError:
+        return None
+
+
+def _read_as_owner(
+    engine: Any, owner: str | None, read: Callable[[str | None], T], provider: str = repo_hosts.DEFAULT_PROVIDER
+) -> T:
+    """Run a repository host read with the owner's connection, falling back to an anonymous read.
 
     Args:
         engine: SQLAlchemy engine holding the connector vault, or ``None``.
         owner: The run's owner.
         read: The read, given a token or ``None``.
+        provider: The repository host.
 
     Returns:
         What ``read`` returns.
 
     Raises:
-        DomainError: GitHub's refusal of the anonymous read, or of the owner's
+        DomainError: The host's refusal of the anonymous read, or of the owner's
             read when it failed for another reason than a rejected token.
     """
-    token = None
-    if engine is not None and owner:
-        try:
-            token = github_token(engine, owner)
-        except RepoFetchError:
-            token = None
+    token = _owner_token(engine, owner, provider)
     if token is None:
         return read(None)
     try:
@@ -273,24 +304,26 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
             current_user: Authenticated caller resolved from the bearer token.
 
         Returns:
-            The repository, the commit, every path sorted, and whether GitHub
+            The repository, the commit, every path sorted, and whether the host
             truncated the tree.
 
         Raises:
             DomainError: 404 when the run is unknown, inaccessible or not a
-                repository run; 409 before its commit is pinned; GitHub's
+                repository run; 409 before its commit is pinned; the host's
                 refusal (404/409/502) when the tree cannot be read.
         """
         job_data = load_job_for_user(job_store, optimization_id, current_user)
         repository, commit = _repo_target(job_data, optimization_id)
+        provider = _repo_provider(job_data)
         owner = job_owner(job_data) or ""
-        key = (owner, repository, commit)
+        key = (owner, provider, repository, commit)
         cached = _trees.get(key)
         if cached is None:
             tree = _read_as_owner(
                 getattr(job_store, "engine", None),
                 owner,
-                lambda token: github.tree_entries(token, repository, commit),
+                lambda token: repo_hosts.host(provider).tree_entries(token, repository, commit),
+                provider,
             )
             entries = sorted(
                 (BlackboxRepoTreeEntry(path=e["path"], type=e["type"], size=e.get("size")) for e in tree["entries"]),
@@ -325,20 +358,22 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         Raises:
             DomainError: 400 for a path outside the repository; 404 when the
                 run is unknown, inaccessible or not a repository run; 409
-                before its commit is pinned; GitHub's refusal (409/502) when
+                before its commit is pinned; the host's refusal (409/502) when
                 the file cannot be read.
         """
         job_data = load_job_for_user(job_store, optimization_id, current_user)
         clean = clean_repo_path(path)
         repository, commit = _repo_target(job_data, optimization_id)
+        provider = _repo_provider(job_data)
         owner = job_owner(job_data) or ""
-        key = (owner, repository, commit, clean)
+        key = (owner, provider, repository, commit, clean)
         cached = _files.get(key)
         if cached is None:
             fetched = _read_as_owner(
                 getattr(job_store, "engine", None),
                 owner,
-                lambda token: github.file_at(token, repository, commit, clean, MAX_FILE_BYTES),
+                lambda token: repo_hosts.host(provider).file_at(token, repository, commit, clean, MAX_FILE_BYTES),
+                provider,
             )
             cached = _file_response(clean, fetched)
             _files.put(key, cached, weight=len(cached.content or ""))
@@ -376,17 +411,13 @@ def register_repository_routes(router: APIRouter, *, job_store) -> None:
         # stamp arbitrary content into a download that looks like the run's.
         if body.patch not in recorded_patches(job_data):
             raise DomainError("optimization.repo_version_unknown", status=404)
-        owner = job_owner(job_data) or ""
-        engine = getattr(job_store, "engine", None)
-        token = None
-        if engine is not None and owner:
-            try:
-                token = github_token(engine, owner)
-            except RepoFetchError:
-                token = None
+        provider = _repo_provider(job_data)
+        token = _owner_token(getattr(job_store, "engine", None), job_owner(job_data) or "", provider)
         workdir = Path(tempfile.mkdtemp(prefix="repo-archive-"))
         try:
-            archive = patched_repo_zip(repository, commit, body.patch, token, workdir)
+            archive = patched_repo_zip(
+                repository, commit, body.patch, token, workdir, **repo_hosts.git_kwargs(provider)
+            )
         except RepoFetchError as error:
             shutil.rmtree(workdir, ignore_errors=True)
             raise DomainError("optimization.repo_archive_failed", status=502, reason=str(error)) from None

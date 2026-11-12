@@ -21,7 +21,6 @@ DELIVERY_CHANNELS: Final[tuple[str, ...]] = (EMAIL, CHROME, SLACK)
 # answers never contain them, so hosted behavior stays exactly as it was.
 LOCAL_CHANNELS: Final[tuple[str, ...]] = (MACOS,)
 
-NEEDS_INPUT: Final = "needs_input"
 BUDGET_NEAR: Final = "budget_near"
 FAILED: Final = "failed"
 FINISHED: Final = "finished"
@@ -31,7 +30,6 @@ SHARED: Final = "shared"
 PRODUCT_NEWS: Final = "product_news"
 
 EVENT_TYPES: Final[tuple[str, ...]] = (
-    NEEDS_INPUT,
     BUDGET_NEAR,
     FAILED,
     FINISHED,
@@ -42,9 +40,9 @@ EVENT_TYPES: Final[tuple[str, ...]] = (
 )
 
 # The inbox's Focused tab: what the user has to act on or wants to know at once.
-FOCUSED_EVENTS: Final[frozenset[str]] = frozenset({NEEDS_INPUT, BUDGET_NEAR, FAILED, FINISHED})
+FOCUSED_EVENTS: Final[frozenset[str]] = frozenset({BUDGET_NEAR, FAILED, FINISHED})
 # Urgent events skip the hold and go out at once on every enabled channel.
-URGENT_EVENTS: Final[frozenset[str]] = frozenset({NEEDS_INPUT, BUDGET_NEAR})
+URGENT_EVENTS: Final[frozenset[str]] = frozenset({BUDGET_NEAR})
 # Events that only ever land in the inbox, whatever the grid says.
 INBOX_ONLY_EVENTS: Final[frozenset[str]] = frozenset({PRODUCT_NEWS})
 
@@ -68,7 +66,6 @@ def _row(inbox: bool, email: bool, chrome: bool, slack: bool) -> dict[str, bool]
 # and a push only reaches browsers the user subscribed in Settings. A stored
 # grid always overrides these cells, so a saved opt-out stays off.
 DEFAULT_GRID: Final[dict[str, dict[str, bool]]] = {
-    NEEDS_INPUT: _row(True, True, True, True),
     BUDGET_NEAR: _row(True, True, True, False),
     FAILED: _row(True, True, True, False),
     FINISHED: _row(True, True, True, False),

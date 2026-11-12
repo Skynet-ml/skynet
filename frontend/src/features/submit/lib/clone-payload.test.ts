@@ -16,130 +16,59 @@ registerHooks({
 });
 const { cloneToSlices } = await import("./clone-payload.ts");
 
-test("a unified run clones every slice it stored", () => {
-  const slices = cloneToSlices(
-    "blackbox",
-    {
-      payload_kind: "unified_v1",
-      name: "stored-name",
-      is_private: true,
-      task: {
-        objective: "Summarize tickets",
-        background: "Support queue",
-        artifact: { kind: "prompt", starting_version: "Summarize:" },
-      },
-      data: {
-        mode: "pairs",
-        cases: [
-          { input: { ticket: "a" }, expected: "x" },
-          { input: { ticket: "b" }, expected: "y" },
-        ],
-        input_fields: ["ticket"],
-        split: { train: 0.6, val: 0.2, test: 0.2 },
-        shuffle: false,
-      },
-      optimizer: { choice: "gepa", budget: { max_scorer_runs: 50 } },
-      models: {
-        reflection_model: { name: "gpt-x" },
-        metric_model: { name: "judge-y" },
-      },
-      workspace: { run_code: "def run(a, i): ...", metric_code: "def score(i, o): return llm('x', model='judge-y')" },
-    },
-    "Job name",
-  );
-  assert.equal(slices.meta.name, "Job name");
-  assert.equal(slices.meta.isPrivate, true);
-  assert.equal(slices.task.artifactKind, "prompt");
-  assert.equal(slices.task.startingVersion, "Summarize:");
-  assert.equal(slices.inputs.mode, "pairs");
-  assert.equal(slices.inputs.cases?.length, 2);
-  assert.deepEqual(slices.inputs.inputFields, ["ticket"]);
-  assert.deepEqual(slices.inputs.split, { train: 0.6, val: 0.2, test: 0.2 });
-  assert.equal(slices.inputs.shuffle, false);
-  assert.equal(slices.optimizer.choice, "gepa");
-  assert.equal(slices.optimizer.reflectionModel?.name, "gpt-x");
-  assert.equal("metricModelMode" in slices.workspace, false);
-  assert.deepEqual(slices.workspace.metricModel, { name: "judge-y" });
-  assert.equal(slices.workspace.runCode, "def run(a, i): ...");
-});
-
 test("a metric model equal to reflection is not pinned when cloning", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
-    models: { reflection_model: { name: "same" }, metric_model: { name: "same" } },
-    workspace: { metric_code: "llm()" },
+  const slices = cloneToSlices({
+    reflection_model_config: { name: "same" },
+    scorer: { metric_code: "llm()", model: { name: "same" } },
   });
   assert.equal(slices.optimizer.reflectionModel?.name, "same");
   assert.equal(slices.workspace.metricModel, null);
 });
 
 test("a code-derived metric model is not pinned when cloning", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
-    models: { reflection_model: { name: "r" }, task_model: { name: "a/b" }, metric_model: { name: "a/b" } },
-    workspace: { metric_code: "llm(model='a/b')" },
+  const slices = cloneToSlices({
+    reflection_model_config: { name: "r" },
+    task_model_config: { name: "a/b" },
+    scorer: { metric_code: "llm(model='a/b')", model: { name: "a/b" } },
   });
   assert.equal(slices.workspace.metricModel, null);
 });
 
 test("a legacy metric model the code replaces is dropped when cloning", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
-    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
-    workspace: { metric_code: "llm(model='a/b')" },
+  const slices = cloneToSlices({
+    reflection_model_config: { name: "r" },
+    scorer: { metric_code: "llm(model='a/b')", model: { name: "old" } },
   });
   assert.equal(slices.workspace.metricModel, null);
 });
 
 test("a distinct legacy metric model is dropped when the code names no model", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
-    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
-    workspace: { metric_code: "llm('x')" },
+  const slices = cloneToSlices({
+    reflection_model_config: { name: "r" },
+    scorer: { metric_code: "llm('x')", model: { name: "old" } },
   });
   assert.equal(slices.workspace.metricModel, null);
 });
 
 test("a distinct legacy metric model is pinned when the code names it", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
-    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
-    workspace: { metric_code: "llm('x', model='old')" },
+  const slices = cloneToSlices({
+    reflection_model_config: { name: "r" },
+    scorer: { metric_code: "llm('x', model='old')", model: { name: "old" } },
   });
   assert.deepEqual(slices.workspace.metricModel, { name: "old" });
 });
 
 test("a legacy metric model is dropped when cloning a metric that never calls llm", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
-    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
-    workspace: { metric_code: "def score(example, output):\n    return 1.0\n" },
+  const slices = cloneToSlices({
+    reflection_model_config: { name: "r" },
+    scorer: { metric_code: "def score(example, output):\n    return 1.0\n", model: { name: "old" } },
   });
   assert.equal(slices.workspace.metricModel, null);
-});
-
-test("a legacy black-box run maps objective, seed, cases and scorer", () => {
-  const slices = cloneToSlices("blackbox", {
-    objective: "Write emails",
-    background: "B2B",
-    seed_candidate: { system: "Be brief", user: "{brief}" },
-    cases: [{ brief: "launch", expected: "Hi" }, { brief: "renewal" }],
-    scorer: { kind: "python", metric_code: "def score(c, o): return llm('x')", model: { name: "judge" } },
-    reflection_model_config: { name: "refl" },
-  });
-  assert.equal(slices.task.objective, "Write emails");
-  assert.deepEqual(slices.task.startingVersion, { system: "Be brief", user: "{brief}" });
-  assert.equal(slices.inputs.mode, "pairs");
-  assert.deepEqual(slices.inputs.cases?.[0], { input: { brief: "launch" }, expected: "Hi" });
-  assert.deepEqual(slices.inputs.cases?.[1], { input: { brief: "renewal" }, expected: null });
-  assert.equal(slices.workspace.metricCode, "def score(c, o): return llm('x')");
-  assert.equal(slices.workspace.metricModel, null);
-  assert.equal(slices.optimizer.reflectionModel?.name, "refl");
 });
 
 test("a black-box clone drops derived models and retains a legacy model the code names", () => {
   const clone = (model: string, code: string, reflection = "r") =>
-    cloneToSlices("blackbox", {
+    cloneToSlices({
       target: { kind: "repo", repo: { repository: "example/site" } },
       reflection_model_config: { name: reflection },
       scorer: { kind: "python", metric_code: code, model: { name: model } },
@@ -151,48 +80,20 @@ test("a black-box clone drops derived models and retains a legacy model the code
   assert.deepEqual(clone("old", "llm(model='old')"), { name: "old" });
 });
 
-for (const shape of ["unified", "blackbox"] as const) {
-  test(`${shape} clone keeps same-name models with distinct settings`, () => {
-    const reflection = { name: "openai/r", token_source: "managed" };
-    const clone = (metric: Record<string, unknown>) =>
-      cloneToSlices("blackbox", shape === "unified"
-        ? { payload_kind: "unified_v1", models: { reflection_model: reflection, metric_model: metric }, workspace: { metric_code: "llm(model='openai/r')" } }
-        : { reflection_model_config: reflection, scorer: { metric_code: "llm(model='openai/r')", model: metric } },
-      ).workspace.metricModel;
-    for (const metric of [
-      { name: "openai/r", token_source: "byok" },
-      { name: "openai/r", token_source: "managed", byok_provider: "openrouter" },
-      { name: "openai/r", token_source: "managed", extra: { economy_mode: true } },
-      { name: "openai/r", token_source: "managed", temperature: 0.2 },
-    ]) assert.notEqual(clone(metric), null);
-    assert.equal(clone({ name: "openai/r" }), null);
-  });
-}
-
-test("a legacy DSPy run maps rows by the column mapping and keeps metric_code", () => {
-  const slices = cloneToSlices("run", {
-    dataset: [
-      { email_text: "Win $1000", category: "spam", note: "x" },
-      { email_text: "Standup", category: "ok", note: "y" },
-    ],
-    column_mapping: { inputs: { email_text: "str" }, outputs: { category: "str" } },
-    metric_code: "def metric(gold, pred, trace=None): ...",
-    model_config: { name: "task-m" },
-  });
-  assert.equal(slices.task.artifactKind, "dspy_program");
-  assert.deepEqual(slices.inputs.cases?.[0], {
-    input: { email_text: "Win $1000" },
-    expected: { category: "spam" },
-  });
-  assert.deepEqual(slices.inputs.inputFields, ["email_text"]);
-  assert.equal(slices.inputs.expectedField, "category");
-  assert.equal(slices.workspace.metricCode, "def metric(gold, pred, trace=None): ...");
-  assert.equal(slices.optimizer.taskModel?.name, "task-m");
-});
-
-test("an unmapped legacy DSPy run leaves the inputs empty", () => {
-  const slices = cloneToSlices("grid_search", { dataset: [{ a: 1 }] });
-  assert.deepEqual(slices.inputs, {});
+test("a black-box clone keeps same-name models with distinct settings", () => {
+  const reflection = { name: "openai/r", token_source: "managed" };
+  const clone = (metric: Record<string, unknown>) =>
+    cloneToSlices({
+      reflection_model_config: reflection,
+      scorer: { metric_code: "llm(model='openai/r')", model: metric },
+    }).workspace.metricModel;
+  for (const metric of [
+    { name: "openai/r", token_source: "byok" },
+    { name: "openai/r", token_source: "managed", byok_provider: "openrouter" },
+    { name: "openai/r", token_source: "managed", extra: { economy_mode: true } },
+    { name: "openai/r", token_source: "managed", temperature: 0.2 },
+  ]) assert.notEqual(clone(metric), null);
+  assert.equal(clone({ name: "openai/r" }), null);
 });
 
 // Sanitized copy of a stored legacy repository run (staging run 52923146): ids,
@@ -285,7 +186,7 @@ const LEGACY_REPO_RUN = {
 };
 
 test("a stored legacy repository run clones every setting the wizard holds", () => {
-  const slices = cloneToSlices("blackbox", LEGACY_REPO_RUN, "Repo check: CV (ShinkaEvolve)");
+  const slices = cloneToSlices(LEGACY_REPO_RUN, "Repo check: CV (ShinkaEvolve)");
   assert.equal(slices.meta.name, "Repo check: CV (ShinkaEvolve)");
   assert.equal(slices.meta.isPrivate, true);
   assert.equal(slices.task.objective, "Make the CV stronger.");
@@ -306,62 +207,24 @@ test("a stored legacy repository run clones every setting the wizard holds", () 
     editablePaths: ["."],
     setupCommand: "npm ci && npm run build",
   });
-  assert.equal(slices.task.artifactKind, "code");
   assert.deepEqual(slices.inputs, { mode: "single" });
 });
 
-test("a legacy text run clones without a repository", () => {
-  const slices = cloneToSlices("blackbox", {
-    target: { kind: "text" },
-    cases: [{ question: "q" }],
-  });
-  assert.equal(slices.task.repo, undefined);
-  assert.equal(slices.inputs.rowCount, 1);
-});
-
 test("a legacy Auto-mode run keeps the default engine", () => {
-  const slices = cloneToSlices("blackbox", {
+  const slices = cloneToSlices({
     strategy: { mode: "auto", engine: "gepa" },
     reflection_model_config: { name: "refl" },
   });
   assert.equal(slices.optimizer.choice, undefined);
 });
 
-test("a clone restores the extra workspace files; an old payload has none", () => {
-  const base = {
-    payload_kind: "unified_v1",
-    task: { objective: "o", artifact: { kind: "prompt", starting_version: "s" } },
-    data: { mode: "single", cases: [{ input: {} }], input_fields: [] },
-    optimizer: { choice: "auto", budget: { max_scorer_runs: 10 } },
-    models: { reflection_model: { name: "m" } },
-  };
-  const withFiles = cloneToSlices("blackbox", {
-    ...base,
-    workspace: {
-      run_code: "from helpers import f",
-      metric_code: "def score(i, o): ...",
-      files: { "helpers.py": "def f(): ...", "run.py": "ignored", bad: 3 },
-    },
-  } as never);
-  assert.equal(withFiles.workspace.runCode, "from helpers import f");
-  assert.deepEqual(withFiles.workspace.files, { "helpers.py": "def f(): ..." });
-  const old = cloneToSlices("blackbox", {
-    ...base,
-    workspace: { run_code: "def run(a, i): ...", metric_code: "def score(i, o): ..." },
-  } as never);
-  assert.deepEqual(old.workspace.files, {});
-});
-
 test("an older run-wide economy run turns economy on for each managed model", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
+  const slices = cloneToSlices({
     economy_mode: true,
-    models: {
-      task_model: { name: "task", token_source: "byok", byok_provider: "openrouter" },
-      reflection_model: { name: "refl" },
-      extra_reflection_models: [{ name: "extra" }],
-      metric_model: { name: "judge" },
-    },
+    task_model_config: { name: "task", token_source: "byok", byok_provider: "openrouter" },
+    reflection_model_config: { name: "refl" },
+    extra_reflection_model_configs: [{ name: "extra" }],
+    scorer: { model: { name: "judge" } },
   });
   assert.equal(slices.optimizer.taskModel?.economy_mode, undefined);
   assert.equal(slices.optimizer.reflectionModel?.economy_mode, true);
@@ -371,12 +234,9 @@ test("an older run-wide economy run turns economy on for each managed model", ()
 });
 
 test("a legacy metric economy setting does not change the reflection model", () => {
-  const slices = cloneToSlices("blackbox", {
-    payload_kind: "unified_v1",
-    models: {
-      reflection_model: { name: "refl", extra: { economy_mode: true, temperature_hint: 1 } },
-      metric_model: { name: "refl" },
-    },
+  const slices = cloneToSlices({
+    reflection_model_config: { name: "refl", extra: { economy_mode: true, temperature_hint: 1 } },
+    scorer: { model: { name: "refl" } },
   });
   assert.equal(slices.optimizer.reflectionModel?.economy_mode, true);
   assert.deepEqual(slices.optimizer.reflectionModel?.extra, { temperature_hint: 1 });
@@ -386,14 +246,10 @@ test("a legacy metric economy setting does not change the reflection model", () 
 test("a clone compares the role actually copied by the resolver", () => {
   const base = { name: "judge", token_source: "managed", extra: { b: 2, a: 1 } };
   const clone = (metric: Record<string, unknown>, code = "llm(model='judge')") =>
-    cloneToSlices("blackbox", {
-      payload_kind: "unified_v1",
-      models: {
-        task_model: base,
-        reflection_model: { name: "judge", token_source: "byok" },
-        metric_model: metric,
-      },
-      workspace: { metric_code: code },
+    cloneToSlices({
+      task_model_config: base,
+      reflection_model_config: { name: "judge", token_source: "byok" },
+      scorer: { metric_code: code, model: metric },
     }).workspace.metricModel;
   assert.equal(clone({ name: "judge", extra: { a: 1, b: 2 } }), null);
   assert.notEqual(clone({ name: "judge", token_source: "byok" }), null);

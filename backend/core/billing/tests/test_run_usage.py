@@ -508,16 +508,6 @@ def test_anthropic_usage_counts_cached_input() -> None:
     assert (row.input_tokens, row.output_tokens) == (105, 7)
 
 
-def test_pair_filter_keeps_only_that_pairs_calls() -> None:
-    """Narrow a grid run to one pair's tagged calls."""
-    rows = aggregate(
-        [_op(evidence=_call(pair="0")), _op(evidence=_call(pair="1")), _op(role="runtime", cost_kind="sandbox")],
-        proposer=False,
-        pair="1",
-    )
-    assert [(row.pair, row.calls) for row in rows] == [("1", 1)]
-
-
 def test_direct_proposer_usage_is_a_row_with_an_estimate_and_no_charge() -> None:
     """Show calls paid on the owner's own Anthropic key, estimated, with nothing charged by Skynet."""
     usage = {"model": "claude-sonnet-4-5", "calls": 4, "prompt_tokens": 1000, "completion_tokens": 200}
@@ -525,7 +515,6 @@ def test_direct_proposer_usage_is_a_row_with_an_estimate_and_no_charge() -> None
     assert (row.role, row.billing, row.calls, row.charged_units) == (ROLE_PROPOSER, BILLING_DIRECT, 4, 0)
     assert row.provider_cents is not None
     assert row.provider_cents > 0
-    assert aggregate([], proposer=True, direct_usage=[usage], pair="0") == []
 
 
 def test_rounding_row_brings_the_rows_up_to_the_billed_charge() -> None:
@@ -590,9 +579,6 @@ def test_budgetless_run_is_rebuilt_from_its_result_and_adds_up_to_the_stamp() ->
     assert rows[0].latency_ms_total == 5 * 1000 + 61 * 500
     assert all(row.billing == BILLING_SKYNET for row in rows)
     assert sum(row.charged_units for row in rows) == cent_units(3)
-    assert (
-        from_result(_LEGACY_RESULT, task_model=None, reflection_model=None, proposer=False, byok=False, pair="0") == []
-    )
 
 
 def test_budgetless_charge_without_usage_keeps_its_own_row() -> None:
@@ -607,19 +593,6 @@ def test_budgetless_charge_without_usage_keeps_its_own_row() -> None:
     assert row.charged_units == cent_units(2)
 
 
-def test_budgetless_grid_pairs_carry_their_own_models() -> None:
-    """Read each grid pair's usage under its pair tag and narrow to one pair."""
-    pair = {
-        "pair_index": 1,
-        "generation_model": "openai/gpt-4o-mini",
-        "reflection_model": "openai/gpt-5",
-        "usage_by_model": [{"model": "openai/gpt-5", "input_tokens": 10, "output_tokens": 5}],
-    }
-    result = {"pair_results": [{**pair, "pair_index": 0}, pair]}
-    rows = from_result(result, task_model=None, reflection_model=None, proposer=False, byok=False, pair="1")
-    assert [(row.pair, row.role, row.input_tokens) for row in rows] == [("1", ROLE_REFLECTION, 10)]
-
-
 def test_usage_route_falls_back_to_the_result_when_the_run_has_no_budget() -> None:
     """Show an older run's recorded usage instead of an empty tab when no budget is linked."""
     job = {
@@ -631,7 +604,7 @@ def test_usage_route_falls_back_to_the_result_when_the_run_has_no_budget() -> No
         },
         "result": _LEGACY_RESULT,
     }
-    usage = run_usage(object(), job, None)
+    usage = run_usage(object(), job)
     assert sum(row["calls"] for row in usage["rows"]) == 67
     assert sum(row["input_tokens"] + row["output_tokens"] for row in usage["rows"]) == 21175
     assert sum(row["charged_cents"] for row in usage["rows"]) == pytest.approx(3)

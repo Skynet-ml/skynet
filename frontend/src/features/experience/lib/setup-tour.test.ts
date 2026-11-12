@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { COLOR_THEMES } from "../../../shared/lib/color-theme.ts";
 import { INTAKE_LLM_PHASES } from "./intake.ts";
 import {
-  MAX_SETUP_STOPS,
   SETUP_STOPS,
   THEME_OPTIONS,
   advancesOnAnswer,
@@ -26,6 +25,15 @@ function sources(dir: string): string[] {
     return /\.tsx$/.test(name) ? [readFileSync(path, "utf8")] : [];
   });
 }
+
+/*
+ * The tour stays short: every stop past this is one the user would skip.
+ * Ten covers the two looks the user sees change behind the card (level
+ * and theme), the one stop a billing answer can add (the key)
+ * and the two places the user connects things (data sources and the update
+ * grid).
+ */
+const MAX_SETUP_STOPS = 10;
 
 test("the setup stays short and every stop is unique", () => {
   for (const billing of ["platform", "byok", "subscription"] as const) {
@@ -67,10 +75,8 @@ test("the privacy question frames its real control in Settings", () => {
 // The stops where the user sets the real controls, and the file that tags each anchor.
 const HANDS_ON: Record<string, string> = {
   providers: "features/billing/components/ByokKeysSection.tsx",
-  clis: "features/settings/components/AgentEngineSetting.tsx",
   connectors: "features/connectors/components/ConnectorsTab.tsx",
   notifications: "features/settings/components/NotificationsTab.tsx",
-  channels: "features/settings/components/NotificationsTab.tsx",
 };
 
 test("each hands-on stop opens its Settings tab on the real controls, with no question", () => {
@@ -94,13 +100,6 @@ test("the Settings tabs the setup opens are ones every user sees", () => {
   }
 });
 
-test("the Chrome and Slack connections sit inside the channels frame", () => {
-  const tab = readFileSync(join(SRC, "features/settings/components/NotificationsTab.tsx"), "utf8");
-  const frame = tab.slice(tab.indexOf('data-setup="notification-channels"'));
-  assert.ok(frame.indexOf("turnOnChrome") > 0, "no Chrome switch-on in the frame");
-  assert.ok(frame.indexOf("<SlackConnectionSection") > 0, "no Slack section in the frame");
-});
-
 test("only stops about a Settings control open Settings", () => {
   for (const stop of SETUP_STOPS) {
     if (stop.settings) {
@@ -115,11 +114,8 @@ test("the model key stop shows only after a bring-your-own-key answer", () => {
   assert.ok(setupStops("byok").length <= MAX_SETUP_STOPS);
 });
 
-test("the CLI stop shows only after a CLI subscription answer", () => {
-  assert.ok(setupStops("subscription").some((s) => s.id === "clis"));
-  assert.ok(!setupStops("subscription").some((s) => s.id === "providers"));
-  assert.ok(!setupStops("platform").some((s) => s.id === "clis"));
-  assert.ok(!setupStops("byok").some((s) => s.id === "clis"));
+test("a CLI subscription answer adds no stop", () => {
+  assert.deepEqual(setupStops("subscription"), setupStops("platform"));
 });
 
 test("the Mac app offers the coding CLI subscription as a billing answer; the hosted app does not", () => {
@@ -163,7 +159,7 @@ test("the theme stop follows the level and offers every Settings theme", () => {
 
 test("a setup back from a sign-in picks up at the stop it left", () => {
   const stops = setupStops("platform");
-  assert.equal(stops[resumeStopIndex(stops, "channels")]!.id, "channels");
+  assert.equal(stops[resumeStopIndex(stops, "notifications")]!.id, "notifications");
   assert.equal(stops[resumeStopIndex(stops, "connectors")]!.id, "connectors");
   assert.equal(resumeStopIndex(stops, undefined), 0);
   // The key stop is gone once the billing answer changed away from an own key.

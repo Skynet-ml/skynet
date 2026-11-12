@@ -8,10 +8,13 @@ import {
   localModelRefusalMessage,
   useLocalStatus,
 } from "@/features/local-runtime";
-import { agentSubscriptionFor, readPref } from "@/features/settings";
+import { composerSeed, rememberComposerPick } from "@/features/settings";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { I18N_KEY } from "@/shared/lib/i18n";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
+import { isLocalMode } from "@/shared/lib/runtime-env";
+import { webPicked } from "@/shared/lib/api";
+import { parseSourceKey, sourceKey, type ApiSource } from "@/shared/lib/api-route";
 import { liveEffort, sentFastMode } from "@/shared/lib/effort-slider";
 import {
   appendReasoning,
@@ -29,7 +32,12 @@ import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/stee
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
-import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
+import {
+  dropPendingToolCalls,
+  pendingToolCall,
+  placeToolCall,
+  stopToolCalls,
+} from "../lib/pending-tool-calls";
 import { editMode, retryMode } from "../lib/edit-turn";
 import type {
   ChatTurn,
@@ -87,10 +95,15 @@ export interface GeneralistAgentState {
    * conversation has no in-memory session and must be loaded from the server.
    */
   activateConversation: (id: string) => boolean;
-  /** Open a server-loaded conversation as the displayed session. */
-  openConversation: (id: string, messages: AgentMessage[]) => void;
+  /**
+   * Open a conversation as the displayed session. A null id shows messages
+   * the server has no copy of: the next turn saves a new conversation.
+   */
+  openConversation: (id: string | null, messages: AgentMessage[], options?: { moveQueue?: boolean }) => void;
   /** Drop a conversation's session (aborting its stream) after deletion. */
   discardConversation: (id: string) => void;
+  /** Drop the displayed session (aborting its stream), even one with no server id yet. */
+  discardActive: () => void;
   /** Conversation ids with a stream running or waiting in the queue. */
   busyConversationIds: ReadonlySet<string>;
   /** Busy sessions other than the displayed one (badge / pill signal). */
@@ -197,6 +210,8 @@ interface SessionRuntime {
   turnStart: number;
   /** Edit target of the latest run until the server confirms it saved the turn. */
   unsavedEdit: { text: string; occurrence: number } | null;
+  /** Where the latest turn runs; its approval confirm goes to the same place. */
+  source: ApiSource;
 }
 
 function blankSession(key: string): SessionView {
@@ -220,6 +235,7 @@ function blankRuntime(): SessionRuntime {
     pendingRun: null,
     turnStart: 0,
     unsavedEdit: null,
+    source: "local",
   };
 }
 
@@ -278,9 +294,11 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     [steerQueues],
   );
 
-  // Seeded from the settings-modal default; the panel is client-only
-  // (ssr:false), so the localStorage read is hydration-safe.
-  const [model, setModelState] = React.useState<string | null>(() => readPref("composerModel"));
+  // The panel is client-only (ssr:false), so the localStorage read is
+  // hydration-safe.
+  const [model, setModelState] = React.useState<string | null>(
+    () => composerSeed(isLocalMode()).model,
+  );
   // Mirrored in a ref so the streaming closures (retry, regenerate) always
   // send the current choice without re-memoizing the run machinery.
   const modelRef = React.useRef<string | null>(model);
@@ -289,7 +307,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     setModelState(next);
   }, []);
   const [reasoningEffort, setReasoningEffortState] = React.useState<string | null>(() =>
-    liveEffort(readPref("composerEffort")),
+    liveEffort(composerSeed(isLocalMode()).effort),
   );
   const effortRef = React.useRef<string | null>(reasoningEffort);
   const setReasoningEffort = React.useCallback((next: string | null) => {
@@ -305,9 +323,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
 
   // Effect ordering guarantees this snapshot is current at send time: this
   // child hook's effects run before the parent panel's, so any same-commit
-  // programmatic send (e.g. the code-authoring handoff) sees the latest props.
-  // Same-tick sends that must carry not-yet-committed values pass them via the
-  // ``wizardStateOverride`` argument instead (see the dataset/code handoffs).
+  // programmatic send sees the latest props.
   const snapshotRef = React.useRef({ wizardState, trustMode });
   React.useEffect(() => {
     snapshotRef.current = { wizardState, trustMode };
@@ -511,6 +527,13 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         if (streamingKeysRef.current.delete(key)) requestPump();
       };
 
+      // A chat stays where it started; a new chat starts on the side picked
+      // in the header. The composer lists that side's models, so the turn
+      // sends the pick resolved for that side.
+      const savedId = sessionsRef.current.get(key)?.conversationId ?? null;
+      const saved = savedId ? parseSourceKey(savedId) : null;
+      const source: ApiSource = saved ? saved.source : webPicked() ? "hosted" : "local";
+      rt.source = source;
       const steerKey = newSteerKey();
       const steerQueue = steerQueueFor(key);
       const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
@@ -542,7 +565,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             { role: "assistant", content: "", toolCalls: [] }];
         });
       };
-      steerQueue.openTurn(agentSteerChannel(steerKey, applySteer));
+      steerQueue.openTurn(agentSteerChannel(steerKey, applySteer, source));
       // The reply bubble closed by the latest applied steer, which the
       // finished turn's `assistant_message` may repeat.
       let replyBeforeSteer: string | null = null;
@@ -550,21 +573,24 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       // Every stream callback short-circuits on ``controller.signal.aborted``
       // so a slow stream replaced by a fresh ``send`` (or by the unmount-time
       // abort) cannot leak state writes or window events into the live view.
-      void localAgentModel(modelRef.current, agentSubscriptionFor("generalist")).then((sentModel) =>
+      const hosted = source === "hosted";
+      rememberComposerPick(isLocalMode(), modelRef.current, effortRef.current);
+      void localAgentModel(modelRef.current, hosted).then((sentModel) =>
         streamGeneralistAgent(
           {
             user_message: run.message,
             chat_history: run.chatHistory,
             wizard_state: run.wizardState,
             trust_mode: run.trustMode,
-            conversation_id: sessionsRef.current.get(key)?.conversationId ?? null,
+            conversation_id: saved?.id ?? null,
             regenerate: run.regenerate,
             edit_user_text: run.editUserTurn?.text,
             edit_user_occurrence: run.editUserTurn?.occurrence,
             locale: getActiveLocale(),
             model: sentModel ?? undefined,
             reasoning_effort:
-              localAgentEffort(modelRef.current, effortRef.current, sentModel) ?? undefined,
+              localAgentEffort(modelRef.current, effortRef.current, sentModel, hosted) ??
+              undefined,
             fast_mode: sentFastMode(fastRef.current, sentModel) || undefined,
             steer_key: steerKey,
           },
@@ -578,9 +604,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               if (controller.signal.aborted) return;
               if (!ev.conversation_id) return;
               rt.unsavedEdit = null;
-              patchSession(key, { conversationId: ev.conversation_id });
+              const id = sourceKey(source, ev.conversation_id);
+              patchSession(key, { conversationId: id });
               callbacksRef.current.onConversationMeta?.(
-                ev.conversation_id,
+                id,
                 ev.title,
                 eventContext(key),
               );
@@ -797,6 +824,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               releaseSlot();
             },
           },
+          source,
         ),
       );
     },
@@ -1033,6 +1061,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "" });
     patchThinking(key, (segments) => closeThinking(segments, Date.now()));
+    patchMessages(key, (prev) => {
+      const last = prev[prev.length - 1];
+      if (!last || last.role !== "assistant" || !last.toolCalls?.some((t) => t.status === "running")) {
+        return prev;
+      }
+      const next = prev.slice();
+      next[next.length - 1] = { ...last, toolCalls: stopToolCalls(last.toolCalls, Date.now()) };
+      return next;
+    });
     if (wasQueued) {
       // Nothing streamed yet — drop the empty assistant placeholder so the
       // transcript doesn't keep a hollow bubble for a turn that never ran.
@@ -1100,28 +1137,30 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const openConversation = React.useCallback(
-    (id: string, loaded: AgentMessage[]) => {
+    (id: string | null, loaded: AgentMessage[], options?: { moveQueue?: boolean }) => {
+      const from = options?.moveQueue ? steerQueues.get(activeKeyRef.current) : undefined;
+      const moved = (from?.getSnapshot().queued ?? []).flatMap((item) => from?.take(item.id) ?? []);
       const key = nextKey();
       commit((draft) => {
-        draft.set(key, { ...blankSession(key), conversationId: id, messages: loaded });
+        draft.set(key, {
+          ...blankSession(key),
+          conversationId: id,
+          messages: loaded,
+        });
         pruneInactive(draft, key);
       });
       setActive(key);
+      if (moved.length === 0) return;
+      // Held, as on the old chat, so no follow-up runs ahead of a resent turn.
+      const queue = steerQueueFor(key);
+      for (const text of moved) queue.enqueue(text);
+      queue.pause();
     },
-    [commit, nextKey, pruneInactive, setActive],
+    [commit, nextKey, pruneInactive, setActive, steerQueues, steerQueueFor],
   );
 
-  const discardConversation = React.useCallback(
-    (id: string) => {
-      let found: string | null = null;
-      for (const [key, session] of sessionsRef.current) {
-        if (session.conversationId === id) {
-          found = key;
-          break;
-        }
-      }
-      if (found === null) return;
-      const key = found;
+  const discardSession = React.useCallback(
+    (key: string) => {
       abortSession(key);
       runtimesRef.current.delete(key);
       dropSteerQueue(key);
@@ -1142,6 +1181,20 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     [abortSession, commit, nextKey, setActive, dropSteerQueue],
   );
 
+  const discardConversation = React.useCallback(
+    (id: string) => {
+      for (const [key, session] of sessionsRef.current) {
+        if (session.conversationId === id) {
+          discardSession(key);
+          return;
+        }
+      }
+    },
+    [discardSession],
+  );
+
+  const discardActive = React.useCallback(() => discardSession(activeKeyRef.current), [discardSession]);
+
   const active = sessions.get(activeKey) ?? blankSession(activeKey);
 
   const activeSteerQueue = steerQueueFor(activeKey);
@@ -1151,14 +1204,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activeSteerQueue.getSnapshot,
   );
   const midTurn = React.useMemo(
-    () => ({
-      ...midTurnOf(() => activeSteerQueue, steerSnapshot),
-      stopAndSendNow: () => {
-        const key = activeKey;
-        activeSteerQueue.stopAndSendNow(() => stopSession(key));
-      },
-    }),
-    [activeKey, activeSteerQueue, steerSnapshot, stopSession],
+    () => midTurnOf(() => activeSteerQueue, steerSnapshot),
+    [activeSteerQueue, steerSnapshot],
   );
 
   const confirmApproval = React.useCallback(
@@ -1167,7 +1214,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       const pa = sessionsRef.current.get(key)?.pendingApproval;
       if (!pa) return;
       patchSession(key, { pendingApproval: null });
-      const resolved = await confirmGeneralistApproval(pa.id, approved);
+      const source = runtimesRef.current.get(key)?.source ?? "local";
+      const resolved = await confirmGeneralistApproval(pa.id, approved, source);
       if (!resolved) {
         // The confirm never reached the stream's process (network blip or a
         // different replica) — silently dropping it leaves the tool hanging
@@ -1219,6 +1267,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activateConversation,
     openConversation,
     discardConversation,
+    discardActive,
     busyConversationIds,
     backgroundBusyCount,
   };

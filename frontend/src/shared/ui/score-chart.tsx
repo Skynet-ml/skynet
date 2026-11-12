@@ -21,16 +21,13 @@ import {
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 /**
- * What one step along the x-axis is: the prompt (DSPy runs), one named file,
- * one text whose render kind names it, or a bare version when nothing fits.
+ * What one step along the x-axis is: one named file, one text whose render
+ * kind names it, or a bare version when nothing fits.
  */
 export type ScoreChartArtifact =
-  | { kind: "prompt" }
   | { kind: "version" }
   | { kind: "file"; name: string }
   | { kind: "text"; text: string };
-
-const PROMPT: ScoreChartArtifact = { kind: "prompt" };
 
 function artifactName(artifact: ScoreChartArtifact): string | null {
   if (artifact.kind === "file") return artifact.name;
@@ -41,7 +38,6 @@ function artifactName(artifact: ScoreChartArtifact): string | null {
 }
 
 function axisLabel(artifact: ScoreChartArtifact): string {
-  if (artifact.kind === "prompt") return msg("shared.score_chart.prompt_version_axis");
   const name = artifactName(artifact);
   return name
     ? formatMsg("shared.score_chart.artifact_version_axis", { artifact: name })
@@ -49,7 +45,6 @@ function axisLabel(artifact: ScoreChartArtifact): string {
 }
 
 function pointLabel(artifact: ScoreChartArtifact, label: string): string {
-  if (artifact.kind === "prompt") return formatMsg("shared.score_chart.prompt_version", { label });
   const name = artifactName(artifact);
   return name
     ? formatMsg("shared.score_chart.artifact_version", { artifact: name, label })
@@ -88,10 +83,10 @@ function ScoreChartTooltip({
 
 export function ScoreChart({
   data,
-  artifact = PROMPT,
+  artifact,
 }: {
   data: Array<{ trial: number; score: number; best: number }>;
-  artifact?: ScoreChartArtifact;
+  artifact: ScoreChartArtifact;
 }) {
   return (
     <ResponsiveContainer width="100%" height="100%">

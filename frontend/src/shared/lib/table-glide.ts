@@ -1,7 +1,7 @@
 /** Pure helpers behind the table glide animation (``table-glide.ts`` primitive). */
 
 /** Container widths, in rem, where ``collapse`` columns fold (see globals.css). */
-export const TABLE_FOLD_POINTS_REM = [32, 44, 60] as const;
+const TABLE_FOLD_POINTS_REM = [32, 44, 60] as const;
 
 /** Return how many fold points a container of ``widthPx`` sits at or below. */
 export function foldTier(widthPx: number, remPx: number): number {

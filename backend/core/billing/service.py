@@ -18,13 +18,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 
 import stripe
-from sqlalchemy import func, select
+from sqlalchemy import URL, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..api.alerts import send_alert
@@ -40,12 +43,12 @@ from ..storage.models import (
     BillingWebhookEventModel,
     ExecutionBudgetModel,
     JobModel,
+    UserModel,
     WalletLedgerModel,
 )
 from ..telemetry import record_server_event
 from .budget_amounts import wallet_reserved_cents
 from .openrouter_float import check_float
-from .plans import PAST_DUE_STATUS, PLAN_FREE, PLAN_PRO, is_pro_status
 from .pricing import ModelUsage, cents_for_usage
 
 logger = logging.getLogger("app.billing.service")
@@ -153,15 +156,122 @@ def _is_customerless(customer_id: str) -> bool:
     return not customer_id or customer_id.startswith(LOCAL_CUSTOMER_PREFIX)
 
 
-# Subscription lifecycle events the webhook mirrors onto ``billing_customers``.
-# Each one re-reads the subscription, so they are order-independent.
-SUBSCRIPTION_EVENTS = frozenset(
-    {
-        "customer.subscription.created",
-        "customer.subscription.updated",
-        "customer.subscription.deleted",
-    }
-)
+# Staging test-credit grants (SKY-573). The test-account tool signs up
+# ``staging-<label>-<6 hex>@`` this inbox; nothing else may receive a grant.
+# The cap is one shared total per UTC day across all accounts in the staging
+# database, so an agent loop cannot drain more than $50. PR previews are
+# refused: each preview has its own database on the same RDS instance, and the
+# cap and advisory lock are per database, so previews would multiply the cap.
+TEST_ACCOUNT_INBOX = "eegeupelae.resend.app"
+TEST_GRANT_DAILY_CAP_CENTS = 5000
+TEST_GRANT_KEY_PREFIX = "testgrant:"
+_TEST_ACCOUNT_ID = re.compile(r"staging-[a-z0-9-]+-[0-9a-f]{6}")
+_SETTLEMENT_KEY_MAX_LENGTH = 64
+_LEDGER_DESCRIPTION_MAX_LENGTH = 255
+# The account sees the ledger description in its wallet history, so it holds
+# only this label and the reason. The approval text goes to the operator log.
+_TEST_GRANT_LABEL = "Test grant: "
+# Continues the 7421370000xx advisory-lock series (worker/engine uses ...07).
+# It serializes grants on different accounts, which the per-account row lock
+# cannot, so two grants cannot both read a total under the cap and together
+# pass it.
+_TEST_GRANT_LOCK_ID = 742137000008
+# Terraform names each RDS instance ``skynet-<environment>``, and its address
+# starts with that identifier. A grant refuses any other PostgreSQL host even
+# when ``APP_ENVIRONMENT`` is overridden. A tunnel to ``localhost`` is refused
+# too.
+_STAGING_DB_HOST_LABEL = "skynet-staging"
+# PR previews use ``skynet_pr_<n>`` databases on the same staging RDS instance
+# (infra/terraform/scripts/preview.sh), so the host alone cannot tell them
+# apart from staging. Only the staging database name passes.
+_STAGING_DB_NAME = "skynet"
+# libpq reads these to pick a server or service file that the URL does not show.
+_LIBPQ_OVERRIDE_ENV = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+
+
+class GrantRefusedError(Exception):
+    """A test-credit grant failed a guard; nothing was written."""
+
+
+@dataclass(frozen=True)
+class GrantResult:
+    """Outcome of a test-credit grant.
+
+    Attributes:
+        credited_cents: Cents this key credited (on a replay, the first grant's cents).
+        balance_cents: Account balance after the grant.
+        replayed: Whether the key was already used, so nothing new was credited.
+    """
+
+    credited_cents: int
+    balance_cents: int
+    replayed: bool
+
+
+def check_account_email(account_id: str) -> str:
+    """Build the email the test-account tool signs up for an account id.
+
+    Args:
+        account_id: Id the tool printed, such as ``staging-label-a1b2c3``.
+
+    Returns:
+        The lowercased account email, which is also the username.
+    """
+    return f"{account_id.strip().lower()}@{TEST_ACCOUNT_INBOX}"
+
+
+def _test_grant_target() -> str | None:
+    """Return the account-id prefix this deployment may grant to.
+
+    Returns:
+        ``"staging"`` on staging, else ``None`` (PR previews included).
+    """
+    return "staging" if settings.app_environment == "staging" else None
+
+
+def _is_staging_database(url: URL) -> bool:
+    """Return whether ``url`` points at the staging database instance.
+
+    SQLite passes, because no deployed environment uses it, so it can never be
+    the production database.
+
+    Args:
+        url: The engine URL. Only its backend, host, database and query are read.
+
+    Returns:
+        ``True`` for SQLite, or for a host whose first label is the staging RDS
+        identifier and the staging database name, with no ``host``,
+        ``hostaddr`` or ``service`` query key and no libpq override variable
+        in the environment.
+    """
+    if url.get_backend_name() == "sqlite":
+        return True
+    # libpq lets these query keys and environment variables pick another
+    # server, so such a URL could reach it while its host looks like staging.
+    if any(key in url.query for key in ("host", "hostaddr", "service")):
+        return False
+    if any(os.environ.get(name) for name in _LIBPQ_OVERRIDE_ENV):
+        return False
+    return (url.host or "").lower().split(".")[0] == _STAGING_DB_HOST_LABEL and url.database == _STAGING_DB_NAME
+
+
+def _is_test_account(username: str, target: str) -> bool:
+    """Return whether ``username`` is a test-tool account for this deployment.
+
+    Args:
+        username: Account email.
+        target: ``staging``, from :func:`_test_grant_target`.
+
+    Returns:
+        ``True`` when the email has the tool's shape and this deployment's target.
+    """
+    local, _, domain = username.partition("@")
+    return (
+        domain == TEST_ACCOUNT_INBOX
+        and _TEST_ACCOUNT_ID.fullmatch(local) is not None
+        and local.startswith(f"{target}-")
+    )
+
 
 # Ceiling handed to fee-less BYOK runs: far above any real run's full cost,
 # small enough to stay a safe int everywhere cents are summed.
@@ -195,22 +305,6 @@ class LedgerRow:
 
 
 @dataclass(frozen=True)
-class PlanSnapshot:
-    """The account's platform plan as the wallet surfaces show it.
-
-    ``renews_at`` is the ISO-8601 end of the current billing period (when Pro
-    renews, or lapses if ``cancel_at_period_end``); ``available`` is whether a
-    Pro price is configured on this deploy, so the UI can hide the upgrade.
-    """
-
-    plan: str = PLAN_FREE
-    status: str | None = None
-    renews_at: str | None = None
-    cancel_at_period_end: bool = False
-    available: bool = False
-
-
-@dataclass(frozen=True)
 class WalletSnapshot:
     """The account's billing state as a single read for the wallet surfaces."""
 
@@ -218,15 +312,17 @@ class WalletSnapshot:
     free_grant_remaining: int
     free_grant_total: int
     usage: list[LedgerRow] = field(default_factory=list)
-    plan: PlanSnapshot = field(default_factory=PlanSnapshot)
 
 
 @dataclass(frozen=True)
 class UsageDayRow:
-    """One calendar day's billed run spend, in cents."""
+    """One calendar day's billed run spend, in cents, with its run count and tokens."""
 
     date: str
     billed_cents: int
+    runs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -253,7 +349,9 @@ class UsageSnapshot:
     and per-model series the dashboard charts, plus the most recent raw ledger
     rows for the activity list. ``billed_cents`` is gross run spend (the
     absolute value of negative run rows). Top-ups and grants are excluded from
-    the spend rollups but still surface in ``entries``.
+    the spend rollups but still surface in ``entries``. ``runs`` counts owned
+    jobs created in the window. The per-day and per-model ``runs`` fields retain
+    their billed-call counts for the activity breakdowns.
     """
 
     start: str
@@ -342,52 +440,6 @@ def _stripe_value(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(key, default)
     return getattr(obj, key, default)
-
-
-def _subscription_period_end(subscription: Any) -> datetime | None:
-    """Return when the subscription's current billing period ends.
-
-    Stripe API versions from 2025-03-31 moved ``current_period_end`` from the
-    subscription onto each subscription item, so both places are read.
-
-    Args:
-        subscription: Stripe Subscription resource or test mapping.
-
-    Returns:
-        The period end as a UTC datetime, or ``None`` when Stripe sent none.
-    """
-    period_end = _stripe_value(subscription, "current_period_end")
-    if period_end is None:
-        items = _stripe_value(_stripe_value(subscription, "items", {}), "data", []) or []
-        if items:
-            period_end = _stripe_value(items[0], "current_period_end")
-    if period_end is None:
-        return None
-    return datetime.fromtimestamp(int(period_end), UTC)
-
-
-def _plan_snapshot(customer: BillingCustomerModel | None) -> PlanSnapshot:
-    """Project a billing row's mirrored subscription into the wallet's plan view.
-
-    Args:
-        customer: The account's billing row, or ``None`` for a new account.
-
-    Returns:
-        The plan the account is on and when it renews or lapses.
-    """
-    available = bool(settings.stripe_price_pro_monthly) and settings.is_stripe_configured
-    if customer is None or not is_pro_status(customer.subscription_status):
-        return PlanSnapshot(available=available)
-    period_end = customer.subscription_current_period_end
-    if period_end is not None and period_end.tzinfo is None:
-        period_end = period_end.replace(tzinfo=UTC)
-    return PlanSnapshot(
-        plan=PLAN_PRO,
-        status=customer.subscription_status,
-        renews_at=period_end.isoformat() if period_end else None,
-        cancel_at_period_end=bool(customer.subscription_cancel_at_period_end),
-        available=available,
-    )
 
 
 def _stripe_id(value: Any) -> str | None:
@@ -521,7 +573,6 @@ def legacy_job_committed_cents(session: Session, username: str, *, exclude_job_i
     ).where(
         JobModel.username == username,
         JobModel.status.in_(("pending", "validating", "running", "paused")),
-        JobModel.parent_optimization_id.is_(None),
         ~attached,
     )
     if exclude_job_id is not None:
@@ -1033,49 +1084,6 @@ class StripeBillingService:
         }
         return self._create_checkout(username, line_item, "custom", cents)
 
-    def create_subscription_checkout(self, username: str) -> str:
-        """Create a Checkout Session that subscribes the account to Skynet Pro.
-
-        The subscription carries ``username`` in its own metadata so every
-        later lifecycle event resolves the account without the Checkout Session.
-
-        Args:
-            username: Subscriber identity.
-
-        Returns:
-            The hosted Stripe Checkout URL to redirect the subscriber to.
-
-        Raises:
-            DomainError: 503 when Stripe or the Pro price is unconfigured; 409
-                when the account is already on Pro; 502 when Stripe refuses.
-        """
-        price_id = settings.stripe_price_pro_monthly
-        if not price_id:
-            raise DomainError("billing.plan_unavailable", status=503)
-        stripe_mod = self._stripe()
-        with Session(self._engine) as session:
-            customer = session.get(BillingCustomerModel, username)
-            if customer is not None and is_pro_status(customer.subscription_status):
-                raise DomainError("billing.already_subscribed", status=409)
-        customer_id = self.get_or_create_customer(username)
-        metadata = {"username": username, "plan": PLAN_PRO}
-        try:
-            checkout = stripe_mod.checkout.Session.create(
-                customer=customer_id,
-                mode="subscription",
-                line_items=[{"price": price_id, "quantity": 1}],
-                billing_address_collection="required",
-                customer_update={"address": "auto", "name": "auto"},
-                success_url=self._return_url("pro"),
-                cancel_url=self._return_url("cancel"),
-                client_reference_id=username,
-                metadata=metadata,
-                subscription_data={"metadata": metadata},
-            )
-        except stripe.StripeError as exc:
-            raise DomainError("billing.provider_unavailable", status=502) from exc
-        return str(checkout.url)
-
     def _create_checkout(self, username: str, line_item: dict[str, Any], pack_id: str, cents: int) -> str:
         """Create the Stripe Checkout Session shared by pack and custom top-ups.
 
@@ -1175,15 +1183,15 @@ class StripeBillingService:
                 free_grant_remaining=grant_remaining,
                 free_grant_total=free_grant_cents(),
                 usage=usage,
-                plan=_plan_snapshot(customer),
             )
 
     def get_usage(self, username: str, start: datetime, end: datetime) -> UsageSnapshot:
         """Aggregate the account's wallet ledger over a date window for the dashboard.
 
-        A pure DB read — no Stripe call. Sums run rows in ``[start, end]`` into
-        gross billed spend, a run count, a per-day billed series (ascending by
-        date), and a per-model spend series (descending by spend); top-ups
+        A pure DB read — no Stripe call. Counts owned optimizations created in
+        ``[start, end]``, including runs without wallet charges. Sums ledger rows into
+        gross billed spend, a per-day series of billed cents, calls
+        and tokens (ascending by date), and a per-model spend series (descending by spend); top-ups
         and grants are excluded from those rollups. The most recent :data:`USAGE_ENTRY_LIMIT` raw ledger rows in the
         window ride along as ``entries`` for the activity list and the per-run
         breakdown, while the rollups span every row in range regardless of that
@@ -1199,6 +1207,18 @@ class StripeBillingService:
             the most recent ledger rows.
         """
         with Session(self._engine) as session:
+            runs = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(JobModel)
+                    .where(
+                        JobModel.username == username,
+                        JobModel.created_at >= start,
+                        JobModel.created_at <= end,
+                    )
+                )
+                or 0
+            )
             # Project only the columns the fold below reads — the full entity
             # (with description text on every row) is materialized for
             # thousands of rows on a wide window, only to be reduced to sums.
@@ -1222,8 +1242,7 @@ class StripeBillingService:
                 .all()
             )
         billed = 0
-        runs = 0
-        per_day: dict[str, int] = {}
+        per_day: dict[str, list[int]] = {}
         per_model: dict[str | None, list[int]] = {}
         # Only debits count as spend; a positive ``run`` row (a legacy
         # correction) is ignored by the rollups but still rides in ``entries``.
@@ -1232,15 +1251,27 @@ class StripeBillingService:
                 continue
             spent = -row.delta_cents
             billed += spent
-            runs += 1
             day = row.created_at.date().isoformat()
-            per_day[day] = per_day.get(day, 0) + spent
+            day_vals = per_day.setdefault(day, [0, 0, 0, 0])
+            day_vals[0] += spent
+            day_vals[1] += 1
+            day_vals[2] += row.input_tokens or 0
+            day_vals[3] += row.output_tokens or 0
             model = per_model.setdefault(row.model, [0, 0, 0, 0])
             model[0] += spent
             model[1] += 1
             model[2] += row.input_tokens or 0
             model[3] += row.output_tokens or 0
-        by_day = [UsageDayRow(date=date, billed_cents=cents) for date, cents in sorted(per_day.items())]
+        by_day = [
+            UsageDayRow(
+                date=date,
+                billed_cents=vals[0],
+                runs=vals[1],
+                input_tokens=vals[2],
+                output_tokens=vals[3],
+            )
+            for date, vals in sorted(per_day.items())
+        ]
         by_model = [
             UsageModelRow(
                 model=model,
@@ -1466,6 +1497,166 @@ class StripeBillingService:
             _report_uncollected_run(username, cost=cost, charged=charged, description=description or "Run")
         return charged
 
+    def grant_test_credit(
+        self,
+        username: str,
+        cents: int,
+        *,
+        reason: str,
+        approval: str,
+        idempotency_key: str,
+    ) -> GrantResult:
+        """Credit a staging test account, once per idempotency key.
+
+        This is the only allowed way to fund a check account. It raises the
+        purchased balance and writes one ``grant`` ledger row in one
+        transaction. The row's description holds the reason, which the account
+        sees in its wallet history. The approval text goes only to the operator
+        log, so the account never sees it. The row's ``settlement_key``
+        (``testgrant:<key>``) makes a retry a no-op. A grant row carries no
+        payment intent and no ``topup`` kind, so revenue reports and refund
+        clawbacks never count it. A grant does not repay ``debt_cents``, so an
+        account with debt is refused.
+
+        Args:
+            username: Test-account email, as built by :func:`check_account_email`.
+            cents: Amount to credit, in cents.
+            reason: Why the check needs the money.
+            approval: The approval text for this grant, logged as given.
+            idempotency_key: Caller key; a repeated key credits nothing.
+
+        Returns:
+            The credited cents, the new balance, and whether the key was a replay.
+
+        Raises:
+            GrantRefusedError: The environment, database, account, amount, text,
+                key or daily cap fails a guard, the key was used for a different
+                account or amount, the account has debt, or concurrent writes
+                conflicted twice.
+                Nothing is written.
+        """
+        target = _test_grant_target()
+        if target is None:
+            raise GrantRefusedError("APP_ENVIRONMENT must be staging; PR preview environments are refused")
+        if not _is_staging_database(self._engine.url):
+            raise GrantRefusedError("the database is not the staging database")
+        reason, approval, idempotency_key = reason.strip(), approval.strip(), idempotency_key.strip()
+        if not approval:
+            raise GrantRefusedError("approval text is required")
+        if not reason:
+            raise GrantRefusedError("reason text is required")
+        if cents <= 0:
+            raise GrantRefusedError("amount must be positive")
+        settlement_key = f"{TEST_GRANT_KEY_PREFIX}{idempotency_key}"
+        if not idempotency_key or len(settlement_key) > _SETTLEMENT_KEY_MAX_LENGTH:
+            raise GrantRefusedError(
+                f"idempotency key must be 1-{_SETTLEMENT_KEY_MAX_LENGTH - len(TEST_GRANT_KEY_PREFIX)} characters"
+            )
+        description = f"{_TEST_GRANT_LABEL}{reason}"
+        if len(description) > _LEDGER_DESCRIPTION_MAX_LENGTH:
+            text_limit = _LEDGER_DESCRIPTION_MAX_LENGTH - len(_TEST_GRANT_LABEL)
+            raise GrantRefusedError(f"reason is too long: it may have at most {text_limit} characters")
+        username = username.strip().lower()
+        if not _is_test_account(username, target):
+            raise GrantRefusedError(f"the account is not a {target} test account from the test-account tool")
+        try:
+            result = self._apply_test_grant(username, cents, description, settlement_key)
+        except IntegrityError:
+            # Another writer created this account's billing row (or used this
+            # key) between our read and our insert. The transaction rolled back
+            # whole, so one fresh attempt reads that row and stays correct.
+            try:
+                result = self._apply_test_grant(username, cents, description, settlement_key)
+            except IntegrityError as error:
+                raise GrantRefusedError("concurrent writes conflicted twice; run the grant again") from error
+        if not result.replayed:
+            logger.warning(
+                "Test credit grant: %s cents, key %s, reason %r, approval %r", cents, settlement_key, reason, approval
+            )
+        return result
+
+    def _apply_test_grant(self, username: str, cents: int, description: str, settlement_key: str) -> GrantResult:
+        """Write one checked test grant in one transaction, or replay its key.
+
+        Args:
+            username: Checked test-account email.
+            cents: Positive amount to credit, in cents.
+            description: Ledger description the account sees.
+            settlement_key: ``testgrant:<key>`` for the ledger row.
+
+        Returns:
+            The credited cents, the new balance, and whether the key was a replay.
+
+        Raises:
+            GrantRefusedError: The account has no user row, the key was used for
+                a different account or amount, the account has debt, or the
+                daily cap would pass.
+            IntegrityError: A concurrent writer inserted the same billing row or
+                key first; nothing from this attempt is kept.
+        """
+        with Session(self._engine) as session:
+            if session.get_bind().dialect.name == "postgresql":
+                session.execute(select(func.pg_advisory_xact_lock(_TEST_GRANT_LOCK_ID)))
+            # Read the clock after the lock wait, so the UTC day matches the
+            # moment the cap total is read.
+            now = datetime.now(UTC)
+            if session.get(UserModel, username) is None:
+                raise GrantRefusedError("the test account has no user row; sign it up first")
+            customer = session.get(BillingCustomerModel, username, with_for_update=True)
+            prior = session.execute(
+                select(WalletLedgerModel.username, WalletLedgerModel.delta_cents).where(
+                    WalletLedgerModel.settlement_key == settlement_key
+                )
+            ).first()
+            if prior is not None:
+                if prior.username != username or int(prior.delta_cents) != cents:
+                    raise GrantRefusedError("idempotency key already used for a different account or amount")
+                balance = int(customer.balance_cents) if customer is not None else 0
+                return GrantResult(credited_cents=int(prior.delta_cents), balance_cents=balance, replayed=True)
+            # A top-up repays debt first, but a grant does not, so a grant to an
+            # account with debt would leave it spendable while it still owes.
+            if customer is not None and int(customer.debt_cents) > 0:
+                raise GrantRefusedError("the account has unpaid debt; a test grant does not repay debt")
+            day_start = datetime.combine(now.date(), time.min, tzinfo=UTC)
+            granted_today = int(
+                session.scalar(
+                    select(func.coalesce(func.sum(WalletLedgerModel.delta_cents), 0)).where(
+                        WalletLedgerModel.kind == "grant",
+                        WalletLedgerModel.settlement_key.like(f"{TEST_GRANT_KEY_PREFIX}%"),
+                        WalletLedgerModel.created_at >= day_start,
+                    )
+                )
+            )
+            if granted_today + cents > TEST_GRANT_DAILY_CAP_CENTS:
+                raise GrantRefusedError(
+                    f"the grant passes the ${TEST_GRANT_DAILY_CAP_CENTS / 100:.2f} daily cap: "
+                    f"${granted_today / 100:.2f} already granted today (UTC)"
+                )
+            if customer is None:
+                customer = BillingCustomerModel(
+                    username=username,
+                    stripe_customer_id=local_customer_id(username),
+                    balance_cents=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(customer)
+            customer.balance_cents = int(customer.balance_cents) + cents
+            customer.updated_at = now
+            session.add(
+                WalletLedgerModel(
+                    username=username,
+                    delta_cents=cents,
+                    kind="grant",
+                    description=description,
+                    settlement_key=settlement_key,
+                    created_at=now,
+                )
+            )
+            balance = int(customer.balance_cents)
+            session.commit()
+        return GrantResult(credited_cents=cents, balance_cents=balance, replayed=False)
+
     def handle_webhook(self, payload: bytes, sig_header: str | None) -> None:
         """Verify and apply a Stripe webhook event, exactly once.
 
@@ -1569,82 +1760,7 @@ class StripeBillingService:
             self._on_charge_refunded(session, event_id, obj)
         elif event_type == "charge.dispute.created":
             self._on_dispute_created(session, event_id, obj)
-        elif event_type in SUBSCRIPTION_EVENTS:
-            self._on_subscription_changed(session, obj)
         return None
-
-    def _on_subscription_changed(self, session: Session, obj: Any) -> None:
-        """Mirror a Pro subscription's current state onto the account's billing row.
-
-        Stripe delivers events out of order, so the handler re-reads the
-        subscription and writes its latest state rather than the event's
-        snapshot; the event copy is only a fallback when Stripe is unreachable.
-
-        Args:
-            session: Open session (caller commits).
-            obj: The Subscription object from the event.
-        """
-        subscription = self._latest_subscription(obj)
-        subscription_id = str(_stripe_value(subscription, "id", "") or "")
-        if not subscription_id:
-            return
-        metadata = _stripe_value(subscription, "metadata", {}) or {}
-        username = str(_stripe_value(metadata, "username", "") or "").lower()
-        customer_id = _stripe_id(_stripe_value(subscription, "customer"))
-        customer = session.get(BillingCustomerModel, username) if username else None
-        if customer is None and customer_id:
-            customer = session.scalars(
-                select(BillingCustomerModel).where(BillingCustomerModel.stripe_customer_id == customer_id)
-            ).first()
-        if customer is None:
-            logger.warning("Subscription %s has no matching billing account", subscription_id)
-            return
-        status = str(_stripe_value(subscription, "status", "") or "")
-        # A second, abandoned subscription must not overwrite the one the
-        # account is actually paying for.
-        if (
-            customer.stripe_subscription_id
-            and customer.stripe_subscription_id != subscription_id
-            and is_pro_status(customer.subscription_status)
-            and not is_pro_status(status)
-        ):
-            return
-        now = datetime.now(UTC)
-        if status != PAST_DUE_STATUS:
-            customer.subscription_past_due_since = None
-        elif customer.subscription_status != PAST_DUE_STATUS or customer.subscription_past_due_since is None:
-            customer.subscription_past_due_since = now
-        customer.stripe_subscription_id = subscription_id
-        customer.subscription_status = status
-        customer.subscription_current_period_end = _subscription_period_end(subscription)
-        customer.subscription_cancel_at_period_end = bool(
-            _stripe_value(subscription, "cancel_at_period_end", False) or _stripe_value(subscription, "cancel_at")
-        )
-        customer.updated_at = now
-        logger.info(
-            "Subscription synced: user=%s status=%s subscription=%s",
-            customer.username,
-            status,
-            subscription_id,
-        )
-
-    def _latest_subscription(self, obj: Any) -> Any:
-        """Return the subscription's current state from Stripe, or the event copy.
-
-        Args:
-            obj: The Subscription object carried by the event.
-
-        Returns:
-            The freshly retrieved subscription, or ``obj`` when the retrieve fails.
-        """
-        subscription_id = _stripe_value(obj, "id")
-        if not subscription_id:
-            return obj
-        try:
-            return self._stripe().Subscription.retrieve(str(subscription_id))
-        except stripe.StripeError:
-            logger.warning("Subscription %s re-read failed; applying the event copy", subscription_id)
-            return obj
 
     def _on_checkout_completed(self, session: Session, event_id: str, obj: Any) -> tuple[str, int, str] | None:
         """Credit a completed one-time pack purchase to the buyer's balance.
@@ -1855,6 +1971,12 @@ class StripeBillingService:
         full reversal and a later event cannot claw it twice. A debt is logged and
         sent as an operator alert.
 
+        On a closed wallet (SKY-567), account deletion forfeited the balance with
+        a negative ``closure`` row. A refund of those cents returns them to the
+        card, so before the draw the clawback reverses up to the net forfeit with
+        a positive ``closure`` row ("Forfeit reversed by refund"). The refund then
+        collects those cents instead of recording debt on a closed wallet.
+
         Args:
             session: Open session (caller commits).
             event_id: Stripe event id, recorded on the ledger row.
@@ -1878,6 +2000,26 @@ class StripeBillingService:
             )
             session.add(customer)
         paid = max(int(customer.balance_cents), 0)
+        # Net of earlier reversals, so two refunds cannot restore the same forfeit twice.
+        forfeited = -int(
+            session.scalar(
+                select(func.coalesce(func.sum(WalletLedgerModel.delta_cents), 0)).where(
+                    WalletLedgerModel.username == username, WalletLedgerModel.kind == "closure"
+                )
+            )
+        )
+        restored = min(max(cents - paid, 0), max(forfeited, 0))
+        if restored:
+            session.add(
+                WalletLedgerModel(
+                    username=username,
+                    delta_cents=restored,
+                    kind="closure",
+                    description="Forfeit reversed by refund",
+                    created_at=now,
+                )
+            )
+            paid += restored
         from_paid = min(cents, paid)
         grant = max(self._resolve_grant(customer, now), 0)
         from_grant = min(cents - from_paid, grant)

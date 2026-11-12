@@ -3,6 +3,7 @@
 import { Terminal } from "@/shared/ui/icons";
 import { useEffect, useState, type CSSProperties } from "react";
 import { getAgentRun } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { detectRenderKind, isDrawable } from "@/shared/lib/candidate-render";
 import { formatDuration } from "@/shared/lib/formatters";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
@@ -113,7 +114,15 @@ function AnswerTab({ record }: { record: BlackboxAgentRunResponse }) {
   );
 }
 
-function RunBody({ optimizationId, run }: { optimizationId: string; run: AgentRunSummary }) {
+function RunBody({
+  optimizationId,
+  run,
+  source,
+}: {
+  optimizationId: string;
+  run: AgentRunSummary;
+  source?: ApiSource;
+}) {
   const [record, setRecord] = useState<BlackboxAgentRunResponse | null>(null);
   const [failed, setFailed] = useState(false);
   const [tab, setTab] = useState<RunTab>(
@@ -129,7 +138,7 @@ function RunBody({ optimizationId, run }: { optimizationId: string; run: AgentRu
     const poll = async (since: number) => {
       let response: BlackboxAgentRunResponse;
       try {
-        response = await getAgentRun(optimizationId, run.run_id, since);
+        response = await getAgentRun(optimizationId, run.run_id, since, source);
       } catch {
         if (!cancelled) setFailed(true);
         return;
@@ -156,7 +165,7 @@ function RunBody({ optimizationId, run }: { optimizationId: string; run: AgentRu
       cancelled = true;
       if (timer !== null) clearTimeout(timer);
     };
-  }, [optimizationId, run.run_id]);
+  }, [optimizationId, run.run_id, source]);
 
   const outcome: RunOutcome = record ?? run;
   const succeeded = agentRunSucceeded(outcome);
@@ -274,6 +283,8 @@ export interface AgentRunViewerProps {
   run: AgentRunSummary | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Where the run lives; a hosted run reads its agent runs through the hosted proxy. */
+  source?: ApiSource;
 }
 
 /**
@@ -281,7 +292,13 @@ export interface AgentRunViewerProps {
  * the check on the result. While the run is going the transcript streams in,
  * polled as a tail so watching a long run stays cheap.
  */
-export function AgentRunViewer({ optimizationId, run, open, onOpenChange }: AgentRunViewerProps) {
+export function AgentRunViewer({
+  optimizationId,
+  run,
+  open,
+  onOpenChange,
+  source,
+}: AgentRunViewerProps) {
   const isRtl = getActiveDir() === "rtl";
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -290,7 +307,7 @@ export function AgentRunViewer({ optimizationId, run, open, onOpenChange }: Agen
         className="flex w-full flex-col overflow-hidden sm:max-w-md md:max-w-[min(640px,92vw)]"
       >
         {run !== null ? (
-          <RunBody key={run.run_id} optimizationId={optimizationId} run={run} />
+          <RunBody key={run.run_id} optimizationId={optimizationId} run={run} source={source} />
         ) : null}
       </SheetContent>
     </Sheet>

@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import time
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -48,8 +49,15 @@ from ...connectors.registry import OAUTH_PROVIDERS, oauth_config_problems
 from ...connectors.vault import ConnectorSecret, ConnectorVault
 from ...storage.dataset_library import DatasetLibraryStore, PostgresDatasetBlobStore
 from ...storage.models import UserConnectorModel
+from ..auth import get_authenticated_user
 from .test_connectors_pruning import clear_caches, settle_indexes
-from .test_connectors_router import _make_client, _response, vault_key  # noqa: F401 - fixture re-export
+from .test_connectors_router import (
+    _BOB,
+    _make_client,
+    _response,
+    oauth_fragment,
+    vault_key,  # noqa: F401 - fixture re-export
+)
 
 CSV = b"name,score\nada,1\nbob,2\n"
 JSONL = b'{"name": "ada", "score": 1}\n{"name": "bob", "score": 2}\n'
@@ -70,7 +78,7 @@ def _fresh_connector_caches() -> Iterator[None]:
 
 @pytest.fixture
 def generic_oauth_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hide the Google, Microsoft, GitHub, Notion and Supabase OAuth buttons unless a test opts in."""
+    """Hide the Google, Microsoft, GitHub, GitLab, Bitbucket, Notion and Supabase OAuth buttons unless a test opts in."""
     for name in ("google_oauth_client_id", "google_oauth_client_secret", "github_oauth_client_id"):
         monkeypatch.setattr(settings, name, None)
     monkeypatch.setattr(settings, "github_oauth_client_secret", None)
@@ -86,6 +94,9 @@ def generic_oauth_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "supabase_oauth_client_id", None)
     monkeypatch.setattr(settings, "supabase_oauth_client_secret", None)
     monkeypatch.setattr(settings, "supabase_oauth_redirect_uri", None)
+    for host in ("gitlab", "bitbucket"):
+        for field in ("client_id", "client_secret", "redirect_uri"):
+            monkeypatch.setattr(settings, f"{host}_oauth_{field}", None)
 
 
 class _StreamCtx:
@@ -222,6 +233,8 @@ def test_status_lists_every_provider(vault_key: str, generic_oauth_off: None) ->
         "google_drive",
         "onedrive",
         "github",
+        "gitlab",
+        "bitbucket",
         "s3",
         "gcs",
         "azure_blob",
@@ -376,6 +389,9 @@ def _github_picker_api(method: str, url: str, **kwargs: Any) -> httpx.Response:
         page = kwargs["params"]["page"]
         names = [f"b{(page - 1) * 100 + i}" for i in range(100)] if page < 4 else []
         return _response(200, [{"name": name} for name in names])
+    if path == "/repos/octo/app/commits":
+        commit = {"sha": "d" * 40, "commit": {"message": "Tune\n\nbody", "committer": {"date": "2026-11-02T00:00:00Z"}}}
+        return _response(200, [commit])
     if path == "/repos/octo/app/git/trees/feature%2Fx":
         return _response(
             200,
@@ -431,6 +447,27 @@ def test_github_picker_lists_repositories_with_details() -> None:
     assert unknown == {"repositories": []}
 
 
+@pytest.mark.parametrize(
+    ("search", "expected"),
+    [
+        ("octo docs", ["octo/docs"]),
+        ("octo-docs", ["octo/docs"]),
+        ("the app", ["octo/app"]),
+        ("app docs", []),
+        ("---", []),
+        ("אתר אישי", []),
+    ],
+)
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_search_matches_words_in_name_and_description(search: str, expected: list[str]) -> None:
+    """Each search word must be in the name or the description; separators only split words."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api):
+        client.put("/connectors/github/credentials", json={"fields": {"token": "ghp_secret"}})
+        found = client.get("/connectors/github/repos", params={"search": search}).json()["repositories"]
+    assert [r["full_name"] for r in found] == expected
+
+
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")
 def test_github_picker_branches_are_paginated_and_capped() -> None:
     """Branches page through GitHub up to the cap, with the default branch kept in the list."""
@@ -445,6 +482,17 @@ def test_github_picker_branches_are_paginated_and_capped() -> None:
     assert body["branches"][0] == "main"
     assert len(body["branches"]) == github.BRANCH_LIMIT + 1
     assert invalid.status_code == 400
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_commits_list_recent_commits() -> None:
+    """Recent commits of a branch come back with a one-line title."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api):
+        client.put("/connectors/github/credentials", json={"fields": {"token": "ghp_secret"}})
+        response = client.get("/connectors/github/commits", params={"repo": "octo/app", "branch": "dev"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"commits": [{"sha": "d" * 40, "title": "Tune", "date": "2026-11-02T00:00:00Z"}]}
 
 
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")
@@ -499,19 +547,83 @@ def test_github_picker_file_reads_text_and_flags_the_rest() -> None:
         assert response.json()["code"] == "connectors.invalid_ref"
 
 
+_GITHUB_READS: tuple[tuple[str, dict[str, str]], ...] = (
+    ("/connectors/github/branches", {"repo": "octo/app"}),
+    ("/connectors/github/tree", {"repo": "octo/app"}),
+    ("/connectors/github/commits", {"repo": "octo/app"}),
+    ("/connectors/github/file", {"repo": "octo/app", "ref": "abc123", "path": "src/app.py"}),
+)
+
+
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")
-def test_github_picker_needs_a_linked_account() -> None:
-    """Every picker route answers 409 before GitHub is linked."""
+def test_github_picker_repository_list_needs_a_linked_account() -> None:
+    """The repository list answers 409 before GitHub is linked: it lists the account's own repositories."""
     client, _ = _make_client()
-    for path, params in (
-        ("/connectors/github/repos", {}),
-        ("/connectors/github/branches", {"repo": "octo/app"}),
-        ("/connectors/github/tree", {"repo": "octo/app"}),
-        ("/connectors/github/file", {"repo": "octo/app", "path": "README.md"}),
+    response = client.get("/connectors/github/repos")
+    assert response.status_code == 409
+    assert response.json()["code"] == "connectors.not_connected"
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_reads_a_public_repository_without_a_link() -> None:
+    """Without a GitHub link, branches, commits, tree and file read anonymously (SKY-568)."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api) as api:
+        responses = [client.get(path, params=params) for path, params in _GITHUB_READS]
+    for response in responses:
+        assert response.status_code == 200, response.text
+    assert api.call_count > 0
+    for call in api.call_args_list:
+        assert "Authorization" not in call.kwargs["headers"]
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_reads_with_the_token_when_linked() -> None:
+    """A linked caller's reads still carry its token."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api) as api:
+        client.put("/connectors/github/credentials", json={"fields": {"token": "ghp_secret"}})
+        api.reset_mock()
+        responses = [client.get(path, params=params) for path, params in _GITHUB_READS]
+    for response in responses:
+        assert response.status_code == 200, response.text
+    assert api.call_count > 0
+    for call in api.call_args_list:
+        assert call.kwargs["headers"]["Authorization"] == "Bearer ghp_secret"
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_anonymous_read_of_a_missing_repository_is_not_found() -> None:
+    """An anonymous read of a private or missing repository answers GitHub's 404 as not found."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api):
+        response = client.get("/connectors/github/branches", params={"repo": "nobody/missing"})
+    assert response.status_code == 404
+    assert response.json()["code"] == "connectors.not_found"
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_expired_link_asks_for_a_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An expired GitHub link answers 409 expired instead of reading anonymously."""
+    monkeypatch.setattr(settings, "github_oauth_client_id", "gh-client")
+    client, store = _make_client()
+    ConnectorVault(store.engine).save(
+        "alice",
+        "github",
+        access_token="old",
+        auth_method="oauth",
+        account_label="octo",
+        refresh_token="rt",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    with (
+        patch("core.connectors.oauth.httpx.post", return_value=_response(400, {"error": "bad_refresh_token"})),
+        patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api) as api,
     ):
-        response = client.get(path, params=params)
-        assert response.status_code == 409
-        assert response.json()["code"] == "connectors.not_connected"
+        response = client.get("/connectors/github/tree", params={"repo": "octo/app"})
+    assert response.status_code == 409
+    assert response.json()["code"] == "connectors.expired"
+    api.assert_not_called()
 
 
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")
@@ -535,25 +647,153 @@ def test_github_oauth_start_and_callback(monkeypatch: pytest.MonkeyPatch) -> Non
     assert query["redirect_uri"] == ["http://testserver/connectors/github/oauth/callback"]
     state = query["state"][0]
 
-    token_body = {"access_token": "gho_1", "token_type": "bearer", "scope": "repo,read:user"}
-    with (
-        patch("core.connectors.oauth.httpx.post", return_value=_response(200, token_body)) as post,
-        patch("core.connectors.transport.CLIENT.request", side_effect=_github_api),
-    ):
+    with patch("core.connectors.oauth.httpx.post") as never:
         callback = client.get(
             "/connectors/github/oauth/callback", params={"code": "c-1", "state": state}, follow_redirects=False
         )
-    assert callback.status_code == 303
-    assert callback.headers["location"] == "https://app.example/?settings=connectors"
+    never.assert_not_called()
+    assert callback.headers["location"].startswith("https://app.example/?settings=connectors#")
+    assert oauth_fragment(callback) == {"oauth_flow": "connector:github", "oauth_state": state, "oauth_code": "c-1"}
+    assert ConnectorVault(store.engine).resolve("alice", "github") is None
+
+    finish, post = _github_finish(client, "github", state)
+    assert finish.status_code == 200, finish.text
+    assert next(c for c in finish.json()["connectors"] if c["provider"] == "github")["connected"] is True
     assert post.call_args.kwargs["data"]["client_secret"] == "gh-secret"
     secret = ConnectorVault(store.engine).resolve("alice", "github")
     assert secret.access_token == "gho_1"
     assert secret.auth_method == "oauth"
 
-    forged = client.get(
-        "/connectors/google_sheets/oauth/callback", params={"code": "c", "state": state}, follow_redirects=False
-    )
-    assert forged.headers["location"].endswith("connector_error=connectors.oauth_state_invalid")
+    forged, post = _github_finish(client, "google_sheets", state)
+    assert forged.status_code == 400
+    assert forged.json()["code"] == "connectors.oauth_state_invalid"
+    post.assert_not_called()
+
+
+def _github_finish(client: Any, provider: str, state: str, code: str = "c-1") -> tuple[Any, Any]:
+    """Call a provider's finish route with GitHub's token and API calls mocked.
+
+    Args:
+        client: The test client.
+        provider: Provider slug in the finish path.
+        state: The state from the callback.
+        code: The code from the callback.
+
+    Returns:
+        The finish response and the mock of the token call.
+    """
+    token_body = {"access_token": "gho_1", "token_type": "bearer", "scope": "repo,read:user"}
+    with (
+        patch("core.connectors.oauth.httpx.post", return_value=_response(200, token_body)) as post,
+        patch("core.connectors.transport.CLIENT.request", side_effect=_github_api),
+    ):
+        response = client.post(f"/connectors/{provider}/oauth/finish", json={"state": state, "code": code})
+    return response, post
+
+
+@pytest.fixture
+def github_oauth_on(monkeypatch: pytest.MonkeyPatch, vault_key: str, generic_oauth_off: None) -> None:  # noqa: F811
+    """Register a GitHub OAuth client."""
+    monkeypatch.setattr(settings, "github_oauth_client_id", "gh-client")
+    monkeypatch.setattr(settings, "github_oauth_client_secret", SecretStr("gh-secret"))
+
+
+def _github_state(client: Any) -> str:
+    """Start the GitHub sign-in and return the state.
+
+    Args:
+        client: The test client.
+
+    Returns:
+        The encrypted state from the authorize URL.
+    """
+    start = client.post("/connectors/github/oauth/start")
+    assert start.status_code == 200, start.text
+    return parse_qs(urlparse(start.json()["authorize_url"]).query)["state"][0]
+
+
+_OAUTH_APP_SETTINGS = {
+    "google_sheets": "google",
+    "google_drive": "google",
+    "onedrive": "microsoft",
+    "azure_blob": "microsoft",
+    "github": "github",
+    "gitlab": "gitlab",
+    "bitbucket": "bitbucket",
+    "notion": "notion",
+    "supabase": "supabase",
+}
+_OAUTH_START_FIELDS: dict[str, dict[str, str]] = {"azure_blob": {"account": "acct", "container": "data"}}
+
+
+def test_oauth_provider_table_covers_every_oauth_provider() -> None:
+    """The per-provider finish test below runs for every OAuth provider."""
+    assert set(_OAUTH_APP_SETTINGS) == OAUTH_PROVIDERS
+
+
+@pytest.mark.parametrize("provider", sorted(_OAUTH_APP_SETTINGS))
+def test_oauth_finish_by_another_user_is_refused(
+    provider: str,
+    monkeypatch: pytest.MonkeyPatch,
+    vault_key: str,  # noqa: F811
+    generic_oauth_off: None,
+) -> None:
+    """A state that Alice started cannot link the account to Bob or to a caller with no sign-in.
+
+    Args:
+        provider: OAuth provider slug.
+        monkeypatch: Pytest monkeypatch fixture.
+        vault_key: Vault key fixture.
+        generic_oauth_off: Fixture that clears every OAuth client first.
+    """
+    app = _OAUTH_APP_SETTINGS[provider]
+    monkeypatch.setattr(settings, f"{app}_oauth_client_id", f"{app}-client")
+    monkeypatch.setattr(settings, f"{app}_oauth_client_secret", SecretStr(f"{app}-secret"))
+    client, store = _make_client()
+    state = _start_oauth(client, provider, _OAUTH_START_FIELDS.get(provider))["state"][0]
+    body = {"state": state, "code": "c-1"}
+    with patch("core.connectors.oauth.httpx.post") as post:
+        client.app.dependency_overrides[get_authenticated_user] = lambda: _BOB
+        refused = client.post(f"/connectors/{provider}/oauth/finish", json=body)
+        client.app.dependency_overrides.pop(get_authenticated_user)
+        unsigned = client.post(f"/connectors/{provider}/oauth/finish", json=body)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] == "connectors.oauth_state_invalid"
+    assert unsigned.status_code == 401
+    post.assert_not_called()
+    vault = ConnectorVault(store.engine)
+    assert vault.resolve("bob", provider) is None
+    assert vault.resolve("alice", provider) is None
+
+
+def test_oauth_finish_needs_a_signed_in_caller(github_oauth_on: None) -> None:
+    """Without a bearer token the finish route answers 401 and trades nothing."""
+    client, store = _make_client()
+    state = _github_state(client)
+    client.app.dependency_overrides.pop(get_authenticated_user)
+    finish, post = _github_finish(client, "github", state)
+    assert finish.status_code == 401
+    post.assert_not_called()
+    assert ConnectorVault(store.engine).resolve("alice", "github") is None
+
+
+def test_oauth_finish_refuses_an_expired_or_used_state(github_oauth_on: None) -> None:
+    """An expired state never reaches the provider; a used code is refused there."""
+    client, store = _make_client()
+    state = _github_state(client)
+    with patch("cryptography.fernet.time.time", return_value=time.time() + 3600):
+        expired, post = _github_finish(client, "github", state)
+    assert expired.status_code == 400
+    assert expired.json()["code"] == "connectors.oauth_state_invalid"
+    post.assert_not_called()
+
+    assert _github_finish(client, "github", state)[0].status_code == 200
+    with patch("core.connectors.oauth.httpx.post", return_value=_response(400, {"error": "bad_verification_code"})):
+        reused = client.post("/connectors/github/oauth/finish", json={"state": state, "code": "c-1"})
+    assert reused.status_code == 400
+    assert reused.json()["code"] == "connectors.oauth_failed"
+    assert ConnectorVault(store.engine).resolve("alice", "github").access_token == "gho_1"
+    assert client.post("/connectors/s3/oauth/finish", json={"state": state, "code": "c"}).status_code == 404
 
 
 S3_LIST = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -1469,7 +1709,7 @@ def _start_oauth(client: Any, provider: str, fields: dict[str, str] | None = Non
 
 
 def _finish_oauth(client: Any, provider: str, state: str, token_body: dict[str, Any], api: Any) -> Any:
-    """Run the callback with a mocked token endpoint and provider API.
+    """Run the callback, then the finish step, with a mocked token endpoint and provider API.
 
     Args:
         client: The test client.
@@ -1481,15 +1721,20 @@ def _finish_oauth(client: Any, provider: str, state: str, token_body: dict[str, 
     Returns:
         The mock of ``oauth.httpx.post`` for asserting the exchange.
     """
+    callback = client.get(
+        f"/connectors/{provider}/oauth/callback", params={"code": "c-1", "state": state}, follow_redirects=False
+    )
+    values = oauth_fragment(callback)
+    assert values["oauth_flow"] == f"connector:{provider}"
     with (
         patch("core.connectors.oauth.httpx.post", return_value=_response(200, token_body)) as post,
         patch("core.connectors.transport.CLIENT.request", side_effect=api),
     ):
-        callback = client.get(
-            f"/connectors/{provider}/oauth/callback", params={"code": "c-1", "state": state}, follow_redirects=False
+        finish = client.post(
+            f"/connectors/{provider}/oauth/finish",
+            json={"state": values["oauth_state"], "code": values["oauth_code"]},
         )
-    assert callback.status_code == 303
-    assert "connector_error" not in callback.headers["location"], callback.headers["location"]
+    assert finish.status_code == 200, finish.text
     return post
 
 
@@ -1780,10 +2025,8 @@ def test_supabase_oauth_browses_projects_and_reads_a_table(
         patch("core.connectors.oauth.httpx.post", return_value=_response(200, token_body)) as post,
         patch("core.connectors.transport.CLIENT.request", side_effect=fake_request),
     ):
-        callback = client.get(
-            "/connectors/supabase/oauth/callback", params={"code": "c-1", "state": state}, follow_redirects=False
-        )
-        assert callback.status_code == 303
+        finish = client.post("/connectors/supabase/oauth/finish", json={"state": state, "code": "c-1"})
+        assert finish.status_code == 200, finish.text
         assert post.call_args.kwargs["auth"] == ("sb-client", "sb-secret")
         assert "client_secret" not in post.call_args.kwargs["data"]
         listed = client.get("/connectors").json()["connectors"]

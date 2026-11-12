@@ -57,7 +57,7 @@ I connettori che importano record includono tabelle di database, tracce LLM e da
 | Profondità delle cartelle       | 3 cartelle                                                              |
 | Tipi di file                    | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`run.py` e `metric.py` sono i file di ingresso di un'esecuzione. Non puoi eliminarli, rinominarli o spostarli.
+`scorer.py` contiene il tuo scorer. Skynet chiama la sua funzione `score(repo_path, case)` per ogni caso.
 
 ## Frequenza delle richieste
 

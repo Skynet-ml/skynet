@@ -98,7 +98,7 @@ Uma execução precisa saber quais colunas são entradas e qual coluna é a saí
 
 No assistente de envio, a etapa "Como ler os dados" mostra cada coluna com três opções:
 
-- **Entrada**: o programa recebe este valor.
+- **Entrada**: o seu avaliador recebe este valor em `case["input"]`.
 - **Saída**: a resposta esperada, com a qual o avaliador compara.
 - **Ignorar**: a execução ignora esta coluna.
 

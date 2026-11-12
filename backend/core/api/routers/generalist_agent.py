@@ -30,9 +30,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
-from ...billing.cli_dispatch import CLI_FAST_KEY
 from ...billing.metering import meter_llm_run
 from ...config import settings
+from ...connectors import github
+from ...connectors.vault import ConnectorVault
 from ...constants import TOKEN_SOURCE_MANAGED
 from ...local.cli_catalog import RetiredEffort
 from ...service_gateway.agents.code import _reply_language
@@ -62,9 +63,11 @@ from ..agent_engine import engine_agent_model
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import ReasoningEffort
+from ..model_fast_mode import with_fast_mode
 from ..model_router import effective_reasoning_effort, metering_token_source, route_agent_model, route_local_byok_model
 from ..suggest_model import hosted_suggest_model
 from ._helpers import enforce_llm_balance, sse_from_events, stream_with_llm_metering
+from .connectors import connector_secret
 
 logger = logging.getLogger(__name__)
 # A suggestion has a larger prompt than a thinking label, and on a CLI engine a
@@ -80,6 +83,10 @@ TITLE_MAX_CHARS = 40
 _COMPOSER_BLOCK_RE = re.compile(
     r'<pasted_text>.*?</pasted_text>|<attached_file name="([^"]*)">.*?</attached_file>', re.DOTALL
 )
+# Hidden setup wizard turns (frontend ``features/agent-panel/lib/screen-agent.ts``).
+# The kickoff holds no user words; a Back turn carries the agent's request.
+_WIZARD_KICKOFF_MARK = "[The wizard opened this screen; I typed nothing.]"
+_WIZARD_BACK_MARK = "[The wizard went back to this screen for your request; I typed nothing.]"
 
 # The history is re-sent in full every turn, so an unbounded thread grows the
 # prompt without limit. Recent turns carry the working context.
@@ -211,8 +218,8 @@ class GeneralistAgentRequest(BaseModel):
     fast_mode: bool = Field(
         default=False,
         description=(
-            "Run this turn in the CLI's fast mode. Applies only to a local CLI model that takes "
-            "fast mode; any other model ignores it."
+            "Run this turn in fast mode on a supported local CLI or OpenRouter priority endpoint. "
+            "Unsupported models ignore this flag."
         ),
     )
     steer_key: str | None = Field(
@@ -223,6 +230,14 @@ class GeneralistAgentRequest(BaseModel):
             "Client-chosen key for this turn. Messages posted to "
             "``/optimizations/agent-steer`` under it while the turn runs reach "
             "the agent at its next step, announced by a ``steer_applied`` event."
+        ),
+    )
+    persist: bool = Field(
+        default=True,
+        description=(
+            "Save the turn as a conversation. False runs the turn without saving: the server ignores "
+            "``conversation_id``, ``regenerate`` and the edit fields, stores no row and emits no "
+            "``conversation_meta`` event. The setup wizard's chat sends False."
         ),
     )
 
@@ -388,7 +403,8 @@ def _derive_title(user_message: str) -> str:
     Truncates whitespace-collapsed text to ``TITLE_MAX_CHARS`` and appends an
     ellipsis when truncation actually loses characters. Attached-file and
     pasted-text blocks are left out; a message with only files is titled
-    from the first file's name.
+    from the first file's name. A setup wizard kickoff gives no title, and a
+    wizard Back turn is titled from its request without the marker.
 
     Args:
         user_message: The first user turn's text.
@@ -396,6 +412,9 @@ def _derive_title(user_message: str) -> str:
     Returns:
         A short, single-line title suitable for the conversation header.
     """
+    if user_message.lstrip().startswith(_WIZARD_KICKOFF_MARK):
+        return ""
+    user_message = user_message.lstrip().removeprefix(_WIZARD_BACK_MARK)
     typed = _COMPOSER_BLOCK_RE.sub(" ", user_message)
     if not typed.strip():
         files = [m.group(1) for m in _COMPOSER_BLOCK_RE.finditer(user_message) if m.group(1)]
@@ -929,9 +948,9 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
             Returns:
                 ``(conversation_id, title)`` — both ``None`` when persistence is
-                off (no ``job_store``) or failed non-fatally.
+                off (no ``job_store`` or ``persist`` is False) or failed non-fatally.
             """
-            if job_store is None:
+            if job_store is None or not req.persist:
                 return None, None
             try:
                 cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)
@@ -959,25 +978,43 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
         wizard_state: WizardState = {**req.wizard_state}  # type: ignore[typeddict-item]
         picked = await asyncio.to_thread(engine_agent_model, job_store, current_user.username, req.model)
+        # A cold model catalog builds on the calling thread, so the catalog
+        # reads below run off the event loop (SKY-603).
         model_config = await asyncio.to_thread(
             route_local_byok_model, picked, job_store=job_store, username=current_user.username
-        ) or route_agent_model(picked)
+        ) or await asyncio.to_thread(route_agent_model, picked)
         # A CLI takes its own effort ladder, not the catalog's, and with no
         # pick it runs its own default. The CLI dispatcher drops a level or
         # fast mode the model does not take.
         on_cli = model_config.token_source == "subscription"
-        effort = req.reasoning_effort if on_cli else effective_reasoning_effort(model_config.name, req.reasoning_effort)
+        effort = (
+            req.reasoning_effort
+            if on_cli
+            else await asyncio.to_thread(effective_reasoning_effort, model_config.name, req.reasoning_effort)
+        )
         if effort:
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
-        if on_cli and req.fast_mode:
-            body = model_config.extra.get("extra_body")
-            fast_body = {**(body if isinstance(body, dict) else {}), CLI_FAST_KEY: True}
-            model_config = model_config.model_copy(update={"extra": {**model_config.extra, "extra_body": fast_body}})
+        model_config = await asyncio.to_thread(with_fast_mode, model_config, req.fast_mode)
         # Model routing can refuse the turn with a 4xx. Store nothing before it
         # passes: the client gets no conversation_meta for a refused turn and
         # would resend it as a new edit.
         conversation_id, title = await asyncio.to_thread(_setup_turn)
         usage_sink: list = []
+
+        def _github_token() -> str | None:
+            """Load the caller's token for the run's repository host, for the coding agent's reads.
+
+            Returns:
+                The token, or ``None`` when the host is not linked or the link expired.
+            """
+            if engine is None:
+                return None
+            provider = str(wizard_state.get("repo_provider") or github.PROVIDER)
+            try:
+                return connector_secret(ConnectorVault(engine), current_user.username, provider).access_token
+            except DomainError:
+                return None
+
         source = run_generalist_agent(
             wizard_state=wizard_state,
             chat_history=history_for_agent(req.chat_history),
@@ -989,6 +1026,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             model_config=model_config,
             usage_sink=usage_sink,
             steer_key=req.steer_key,
+            github_token=_github_token,
         )
         metered = stream_with_llm_metering(
             source,

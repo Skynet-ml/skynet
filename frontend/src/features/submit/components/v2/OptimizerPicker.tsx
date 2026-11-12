@@ -5,7 +5,8 @@ import { useRef, type KeyboardEvent } from "react";
 import { Warning } from "@/shared/ui/icons";
 import { Label } from "@/shared/ui/primitives/label";
 import { msg } from "@/shared/lib/messages";
-import type { ArtifactKind, DataMode, OptimizerChoice } from "@/shared/types/unified-run";
+import type { DataMode } from "@/shared/types/unified-run";
+import { OPTIMIZER_NAMES } from "@/shared/lib/optimizer-names";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
@@ -20,32 +21,19 @@ import { StepCard } from "../blackbox/shared";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { OptimizerSourceLinks } from "./OptimizerSourceLinks";
 
-// Product names stay untranslated in every locale; Auto is the one generic word.
-const OPTIMIZER_NAMES: Record<Exclude<OptimizerChoice, "auto">, string> = {
-  dspy_gepa: "DSPy GEPA",
-  dspy_miprov2: "MIPROv2",
-  dspy_bootstrap_fewshot: "BootstrapFewShot",
-  gepa: "GEPA",
-  best_of_n: "Best-of-N",
-  autoresearch: "AutoResearch",
-  meta_harness: "Meta-Harness",
-  autosaddler: "AutoSaddler",
-  shinka_evolve: "ShinkaEvolve",
-};
-
-/** The display name of an optimizer choice in the active locale. */
-export function optimizerLabel(choice: OptimizerChoice, guided: boolean): string {
-  return choice === "auto" ? v2Msg("submit.v2.optimizer.option.auto.label", guided) : OPTIMIZER_NAMES[choice];
+/**
+ * The display name of an optimizer id in the active locale. A stored id with
+ * no name, such as a retired DSPy optimizer, shows as the raw id.
+ */
+export function optimizerLabel(choice: string, guided: boolean): string {
+  if (choice === "auto") return v2Msg("submit.v2.optimizer.option.auto.label", guided);
+  return OPTIMIZER_NAMES[choice as keyof typeof OPTIMIZER_NAMES] ?? choice;
 }
 
-function optimizerDescription(view: OptimizerOptionView, kind: ArtifactKind, guided: boolean): string {
+// Auto composes repository engines, so it gets its own words.
+function optimizerDescription(view: OptimizerOptionView, guided: boolean): string {
   if (view.id !== "auto") return v2Msg(`submit.v2.optimizer.option.${view.id}.desc`, guided);
-  return v2Msg(
-    kind === "dspy_program"
-      ? "submit.v2.optimizer.option.auto.desc_dspy"
-      : "submit.v2.optimizer.option.auto.desc_blackbox",
-    guided,
-  );
+  return v2Msg("submit.v2.optimizer.option.auto.desc_repo", guided);
 }
 
 /**
@@ -55,25 +43,19 @@ function optimizerDescription(view: OptimizerOptionView, kind: ArtifactKind, gui
  * `plain` (Standard) words each card the plain way.
  */
 export function OptimizerPicker({
-  kind,
   mode,
   plain = false,
 }: {
-  kind: ArtifactKind;
   mode: DataMode;
   plain?: boolean;
 }) {
   const { state, patchOptimizer, optimizerCatalog, optimizerCatalogLoading, guided } = useWizardV2();
   const t = (key: string, params?: Record<string, string>) => v2Msg(key, guided, params);
   const choice = state.optimizer.choice;
-  const repo = Boolean(state.task.repo);
-  const options = optimizerOptions({ kind, mode, catalog: optimizerCatalog, guided, choice, repo });
-  const issue = optimizerChoiceIssue({ kind, mode, catalog: optimizerCatalog, choice, repo });
+  const options = optimizerOptions({ mode, catalog: optimizerCatalog, guided, choice });
+  const issue = optimizerChoiceIssue({ mode, catalog: optimizerCatalog, choice });
   const selectedIndex = options.findIndex((option) => option.id === choice);
-  const catalog =
-    optimizerCatalog?.artifact_kind === kind && optimizerCatalog.data_mode === mode
-      ? optimizerCatalog
-      : null;
+  const catalog = optimizerCatalog?.data_mode === mode ? optimizerCatalog : null;
   // Roving tabindex: the checked card takes the Tab stop, else the first.
   const focusIndex = selectedIndex >= 0 ? selectedIndex : 0;
   const groupRef = useRef<HTMLDivElement>(null);
@@ -151,7 +133,7 @@ export function OptimizerPicker({
                     engine={{
                       id: option.id,
                       label,
-                      description: optimizerDescription(option, kind, guided || plain),
+                      description: optimizerDescription(option, guided || plain),
                       available: option.available,
                       unavailable_reason: option.unavailableReason,
                     }}

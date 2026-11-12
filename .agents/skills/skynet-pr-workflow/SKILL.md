@@ -1,6 +1,6 @@
 ---
 name: skynet-pr-workflow
-description: Use this skill whenever you create, update, describe, review, verify, record videos for, or merge a Skynet pull request, or move its Linear issue. It holds the fix-locally-then-push-once order, the merge gates and proof card, the PR description structure and test table, the Opus 5.5 RevEngine review gate, the staging and preview acceptance rules, the costly-workflow rule, the UI before-and-after video specs, the backend-only merge scope, the Linear approval flow and the daily merge window.
+description: Use this skill whenever you create, update, describe, review, verify, or merge a Skynet pull request, or move its Linear issue. It holds the PR description, review, acceptance, UI PR flow, Linear and merge rules.
 ---
 
 # Skynet PR workflow
@@ -15,39 +15,49 @@ full PR, review and merge procedure.
 - Branch, worktree and draft PR rules: `AGENTS.md`.
 - Run independent issues in parallel, each in its own worktree and branch.
   Check memory, CPU and active work before you add an agent. Do not start
-  duplicate workers. The ceilings are six implementation worktrees and
-  twelve reviewers; they do not guarantee free capacity.
+  duplicate workers. The ceilings are fourteen implementation worktrees and
+  fourteen reviewers; they do not guarantee free capacity.
 - Give issues that touch the same code to one agent, one after the other,
   each with its own branch and PR.
 - Reviewers use the implementation worktree only after implementation
   stops. An implementer and its reviewers never work in the same worktree at
   the same time.
 - Each agent runs at most one headless browser at a time and closes it when
-  done. Prefer the cloud preview (AWS). Start a local dev server only when
-  there is no other way.
+  done.
 
-### 1a. Fix bugs locally, deploy once (MANDATORY)
+### 1a. Fix bugs locally, push once (MANDATORY)
 
-Each push rebuilds the PR preview (the sandbox image too) and starts a new
-automated review. A bug found after the push costs a full rebuild. Find the
-bugs before you push. Follow this order for every PR:
+Shared staging replaces PR previews (Gilad, 2026-11-11). Each push starts a
+new automated review. A bug found after the push costs a new review round.
+Find the bugs before you push. Follow this order for every PR:
 
 1. Build the change. Run the tests, lint and typecheck locally.
 2. Review the full diff locally. Use two reviewers with fresh context (for
    example, two subagents). Verify each finding with a failing test, then
    fix it. Repeat until a review finds nothing new.
-3. Push once. Let CI, the preview build and the automated review gate run.
-4. Run the acceptance checks on the PR preview.
-5. Record the After video last, on the final commit.
+3. Push once. Let the PR checks and the automated review gate run. The full
+   CI runs later on the batch (section 7).
+4. After the merge reaches staging, the orchestrator runs the acceptance
+   checks on staging (section 4).
 
-If the review gate or the acceptance checks find a bug, fix all findings
-locally, check them again, and then push them together in one push.
+If the review gate finds a bug, fix all findings locally, check them again,
+and then push them together in one push.
+
+A PR that adds a harness to `BLACKBOX_HARNESSES` in
+`backend/core/models/blackbox.py` must also update the frontend in the same
+PR: `frontend/src/shared/lib/blackbox-harness.ts`, the `BlackboxHarness` type
+in `frontend/src/shared/types/api.ts`, and the harness label in `he.json`,
+`en.json` and every other locale catalog that has harness labels.
+`HARNESS_EFFORTS` must match the new module's `supported_efforts`. Then run
+`python3 scripts/generate_i18n.py`. The harness parity test
+(`frontend/src/shared/lib/__tests__/blackbox-harness.test.ts`) then stays
+green (SKY-625, SKY-626).
 
 ## 2. Required for every PR
 
 - State the problem, the resulting behavior and the linked Linear issue in
-  plain language. Put the decision for Gilad in plain language. He must not
-  need to read source code to understand the change or its evidence.
+  plain language. Gilad must not need to read source code to understand the
+  change or its evidence.
 - Name the tested head commit and the baseline commit. Refresh the evidence
   after changes that affect it.
 - Explain the test scope: which behaviors, failure cases and integration
@@ -58,14 +68,15 @@ locally, check them again, and then push them together in one push.
   reports them. Link the CI run or saved output.
 - State material coverage gaps and the reason for any skipped required check.
   Never invent a result or evidence.
-- Run checks that fit the change and the repository's required checks. Avoid
-  tests that only copy the implementation.
+- Run checks that fit the change, locally. The full CI runs on the batch
+  (section 7). Avoid tests that only copy the implementation.
 - Keep one coherent change per PR. Explain why the approach fits, and the
   consequential tradeoffs. Do not list abandoned attempts.
 - Explain affected users, compatibility, data changes, rollout and rollback
   only when they matter. Link long logs; do not paste them.
 - Keep the description current when the scope changes.
-- Keep the PR draft while required checks fail or review evidence is missing.
+- Keep the PR draft while its PR checks or local tests fail, or review
+  evidence is missing.
 
 ### Description structure
 
@@ -73,10 +84,13 @@ Use the repository template when there is one. Include, in this order:
 
 1. Problem and resulting behavior (one concrete before-and-after example when
    useful).
-2. Review evidence: the UI videos, or why there is no visible UI change.
+2. Review evidence: the local checks for the changed behavior, the acceptance
+   checks for staging after the merge, or the section 4 exemption that
+   applies. Say if the change is visible in the UI. UI PRs need no Before and
+   After images or videos (section 5).
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
-5. Automated review verdicts and the decision requested from Gilad.
+5. Automated review verdicts.
 
 Also list the PR's `## Files` (the issue's Files list). For a PR without a
 visible UI change, say so, explain what each test group proves, and add
@@ -88,8 +102,9 @@ for review until the evidence is there.
 ## 3. Automated review gate (RevEngine)
 
 - One review by Claude Opus 5.5 (`claude-opus-5-5`) at medium effort must
-  approve the current head commit and its base commit. Do not substitute
-  another model silently. Do not add a GPT review or a paid review service.
+  approve the current head commit and its base commit with 0 findings. Do
+  not substitute another model silently. Do not add a GPT review or a paid
+  review service.
 - The orchestrator starts a fresh reviewer subagent after implementation
   stops. **The implementer never reviews its own work as the final gate.**
 - RevEngine steps: **Review, Verify, Rank.**
@@ -107,49 +122,69 @@ for review until the evidence is there.
 - Focus on concrete correctness, security, integration, concurrency and
   regression problems. No speculative findings or style preferences. Keep new
   defects apart from problems that existed before.
+- The review is about the code. It does not grade the PR body. The body is
+  for observability only. When the body is wrong or incomplete, the author
+  or the orchestrator fixes it in place. A body issue is never a finding,
+  never blocks approval and never starts a new review round
+  (Gilad, November 11, 2026).
 - Save the first reports, candidate decisions, ranking and rejected findings
   for audit.
 - A missing, failed, interrupted, stale or quota-limited review is not
   approval. **A new commit cancels the approval.** A change to the
-  description or evidence needs a new evidence check.
+  description keeps the approval.
 - Add a short review table: reviewer model, reviewed commit, verdict, report
   link.
-- Approval permits human review, or the backend-only merge below. It never
+- Approval permits the automatic merge into `staging` (section 7). It never
   permits a production deploy.
 - For a PR the automation cannot control, record the failed gate. Do not
-  call it ready for human review.
+  call it ready to merge.
+- **A red `staging` run is never a "known failure".** This covers the batch
+  CI run (`ci` by `workflow_dispatch`), the `ci` run on the promotion PR and
+  the `staging deploy` run (`staging-deploy.yml`). For a staging smoke
+  failure, gate 5 applies. The reviewer or implementation agent that sees a
+  red run names the failing check and the commit where it started, in its
+  report. When a PR in the current batch causes the failure, section 7
+  applies. Otherwise the orchestrator opens an Urgent Linear issue and
+  delegates the fix. The fix PR is the first PR in the next batch (SKY-625,
+  SKY-626).
 
-## 4. Acceptance on staging or the PR preview
+## 4. Acceptance on staging after the merge
 
-- Run unit tests, lint and builds locally or in CI. Run application
-  acceptance checks on AWS staging or the PR's isolated preview copied from
-  staging. Sign in with the `skynet-test-accounts` skill.
+- Run unit tests, lint and builds locally or in CI before the merge.
+- Shared staging replaces PR previews (Gilad, 2026-11-11). After the merge
+  reaches staging, the orchestrator runs the issue's acceptance checks on
+  `https://staging.skynetml.com` with a test account. Sign in with the
+  `skynet-test-accounts` skill.
+- A failed acceptance check becomes a new bug issue in Linear. Link it to
+  the merged PR and its issue.
 - AWS staging (us-east-2, AWS profile `skynet`, Terraform root
   `infra/terraform/environments/staging`): app `https://staging.skynetml.com`,
   API `https://api-staging.skynetml.com`. Railway is deleted (2026-10-29);
   never log in to, call, deploy to or test on it.
-- Use shared staging for baseline checks. Use the PR preview for changed
-  behavior. For the Before and After videos, follow section 5: both go on
-  the preview, and staging is only the fallback for the Before. Never
-  overwrite shared staging with an unmerged branch.
+- Never overwrite shared staging with an unmerged branch.
 - Until AWS staging serves a needed flow, use local Docker evidence and state
   the gap in the PR body.
-- You may deploy the issue's isolated preview. Never deploy production, run
-  billing transactions or change live billing configuration.
-- Use only staging or preview databases, queues, storage, credentials and
-  test accounts. Never use production services or data.
-- Put in the PR: environment, app and API URLs, baseline and tested head
-  commits, deployment versions, exact acceptance checks and results.
+- Never deploy production, run billing transactions or change live billing
+  configuration.
+- Use only staging databases, queues, storage, credentials and test
+  accounts. Never use production services or data.
+- Record on the Linear issue: the app and API URLs, the staging commit you
+  tested, the exact acceptance checks and their results.
 - Check `/health` on the API and `/api/version` on the frontend. Each
-  affected service must serve the tested commit. An unchanged service may run
-  an older SHA only with proof that it misses no relevant change.
-- Use real acceptance for feasible flows. Missing access, deployment or
-  evidence keeps the PR draft. An infrastructure failure is a blocker, not a
-  pass.
+  affected service must serve the merged commit or a later one. An unchanged
+  service may run an older SHA only with proof that it misses no relevant
+  change.
+- Use real acceptance for feasible flows. Record missing access or
+  deployment as a coverage gap. An infrastructure failure is a blocker, not
+  a pass.
 - Documentation-only work with no runtime effect may skip staging acceptance.
-  Explain that exemption in the description. The Opus 5.5 review must approve
-  the staging evidence, the costly-flow alternative or the documentation
-  exemption. A changed review policy cancels earlier approval.
+  Explain that exemption in the description.
+- A visual-only change with no app logic under test (layout, styling, copy,
+  labels, static states) may skip the staging acceptance checks and the
+  served-commit check. Explain that exemption in the description.
+- The Opus 5.5 review must approve the visual-only exemption, the costly-flow
+  alternative or the documentation exemption. A changed review policy cancels
+  earlier approval.
 
 ### Real data and costly workflows
 
@@ -160,47 +195,40 @@ for review until the evidence is there.
   validation and authentication. Record material differences. Never silently
   replace a real integration with a test substitute.
 - A test-account login is access setup, not proof of email verification.
-  Never disable verification on previews. Test authentication changes with
+  Never disable verification on staging. Test authentication changes with
   fresh accounts and real codes.
 - Use only test allowances that already exist. Never add funds, grant
-  credits, change balances or create charges.
+  credits, change balances or create charges. The one exception is the
+  staging test-credit grant command in the `skynet-test-accounts` skill
+  ("Grant test credit"). Use it only for a check account you created for
+  this check, only after Gilad approves that grant in chat, and within the
+  one $50 UTC-day cap on the staging database. Amounts depend on the check.
+  Before each grant, ask Gilad in chat for a specific dollar amount: the
+  smallest amount the check needs, with a short cost estimate. Gilad
+  approves that amount, or a larger one if he thinks the check needs more.
+  Record his approval text. Spend as little as possible. Never grant on
+  production, to real customers or to manual accounts. Never use a raw
+  wallet INSERT, Stripe or any other path.
 - Mocks are allowed for focused unit tests or unavailable dependencies.
   Explain the reason, boundary and coverage gap.
 - Costly or rare workflows (for example expensive scheduled runs): backend
   algorithmic tests and source review may verify the backend. The frontend
-  may use clearly labeled simulated state on the real running UI. Use the
-  same simulated state for Before and After, and label it in the videos and
-  the PR. State the cost, the simulated boundary, the real coverage and the
-  remaining gap. Never claim the expensive run happened.
+  may use clearly labeled simulated state on the real running UI. Label the
+  simulated state on the Linear issue. State the cost, the simulated
+  boundary, the real coverage and the remaining gap. Never claim the
+  expensive run happened.
 - This exception does not cover cheap authentication, data or navigation
   flows. Test those on real staging.
 
-## 5. UI PRs: before-and-after videos
+## 5. UI PRs: no before-and-after media
 
-- Every visible UI change needs playable Before and After videos. Screenshots
-  alone are not enough.
-- Upload the videos to the **Linear issue** as private Linear uploads, in a
-  comment. Never put videos in Git or on GitHub (no commits, attachments,
-  comments or releases): the repository is public. In the PR body, say that
-  the videos are on the Linear issue and name it.
-- Record the Before first: open the draft PR before you change code, record
-  the Before on its preview, then implement and record the After on the same
-  preview. Use staging for the Before only when the preview cannot show the
-  baseline.
-- Record the same flow, data, viewport and pace on both versions. Use real
-  running versions; never mockups, staged output or an unrelated preview.
-- Label the videos Before and After. Name their commit or deployment, and
-  say what the reviewer should see.
-- Cover the affected layouts, themes and language directions (light and
-  dark, LTR and RTL).
-- Specs: viewport 1440x900 at device scale 2 (2880x1800 captures). H.264, at
-  least 2560 px wide, CRF 16 or lower, yuv420p, at least 30 fps, readable
-  text, under about 60 s, slow enough to follow. Stills: lossless
-  full-resolution PNG, a before/after pair at each key moment plus one
-  side-by-side image.
-- Check that both uploaded videos play and show the expected behavior. State
-  that check in the Linear comment and in the PR body.
-- Record the After video last, on the final commit (section 1a, step 5).
+- UI PRs need no Before and After images or videos (Gilad, 2026-11-10). Do
+  not capture, upload or link screenshots or videos as PR evidence.
+- UI PRs use the same flow as backend PRs: build, fresh review, then verify
+  and fix (sections 1a and 3). The acceptance checks in section 4 still
+  apply.
+- UI PRs merge like backend PRs, when all gates pass (Gilad, 2026-11-11).
+  The gates are in section 7.
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -220,86 +248,128 @@ for review until the evidence is there.
 - Bounded file-repair sessions keep their exact manifests. Expanded work
   needs a separate authorized session.
 
-## 7. Merging (orchestrator only)
+## 7. Merging
 
 ### Merge gates (MANDATORY)
 
-**Backend PRs** (only files under `backend/`, at least one, plus optional
-Markdown under `docs/`) merge into `staging` only when **all** of these
-gates pass:
+A PR merges into `staging` only when **all** of these gates pass:
 
-1. Agent code review is clean.
-2. Tests and the Linear issue's acceptance checks pass in the PR environment.
+1. One Opus 5.5 medium-effort review approves the current head with 0
+   findings (section 3).
+2. The local tests and checks in `AGENTS.md` ("Verification") pass.
 3. The diff touches only the files in the issue's `## Files` list.
-4. Up to date: the branch includes the latest `staging` (one merge commit from
-   `staging`, never a force-push), then tests pass again.
+4. Batch CI: the PR's approved head goes into a batch branch made from the
+   latest `staging`, and the full CI passes on the batch (see "PR tests and
+   batch CI").
 5. After the merge, the staging smoke test passes. If it fails, revert that
-   PR's merge right away and reopen its issue with the failure.
+   PR's merge commit from the batch right away (`git revert -m 1 <merge
+   commit>`) and reopen its issue with the failure. The revert goes in its
+   own PR and through the batch CI flow below.
 
-**UI PRs** (anything touching `frontend/`, including mixed PRs) wait for the
-user. Attach a proof card: one line naming the decision and the Linear issue,
-the Before and After videos of the acceptance criteria in the PR environment
-(on the Linear issue; section 5), the review verdict, and the diff size.
-Merge only after the user approves that specific PR in chat or on GitHub (or
-with `Approved for merge` on the Linear issue), and then only in the daily
-window. A frontend PR with no meaningful visible change can use the backend
-path (the 2026-10-22 exception below).
+After the merge reaches staging, the orchestrator runs the acceptance checks
+on staging (section 4). A failed check becomes a new bug issue.
 
-Any other PR (files outside `backend/` and `docs/**/*.md`, or no backend
-file) also waits for the user's approval.
+### Every PR merges on the gates (Gilad, 2026-11-11)
+
+Every PR merges into `staging` when the five gates pass, with no human
+approval. Gilad scopes and designs each issue with the agent, so the review
+gate is enough. This includes backend, UI, docs-only, i18n-only,
+`scripts/**`, CI (`.github/**`), deploy and infra config, and agent rule
+file PRs.
+
+A PR that Gilad marks "do not merge" (for example SKY-318) stays unmerged
+until he removes the mark. A manual hold or a `Changes requested:` comment
+also stops a merge.
 
 **`staging` → `main`**: a change in `staging` is approved for production.
-The orchestrator promotes `staging` to `main` when the staging checks pass.
+The orchestrator promotes `staging` to `main` when the staging checks pass
+and CI passes on the promotion PR (see "PR tests and batch CI").
 Do not send a promotion card or a video tour, and do not wait for "promote".
 A manual hold on a change or on a promotion still stops it.
 
-### Backend-only merges (2026-10-19)
+### Automatic merges (2026-10-19, all PRs 2026-11-11)
 
-- The orchestrator may merge a backend-only PR into `staging` without another
-  human approval, in the daily merge window below. Gates: one current Opus 5.5 medium-effort approval of the
-  current head and base, required checks and staging evidence pass, and the
-  review confirms no visible UI change.
-- Automatic scope: `backend/**`, plus optional Markdown under `docs/**`. At
-  least one backend file. UI, mixed, unknown and other-repository changes
-  keep the human approval.
-- Exception (2026-10-22): a PR that touches frontend files may use this path
-  when the review confirms no meaningful visible change in normal use (for
-  example payload or data-cleanup fixes for stale states, internal refactors,
-  tests, i18n-only string moves). It needs no videos. The PR body must say
-  why the change is not visible. If the reviewer is unsure, keep the human
-  approval.
-- Just before the merge, check the full changed-file list, the current
-  revision, base, evidence and review policy. Use a merge command that
-  requires the reviewed head commit. Never bypass branch protection or queue
-  an unchecked future merge.
-- **Only the orchestrator merges** (through its cloud merger routine, in the
-  daily merge window below). Implementation and review agents leave the
-  final action to the orchestrator.
+- The orchestrator may put any PR into the batch (see "PR tests and batch
+  CI") without human approval.
+  Gates: one current Opus 5.5 medium-effort approval of the current head and
+  base, and the PR's own checks and its local test evidence pass. The full
+  CI runs on the batch, not on the PR.
+- Automatic scope: every path. It covers only merges into `staging`. It
+  never covers `main`, production or other repositories.
+- Just before a PR goes into the batch, check the full changed-file list
+  against the issue's `## Files` list. Check that no "do not merge" mark,
+  manual hold or `Changes requested:` applies. Also check the current
+  revision, base, evidence and review policy. Merge the reviewed head commit
+  into the batch.
+  Merge the batch PR with a command that requires its reviewed head commit
+  (`gh pr merge <n> --merge --match-head-commit <sha>`). Never bypass
+  branch protection or queue an unchecked future merge.
+- **Among agents, only the orchestrator merges** (through the batch, in the
+  daily merge window below). Gilad can also merge.
+  Implementation and review agents leave the final action to the orchestrator.
 
-### Linear approval and revisions (2026-10-19)
+### Linear revisions and holds (2026-10-19, 2026-11-11)
 
-- An issue in **Ready for Review** is Gilad's review inbox. After the Opus
-  5.5 approval, the orchestrator moves the issue there and notifies Gilad
-  only for changes that need human review (PR, UI videos, preview, checks,
-  review evidence). Withdraw readiness quietly if commits, checks or evidence
-  change. A backend merge needs no notification.
-- Gilad approves with a new comment that contains `Approved for merge`. It
-  authorizes only the version in the latest completed review handoff, and
-  only from Gilad's Linear account after that handoff. Delegated agent
-  comments, old or quoted comments, praise and unclear links do not count.
+- A merge into `staging` needs no `Approved for merge` comment and no
+  notification to Gilad.
 - Gilad asks for a revision with a new comment that starts with
-  `Changes requested:`. A newer `Changes requested:`, a deleted approval or a
-  changed review identity stops the merge. The orchestrator moves the issue
+  `Changes requested:`. A newer `Changes requested:` or a changed review
+  identity stops the merge. The orchestrator moves the issue
   back to In Progress and delegates the revision in the existing worktree
   and branch. Never interrupt active work for it. Update the same draft PR,
   refresh evidence and repeat the review.
 - **Implementation and review agents never post `Approved for merge` or
   `Changes requested:` comments**, even from Gilad's account.
 - Before a merge, recheck the commit, base, policy, evidence, review, checks
-  and the latest Linear decision. This approval never covers production or
-  other repositories.
+  and the latest Linear decision (`Changes requested:`, "do not merge" or a
+  manual hold). No merge rule covers production or other repositories.
 
-### Daily merge window (2026-10-20)
+### PR tests and batch CI (Gilad, 2026-11-10)
+
+- No CI workflow (`ci`, `i18n`, `desktop`) runs on a pull request to
+  `staging`. Before every push, run the local gate in `AGENTS.md`
+  ("Verification"). Put the exact commands and their results in the PR body.
+- The policy checks still run on every PR: gitleaks, pr files scope
+  (`scope`), pr kind label and terraform.
+- CI runs on each batch (dispatch), on the `staging` → `main` promotion PR
+  and on the push to `main`.
+- An individual PR never merges on its own. The orchestrator merges approved
+  PRs into `staging` through one batch PR. GitHub marks each included PR as
+  merged when the batch merges.
+- **Only the orchestrator creates `batch/` branches.** The `scope` check
+  passes for any `batch/` branch in this repository, because it trusts the
+  name. Never use the `batch/` prefix for other work.
+- The orchestrator builds each batch:
+  1. Create `batch/<date>-<n>` from current `staging`. `<n>` counts the
+     batches of that day (1, 2, ...), so each batch has a new name.
+  2. Merge the approved head of each PR branch into it with a merge commit.
+     Never force-push.
+  3. Run `gh workflow run ci.yml --ref batch/<date>-<n>` and `gh workflow
+     run i18n.yml --ref batch/<date>-<n>`. Wait for both runs to pass.
+  4. Open one PR from `batch/<date>-<n>` to `staging`. List the included PRs
+     and their merged heads, and link the CI run.
+  5. Merge it with a merge commit (`gh pr merge <pr> --merge --delete-branch
+     --match-head-commit <sha>`).
+- The `staging merge gates` ruleset requires only `scope`. So the
+  orchestrator must check the green batch run itself before the merge. A new
+  batch commit needs a new dispatched run.
+- **No unreviewed code on the batch branch.**
+  - A CI failure or a bug: fix it in the PR's own branch. That PR gets a new
+    review, then its new head goes into the batch again. Or remove the PR
+    from the batch.
+  - A rebuild uses a new branch (`batch/<date>-<n+1>`) and a new batch PR.
+    Close the old batch PR and delete its branch.
+  - A merge conflict between PRs: the orchestrator may resolve it in the
+    batch merge commit. Then the batch head needs a fresh Opus 5.5
+    medium-effort review before the merge.
+- **A red batch run or a red promotion run blocks the promotion.** Fix it in
+  a new PR, which goes through the next batch. Do not promote `staging` to
+  `main` while the latest batch run or the promotion run is red.
+- Bootstrap (SKY-570): the PR that adds this flow merges the same way.
+  Dispatch `ci` and `i18n` on its own branch (`gh workflow run ci.yml --ref
+  <branch>`), wait for both runs to pass, then merge the PR.
+
+### Daily merge window (2026-10-20, batch flow 2026-11-10)
 
 - Merges into `staging` happen only in the daily window at 03:00
   America/Los_Angeles, or when Gilad asks for a merge.
@@ -308,15 +378,16 @@ A manual hold on a change or on a promotion still stops it.
   `agent-review/ready-to-merge` status on the approved head.
 - The approval stays valid when only `staging` moves. A new PR commit, a move
   back to draft or a Linear move withdraws it.
-- A cloud merger routine runs the window. It merges PRs one at a time and
-  requires the approved head. It fixes an out-of-date branch or a conflict
-  with one merge commit from `staging`, then needs a full Opus 5.5
-  medium-effort re-review of the new head. If a UI PR's visible UI changes
-  in that update, it stops and waits for Gilad.
-- A PR it cannot fix waits for the next window, with the reason in the PR
-  and in Linear.
-- After GitHub confirms the merge, move the issue to Done and attach the
-  merge commit. The merger never merges into `main` or touches production.
+- The orchestrator's cloud merger routine runs the window. It builds one
+  batch from every PR in **Ready to Merge** (see "PR tests and batch CI"). A
+  PR branch does not need a merge from `staging`, because the batch starts
+  from current `staging`.
+- A PR that the batch cannot take (a conflict it cannot resolve, a CI
+  failure) leaves the batch. It waits for the next window, with the reason
+  in the PR and in Linear.
+- After GitHub confirms the batch merge, move each included issue to Done
+  and attach the batch merge commit. The merger never merges into `main` or
+  touches production.
 
 ## Sources
 

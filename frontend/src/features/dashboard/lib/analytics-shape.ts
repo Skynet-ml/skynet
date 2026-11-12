@@ -14,8 +14,6 @@ export interface AnalyticsShape {
   kpis: boolean;
   optimizers: number;
   status: number;
-  jobTypes: number;
-  modules: number;
   models: number;
   leaders: number;
   sharing: boolean;
@@ -36,8 +34,6 @@ export function analyticsShape(
     kpis: chartData.kpis != null,
     optimizers: chartData.optimizerStats.length,
     status: chartData.status.length,
-    jobTypes: chartData.jobTypes.length,
-    modules: chartData.modules.length,
     models: chartData.modelStats.length,
     leaders: chartData.topJobs.length,
     sharing,

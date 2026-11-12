@@ -8,6 +8,7 @@ import { Button } from "@/shared/ui/primitives/button";
 import { cn } from "@/shared/lib/utils";
 
 import { EntryRow } from "./EntryRow";
+import { SecretRequestCard } from "./SecretRequestCard";
 import { getToolMeta, type ApprovalSeverity } from "../lib/tool-meta";
 import type { PendingApprovalPayload } from "../lib/types";
 
@@ -77,6 +78,13 @@ const SEVERITY_STYLES: Record<
  * details tucked behind a disclosure toggle.
  */
 export function ApprovalCard({ payload, onResolve, className }: ApprovalCardProps) {
+  if (payload.tool === "request_secret") {
+    return <SecretRequestCard payload={payload} onResolve={onResolve} className={className} />;
+  }
+  return <ToolApprovalCard payload={payload} onResolve={onResolve} className={className} />;
+}
+
+function ToolApprovalCard({ payload, onResolve, className }: ApprovalCardProps) {
   const [busy, setBusy] = React.useState<"approve" | "deny" | null>(null);
   const [showDetails, setShowDetails] = React.useState(false);
 

@@ -1,61 +1,18 @@
-"""Verify isolated setup checks exercise configured task models without optimization."""
+"""Verify explicit workflow previews run authored nodes inside the protected guest."""
 
 from __future__ import annotations
 
 from typing import Any
 
-import dspy
 import pytest
 from dspy.utils.dummies import DummyLM
 
 from core.worker import preflight
 
 
-def _payload() -> dict[str, Any]:
-    """Build one parent-selected training sample with authored metric code."""
-    return {
-        "module_name": "predict",
-        "signature_code": "import dspy\nclass Answer(dspy.Signature):\n    question: str = dspy.InputField()\n    answer: str = dspy.OutputField()\n",
-        "metric_code": "def metric(gold, pred, trace=None):\n    return float(gold.answer == pred.answer)\n",
-        "column_mapping": {"inputs": {"question": "question"}, "outputs": {"answer": "answer"}},
-        "dataset": [{"question": "sample", "answer": "yes"}],
-        "model_config": {"name": "test/model"},
-    }
-
-
-def test_evaluation_check_does_not_call_models(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inspect authored code and sample mapping while explicitly deferring inference."""
-
-    def forbid(*args: Any, **kwargs: Any) -> None:
-        """Reject accidental paid model construction during evaluation-only setup."""
-        pytest.fail("Evaluation-only preflight must not invoke a model.")
-
-    monkeypatch.setattr(preflight, "build_language_model", forbid)
-    result = preflight.run_dspy_preflight(_payload(), {"scope": "evaluation"})
-    assert result["checks"][-1] == {"key": "sample_prediction", "status": "pending"}
-
-
-def test_execution_checks_the_task_model_without_search(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Perform a sample prediction and actual metric for the single task model."""
-    calls = []
-
-    def build(config: Any, **kwargs: Any) -> DummyLM:
-        """Return deterministic DSPy responses instead of contacting a model provider."""
-        calls.append(config.name)
-        return DummyLM([{"answer": "yes"}])
-
-    monkeypatch.setattr(preflight, "build_language_model", build)
-    with dspy.context():
-        result = preflight.run_dspy_preflight(_payload(), {"scope": "execution"})
-    assert calls == ["test/model"]
-    assert [score["score"] for score in result["sample_scores"]] == [1.0]
-    assert all(check["status"] == "succeeded" for check in result["checks"])
-
-
 def _workflow_payload(*, fail: bool = False) -> dict[str, Any]:
     """Build an actual authored transform between workflow input and output anchors."""
-    payload = _payload()
-    payload["module_name"] = "workflow"
+    payload: dict[str, Any] = {"model_config": {"name": "test/model"}}
     code = "def transform(question):\n    return {'answer': question.upper()}\n"
     if fail:
         code = "def transform(question):\n    raise ValueError('sample node failed')\n"
@@ -76,35 +33,7 @@ def _workflow_payload(*, fail: bool = False) -> dict[str, Any]:
             {"source": "actual_transform", "source_port": "answer", "target": "output", "target_port": "answer"},
         ],
     }
-    payload["dataset"] = [{"question": "real sample", "answer": "REAL SAMPLE"}]
     return payload
-
-
-def test_workflow_preflight_returns_actual_sample_traces(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replay the actual authored transform and its output anchor without optimization."""
-    monkeypatch.setattr(preflight, "build_language_model", lambda *_args, **_kwargs: DummyLM([]))
-    result = preflight.run_dspy_preflight(_workflow_payload(), {"scope": "execution"})
-    actual = result["workflow_result"]
-    assert actual["outputs"] == {"answer": "REAL SAMPLE"}
-    assert actual["model_used"] == "test/model"
-    assert [trace["node_id"] for trace in actual["node_traces"]] == ["input", "actual_transform", "output"]
-    assert actual["node_traces"][1]["inputs"] == {"question": "real sample"}
-    assert actual["node_traces"][1]["outputs"] == {"answer": "REAL SAMPLE"}
-    assert actual["error"] is None
-    assert result["sample_score"] == 1.0
-
-
-def test_workflow_preflight_retains_actual_failed_node_trace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep partial traces while a real node failure blocks setup readiness."""
-    monkeypatch.setattr(preflight, "build_language_model", lambda *_args, **_kwargs: DummyLM([]))
-    result = preflight.run_dspy_preflight(_workflow_payload(fail=True), {"scope": "execution"})
-    actual = result["workflow_result"]
-    assert actual["outputs"] is None
-    assert actual["failed_node_id"] == "actual_transform"
-    assert "sample node failed" in actual["error"]
-    assert [trace["node_id"] for trace in actual["node_traces"]] == ["input", "actual_transform"]
-    assert result["checks"][-1]["status"] == "failed"
-    assert result["sample_scores"] == []
 
 
 def test_explicit_workflow_preview_uses_only_debug_inputs(monkeypatch: pytest.MonkeyPatch) -> None:

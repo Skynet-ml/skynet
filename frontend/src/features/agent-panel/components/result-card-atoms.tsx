@@ -64,29 +64,8 @@ export function StatTile({
   );
 }
 
-/** A pass/fail marker: green filled dot on pass, dimmed red dot on fail. */
-export function PassDot({ pass }: { pass: boolean }) {
-  return (
-    <span
-      aria-hidden="true"
-      className="inline-block size-2 shrink-0 rounded-full"
-      style={{
-        backgroundColor: pass ? "var(--success)" : "var(--danger)",
-        opacity: pass ? 1 : 0.55,
-      }}
-    />
-  );
-}
-
-/** Run vs grid-search badge, localized via the shared TERMS vocabulary. */
-export function TypeBadge({ type }: { type: string }) {
-  if (type === "grid_search") {
-    return (
-      <Badge variant="outline" className="border-primary-fill/30 text-primary">
-        {TERMS.optimizationTypeGrid}
-      </Badge>
-    );
-  }
+/** Run badge, localized via the shared TERMS vocabulary. */
+export function TypeBadge() {
   return <Badge variant="secondary">{TERMS.optimizationTypeRun}</Badge>;
 }
 

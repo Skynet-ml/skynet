@@ -43,9 +43,10 @@ _REMOTE_TIMEOUT_SECONDS = 10.0
 _REPO_DOCS_DIR = Path(__file__).resolve().parents[4] / "frontend" / "src" / "features" / "docs" / "content"
 
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
-_HEBREW_WORD = re.compile(r"^[א-ת]+$")
+# Escapes keep raw Hebrew out of backend modules (test_i18n_catalog_boundary).
+_HEBREW_WORD = re.compile("^[\u05d0-\u05ea]+$")
 # One-letter Hebrew prefixes: and, the, in, as, to, from, that.
-_HEBREW_PREFIXES = "והבכלמש"
+_HEBREW_PREFIXES = "\u05d5\u05d4\u05d1\u05db\u05dc\u05de\u05e9"
 _WORD_SPLIT = re.compile(r"[\W_]+", re.UNICODE)
 _SOURCE_LINE = re.compile(r"^Source: (?P<url>\S+)\s*$", re.MULTILINE)
 

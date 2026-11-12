@@ -27,7 +27,7 @@
  * 4. Grep for hardcoded variants and migrate or document any deliberate
  *    exceptions in the same change.
  */
-import { TERMS as TERMS_HE, TERMS_BY_LOCALE, type TermKey } from "./generated/i18n-catalog";
+import { TERMS as TERMS_HE, TERMS_BY_LOCALE } from "./generated/i18n-catalog";
 import { fallbackChain } from "./locale";
 import { getActiveLocale } from "./runtime-locale";
 
@@ -66,26 +66,3 @@ export const TERMS: typeof TERMS_HE = new Proxy(TERMS_HE, {
     return Reflect.get(target, key, receiver);
   },
 });
-
-// The backend persists a job's cancel/pause reason into `message` as the
-// rendering of these glossary terms in its own base locale (Hebrew), so a
-// stored reason has to be mapped back to its term key before the active
-// locale can render it.
-const STORED_REASON_TERMS: readonly TermKey[] = ["cancellationReason", "pauseReason"];
-
-/**
- * Re-render a backend-persisted reason string in the active locale.
- *
- * Matches `value` against every locale's rendering of the stored-reason terms
- * (so the lookup does not depend on which locale the backend wrote) and returns
- * the active locale's rendering. Any other text — failure details, progress
- * messages — is returned unchanged.
- */
-export function localizeStoredReason(value: string): string {
-  for (const key of STORED_REASON_TERMS) {
-    for (const overlay of Object.values(TERM_OVERLAYS)) {
-      if (overlay[key] === value) return TERMS[key];
-    }
-  }
-  return value;
-}

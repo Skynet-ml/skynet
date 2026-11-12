@@ -23,10 +23,6 @@ export const WIZARD_STAGE: Readonly<Record<WizardStageId, number>> = {
   metric: 3,
 };
 
-export function isWizardStageId(value: unknown): value is WizardStageId {
-  return typeof value === "string" && (WIZARD_STAGE_ORDER as readonly string[]).includes(value);
-}
-
 /**
  * Whether forward moves (Next, the arrow keys, the stepper) may leave
  * `current`. Nothing past Inputs opens while Inputs has an issue, from

@@ -1,4 +1,4 @@
-"""Tests for the per-user agent engine: the default, the endpoints, account data and routing."""
+"""Tests for the agent engine: the automatic pick, account data and routing."""
 
 from __future__ import annotations
 
@@ -24,21 +24,20 @@ from ...billing import cli_dispatch
 from ...billing.tests.test_cli_runners import CODEX_TURN, emitting, fake_app_server, local_settings, requests
 from ...local.cli_catalog import CLI_MODELS
 from ...local.cli_probe import CliStatus
+from ...models import ModelConfig
 from ...service_gateway import language_models
 from ...service_gateway.agents import code as code_agent_engine
 from ...service_gateway.language_models import build_language_model
 from ...storage.models import AgentEnginePreferenceModel, Base, UserModel
-from .. import agent_engine, model_router
+from .. import agent_engine, model_catalog, model_fast_mode, model_router
 from .. import auth as auth_mod
 from ..account_data_service import delete_account, export_account
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..model_catalog import CatalogModel
-from ..routers import agent_engine as engine_router_mod
+from ..model_catalog import CatalogModel, ModelCatalogResponse
 from ..routers import code_agent as code_agent_mod
 from ..routers import generalist_agent as agent_mod
 from ..routers import tagger_assist as tagger_mod
-from ..routers.agent_engine import create_agent_engine_router
 from ..routers.code_agent import create_code_agent_router
 from ..routers.generalist_agent import create_generalist_agent_router
 from ..routers.tagger_assist import create_tagger_assist_router
@@ -82,30 +81,6 @@ def _engine() -> Engine:
     return engine
 
 
-def _client(store: object, username: str = _USER) -> TestClient:
-    """Mount the engine router for one caller, rendering domain errors with their code.
-
-    Args:
-        store: The job store the router reads and writes.
-        username: The authenticated caller.
-
-    Returns:
-        A test client.
-    """
-    app = FastAPI()
-
-    @app.exception_handler(DomainError)
-    async def _domain_error(request: Request, exc: DomainError) -> JSONResponse:
-        """Render a domain error with its i18n code."""
-        return JSONResponse(status_code=exc.status_code, content={"code": exc.code})
-
-    app.include_router(create_agent_engine_router(job_store=store))
-    app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(
-        username=username, role="user", groups=()
-    )
-    return TestClient(app)
-
-
 class _NoDatabase:
     """A job store whose database must not be touched."""
 
@@ -119,7 +94,7 @@ class _NoDatabase:
 def hosted(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep local mode off, and fail if anything probes a CLI."""
     current = config.settings.model_copy(update={"local_mode": False})
-    for module in (config, agent_engine, engine_router_mod, model_router):
+    for module in (config, agent_engine, model_router):
         monkeypatch.setattr(module, "settings", current)
 
     def no_probe(_settings: object) -> list[CliStatus]:
@@ -138,7 +113,7 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[CliStatus]:
     """
     fake_app_server(tmp_path, emitting(*CODEX_TURN))
     current = local_settings(tmp_path)
-    for module in (config, agent_engine, engine_router_mod, model_router, language_models):
+    for module in (config, agent_engine, model_router, language_models):
         monkeypatch.setattr(module, "settings", current)
     monkeypatch.setattr(cli_dispatch, "_gateway", None)
     monkeypatch.setattr(cli_dispatch, "_list_prices", lambda model: None)
@@ -150,25 +125,9 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[CliStatus]:
 @pytest.mark.usefixtures("hosted")
 def test_hosted_default_is_openrouter_without_a_database_read() -> None:
     """Answer ``openrouter`` in hosted mode, and leave an agent pick untouched, with no DB read."""
-    client = _client(_NoDatabase())
-    assert client.get("/account/agent-engine").json() == {"engine": "openrouter", "stored": False}
+    assert agent_engine.effective_agent_engine(_NoDatabase(), _USER) == "openrouter"
     assert agent_engine.engine_agent_model(_NoDatabase(), _USER, None) is None
     assert agent_engine.engine_agent_model(_NoDatabase(), _USER, "openai/gpt-5.5") == "openai/gpt-5.5"
-
-
-@pytest.mark.usefixtures("hosted")
-@pytest.mark.parametrize("engine", ["codex", "claude"])
-def test_hosted_refuses_a_cli_engine(engine: str) -> None:
-    """Refuse every CLI engine in hosted mode with the existing local-only error.
-
-    Args:
-        engine: The CLI engine asked for.
-    """
-    client = _client(_NoDatabase())
-    response = client.put("/account/agent-engine", json={"engine": engine})
-    assert (response.status_code, response.json()) == (422, {"code": "models.subscription_local_only"})
-    put = client.put("/account/agent-engine", json={"engine": "openrouter"})
-    assert (put.status_code, put.json()) == (200, {"engine": "openrouter", "stored": False})
 
 
 def test_local_default_is_the_first_ready_cli(local: list[CliStatus]) -> None:
@@ -177,109 +136,54 @@ def test_local_default_is_the_first_ready_cli(local: list[CliStatus]) -> None:
     Args:
         local: The probe results, edited in place.
     """
-    client = _client(SimpleNamespace(engine=_engine()))
-    assert client.get("/account/agent-engine").json() == {"engine": "codex", "stored": False}
+    store = SimpleNamespace(engine=_engine())
+    assert agent_engine.effective_agent_engine(store, _USER) == "codex"
     local[0] = _status("codex", logged_in=False)
     local[1] = _status("claude", rate_limited_until="2099-01-01T00:00:00Z")
-    assert client.get("/account/agent-engine").json() == {"engine": None, "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) is None
     local[1] = _status("claude")
-    assert client.get("/account/agent-engine").json() == {"engine": "claude", "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) == "claude"
     local[1] = _status("claude", version_ok=False)
-    assert client.get("/account/agent-engine").json() == {"engine": None, "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) is None
     assert agent_engine.engine_agent_model(None, _USER, None) is None
     with pytest.raises(DomainError) as caught:
         model_router.route_agent_model(agent_engine.engine_agent_model(None, _USER, None))
     assert caught.value.code == "models.managed_unavailable_local"
 
 
-@pytest.mark.usefixtures("local")
-def test_local_refuses_openrouter_and_unknown_engines() -> None:
-    """Refuse OpenRouter in local mode, which has no managed key, and any unknown value."""
-    engine = _engine()
-    client = _client(SimpleNamespace(engine=engine))
-    response = client.put("/account/agent-engine", json={"engine": "openrouter"})
-    assert (response.status_code, response.json()) == (422, {"code": "models.managed_unavailable_local"})
-    assert client.put("/account/agent-engine", json={"engine": "gemini"}).status_code == 422
-    with Session(engine) as session:
-        assert session.get(AgentEnginePreferenceModel, _USER) is None
-
-
-@pytest.mark.parametrize("mode", ["hosted", "local"])
-def test_droid_is_not_an_agent_engine(mode: str, request: pytest.FixtureRequest) -> None:
-    """Refuse droid as an engine: it cannot skip the user's config, hooks and MCP servers.
-
-    Args:
-        mode: The fixture that sets hosted or local mode.
-        request: Pytest request used to load that fixture.
-    """
-    request.getfixturevalue(mode)
-    engine = _engine()
-    client = _client(SimpleNamespace(engine=engine) if mode == "local" else _NoDatabase())
-    response = client.put("/account/agent-engine", json={"engine": "droid"})
-    assert response.status_code == 422
-    assert [issue["loc"] for issue in response.json()["detail"]] == [["body", "engine"]]
-    if mode == "local":
-        with Session(engine) as session:
-            assert session.get(AgentEnginePreferenceModel, _USER) is None
-    app = FastAPI()
-    app.include_router(create_agent_engine_router(job_store=None))
-    schemas = TestClient(app).get("/openapi.json").json()["components"]["schemas"]
-    assert schemas["AgentEngineUpdate"]["properties"]["engine"]["enum"] == ["openrouter", "codex", "claude"]
-
-
-def test_stored_droid_falls_back_to_the_default(local: list[CliStatus]) -> None:
-    """Run a saved droid setting on the first ready isolated CLI, never on droid.
+def test_droid_is_never_the_engine(local: list[CliStatus]) -> None:
+    """Skip a ready droid CLI: it cannot skip the user's config, hooks and MCP servers.
 
     Args:
         local: The probe results, edited in place.
     """
+    local[:] = [_status("droid"), _status("claude")]
+    assert agent_engine.effective_agent_engine(None, _USER) == "claude"
+    local[:] = [_status("droid")]
+    assert agent_engine.effective_agent_engine(None, _USER) is None
+    assert agent_engine.engine_agent_model(None, _USER, None) is None
+
+
+@pytest.mark.parametrize("stored", ["claude", "openrouter", "droid"])
+def test_stored_engine_rows_are_ignored(local: list[CliStatus], stored: str) -> None:
+    """Run on the first ready CLI for every caller, whatever engine an old row names.
+
+    Args:
+        local: The probe results, edited in place.
+        stored: The engine an old ``agent_engine_preferences`` row names.
+    """
     engine = _engine()
     with Session(engine) as session:
-        session.add(AgentEnginePreferenceModel(username=_USER, engine="droid"))
+        session.add(AgentEnginePreferenceModel(username=_USER, engine=stored))
         session.commit()
     store = SimpleNamespace(engine=engine)
-    assert _client(store).get("/account/agent-engine").json() == {"engine": "codex", "stored": False}
-    assert agent_engine.engine_agent_model(store, _USER, None) == _CODEX_ID
+    for username in (_USER, _OTHER):
+        assert agent_engine.effective_agent_engine(store, username) == "codex"
+        assert agent_engine.engine_agent_model(store, username, None) == _CODEX_ID
     local[0] = _status("codex", path=None)
     local[1] = _status("claude", logged_in=False)
-    assert _client(store).get("/account/agent-engine").json() == {"engine": None, "stored": False}
+    assert agent_engine.effective_agent_engine(store, _USER) is None
     assert agent_engine.engine_agent_model(store, _USER, None) is None
-
-
-@pytest.mark.usefixtures("local")
-def test_local_setting_persists_per_user() -> None:
-    """Keep the choice across a new router over the same database, for that caller only."""
-    engine = _engine()
-    assert _client(SimpleNamespace(engine=engine)).put("/account/agent-engine", json={"engine": "claude"}).json() == {
-        "engine": "claude",
-        "stored": True,
-    }
-    restarted = SimpleNamespace(engine=engine)
-    assert _client(restarted).get("/account/agent-engine").json() == {"engine": "claude", "stored": True}
-    assert _client(restarted, _OTHER).get("/account/agent-engine").json() == {"engine": "codex", "stored": False}
-    assert (
-        agent_engine.engine_agent_model(restarted, _USER, None)
-        == f"subscription/claude/{next(iter(CLI_MODELS['claude']))}"
-    )
-
-
-def test_get_reports_whether_the_engine_is_stored(local: list[CliStatus]) -> None:
-    """Flag a saved engine as stored, and the automatic pick as not stored, also when both name one CLI.
-
-    Args:
-        local: The probe results, edited in place.
-    """
-    client = _client(SimpleNamespace(engine=_engine()))
-    assert client.get("/account/agent-engine").json() == {"engine": "codex", "stored": False}
-    client.put("/account/agent-engine", json={"engine": "codex"})
-    assert client.get("/account/agent-engine").json() == {"engine": "codex", "stored": True}
-    local[0] = _status("codex", logged_in=False)
-    assert client.get("/account/agent-engine").json() == {"engine": "codex", "stored": True}
-    app = FastAPI()
-    app.include_router(create_agent_engine_router(job_store=None))
-    schema = TestClient(app).get("/openapi.json").json()["components"]["schemas"]["AgentEnginePreference"]
-    assert schema["properties"]["stored"]["type"] == "boolean"
-    assert schema["required"] == ["engine", "stored"]
 
 
 @pytest.mark.usefixtures("local")
@@ -304,18 +208,16 @@ def test_get_reports_whether_the_engine_is_stored(local: list[CliStatus]) -> Non
         "removed_managed",
     ],
 )
-def test_engine_fills_only_an_empty_pick(model: str | None, expected: str) -> None:
+def test_engine_fills_only_an_empty_pick(model: str | None, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fill an empty, retired or removed pick from the engine, and keep any explicit pick.
 
     Args:
         model: The request's model value.
         expected: The model the router receives.
+        monkeypatch: Swaps in an empty catalog, so the removal check builds none.
     """
-    engine = _engine()
-    with Session(engine) as session:
-        session.add(AgentEnginePreferenceModel(username=_USER, engine="codex"))
-        session.commit()
-    assert agent_engine.engine_agent_model(SimpleNamespace(engine=engine), _USER, model) == expected
+    monkeypatch.setattr(model_catalog, "_cached_response", ModelCatalogResponse(providers=[], models=[]))
+    assert agent_engine.engine_agent_model(SimpleNamespace(engine=_engine()), _USER, model) == expected
 
 
 def test_account_data_exports_and_deletes_the_engine() -> None:
@@ -367,7 +269,6 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
     _fund(engine)
     with Session(engine) as session:
         session.add(UserModel(email=_USER, name=_USER, password_hash="x"))
-        session.add(AgentEnginePreferenceModel(username=_USER, engine="codex"))
         session.commit()
     monkeypatch.setattr(agent_mod, "queue_conversation_embed", lambda *a, **k: None)
     ladder = CatalogModel(
@@ -438,13 +339,15 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
 
 
 @pytest.mark.parametrize("effort", ["ultra", "ultracode"])
-def test_hosted_chat_turn_maps_a_retired_effort_and_drops_fast_mode(
-    effort: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("priority", [False, True])
+def test_hosted_chat_turn_maps_retired_effort_and_applies_supported_fast_mode(
+    effort: str, priority: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Run a hosted turn at its top level for a retired level, and without fast mode.
+    """Run a hosted turn at its top level with fast mode only on supported endpoints.
 
     Args:
         effort: A retired level from an old pick.
+        priority: Whether the selected model supports OpenRouter priority routing.
         monkeypatch: Swaps the agent loop and the catalog.
     """
     engine = _engine()
@@ -453,7 +356,8 @@ def test_hosted_chat_turn_maps_a_retired_effort_and_drops_fast_mode(
         session.add(UserModel(email=_USER, name=_USER, password_hash="x"))
         session.commit()
     monkeypatch.setattr(agent_mod, "queue_conversation_embed", lambda *a, **k: None)
-    slug = "anthropic/claude-opus-5.5"
+    slug = "openrouter/anthropic/claude-opus-5.5" if priority else "anthropic/claude-opus-5.5"
+    monkeypatch.setattr(model_fast_mode, "fast_providers", lambda model: ("anthropic/fast",) if priority else ())
     ladder = CatalogModel(
         value=slug,
         label="Opus",
@@ -497,23 +401,12 @@ def test_hosted_chat_turn_maps_a_retired_effort_and_drops_fast_mode(
     assert model_config.token_source != "subscription"
     assert model_config.extra.get("reasoning_effort") == "high"
     assert cli_dispatch.CLI_FAST_KEY not in (model_config.extra.get("extra_body") or {})
+    if priority:
+        assert model_config.extra["extra_body"]["provider"]["only"] == ["anthropic/fast"]
 
 
 # Each route, its routing function and its module, with a minimal valid body.
 _AGENT_ROUTES = [
-    (
-        "/optimizations/ai-generate-code",
-        code_agent_mod,
-        "route_menu_model",
-        {"dataset_columns": ["q", "a"], "column_roles": {"q": "input", "a": "output"}, "user_message": "hi"},
-    ),
-    ("/optimizations/task-interview", code_agent_mod, "route_interview_model", {"objective": "Answer questions"}),
-    (
-        "/optimizations/infer-inputs",
-        code_agent_mod,
-        "route_interview_model",
-        {"objective": "Answer questions", "artifact_kind": "prompt"},
-    ),
     ("/account/intake-interview", code_agent_mod, "route_interview_model", {"phase": "billing"}),
     ("/tagging-sessions/s1/assist/interview", tagger_mod, "route_interview_model", {}),
     ("/tagging-sessions/s1/assist/interview/stream", tagger_mod, "route_interview_model", {}),
@@ -525,9 +418,6 @@ _AGENT_ROUTES = [
     ("path", "module", "router_fn", "body"),
     _AGENT_ROUTES,
     ids=[
-        "ai_generate_code",
-        "task_interview",
-        "infer_inputs",
         "intake_interview",
         "tagger_interview",
         "tagger_interview_stream",
@@ -536,7 +426,7 @@ _AGENT_ROUTES = [
 def test_agent_route_with_no_model_routes_the_engine_model(
     path: str, module: Any, router_fn: str, body: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Send the stored engine's model, not the empty pick, to the model router on each agent route.
+    """Send the engine's model, not the empty pick, to the model router on each agent route.
 
     The balance gates and the session load are stubbed, and the model router
     records its input and stops the turn, so no agent runs and nothing is
@@ -550,9 +440,6 @@ def test_agent_route_with_no_model_routes_the_engine_model(
         monkeypatch: Stubs the gates and records the routed model.
     """
     engine = _engine()
-    with Session(engine) as session:
-        session.add(AgentEnginePreferenceModel(username=_USER, engine="codex"))
-        session.commit()
     routed: list[str | None] = []
 
     def record(model: str | None) -> str:
@@ -561,8 +448,7 @@ def test_agent_route_with_no_model_routes_the_engine_model(
         raise DomainError("test.routed", status=418)
 
     monkeypatch.setattr(module, router_fn, record)
-    monkeypatch.setattr(module, "fits_kickoff_budget", lambda _size: True)
-    monkeypatch.setattr(code_agent_mod, "gate_interactive_turn", lambda *_args: None)
+    monkeypatch.setattr(tagger_mod, "fits_kickoff_budget", lambda _size: True)
     monkeypatch.setattr(code_agent_mod, "gate_intake_turn", lambda *_args: (None, False))
     monkeypatch.setattr(code_agent_mod, "_intake_catalog", lambda: ([], []))
     monkeypatch.setattr(tagger_mod, "enforce_llm_balance", lambda *_args: None)
@@ -587,13 +473,6 @@ def test_agent_route_with_no_model_routes_the_engine_model(
 # Each composer route that runs a turn on the picked model, the engine call it
 # makes, and a minimal valid body.
 _COMPOSER_ROUTES = [
-    (
-        "/optimizations/ai-generate-code",
-        code_agent_mod,
-        "run_code_agent",
-        {"dataset_columns": ["q", "a"], "column_roles": {"q": "input", "a": "output"}, "user_message": "hi"},
-    ),
-    ("/optimizations/task-interview", code_agent_mod, "task_interview_turn_stream", {"objective": "Answer questions"}),
     ("/tagging-sessions/s1/assist/interview", tagger_mod.tagging, "interview_turn", {}),
     ("/tagging-sessions/s1/assist/interview/stream", tagger_mod.tagging, "interview_turn_stream", {}),
 ]
@@ -603,13 +482,20 @@ _COMPOSER_ROUTES = [
 @pytest.mark.parametrize(
     ("path", "module", "engine_fn", "body"),
     _COMPOSER_ROUTES,
-    ids=["ai_generate_code", "task_interview", "tagger_interview", "tagger_interview_stream"],
+    ids=["tagger_interview", "tagger_interview_stream"],
 )
 @pytest.mark.parametrize("fast", [True, False])
-def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
-    path: str, module: Any, engine_fn: str, body: dict[str, Any], fast: bool, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("openrouter", [False, True])
+def test_composer_route_passes_effort_and_fast_mode_to_the_engine(
+    path: str,
+    module: Any,
+    engine_fn: str,
+    body: dict[str, Any],
+    fast: bool,
+    openrouter: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hand the engine the CLI's top effort and, when asked, the fast-mode flag on each composer route.
+    """Pass effort and fast mode through each composer route for CLI and OpenRouter BYOK.
 
     The gates and the session load are stubbed, and the engine call records
     its arguments and stops the turn, so no model runs and nothing is charged.
@@ -620,6 +506,7 @@ def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
         engine_fn: The engine call the route makes.
         body: A valid request body with no model.
         fast: Whether the turn asks for fast mode.
+        openrouter: Whether the local engine uses its OpenRouter key instead of a CLI.
         monkeypatch: Stubs the gates and records the engine call.
     """
     engine = _engine()
@@ -631,12 +518,20 @@ def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
         raise DomainError("test.routed", status=418)
 
     monkeypatch.setattr(module, engine_fn, record)
-    monkeypatch.setattr(code_agent_mod, "fits_kickoff_budget", lambda _size: True)
     monkeypatch.setattr(tagger_mod, "fits_kickoff_budget", lambda _size: True)
-    monkeypatch.setattr(code_agent_mod, "gate_interactive_turn", lambda *_args: None)
     monkeypatch.setattr(tagger_mod, "enforce_llm_balance", lambda *_args: None)
     monkeypatch.setattr(tagger_mod, "_load_for_role", lambda *_args: SimpleNamespace(columns=[], data=[]))
     monkeypatch.setattr(tagger_mod, "_interview_config", lambda _row: {})
+    if openrouter:
+        byok = ModelConfig(
+            name="openrouter/anthropic/claude-opus-5.5",
+            token_source="byok",
+            byok_provider="openrouter",
+            extra={"api_key": "synthetic"},
+        )
+        monkeypatch.setattr(tagger_mod, "route_local_byok_model", lambda *args, **kwargs: byok)
+        monkeypatch.setattr(tagger_mod, "effective_reasoning_effort", lambda model, effort: effort)
+        monkeypatch.setattr(model_fast_mode, "fast_providers", lambda model: ("anthropic/fast",))
     store = SimpleNamespace(engine=engine)
     app = FastAPI()
 
@@ -649,9 +544,17 @@ def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
     app.include_router(create_tagger_assist_router(job_store=store, get_worker_ref=lambda: None))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(username=_USER, role="user", groups=())
     TestClient(app).post(path, json={**body, "model": _CODEX_ID, "reasoning_effort": "max", "fast_mode": fast})
-    assert seen["model"] == _CODEX_ID
+    assert seen["model"] == (byok.name if openrouter else _CODEX_ID)
     assert seen["reasoning_effort"] == "max"
     config_ = seen["model_config"]
+    if openrouter:
+        assert config_.token_source == "byok"
+        assert config_.extra["api_key"] == "synthetic"
+        if fast:
+            assert config_.extra["extra_body"]["provider"]["only"] == ["anthropic/fast"]
+        else:
+            assert "extra_body" not in config_.extra
+        return
     if not fast:
         assert config_ is None
         return

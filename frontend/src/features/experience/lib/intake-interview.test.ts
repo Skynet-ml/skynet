@@ -2,9 +2,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   INTAKE_PHASES,
-  applyInterviewTurn,
   clearIntakeDraft,
-  coerceProfilePatch,
   coerceSkipPhases,
   emptyDraft,
   emptyIntake,
@@ -16,11 +14,9 @@ import {
   prepareLanguageSwitch,
   profileSoFar,
   readIntakeDraft,
-  requestTurns,
   resumeAfterLanguageSwitch,
   takeIntakeResume,
   writeIntakeDraft,
-  type IntakeTurnOutcome,
 } from "./intake.ts";
 import { FULL_TRANSLATION_LOCALES } from "../../../shared/lib/locale.ts";
 
@@ -43,45 +39,7 @@ afterEach(() => {
   delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
 });
 
-function outcome(partial: Partial<IntakeTurnOutcome>): IntakeTurnOutcome {
-  return {
-    message: "",
-    options: [],
-    phase_done: false,
-    profile_patch: null,
-    skip_phases: [],
-    skip_rest: false,
-    ...partial,
-  };
-}
-
-test("coerceProfilePatch keeps valid answers and drops anything unknown or out of range", () => {
-  const { patch, phases } = coerceProfilePatch({
-    goal: "  route tickets  ",
-    source: "repo",
-    billing: "byok",
-    byok_provider: " OpenAI ",
-    privacy: "no_training",
-    email_cadence: "hourly",
-    trust: "yolo",
-    level: "wizard",
-  });
-  // The setup is settings only: anything about a first run is dropped.
-  assert.equal("goal" in patch, false);
-  assert.equal("source" in patch, false);
-  assert.equal(patch.billing, "byok");
-  assert.equal(patch.byok_provider, "openai");
-  assert.equal(patch.privacy, "deny");
-  assert.equal("cadence" in patch, false);
-  assert.equal(patch.trust, "yolo");
-  assert.equal(patch.level, undefined);
-  assert.deepEqual(phases, ["billing", "privacy", "trust"]);
-});
-
-test("coerceProfilePatch: a key without a provider leaves billing open; junk yields nothing", () => {
-  assert.deepEqual(coerceProfilePatch({ billing: "byok" }).phases, []);
-  assert.deepEqual(coerceProfilePatch(null), { patch: {}, phases: [] });
-  assert.deepEqual(coerceProfilePatch(["billing"]), { patch: {}, phases: [] });
+test("coerceSkipPhases keeps known phases in agenda order and drops the rest", () => {
   assert.deepEqual(coerceSkipPhases(["trust", "bogus", "language"]), ["language", "trust"]);
 });
 
@@ -107,73 +65,6 @@ test("profileSoFar only reports what the user answered, in the interviewer's wor
     language: "he",
     privacy: "no_training",
   });
-});
-
-test("applyInterviewTurn keeps an open phase's transcript and options", () => {
-  const sent = [{ role: "user" as const, content: "not sure" }];
-  const draft = applyInterviewTurn(
-    { ...emptyDraft(), screen: "billing" },
-    "billing",
-    sent,
-    outcome({
-      message: " Do you have your own key? ",
-      options: [{ label: "Yes, OpenAI", description: "d" }],
-      profile_patch: { trust: "ask" },
-    }),
-  );
-  assert.equal(draft.screen, "billing");
-  assert.deepEqual(draft.turns.billing, [
-    ...sent,
-    { role: "assistant", content: "Do you have your own key?" },
-  ]);
-  assert.deepEqual(draft.options.billing, [{ label: "Yes, OpenAI", description: "d" }]);
-  // A volunteered later answer is kept and its phase skipped.
-  assert.deepEqual(draft.answered, ["trust"]);
-  assert.equal(draft.answers.trust, "ask");
-});
-
-test("applyInterviewTurn finishing a phase moves on, or to the closing line on skip_rest", () => {
-  const base = {
-    ...emptyDraft(),
-    answered: markAnswered([], ["language"]),
-    screen: "billing" as const,
-  };
-  const sent = [{ role: "user" as const, content: "use your credits" }];
-  const done = applyInterviewTurn(
-    base,
-    "billing",
-    sent,
-    outcome({ phase_done: true, profile_patch: { billing: "platform" } }),
-  );
-  assert.equal(done.answers.billing, "platform");
-  assert.deepEqual(done.answered, ["language", "billing"]);
-  assert.equal(done.screen, "privacy");
-  assert.deepEqual(done.options.billing, []);
-  const rest = applyInterviewTurn(
-    base,
-    "billing",
-    sent,
-    outcome({ phase_done: true, skip_rest: true }),
-  );
-  assert.equal(rest.screen, "done");
-  // The last phase done leads to the closing line too.
-  const last = applyInterviewTurn(
-    { ...base, answered: markAnswered([], INTAKE_PHASES.slice(0, -1)), screen: "trust" },
-    "trust",
-    [{ role: "user", content: "ask me" }],
-    outcome({ phase_done: true, profile_patch: { trust: "ask" } }),
-  );
-  assert.equal(last.screen, "done");
-  assert.equal(last.answers.trust, "ask");
-});
-
-test("requestTurns caps the transcript a request carries", () => {
-  const turns = Array.from({ length: 12 }, (_, i) => ({
-    role: (i % 2 ? "assistant" : "user") as "user" | "assistant",
-    content: String(i),
-  }));
-  assert.equal(requestTurns(turns).length, 8);
-  assert.equal(requestTurns(turns)[0]!.content, "4");
 });
 
 test("drafts round-trip through storage and survive junk", () => {

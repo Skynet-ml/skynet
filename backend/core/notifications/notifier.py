@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..constants import PAYLOAD_OVERVIEW_NAME
 from ..i18n import t
 from ..storage.models import JobModel
-from .catalog import BUDGET_NEAR, FAILED, FINISHED, NEEDS_INPUT, NEW_BEST, SHARED, STUCK
+from .catalog import BUDGET_NEAR, FAILED, FINISHED, NEW_BEST, SHARED, STUCK
 from .dispatch import notify
 from .preferences import notification_engine
 
@@ -187,25 +187,6 @@ def notify_run_budget(optimization_id: str, username: str, spent_cents: float, l
         limit_cents: The run's spending limit in cents.
     """
     _emit(username, BUDGET_NEAR, optimization_id, {"spent": spent_cents / 100, "limit": limit_cents / 100})
-
-
-def notify_run_needs_input(
-    optimization_id: str, username: str, spent_cents: float | None = None, limit_cents: int | None = None
-) -> None:
-    """Emit ``needs_input`` when a run paused and waits for the owner.
-
-    Args:
-        optimization_id: The run.
-        username: Owner and recipient.
-        spent_cents: Cents spent when it paused, when known.
-        limit_cents: The limit it hit, when known.
-    """
-    facts: dict[str, Any] = {"detail": t("notifier.body.needs_input")}
-    if spent_cents is not None:
-        facts["spent"] = spent_cents / 100
-    if limit_cents is not None:
-        facts["limit"] = limit_cents / 100
-    _emit(username, NEEDS_INPUT, optimization_id, facts)
 
 
 def _emit_shared(optimization_id: str, recipient: str, actor: str, kind: str, detail: str, role: str | None) -> None:

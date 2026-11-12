@@ -35,6 +35,7 @@ import os
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -47,6 +48,7 @@ import time
 import urllib.parse
 import uuid
 import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -55,9 +57,10 @@ from typing import Any, Literal, cast
 
 from ..config import Settings
 from ..i18n import t_locale
-from ..local.cli_catalog import CliProvider, cli_model_arg, parse_subscription_model_id
+from ..local.cli_catalog import CliProvider, cli_efforts, cli_model_arg, parse_subscription_model_id
 from ..local.cli_isolation import CODEX_AUTH_FILE, isolated_cli
 from ..local.cli_probe import cli_binary, codex_subscription_login, read_cli_limits, write_cli_limit
+from ..service_gateway.optimization.blackbox import harness_bridge
 from ..worker.host_agent_shim import INSTRUCTIONS_FILES, excluded_path
 from .cli_runners import limit_error
 from .codex_auth_proxy import CodexAuthProxy, jwt_claims, placeholder_login, real_account
@@ -79,6 +82,7 @@ SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 # Agent sockets act outside the sandbox (the SSH agent signs with the user's keys).
 RATE_LIMITED_CODE = "subscription.rate_limited"
 FAILED_KEY = "blackbox.host_agent_failed"
+NOT_STARTED_KEY = "_cli_not_started"
 CLAUDE_WORKSPACE_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
 CODEX_SUBSCRIPTION_HINT = (
     "Codex is not signed in with a ChatGPT subscription in a login file. Sign in with ChatGPT, not an API key: "
@@ -116,6 +120,10 @@ class HostAgentRequestError(ValueError):
     """Raised for a request the capability refuses before any CLI runs."""
 
 
+class CliStartError(OSError):
+    """Raised when the CLI process itself could not start."""
+
+
 _failures: weakref.WeakKeyDictionary[ModelGateway, HostAgentFailure] = weakref.WeakKeyDictionary()
 _failures_lock = threading.Lock()
 
@@ -127,6 +135,8 @@ def host_cli_argv(
     workdir: Path,
     model_arg: str | None,
     isolation_args: tuple[str, ...] = (),
+    effort: str | None = None,
+    hidden_rules: Sequence[str] = (),
 ) -> list[str]:
     """Build the CLI command for one turn; the prompt goes on stdin.
 
@@ -138,6 +148,8 @@ def host_cli_argv(
         workdir: The copied workspace.
         model_arg: The CLI's own model name, or None for its default.
         isolation_args: Flags that keep the user's own config out.
+        effort: An effort level from :func:`_effort_arg`, or None for the CLI's default.
+        hidden_rules: Claude deny rules from :func:`claude_hidden_rules`.
 
     Returns:
         The argv list.
@@ -163,11 +175,163 @@ def host_cli_argv(
             # tool that runs a command (Bash, Monitor, Task agents, Workflow) could read
             # decrypted Keychain items. This allow-list has only file tools.
             argv += ["--tools", ",".join(CLAUDE_WORKSPACE_TOOLS)]
+        for rule in hidden_rules:
+            argv += ["--disallowedTools", rule]
     else:
         raise HostAgentRequestError(f"Unknown host CLI {cli!r}.")
     if model_arg:
         argv += ["--model", model_arg]
+    if effort:
+        # ``codex exec`` has no effort flag; its config key takes the same levels.
+        argv += ["-c", f"model_reasoning_effort={json.dumps(effort)}"] if cli == "codex" else ["--effort", effort]
     return argv
+
+
+# The host agent runs on macOS, whose default file system ignores case, so
+# OPTIMIZE.TOML opens optimize.toml; the guard compares names without case.
+_FOLD_CASE = sys.platform == "darwin"
+
+
+def claude_hidden_rules(workdir: Path, hidden_paths: Sequence[str], full: bool) -> list[str]:
+    """Build the Claude deny rules that refuse each hidden path.
+
+    Each rule names one hidden path in full. Claude matches the rules
+    without case, so a different letter case of the path is also refused.
+    A ``Read`` rule also covers Grep and Glob, and an ``Edit`` rule covers
+    every file-editing tool. Only ``full_access`` turns have Bash.
+
+    Args:
+        workdir: The copied workspace.
+        hidden_paths: Repository-relative hidden files and folders.
+        full: Whether the turn runs with ``full_access``.
+
+    Returns:
+        The rules, one per tool and path.
+    """
+    roots = list(dict.fromkeys([str(workdir), os.path.realpath(workdir)]))
+    rules: list[str] = []
+    for hidden in (str(path).strip("/") for path in hidden_paths):
+        if not hidden:
+            continue
+        for root in roots:
+            absolute = f"/{root.lstrip('/')}/{hidden}"
+            for tool in ("Read", "Edit"):
+                rules += [f"{tool}(/{absolute})", f"{tool}(/{absolute}/**)"]
+        if full:
+            rules.append(f"Bash(*{hidden}*)")
+    return rules
+
+
+def _guard_hook(turn: Path, workdir: Path, hidden_paths: Sequence[str]) -> tuple[dict[str, Any], list[str]]:
+    """Write the turn's guard policy and build the hook that checks each tool call against it.
+
+    Args:
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        The PreToolUse command hook, and the folders its interpreter must read under ``confine``.
+    """
+    guard_dir = turn / harness_bridge.GUARD_DIR
+    guard_dir.mkdir()
+    # confine() hides the user's home, where the backend and its virtualenv live,
+    # so the hook runs a turn copy of the stdlib-only bridge on the base interpreter.
+    bridge = guard_dir / "harness_bridge.py"
+    shutil.copyfile(harness_bridge.__file__, bridge)
+    log = guard_dir / "refusals.jsonl"
+    log.write_text("", encoding="utf-8")
+    policy_file = guard_dir / "policy.json"
+    digest = harness_bridge.write_guard_policy(
+        policy_file, harness_bridge.guard_policy(workdir, list(hidden_paths), log, _FOLD_CASE, turn / "home")
+    )
+    python = os.path.realpath(sys.executable)
+    command = [python, "-I", str(bridge), "guard", "hook", str(policy_file), digest]
+    hook = {"type": "command", "command": shlex.join(command), "timeout": 10}
+    return hook, list(dict.fromkeys([os.path.realpath(sys.base_prefix), str(Path(python).parent)]))
+
+
+def install_codex_guard(turn: Path, workdir: Path, codex_home: Path, hidden_paths: Sequence[str]) -> list[str]:
+    """Send every codex tool call of one turn through the hidden-path guard.
+
+    Args:
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        codex_home: The turn's ``CODEX_HOME``.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        The folders the guard's interpreter must read under ``confine``.
+    """
+    hook, roots = _guard_hook(turn, workdir, hidden_paths)
+    (codex_home / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}), encoding="utf-8")
+    return roots
+
+
+def install_claude_guard(turn: Path, workdir: Path, hidden_paths: Sequence[str]) -> tuple[str, ...]:
+    """Send every Claude Bash call of one turn through the hidden-path guard.
+
+    A deny rule matches a Bash command only by text, so ``cd eval && cat
+    cases.jsonl`` or ``cat eval/./cases.jsonl`` pass it; the guard resolves
+    the path. ``--setting-sources ""`` loads no settings file, but Claude
+    still reads the hooks of a ``--settings`` file.
+
+    Args:
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        The CLI arguments that load the hook.
+    """
+    hook, _ = _guard_hook(turn, workdir, hidden_paths)
+    settings_file = turn / harness_bridge.GUARD_DIR / "settings.json"
+    settings_file.write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}}), encoding="utf-8"
+    )
+    return ("--settings", str(settings_file))
+
+
+def host_refusals(
+    cli: CliProvider, stdout: str, turn: Path, workdir: Path, hidden_paths: Sequence[str]
+) -> list[dict[str, str]]:
+    """List the hidden-path refusals of one turn, with only the tool and the path kind.
+
+    Args:
+        cli: The CLI of the turn.
+        stdout: The CLI's captured output.
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        One ``{"tool", "kind"}`` entry per refusal. The kind is ``"unknown"``
+        when the check cannot name it.
+    """
+    if not hidden_paths:
+        return []
+    if cli == "codex":
+        return harness_bridge.read_refusals(turn)
+    policy = harness_bridge.guard_policy(workdir, list(hidden_paths), turn / "unused.jsonl", _FOLD_CASE, turn / "home")
+    refusals = []
+    for document in _json_documents(stdout):
+        for denial in document.get("permission_denials") or ():
+            if not isinstance(denial, dict):
+                continue
+            tool = str(denial.get("tool_name") or "")
+            try:
+                kind = harness_bridge.guard_check(policy, tool, denial.get("tool_input"))
+            # The hook refused a call above a cost cap; the turn's work must not be lost for it.
+            except ValueError:
+                kind = "unknown"
+            # A denial does not carry the shell's folder, so a Bash call the guard
+            # refused after a ``cd`` can look clean here. Only a hidden path
+            # denies Bash in a guarded turn.
+            if kind is None and tool == "Bash":
+                kind = "unknown"
+            if kind is not None:
+                refusals.append({"tool": tool, "kind": kind})
+    return refusals
 
 
 def _catalog_slug(cli: CliProvider, model: str) -> str | None:
@@ -204,6 +368,27 @@ def _model_arg(cli: CliProvider, model: str) -> str | None:
     """
     slug = _catalog_slug(cli, model)
     return cli_model_arg(cli, slug) if slug else None
+
+
+def _effort_arg(cli: CliProvider, model: str, effort: str | None) -> str | None:
+    """Map the run's effort to a level the CLI takes for the proposer's model.
+
+    Like the CLI dispatcher, Max runs at the model's top level when the model
+    has no Max, and any other level the model does not take is dropped.
+
+    Args:
+        cli: The CLI that runs the turn.
+        model: ``subscription/<cli>/<slug>``, a plain catalog slug, or empty.
+        effort: The reflection model's effort from the run settings, or None.
+
+    Returns:
+        A level from :data:`~core.local.cli_catalog.CLI_EFFORTS`, or None for the CLI's default.
+    """
+    slug = _catalog_slug(cli, model)
+    levels = cli_efforts(cli, slug) if slug and effort else ()
+    if effort == "max" and levels and "max" not in levels:
+        return levels[-1]
+    return effort if effort in levels else None
 
 
 def _extract(archive_bytes: bytes, destination: Path) -> None:
@@ -778,22 +963,26 @@ def run_group(
 
     Raises:
         subprocess.TimeoutExpired: When the command ran longer than ``timeout``.
-        OSError: When the command could not start.
+        CliStartError: When the command could not start.
+        OSError: When stopping the turn's processes failed after the command ran.
     """
     root = root or cwd
     marker_value = uuid.uuid4().hex
     marker = f"{TURN_MARKER_ENV}={marker_value}"
-    process = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env={**env, TURN_MARKER_ENV: marker_value},
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env={**env, TURN_MARKER_ENV: marker_value},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise CliStartError(error.errno, error.strerror, error.filename) from error
     try:
         stdout, stderr = process.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -946,6 +1135,19 @@ def _error(code: str, message: str, *, reset_at: str | None = None, transcript: 
     }
 
 
+def _not_started(document: dict[str, Any]) -> dict[str, Any]:
+    """Mark an error response as one that never started the CLI.
+
+    Args:
+        document: A response from :func:`_error`.
+
+    Returns:
+        The same response with :data:`NOT_STARTED_KEY` set; the proposer
+        route removes the key before the guest sees the response.
+    """
+    return {**document, NOT_STARTED_KEY: True}
+
+
 def _login_paths(cli: CliProvider) -> list[str]:
     """Return the paths in the user's home a CLI must read for its subscription login.
 
@@ -1087,7 +1289,14 @@ def _command(binary: str, env: dict[str, str]) -> str:
 
 
 def run_host_agent(
-    body: dict, settings: Settings, *, cli: CliProvider, permission: HostPermission, job: str = "run"
+    body: dict,
+    settings: Settings,
+    *,
+    cli: CliProvider,
+    permission: HostPermission,
+    job: str = "run",
+    reasoning_effort: str | None = None,
+    hidden_paths: Sequence[str] = (),
 ) -> dict:
     """Run one host-CLI turn on a copy of the guest workspace.
 
@@ -1098,23 +1307,26 @@ def run_host_agent(
         cli: The CLI from the run's stored proposer settings.
         permission: The permission from the run's stored proposer settings.
         job: Folder name that groups this run's copies.
+        reasoning_effort: The reflection model's effort from the run's stored settings, or None.
+        hidden_paths: The run's scoring-side files and folders, which every
+            tool refuses by exact name.
 
     Returns:
-        ``{status, result_tar_b64, usage, transcript_tail, error?}``.
+        ``{status, result_tar_b64, usage, transcript_tail, refusals, error?}``.
     """
     if cli not in HOST_CLIS:
-        return _error(FAILED_KEY, f"Unknown host CLI {cli!r}.")
+        return _not_started(_error(FAILED_KEY, f"Unknown host CLI {cli!r}."))
     if permission not in HOST_PERMISSIONS:
-        return _error(FAILED_KEY, f"Unknown host permission {permission!r}.")
+        return _not_started(_error(FAILED_KEY, f"Unknown host permission {permission!r}."))
     try:
         root = _workspace_root(settings)
         archive = base64.b64decode(str(body.get("workspace_tar_b64") or ""), validate=True)
     except (HostAgentRequestError, binascii.Error) as error:
-        return _error(FAILED_KEY, str(error))
+        return _not_started(_error(FAILED_KEY, str(error)))
     capped_until = _recorded_cap(settings, cli)
     if capped_until is not None:
         message = f"{cli} is capped until {capped_until.isoformat()}"
-        return _error(RATE_LIMITED_CODE, message, reset_at=capped_until.isoformat())
+        return _not_started(_error(RATE_LIMITED_CODE, message, reset_at=capped_until.isoformat()))
     safe_job = "".join(char for char in job if char.isalnum() or char in "-_") or "run"
     turn = root / safe_job / uuid.uuid4().hex
     workdir = turn / "workspace"
@@ -1145,16 +1357,32 @@ def run_host_agent(
                 ca_file.write_bytes(proxy.ca_pem)
                 env["CODEX_CA_CERTIFICATE"] = str(ca_file)
                 secret_values.update(_login_secrets((turn / "codex" / CODEX_AUTH_FILE).read_bytes())[1])
+            guard_roots: list[str] = []
+            if hidden_paths and cli == "codex":
+                guard_roots = install_codex_guard(turn, workdir, Path(env["CODEX_HOME"]), hidden_paths)
+                # Codex skips a new hooks.json hook until it is trusted.
+                isolation_args = (*isolation_args, "--dangerously-bypass-hook-trust")
+            elif hidden_paths and cli == "claude" and permission == "full_access":
+                # Only full_access turns have Bash, and they run without confine().
+                isolation_args = (*isolation_args, *install_claude_guard(turn, workdir, hidden_paths))
             binary = _command(cli_binary(cli, settings), env)
+            model = str(body.get("model") or "")
             argv = host_cli_argv(
-                cli, permission, binary, workdir, _model_arg(cli, str(body.get("model") or "")), isolation_args
+                cli,
+                permission,
+                binary,
+                workdir,
+                _model_arg(cli, model),
+                isolation_args,
+                _effort_arg(cli, model, reasoning_effort),
+                claude_hidden_rules(workdir, hidden_paths, permission == "full_access") if cli == "claude" else (),
             )
             if permission == "workspace_only":
                 argv = confine(
                     argv,
                     home=Path.home(),
                     writable=[str(turn)],
-                    readable=[*tool_roots(binary), *_login_paths(cli)],
+                    readable=[*tool_roots(binary), *_login_paths(cli), *guard_roots],
                     hidden=(tempfile.gettempdir(), "/private/tmp"),
                 )
             started = time.monotonic()
@@ -1164,12 +1392,19 @@ def run_host_agent(
                 )
             except subprocess.TimeoutExpired:
                 return _error(FAILED_KEY, f"The {cli} turn ran longer than {settings.host_agent_timeout_seconds:.0f}s.")
+            except CliStartError as error:
+                return _not_started(_error(FAILED_KEY, f"The {cli} CLI could not start: {error}"))
             except OSError as error:
-                return _error(FAILED_KEY, f"The {cli} CLI could not start: {error}")
+                # The CLI ran, so the turn counts as local use; only the cleanup after it failed.
+                return _error(FAILED_KEY, f"The {cli} turn could not be cleaned up: {error}")
         elapsed_ms = int((time.monotonic() - started) * 1000)
         # The transcript and the error text go to the guest like the files do.
         stdout, stderr = _redact(completed.stdout, secret_values), _redact(completed.stderr, secret_values)
         text, usage, cli_error = parse_cli_output(cli, stdout)
+        refusals = host_refusals(cli, stdout, turn, workdir, hidden_paths)
+        for refusal in refusals:
+            # A refusal does not stop the turn; only the tool and the path kind are logged.
+            logger.warning("Host agent: refused a %s call on a hidden %s path", refusal["tool"], refusal["kind"])
         transcript = text or stdout or stderr
         if completed.returncode != 0 and cli_error is None:
             cli_error = (stderr or stdout).strip()[-2000:] or f"exit status {completed.returncode}"
@@ -1192,9 +1427,12 @@ def run_host_agent(
             "result_tar_b64": base64.b64encode(_pack(workdir, secret_values)).decode("ascii"),
             "usage": {**usage, "model_ms": usage["model_ms"] or elapsed_ms, "cost": 0.0},
             "transcript_tail": transcript[-_TRANSCRIPT_TAIL_CHARS:],
+            # The proposer side writes these to the run log.
+            "refusals": refusals,
         }
     except HostAgentRequestError as error:
-        return _error(FAILED_KEY, str(error))
+        # Every HostAgentRequestError comes from a check that runs before the CLI starts.
+        return _not_started(_error(FAILED_KEY, str(error)))
     finally:
         shutil.rmtree(turn, ignore_errors=True)
 
@@ -1217,6 +1455,36 @@ def host_proposer(payload: dict[str, Any]) -> tuple[CliProvider, HostPermission]
     return cast(CliProvider, proposer["host_cli"]), cast(HostPermission, permission)
 
 
+def _proposer_model_extra(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``extra`` settings of a run's proposer model.
+
+    Args:
+        payload: The stored run payload (black-box ``reflection_model_config`` or
+            unified ``models.reflection_model``).
+
+    Returns:
+        The model's ``extra`` mapping, or an empty one when the payload has none.
+    """
+    config = payload.get("reflection_model_config")
+    if not isinstance(config, dict) and isinstance(payload.get("models"), dict):
+        config = payload["models"].get("reflection_model")
+    extra = config.get("extra") if isinstance(config, dict) else None
+    return extra if isinstance(extra, dict) else {}
+
+
+def host_reasoning_effort(payload: dict[str, Any]) -> str | None:
+    """Read the proposer model's effort from a run's stored settings.
+
+    Args:
+        payload: The stored run payload.
+
+    Returns:
+        The effort, or None when the run chose none.
+    """
+    effort = _proposer_model_extra(payload).get("reasoning_effort")
+    return effort if isinstance(effort, str) and effort else None
+
+
 def attach_host_agent_token(payload: dict[str, Any], token: str) -> None:
     """Hand the host proposer's token to the guest beside its proposer route.
 
@@ -1227,10 +1495,7 @@ def attach_host_agent_token(payload: dict[str, Any], token: str) -> None:
     Raises:
         ValueError: When the payload has no proposer route.
     """
-    config = payload.get("reflection_model_config")
-    if not isinstance(config, dict) and isinstance(payload.get("models"), dict):
-        config = payload["models"].get("reflection_model")
-    route = ((config or {}).get("extra") or {}).get(ROUTE_KEY) if isinstance(config, dict) else None
+    route = _proposer_model_extra(payload).get(ROUTE_KEY)
     if not isinstance(route, dict):
         raise ValueError("A host CLI proposer needs its proposer model route.")  # noqa: TRY004 - a bad payload, not a bad argument type
     route[HOST_AGENT_TOKEN_KEY] = token
@@ -1288,7 +1553,32 @@ def _reply(status: int, document: dict[str, Any]) -> ModelHTTPResult:
     return ModelHTTPResult(status, "application/json", json.dumps(document).encode())
 
 
-def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, permission: str) -> str:
+def check_host_agent(settings: Settings, *, cli: str, permission: str) -> None:
+    """Refuse a host proposer this worker cannot run, before the run does paid work.
+
+    Args:
+        settings: Local-mode settings.
+        cli: The proposer's host CLI from the run settings.
+        permission: The proposer's host permission from the run settings.
+
+    Raises:
+        ValueError: Outside local mode, or for an unknown CLI or permission.
+    """
+    if not settings.local_mode:
+        raise ValueError("Host agents are available only in local mode.")
+    if cli not in HOST_CLIS or permission not in HOST_PERMISSIONS:
+        raise ValueError(f"Unknown host proposer {cli!r} with permission {permission!r}.")
+
+
+def bind_host_agent(
+    gateway: ModelGateway,
+    settings: Settings,
+    *,
+    cli: str,
+    permission: str,
+    reasoning_effort: str | None = None,
+    hidden_paths: Sequence[str] = (),
+) -> str:
     """Serve ``/v1/_host_agent`` for one run whose proposer is a host CLI.
 
     The worker calls this only for a run whose stored proposer names a host
@@ -1303,6 +1593,8 @@ def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, perm
         settings: Local-mode settings.
         cli: The proposer's host CLI from the run settings.
         permission: The proposer's host permission from the run settings.
+        reasoning_effort: The proposer model's effort from the run settings, or None.
+        hidden_paths: The run's scoring-side files and folders, which the CLI must refuse.
 
     Returns:
         The token the host proposer's shim must present.
@@ -1310,10 +1602,7 @@ def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, perm
     Raises:
         ValueError: Outside local mode, or for an unknown CLI or permission.
     """
-    if not settings.local_mode:
-        raise ValueError("Host agents are available only in local mode.")
-    if cli not in HOST_CLIS or permission not in HOST_PERMISSIONS:
-        raise ValueError(f"Unknown host proposer {cli!r} with permission {permission!r}.")
+    check_host_agent(settings, cli=cli, permission=permission)
     trusted_cli = cast(CliProvider, cli)
     trusted_permission = cast(HostPermission, permission)
     token = secrets.token_urlsafe(32)
@@ -1354,8 +1643,15 @@ def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, perm
         def dispatch() -> PaidResult[dict[str, Any]]:
             """Run the CLI; the subscription pays, so the settled cost is zero."""
             document = run_host_agent(
-                body, settings, cli=trusted_cli, permission=trusted_permission, job=str(runtime.budget_id)
+                body,
+                settings,
+                cli=trusted_cli,
+                permission=trusted_permission,
+                job=str(runtime.budget_id),
+                reasoning_effort=reasoning_effort,
+                hidden_paths=tuple(hidden_paths),
             )
+            started = not document.pop(NOT_STARTED_KEY, False)
             usage = document["usage"]
             evidence = {
                 "source": "host_agent",
@@ -1369,6 +1665,9 @@ def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, perm
                 "usage": {"prompt_tokens": usage["prompt_tokens"], "completion_tokens": usage["completion_tokens"]},
                 "latency_ms": usage["model_ms"],
             }
+            if not started:
+                # The local usage panel must not count a turn that no CLI ran (SKY-341).
+                evidence["dispatched"] = False
             return PaidResult(document, Decimal(0), evidence)
 
         document = runtime.execute(

@@ -37,8 +37,6 @@ class JobRecord(TypedDict, total=False):
     log_count: int
     stored_bytes: int
     accumulated_runtime_seconds: float
-    parent_optimization_id: str | None
-    pair_index: int | None
 
 
 class ProgressEventRecord(TypedDict):
@@ -57,7 +55,6 @@ class LogEntryRecord(TypedDict):
     level: str
     logger: str
     message: str
-    pair_index: int | None
     source: str
     event: str | None
     fields: dict[str, Any] | None
@@ -229,7 +226,6 @@ class JobStore(Protocol):
         logger_name: str,
         message: str,
         timestamp: datetime | None = None,
-        pair_index: int | None = None,
         source: str | None = None,
         event: str | None = None,
         fields: dict[str, Any] | None = None,
@@ -247,7 +243,6 @@ class JobStore(Protocol):
             logger_name: Originating logger name.
             message: Log line content.
             timestamp: Optional override for the entry timestamp.
-            pair_index: Optional grid-pair index when emitted from a sweep.
             source: Where the line came from, see :data:`core.run_log.SOURCES`.
             event: Typed event name, if the line is an event.
             fields: The event's JSON payload.
@@ -331,7 +326,7 @@ class JobStore(Protocol):
         Returns:
             Matching ``JobRecord`` rows in newest-first order. Implementations
             may prune ``result`` down to the summary scalars list surfaces
-            read (test metrics, runtime, pair counters, ``best_pair`` labels);
+            read (test metrics, runtime, scores);
             use :meth:`get_job` for the full blob.
         """
         ...
@@ -486,5 +481,46 @@ class JobStore(Protocol):
 
         Returns:
             ``True`` when a row was deleted, ``False`` when none matched.
+        """
+        ...
+
+    def list_run_calls(
+        self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return a candidate's relay calls after the ``since`` cursor, oldest first.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            since: The last call ``seq`` the caller holds; ``0`` for the start.
+            limit: The most calls to return.
+
+        Returns:
+            The call records, or an empty list when the candidate has none.
+        """
+        ...
+
+    def get_run_candidate(self, optimization_id: str, candidate_id: str) -> dict[str, Any] | None:
+        """Return one candidate's summary with role, state, call count and cost.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+
+        Returns:
+            The candidate summary, or ``None`` when the run has no such candidate.
+        """
+        ...
+
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        """Return one page of a run's candidate summaries in start order.
+
+        Args:
+            optimization_id: Owning job id.
+            limit: The most candidates to return.
+            offset: The number of candidates to skip, in start order.
+
+        Returns:
+            One summary for each candidate on the page.
         """
         ...

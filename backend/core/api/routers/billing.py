@@ -22,7 +22,7 @@ from threading import Lock
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import AliasChoices, BaseModel, Field
 
@@ -49,6 +49,7 @@ from ..model_catalog import (
     get_byok_catalog_cached,
     narrow_models_to_served,
     probe_byok_provider_models,
+    with_effort_controls,
 )
 from .models import discover_models_at_endpoint
 
@@ -242,7 +243,7 @@ def _byok_catalog_for_user(vault: ProviderKeyVault, username: str) -> ModelCatal
             providers.append(CatalogProvider(slug=prefix, label=view.label or view.provider, has_env_key=True))
         models.extend(provider_models)
 
-    response = ModelCatalogResponse(providers=providers, models=models)
+    response = with_effort_controls(ModelCatalogResponse(providers=providers, models=models))
     with _byok_user_catalog_lock:
         _byok_user_catalog_cache[username] = (signature, now, response)
     return response
@@ -264,16 +265,6 @@ class UsageEntryResponse(BaseModel):
     model: str | None = Field(default=None, description="Model id for a run row, else null.")
     cents: int = Field(description="Signed delta in cents: negative for a spend.")
     kind: str = Field(description="Entry kind: 'run', 'topup', or 'grant'.")
-
-
-class PlanResponse(BaseModel):
-    """The caller's platform plan: free, or the Skynet Pro subscription."""
-
-    plan: Literal["free", "pro"] = Field(description="'pro' while the subscription is entitled, else 'free'.")
-    status: str | None = Field(default=None, description="Mirrored Stripe subscription status, or null.")
-    renews_at: str | None = Field(default=None, description="ISO-8601 end of the current Pro billing period.")
-    cancel_at_period_end: bool = Field(default=False, description="True when Pro lapses at renews_at.")
-    available: bool = Field(default=False, description="Whether Pro can be purchased on this deployment.")
 
 
 class PricingTermsResponse(BaseModel):
@@ -307,7 +298,6 @@ class WalletResponse(BaseModel):
     paid_balance_cents: int = Field(description="Purchased balance in cents, on top of the free grant.")
     free_grant: FreeGrantResponse
     usage: list[UsageEntryResponse] = Field(default_factory=list, description="Most-recent-first ledger rows.")
-    plan: PlanResponse = Field(default_factory=lambda: PlanResponse(plan="free"))
     pricing: PricingTermsResponse = Field(default_factory=_pricing_terms)
 
 
@@ -316,6 +306,9 @@ class UsageDayResponse(BaseModel):
 
     date: str = Field(description="Calendar day (YYYY-MM-DD, UTC).")
     billed_cents: int = Field(description="Gross run spend billed that day, in cents.")
+    runs: int = Field(default=0, description="Billed runs (debited ledger rows) that day.")
+    input_tokens: int = Field(default=0, description="Measured input tokens behind that day's billed runs.")
+    output_tokens: int = Field(default=0, description="Measured output tokens behind that day's billed runs.")
 
 
 class UsageModelResponse(BaseModel):
@@ -498,6 +491,13 @@ class OpenRouterOAuthStartResponse(BaseModel):
     authorize_url: str = Field(description="OpenRouter sign-in URL carrying the PKCE challenge and callback.")
 
 
+# Body for the signed-in finish step. The state is the encrypted payload from
+# the start step; Fernet tokens are several hundred characters long.
+class OpenRouterOAuthFinishRequest(BaseModel):
+    state: str = Field(min_length=1, max_length=4096)
+    code: str = Field(min_length=1, max_length=2048)
+
+
 # Request to save (or rotate) a provider's BYOK connection. The secret is
 # encrypted at rest the instant it lands and is never returned. ``api_base`` and
 # ``params`` let a connection target any OpenAI-compatible host; ``api_base`` is
@@ -601,13 +601,6 @@ def create_billing_router(*, job_store) -> APIRouter:
                 )
                 for row in snapshot.usage
             ],
-            plan=PlanResponse(
-                plan="pro" if snapshot.plan.plan == "pro" else "free",
-                status=snapshot.plan.status,
-                renews_at=snapshot.plan.renews_at,
-                cancel_at_period_end=snapshot.plan.cancel_at_period_end,
-                available=snapshot.plan.available,
-            ),
         )
 
     if local:
@@ -663,7 +656,16 @@ def create_billing_router(*, job_store) -> APIRouter:
             end=snapshot.end,
             billed_cents=snapshot.billed_cents,
             runs=snapshot.runs,
-            by_day=[UsageDayResponse(date=day.date, billed_cents=day.billed_cents) for day in snapshot.by_day],
+            by_day=[
+                UsageDayResponse(
+                    date=day.date,
+                    billed_cents=day.billed_cents,
+                    runs=day.runs,
+                    input_tokens=day.input_tokens,
+                    output_tokens=day.output_tokens,
+                )
+                for day in snapshot.by_day
+            ],
             by_model=[
                 UsageModelResponse(
                     model=row.model,
@@ -817,22 +819,6 @@ def create_billing_router(*, job_store) -> APIRouter:
         else:
             raise DomainError("billing.invalid_amount", status=400)
         return CheckoutSessionResponse(url=url)
-
-    @router.post(
-        "/billing/subscription/checkout",
-        response_model=CheckoutSessionResponse,
-        summary=f"Start a Stripe Checkout session that subscribes the caller to {APP_NAME} Pro",
-    )
-    def create_subscription_checkout(user: AuthenticatedUserDep) -> CheckoutSessionResponse:
-        """Create a subscription Checkout session for the Skynet Pro monthly plan.
-
-        Args:
-            user: Authenticated subscriber; the plan lands on their account via webhook.
-
-        Returns:
-            The hosted Checkout URL to redirect the subscriber to.
-        """
-        return CheckoutSessionResponse(url=service.create_subscription_checkout(user.username))
 
     @router.post(
         "/billing/portal",
@@ -1053,29 +1039,55 @@ def create_billing_router(*, job_store) -> APIRouter:
         include_in_schema=False,
     )
     def openrouter_oauth_callback(code: str | None = None, state: str | None = None) -> RedirectResponse:
-        """Trade the code for a key, save it like a pasted one, and return to Settings.
+        """Pass the state and code to the web app, which finishes the sign-in.
 
-        Unauthenticated: the browser arrives from openrouter.ai without the
-        app's bearer token, so the encrypted ``state`` is what ties the code to
-        the user who started the flow.
+        This route has no session, because auth is a bearer header. So it
+        trades no code itself: the signed-in finish route checks that the
+        caller started the sign-in, which blocks an account-link hijack.
 
         Args:
             code: Authorization code from OpenRouter.
             state: The encrypted state minted at start.
 
         Returns:
-            A redirect to the providers tab, carrying an error code on failure.
+            A redirect with an error code, or with the state and code in the
+            URL fragment, which the browser does not send to any server.
         """
         if not code or not state:
             return _providers_redirect("billing.openrouter_oauth_failed")
-        try:
-            payload = openrouter_oauth.parse_state(state)
-            key = openrouter_oauth.exchange_code(code, payload["v"])
-            vault.save_key(payload["u"], openrouter_oauth.PROVIDER, key)
-        except DomainError as exc:
-            return _providers_redirect(str(exc.code))
-        _invalidate_byok_user_catalog(payload["u"])
-        return _providers_redirect()
+        fragment = urlencode({"oauth_flow": "openrouter", "oauth_state": state, "oauth_code": code})
+        return RedirectResponse(
+            f"{settings.app_public_url.rstrip('/')}/?{urlencode({'settings': 'providers'})}#{fragment}",
+            status_code=303,
+        )
+
+    @router.post(
+        "/billing/byok/openrouter/oauth/finish",
+        status_code=204,
+        summary="Finish 'Continue with OpenRouter' and save the minted key",
+    )
+    def finish_openrouter_oauth(body: OpenRouterOAuthFinishRequest, user: AuthenticatedUserDep) -> Response:
+        """Trade the code for a key when the caller started this sign-in.
+
+        Args:
+            body: The state and code from the callback.
+            user: Authenticated caller.
+
+        Returns:
+            An empty 204 answer.
+
+        Raises:
+            DomainError: 400 for a forged or expired state, or a refused code;
+                403 when another user started the sign-in; 503 when the vault
+                is not configured.
+        """
+        payload = openrouter_oauth.parse_state(body.state)
+        if payload["u"] != user.username:
+            raise DomainError("billing.openrouter_oauth_state_invalid", status=403)
+        key = openrouter_oauth.exchange_code(body.code, payload["v"])
+        vault.save_key(user.username, openrouter_oauth.PROVIDER, key)
+        _invalidate_byok_user_catalog(user.username)
+        return Response(status_code=204)
 
     @router.delete(
         "/billing/byok/keys/{provider}",

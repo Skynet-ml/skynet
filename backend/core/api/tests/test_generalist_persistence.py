@@ -12,16 +12,19 @@ end so that regression can't return unnoticed.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import threading
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -264,7 +267,9 @@ def test_turn_forwards_chosen_model(
     monkeypatch.setattr(
         model_catalog,
         "get_catalog_cached",
-        lambda: SimpleNamespace(models=[SimpleNamespace(value="openai/gpt-test")]),
+        lambda: SimpleNamespace(
+            models=[SimpleNamespace(value="openai/gpt-test", supports_thinking=True, reasoning_efforts=None)]
+        ),
     )
     resp = client.post(
         "/optimizations/generalist-agent",
@@ -398,6 +403,64 @@ def test_edit_and_resend_replaces_the_edited_turn_and_later_rows(
 
     assert edited.status_code == 200
     assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
+
+
+def test_unsaved_turn_streams_the_reply_and_stores_nothing(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """A turn sent with ``persist`` False streams the reply but writes no conversation or message."""
+    client, engine = persistence_client
+    _fund(engine)
+
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={
+            "user_message": "hi",
+            "chat_history": [],
+            "wizard_state": {"wizard_screen": "brief"},
+            "trust_mode": "ask",
+            "conversation_id": "setup-local-id",
+            "persist": False,
+        },
+        headers={"Authorization": f"Bearer {_session_token()}"},
+    )
+
+    assert resp.status_code == 200
+    assert "conversation_meta" not in resp.text
+    assert "שלום" in resp.text
+    with Session(engine) as session:
+        assert session.query(AgentConversationModel).count() == 0
+        assert session.query(AgentMessageModel).count() == 0
+
+
+def test_unsaved_edit_and_regenerate_leave_saved_turns_alone(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """With ``persist`` False the edit and regenerate fields delete no stored turn."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["one", "two"])
+    before = _stored_contents(engine)
+
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={
+            "user_message": "two",
+            "chat_history": [],
+            "wizard_state": {},
+            "trust_mode": "ask",
+            "conversation_id": conversation_id,
+            "regenerate": True,
+            "edit_user_text": "one",
+            "persist": False,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200
+    assert "conversation_meta" not in resp.text
+    assert _stored_contents(engine) == before
 
 
 def test_retry_of_an_edit_refused_by_the_balance_gate_replaces_the_edited_turn_and_later_rows(
@@ -991,6 +1054,18 @@ def test_title_skips_attached_file_and_pasted_text_blocks() -> None:
     assert agent_mod._derive_title("<pasted_text>\nlong paste\n</pasted_text>") == ""
 
 
+def test_title_skips_the_setup_wizard_hidden_turns() -> None:
+    """A setup chat is not titled from the wizard's hidden kickoff or from its Back marker."""
+    kickoff = (
+        "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in "
+        "and continue; otherwise ask me the one thing you need."
+    )
+    assert agent_mod._derive_title(kickoff) == ""
+    back = "[The wizard went back to this screen for your request; I typed nothing.] Change the metric to F1"
+    assert agent_mod._derive_title(back) == "Change the metric to F1"
+    assert agent_mod._derive_title("[The wizard went back to this screen for your request; I typed nothing.]") == ""
+
+
 def test_turn_forwards_tool_trace_and_owner(
     persistence_client: tuple[TestClient, Engine],
     monkeypatch: pytest.MonkeyPatch,
@@ -1057,3 +1132,60 @@ def test_confirm_resolves_only_for_the_stream_owner(
     assert not decided.is_set()
     assert confirm("alice@example.com") == 200
     assert decided.is_set()
+
+
+def test_turn_does_not_block_the_event_loop_on_a_cold_catalog(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold catalog build runs off the loop, so the loop can still run while it waits (SKY-603)."""
+    client, engine = persistence_client
+    _fund(engine)
+    release = threading.Event()
+    builds: list[bool] = []
+
+    def held_build() -> model_catalog.ModelCatalogResponse:
+        """Hold the build until the event loop releases it.
+
+        Returns:
+            A catalog with the chosen model.
+        """
+        builds.append(release.wait(2))
+        model = model_catalog.CatalogModel(value="openai/gpt-test", label="gpt-test", provider="openai", available=True)
+        return model_catalog.ModelCatalogResponse(providers=[], models=[model])
+
+    monkeypatch.setattr(model_catalog, "_cached_response", None)
+    monkeypatch.setattr(model_catalog, "_refresh_in_flight", False)
+    monkeypatch.setattr(model_catalog, "_refresh_thread", None)
+    monkeypatch.setattr(model_catalog, "get_catalog", held_build)
+
+    async def post_and_release() -> httpx.Response:
+        """Send the turn, then release the build from the event loop.
+
+        Returns:
+            The route's response.
+        """
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            request = asyncio.create_task(
+                http.post(
+                    "/optimizations/generalist-agent",
+                    json={
+                        "user_message": "hi",
+                        "chat_history": [],
+                        "wizard_state": {},
+                        "trust_mode": "ask",
+                        "model": "openai/gpt-test",
+                    },
+                    headers={"Authorization": f"Bearer {_session_token()}"},
+                )
+            )
+            await asyncio.sleep(0.05)
+            release.set()
+            return await request
+
+    resp = asyncio.run(post_and_release())
+
+    assert resp.status_code == 200, resp.text
+    assert builds
+    assert all(builds)

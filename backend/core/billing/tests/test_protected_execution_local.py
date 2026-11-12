@@ -19,9 +19,9 @@ from core.billing.protected_execution import (
 )
 from core.config import Settings
 from core.i18n import t
+from core.sandbox.bridge import ProtectedBridgeRuntime
 from core.service_gateway.optimization.blackbox import agent_eval
 from core.service_gateway.optimization.blackbox import service as blackbox_service
-from core.service_gateway.optimization.blackbox.docker_sandbox import DockerSandboxRuntime
 from core.service_gateway.optimization.blackbox.sandbox import JOB_TAG
 
 _IMAGE = "sha256:" + "c" * 64
@@ -50,6 +50,9 @@ if sys.argv[1] == "run":
 class _NoChargeBudget:
     """Budget stand-in that fails the test if a local box touches it."""
 
+    # Setup work builds no run-call recorder, so the bind reads only this phase.
+    phase = "setup"
+
     def __getattr__(self, name: str) -> Any:
         """Refuse every budget operation.
 
@@ -74,6 +77,9 @@ class _Gateway:
 
     def dispatch_guest(self, *_args: Any) -> None:
         """Accept guest model calls; none happen in these tests."""
+
+    def dispatch_route(self, *_args: Any) -> None:
+        """Accept parent box model calls; none happen in these tests."""
 
     def bind_sandbox(self, broker: Any, **values: Any) -> None:
         """Keep the broker and its profile.
@@ -132,31 +138,29 @@ def local_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Set
     return settings, log
 
 
-def test_local_mode_pins_the_bare_local_image_for_every_workflow(local_settings: tuple[Settings, Path]) -> None:
-    """Accept a bare ``sha256:`` id in local mode, for DSPy and Anything alike."""
+def test_local_mode_pins_the_bare_local_image(local_settings: tuple[Settings, Path]) -> None:
+    """Accept a bare ``sha256:`` id in local mode."""
     settings, _ = local_settings
-    assert protected_image(settings, "dspy") == _IMAGE
-    assert protected_image(settings, "anything") == _IMAGE
-    assert protected_vercel_unavailable_reason(settings, "dspy") is None
+    assert protected_image(settings) == _IMAGE
+    assert protected_vercel_unavailable_reason(settings) is None
 
 
 def test_hosted_mode_refuses_a_bare_image_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hosted deployment still requires a registry digest reference."""
-    settings = _settings(monkeypatch, vercel_sandbox_image=_IMAGE, dspy_sandbox_image=_IMAGE)
-    assert protected_image(settings, "dspy") is None
-    assert protected_image(settings, "anything") is None
+    settings = _settings(monkeypatch, vercel_sandbox_image=_IMAGE)
+    assert protected_image(settings) is None
 
 
 def test_local_mode_reports_a_missing_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explain the Docker problem instead of a Vercel one."""
     settings = _settings(monkeypatch, local_mode=True, docker_bin=str(tmp_path / "missing"), local_sandbox_image=_IMAGE)
-    assert protected_vercel_unavailable_reason(settings, "dspy") == t("sandbox.docker_unavailable")
+    assert protected_vercel_unavailable_reason(settings) == t("sandbox.docker_unavailable")
 
 
 def test_docker_cost_profile_is_zero(local_settings: tuple[Settings, Path]) -> None:
     """A local box adds no sandbox cost to the run."""
     settings, _ = local_settings
-    profile = runtime_cost_profile(settings, "dspy", "docker")
+    profile = runtime_cost_profile(settings, "docker")
     assert profile["minimum_session_cents"] == "0"
     assert profile["maximum_session_cents"] == "0"
 
@@ -167,13 +171,14 @@ def test_bind_uses_docker_without_a_vercel_token_and_never_charges(local_setting
     assert settings.vercel_token is None
     gateway = _Gateway()
 
-    identity = bind_protected_sandbox(gateway, settings, workflow="dspy", owner_id="job-9", parent_hosts=("pypi.org",))
+    identity = bind_protected_sandbox(gateway, settings, owner_id="job-9", parent_hosts=("pypi.org",))
 
     assert identity["image"] == _IMAGE
     assert gateway.bound == {"image": _IMAGE, "lifetime_seconds": identity["lifetime_seconds"]}
     assert gateway.parent_hosts == ("pypi.org",)
     runtime = gateway.broker._runtime
-    assert isinstance(runtime, DockerSandboxRuntime)
+    assert isinstance(runtime, ProtectedBridgeRuntime)
+    assert runtime.provider == "docker"
     assert runtime.protected
     assert gateway.broker._command_runner is not None
 
@@ -187,14 +192,14 @@ def test_bind_uses_docker_without_a_vercel_token_and_never_charges(local_setting
     assert run[run.index("--network") + 1] == "none"
     assert "skynet.job=job-9" in run
     assert f"{JOB_TAG}=job-9" in run
-    assert ["rm", "-f", "box" * 20] in calls
+    assert ["rm", "-f", run[run.index("--name") + 1]] in calls
 
 
 def test_hosted_bind_refuses_a_bare_pinned_image(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hosted mode never boots a local image id, even when one is pinned on the run."""
     settings = _settings(monkeypatch)
     with pytest.raises(UnpricedOperationError):
-        bind_protected_sandbox(_Gateway(), settings, workflow="dspy", owner_id="job-9", image=_IMAGE)
+        bind_protected_sandbox(_Gateway(), settings, owner_id="job-9", image=_IMAGE)
 
 
 def test_runtime_catalog_reports_docker_in_local_mode(

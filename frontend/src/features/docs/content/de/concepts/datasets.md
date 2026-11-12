@@ -1,4 +1,4 @@
-Ein Datensatz ist eine Tabelle mit Fällen. Jede Zeile ist ein Fall. Skynet führt Ihr Artefakt auf den Fällen aus, bewertet jede Ausgabe und vergleicht Versionen anhand der Scores. Diese Seite erklärt, wie Skynet die Fälle liest, was die Spaltenrollen bewirken und wie Skynet die Fälle in Trainings-, Validierungs- und Testmenge aufteilt.
+Ein Datensatz ist eine Tabelle mit Fällen. Jede Zeile ist ein Fall. Skynet bewertet jede Version Ihres Repositorys auf den Fällen mit Ihrem Scorer und vergleicht Versionen anhand der Scores. Diese Seite erklärt, wie Skynet die Fälle liest, was die Spaltenrollen bewirken und wie Skynet die Fälle in Trainings-, Validierungs- und Testmenge aufteilt.
 
 ## Daten laden
 
@@ -17,8 +17,8 @@ Geben Sie unter **So werden die Daten gelesen** jeder Spalte eine Rolle:
 
 | Rolle        | Was Skynet mit der Spalte tut                                         |
 | ------------ | --------------------------------------------------------------------- |
-| Eingabe      | Legt den Wert in `input` ab, das Ihr Ausführungscode erhält           |
-| Ausgabe      | Legt den Wert in `expected` ab, das Ihre Metrik erhält                |
+| Eingabe      | Legt den Wert in `case["input"]` ab, den Ihr Scorer erhält           |
+| Ausgabe      | Legt den Wert in `case["expected"]` ab, den Ihr Scorer erhält                |
 | Überspringen | Verwendet die Spalte nicht                                            |
 
 Jede Spalte hat außerdem eine Art: **Text** oder **Bild**.
@@ -49,7 +49,7 @@ mit den Rollen `message` = Eingabe, `label` = Ausgabe und `id` = Überspringen e
 ```
 
 > [!TIP]
-> Lesen Sie den erwarteten Wert in Ihrer Metrik über den Spaltennamen, zum Beispiel `expected["label"]`.
+> Lesen Sie den erwarteten Wert in Ihrem Scorer über den Spaltennamen, zum Beispiel `case["expected"]["label"]`.
 
 ## Datenmodi
 
@@ -111,7 +111,7 @@ Bei der manuellen Auswahl nimmt jedes Feld einen Anteil von 0 bis 1 in Schritten
 
 ## Beispielfälle für die Vertragsprüfung
 
-Die Vertragsprüfung im Schritt **Metrik & Ausführung** führt Ihren Code auf 3 Beispielfällen aus. Skynet nimmt diese Beispiele nur aus den Trainings- und Validierungsfällen, nie aus dem Test.
+Die Vertragsprüfung im Schritt **Metrik & Ausführung** führt Ihr Setup und Ihren Scorer auf der Startversion aus, auf 3 Beispielfällen. Skynet nimmt diese Beispiele nur aus den Trainings- und Validierungsfällen, nie aus dem Test.
 
 ## Verwandte Seiten
 

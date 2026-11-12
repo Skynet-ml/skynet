@@ -36,7 +36,8 @@ from ...config import settings
 from ...local.cli_catalog import SUBSCRIPTION_MODEL_PREFIX
 from ...local.cli_probe import probe_clis
 from ...service_gateway.optimization.blackbox.runner import DEFAULT_MAX_TOKENS
-from ...service_gateway.optimization.blackbox.sandbox import COVERAGE_SLICE_SECONDS, SandboxSpec
+from ...service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from ...service_gateway.optimization.blackbox.sandbox_runtime import COVERAGE_SLICE_SECONDS
 from ..artificial_analysis import with_artificial_analysis_links
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..interview_model import with_interview_default
@@ -47,6 +48,7 @@ from ..model_catalog import (
     get_catalog_cached,
     with_zero_retention,
 )
+from ..model_fast_mode import fast_providers
 from ..response_limits import AGENT_MAX_LIST, AGENT_MAX_TEXT, cap_list, truncate_text
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
@@ -430,6 +432,25 @@ def create_models_router(*, http_client: Callable[[], httpx.Client] | None = Non
             The cached catalog including each model's availability flag.
         """
         return with_artificial_analysis_links(with_interview_default(with_zero_retention(get_catalog_cached())))
+
+    @router.get("/models/fast-mode", summary="Check priority endpoint availability")
+    def model_fast_mode(model: str, current_user: AuthenticatedUserDep) -> dict[str, bool]:
+        """Report whether the selected OpenRouter model offers priority routing.
+
+        Only catalog models reach OpenRouter, so a caller cannot make the
+        server fetch metadata for arbitrary ids.
+
+        Args:
+            model: The frontend's fully qualified model id.
+            current_user: The signed-in caller.
+
+        Returns:
+            Whether public endpoint metadata lists an available priority tier.
+        """
+        known = any(entry.value == model for entry in get_catalog_cached().models) or any(
+            entry.value == model for entry in get_byok_catalog_cached().models
+        )
+        return {"supports_fast": known and bool(fast_providers(model))}
 
     @router.get(
         "/models/byok",

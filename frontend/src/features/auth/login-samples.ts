@@ -30,93 +30,93 @@ export interface HaloCard {
 export const HALO_CARDS: HaloCard[] = [
   // Top band — front row
   {
-    key: "auth.halo.intent_classification",
+    key: "auth.halo.cuda_kernels",
     pos: { top: "-3%", left: "1%" },
     rot: -5,
     mobilePos: { top: "6%", left: "4%" },
   },
-  { key: "auth.halo.meeting_summary", pos: { top: "-4%", left: "15%" }, rot: 3 },
-  { key: "auth.halo.document_tagging", pos: { top: "-2%", left: "29%" }, rot: -4 },
+  { key: "auth.halo.video_encoding", pos: { top: "-4%", left: "15%" }, rot: 3 },
+  { key: "auth.halo.fraud_rules", pos: { top: "-2%", left: "29%" }, rot: -4 },
   {
-    key: "auth.halo.language_detection",
+    key: "auth.halo.delivery_routes",
     pos: { top: "-3%", left: "43%" },
     rot: 4,
     mobilePos: { top: "13%", right: "5%" },
   },
-  { key: "auth.halo.content_moderation", pos: { top: "-2%", left: "57%" }, rot: -3 },
-  { key: "auth.halo.query_rewriting", pos: { top: "-4%", left: "71%" }, rot: 5 },
-  { key: "auth.halo.entity_linking", pos: { top: "-3%", right: "2%" }, rot: -5 },
+  { key: "auth.halo.database_indexes", pos: { top: "-2%", left: "57%" }, rot: -3 },
+  { key: "auth.halo.game_balance", pos: { top: "-4%", left: "71%" }, rot: 5 },
+  { key: "auth.halo.risc_v_code", pos: { top: "-3%", right: "2%" }, rot: -5 },
 
   // Top band — middle row
-  { key: "auth.halo.entity_extraction", pos: { top: "9%", left: "7%" }, rot: 4 },
+  { key: "auth.halo.cache_policies", pos: { top: "9%", left: "7%" }, rot: 4 },
   {
-    key: "auth.halo.sentiment_analysis",
+    key: "auth.halo.text_to_sql",
     pos: { top: "11%", left: "26%" },
     rot: -3,
     mobilePos: { top: "20%", left: "22%" },
   },
-  { key: "auth.halo.keyword_extraction", pos: { top: "9%", left: "45%" }, rot: 5 },
-  { key: "auth.halo.spam_detection", pos: { top: "11%", left: "64%" }, rot: -4 },
-  { key: "auth.halo.grammar_correction", pos: { top: "9%", left: "81%" }, rot: 3 },
+  { key: "auth.halo.warehouse_layouts", pos: { top: "9%", left: "45%" }, rot: 5 },
+  { key: "auth.halo.hyperparameters", pos: { top: "11%", left: "64%" }, rot: -4 },
+  { key: "auth.halo.log_parsing", pos: { top: "9%", left: "81%" }, rot: 3 },
 
   // Top band — back row
-  { key: "auth.halo.quote_extraction", pos: { top: "19%", left: "6%" }, rot: -4 },
-  { key: "auth.halo.difficulty_ranking", pos: { top: "20%", left: "47%" }, rot: 5 },
-  { key: "auth.halo.pos_tagging", pos: { top: "19%", left: "80%" }, rot: -3 },
+  { key: "auth.halo.bin_packing", pos: { top: "19%", left: "6%" }, rot: -4 },
+  { key: "auth.halo.seo_content", pos: { top: "20%", left: "47%" }, rot: 5 },
+  { key: "auth.halo.audio_codecs", pos: { top: "19%", left: "80%" }, rot: -3 },
 
   // Left wing — outer column
-  { key: "auth.halo.relevance_ranking", pos: { top: "30%", left: "2%" }, rot: 5 },
-  { key: "auth.halo.question_answering", pos: { top: "44%", left: "2%" }, rot: 6 },
-  { key: "auth.halo.product_matching", pos: { top: "58%", left: "3%" }, rot: 4 },
-  { key: "auth.halo.contradiction_detection", pos: { top: "70%", left: "2%" }, rot: -3 },
+  { key: "auth.halo.release_pipelines", pos: { top: "30%", left: "2%" }, rot: 5 },
+  { key: "auth.halo.page_load_time", pos: { top: "44%", left: "2%" }, rot: 6 },
+  { key: "auth.halo.memory_allocators", pos: { top: "58%", left: "3%" }, rot: 4 },
+  { key: "auth.halo.energy_grids", pos: { top: "70%", left: "2%" }, rot: -3 },
 
   // Left wing — inner column
-  { key: "auth.halo.quality_scoring", pos: { top: "37%", left: "17%" }, rot: -4 },
-  { key: "auth.halo.topic_extraction", pos: { top: "64%", left: "17%" }, rot: -3 },
+  { key: "auth.halo.ticket_routing", pos: { top: "37%", left: "17%" }, rot: -4 },
+  { key: "auth.halo.search_retrieval", pos: { top: "64%", left: "17%" }, rot: -3 },
 
   // Right wing — outer column
-  { key: "auth.halo.tool_use", pos: { top: "30%", right: "4%" }, rot: -5 },
-  { key: "auth.halo.answer_ranking", pos: { top: "44%", right: "5%" }, rot: -6 },
-  { key: "auth.halo.fraud_detection", pos: { top: "58%", right: "6%" }, rot: -4 },
-  { key: "auth.halo.mathematical_reasoning", pos: { top: "70%", right: "5%" }, rot: 5 },
+  { key: "auth.halo.agent_harnesses", pos: { top: "30%", right: "4%" }, rot: -5 },
+  { key: "auth.halo.cloud_costs", pos: { top: "44%", right: "5%" }, rot: -6 },
+  { key: "auth.halo.shader_speed", pos: { top: "58%", right: "6%" }, rot: -4 },
+  { key: "auth.halo.demand_forecasts", pos: { top: "70%", right: "5%" }, rot: 5 },
 
   // Right wing — inner column
-  { key: "auth.halo.grounded_answering", pos: { top: "37%", right: "17%" }, rot: 4 },
+  { key: "auth.halo.geocoding", pos: { top: "37%", right: "17%" }, rot: 4 },
   {
-    key: "auth.halo.fact_checking",
+    key: "auth.halo.chess_engines",
     pos: { top: "64%", right: "17%" },
     rot: 5,
     mobilePos: { bottom: "20%", right: "20%" },
   },
 
   // Bottom band — back row
-  { key: "auth.halo.query_expansion", pos: { bottom: "19%", left: "6%" }, rot: 4 },
-  { key: "auth.halo.confidence_estimation", pos: { bottom: "20%", left: "47%" }, rot: -3 },
+  { key: "auth.halo.load_balancing", pos: { bottom: "19%", left: "6%" }, rot: 4 },
+  { key: "auth.halo.test_suites", pos: { bottom: "20%", left: "47%" }, rot: -3 },
   {
-    key: "auth.halo.json_extraction",
+    key: "auth.halo.document_extraction",
     pos: { bottom: "19%", left: "80%" },
     rot: 4,
     mobilePos: { bottom: "6%", right: "4%" },
   },
 
   // Bottom band — middle row
-  { key: "auth.halo.product_attribute_extraction", pos: { bottom: "10%", left: "9%" }, rot: -4 },
-  { key: "auth.halo.relation_extraction", pos: { bottom: "11%", left: "25%" }, rot: 4 },
-  { key: "auth.halo.contact_extraction", pos: { bottom: "9%", left: "41%" }, rot: -5 },
-  { key: "auth.halo.text_to_sql", pos: { bottom: "11%", left: "57%" }, rot: 3 },
-  { key: "auth.halo.toxicity_detection", pos: { bottom: "9%", left: "72%" }, rot: -4 },
+  { key: "auth.halo.hash_functions", pos: { bottom: "10%", left: "9%" }, rot: -4 },
+  { key: "auth.halo.scheduling", pos: { bottom: "11%", left: "25%" }, rot: 4 },
+  { key: "auth.halo.antenna_design", pos: { bottom: "9%", left: "41%" }, rot: -5 },
+  { key: "auth.halo.spam_filters", pos: { bottom: "11%", left: "57%" }, rot: 3 },
+  { key: "auth.halo.inventory_levels", pos: { bottom: "9%", left: "72%" }, rot: -4 },
   {
-    key: "auth.halo.document_summarization",
+    key: "auth.halo.image_classifiers",
     pos: { bottom: "11%", left: "85%" },
     rot: 4,
     mobilePos: { bottom: "13%", left: "5%" },
   },
 
   // Bottom band — front row
-  { key: "auth.halo.date_extraction", pos: { bottom: "-3%", left: "7%" }, rot: 4 },
-  { key: "auth.halo.category_classification", pos: { bottom: "2%", left: "23%" }, rot: 5 },
-  { key: "auth.halo.purchase_intent_detection", pos: { bottom: "-2%", left: "40%" }, rot: -3 },
-  { key: "auth.halo.multi_step_retrieval", pos: { bottom: "3%", left: "57%" }, rot: 4 },
-  { key: "auth.halo.ticket_classification", pos: { bottom: "-3%", left: "73%" }, rot: 5 },
-  { key: "auth.halo.ticket_routing", pos: { bottom: "-2%", right: "4%" }, rot: 5 },
+  { key: "auth.halo.sorting_algorithms", pos: { bottom: "-3%", left: "7%" }, rot: 4 },
+  { key: "auth.halo.model_distillation", pos: { bottom: "2%", left: "23%" }, rot: 5 },
+  { key: "auth.halo.code_translation", pos: { bottom: "-2%", left: "40%" }, rot: -3 },
+  { key: "auth.halo.build_pipelines", pos: { bottom: "3%", left: "57%" }, rot: 4 },
+  { key: "auth.halo.speech_recognition", pos: { bottom: "-3%", left: "73%" }, rot: 5 },
+  { key: "auth.halo.solver_heuristics", pos: { bottom: "-2%", right: "4%" }, rot: 5 },
 ];

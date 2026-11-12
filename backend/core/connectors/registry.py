@@ -2,8 +2,8 @@
 
 Every module here exposes ``PROVIDER``, ``verify_credentials``, ``browse``,
 ``preview`` and ``import_ref``; the OAuth-capable ones (Google Sheets,
-Google Drive, OneDrive, GitHub, Azure Blob, Notion, Supabase)
-additionally expose ``oauth_app``, ``oauth_available`` and
+Google Drive, OneDrive, GitHub, GitLab, Bitbucket, Azure Blob, Notion,
+Supabase) additionally expose ``oauth_app``, ``oauth_available`` and
 ``fetch_account_label``, and Azure Blob also ``oauth_account`` for the storage
 account named before sign-in. Hugging Face keeps its own module and routes.
 """
@@ -17,10 +17,12 @@ from ..config import settings
 from . import (
     azure_blob,
     bigquery,
+    bitbucket,
     braintrust,
     foundry,
     gcs,
     github,
+    gitlab,
     google_drive,
     google_sheets,
     kaggle,
@@ -41,6 +43,8 @@ PROVIDERS: dict[str, ModuleType] = {
     google_drive.PROVIDER: google_drive,
     onedrive.PROVIDER: onedrive,
     github.PROVIDER: github,
+    gitlab.PROVIDER: gitlab,
+    bitbucket.PROVIDER: bitbucket,
     s3.PROVIDER: s3,
     gcs.PROVIDER: gcs,
     azure_blob.PROVIDER: azure_blob,
@@ -61,6 +65,8 @@ OAUTH_PROVIDERS = frozenset(
         google_drive.PROVIDER,
         onedrive.PROVIDER,
         github.PROVIDER,
+        gitlab.PROVIDER,
+        bitbucket.PROVIDER,
         azure_blob.PROVIDER,
         notion.PROVIDER,
         supabase.PROVIDER,

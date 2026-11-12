@@ -51,9 +51,7 @@ logger = logging.getLogger(__name__)
 # agent-tagged route depends on ``get_authenticated_user``, so without the
 # bearer token every tool call returns 401 ``auth.missing_token``. Override
 # the lookup in the components module so the header flows through.
-_fastmcp_openapi_components.get_http_headers = partial(
-    _fastmcp_deps.get_http_headers, include={"authorization"}
-)
+_fastmcp_openapi_components.get_http_headers = partial(_fastmcp_deps.get_http_headers, include={"authorization"})
 
 AGENT_TAG = "agent"
 
@@ -62,8 +60,8 @@ _SCHEMA_NOISE_KEYS = frozenset({"examples", "example", "title"})
 
 # REST semantics carry an honest approval signal the OpenAPI projection drops:
 # a read is safe, a delete is destructive, any other write mutates state. We
-# surface that as MCP tool annotations so downstream consumers (and the
-# optimizer's severity capture) read a real hint instead of fabricating one.
+# surface that as MCP tool annotations so downstream consumers read a real
+# hint instead of fabricating one.
 _READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _DESTRUCTIVE_METHODS = frozenset({"DELETE"})
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH"})

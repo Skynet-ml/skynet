@@ -1,8 +1,6 @@
 "use client";
 
 import { notifyCopied } from "@/shared/lib/notify";
-import { formatBudgetUsd } from "@/features/billing";
-import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -11,24 +9,22 @@ import { useSession } from "next-auth/react";
 import {
   XCircle,
   Clock,
+  Hash,
+  TextAlignLeft,
   Code,
   Terminal,
   TrendUp,
-  Timer,
-  PaperPlaneTilt,
   Copy,
-  Database,
   Gear,
   ArrowCounterClockwise,
   Play,
   Pause,
   HardDrive,
-  GridFour,
   Package,
   Cube,
   Coins,
   Repeat,
-  Trophy,
+  PaperPlaneTilt,
 } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 
@@ -38,29 +34,24 @@ import { PingDot } from "@/shared/ui/ping-dot";
 import { markRecentSession } from "@/shared/lib/recent-session";
 import { FadeIn } from "@/shared/ui/motion";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
-import { CopyButton } from "@/shared/ui/copy-button";
+import { CopyButton, useCopyToClipboard } from "@/shared/ui/copy-button";
 import {
   getJob,
   cancelJob,
   pauseJob,
   resumeJob,
   getOptimizationPayload,
-  getServeInfo,
-  getPairServeInfo,
-  serveProgram,
-  serveProgramStream,
-  servePairProgramStream,
-  serveSharedOptimization,
   STORAGE_CHANGED_EVENT,
   getContinuousState,
+  unhideSharedItem,
+  apiUrl,
 } from "@/shared/lib/api";
-import type { ServeInfoResponse, WorkflowNodeTrace, WorkflowSpec } from "@/shared/types/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatBytes } from "@/shared/lib/formatters";
 import { TERMS } from "@/shared/lib/terms";
-import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { ACTIVE_STATUSES, TERMINAL_STATUSES } from "@/shared/constants/job-status";
@@ -73,23 +64,17 @@ import type {
   OptimizationPayloadResponse,
 } from "@/shared/types/api";
 import type { SharedOptimizationData } from "@/shared/lib/api";
-import { extractScoresFromLogs } from "../lib/extract-scores";
 import { extractBlackboxScorePoints } from "../lib/blackbox";
 import { extractCandidates, scopeToLatestLane } from "@/features/trajectory";
-import { isReactModuleName } from "../lib/is-react-module";
-import { reconstructGridResult } from "../lib/reconstruct-grid";
 import {
   rememberRunKind,
   measureOverview,
   rememberRunShape,
   runShapeHint,
-  runShapeKey,
-  useRunKindHint,
   type RunShape,
 } from "../lib/run-kind-hint";
 import { runCostCents } from "../lib/run-billing";
 import { requestedDetailTab, shownDetailTab } from "../lib/detail-tabs";
-import { DataTab } from "./DataTab";
 import { LogsTab } from "./LogsTab";
 import { DeleteJobDialog } from "./DeleteJobDialog";
 import { ShareDialog } from "./ShareDialog";
@@ -97,21 +82,15 @@ import { RunAccessBanner } from "./RunAccessBanner";
 import { StatusBadge } from "@/shared/ui/status-badge";
 import { ConfigTab } from "./ConfigTab";
 import { CodeTab } from "./CodeTab";
-import { ArtifactTab } from "./ArtifactTab";
-import { PairSelectionStrip } from "./PairSelectionStrip";
 import { OverviewTab } from "./OverviewTab";
-import { HeldOutNotice, isNotHeldOut } from "./RewardComparison";
-import { RewardTab, hasRewardTab } from "./RewardTab";
+import { HeldOutNotice, isNotHeldOut } from "./HeldOutNotice";
 import { RunLifecycleNotice } from "./RunLifecycleNotice";
 import { isBudgetPause } from "../lib/run-lifecycle";
 import { RunCostChip } from "./RunCostChip";
 import { BestVersionTab } from "./BestVersionTab";
-import { GridServeTab } from "./GridServeTab";
 import { UsageTab } from "./UsageTab";
 import { ContinuousTab } from "./ContinuousTab";
-import { ReactServeChat } from "./ReactServeChat";
-import { ReactServeApi } from "./ReactServeApi";
-import { RunPlayground } from "./RunPlayground";
+import { ServeTab } from "./ServeTab";
 import { linkifyMessage } from "@/shared/lib/linkify";
 import { useStreamWithPollFallback } from "@/shared/hooks/use-stream-with-poll-fallback";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
@@ -216,7 +195,7 @@ function formatElapsed(seconds: number): string {
 // tails — a 0 offset (or no prior buffer) replaces, a positive offset splices
 // the tail onto rows already held. Slicing at the server-echoed offset
 // reconstructs the complete array even if the request cursor lagged a tick,
-// which keeps grid reconstruction (driven off the full progress_events) sound.
+// which keeps views driven off the full progress_events sound.
 function mergeJobDelta(
   prev: OptimizationStatusResponse | null,
   next: OptimizationStatusResponse,
@@ -224,7 +203,7 @@ function mergeJobDelta(
   const po = next.progress_offset ?? 0;
   const lo = next.logs_offset ?? 0;
   // An empty tail at the end of the held buffer keeps the old array, so the
-  // logs and grid memos keyed on it don't rerun on every quiet poll.
+  // logs memos keyed on it don't rerun on every quiet poll.
   const progress_events =
     po > 0 && prev?.progress_events
       ? next.progress_events.length === 0 && po === prev.progress_events.length
@@ -328,23 +307,28 @@ function FailureCopyButton({ text }: { text: string }) {
   );
 }
 
-export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimizationData } = {}) {
+export function OptimizationDetailView({
+  shareData,
+  source = "local",
+}: {
+  shareData?: SharedOptimizationData;
+  /** Where the run lives, as the gate resolved it; a hosted run reads through the hosted proxy. */
+  source?: ApiSource;
+} = {}) {
   const params = useParams<{ id?: string; token?: string }>();
   const isShare = !!shareData;
   const id = shareData?.optimization_id ?? (params.id as string);
   // The /share/[token] route carries the capability token in the URL; the
-  // shared serve + clone-with-token paths need it. shareData itself omits it.
+  // clone-with-token path needs it. shareData itself omits it.
   const shareToken = params.token ?? null;
   const shareRole = shareData?.role ?? null;
-  // Cloning is viewer+ (it makes the caller's own copy, no spend). Serving/chat
-  // spends the owner's key, so it's editor+ only (see shareCanServe).
+  // Cloning is viewer+ (it makes the caller's own copy, no spend).
   const shareCanInteract = isShare && shareRole != null;
-  const shareCanServe = isShare && (shareRole === "editor" || shareRole === "owner");
   const router = useRouter();
   const searchParams = useSearchParams();
   const [detailTab, setDetailTab] = useState(() => requestedDetailTab(searchParams.get("tab")));
-  // Phones get the view-first subset: Overview, Usage (chat), Artifact, Logs,
-  // Usage and cost. Data/Code/LM activity/Config are desk work; a deep link to one of
+  // Phones get the view-first subset: Overview, Best version, Logs, Usage and
+  // cost. Data/Code/LM activity/Config are desk work; a deep link to one of
   // those tabs lands on Overview instead of an empty pane.
   const isPhone = useIsPhone();
   const activeDetailTab = shownDetailTab(detailTab, isPhone);
@@ -361,22 +345,31 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // later with the token now in place.
   const { status: sessionStatus } = useSession();
   const authReady = isShare || sessionStatus === "authenticated";
+  const { copy: copyRunId } = useCopyToClipboard();
 
   const [job, setJob] = useState<OptimizationStatusResponse | null>(null);
+  // Opening a run shared with the caller shows it in Shared with me again if
+  // they hid it there.
+  const memberRole = isShare ? shareRole : (job?.effective_role ?? null);
+  useEffect(() => {
+    if (memberRole !== "viewer" && memberRole !== "editor") return;
+    void unhideSharedItem("optimizations", id, source).catch(() => {});
+  }, [memberRole, id, source]);
   const [payload, setPayload] = useState<OptimizationPayloadResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  // Shapes the loading skeleton like this run's kind when an earlier fetch saw it.
-  const kindHint = useRunKindHint(id);
   const [error, setError] = useState<string | null>(null);
 
   // Stamp this run as recent only while it's actually in progress, so the
   // sidebar's Optimize button resumes ongoing work — never a finished run the
   // user merely opened to look at. Share views aren't the caller's to resume.
   useEffect(() => {
-    if (skipNetwork || !id || !job || !ACTIVE_STATUSES.has(job.status)) return;
+    // The recent-session resume link opens local runs only.
+    if (skipNetwork || source === "hosted" || !id || !job || !ACTIVE_STATUSES.has(job.status)) {
+      return;
+    }
     markRecentSession("optimization", id);
     return () => markRecentSession("optimization", id);
-  }, [id, skipNetwork, job?.status]);
+  }, [id, source, skipNetwork, job?.status]);
   // Funnel milestone: the user has seen a finished run's results. Once per
   // run per mount — the poll re-renders, and a run that finishes while open
   // counts the moment it flips to success.
@@ -405,55 +398,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     setLoading(false);
   }, [shareData]);
 
-  const [serveInfo, setServeInfo] = useState<ServeInfoResponse | null>(null);
-  const [serveInfoError, setServeInfoError] = useState<string | null>(null);
-  const [serveLoading, setServeLoading] = useState(false);
-  const [runHistory, setRunHistory] = useState<
-    Array<{
-      inputs: Record<string, string>;
-      outputs: Record<string, unknown>;
-      model: string;
-      ts: number;
-      nodeTraces?: WorkflowNodeTrace[] | null;
-      centsCharged?: string | null;
-    }>
-  >([]);
-  const [streamingRun, setStreamingRun] = useState<{
-    inputs: Record<string, string>;
-    partial: Record<string, string>;
-  } | null>(null);
-  const streamReqIdRef = useRef(0);
-  const streamAbortRef = useRef<AbortController | null>(null);
-  const chatScrollRef = useRef<HTMLDivElement>(null);
-  const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
-  const [serveError, setServeError] = useState<string | null>(null);
-
-  const activePairIndex =
-    searchParams.get("pair") != null ? parseInt(searchParams.get("pair")!, 10) : null;
-
-  /* Cancelled/failed grid jobs have no persisted grid_result — rebuild from
-     progress_events so overview + per-pair views still render. Memoized on
-     [job] so the reconstruction + fresh object reference rebuild only on a real
-     refetch, not on every render — a stable ref is what lets the memoized
-     OverviewTab/GridOverview skip re-rendering between unrelated state changes. */
-  const effectiveJob: OptimizationStatusResponse | null = useMemo(() => {
-    if (!job) return null;
-    if (job.grid_result || job.optimization_type !== "grid_search") return job;
-    const rebuilt = reconstructGridResult(job);
-    return rebuilt ? { ...job, grid_result: rebuilt } : job;
-  }, [job]);
-
-  const activePair =
-    activePairIndex === null || !effectiveJob?.grid_result
-      ? null
-      : (effectiveJob.grid_result.pair_results.find((p) => p.pair_index === activePairIndex) ??
-        null);
-  const isPairContext = activePair != null;
-  const overviewRef = useRememberOverview(runShapeKey(id, isPairContext));
-  useRememberPanel(
-    runShapeKey(id, isPairContext),
-    loading || !authReady || !job ? "overview" : activeDetailTab,
-  );
+  const overviewRef = useRememberOverview(id);
+  useRememberPanel(id, loading || !authReady || !job ? "overview" : activeDetailTab);
 
   // Hoisted so the memos below depend on a plain local — the React Compiler lint
   // can't equate an inferred `job.logs` path with a `job?.logs` dependency
@@ -472,7 +418,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const quotaToastShownRef = useRef(false);
   const logStreamStatus = useRunLogStream(
     !skipNetwork && authReady && hasJob && jobRunning
-      ? `${getRuntimeEnv().apiUrl}/optimizations/${encodeURIComponent(id)}/logs/stream`
+      ? apiUrl(`/optimizations/${encodeURIComponent(id)}/logs/stream`, source)
       : "",
     () => maxLogId(fetchedLogsRef.current),
     (entries) => {
@@ -489,25 +435,6 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const jobLogs = useMemo(
     () => (fetchedLogs ? mergeLiveLogs(fetchedLogs, liveLogs) : undefined),
     [fetchedLogs, liveLogs],
-  );
-
-  const pairScorePoints = useMemo(() => {
-    if (activePairIndex === null || !jobLogs) return [];
-    const pairLogs = jobLogs.filter((l) => l.pair_index === activePairIndex);
-    return extractScoresFromLogs(pairLogs);
-  }, [jobLogs, activePairIndex]);
-
-  const pairFilteredLogs = useMemo(
-    () =>
-      activePairIndex === null || !jobLogs
-        ? (jobLogs ?? [])
-        : jobLogs.filter(
-            (l) =>
-              l.pair_index === activePairIndex ||
-              l.pair_index === null ||
-              l.pair_index === undefined,
-          ),
-    [jobLogs, activePairIndex],
   );
 
   const jobRef = useRef(job);
@@ -530,7 +457,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
             sinceLog: prev.logs?.length ?? 0,
           }
         : undefined;
-      const data = await getJob(id, cursor);
+      const data = await getJob(id, cursor, source);
       rememberRunKind(id, data.optimization_type);
       setJob((cur) => mergeJobDelta(cur, data));
       setError(null);
@@ -550,15 +477,15 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       setLoading(false);
       fetchingRef.current = false;
     }
-  }, [id]);
+  }, [id, source]);
 
   useEffect(() => {
     if (skipNetwork) return;
     if (!authReady) return;
-    getOptimizationPayload(id)
+    getOptimizationPayload(id, source)
       .then(setPayload)
       .catch(() => {});
-  }, [id, skipNetwork, authReady]);
+  }, [id, source, skipNetwork, authReady]);
 
   useEffect(() => {
     jobRef.current = job;
@@ -589,9 +516,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     void fetchJob();
   }, [id, skipNetwork, authReady, fetchJob]);
 
-  const API = getRuntimeEnv().apiUrl;
   useStreamWithPollFallback({
-    url: skipNetwork ? "" : `${API}/optimizations/${encodeURIComponent(id)}/stream`,
+    url: skipNetwork ? "" : apiUrl(`/optimizations/${encodeURIComponent(id)}/stream`, source),
     enabled: !skipNetwork && authReady,
     onMessage: (event) => {
       try {
@@ -602,16 +528,16 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
         const progressed = progressCount > prev.progress;
         const statusChanged = sseData.status !== jobRef.current?.status;
         lastCountsRef.current = { logs: logCount, progress: progressCount };
-        // During an active run DSPy/GEPA emit log lines continuously, so a gate
-        // that re-fetches on every `log_count` bump re-downloads the full
+        // During an active run the sandbox writes log lines continuously, so a
+        // gate that re-fetches on every `log_count` bump re-downloads the full
         // (growing) progress_events+logs payload ~every tick — and since the
         // backend ETag is keyed on those counts, the 304 fast-path can never
-        // fire. Re-fetch only when progress advances (drives the trajectory /
-        // grid / score views, emitted throughout the run via capture_tqdm) or
-        // the status changes; for logs-only bumps, patch the lightweight live
-        // fields in place. The Logs tab catches up on the next progress tick and
-        // a terminal status always triggers a final full fetch. Black-box jobs
-        // also coalesce a fetch on log growth: see scheduleLogFetch.
+        // fire. Re-fetch only when progress advances (the run's progress events
+        // drive the trajectory and score views) or the status changes; for
+        // logs-only bumps, patch the lightweight live fields in place. The Logs
+        // tab catches up on the next progress tick and a terminal status always
+        // triggers a final full fetch. Black-box jobs also coalesce a fetch on
+        // log growth: see scheduleLogFetch.
         if (progressed || statusChanged) {
           void fetchJob();
         } else {
@@ -670,7 +596,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const handleCancel = async () => {
     if (skipNetwork) return;
     try {
-      await cancelJob(id);
+      await cancelJob(id, source);
       toast.success(msg("optimization.cancel.sent"));
       void fetchJob();
     } catch (err) {
@@ -687,7 +613,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     if (skipNetwork || resuming) return;
     setResuming(true);
     try {
-      await resumeJob(id);
+      await resumeJob(id, source);
       toast.success(msg("optimization.resume.success"));
       window.dispatchEvent(new Event("optimizations-changed"));
       // Resume continues the same run in place — refresh this view rather than
@@ -704,7 +630,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     if (skipNetwork || pausing) return;
     setPausing(true);
     try {
-      await pauseJob(id);
+      await pauseJob(id, source);
       toast.success(msg("optimization.pause.success"));
       window.dispatchEvent(new Event("optimizations-changed"));
       // Pause suspends the same run in place — refresh this view rather than navigating.
@@ -716,260 +642,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     }
   };
 
-  // Share view: seed the playground serve info from the public composite.
-  // It is non-null only for viewer+ (the backend nulls it for anonymous view).
-  useEffect(() => {
-    if (!shareData) return;
-    setServeInfo(shareData.serve_info ?? null);
-    setServeInfoError(null);
-  }, [shareData]);
-
-  useEffect(() => {
-    if (skipNetwork) return;
-    if (job?.status !== "success") return;
-    // Black-box runs have no servable program.
-    if (job.optimization_type === "blackbox") return;
-    // A failure here used to be swallowed as `setServeInfo(null)`, which
-    // silently blanked the Usage tab (e.g. when an expired bearer 401'd).
-    // request() now self-heals a stale token; a persistent failure surfaces.
-    const onFail = (err: unknown) => {
-      setServeInfo(null);
-      setServeInfoError(
-        err instanceof Error
-          ? err.message
-          : formatMsg("auto.app.optimizations.id.page.template.1", { p1: TERMS.optimization }),
-      );
-    };
-    const isGrid = job.optimization_type === "grid_search";
-    // The grid summary never reads this: its Usage tab (GridServeTab) loads
-    // each pair's own serve info. Asking anyway 409s on a grid with no pair
-    // results, as does a pair link to a pair that isn't there.
-    if (isGrid && !isPairContext) return;
-    const loader =
-      isGrid && activePairIndex != null ? getPairServeInfo(id, activePairIndex) : getServeInfo(id);
-    loader
-      .then((info) => {
-        setServeInfo(info);
-        setServeInfoError(null);
-      })
-      .catch(onFail);
-  }, [id, job?.status, job?.optimization_type, activePairIndex, isPairContext, skipNetwork]);
-
-  useEffect(() => {
-    if (chatScrollRef.current) {
-      const el = chatScrollRef.current;
-      if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
-        el.scrollTop = el.scrollHeight;
-      }
-    }
-  }, [runHistory, streamingRun]);
-
-  useEffect(() => {
-    return () => {
-      streamAbortRef.current?.abort();
-    };
-  }, []);
-
-  useEffect(() => {
-    // Share view has no pair switching; skip so the seeded share serveInfo
-    // (set from the public composite above) is not clobbered to null on mount.
-    if (isShare) return;
-    streamAbortRef.current?.abort();
-    setRunHistory([]);
-    setStreamingRun(null);
-    setServeLoading(false);
-    setServeError(null);
-    setServeInfo(null);
-    setServeInfoError(null);
-  }, [activePairIndex, isShare]);
-
-  const readServeInputs = () => {
-    const vals: Record<string, string> = {};
-    for (const f of serveInfo?.input_fields ?? []) vals[f] = textareaRefs.current[f]?.value ?? "";
-    return vals;
-  };
-
-  const handleServe = async (overrideInputs?: Record<string, string>) => {
-    if (!serveInfo) return;
-    const inputs = overrideInputs ?? readServeInputs();
-    const missing = serveInfo.input_fields.filter((f) => !inputs[f]?.trim());
-    if (missing.length > 0) {
-      toast.error(
-        <div>
-          {msg("auto.app.optimizations.id.page.1")}
-          <br />
-          {missing.join(", ")}
-        </div>,
-      );
-      return;
-    }
-    const idempotencyKey = crypto.randomUUID();
-    // Abort any in-flight stream, then start a new one tagged with a fresh id
-    streamAbortRef.current?.abort();
-    const reqId = ++streamReqIdRef.current;
-    const controller = new AbortController();
-    streamAbortRef.current = controller;
-    setServeLoading(true);
-    setServeError(null);
-    setStreamingRun({ inputs: { ...inputs }, partial: {} });
-    if (!overrideInputs) {
-      Object.values(textareaRefs.current).forEach((el) => {
-        if (el) {
-          el.value = "";
-          el.style.height = "auto";
-        }
-      });
-    }
-    const isStale = () => reqId !== streamReqIdRef.current;
-
-    // Share view runs inference through the token-gated, non-streaming
-    // /share/{token}/serve endpoint (owner key applied server-side).
-    if (isShare) {
-      if (!shareToken) {
-        setStreamingRun(null);
-        setServeLoading(false);
-        return;
-      }
-      try {
-        const res = await serveSharedOptimization(shareToken, inputs, idempotencyKey);
-        if (isStale()) return;
-        setRunHistory((prev) => {
-          const next = [
-            {
-              inputs: { ...inputs },
-              outputs: res.outputs,
-              model: res.model_used,
-              ts: Date.now(),
-              centsCharged: res.cents_charged,
-            },
-            ...prev,
-          ];
-          return next.length > 50 ? next.slice(0, 50) : next;
-        });
-        setStreamingRun(null);
-        if (res.cents_charged != null) {
-          toast.success(
-            formatMsg("optimizations.serve.request_spent", {
-              cents: formatBudgetUsd(String(res.cents_charged), getActiveIntlLocale()),
-            }),
-          );
-        }
-      } catch (err) {
-        if (isStale()) return;
-        setServeError(err instanceof Error ? err.message : msg("share.inference_failed"));
-        setStreamingRun(null);
-      } finally {
-        if (!isStale()) setServeLoading(false);
-      }
-      return;
-    }
-    // Workflow runs serve through the blocking endpoint: the response carries
-    // the per-node trace the playground replays, which the SSE final event
-    // does not.
-    if ((job?.module_name ?? "").toLowerCase() === "workflow" && activePairIndex == null) {
-      try {
-        const res = await serveProgram(id, inputs, idempotencyKey);
-        if (isStale()) return;
-        setRunHistory((prev) => {
-          const next = [
-            {
-              inputs: { ...inputs },
-              outputs: res.outputs,
-              model: res.model_used,
-              ts: Date.now(),
-              nodeTraces: res.node_traces ?? null,
-              centsCharged: res.cents_charged,
-            },
-            ...prev,
-          ];
-          return next.length > 50 ? next.slice(0, 50) : next;
-        });
-        setStreamingRun(null);
-        if (res.cents_charged != null) {
-          toast.success(
-            formatMsg("optimizations.serve.request_spent", {
-              cents: formatBudgetUsd(String(res.cents_charged), getActiveIntlLocale()),
-            }),
-          );
-        }
-      } catch (err) {
-        if (isStale()) return;
-        setServeError(err instanceof Error ? err.message : msg("share.inference_failed"));
-        setStreamingRun(null);
-      } finally {
-        if (!isStale()) setServeLoading(false);
-      }
-      return;
-    }
-    const streamFn =
-      job?.optimization_type === "grid_search" && activePairIndex != null
-        ? (i: Record<string, string>, h: Parameters<typeof serveProgramStream>[3]) =>
-            servePairProgramStream(id, activePairIndex, i, idempotencyKey, h)
-        : (i: Record<string, string>, h: Parameters<typeof serveProgramStream>[3]) =>
-            serveProgramStream(id, i, idempotencyKey, h);
-    await streamFn(inputs, {
-      signal: controller.signal,
-      onToken: (field, chunk) => {
-        if (isStale()) return;
-        setStreamingRun((prev) =>
-          prev
-            ? {
-                ...prev,
-                partial: { ...prev.partial, [field]: (prev.partial[field] ?? "") + chunk },
-              }
-            : prev,
-        );
-      },
-      onFinal: (res) => {
-        if (isStale()) return;
-        setRunHistory((prev) => {
-          // Cap history so the chat panel stays responsive across long sessions.
-          const next = [
-            {
-              inputs: { ...inputs },
-              outputs: res.outputs,
-              model: res.model_used,
-              ts: Date.now(),
-              centsCharged: res.cents_charged,
-            },
-            ...prev,
-          ];
-          return next.length > 50 ? next.slice(0, 50) : next;
-        });
-        setStreamingRun(null);
-        if (res.cents_charged != null) {
-          toast.success(
-            formatMsg("optimizations.serve.request_spent", {
-              cents: formatBudgetUsd(String(res.cents_charged), getActiveIntlLocale()),
-            }),
-          );
-        }
-      },
-      onError: (errorMsg) => {
-        if (isStale()) return;
-        setServeError(errorMsg);
-        setStreamingRun(null);
-      },
-    });
-    if (!isStale()) setServeLoading(false);
-  };
-
-  const handleStopServe = () => {
-    streamReqIdRef.current += 1;
-    streamAbortRef.current?.abort();
-    streamAbortRef.current = null;
-    setServeLoading(false);
-    setStreamingRun(null);
-  };
-
-  const handleClearHistory = () => {
-    setRunHistory([]);
-    setServeError(null);
-  };
-
   const metrics = job?.latest_metrics ?? {};
 
-  const signatureCode = (payload?.payload?.signature_code as string) ?? null;
   const blackboxScorer = payload?.payload?.scorer as { metric_code?: string } | undefined;
   const blackboxWorkspace = payload?.payload?.workspace as { metric_code?: string } | undefined;
   const metricCode =
@@ -977,7 +651,6 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     blackboxWorkspace?.metric_code ??
     blackboxScorer?.metric_code ??
     null;
-  const workflowSpec = (payload?.payload?.workflow as WorkflowSpec | undefined) ?? null;
 
   const payloadRecipe = payload?.payload?.recipe as string | undefined;
 
@@ -990,13 +663,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     [jobIsBlackbox, jobProgressEvents],
   );
   const scorePoints = useMemo(
-    () =>
-      jobIsBlackbox
-        ? extractBlackboxScorePoints(blackboxCandidates)
-        : jobLogs?.length
-          ? extractScoresFromLogs(jobLogs)
-          : [],
-    [jobIsBlackbox, blackboxCandidates, jobLogs],
+    () => (jobIsBlackbox ? extractBlackboxScorePoints(blackboxCandidates) : []),
+    [jobIsBlackbox, blackboxCandidates],
   );
 
   // A schedule set up in the submit wizard stays on its run when the run fails,
@@ -1006,12 +674,12 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const endedRun = jobStatus === "failed" || jobStatus === "cancelled" || jobStatus === "stopped";
   const [endedRunHasPlan, setEndedRunHasPlan] = useState(false);
   useEffect(() => {
-    if (!endedRun || !jobIsBlackbox || !jobId || skipNetwork || isPairContext) {
+    if (!endedRun || !jobIsBlackbox || !jobId || skipNetwork) {
       setEndedRunHasPlan(false);
       return;
     }
     let cancelled = false;
-    getContinuousState(jobId)
+    getContinuousState(jobId, source)
       .then((state) => {
         if (!cancelled) setEndedRunHasPlan(state.plan != null);
       })
@@ -1021,51 +689,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     return () => {
       cancelled = true;
     };
-  }, [endedRun, jobIsBlackbox, jobId, skipNetwork, isPairContext]);
-
-  // Optimized prompt picks the pair's artifact in pair view, otherwise falls
-  // back to the run's artifact, otherwise to the grid's best pair (for the
-  // grid-root overview banner/code tab).
-  const optimizedPrompt = isPairContext
-    ? (activePair.program_artifact?.optimized_prompt ?? null)
-    : (job?.result?.program_artifact?.optimized_prompt ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_prompt ??
-      null);
-
-  // The real optimized artifact for a react run lives in react_overlay (tuned
-  // tool descriptions / display names), not the reasoning-predictor prompt.
-  const reactOverlay = isPairContext
-    ? (activePair.program_artifact?.react_overlay ?? null)
-    : (job?.result?.program_artifact?.react_overlay ?? null);
-
-  // Flex optimizes the program's code alongside its prompt; the rewritten
-  // module source is the headline artifact for those runs.
-  const optimizedModuleSrc = isPairContext
-    ? (activePair.program_artifact?.optimized_module_src ?? null)
-    : (job?.result?.program_artifact?.optimized_module_src ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_module_src ??
-      null);
-  // A workflow is not itself a Flex, so its flex nodes arrive keyed by node.
-  const optimizedComponentSrcs = isPairContext
-    ? activePair.program_artifact?.optimized_component_srcs
-    : (job?.result?.program_artifact?.optimized_component_srcs ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_component_srcs);
-
-  // The unified per-node view of a workflow's optimized surface — each node's
-  // prompt, react overlay, or rewritten code, keyed "n_<node_id>". Present only
-  // for workflow runs, where it supersedes the scalar prompt/flex/react
-  // projections above in the artifact tab.
-  const optimizedNodes = isPairContext
-    ? activePair.program_artifact?.optimized_nodes
-    : (job?.result?.program_artifact?.optimized_nodes ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_nodes);
-
-  // Artifact tab appears once the run has produced something durable — an
-  // optimized prompt, tuned react tools, or downloadable program files.
-  const artifactFiles = isPairContext
-    ? (activePair.program_artifact ?? null)
-    : (job?.result?.program_artifact ?? job?.grid_result?.best_pair?.program_artifact ?? null);
-  const showArtifactTab = !!(optimizedPrompt || reactOverlay || artifactFiles);
+  }, [endedRun, jobIsBlackbox, jobId, skipNetwork, source]);
 
   const isActive = job ? ACTIVE_STATUSES.has(job.status) : false;
   const startedAt = job?.started_at ?? null;
@@ -1073,35 +697,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const completedAt = job?.completed_at ?? null;
   const elapsedSeconds = job?.elapsed_seconds ?? null;
 
-  // Stable identities so the memoized OverviewTab/GridOverview don't re-render
-  // on every parent state tick (live elapsed, SSE patches) just because these
-  // handlers were freshly allocated.
-  const handlePairSelect = useCallback(
-    (pi: number) => router.push(`/optimizations/${id}?pair=${pi}`),
-    [id, router],
-  );
-  const handlePairDeleted = useCallback(
-    (pi: number) => {
-      try {
-        window.localStorage.removeItem(`grid-serve:pair:${id}`);
-      } catch {
-        /* localStorage unavailable — nothing to clean up */
-      }
-      if (activePairIndex === pi) {
-        router.replace(`/optimizations/${id}`);
-      }
-      void fetchJob();
-    },
-    [id, activePairIndex, router, fetchJob],
-  );
-
   if (loading || !authReady) {
-    return (
-      <OptimizationDetailSkeleton
-        pair={activePairIndex !== null}
-        grid={(job?.optimization_type ?? kindHint) === "grid_search"}
-      />
-    );
+    return <OptimizationDetailSkeleton />;
   }
 
   if (error || !job) {
@@ -1122,16 +719,17 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // it via sharing. Mutations gate on this so a viewer can't cancel/delete/manage.
   const effectiveRole = job.effective_role ?? null;
   const canEditRun = effectiveRole == null || effectiveRole === "editor";
-  const canDeleteRun = effectiveRole == null;
-  // Grid searches are retired: their stored runs stay readable, but the backend
-  // refuses to clone, retry or resume one, so those actions are hidden.
-  const canRerun = job.optimization_type !== "grid_search";
+  // Delete and share call local-only routes, so a hosted run hides them.
+  const canDeleteRun = effectiveRole == null && source === "local";
+  // Clone and Retry open the local submit form, which cannot read a hosted run.
+  // Resume calls the run's own source, so it stays for hosted runs.
+  const canClone = source === "local";
   // Sharing is owner-only: members (even editors) can't invite, change roles,
   // or set general access. null = the owner's own run / admin / co-owner.
   // Never on the public /share/<token> route: there the job is seeded from
   // shareData and carries no effective_role, so it would read as owner-level
   // and leak the management controls to viewers (even anonymous visitors).
-  const canManageShare = !isShare && effectiveRole == null;
+  const canManageShare = !isShare && effectiveRole == null && source === "local";
   // Share banner: surface the caller's granted tier whenever they're NOT the
   // owner — both the public /share link and an explicit member grant. "viewer"
   // maps to the viewer tier, "editor" to the editor tier. null / "owner" is the
@@ -1146,68 +744,49 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     canEditRun &&
     (job.status === "failed" || job.status === "cancelled" || job.status === "paused") &&
     !isBudgetPause(job);
+  const showResume = canRestart && !!job.resumable;
+  const showRetry = canRestart && !job.resumable && canClone;
   const canCancel = canEditRun && isActive;
+  // /storage lists the local account's storage, which has no hosted view.
+  const showStorageLink = source === "local" && (job.stored_bytes ?? 0) > 0;
   const headerActionCounts = isShare
     ? { wide: shareCanInteract ? 1 : null, phone: null }
     : {
         wide:
           Number(canManageShare) +
-          1 +
-          Number(canRestart) +
+          Number(canClone) +
+          Number(showResume || showRetry) +
           Number(canCancel && !!job.pausable) +
           Number(canCancel) +
           Number(canDeleteRun && isTerminal),
         phone: Number(canManageShare) + Number(canCancel),
       };
-  // Pair-aware terminal: a pair is considered "available for data export" once
-  // it has either a program artifact or an error recorded. This mirrors the
-  // standalone job's "isTerminal" gate so the data/export surfaces appear
-  // identically in both contexts.
-  const isPairTerminal = isPairContext
-    ? !!(
-        activePair.error ||
-        activePair.program_artifact ||
-        activePair.optimized_test_metric != null
-      )
-    : false;
-
-  // Tab gating uniform across run and pair contexts.
-  // Share view: only editor+ may run inference (it spends the owner's key),
-  // and only through the single non-streaming /share serve endpoint, so it
-  // needs a seeded serveInfo (the backend nulls serve_info below editor).
   // The level trims desk tabs, but a deep link to one still opens it: the
   // linked tab is kept rather than stranding the link on Overview.
   const levelShowsTab = (tab: string) => isShare || levelTabGate(tab) || tab === linkedDetailTab;
-  const showPlaygroundTab = isShare
-    ? shareCanServe && job.status === "success" && !!serveInfo
-    : job.status === "success" && (job.optimization_type === "grid_search" || !!serveInfo);
-  const showDataTab =
-    (isShare
-      ? !!shareData?.dataset
-      : isPairContext
-        ? isPairTerminal
-        : isTerminal && job.optimization_type !== "grid_search" && !jobIsBlackbox) &&
-    levelShowsTab("data");
-  const showLogsTab =
-    (job.optimization_type !== "grid_search" || isPairContext) && levelShowsTab("logs");
+  const showLogsTab = levelShowsTab("logs");
   const showBestVersionTab = jobIsBlackbox && !!job.blackbox_result;
   // A remote-scorer black-box run has no code to show at all.
   const showCodeTab = (!jobIsBlackbox || !!metricCode) && levelShowsTab("code");
   const showConfigTab = levelShowsTab("config");
-  const showRewardTab = jobIsBlackbox && hasRewardTab(payload?.payload) && levelShowsTab("reward");
   // Usage reads the run's billing records, which only an authenticated viewer can fetch.
-  const showUsageTab = !skipNetwork;
-  // Continuous optimization starts from the owner's own successful black-box
+  // The billing reads behind it have no hosted route.
+  const showUsageTab = !skipNetwork && source === "local";
+  // Continuous optimization starts from the owner's own successful repository
   // run; the backend still decides whether this run can carry a plan.
   const showContinuousTab =
-    !skipNetwork &&
-    !isPairContext &&
-    jobIsBlackbox &&
-    (job.status === "success" || endedRunHasPlan);
+    !skipNetwork && jobIsBlackbox && (job.status === "success" || endedRunHasPlan);
 
-  const pairCount = effectiveJob?.grid_result?.pair_results.length ?? 0;
-  const isBestPair =
-    isPairContext && effectiveJob?.grid_result?.best_pair?.pair_index === activePair.pair_index;
+  // Serving a repository run is opt-in and billed per call, so only its owner
+  // (or an owner-tier grant) sees the tab, and only once the run succeeded.
+  const showServeTab =
+    !skipNetwork &&
+    jobIsBlackbox &&
+    // Same check as the backend's is_repo_payload: old text and agent
+    // blackbox runs have no serve.py to run.
+    (payload?.payload?.target as { kind?: string } | undefined)?.kind === "repo" &&
+    job.status === "success" &&
+    effectiveRole == null;
 
   return (
     <div className="space-y-6 pb-12">
@@ -1236,29 +815,31 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                 )}
               </div>
               {job.description && (
-                <p className="text-sm text-muted-foreground/70 leading-relaxed">
-                  {job.description}
+                <p className="flex items-start gap-1.5 text-sm text-muted-foreground/70 leading-relaxed">
+                  <TextAlignLeft className="mt-1 size-3.5 shrink-0" aria-hidden="true" />
+                  <span dir="auto">{job.description}</span>
                 </p>
               )}
-              <span className="inline-flex items-center gap-1">
-                <code className="break-all font-mono text-xs text-muted-foreground/60" dir="ltr">
+              <button
+                type="button"
+                className="inline-flex max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground/60 transition-colors hover:text-primary focus-visible:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+                aria-label={formatMsg("auto.app.optimizations.id.page.template.3", {
+                  p1: TERMS.optimization,
+                })}
+                title={formatMsg("auto.app.optimizations.id.page.template.3", {
+                  p1: TERMS.optimization,
+                })}
+                onClick={async () => {
+                  if (await copyRunId(job.optimization_id)) notifyCopied();
+                }}
+              >
+                <Hash className="size-3.5 shrink-0" aria-hidden="true" />
+                <code className="break-all font-mono text-xs" dir="ltr">
                   {job.optimization_id}
                 </code>
-                <CopyButton
-                  text={job.optimization_id}
-                  ariaLabel={formatMsg("auto.app.optimizations.id.page.template.3", {
-                    p1: TERMS.optimization,
-                  })}
-                  onCopied={notifyCopied}
-                />
-              </span>
+              </button>
               <div className="flex items-center gap-3 flex-wrap text-sm text-muted-foreground">
-                {job.optimization_type === "grid_search" ? (
-                  <span className="flex items-center gap-1.5">
-                    <GridFour className="size-3.5" />
-                    {msg("auto.app.optimizations.id.page.literal.2")}
-                  </span>
-                ) : jobIsBlackbox ? (
+                {jobIsBlackbox ? (
                   <span className="flex items-center gap-1.5">
                     <Cube className="size-3.5" />
                     {msg("optimization.blackbox.badge")}
@@ -1271,14 +852,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                   completedAt={completedAt}
                   elapsedSeconds={elapsedSeconds}
                 />
-                {isActive && job.estimated_remaining && (
-                  <span className="flex items-center gap-1.5">
-                    <Timer className="size-3.5" />
-                    {msg("auto.app.optimizations.id.page.3")}
-                    {job.estimated_remaining}
-                  </span>
-                )}
-                {!isPairContext && !isPhone && (job.stored_bytes ?? 0) > 0 && (
+                {showStorageLink && !isPhone && (
                   <Link
                     href="/storage"
                     title={msg("optimization.storage_label")}
@@ -1289,20 +863,18 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                     {formatBytes(job.stored_bytes ?? 0)}
                   </Link>
                 )}
-                {!isPairContext && (
-                  <RunCostChip
-                    details={job.result?.details ?? job.blackbox_result?.details}
-                    budget={job.execution_budget ?? job.terminal_evidence?.execution_budget}
-                    running={isActive}
-                    onOpen={showUsageTab ? () => setDetailTab("usage") : undefined}
-                  />
-                )}
+                <RunCostChip
+                  details={job.blackbox_result?.details}
+                  budget={job.execution_budget ?? job.terminal_evidence?.execution_budget}
+                  running={isActive}
+                  onOpen={showUsageTab ? () => setDetailTab("usage") : undefined}
+                />
               </div>
             </div>
             {!isShare && (
               <div className="flex w-full flex-wrap items-center justify-end gap-1 sm:w-auto sm:shrink-0 sm:flex-nowrap sm:gap-2">
                 {canManageShare && <ShareDialog optimizationId={job.optimization_id} />}
-                {!isPhone && canRerun && (
+                {!isPhone && canClone && (
                   <TooltipButton tooltip={msg("auto.app.optimizations.id.page.4")}>
                     <Button
                       variant="ghost"
@@ -1314,42 +886,36 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                     </Button>
                   </TooltipButton>
                 )}
-                {!isPhone &&
-                  canEditRun &&
-                  canRerun &&
-                  (job.status === "failed" ||
-                    job.status === "cancelled" ||
-                    job.status === "paused") &&
-                  !isBudgetPause(job) &&
-                  (job.resumable ? (
-                    <TooltipButton tooltip={msg("optimization.resume_tooltip")}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={handleResume}
-                        disabled={resuming}
-                        aria-label={msg("optimization.resume")}
-                      >
-                        {/* Mirror the triangle to point in the reading direction — left in RTL, right in LTR. */}
-                        <Play
-                          className={`size-4${getActiveDir() === "rtl" ? " -scale-x-100" : ""}${
-                            resuming ? " animate-spin" : ""
-                          }`}
-                        />
-                      </Button>
-                    </TooltipButton>
-                  ) : (
-                    <TooltipButton tooltip={msg("optimization.configure_new.tooltip")}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={handleRetry}
-                        aria-label={msg("optimization.configure_new.label")}
-                      >
-                        <ArrowCounterClockwise className="size-4" />
-                      </Button>
-                    </TooltipButton>
-                  ))}
+                {!isPhone && showResume && (
+                  <TooltipButton tooltip={msg("optimization.resume_tooltip")}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={handleResume}
+                      disabled={resuming}
+                      aria-label={msg("optimization.resume")}
+                    >
+                      {/* Mirror the triangle to point in the reading direction — left in RTL, right in LTR. */}
+                      <Play
+                        className={`size-4${getActiveDir() === "rtl" ? " -scale-x-100" : ""}${
+                          resuming ? " animate-spin" : ""
+                        }`}
+                      />
+                    </Button>
+                  </TooltipButton>
+                )}
+                {!isPhone && showRetry && (
+                  <TooltipButton tooltip={msg("optimization.configure_new.tooltip")}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={handleRetry}
+                      aria-label={msg("optimization.configure_new.label")}
+                    >
+                      <ArrowCounterClockwise className="size-4" />
+                    </Button>
+                  </TooltipButton>
+                )}
                 {!isPhone && canEditRun && isActive && job.pausable && (
                   <TooltipButton tooltip={msg("optimization.pause_tooltip")}>
                     <Button
@@ -1384,7 +950,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                 )}
               </div>
             )}
-            {shareCanInteract && !isPhone && canRerun && (
+            {shareCanInteract && !isPhone && (
               <div className="flex w-full items-center justify-end gap-2 sm:w-auto sm:shrink-0">
                 <TooltipButton tooltip={msg("share.clone_tooltip")}>
                   <Button
@@ -1410,6 +976,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
       <RunLifecycleNotice
         job={job}
+        source={source}
         canEdit={canEditRun && !skipNetwork}
         onBudgetChanged={() => {
           window.dispatchEvent(new Event("optimizations-changed"));
@@ -1417,24 +984,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
         }}
       />
 
-      {isPairContext && effectiveJob?.grid_result && (
-        <PairSelectionStrip
-          job={effectiveJob}
-          activePair={activePair}
-          activePairIndex={activePair.pair_index}
-          pairCount={pairCount}
-          isBest={isBestPair}
-          jobActive={isActive}
-          jobTerminal={isTerminal}
-          onBack={() => router.push(`/optimizations/${id}`)}
-          onPrev={() => router.push(`/optimizations/${id}?pair=${activePair.pair_index - 1}`)}
-          onNext={() => router.push(`/optimizations/${id}?pair=${activePair.pair_index + 1}`)}
-          onCancel={handleCancel}
-          onDeleted={() => router.push(`/optimizations/${id}`)}
-        />
-      )}
-
-      {job.status === "failed" && !isPairContext && (job.message || (metrics.error as string)) && (
+      {job.status === "failed" && (job.message || (metrics.error as string)) && (
         <FadeIn delay={0.15}>
           <div className="rounded-xl border border-destructive/20 bg-destructive/[0.04] p-5">
             <div className="flex items-center gap-3">
@@ -1485,102 +1035,48 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
         </FadeIn>
       )}
 
-      {isPairContext && activePair.error && (
-        <FadeIn delay={0.05}>
-          <div
-            role="alert"
-            className="rounded-xl border border-destructive/30 bg-destructive/5 p-4"
-          >
-            <div className="text-sm font-medium text-destructive mb-1">
-              {msg("auto.features.optimizations.components.pairdetailview.3")}
-            </div>
-            <pre
-              className="text-xs font-mono text-destructive/80 whitespace-pre-wrap break-words"
-              dir="ltr"
-            >
-              {activePair.error}
-            </pre>
-          </div>
-        </FadeIn>
-      )}
-
-      {job.optimization_type === "grid_search" &&
-        activePairIndex !== null &&
-        (!activePair || !effectiveJob?.grid_result) && (
-          <FadeIn>
-            <div className="rounded-xl border border-border/50 bg-card/80 p-8 text-center space-y-3">
-              <p className="text-sm font-medium">{msg("auto.app.optimizations.id.page.10")}</p>
-              <p className="text-xs text-muted-foreground">
-                {msg("auto.app.optimizations.id.page.11")}
-                {TERMS.optimization}
-                {msg("auto.app.optimizations.id.page.12")}
-              </p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => router.push(`/optimizations/${id}`)}
-              >
-                {msg("auto.app.optimizations.id.page.13")}
-              </Button>
-            </div>
-          </FadeIn>
-        )}
-
       {(() => {
         const tabCls =
           "relative min-h-[44px] shrink-0 flex-none px-2.5 sm:px-4 py-2.5 rounded-none border-b-2 border-transparent text-foreground/70 hover:text-foreground data-[state=active]:border-transparent data-[state=active]:border-b-primary data-[state=active]:font-medium data-[state=active]:text-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none transition-all duration-200 text-xs sm:text-sm";
-        // Pair view pings the trajectory/logs tabs only while the pair itself
-        // is still running, matching the standalone run's behaviour exactly.
-        const pingActive = isPairContext
-          ? isActive &&
-            !activePair.error &&
-            !(activePair.program_artifact || activePair.optimized_test_metric != null)
-          : isActive;
+        const pingActive = isActive;
         return (
           <Tabs value={activeDetailTab} onValueChange={setDetailTab} data-detail-tabs="">
             <RememberRunShape
-              hintKey={runShapeKey(id, isPairContext)}
+              hintKey={id}
               shape={{
                 name: job.name ?? null,
                 description: job.description ?? null,
                 costChip:
-                  !isPairContext &&
                   runCostCents(
-                    job.result?.details ?? job.blackbox_result?.details,
+                    job.blackbox_result?.details,
                     job.execution_budget ?? job.terminal_evidence?.execution_budget,
                     isActive,
                   ) != null,
-                storageLink: !isPairContext && (job.stored_bytes ?? 0) > 0,
+                storageLink: showStorageLink,
                 access: sharedTier ? { tier: sharedTier, owner: sharedByOwner ?? null } : null,
                 actions: headerActionCounts,
                 tabs:
                   1 +
                   Number(showConfigTab) +
-                  Number(showPlaygroundTab) +
                   Number(showBestVersionTab) +
-                  Number(showDataTab) +
                   Number(showCodeTab) +
-                  Number(showArtifactTab) +
                   Number(showLogsTab) +
                   Number(showUsageTab) +
+                  Number(showServeTab) +
                   Number(showContinuousTab),
                 phoneTabs:
                   1 +
-                  Number(showPlaygroundTab) +
                   Number(showBestVersionTab) +
-                  Number(showArtifactTab) +
                   Number(showLogsTab) +
-                  Number(showUsageTab),
+                  Number(showUsageTab) +
+                  Number(showServeTab),
                 tabIds: [
                   "overview",
-                  ...(showPlaygroundTab ? ["playground"] : []),
                   ...(showBestVersionTab ? ["best"] : []),
-                  ...(showDataTab ? ["data"] : []),
                   ...(showCodeTab ? ["code"] : []),
-                  ...(showRewardTab ? ["reward"] : []),
-                  ...(showArtifactTab ? ["artifact"] : []),
                   ...(showLogsTab ? ["logs"] : []),
                   ...(showUsageTab ? ["usage"] : []),
+                  ...(showServeTab ? ["playground"] : []),
                   ...(showContinuousTab ? ["continuous"] : []),
                   ...(showConfigTab ? ["config"] : []),
                 ],
@@ -1595,40 +1091,16 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                 {msg("auto.app.optimizations.id.page.14")}
                 {pingActive && <PingDot className="ms-1" />}
               </TabsTrigger>
-              {showPlaygroundTab && (
-                <TabsTrigger value="playground" className={tabCls}>
-                  <PaperPlaneTilt className="size-3.5" />
-                  {msg("auto.app.optimizations.id.page.15")}
-                </TabsTrigger>
-              )}
               {showBestVersionTab && (
                 <TabsTrigger value="best" className={tabCls}>
                   <Package className="size-3.5" />
                   {msg("optimization.artifact.tab")}
                 </TabsTrigger>
               )}
-              {showDataTab && !isPhone && (
-                <TabsTrigger value="data" className={tabCls}>
-                  <Database className="size-3.5" />
-                  {msg("auto.app.optimizations.id.page.16")}
-                </TabsTrigger>
-              )}
               {!isPhone && showCodeTab && (
                 <TabsTrigger value="code" className={tabCls}>
                   <Code className="size-3.5" />
                   {msg("auto.app.optimizations.id.page.17")}
-                </TabsTrigger>
-              )}
-              {showRewardTab && (
-                <TabsTrigger value="reward" className={tabCls}>
-                  <Trophy className="size-3.5" />
-                  {msg("reward_tab.title")}
-                </TabsTrigger>
-              )}
-              {showArtifactTab && (
-                <TabsTrigger value="artifact" className={tabCls}>
-                  <Package className="size-3.5" />
-                  {msg("optimization.artifact.tab")}
                 </TabsTrigger>
               )}
               {showLogsTab && (
@@ -1643,6 +1115,12 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                   <Coins className="size-3.5" />
                   {msg("usage_tab.title")}
                   {pingActive && <PingDot className="ms-1" />}
+                </TabsTrigger>
+              )}
+              {showServeTab && (
+                <TabsTrigger value="playground" className={tabCls}>
+                  <PaperPlaneTilt className="size-3.5" />
+                  {msg("serve_tab.title")}
                 </TabsTrigger>
               )}
               {!isPhone && showContinuousTab && (
@@ -1661,66 +1139,19 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
             <TabsContent ref={overviewRef} value="overview" className="space-y-6 mt-4">
               <OverviewTab
-                job={effectiveJob ?? job}
+                job={job}
                 isActive={isActive}
-                scorePoints={isPairContext ? pairScorePoints : scorePoints}
-                activePairIndex={activePairIndex}
-                activePair={activePair}
-                onPairSelect={handlePairSelect}
-                onPairDeleted={handlePairDeleted}
+                scorePoints={scorePoints}
                 payload={payload}
+                source={source}
               />
             </TabsContent>
-
-            {showPlaygroundTab && (
-              <TabsContent value="playground" className="space-y-4 mt-4">
-                {!isShare && job.optimization_type === "grid_search" && !isPairContext ? (
-                  <GridServeTab job={job} />
-                ) : !isShare &&
-                  !isPairContext &&
-                  (isReactModuleName(serveInfo?.module_name) ||
-                    isReactModuleName(job.module_name)) ? (
-                  <>
-                    <ReactServeChat optimizationId={job.optimization_id} />
-                    <ReactServeApi optimizationId={job.optimization_id} />
-                  </>
-                ) : serveInfo ? (
-                  <RunPlayground
-                    serveInfo={serveInfo}
-                    runHistory={runHistory}
-                    setRunHistory={setRunHistory}
-                    streamingRun={streamingRun}
-                    serveLoading={serveLoading}
-                    serveError={serveError}
-                    setServeError={setServeError}
-                    textareaRefs={textareaRefs}
-                    chatScrollRef={chatScrollRef}
-                    handleServe={handleServe}
-                    handleStopServe={handleStopServe}
-                    optimizationId={job.optimization_id}
-                    pairIndex={isPairContext ? activePair.pair_index : undefined}
-                    onClearHistory={handleClearHistory}
-                    isShare={isShare}
-                  />
-                ) : null}
-              </TabsContent>
-            )}
-
-            {showDataTab && !isPhone && (
-              <TabsContent value="data">
-                <DataTab
-                  job={job}
-                  pairIndex={isPairContext ? activePair.pair_index : undefined}
-                  sharedDataset={shareData?.dataset ?? undefined}
-                  sharedTestResults={shareData?.test_results ?? undefined}
-                />
-              </TabsContent>
-            )}
 
             {showBestVersionTab && job.blackbox_result && (
               <TabsContent value="best" className="mt-4">
                 <BestVersionTab
                   result={job.blackbox_result}
+                  source={source}
                   jobName={job.name}
                   repository={payloadRecipe === "repo"}
                   optimizationId={job.optimization_id}
@@ -1730,64 +1161,45 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
             {!isPhone && showCodeTab && (
               <TabsContent value="code" className="space-y-6 mt-4">
-                <CodeTab
-                  signatureCode={signatureCode ?? ""}
-                  metricCode={metricCode ?? ""}
-                  workflowSpec={workflowSpec}
-                  metricLabel={jobIsBlackbox ? msg("optimization.blackbox.scorer_code") : undefined}
-                />
-              </TabsContent>
-            )}
-
-            {showRewardTab && (
-              <TabsContent value="reward" className="mt-4">
-                <RewardTab
-                  payload={payload?.payload}
-                  result={job.status === "success" ? (job.blackbox_result ?? null) : null}
-                />
-              </TabsContent>
-            )}
-
-            {showArtifactTab && (
-              <TabsContent value="artifact" className="space-y-6 mt-4">
-                <ArtifactTab
-                  job={job}
-                  activePair={activePair}
-                  optimizedPrompt={optimizedPrompt}
-                  reactOverlay={reactOverlay}
-                  optimizedModuleSrc={optimizedModuleSrc}
-                  optimizedComponentSrcs={optimizedComponentSrcs}
-                  optimizedNodes={optimizedNodes}
-                  workflowSpec={workflowSpec}
-                  isShare={isShare}
-                />
+                <CodeTab metricCode={metricCode ?? ""} />
               </TabsContent>
             )}
 
             {showLogsTab && (
               <TabsContent value="logs">
-                <LogsTab
-                  logs={isPairContext ? pairFilteredLogs : (jobLogs ?? [])}
-                  liveStatus={logStreamStatus}
-                />
+                <LogsTab logs={jobLogs ?? []} liveStatus={logStreamStatus} />
               </TabsContent>
             )}
 
             {showUsageTab && (
               <TabsContent value="usage" className="mt-4">
-                <UsageTab job={job} pairIndex={isPairContext ? activePair.pair_index : null} />
+                <UsageTab job={job} />
+              </TabsContent>
+            )}
+
+            {showServeTab && (
+              <TabsContent value="playground">
+                <ServeTab
+                  key={`${source}:${job.optimization_id}`}
+                  optimizationId={job.optimization_id}
+                  source={source}
+                />
               </TabsContent>
             )}
 
             {!isPhone && showContinuousTab && (
               <TabsContent value="continuous">
-                <ContinuousTab optimizationId={job.optimization_id} />
+                <ContinuousTab
+                  key={`${source}:${job.optimization_id}`}
+                  optimizationId={job.optimization_id}
+                  source={source}
+                />
               </TabsContent>
             )}
 
             {!isPhone && (
               <TabsContent value="config" className="mt-4">
-                <ConfigTab job={job} payload={payload} activePair={activePair ?? undefined} />
+                <ConfigTab job={job} payload={payload} />
               </TabsContent>
             )}
           </Tabs>

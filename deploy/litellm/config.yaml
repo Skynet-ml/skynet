@@ -19,6 +19,12 @@ model_list:
       model: "openrouter/*"
       api_key: os.environ/OPENROUTER_API_KEY
       api_base: https://openrouter.ai/api/v1
+      # LiteLLM forwards reasoning_effort only for models its own catalog marks as
+      # reasoning-capable; drop_params below silently strips it from any newer
+      # model. Coding harnesses (Pi, OpenCode) send the user's chosen effort here,
+      # so let it through for every model. OpenRouter ignores it for a model that
+      # cannot reason.
+      allowed_openai_params: ["reasoning_effort"]
 
 litellm_settings:
   drop_params: true

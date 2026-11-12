@@ -80,3 +80,22 @@ export function restoreSavedLimit(saved: SavedLimit, { budget, patchSaved }: Lim
     patchSaved({ maxCostCents: saved.maxCostCents });
   }
 }
+
+/** A balance as `useBalance()` reports it: a total, and whether it loaded. */
+interface KnownBalance {
+  available: boolean;
+  totalCents: number;
+}
+
+/**
+ * Pick the balance that funds the run: the hosted account's for a Web run,
+ * the Mac's own wallet otherwise. Null while that balance is unknown.
+ */
+export function runBalance(
+  runOn: "local" | "hosted",
+  local: KnownBalance,
+  shown: KnownBalance,
+): number | null {
+  const funding = runOn === "hosted" ? shown : local;
+  return funding.available ? funding.totalCents : null;
+}

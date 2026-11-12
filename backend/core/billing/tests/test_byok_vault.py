@@ -247,21 +247,6 @@ def test_remove_key_is_idempotent(engine: object, vault_key: str) -> None:
     assert vault.list_keys("u@x.com").keys == []
 
 
-def test_reveal_secret_round_trips(engine: object, vault_key: str) -> None:
-    """The run path can decrypt the stored secret back to its plaintext."""
-    vault = ProviderKeyVault(engine=engine)
-    secret = "sk-reveal-4444"
-    with patch("core.billing.byok_vault.httpx.get", return_value=_probe_response(200)):
-        vault.save_key("u@x.com", "openrouter", secret)
-    assert vault.reveal_secret("u@x.com", "openrouter") == secret
-
-
-def test_reveal_secret_missing_returns_none(engine: object, vault_key: str) -> None:
-    """Revealing a provider with no stored key returns None, not an error."""
-    vault = ProviderKeyVault(engine=engine)
-    assert vault.reveal_secret("u@x.com", "openrouter") is None
-
-
 def test_save_key_custom_api_base_probes_that_endpoint(engine: object, vault_key: str) -> None:
     """A connection with a custom api_base verifies against that endpoint, not a default."""
     vault = ProviderKeyVault(engine=engine)

@@ -14,8 +14,9 @@ import httpx
 from ....billing import budgets
 from ....billing.runtime import OperationCompletedError, UsagePendingError
 from ....billing.signals import BudgetReached
+from ....billing.usage_tags import box_tag
 from ....exceptions import InfrastructureInterruptionError, ServiceError
-from .sandbox import CommandResult, OutputSink, SandboxSpec
+from .sandbox_contract import CommandResult, OutputSink, SandboxSpec
 
 _ERRORS = {
     error.__name__: error
@@ -124,10 +125,11 @@ class RemoteSandboxRuntime:
         Returns:
             A guest handle containing only an opaque broker identity.
         """
+        request_id = spec.operation_key or uuid.uuid4().hex
         value = self._request(
             "open",
             {
-                "request_id": spec.operation_key or uuid.uuid4().hex,
+                "request_id": request_id,
                 "spec": {
                     "lifetime_seconds": spec.lifetime_seconds,
                     "env": dict(spec.env),
@@ -142,7 +144,11 @@ class RemoteSandboxRuntime:
         identity = value.get("sandbox_id")
         if not isinstance(identity, str) or not identity:
             raise ServiceError("The parent did not return a sandbox capability.")
-        return RemoteSandboxSession(self, identity, spec.lifetime_seconds)
+        session = RemoteSandboxSession(self, identity, spec.lifetime_seconds)
+        # The parent names this box the same way, so the guest can tag the work
+        # that this box waits on, such as its evaluator requests (SKY-647).
+        session.box = box_tag(f"sandbox:{request_id}")
+        return session
 
 
 class RemoteSandboxSession:
@@ -160,6 +166,7 @@ class RemoteSandboxSession:
         self._identity = identity
         self._lifetime = lifetime_seconds
         self._closed = False
+        self.box: str | None = None
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write text files in the owned guest directory.
@@ -168,6 +175,14 @@ class RemoteSandboxSession:
             files: Relative guest paths and contents.
         """
         self._runtime._request("write", {"sandbox_id": self._identity, "files": dict(files)})
+
+    def write_codex_requirements(self) -> None:
+        """Ask the parent to write the root-owned Codex requirements file in this box.
+
+        The request names only the box: the parent builds the root command
+        and the file's content from its own data.
+        """
+        self._runtime._request("codex_requirements", {"sandbox_id": self._identity})
 
     def read_file(self, path: str) -> str | None:
         """Read a guest file without exposing the parent's filesystem.
@@ -190,6 +205,7 @@ class RemoteSandboxSession:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Consume parent NDJSON output while allowing mailbox callbacks to use control RPC.
 
@@ -198,13 +214,16 @@ class RemoteSandboxSession:
             env: Optional guest environment.
             timeout_seconds: Command timeout within the sandbox lifetime.
             on_output: Callback for stdout/stderr chunks after parent model interception.
+            sudo: Refused; the child never sends a root command.
 
         Returns:
             The terminal command result received from the parent.
 
         Raises:
-            ServiceError: When the stream ends without a terminal result.
+            ServiceError: When ``sudo`` is set or the stream ends without a terminal result.
         """
+        if sudo:
+            raise ServiceError("A child cannot run sandbox commands as root.")
         request = {
             "action": "run",
             "payload": {

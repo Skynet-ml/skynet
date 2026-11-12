@@ -93,6 +93,46 @@ export function finishedTurnMs(
   return Math.max(durationMs ?? 0, span);
 }
 
+/** One turn of a work block, as its header times it. */
+export interface TimedTurn {
+  thinking: readonly Timed[];
+  steps: readonly TimedCall[];
+  /** The backend-measured duration of the chat turn, when known. */
+  durationMs?: number | null;
+}
+
+/**
+ * The time a work block's header shows: each turn's own work, added up.
+ *
+ * A wizard screen's turn joins the block of the screen before it, and the
+ * user can take an hour to get there. Counting from the first turn's start
+ * showed that hour as "Working for 57m", still going up while the agent
+ * waited on the user.
+ *
+ * Args:
+ *   earlier: The block's earlier turns, finished.
+ *   turn: The latest turn, with the start its clock keeps.
+ *   now: The current time while the latest turn runs; null once it ended.
+ *
+ * Returns:
+ *   The work time in ms, with no gaps between turns.
+ */
+export function blockWorkMs(
+  earlier: readonly TimedTurn[],
+  turn: TimedTurn & { start: number | null },
+  now: number | null,
+): number {
+  let total = 0;
+  for (const t of earlier) {
+    total += finishedTurnMs(turnStart(t.thinking, t.steps), t.thinking, t.steps, t.durationMs);
+  }
+  const own =
+    now === null
+      ? finishedTurnMs(turn.start, turn.thinking, turn.steps, turn.durationMs)
+      : Math.max(0, now - (turn.start ?? now));
+  return total + own;
+}
+
 /** A turn header's clock: the turn's start and whether it runs. */
 export interface TurnClock {
   start: number | null;

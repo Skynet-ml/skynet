@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { budgetContinueBlock, budgetShortfall } = await import("./budget-limit.ts");
+const { budgetContinueBlock, budgetShortfall, runBalance } = await import("./budget-limit.ts");
 
 const floor = 119;
 
@@ -61,4 +61,14 @@ test("Continue holds on the limit screens and at the gate, and nowhere else", ()
     budgetContinueBlock("budget", null, { uncapped: false, limit: 1, balance: 0 }, true),
     null,
   );
+});
+
+test("a Web run is funded by the hosted balance, a Mac run by the Mac wallet", () => {
+  const mac = { available: true, totalCents: 5000 };
+  const web = { available: true, totalCents: 40 };
+
+  assert.equal(runBalance("local", mac, web), 5000);
+  assert.equal(runBalance("hosted", mac, web), 40);
+  assert.equal(runBalance("hosted", mac, { available: false, totalCents: 0 }), null);
+  assert.equal(runBalance("local", { available: false, totalCents: 0 }, web), null);
 });

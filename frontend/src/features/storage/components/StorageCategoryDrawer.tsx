@@ -22,7 +22,6 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/shared/ui/primit
 import { formatStorageSize } from "@/shared/lib/formatters";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
-import { SelectCheckbox } from "@/shared/ui/select-checkbox";
 import { StorageItemRow } from "./StorageItemRow";
 import { categoryMeta } from "../lib/categories";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
@@ -51,8 +50,8 @@ interface StorageCategoryDrawerProps {
 
 /**
  * A slide-over (matching the admin drawer) listing every item in one storage
- * category. Each row carries a leading checkbox for multi-select; a select-all
- * header, a sticky action bar, a summary confirm, and a determinate progress
+ * category. Each row carries a leading checkbox for multi-select; a sticky
+ * action bar, a summary confirm, and a determinate progress
  * dialog drive bulk deletion. A per-row trash still offers a quick single delete.
  * Loads the full set — not a top-N — so the user can clear a whole category here.
  */
@@ -149,14 +148,6 @@ export function StorageCategoryDrawer({
     [items, anchorIndex],
   );
 
-  const toggleAll = React.useCallback(() => {
-    const current = items ?? [];
-    setSelected((prev) =>
-      prev.size === current.length ? new Set() : new Set(current.map((it) => it.id)),
-    );
-    setAnchorIndex(null);
-  }, [items]);
-
   const clearSelection = React.useCallback(() => {
     setSelected(new Set());
     setAnchorIndex(null);
@@ -197,8 +188,6 @@ export function StorageCategoryDrawer({
 
   const list = items ?? [];
   const selectedBytes = list.reduce((sum, it) => (selected.has(it.id) ? sum + it.bytes : sum), 0);
-  const allSelected = list.length > 0 && selected.size === list.length;
-  const someSelected = selected.size > 0 && !allSelected;
   const running = progress !== null;
   const busy = deleting || running;
 
@@ -243,31 +232,18 @@ export function StorageCategoryDrawer({
                 <EmptyState icon={HardDrive} title={msg("storage.items.empty")} />
               </div>
             ) : (
-              <>
-                <div className="flex items-center gap-3 px-2 pb-1">
-                  <SelectCheckbox
-                    checked={allSelected}
-                    indeterminate={!allSelected && someSelected}
-                    onToggle={toggleAll}
-                    ariaLabel={msg("storage.select.all")}
+              <ul className="flex flex-col">
+                {list.map((item) => (
+                  <StorageItemRow
+                    key={`${item.type}:${item.id}`}
+                    item={item}
+                    selected={selected.has(item.id)}
+                    onToggle={toggleItem}
+                    onDelete={setPending}
+                    onNavigate={onClose}
                   />
-                  <span className="text-xs font-medium text-muted-foreground">
-                    {msg("storage.select.all")}
-                  </span>
-                </div>
-                <ul className="flex flex-col">
-                  {list.map((item) => (
-                    <StorageItemRow
-                      key={`${item.type}:${item.id}`}
-                      item={item}
-                      selected={selected.has(item.id)}
-                      onToggle={toggleItem}
-                      onDelete={setPending}
-                      onNavigate={onClose}
-                    />
-                  ))}
-                </ul>
-              </>
+                ))}
+              </ul>
             )}
           </div>
 

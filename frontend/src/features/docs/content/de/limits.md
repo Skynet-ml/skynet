@@ -57,7 +57,7 @@ Zu den Connectors, die Datensätze importieren, gehören Datenbanktabellen, LLM-
 | Ordnertiefe                       | 3 Ordner                                                                |
 | Dateitypen                        | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`run.py` und `metric.py` sind die Einstiegsdateien eines Durchlaufs. Sie können sie nicht löschen, umbenennen oder verschieben.
+`scorer.py` enthält Ihren Scorer. Skynet ruft dessen Funktion `score(repo_path, case)` für jeden Fall auf.
 
 ## Anfrageraten
 

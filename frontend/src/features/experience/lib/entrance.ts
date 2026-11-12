@@ -51,7 +51,6 @@ export function setupCoversPath(pathname: string): boolean {
     pathname === "/mcp/authorize" ||
     pathname === "/terms" ||
     pathname === "/privacy" ||
-    pathname === "/download" ||
     pathname === "/docs" ||
     pathname.startsWith("/docs/") ||
     pathname.startsWith("/share/")
@@ -73,8 +72,8 @@ export function endSplash(how: Exclude<SplashState, "playing">): void {
 
 /**
  * Record the exit the landed splash commits to. A fade marks the splash gone
- * at once, so a setup that opens during the fade plays its own glance and
- * slide instead of the handoff entrance under a fading splash.
+ * at once, so a setup that opens during the fade fades in on its own instead
+ * of taking the handoff entrance under a fading splash.
  *
  * Args:
  *   exit: The exit the splash starts, never "hold".
@@ -106,8 +105,8 @@ export function subscribeSplash(listener: () => void): () => void {
  *
  * Returns:
  *   True only for a fresh setup while the splash still plays. A splash that
- *   already left (even by a handoff nothing took) never makes a later setup
- *   skip its own glance and slide.
+ *   already left (even by a handoff nothing took) never hands off to a later
+ *   setup; `fadesInEntrance` covers that setup.
  */
 export function playsEntrance(s: {
   languageAnswered: boolean;
@@ -115,4 +114,28 @@ export function playsEntrance(s: {
   splash: SplashState;
 }): boolean {
   return !s.languageAnswered && !s.rerunning && s.splash === "playing";
+}
+
+/**
+ * Decide whether a fresh setup that mounts after the splash left fades in on
+ * the entrance frame. This is the first run after a password sign-in: the
+ * splash played and faded on `/login`, and the soft navigation to the app
+ * mounts the setup with no splash above it. The setup then shows the
+ * splash's last frame with a short fade, not the glance and slide-down.
+ *
+ * Args:
+ *   languageAnswered: Whether the draft already answers the language.
+ *   rerunning: Whether Settings reruns the setup.
+ *   splash: The splash state when the setup mounts.
+ *
+ * Returns:
+ *   True only for a fresh setup that Settings does not rerun, once the
+ *   splash is no longer playing.
+ */
+export function fadesInEntrance(s: {
+  languageAnswered: boolean;
+  rerunning: boolean;
+  splash: SplashState;
+}): boolean {
+  return !s.languageAnswered && !s.rerunning && s.splash !== "playing";
 }

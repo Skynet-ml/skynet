@@ -34,7 +34,7 @@ _SCORER = (
     '    bonus = 0.5 if "skynet" in text.lower() else 0.0\n'
     "    return bonus + max(0.0, 0.5 - len(text) / 400.0)\n"
 )
-_SEED_PROMPT = "Write a one-line tagline for Skynet, a prompt-optimization platform."
+_SEED_PROMPT = "Write a one-line tagline for Skynet, a code-optimization platform."
 
 _DRY_RUN = "blackbox_scorer_dry_run_blackbox_scorer_dry_run_post"
 _SUBMIT_BB = "submit_blackbox_run_blackbox_run_post"

@@ -11,7 +11,7 @@ done
 repo_root="$(cd "$(dirname "$0")/../../../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/build" "$tmp/preview/infra/terraform/scripts"
+mkdir -p "$tmp/bin" "$tmp/build"
 real_rm="$(command -v rm)"
 real_find="$(command -v find)"
 real_mv="$(command -v mv)"
@@ -19,11 +19,6 @@ real_ps="$(command -v ps)"
 real_sed="$(command -v sed)"
 real_stat="$(command -v stat)"
 cp "$repo_root/infra/terraform/scripts/"{build-push.sh,lib.sh,image-key.sh} "$tmp/build/"
-cp "$repo_root/infra/terraform/scripts/"{preview.sh,lib.sh,image-key.sh} "$tmp/preview/infra/terraform/scripts/"
-ln -s "$repo_root/backend" "$tmp/preview/backend"
-ln -s "$repo_root/frontend" "$tmp/preview/frontend"
-mkdir -p "$tmp/preview/deploy"
-ln -s "$repo_root/deploy/litellm" "$tmp/preview/deploy/litellm"
 
 cat >"$tmp/bin/aws" <<'SH'
 #!/usr/bin/env bash
@@ -500,86 +495,5 @@ assert_no_match 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG" ||
   fail "post-push credential refresh failure still wrote a key tag"
 unset TEST_EXISTING_NON_BACKEND TEST_FAIL_CURL_AFTER_BACKEND
 unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_DEPLOY_ROLE_ARN
-
-rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
-CURRENT_LOG="$tmp/preview-backend.log"
-: >"$CURRENT_LOG"
-# The source path points at a test copy in the temporary fixture.
-# shellcheck disable=SC1091
-source "$tmp/preview/infra/terraform/scripts/preview.sh" build 123 "$TEST_SHA"
-pr=123
-sha="$TEST_SHA"
-export ACTIONS_ID_TOKEN_REQUEST_URL=https://token.invalid/request
-export ACTIONS_ID_TOKEN_REQUEST_TOKEN=test-request-token
-export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
-export TEST_FAIL_BUILD=preview-backend
-cfg='{"domain":"staging.skynetml.com"}'
-if run_preview_lane preview-backend backend_and_migrate \
-  123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-backend:"$sha-pr-$pr" "$cfg" \
-  >"$CURRENT_LOG" 2>&1; then
-  fail "failed preview backend build returned success"
-fi
-grep -Eq '^refresh$' "$TEST_EVENT_LOG" || fail "preview build did not use the successful credential stub"
-assert_no_match 'ecs ' "$TEST_AWS_LOG" ||
-  fail "preview migration ran after its backend build failed"
-
-slot_of() { printf 'slot-1\n'; }
-preview_env() { printf '{}\n'; }
-account() { printf '123456789012\n'; }
-register() { echo "register stub failed" >&2; return 17; }
-export BACKEND_IMAGE=123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/backend:staging
-rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
-CURRENT_LOG="$tmp/preview-register.log"
-: >"$CURRENT_LOG"
-if run_preview_lane preview-backend backend_and_migrate "$BACKEND_IMAGE" "$cfg" \
-  >"$CURRENT_LOG" 2>&1; then
-  fail "preview backend lane accepted a failed register step"
-fi
-assert_no_match 'migration ok' "$CURRENT_LOG" ||
-  fail "preview lane reported migration ok after register failed"
-assert_no_match 'ecs (run-task|update-service|create-service)' "$TEST_AWS_LOG" ||
-  fail "preview lane rolled services after register failed"
-unset BACKEND_IMAGE
-
-unset TEST_FAIL_BUILD
-export TEST_FAIL_BUILD=preview-frontend
-rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
-CURRENT_LOG="$tmp/preview-frontend.log"
-: >"$CURRENT_LOG"
-if run_preview_lane preview-frontend build_frontend \
-  123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-frontend "$sha-pr-$pr" staging.skynetml.com \
-  >"$CURRENT_LOG" 2>&1; then
-  fail "failed preview frontend build returned success"
-fi
-
-preview_lookup_step="$tmp/preview-backend-lookup.sh"
-awk '
-  $0 == "      - name: Find a reusable backend image" { in_step=1; next }
-  in_step && /^      - / { exit }
-  in_step && /^        run: \|$/ { in_run=1; next }
-  in_run && /^          / { print substr($0, 11); next }
-  in_run { exit }
-' "$TEST_REPO_ROOT/.github/workflows/preview.yml" >"$preview_lookup_step"
-[[ -s "$preview_lookup_step" ]] || fail "preview backend lookup workflow step was not found"
-cat >"$tmp/preview/infra/terraform/scripts/preview.sh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' 'simulated backend image lookup failure' >&2
-exit 17
-SH
-chmod +x "$tmp/preview/infra/terraform/scripts/preview.sh"
-preview_lookup_output="$tmp/preview-backend-image.txt"
-: >"$preview_lookup_output"
-CURRENT_LOG="$tmp/preview-backend-lookup.log"
-if ! (
-  cd "$tmp/preview"
-  export PR=123 SHA="$TEST_SHA" GITHUB_OUTPUT="$preview_lookup_output"
-  bash -e -o pipefail "$preview_lookup_step"
-) >"$CURRENT_LOG" 2>&1; then
-  fail "backend image lookup error failed the preview step"
-fi
-grep -Fxq 'image=' "$preview_lookup_output" ||
-  fail "backend image lookup error did not select a full backend build"
-grep -Fq '::warning::backend image lookup failed; building a new backend image' "$CURRENT_LOG" ||
-  fail "backend image lookup error did not emit a warning"
 
 printf '%s\n' 'lane failure stub tests passed'

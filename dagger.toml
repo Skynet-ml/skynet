@@ -1,0 +1,12 @@
+[modules.python-sdk]
+source = "dagger.io/sdk/python"
+
+[sdks.python]
+module = "python-sdk"
+
+[modules.skynet-ci]
+source = ".dagger/modules/skynet-ci"
+
+[sdks.python.scopes.".dagger/modules/skynet-ci"]
+is-module = true
+name = "skynet-ci"

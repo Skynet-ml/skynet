@@ -1,7 +1,7 @@
 "use client";
 
 import type { ModelConfig } from "@/shared/types/api";
-import type { ArtifactKind, OptimizerChoice } from "@/shared/types/unified-run";
+import type { OptimizerChoice } from "@/shared/types/unified-run";
 import { NumberInput } from "@/shared/ui/number-input";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
@@ -16,13 +16,13 @@ import { v2Msg } from "./ArtifactConfirmCard";
  * iteration cap where the engine honours one, the score that ends the run
  * early, and the spending limit with the least it can be.
  */
-export function BudgetSection({ kind, choice }: { kind: ArtifactKind; choice: OptimizerChoice }) {
+export function BudgetSection({ choice }: { choice: OptimizerChoice }) {
   const ctx = useWizardV2();
   const { state, patchOptimizer, guided } = ctx;
   const t = (key: string, params?: Record<string, string>) => v2Msg(key, guided, params);
   const { budget, taskModel, reflectionModel, extraReflectionModels } = state.optimizer;
-  const minRuns = minScorerRuns(choice, kind);
-  const iterationLimit = supportsIterationLimit(choice, kind);
+  const minRuns = minScorerRuns(choice);
+  const iterationLimit = supportsIterationLimit(choice);
   const patchBudget = (patch: Partial<typeof budget>) =>
     patchOptimizer({ budget: { ...budget, ...patch } });
   const models = [taskModel, reflectionModel, ...extraReflectionModels].filter(

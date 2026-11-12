@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
+import os
 import subprocess
 import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from core.sandbox.providers import vercel
+
 from .. import runner
+from ..repo_constraints import McpServer, RoleEnvironment
+from ..repo_services import box_mcp_config
 from ..runner import (
     GatewayClient,
     Image,
@@ -557,6 +569,42 @@ def test_main_runs_the_file_contract_end_to_end(tmp_path: Path, interpreter: str
     assert not (call_dir / (runner.OUTPUT_FILE + ".part")).exists()
 
 
+def test_an_isolated_runner_imports_user_site_packages_without_their_pth_files(tmp_path: Path) -> None:
+    """Under ``python3 -I`` a metric still imports a user-site dependency, and no ``.pth`` file there runs (E38, E40)."""
+    base = getattr(sys, "_base_executable", sys.executable)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    folder = subprocess.run(
+        [base, "-c", "import site; print(site.getusersitepackages())"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout.strip()
+    user_site = Path(folder)
+    user_site.mkdir(parents=True)
+    (user_site / "userdep.py").write_text("VALUE = 0.5\n", encoding="utf-8")
+    marker = tmp_path / "pth-ran"
+    (user_site / "plant.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('x')\n")
+    call_dir = tmp_path / "calls" / "000001"
+    call_dir.mkdir(parents=True)
+    payload = {"code": "import userdep\ndef score(candidate, case=None):\n    return userdep.VALUE, 'ok'\n"}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps({**payload, "candidate": "x", "case": None}), encoding="utf-8")
+
+    completed = subprocess.run(
+        [base, "-I", "-B", runner.__file__, str(call_dir)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=tmp_path,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))["score"] == 0.5
+    assert not marker.exists()
+
+
 def test_main_wants_exactly_one_argument(capsys: pytest.CaptureFixture[str]) -> None:
     """Anything but a single call directory is a usage error."""
     assert runner.main([]) == 2
@@ -607,3 +655,886 @@ def test_env_value_prefers_the_new_name_and_falls_back_to_the_legacy_one(monkeyp
     assert runner.env_value("APP_API_KEY") == "old"
     monkeypatch.setenv("APP_API_KEY", "new")
     assert runner.env_value("APP_API_KEY") == "new"
+
+
+def _answer_stage_calls(responses: Path, answers: dict[str, dict[str, Any]], sent: list[dict[str, Any]]) -> Any:
+    """Build a fake stdout that answers each stage frame the way the parent relay does.
+
+    Args:
+        responses: The folder the client polls for answers.
+        answers: The stage name to the answer the parent writes.
+        sent: Collects every frame the client sends.
+
+    Returns:
+        A writable stream to put in place of ``sys.__stdout__``.
+    """
+
+    class Relay(io.StringIO):
+        """Answer each complete frame line at once."""
+
+        def write(self, text: str) -> int:
+            """Record a frame and write its answer.
+
+            Args:
+                text: One frame, on its own line.
+
+            Returns:
+                The number of characters taken.
+            """
+            assert text.startswith("\nPFX:")
+            assert text.endswith("\n")
+            frame = json.loads(text.strip().removeprefix("PFX:"))
+            sent.append(frame)
+            (responses / f"{frame['id']}.json").write_text(json.dumps(answers[frame["stage"]]))
+            return len(text)
+
+    return Relay()
+
+
+def test_stage_call_returns_the_output_and_raises_stage_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``call`` sends one frame, returns the stage output, and turns a stage failure into ``StageError``."""
+    sent: list[dict[str, Any]] = []
+    answers = {"good": {"output": {"doubled": 4}}, "bad": {"error": "Stage 'bad' passed its 5s timeout."}}
+    monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, sent))
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good", "bad"]})
+    assert client("good", {"x": 2}) == {"doubled": 4}
+    assert sent[0]["stage"] == "good"
+    assert sent[0]["input"] == {"x": 2}
+    assert len(sent[0]["id"]) == 32
+    with pytest.raises(runner.StageError, match="timeout"):
+        client("bad", None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stage_client_yields_each_streamed_part_and_removes_its_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer with ``"more": true`` is followed by ``<id>.1.json`` and on, until a part has ``"more": false``."""
+
+    class Relay(io.StringIO):
+        """Write the answer and both parts for each frame."""
+
+        def write(self, text: str) -> int:
+            """Write the streamed answer files for one frame.
+
+            Args:
+                text: One frame, on its own line.
+
+            Returns:
+                The number of characters taken.
+            """
+            identity = json.loads(text.strip().removeprefix("PFX:"))["id"]
+            (tmp_path / f"{identity}.json").write_text(json.dumps({"status": 200, "more": True}))
+            (tmp_path / f"{identity}.1.json").write_text(json.dumps({"body": "YQ==", "more": True}))
+            (tmp_path / f"{identity}.2.json").write_text(json.dumps({"more": False}))
+            return len(text)
+
+    monkeypatch.setattr(sys, "__stdout__", Relay())
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": []})
+    assert list(client.answers({"mcp": "search"})) == [
+        {"status": 200, "more": True},
+        {"body": "YQ==", "more": True},
+        {"more": False},
+    ]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stage_client_tells_the_parent_to_stop_a_stream_it_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the answers before the end part sends a stop frame with the stream's id; a whole answer sends none."""
+    frames: list[dict[str, Any]] = []
+
+    class Relay(io.StringIO):
+        """Record each frame, and answer a request frame with a stream that has not ended."""
+
+        def write(self, text: str) -> int:
+            """Record one frame and write its first answer files.
+
+            Args:
+                text: One frame, on its own line.
+
+            Returns:
+                The number of characters taken.
+            """
+            frame = json.loads(text.strip().removeprefix("PFX:"))
+            frames.append(frame)
+            if "stop" not in frame:
+                more = frame["mcp"] == "events"
+                (tmp_path / f"{frame['id']}.json").write_text(json.dumps({"status": 200, "more": more}))
+                (tmp_path / f"{frame['id']}.1.json").write_text(json.dumps({"body": "YQ==", "more": True}))
+            return len(text)
+
+    monkeypatch.setattr(sys, "__stdout__", Relay())
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": []})
+    answers = client.answers({"mcp": "events"})
+    assert next(answers)["more"] is True
+    assert next(answers) == {"body": "YQ==", "more": True}
+    answers.close()
+    whole = client.answers({"mcp": "search"})
+    assert next(whole) == {"status": 200, "more": False}
+    whole.close()
+    request, stop, plain = frames
+    assert stop["stop"] == request["id"]
+    assert len(stop["id"]) == 32
+    assert stop["id"] != request["id"]
+    assert "stop" not in plain
+
+
+def test_stage_call_with_an_unknown_name_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown stage name fails at once with the run's stage names, and no frame leaves the box."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, {}, sent))
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good"]})
+    with pytest.raises(runner.StageError, match=r"Unknown stage 'nope'.*good"):
+        client("nope", 1)
+    assert sent == []
+
+
+def test_stage_call_raises_the_budget_control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A budget stop on the parent reaches the scorer as the gateway's control signal."""
+    answers = {"good": {"control": {"code": "budget_reached", "message": "spent"}}}
+    monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, []))
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good"]})
+    with pytest.raises(runner.GatewayControl):
+        client("good", 1)
+
+
+def test_a_run_without_stages_has_a_call_that_explains_itself() -> None:
+    """Scorer code that imports ``call`` still loads; calling it says the run has no stages."""
+    fn = load_scorer_from_code(
+        "from skynet import call, StageError\n"
+        "def score(c, case=None):\n"
+        "    try:\n"
+        "        call('x', 1)\n"
+        "    except StageError as error:\n"
+        "        return 0.0, str(error)\n",
+        helpers={runner.STAGE_HELPER_NAME: runner.missing_stage, runner.STAGE_ERROR_NAME: runner.StageError},
+    )
+    assert "no target stages" in fn("c")[1]
+
+
+@pytest.mark.parametrize(
+    ("source", "answer"),
+    [
+        ("def run(value):\n    return {'twice': value * 2}\n", {"output": {"twice": 6}}),
+        ("def run(value):\n    raise ValueError('bad input')\n", {"error": "ValueError: bad input"}),
+    ],
+)
+def test_stage_mode_runs_the_entry_function(tmp_path: Path, source: str, answer: dict[str, Any]) -> None:
+    """``--stage`` loads ``path:function`` from the tree and writes its output or its error."""
+    tree = tmp_path / "tree"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "stage.py").write_text(source)
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    (call_dir / runner.INPUT_FILE).write_text("3")
+    completed = subprocess.run(
+        [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "pkg/stage.py:run"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == answer
+
+
+def _stage_call(tmp_path: Path, port: int, call: str = "one", mcp: tuple[str, ...] = ("search",)) -> tuple[Path, Path]:
+    """Lay out a stage tree and one call folder whose relay config names its MCP servers.
+
+    Args:
+        tmp_path: The test's folder, which stands for the stage box.
+        port: The relay port the config asks for.
+        call: The call's folder name.
+        mcp: The MCP servers the config names.
+
+    Returns:
+        The stage tree and the call folder.
+    """
+    tree = tmp_path / "tree"
+    tree.mkdir(exist_ok=True)
+    call_dir = tmp_path / "calls" / call
+    call_dir.mkdir(parents=True)
+    (call_dir / runner.INPUT_FILE).write_text("3")
+    config = {
+        "prefix": "APP_STAGE_test:",
+        "response_dir": "../relay",
+        "names": [],
+        "services": [],
+        "mcp": list(mcp),
+        "mcp_file": ".mcp.json",
+        "port": port,
+    }
+    (call_dir / runner.STAGE_RELAY_FILE).write_text(json.dumps(config))
+    return tree, call_dir
+
+
+def test_stage_mode_serves_the_stage_relay_and_names_the_calls_own_mcp_file(tmp_path: Path) -> None:
+    """``--stage`` with a relay config gives the entry its MCP variables and the call's own MCP file (SKY-624)."""
+    tree, call_dir = _stage_call(tmp_path, 0)
+    (tree / "stage.py").write_text(
+        "import os\n"
+        "def run(value):\n"
+        "    return {key: os.environ[key] for key in ('SKYNET_MCP_SEARCH_URL', 'SKYNET_MCP_CONFIG')}\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    env = json.loads((call_dir / runner.OUTPUT_FILE).read_text())["output"]
+    url = urllib.parse.urlsplit(env["SKYNET_MCP_SEARCH_URL"])
+    assert url.hostname == "127.0.0.1"
+    assert url.port
+    assert url.path == "/mcp/search"
+    assert env["SKYNET_MCP_CONFIG"] == str((call_dir / "mcp.json").resolve())
+    assert json.loads((call_dir / "mcp.json").read_text()) == {
+        "mcpServers": {"search": {"type": "http", "url": env["SKYNET_MCP_SEARCH_URL"]}}
+    }
+
+
+def test_two_parallel_stage_calls_in_one_box_each_get_their_own_port_and_mcp_file(tmp_path: Path) -> None:
+    """Two calls that run at the same time in one stage box serve their relays on two ports (SKY-624)."""
+    entry = (
+        "import json, os, time\n"
+        "def run(value):\n"
+        "    time.sleep(1.0)\n"
+        "    path = os.environ['SKYNET_MCP_CONFIG']\n"
+        "    return {'url': os.environ['SKYNET_MCP_SEARCH_URL'], 'file': path, 'config': json.load(open(path))}\n"
+    )
+    calls = [_stage_call(tmp_path, 0, call) for call in ("one", "two")]
+    tree = calls[0][0]
+    (tree / "stage.py").write_text(entry)
+    processes = [
+        subprocess.Popen(
+            [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
+            cwd=tree,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+        )
+        for _, call_dir in calls
+    ]
+    for process in processes:
+        _, stderr = process.communicate(timeout=30)
+        assert process.returncode == 0, stderr
+    outputs = [json.loads((call_dir / runner.OUTPUT_FILE).read_text())["output"] for _, call_dir in calls]
+
+    ports = {urllib.parse.urlsplit(output["url"]).port for output in outputs}
+    assert len(ports) == 2
+    for (_, call_dir), output in zip(calls, outputs, strict=True):
+        assert output["file"] == str((call_dir / "mcp.json").resolve())
+        assert output["config"] == {"mcpServers": {"search": {"type": "http", "url": output["url"]}}}
+
+
+def test_a_calls_own_mcp_file_keeps_servers_whose_variable_names_collide(tmp_path: Path) -> None:
+    """Servers "a-b" and "a_b" share one variable name, so the call's MCP file must name each one's own URL."""
+    tree, call_dir = _stage_call(tmp_path, 0, mcp=("a-b", "a_b"))
+    (tree / "stage.py").write_text("def run(value):\n    return value\n")
+    completed = subprocess.run(
+        [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    servers = json.loads((call_dir / "mcp.json").read_text())["mcpServers"]
+    assert {name: urllib.parse.urlsplit(entry["url"]).path for name, entry in servers.items()} == {
+        "a-b": "/mcp/a-b",
+        "a_b": "/mcp/a_b",
+    }
+
+
+def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exit_code(tmp_path: Path) -> None:
+    """``--stage-command`` runs the command on ``input.json`` into ``output.json``, with the relay's variables."""
+    tree, call_dir = _stage_call(tmp_path, 0)
+    script = (
+        "import json, os, sys\n"
+        "print(json.dumps({'input': json.load(sys.stdin), 'url': os.environ['SKYNET_MCP_SEARCH_URL']}))\n"
+        "sys.exit(3)\n"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(runner.__file__)),
+            runner.STAGE_COMMAND_FLAG,
+            str(call_dir),
+            sys.executable,
+            "-c",
+            script,
+        ],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 3, completed.stderr
+    written = json.loads((call_dir / runner.OUTPUT_FILE).read_text())
+    assert written["input"] == 3
+    assert written["url"].startswith("http://127.0.0.1:")
+    assert written["url"].endswith("/mcp/search")
+
+
+def test_stage_command_mode_without_a_relay_config_sets_no_relay_variable(tmp_path: Path) -> None:
+    """A call with no relay config runs the command with the box's own environment only."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    (call_dir / runner.INPUT_FILE).write_text("{}")
+    script = "import json, os\nprint(json.dumps(sorted(k for k in os.environ if k.startswith('SKYNET_MCP'))))\n"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(runner.__file__)),
+            runner.STAGE_COMMAND_FLAG,
+            str(call_dir),
+            sys.executable,
+            "-c",
+            script,
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={key: value for key, value in os.environ.items() if not key.startswith("SKYNET_MCP")},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == []
+
+
+def test_service_proxy_relays_each_request_through_the_parent() -> None:
+    """A request to the loopback url becomes one relay message, and the parent's answer comes back unchanged."""
+
+    class Client:
+        """Answer each message the way the parent relay does."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                A service response, or a refusal for the second service.
+            """
+            self.sent.append(message)
+            if message["service"] == "blocked one":
+                yield {"status": 403, "error": "Service 'blocked one' is not listed for the [run] role."}
+                return
+            yield {"status": 201, "headers": [["X-Upstream", "yes"]], "body": base64.b64encode(b"graded").decode()}
+
+    client = Client()
+    urls = runner.start_service_proxy(client, ["judge-api", "blocked one"])  # type: ignore[arg-type]
+    assert set(urls) == {"SKYNET_SERVICE_JUDGE_API_URL", "SKYNET_SERVICE_BLOCKED_ONE_URL"}
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(urls["SKYNET_SERVICE_JUDGE_API_URL"] + "v1/grade?x=1", data=b"hi", method="POST")
+    with opener.open(request) as response:
+        assert response.status == 201
+        assert response.headers["X-Upstream"] == "yes"
+        assert response.read() == b"graded"
+    [message] = client.sent
+    assert message["service"] == "judge-api"
+    assert message["path"] == "v1/grade?x=1"
+    assert message["method"] == "POST"
+    assert base64.b64decode(message["body"]) == b"hi"
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        opener.open(urls["SKYNET_SERVICE_BLOCKED_ONE_URL"] + "x")
+    assert refused.value.code == 403
+    assert b"not listed for the [run] role" in refused.value.read()
+
+
+def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> None:
+    """A chunked request body reaches the parent decoded, and the service's Date and Server come back once."""
+
+    class Client:
+        """Answer each message with the service's own Date and Server."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                A service response with its own Date and Server headers.
+            """
+            self.sent.append(message)
+            headers = [["Date", "Mon, 02 Nov 2026 10:00:00 GMT"], ["Server", "judge"]]
+            yield {"status": 200, "headers": headers, "body": base64.b64encode(b"ok").decode()}
+
+    client = Client()
+    url = urllib.parse.urlsplit(runner.start_service_proxy(client, ["judge"])["SKYNET_SERVICE_JUDGE_URL"])  # type: ignore[arg-type]
+    connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+    connection.putrequest("POST", url.path + "v1/grade")
+    connection.putheader("Transfer-Encoding", "chunked")
+    connection.endheaders()
+    for chunk in (b"hello ", b"chunked world"):
+        connection.send(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+    connection.send(b"0\r\nX-Trailer: 1\r\n\r\n")
+    response = connection.getresponse()
+    assert response.status == 200
+    assert response.read() == b"ok"
+    assert response.headers.get_all("Date") == ["Mon, 02 Nov 2026 10:00:00 GMT"]
+    assert response.headers.get_all("Server") == ["judge"]
+    connection.close()
+    [message] = client.sent
+    assert base64.b64decode(message["body"]) == b"hello chunked world"
+
+
+def test_mcp_proxy_passes_an_event_stream_on_part_by_part() -> None:
+    """A streamed MCP answer reaches the box as one body with no length, each part in order, and then the close."""
+
+    class Client:
+        """Answer with an event stream in two parts."""
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Yield the head and each part the way the parent relay writes them.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                The streamed answer, then its parts.
+            """
+            headers = [["Content-Type", "text/event-stream"]]
+            yield {"status": 200, "headers": headers, "body": base64.b64encode(b"data: one\n\n").decode(), "more": True}
+            yield {"body": base64.b64encode(b"data: two\n\n").decode(), "more": True}
+            yield {"more": False}
+
+    url = runner.start_service_proxy(Client(), [], ["search"])["SKYNET_MCP_SEARCH_URL"]  # type: ignore[arg-type]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(url) as response:
+        assert response.status == 200
+        assert response.headers["Content-Type"] == "text/event-stream"
+        assert response.headers["Content-Length"] is None
+        assert response.read() == b"data: one\n\ndata: two\n\n"
+
+
+def test_mcp_proxy_closes_the_answers_when_the_client_leaves() -> None:
+    """A client that leaves an endless event stream makes the proxy close its answers, so the parent stops the stream."""
+    closed = threading.Event()
+
+    class Client:
+        """Answer with an event stream that never ends."""
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Yield the head, then parts until the proxy closes the generator.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                The streamed answer, then its parts.
+            """
+            part = base64.b64encode(b"data: " + b"x" * 65536 + b"\n\n").decode()
+            try:
+                yield {"status": 200, "headers": [["Content-Type", "text/event-stream"]], "body": "", "more": True}
+                while True:
+                    time.sleep(0.01)
+                    yield {"body": part, "more": True}
+            except GeneratorExit:
+                closed.set()
+                raise
+
+    url = urllib.parse.urlsplit(runner.start_service_proxy(Client(), [], ["search"])["SKYNET_MCP_SEARCH_URL"])  # type: ignore[arg-type]
+    connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+    connection.request("GET", url.path)
+    response = connection.getresponse()
+    assert response.status == 200
+    response.read(10)
+    response.close()
+    connection.close()
+    assert closed.wait(10)
+
+
+def test_mcp_proxy_relays_each_server_and_names_the_role_mcp_file() -> None:
+    """``/mcp/<name>`` becomes one ``mcp`` message, and the box's MCP variable names the role's own file (E49, E55)."""
+
+    class Client:
+        """Answer each message the way the parent relay does."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                An MCP server response.
+            """
+            self.sent.append(message)
+            yield {
+                "status": 200,
+                "headers": [["Content-Type", "application/json"]],
+                "body": base64.b64encode(b"{}").decode(),
+            }
+
+    client = Client()
+    env = runner.start_service_proxy(client, [], ["search tool"], mcp_file=".mcp.json")  # type: ignore[arg-type]
+    assert set(env) == {"SKYNET_MCP_SEARCH_TOOL_URL", runner.MCP_CONFIG_ENV}
+    url = env["SKYNET_MCP_SEARCH_TOOL_URL"]
+    assert url.startswith("http://127.0.0.1:")
+    assert url.endswith("/mcp/search%20tool")
+    assert env[runner.MCP_CONFIG_ENV] == str(Path(".mcp.json").resolve())
+    role = RoleEnvironment(mcp=".mcp.json", mcp_servers=(McpServer(name="search tool", url="https://x.test/mcp"),))
+    assert box_mcp_config(role, url.split("/mcp/")[0]) == {"mcpServers": {"search tool": {"type": "http", "url": url}}}
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(urllib.request.Request(url, data=b'{"jsonrpc":"2.0"}', method="POST")) as response:
+        assert response.status == 200
+        assert response.read() == b"{}"
+    [message] = client.sent
+    assert message["mcp"] == "search tool"
+    assert "service" not in message
+    assert message["path"] == ""
+    assert base64.b64decode(message["body"]) == b'{"jsonrpc":"2.0"}'
+
+    base = url.split("/mcp/")[0]
+    with pytest.raises(urllib.error.HTTPError) as unknown:
+        opener.open(base + "/other/search%20tool")
+    assert unknown.value.code == 404
+    assert len(client.sent) == 1
+
+
+def test_relay_env_starts_no_proxy_when_the_role_reaches_nothing() -> None:
+    """A role with no service and no MCP server gets no loopback variables."""
+    assert runner._relay_env(object(), {"services": [], "mcp": []}) == {}  # type: ignore[arg-type]
+    assert runner._relay_env(object(), {}) == {}  # type: ignore[arg-type]
+
+
+_CANDIDATE_CODE = """
+import json
+import subprocess
+import sys
+import time
+
+
+def echo(value):
+    return {"got": value}
+
+
+def leaves_a_sleeper(value):
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"], start_new_session=True)
+    return value
+
+
+def boom(value):
+    raise ValueError("boom")
+
+
+def not_json(value):
+    return object()
+
+
+def slow(value):
+    time.sleep(30)
+
+
+def fakes_its_time(value):
+    # Patch every clock in this process and report a fake time; neither reaches the supervisor.
+    time.sleep(value)
+    for name in ("monotonic", "perf_counter", "time", "process_time"):
+        setattr(time, name, lambda: 0.0)
+    return {"elapsed_s": 0.0}
+"""
+
+
+def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
+    """Run the ``[run]`` supervisor once in a fresh folder, as the candidate box does.
+
+    Args:
+        tmp_path: Scratch folder; the candidate's code lives in ``cand.py`` there.
+        entry: The ``[run]`` entry.
+        value: The case input.
+        timeout: The run timeout.
+
+    Returns:
+        The supervisor's output document.
+    """
+    (tmp_path / "cand.py").write_text(_CANDIDATE_CODE, encoding="utf-8")
+    call_dir = tmp_path / "call"
+    call_dir.mkdir(exist_ok=True)
+    payload = {"entry": entry, "input": value, "timeout": timeout, "stages": None}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
+    stdout = subprocess.run(
+        [sys.executable, runner.__file__, runner.CANDIDATE_FLAG, str(call_dir)],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        text=True,
+        check=True,
+        timeout=timeout + 60,
+    ).stdout
+    [frame] = [line for line in stdout.splitlines() if line.startswith(runner.RESULT_PREFIX)]
+    assert not (call_dir / runner.OUTPUT_FILE).exists()
+    return json.loads(frame[len(runner.RESULT_PREFIX) :])
+
+
+def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Path) -> None:
+    """A ``path.py:function`` entry gets the case input; its JSON return value is the output."""
+    ran = _candidate(tmp_path, "cand.py:echo", {"a": 1})
+    assert ran.pop(runner.ELAPSED_PARAM) >= 0
+    assert ran == {"output": {"got": {"a": 1}}, "error": None}
+
+
+def test_a_command_entry_reads_stdin_and_a_nonzero_exit_is_an_output(tmp_path: Path) -> None:
+    """A command gets the input as JSON on stdin; its exit code and stdout are the output, not a failure."""
+    ran = _candidate(tmp_path, ["sh", "-c", "cat; echo; exit 3"], {"a": 1})
+    assert ran.pop(runner.ELAPSED_PARAM) >= 0
+    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None}
+
+
+def test_a_command_stdout_is_capped(tmp_path: Path) -> None:
+    """Keep at most 1 MB of a command's stdout."""
+    ran = _candidate(tmp_path, [sys.executable, "-c", "print('x' * 3_000_000)"])
+    assert len(ran["output"]["stdout"].encode()) <= runner.MAX_RUN_STDOUT_BYTES
+
+
+@pytest.mark.parametrize(
+    ("entry", "error"),
+    [
+        ("cand.py:boom", "boom"),
+        ("cand.py:not_json", "JSON"),
+        ("cand.py:slow", "timeout after 1 s"),
+        (["sh", "-c", "sleep 30"], "timeout after 1 s"),
+        (["no-such-command-e38"], "could not start"),
+        (["sh", "-c", "kill -9 $$"], "SIGKILL"),
+    ],
+)
+def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> None:
+    """A raise, a non-JSON return, a timeout, a command that cannot start and a signal kill are failures."""
+    # Only the timeout cases get the short limit; a loaded test host can
+    # take over a second just to start Python.
+    ran = _candidate(tmp_path, entry, timeout=1 if "timeout" in error else 30)
+    assert ran["output"] is None
+    assert error in ran["error"]
+
+
+def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path: Path) -> None:
+    """A process in its own session neither holds the result nor counts in the run time (SKY-398).
+
+    Closing the candidate box ends that process; the supervisor only kills
+    the entry's own process group.
+    """
+    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
+    assert ran.pop(runner.ELAPSED_PARAM) < 5
+    assert ran == {"output": 7, "error": None}
+
+
+def test_a_stage_client_names_its_role_in_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each frame carries the box's role, so the parent can refuse a frame from the other box (SKY-398)."""
+    stream = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", stream)
+    client = runner.StageClient({"prefix": "@@", "response_dir": "r", "names": [], "role": "run"})
+    client._send({"kind": "stop", "role": "metric"})
+    [frame] = [line for line in stream.getvalue().splitlines() if line]
+    assert json.loads(frame.removeprefix("@@"))["role"] == "run"
+
+
+def test_accepts_output_counts_the_third_argument() -> None:
+    """Pass the output to ``score(repo_path, case, output)``, and to ``*args`` only after a run."""
+    assert runner.accepts_output(lambda repo, case, output: 0, ran=False)
+    assert not runner.accepts_output(lambda repo, case=None: 0, ran=True)
+    assert runner.accepts_output(lambda *args: 0, ran=True)
+    assert not runner.accepts_output(lambda *args: 0, ran=False)
+
+
+def test_the_supervisor_times_the_entry_whatever_clock_the_candidate_patches(tmp_path: Path) -> None:
+    """The run time comes from the supervisor's process; a patched clock or a faked output cannot lower it (SKY-642)."""
+    ran = _candidate(tmp_path, "cand.py:fakes_its_time", 0.4)
+    assert ran["error"] is None
+    assert ran["output"] == {"elapsed_s": 0.0}
+    assert ran[runner.ELAPSED_PARAM] >= 0.4
+
+
+def test_the_supervisor_times_a_command_entry(tmp_path: Path) -> None:
+    """A command entry gets the same time from the supervisor (SKY-642)."""
+    ran = _candidate(tmp_path, ["sh", "-c", "sleep 0.4"])
+    assert ran["error"] is None
+    assert 0.4 <= ran[runner.ELAPSED_PARAM] < 30
+
+
+def test_a_timed_out_entry_still_reports_its_time(tmp_path: Path) -> None:
+    """A timeout is a failure; its time is about the timeout (SKY-642)."""
+    ran = _candidate(tmp_path, ["sh", "-c", "sleep 30"], timeout=1)
+    assert "timeout" in ran["error"]
+    assert 1 <= ran[runner.ELAPSED_PARAM] < 30
+
+
+def test_accepts_elapsed_needs_the_name_after_the_output() -> None:
+    """Pass ``elapsed_s`` only to a metric that names it after ``output``, never to ``*args`` or ``**kwargs`` (SKY-642)."""
+    assert runner.accepts_elapsed(lambda repo, case, output=None, elapsed_s=None: 0)
+    assert runner.accepts_elapsed(lambda repo, case, output=None, *, elapsed_s=None: 0)
+    assert not runner.accepts_elapsed(lambda repo, case, output=None: 0)
+    assert not runner.accepts_elapsed(lambda repo, case, elapsed_s=None: 0)
+    assert not runner.accepts_elapsed(lambda *args: 0)
+    assert not runner.accepts_elapsed(lambda repo, case, output=None, **kwargs: 0)
+
+
+def _metric_call(tmp_path: Path, code: str, document: dict[str, Any]) -> dict[str, Any]:
+    """Run one metric call in a fresh folder, as the scorer box does.
+
+    Args:
+        tmp_path: Scratch folder.
+        code: The metric's source.
+        document: The rest of ``input.json``.
+
+    Returns:
+        The runner's output document.
+    """
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    payload = {"code": code, "candidate": str(tmp_path), "case": None, "gateway": None, **document}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
+    subprocess.run([sys.executable, runner.__file__, str(call_dir)], cwd=tmp_path, check=True, timeout=60)
+    return json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("def score(repo_path, case, output=None, elapsed_s=None):\n    return elapsed_s, 'f'\n", 0.75),
+        ("def score(repo_path, case, output=None, *, elapsed_s=None):\n    return elapsed_s, 'f'\n", 0.75),
+        ("def score(repo_path, case, output):\n    return output['n'], 'f'\n", 0.5),
+        ("def score(repo_path, case=None):\n    return 0.25, 'f'\n", 0.25),
+        ("def score(*args):\n    return len(args) / 10, 'f'\n", 0.3),
+    ],
+)
+def test_the_metric_gets_the_run_time_only_when_it_asks(tmp_path: Path, code: str, expected: float) -> None:
+    """A metric that names ``elapsed_s`` gets the time; older 1-, 2- and 3-argument metrics get the same call (SKY-642)."""
+    result = _metric_call(tmp_path, code, {"output": {"n": 0.5}, runner.ELAPSED_PARAM: 0.75})
+    assert result["error"] is None
+    assert result["score"] == pytest.approx(expected)
+
+
+def test_a_metric_without_a_run_gets_no_time(tmp_path: Path) -> None:
+    """With no ``[run]`` entry, ``elapsed_s`` keeps its default (SKY-642)."""
+    code = "def score(repo_path, case, output=None, elapsed_s=None):\n    return (1.0 if elapsed_s is None else 0.0), 'f'\n"
+    assert _metric_call(tmp_path, code, {})["score"] == 1.0
+
+
+def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path) -> None:
+    """With an output in the input, the metric may start no process, even when it catches the refusal (E40)."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    code = (
+        "import subprocess\n"
+        "def score(repo_path, case, output):\n"
+        "    try:\n"
+        "        subprocess.run(['true'])\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    return 1.0\n"
+    )
+    document = {"code": code, "candidate": str(tmp_path), "case": None, "gateway": None, "output": {"x": 1}}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(document), encoding="utf-8")
+    subprocess.run([sys.executable, runner.__file__, str(call_dir)], cwd=tmp_path, check=True, timeout=60)
+    result = json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+    assert result["score"] is None
+    assert result["error"] == runner.RERUN_REFUSED
+
+
+def test_the_metric_gets_the_output_as_its_third_argument(tmp_path: Path) -> None:
+    """``score(repo_path, case, output)`` receives the run's output and the full case."""
+    call_dir = tmp_path / "call"
+    call_dir.mkdir()
+    code = "def score(repo_path, case, output):\n    return output['n'] / 10, {'feedback': case['expected']}\n"
+    case = {"input": 1, "expected": "e"}
+    document = {"code": code, "candidate": str(tmp_path), "case": case, "gateway": None, "output": {"n": 4}}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps(document), encoding="utf-8")
+    subprocess.run([sys.executable, runner.__file__, str(call_dir)], cwd=tmp_path, check=True, timeout=60)
+    result = json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+    assert result["score"] == pytest.approx(0.4)
+    assert result["side_info"]["feedback"] == "e"
+
+
+def test_the_metric_site_goes_before_the_image_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The metric's installed packages win over the image's, and a missing or repeated folder changes nothing."""
+    site = tmp_path / "site"
+    site.mkdir()
+    monkeypatch.setattr(sys, "path", ["/usr/lib/python313.zip", "/app/.venv/lib/python3.13/site-packages"])
+
+    runner._add_metric_site(str(site))
+    runner._add_metric_site(str(site))
+    runner._add_metric_site(str(tmp_path / "missing"))
+    runner._add_metric_site(None)
+
+    assert sys.path == ["/usr/lib/python313.zip", str(site), "/app/.venv/lib/python3.13/site-packages"]
+
+
+def test_the_wrapper_file_names_match_the_vercel_exec_wrapper() -> None:
+    """The supervisor checks the names that the Vercel exec wrapper writes, so the prefixes stay equal (SKY-398)."""
+    assert runner.WRAPPER_OUTPUT_PREFIX == vercel.OUTPUT_PREFIX
+    assert runner.WRAPPER_EXIT_PREFIX == vercel.EXIT_PREFIX
+
+
+_UNSAFE_OUTPUT = (
+    "import importlib.util,sys;"
+    "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
+    "sys.modules['r']=m;spec.loader.exec_module(m);sys.stderr.write(repr(m.unsafe_output()))"
+)
+
+
+def test_a_pipe_stdout_is_safe_for_the_result_frame() -> None:
+    """The runtime holds the other end of a pipe, so the entry cannot replace it."""
+    done = subprocess.run(
+        [sys.executable, "-c", _UNSAFE_OUTPUT, runner.__file__], capture_output=True, text=True, timeout=60, check=False
+    )
+
+    assert done.stderr == "None"
+
+
+def test_a_file_stdout_that_is_not_the_wrappers_root_file_is_refused(tmp_path: Path) -> None:
+    """A stdout file that the test's user owns, outside the wrapper's names, could carry a forged frame."""
+    with (tmp_path / "out").open("w") as out:
+        done = subprocess.run(
+            [sys.executable, "-c", _UNSAFE_OUTPUT, runner.__file__],
+            stdout=out,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    # repr() quotes the refusal with double quotes when it holds an apostrophe.
+    assert done.stderr.strip("'\"").startswith("The supervisor")
+
+
+_ENTRY_USER = (
+    "import importlib.util,json,sys;"
+    "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
+    "sys.modules['r']=m;spec.loader.exec_module(m);m.os.geteuid=lambda:0;"
+    "m._has_capabilities=lambda:sys.argv[2]=='caps';sys.stderr.write(json.dumps(m._entry_user({})))"
+)
+
+
+@pytest.mark.parametrize(("capabilities", "switched"), [("caps", True), ("none", False)])
+def test_a_root_with_capabilities_drops_the_entry_to_the_tree_owner_also_with_a_pipe(
+    tmp_path: Path, capabilities: str, switched: bool
+) -> None:
+    """Only a root with no capability, as in a local Docker box, keeps the entry as itself (SKY-398)."""
+    done = subprocess.run(
+        [sys.executable, "-c", _ENTRY_USER, runner.__file__, capabilities],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    chosen = json.loads(done.stderr)
+    assert chosen == ({"user": os.getuid(), "group": os.getgid(), "extra_groups": []} if switched else {})

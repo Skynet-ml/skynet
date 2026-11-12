@@ -1,7 +1,6 @@
 # AGENTS.md — Skynet working rules
 
-Skynet optimizes any user-supplied artifact: prompts, programs, agents and
-more. Stack: FastAPI (`backend/`), Next.js (`frontend/`), PostgreSQL.
+Skynet is Optimize Anything: every run optimizes a repository. Stack: FastAPI (`backend/`), Next.js (`frontend/`), PostgreSQL.
 
 Every coding agent (Devin, Claude Code, Codex and others) reads this file
 first. Its rules always apply; nested `AGENTS.md` files only add rules. Read
@@ -9,9 +8,8 @@ the matching file below when the task needs it:
 
 | When you | Read |
 | --- | --- |
-| Open, update, describe, review, record videos for, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
-| Sign in to staging or a PR preview, or run acceptance checks there | `.agents/skills/skynet-test-accounts/SKILL.md` |
-| Work on or debug a PR preview environment | `docs/agents/pr-previews.md` |
+| Open, update, describe, review, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
+| Sign in to staging, or run acceptance checks there | `.agents/skills/skynet-test-accounts/SKILL.md` |
 | Need the stack, layout, local URLs, persistence, auth or i18n facts | `docs/agents/architecture.md` |
 | Install a worktree or run maintenance | `docs/agents/install-and-maintain.md` |
 | Move code between files or add a router or feature slice | `docs/agents/refactoring.md` |
@@ -33,7 +31,18 @@ cd frontend && npm run build                                   # production buil
 
 # i18n: catalog drift.
 just check-i18n
+
+# The same CI checks in Docker, as GitHub Actions runs them (Dagger v1.0.0-beta.25).
+dagger generate -y                          # after a module change; commit sdk/, clients/, uv.lock
+dagger check -l                             # list the checks
+dagger check skynet-ci/backend-gates        # one check; `dagger check 'skynet-ci/*'` runs all
 ```
+
+- PRs to `staging` run no CI (SKY-570). This local gate is the PR check.
+  Run all of it that the change touches before every push, and put the
+  commands and results in the PR body.
+- CI jobs call `dagger check skynet-ci/<name>`. The module is in
+  `.dagger/modules/skynet-ci/`. Add a new CI gate there, not only in `ci.yml`.
 
 - New UI strings go into the source catalogs: `i18n/locales/ui/he.json` (base)
   **and** `en.json`. Then run `python3 scripts/generate_i18n.py`.
@@ -45,8 +54,8 @@ just check-i18n
   requirements files aligned, and pass the stable and preview Docker builds.
 - Lint, typecheck and build are not behavior tests. Say which is which.
 - Local frontend work: do not drive a browser unless the task asks for it.
-  Tell the user what to check at `localhost:3000`. PR acceptance checks and
-  videos still follow the `skynet-pr-workflow` skill.
+  Tell the user what to check at `localhost:3000`. PR acceptance checks
+  still follow the `skynet-pr-workflow` skill.
 
 Local dev servers: backend `:8000` (`cd backend && .venv/bin/python main.py`
 or `just backend`), frontend `:3000` (`cd frontend && npm run dev` or `just
@@ -89,35 +98,68 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   (`.github/workflows/pr-files-scope.yml` checks this).
 - Never bypass branch protection or hooks. Never force-push.
 - The repository is **public**. Never commit secrets, passwords, tokens,
-  emails, account data or videos. Secret names are fine.
+  emails, account data, or screenshots or screen recordings. Secret names
+  are fine.
 
 ## Merge policy (MANDATORY)
 
-- Each PR gets a preview (staging copy, empty database) at
-  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks and videos there.
-- **Fix bugs locally, deploy once.** Each push rebuilds the preview and
-  starts a new review. Test and review the full diff locally, then push once.
-- **Only the orchestrator merges**, in the daily window (03:00
+- Shared staging replaces PR previews (Gilad, 2026-11-11). UI PRs need no
+  Before and After images or videos.
+- **Fix bugs locally, push once.** Each push starts a new review. Test and
+  review the full diff locally, then push once.
+- **Among agents, only the orchestrator merges**, in the daily window (03:00
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
-- Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
-  gates pass. UI PRs (`frontend/`) and other PRs wait for the user's approval.
-  A change in `staging` is approved for production. The orchestrator promotes
+- A PR merges into `staging` when one Opus 5.5 review at medium effort
+  approves its current head commit with 0 findings, and CI passes (Gilad,
+  2026-11-11). This includes CI (`.github/**`), deploy and infra config, and
+  the agent rule files. A PR that Gilad marks "do not merge" stays unmerged.
+  The automatic merge never covers `main` or production.
+- After the merge reaches staging, the orchestrator runs the acceptance
+  checks on `https://staging.skynetml.com` with a test account. A failed
+  check becomes a new bug issue.
+- A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
-  Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
+  Steps, gates and Linear flow: the `skynet-pr-workflow` skill.
+- **CI runs only per batch and on the promotion PR** (`staging` → `main`).
+  A red batch run or a red promotion run blocks the promotion. Put its fix
+  in a new PR.
 
 ## Test accounts and environments (MANDATORY)
 
 - Run acceptance checks on AWS staging (`https://staging.skynetml.com`, API
-  `https://api-staging.skynetml.com`) or the PR's preview. Never test against
-  production. Railway is deleted; never use it.
-- Use only the test account that setup gave you. If it is missing, report
-  the exact setup failure and record the coverage gap. Do not ask Gilad to
-  create one. Never sign up for a normal check. Never borrow a personal
+  `https://api-staging.skynetml.com`). Never test against production.
+  Railway is deleted; never use it.
+- **Test accounts are ephemeral.** Each signed-in check creates its own
+  fresh account and deletes it when the check ends, also after a failure.
+  No check uses a fixed, shared or long-lived account.
+- Create the account with `.agents/skills/skynet-test-accounts/account.py`.
+  It signs up through the normal register, email code and confirm flow. It
+  stores the account only for the check, in the AWS Secrets Manager secret
+  `skynet/staging/check-account/<id>` (account 669242775630, region
+  `us-east-2`, profile `skynet`). Its `delete` command deletes the account
+  in the app and then removes the secret.
+- Cancel or wait out the account's runs before you delete it. If the delete
+  fails, report the account id. Never leave a secret without a report.
+- If you cannot create an account, report the exact failure and record the
+  coverage gap. Do not ask Gilad to create one. Never borrow a personal
   session. Never print or commit passwords, tokens, cookies or email codes.
-- Never add funds, grant credits, change balances or change live billing
-  configuration. Never deploy production.
-- Sign-in, sign-up exceptions, served-commit check: `skynet-test-accounts`.
+- New staging accounts get no credit. For a paid check, get Gilad's
+  approval in chat and fund the check account with the staging test-credit
+  grant (see `skynet-test-accounts`). Or record the gap.
+- Never add funds, grant credits or change balances, with one exception: the
+  staging test-credit grant command (`skynet-test-accounts`, "Grant test
+  credit"). Use it only for a check account you created for this check, only
+  after Gilad approves that grant in chat, and within the one $50 UTC-day cap
+  on the staging database. Amounts depend on the check. Before each grant,
+  ask Gilad in chat for a specific dollar amount: the smallest amount the
+  check needs, with a short cost estimate. Gilad approves that amount, or a
+  larger one if he thinks the check needs more. Record his approval text.
+  Spend as little as possible. Never grant on production, to real customers
+  or to manual accounts. Never use a raw wallet INSERT, Stripe or any other
+  path.
+- Never change live billing configuration. Never deploy production.
+- Create, sign in, delete, served-commit check: `skynet-test-accounts`.
 
 ## Writing rule (MANDATORY)
 
@@ -179,12 +221,12 @@ Applies to every `backend/` file you touch (not `.venv/`, `__pycache__/` or
 
 ## Product and runtime model
 
-- **Skynet is Optimize Anything.** It is one product that optimizes any
-  user-supplied artifact: prompts, programs, agents, workflows, datasets and
-  more. Do not describe DSPy and Optimize Anything as two separate paths or
-  products, in code comments, docs, UI copy or marketing text.
-- **DSPy programs** are one artifact type inside Optimize Anything. Skynet
-  optimizes them with the DSPy optimizers.
+- **Skynet is Optimize Anything: every run optimizes a repository.** It is
+  one product. A run uses a GitHub repository that the user connects, or a
+  new repository that Skynet creates. Never describe two paths or products,
+  in code comments, docs, UI copy or marketing text.
+- **DSPy is not an artifact type.** It is only a library that a user's
+  repository (or Skynet's own agents) can use.
 - **Engines.** The native engines come from the pinned upstream GEPA
   implementation and include GEPA, Best-of-N and Meta-Harness, plus Skynet's
   own AutoResearch and the pinned AutoSaddler and ShinkaEvolve packages.

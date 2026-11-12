@@ -8,12 +8,18 @@ import { Warning } from "@/shared/ui/icons";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { stepPages } from "../../lib/wizard-pages";
 import { optimizerModelsReady } from "../../lib/wizard-v2";
+import { AgentFieldLock } from "./AgentFieldLock";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { BudgetSection } from "./BudgetSection";
 import { GeneralistAgentShell } from "./GeneralistAgentShell";
 import { ModelsSection } from "./ModelsSection";
 import { OptimizerPicker } from "./OptimizerPicker";
 import { WizardScreen } from "./WizardScreen";
+
+// The wizard fields the setup agent writes on each section.
+const OPTIMIZER_FIELDS = ["optimizer_choice"] as const;
+const MODEL_FIELDS = ["model_config", "reflection_model_config"] as const;
+const BUDGET_FIELDS = ["max_cost_cents"] as const;
 
 /**
  * Step 3, Optimizer: which optimizer runs (Auto unless the user picks
@@ -27,7 +33,6 @@ export function OptimizerStep({ page }: { page: number }) {
   const { state, guided } = useWizardV2();
   const { openTo } = useSettingsModal();
   const t = (key: string) => v2Msg(key, guided);
-  const kind = state.task.artifactKind;
   const mode = state.inputs.mode;
   const choice = state.optimizer.choice;
   const pages = stepPages("optimizer", state);
@@ -35,7 +40,7 @@ export function OptimizerStep({ page }: { page: number }) {
   // Once shown, the models stay on Standard's screen, so picking the last one
   // doesn't pull the section out from under the user.
   const [askModels, setAskModels] = useState(false);
-  if (!askModels && kind && mode && !optimizerModelsReady(state)) setAskModels(true);
+  if (!askModels && mode && !optimizerModelsReady(state)) setAskModels(true);
 
   return (
     <GeneralistAgentShell active={state.step === "optimizer"}>
@@ -61,23 +66,37 @@ export function OptimizerStep({ page }: { page: number }) {
           </p>
         </header>
 
-        {kind && mode ? (
+        {mode ? (
           shown === "plan" ? (
             <WizardScreen active className="flex flex-col gap-5">
-              <OptimizerPicker kind={kind} mode={mode} plain />
-              {askModels && <ModelsSection kind={kind} choice={choice} />}
-              <BudgetSection kind={kind} choice={choice} />
+              <AgentFieldLock fields={OPTIMIZER_FIELDS}>
+                <OptimizerPicker mode={mode} plain />
+              </AgentFieldLock>
+              {askModels && (
+                <AgentFieldLock fields={MODEL_FIELDS}>
+                  <ModelsSection choice={choice} />
+                </AgentFieldLock>
+              )}
+              <AgentFieldLock fields={BUDGET_FIELDS}>
+                <BudgetSection choice={choice} />
+              </AgentFieldLock>
             </WizardScreen>
           ) : (
             <>
               <WizardScreen active={shown === "optimizer"}>
-                <OptimizerPicker kind={kind} mode={mode} />
+                <AgentFieldLock fields={OPTIMIZER_FIELDS}>
+                  <OptimizerPicker mode={mode} />
+                </AgentFieldLock>
               </WizardScreen>
               <WizardScreen active={shown === "models"}>
-                <ModelsSection kind={kind} choice={choice} />
+                <AgentFieldLock fields={MODEL_FIELDS}>
+                  <ModelsSection choice={choice} />
+                </AgentFieldLock>
               </WizardScreen>
               <WizardScreen active={shown === "budget"}>
-                <BudgetSection kind={kind} choice={choice} />
+                <AgentFieldLock fields={BUDGET_FIELDS}>
+                  <BudgetSection choice={choice} />
+                </AgentFieldLock>
               </WizardScreen>
             </>
           )

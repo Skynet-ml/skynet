@@ -13,11 +13,11 @@ above each class, not in class bodies.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .artifacts import ProgramArtifact
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
 from .scorer_dependencies import ScorerDependencyLock
@@ -38,13 +38,49 @@ BLACKBOX_HARNESS_CODEX = "codex"
 # runs may still name it; new requests that do are rejected.
 BLACKBOX_HARNESS_CLAUDE_CODE = "claude_code"
 BLACKBOX_HARNESS_OPENCODE = "opencode"
+BLACKBOX_HARNESS_OPENCODE_V2 = "opencode_v2"
 BLACKBOX_HARNESS_PRIME = "prime"
+BLACKBOX_HARNESS_AIDER = "aider"
+BLACKBOX_HARNESS_MINI_SWE_AGENT = "mini_swe_agent"
+BLACKBOX_HARNESS_SWE_AGENT = "swe_agent"
+BLACKBOX_HARNESS_OPENHANDS = "openhands"
+BLACKBOX_HARNESS_OPENHANDS_SDK = "openhands_sdk"
+BLACKBOX_HARNESS_ANTIGRAVITY_SDK = "antigravity_sdk"
+BLACKBOX_HARNESS_GROK_BUILD = "grok_build"
+BLACKBOX_HARNESS_DEERFLOW = "deerflow"
+BLACKBOX_HARNESS_CLINE = "cline"
+BLACKBOX_HARNESS_FABRIC = "fabric"
+BLACKBOX_HARNESS_GOOSE = "goose"
+BLACKBOX_HARNESS_TERMINUS = "terminus"
+BLACKBOX_HARNESS_KIMI_CODE = "kimi_code"
+BLACKBOX_HARNESS_QWEN_CODE = "qwen_code"
+BLACKBOX_HARNESS_HERMES = "hermes"
+BLACKBOX_HARNESS_EVE = "eve"
+BLACKBOX_HARNESS_CODE_PUPPY = "code_puppy"
 BLACKBOX_HARNESS_CUSTOM = "custom"
 BLACKBOX_HARNESSES = (
     BLACKBOX_HARNESS_PI,
     BLACKBOX_HARNESS_CODEX,
     BLACKBOX_HARNESS_OPENCODE,
+    BLACKBOX_HARNESS_OPENCODE_V2,
     BLACKBOX_HARNESS_PRIME,
+    BLACKBOX_HARNESS_AIDER,
+    BLACKBOX_HARNESS_MINI_SWE_AGENT,
+    BLACKBOX_HARNESS_SWE_AGENT,
+    BLACKBOX_HARNESS_OPENHANDS,
+    BLACKBOX_HARNESS_OPENHANDS_SDK,
+    BLACKBOX_HARNESS_QWEN_CODE,
+    BLACKBOX_HARNESS_ANTIGRAVITY_SDK,
+    BLACKBOX_HARNESS_FABRIC,
+    BLACKBOX_HARNESS_TERMINUS,
+    BLACKBOX_HARNESS_GOOSE,
+    BLACKBOX_HARNESS_HERMES,
+    BLACKBOX_HARNESS_EVE,
+    BLACKBOX_HARNESS_GROK_BUILD,
+    BLACKBOX_HARNESS_DEERFLOW,
+    BLACKBOX_HARNESS_CLINE,
+    BLACKBOX_HARNESS_KIMI_CODE,
+    BLACKBOX_HARNESS_CODE_PUPPY,
     BLACKBOX_HARNESS_CUSTOM,
 )
 # Engines that accept a multi-part (named files) starting point.
@@ -71,8 +107,7 @@ BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
 CLAUDE_CODE_RETIRED = "Claude Code is no longer available as an agent harness. Choose another one, such as codex."
 # Extra optimization models a single run may add beyond the reflection model.
 BLACKBOX_MAX_EXTRA_REFLECTION_MODELS = 4
-# Stands in for ``module_name`` in the job overview and notifications, where
-# DSPy jobs record the program they optimized.
+# Stands in for ``module_name`` in the job overview and notifications.
 BLACKBOX_MODULE_NAME = "blackbox"
 
 # A text artifact under optimization. ``dict`` form names several parts that
@@ -132,7 +167,12 @@ class BlackboxBudget(BaseModel):
 
 REPO_SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
 REPO_NAME_PATTERN = r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+# GitLab nests projects in subgroups (``group/sub/project``); GitHub and Bitbucket use two parts.
+REPO_PATH_PATTERN = r"^[A-Za-z0-9_.-]{1,255}(/[A-Za-z0-9_.-]{1,255}){1,20}$"
 REPO_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
+# An exact host, or ``*.`` and a suffix of two or more labels: ``*.com``
+# would let a secret go to any host of a top-level domain.
+REPO_SECRET_HOST_PATTERN = re.compile(r"^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$")
 
 
 # One environment variable a repository needs to build or score. ``value`` is
@@ -147,6 +187,32 @@ class BlackboxRepoSecret(BaseModel):
     saved_secret_id: str | None = Field(default=None, min_length=1, max_length=64)
     credential_ref: str | None = Field(default=None, min_length=1, max_length=64)
     credential_revision: int | None = Field(default=None, ge=1)
+    # The hosts this secret may go to (SKY-381 E52): an exact host or
+    # ``*.suffix``. The run, not the repository, sets them, so a shared file
+    # cannot send the secret to another host. Empty means no host, and the
+    # setup check fails for a user-bound secret that a url uses.
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _clean_allowed_hosts(cls, hosts: list[str]) -> list[str]:
+        """Normalize each allowed host and refuse one that is not a host or ``*.suffix``.
+
+        Args:
+            hosts: The hosts as given.
+
+        Returns:
+            The lower-case hosts without a trailing dot, in order, without repeats.
+
+        Raises:
+            ValueError: When an entry is not an exact host or ``*.`` and a
+                suffix of two or more labels.
+        """
+        cleaned = [host.strip().rstrip(".").lower() for host in hosts]
+        for host in cleaned:
+            if len(host) > 253 or not REPO_SECRET_HOST_PATTERN.match(host):
+                raise ValueError(f"Allowed host '{host}' must be a host such as api.example.com, or *.example.com.")
+        return list(dict.fromkeys(cleaned))
 
     @model_validator(mode="after")
     def _ensure_one_source(self) -> BlackboxRepoSecret:
@@ -170,14 +236,22 @@ class BlackboxRepoSecret(BaseModel):
 # folders (relative, ``/``-separated) an agent may change; the rest of the
 # repository is read-only context; ``.`` makes the whole repository editable.
 # Submodules and Git LFS files are fetched
-# read-only.
+# read-only. ``created_by_skynet`` marks a repository Skynet created for the
+# run: its finished run pushes every version to its own branch and moves
+# ``skynet/best`` to the winner, instead of opening a pull request.
 class BlackboxRepoSource(BaseModel):
-    provider: Literal["github"] = "github"
-    repository: str = Field(pattern=REPO_NAME_PATTERN)
+    provider: Literal["github", "gitlab", "bitbucket"] = "github"
+    repository: str = Field(pattern=REPO_PATH_PATTERN, max_length=1024)
     branch: str | None = Field(default=None, min_length=1, max_length=255)
     commit: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
     editable_paths: list[str] = Field(min_length=1, max_length=200)
     secrets: list[BlackboxRepoSecret] = Field(default_factory=list, max_length=100)
+    # How each ``${NAME}`` in optimize.toml and the role MCP files is filled
+    # (SKY-381 E50): ``user`` from the run's secrets (BYOK, no Skynet fee), or
+    # ``managed`` with Skynet's key for a catalog host, metered per call. A
+    # name this map does not hold binds to ``user``.
+    secret_bindings: dict[str, Literal["user", "managed"]] = Field(default_factory=dict, max_length=100)
+    created_by_skynet: bool = False
 
     @model_validator(mode="after")
     def _ensure_clean_paths(self) -> BlackboxRepoSource:
@@ -188,8 +262,13 @@ class BlackboxRepoSource(BaseModel):
 
         Raises:
             ValueError: When a path is absolute, empty, or walks out with ``..``,
-                or when two secrets share a name.
+                when two secrets share a name, when a binding name is invalid,
+                or when the repository path does not fit its host.
         """
+        if self.provider != "gitlab" and not re.fullmatch(REPO_NAME_PATTERN, self.repository):
+            raise ValueError("The repository must be written as 'owner/name'.")
+        if self.created_by_skynet and self.provider != "github":
+            raise ValueError("Skynet creates new repositories only on GitHub.")
         cleaned: list[str] = []
         for raw in self.editable_paths:
             path = raw.strip().replace("\\", "/")
@@ -208,6 +287,9 @@ class BlackboxRepoSource(BaseModel):
         names = [secret.name for secret in self.secrets]
         if len(names) != len(set(names)):
             raise ValueError("Each secret name can only be used once.")
+        for name in self.secret_bindings:
+            if not re.fullmatch(REPO_SECRET_NAME_PATTERN, name):
+                raise ValueError(f"The secret binding name '{name[:100]}' must use only letters, digits and '_'.")
         return self
 
 
@@ -388,8 +470,7 @@ class BlackboxStrategy(BaseModel):
         return self
 
 
-# Submission payload for ``POST /blackbox/run``. Not a subclass of the DSPy
-# request base: there is no module, signature or column mapping here.
+# Submission payload for ``POST /blackbox/run``.
 class BlackboxRunRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -398,20 +479,31 @@ class BlackboxRunRequest(BaseModel):
     username: str | None = None
     objective: str | None = None
     background: str | None = None
-    # Which wizard recipe authored the run ("prompt" / "code" / "anything" / "repo").
-    # Engines ignore it; cloning reads it back to preselect the recipe picker.
-    recipe: Literal["prompt", "code", "anything", "repo"] | None = None
+    # Marks a repository run. Engines ignore it; cloning reads it back.
+    recipe: Literal["repo"] | None = None
     seed_candidate: BlackboxCandidate | None = None
     scorer: BlackboxScorer
     cases: list[dict[str, Any]] | None = Field(default=None, max_length=200_000)
     # By-reference twin of ``cases`` for agent callers: a dataset already staged
     # server-side, so the rows never travel through the model's tool arguments.
     staged_dataset_id: str | None = Field(default=None, min_length=1, max_length=64)
+    # How staged rows map to cases, as in the unified run's data block.
+    input_fields: list[str] = Field(default_factory=list)
+    expected_field: str | None = None
     seed: int | None = None
     budget: BlackboxBudget = Field(default_factory=BlackboxBudget)
     strategy: BlackboxStrategy = Field(default_factory=BlackboxStrategy)
     target: BlackboxTarget = Field(default_factory=BlackboxTarget)
     proposer_runtime: Literal["vercel", "docker"] = "vercel"
+    sandbox_provider: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "The sandbox provider this run uses, one id from GET /sandbox-providers. "
+            "Unset uses the deployment default. A provider this deployment does not offer is refused before any paid work."
+        ),
+    )
     proposer: BlackboxProposer = Field(default_factory=BlackboxProposer)
     task_model_settings: ModelConfig | None = Field(default=None, alias="task_model_config")
     reflection_model_settings: ModelConfig = Field(alias="reflection_model_config")
@@ -435,6 +527,17 @@ class BlackboxRunRequest(BaseModel):
             "user's own OpenRouter key run normally."
         ),
     )
+    deadline_seconds: int | None = Field(
+        default=None,
+        ge=60,
+        description=(
+            "A shorter run deadline in seconds for this run only. The deployment's sandbox "
+            "lifetime still caps it, so it can only shorten the run."
+        ),
+    )
+    # The setup's metric-hardening job (SKY-356). A finished job of the same
+    # owner ships its exploit suite and counts in the repository run's PR.
+    hardening_job_id: str | None = Field(default=None, min_length=1, max_length=36)
     preflight_id: str | None = Field(default=None, min_length=1, max_length=64)
     preflight_fingerprint: str | None = Field(default=None, min_length=1, max_length=128)
     execution_budget_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -529,7 +632,8 @@ class BlackboxRunRequest(BaseModel):
 
         Raises:
             ValueError: When the seed is multi-part, the scorer is not Python
-                code, or the run is not a single-engine run.
+                code, or a single-engine run names an engine that does not
+                optimize a repository.
         """
         multi_part = isinstance(self.seed_candidate, dict)
         if multi_part:
@@ -537,32 +641,8 @@ class BlackboxRunRequest(BaseModel):
         if self.scorer.kind != "python":
             raise ValueError("A repository run is scored by Python code that receives the checkout's path.")
         self.seed_candidate = self.seed_candidate or ""
-        if self.strategy.mode != "single" or self.strategy.engine not in BLACKBOX_REPO_ENGINES:
-            raise ValueError("A repository target runs one engine; Auto mode does not optimize a repository.")
-
-
-# ``POST /blackbox/scorer/dry-run``: score one version on one case before
-# submitting, so a broken scorer fails in the wizard rather than in the job.
-class ScorerDryRunRequest(BaseModel):
-    scorer: BlackboxScorer
-    candidate: BlackboxCandidate
-    case: dict[str, Any] | None = None
-    execution_budget_id: str | None = Field(default=None, min_length=1, max_length=64)
-    execution_budget_revision: int | None = Field(default=None, ge=1)
-
-
-class ScorerDryRunResponse(BaseModel):
-    ok: bool
-    score: float | None = None
-    side_info: dict[str, Any] = Field(default_factory=dict)
-    error: str | None = None
-    elapsed_ms: float
-    usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    # What this one check debited, so the wizard can show setup spend against the total budget.
-    cents_charged: int = 0
-    budget: dict[str, Any] | None = None
-    preview_status: Literal["succeeded", "failed", "pending"] | None = None
-    preflight_id: str | None = None
+        if self.strategy.mode == "single" and self.strategy.engine not in BLACKBOX_REPO_ENGINES:
+            raise ValueError("A repository target runs Auto or one repository engine.")
 
 
 # One engine lane of a run. ``explore`` lanes share the budget; the
@@ -610,8 +690,8 @@ class BlackboxNamedScore(BaseModel):
 
 # The final run's fresh scores of the starting point and the winner on one case.
 # ``*_observation`` is the trusted measurement of that version's run on the
-# case (time in ms, each model attempt, metered service cost); see
-# ``workspace_harness.build_observation``. ``None`` where nothing measured it.
+# case (time in ms, each model attempt, metered service cost). ``None`` where
+# nothing measured it.
 class BlackboxCaseResult(BaseModel):
     index: int
     baseline_score: float | None = None
@@ -662,24 +742,19 @@ class BlackboxRunResponse(BaseModel):
     candidate_tree: list[BlackboxCandidateNode] = Field(default_factory=list)
     total_scorer_runs: int = 0
     runtime_seconds: float
-    num_lm_calls: int = 0
     total_tokens: int | None = None
     usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    # Reflection-LM timing on the shared LMActivity shape, so the run view
-    # renders the same stage matrix as DSPy runs. Only ``reflection`` is
-    # populated — black-box engines drive no generation LM.
+    # Reflection-LM timing on the shared LMActivity shape. Only
+    # ``reflection`` is populated — black-box engines drive no generation LM.
     lm_activity: LMActivity | None = None
     optimization_metadata: dict[str, Any] = Field(default_factory=dict)
     details: dict[str, Any] = Field(default_factory=dict)
-    # Unified runs only: how cases were split, the selection scores measured
-    # on ``split_counts.selection_split`` (``baseline_score``/``best_score``
-    # stay the reported scores, on ``split_counts.report_split``), the
-    # optimizer Auto resolved to, and a DSPy optimizer's compiled program.
+    # How cases were split, and the selection scores measured on
+    # ``split_counts.selection_split`` (``baseline_score``/``best_score``
+    # stay the reported scores, on ``split_counts.report_split``).
     split_counts: UnifiedSplitCounts | None = None
     baseline_val_score: float | None = None
     best_val_score: float | None = None
-    optimizer_resolved: str | None = None
-    program_artifact: ProgramArtifact | None = None
 
     # Results stored before the final run existed carry the DSPy names for
     # their held-out scores; read them as the baseline and best scores.

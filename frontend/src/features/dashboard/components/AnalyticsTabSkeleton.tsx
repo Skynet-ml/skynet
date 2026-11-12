@@ -11,7 +11,6 @@ import type { DashboardAnalyticsJob } from "@/shared/lib/api";
 import { AnalyticsSection } from "./AnalyticsSection";
 import { KpiCard, kpiLabels, RangeControl } from "./AnalyticsParts";
 import { Leaderboard, OptimizerTable } from "./AnalyticsTables";
-import { BREAKDOWN_GRID_CLASS, BREAKDOWN_WIDE_CELL_CLASS } from "../constants";
 import { ANALYTICS_LAYOUT_KEY, type AnalyticsShape } from "../lib/analytics-shape";
 import type { OptimizerRow } from "../lib/transform-chart-data";
 
@@ -21,8 +20,6 @@ const COLD_SHAPE: AnalyticsShape = {
   kpis: true,
   optimizers: 0,
   status: 3,
-  jobTypes: 2,
-  modules: 2,
   models: 0,
   leaders: 0,
   sharing: false,
@@ -224,11 +221,7 @@ export function AnalyticsTabSkeleton() {
 
           <div>
             <AnalyticsSection title={<SectionTitle />} className="border-border/60">
-              <div className={BREAKDOWN_GRID_CLASS}>
-                <BarColumn rows={shape.status} />
-                <BarColumn rows={shape.jobTypes} />
-                <BarColumn rows={shape.modules} className={BREAKDOWN_WIDE_CELL_CLASS} />
-              </div>
+              <BarColumn rows={shape.status} />
             </AnalyticsSection>
           </div>
 

@@ -5,8 +5,8 @@ import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 import { msg } from "@/shared/lib/messages";
 import {
-  getLocalHostedBalance,
   getLocalHostedLinkStatus,
+  getLocalHostedWallet,
   getWallet,
   HOSTED_LINK_CHANGED_EVENT,
   WALLET_CHANGED_EVENT,
@@ -54,15 +54,20 @@ interface BalanceContextValue {
    * `totalCents`.
    */
   shown: ShownBalance;
+  /**
+   * The wallet whose paid balance, grant and activity surfaces show next to
+   * `shown`. On the web it is `wallet`. In the Mac app it is the linked
+   * account's wallet, or null when no linked wallet loaded: never the local credit.
+   */
+  shownWallet: WalletBalance | null;
   /** Re-fetch the wallet from the backend — call after a checkout/portal return. */
   refresh: () => void;
   /**
    * Enter the post-checkout `syncing` state and poll the wallet until the webhook
    * lands (the balance changes) or a short budget elapses. Call on a Stripe
-   * `?billing=success` return so the chip never shows a false zero. With
-   * `until: "pro"` (a subscription return) it waits for the plan to flip instead.
+   * `?billing=success` return so the wallet never shows a false zero.
    */
-  beginSync: (until?: "balance" | "pro") => void;
+  beginSync: () => void;
 }
 
 /** Overlay a backend wallet response onto the current wallet. */
@@ -82,12 +87,6 @@ function applyWalletResponse(prev: WalletBalance, r: BillingWalletResponse): Wal
       cents: u.cents,
       kind: u.kind as LedgerKind,
     })),
-    plan: {
-      plan: r.plan.plan,
-      renewsAt: r.plan.renews_at,
-      cancelAtPeriodEnd: r.plan.cancel_at_period_end,
-      available: r.plan.available,
-    },
     pricing: r.pricing
       ? {
           usageMarkup: r.pricing.usage_markup,
@@ -146,7 +145,9 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
       () =>
         loadHostedBalance({
           linked: () => getLocalHostedLinkStatus().then((s) => s.linked),
-          balance: getLocalHostedBalance,
+          wallet: () => getLocalHostedWallet().then((r) => applyWalletResponse(EMPTY_WALLET, r)),
+          total: totalCents,
+          status: walletStatus,
         }),
       setHosted,
     ),
@@ -157,7 +158,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
   // The first read comes from refresh() once the session signs in.
   React.useEffect(() => {
     if (!local) return;
-    const onFocus = () => void readHosted(false);
+    const onFocus = () => void readHosted(true);
     const onLinkChange = () => void readHosted(true);
     window.addEventListener("focus", onFocus);
     window.addEventListener(HOSTED_LINK_CHANGED_EVENT, onLinkChange);
@@ -198,6 +199,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (sessionStatus !== "authenticated") return;
     const reread = () => {
+      if (local) void readHosted(true);
       void getWallet()
         .then((r) => {
           setWallet((prev) => applyWalletResponse(prev, r));
@@ -208,14 +210,14 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener(WALLET_CHANGED_EVENT, reread);
     return () => window.removeEventListener(WALLET_CHANGED_EVENT, reread);
-  }, [sessionStatus]);
+  }, [sessionStatus, local, readHosted]);
 
   // Post-checkout sync [FG-3]: Stripe webhooks aren't instant, so on a success
   // return we poll the wallet (without toggling `loading`, to avoid wiping the
   // prior balance) until it changes or a short budget elapses. The chip reads
   // `syncing` and shimmers over the prior balance instead of flashing a zero.
   const beginSync = React.useCallback(
-    (until: "balance" | "pro" = "balance") => {
+    () => {
       setSyncing(true);
       let attempt = 0;
       const baseline = wallet.paidBalanceCents;
@@ -226,7 +228,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
             setWallet((prev) => applyWalletResponse(prev, r));
             setAvailable(true);
             setLoadError(false);
-            return until === "pro" ? r.plan.plan === "pro" : r.paid_balance_cents !== baseline;
+            return r.paid_balance_cents !== baseline;
           })
           .catch(() => {
             setLoadError(true);
@@ -247,7 +249,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
     [wallet.paidBalanceCents],
   );
 
-  // Stripe Checkout returns to `/?billing=success|pro|cancel` (there is no
+  // Stripe Checkout returns to `/?billing=success|cancel` (there is no
   // standalone add-funds page). On success, toast and enter the syncing
   // state; either way strip the param so a reload doesn't re-toast. beginSync's
   // identity changes as the wallet loads, but re-runs bail on the cleared param.
@@ -258,9 +260,6 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
     if (status === "success") {
       toast.success(msg("billing.upgrade.success_toast"));
       beginSync();
-    } else if (status === "pro") {
-      toast.success(msg("billing.pro.success_toast"));
-      beginSync("pro");
     }
     params.delete("billing");
     const query = params.toString();
@@ -276,8 +275,10 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
       totalCents: total,
       status,
     });
+    const shownWallet = !local ? wallet : hosted.kind === "hosted" ? hosted.wallet : null;
     return {
       wallet,
+      shownWallet,
       loading,
       syncing,
       available,

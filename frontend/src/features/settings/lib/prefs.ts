@@ -1,19 +1,9 @@
-import type { CliProvider } from "@/features/billing";
 import type { ModelConfig } from "@/shared/types/api";
-import type { OptimizerChoice } from "@/shared/types/unified-run";
+import { storedOptimizerChoice, type OptimizerChoice } from "@/shared/types/unified-run";
 
 type CodeAssistDefault = "auto" | "manual";
 type SplitModeDefault = "auto" | "manual";
 type TrustModeDefault = "ask" | "auto_safe" | "yolo";
-
-/** The agents the local desktop build can run on the user's CLI subscription. */
-export type LocalAgentRole = "generalist" | "code" | "interview" | "tagger";
-export const LOCAL_AGENT_ROLES: readonly LocalAgentRole[] = [
-  "generalist",
-  "code",
-  "interview",
-  "tagger",
-];
 
 export interface UserPrefs {
   wizardCodeAssist: CodeAssistDefault;
@@ -22,9 +12,9 @@ export interface UserPrefs {
   // AI co-tagging in the tagger: the master toggle (off = today's fully
   // manual tagger).
   taggerAssist: boolean;
-  // Seed for new conversations (agent panel, code interview, tagger
-  // interview): the composer-menu model id, or null for the catalog's
-  // default. Per-conversation picks override it.
+  // The Mac app's last composer pick that a message used (agent panel,
+  // tagger interview): a model id, or null for the catalog's default. New
+  // conversations start on it; see composerSeed.
   composerModel: string | null;
   // Companion thinking level for composerModel; null runs the model default.
   composerEffort: string | null;
@@ -38,9 +28,6 @@ export interface UserPrefs {
   optimizerTaskModel: ModelConfig;
   optimizerReflectionModel: ModelConfig;
   optimizerMaxRuns: number | null;
-  // Local desktop build only: the CLI each agent role runs on, or null to
-  // use the composer's model as usual.
-  agentSubscription: Record<LocalAgentRole, CliProvider | null>;
 }
 
 export type AgentPreferencePatch = Partial<
@@ -101,7 +88,6 @@ export const PREF_KEYS: Record<keyof UserPrefs, string> = {
   optimizerTaskModel: "app.prefs.optimizer.task-model",
   optimizerReflectionModel: "app.prefs.optimizer.reflection-model",
   optimizerMaxRuns: "app.prefs.optimizer.max-runs",
-  agentSubscription: "app.prefs.agent.subscription",
 };
 
 export const DEFAULT_PREFS: UserPrefs = {
@@ -118,7 +104,6 @@ export const DEFAULT_PREFS: UserPrefs = {
   optimizerTaskModel: { name: "" },
   optimizerReflectionModel: { name: "" },
   optimizerMaxRuns: null,
-  agentSubscription: { generalist: null, code: null, interview: null, tagger: null },
 };
 
 // `skynet.prefs.advanced-mode` and `skynet.prefs.expand-advanced` belonged to
@@ -133,7 +118,11 @@ export function readPref<K extends keyof UserPrefs>(key: K): UserPrefs[K] {
   try {
     const raw = window.localStorage.getItem(PREF_KEYS[key]);
     if (raw == null) return DEFAULT_PREFS[key];
-    return JSON.parse(raw) as UserPrefs[K];
+    const value: unknown = JSON.parse(raw);
+    // A saved default can name a retired DSPy optimizer; it reads as Auto.
+    if (key === "optimizerEngine")
+      return (storedOptimizerChoice(value) ?? DEFAULT_PREFS.optimizerEngine) as UserPrefs[K];
+    return value as UserPrefs[K];
   } catch {
     return DEFAULT_PREFS[key];
   }
@@ -148,15 +137,23 @@ export function writePref<K extends keyof UserPrefs>(key: K, value: UserPrefs[K]
   }
 }
 
-const CLI_VALUES: readonly string[] = ["codex", "claude"];
-
 /**
- * The CLI one agent role runs on. The stored value is user-editable browser
- * storage, so anything but a known CLI reads as "off".
+ * The model and thinking level a new conversation starts on. The Mac app
+ * (`local`) keeps the last pick a message used. The web app always starts on
+ * the backend's best-value default, which moves with live prices.
  */
-export function agentSubscriptionFor(role: LocalAgentRole): CliProvider | null {
-  const stored = readPref("agentSubscription") as unknown;
-  if (!stored || typeof stored !== "object") return null;
-  const value = (stored as Record<string, unknown>)[role];
-  return typeof value === "string" && CLI_VALUES.includes(value) ? (value as CliProvider) : null;
+export function composerSeed(local: boolean): { model: string | null; effort: string | null } {
+  if (!local) return { model: null, effort: null };
+  return { model: readPref("composerModel"), effort: readPref("composerEffort") };
+}
+
+/** Keep a sent composer pick as the next seed; only the Mac app keeps one. */
+export function rememberComposerPick(
+  local: boolean,
+  model: string | null,
+  effort: string | null,
+): void {
+  if (!local) return;
+  writePref("composerModel", model);
+  writePref("composerEffort", effort);
 }

@@ -111,11 +111,13 @@ def list_grants_for_user_all(session: Session, username: str) -> dict[str, str]:
         username: Grantee username (compared case-insensitively).
 
     Returns:
-        ``{session_id: role}`` for every grant the user holds.
+        ``{session_id: role}`` for every grant the user holds and did not hide
+        from their own view.
     """
     rows = session.scalars(
         select(TaggingSessionShareGrantModel).where(
             TaggingSessionShareGrantModel.grantee_username == _normalize_username(username),
+            TaggingSessionShareGrantModel.hidden_at.is_(None),
         )
     )
     return {grant.session_id: grant.role for grant in rows}

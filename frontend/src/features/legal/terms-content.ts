@@ -1,352 +1,174 @@
 /**
- * Terms of Service copy for the hosted Skynet service.
+ * Terms of Service for the hosted Skynet service, as catalog keys.
  *
- * Original prose tailored to Skynet's real mechanics (a prepaid dollar balance
- * via Stripe, bring-your-own-key runs, third-party LLM providers, AGPL software vs.
- * hosted service). This is a launch-ready draft, not legal advice — have
- * counsel review it before relying on it. Operator-specific values (entity,
- * governing law and contact emails) live in legal-config.ts.
+ * The copy lives in the UI catalogs under `legal.terms.*` (English is the
+ * source text; every other language is a translation). This is a
+ * launch-ready draft, not legal advice: have counsel review it before
+ * relying on it. Operator-specific values (entity, contact emails) live in
+ * legal-config.ts.
  */
 
-import { LEGAL_CONFIG as C, SOURCE_CODE_URL } from "./legal-config";
 import type { LegalDocument } from "./types";
 
 export const TERMS_OF_SERVICE: LegalDocument = {
-  title: "Terms of Service",
-  intro:
-    `These Terms of Service ("Terms") govern your access to and use of ${C.serviceName}, ` +
-    `the prompt-optimization service available at ${C.websiteLabel} (the "Service"), operated by ` +
-    `${C.legalEntity} ("${C.serviceName}", "we", "us", or "our"). By creating an account or using ` +
-    `the Service, you agree to these Terms. If you do not agree, do not use the Service.`,
+  title: "legal.terms_link",
+  intro: "legal.terms.intro",
   sections: [
     {
-      heading: "The Service",
+      id: "the-service",
+      heading: "legal.terms.the_service.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `${C.serviceName} is a platform for optimizing and evaluating prompts for large language ` +
-            `models ("LLMs") using automated techniques. You provide datasets, prompts, and ` +
-            `evaluation criteria; the Service runs optimization jobs against LLMs and returns ` +
-            `improved prompts, metrics, and results.`,
-        },
-        {
-          kind: "paragraph",
-          text:
-            `The underlying ${C.serviceName} software is open source under the GNU Affero General ` +
-            `Public License v3 (AGPL v3). These Terms govern the hosted Service we operate, which is ` +
-            `separate from, and additional to, that software license. If you run your own copy of the ` +
-            `software, these Terms do not apply to your deployment. The complete source code of the ` +
-            `version we run is available at ${SOURCE_CODE_URL}.`,
-        },
+        { kind: "paragraph", key: "legal.terms.the_service.b1" },
+        { kind: "paragraph", key: "legal.terms.the_service.b2" },
       ],
     },
     {
-      heading: "Eligibility and accounts",
+      id: "eligibility-and-accounts",
+      heading: "legal.terms.eligibility_and_accounts.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `You must be at least 18 years old, or the age of majority in your jurisdiction, to use ` +
-            `the Service. You agree to provide accurate registration information and to keep it ` +
-            `current.`,
-        },
-        {
-          kind: "paragraph",
-          text:
-            `You may sign in with an email and password or with a supported third-party identity ` +
-            `provider (for example, Google or GitHub). Your use of a third-party provider is subject ` +
-            `to that provider's terms.`,
-        },
-        {
-          kind: "paragraph",
-          text:
-            `You are responsible for all activity under your account and for safeguarding your ` +
-            `credentials, including passwords, passkeys, two-factor codes, recovery codes, and ` +
-            `personal access tokens. Notify us promptly if you suspect unauthorized use of your ` +
-            `account.`,
-        },
+        { kind: "paragraph", key: "legal.terms.eligibility_and_accounts.b1" },
+        { kind: "paragraph", key: "legal.terms.eligibility_and_accounts.b2" },
+        { kind: "paragraph", key: "legal.terms.eligibility_and_accounts.b3" },
       ],
     },
     {
-      heading: "Acceptable use",
+      id: "acceptable-use",
+      heading: "legal.terms.acceptable_use.heading",
       blocks: [
-        { kind: "paragraph", text: "You agree not to:" },
+        { kind: "paragraph", key: "legal.terms.acceptable_use.b1" },
         {
           kind: "list",
           items: [
-            "Break the law or infringe the intellectual-property, privacy, or other rights of others.",
-            "Upload content you do not have the rights to use, or that contains other people's personal data without a lawful basis.",
-            "Access another user's account or data, or attempt to bypass access controls, usage limits, quotas, or billing.",
-            "Interfere with, disrupt, overload, or probe the Service or its infrastructure, except as expressly permitted by the open-source license for the software itself.",
-            "Use the Service to generate or distribute unlawful, harmful, deceptive, or abusive content, or to violate the acceptable-use policies of the LLM providers reached through the Service.",
-            "Resell, sublicense, or provide the hosted Service to third parties except as expressly permitted by us. Calling a program you optimized through its serving API from your own product, including one open to the public, is permitted.",
-            "Use automated means to extract data from the Service beyond the interfaces we provide.",
+            "legal.terms.acceptable_use.b2_1",
+            "legal.terms.acceptable_use.b2_2",
+            "legal.terms.acceptable_use.b2_3",
+            "legal.terms.acceptable_use.b2_4",
+            "legal.terms.acceptable_use.b2_5",
+            "legal.terms.acceptable_use.b2_6",
+            "legal.terms.acceptable_use.b2_7",
           ],
         },
-        {
-          kind: "paragraph",
-          text:
-            "If you expose a served program to other people, you are responsible for how they use " +
-            "it, and you must make them follow these rules. You must also tell them clearly that " +
-            "they are interacting with an AI system, unless that is already obvious from the " +
-            "context, and you must not present its outputs as written by a person.",
-        },
-        {
-          kind: "paragraph",
-          text:
-            "We may investigate suspected violations and may suspend or terminate accounts that " +
-            "violate these rules or create risk for us, other users, or third parties.",
-        },
+        { kind: "paragraph", key: "legal.terms.acceptable_use.b3" },
+        { kind: "paragraph", key: "legal.terms.acceptable_use.b4" },
       ],
     },
     {
-      heading: "Your content",
+      id: "your-content",
+      heading: "legal.terms.your_content.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `You retain all rights to the datasets, prompts, evaluation code, and other materials you ` +
-            `submit ("Your Content"), and to the outputs the Service generates for you. We do not ` +
-            `claim ownership of Your Content.`,
-        },
-        {
-          kind: "paragraph",
-          text:
-            `You grant us a limited, non-exclusive license to host, store, process, transmit, and ` +
-            `display Your Content solely to operate and provide the Service to you. This includes ` +
-            `sending Your Content to the LLM, payment, and infrastructure providers described in our ` +
-            `Privacy Policy, as needed to run your jobs.`,
-        },
-        {
-          kind: "paragraph",
-          text:
-            "You are responsible for Your Content and represent that you have the necessary rights " +
-            "and lawful bases to submit it and to have it processed as described. Do not upload " +
-            "sensitive personal data unless you have a lawful basis to do so.",
-        },
-        {
-          kind: "paragraph",
-          text:
-            "Your Content includes any scorer code and any packages you ask the Service to install " +
-            "to run it. You represent that you may use those packages under their licenses, that " +
-            "they contain no malicious code, and that running them does not infringe anyone's rights.",
-        },
+        { kind: "paragraph", key: "legal.terms.your_content.b1" },
+        { kind: "paragraph", key: "legal.terms.your_content.b2" },
+        { kind: "paragraph", key: "legal.terms.your_content.b3" },
+        { kind: "paragraph", key: "legal.terms.your_content.b4" },
       ],
     },
     {
-      heading: "AI outputs and third-party model providers",
+      id: "ai-outputs-and-third-party-model-providers",
+      heading: "legal.terms.ai_outputs_and_third_party_model_providers.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            "To perform optimization, the Service sends your prompts and dataset content to " +
-            "third-party LLM providers (through OpenRouter and, where we have configured one, a " +
-            "self-hosted gateway). Your use of the Service is also subject to those providers' terms " +
-            "and acceptable-use policies.",
-        },
-        {
-          kind: "paragraph",
-          text:
-            "AI-generated outputs may be inaccurate, incomplete, or unsuitable for your purpose. You " +
-            "are responsible for reviewing and validating outputs before relying on them. We do not " +
-            "warrant that outputs are correct, fit for a particular purpose, or free of third-party " +
-            "rights, and you should not treat outputs as a substitute for professional advice.",
-        },
+        { kind: "paragraph", key: "legal.terms.ai_outputs_and_third_party_model_providers.b1" },
+        { kind: "paragraph", key: "legal.terms.ai_outputs_and_third_party_model_providers.b2" },
       ],
     },
     {
-      heading: "Bring your own key (BYOK)",
+      id: "bring-your-own-key-byok",
+      heading: "legal.terms.bring_your_own_key_byok.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            "If you provide your own third-party provider API key, you authorize us to store it " +
-            "encrypted and to use it to run your jobs against that provider on your behalf. We store " +
-            "provider keys encrypted at rest and do not display the full key back to you.",
-        },
-        {
-          kind: "paragraph",
-          text:
-            "You represent that you are authorized to use any key you provide, and you remain " +
-            "responsible for your provider account, its usage, its costs, and your compliance with " +
-            "that provider's terms.",
-        },
-        {
-          kind: "paragraph",
-          text:
-            "Gemma and Llama models are available only with your own key, because their license " +
-            "terms must bind you directly as the licensee.",
-        },
+        { kind: "paragraph", key: "legal.terms.bring_your_own_key_byok.b1" },
+        { kind: "paragraph", key: "legal.terms.bring_your_own_key_byok.b2" },
+        { kind: "paragraph", key: "legal.terms.bring_your_own_key_byok.b3" },
       ],
     },
     {
-      heading: "Balance, billing, and refunds",
+      id: "balance-billing-and-refunds",
+      heading: "legal.terms.balance_billing_and_refunds.heading",
       blocks: [
         {
           kind: "list",
           items: [
-            "The Service uses a prepaid balance held in US dollars. You add funds to your balance, and the cost of each job is deducted from it as you run jobs. Prices and the cost of features are shown in the Service and may change.",
-            "Each top-up includes a platform fee on top of the amount added to your balance. The fee is shown in the price before you pay, is the same for every payment method, and is not added to your balance.",
-            "Payments are processed by our payment processor, Stripe. We do not receive or store your full card details. Your purchases are also subject to Stripe's terms.",
-            `Within 30 days of a top-up, you may ask for a refund of the part of that top-up you have not yet used by writing to ${C.contactEmail}. We refund that amount to your original payment method; the platform fee is not refunded. Free or promotional balance is not refundable.`,
-            "Except as stated above or where required by law, top-ups are final. If a charge is refunded, reversed, or disputed (including chargebacks), we may deduct the corresponding amount from your balance and may suspend access while the matter is resolved.",
-            "You are responsible for any taxes associated with your purchases, other than taxes based on our net income.",
-            "Free or promotional balance has no cash value and may expire or be revoked.",
+            "legal.terms.balance_billing_and_refunds.b1_1",
+            "legal.terms.balance_billing_and_refunds.b1_2",
+            "legal.terms.balance_billing_and_refunds.b1_3",
+            "legal.terms.balance_billing_and_refunds.b1_4",
+            "legal.terms.balance_billing_and_refunds.b1_5",
+            "legal.terms.balance_billing_and_refunds.b1_6",
+            "legal.terms.balance_billing_and_refunds.b1_7",
           ],
         },
       ],
     },
     {
-      heading: "Availability, limits, and changes to the Service",
+      id: "availability-limits-and-changes-to-the-service",
+      heading: "legal.terms.availability_limits_and_changes_to_the_service.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            "We may modify, suspend, or discontinue any part of the Service at any time. We aim for " +
-            "high availability but do not guarantee that the Service will be uninterrupted, timely, " +
-            "secure, or error-free.",
-        },
-        {
-          kind: "paragraph",
-          text:
-            "We may set or change usage limits (such as storage quotas and rate limits) to protect " +
-            "the Service, and we may retain, cap, or automatically purge certain data (such as logs " +
-            "and inactive items) as described in our Privacy Policy.",
-        },
+        { kind: "paragraph", key: "legal.terms.availability_limits_and_changes_to_the_service.b1" },
+        { kind: "paragraph", key: "legal.terms.availability_limits_and_changes_to_the_service.b2" },
       ],
     },
     {
-      heading: "Intellectual property",
+      id: "intellectual-property",
+      heading: "legal.terms.intellectual_property.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `The hosted Service, including its design, look and feel, and the "${C.serviceName}" name ` +
-            `and logo, is owned by us or our licensors. Apart from the AGPL v3 license that applies to ` +
-            `the open-source ${C.serviceName} codebase, these Terms grant you no rights in our ` +
-            `intellectual property beyond the right to use the Service, and you may not use our marks ` +
-            `without our prior written permission.`,
-        },
-        {
-          kind: "paragraph",
-          text:
-            "Names and logos of third-party model providers, agent harnesses, and data sources appear " +
-            "in the Service only to identify the products it works with. They are the trademarks of " +
-            "their owners, and their use does not mean those owners endorse or sponsor the Service.",
-        },
+        { kind: "paragraph", key: "legal.terms.intellectual_property.b1" },
+        { kind: "paragraph", key: "legal.terms.intellectual_property.b2" },
       ],
     },
     {
-      heading: "Termination",
+      id: "termination",
+      heading: "legal.terms.termination.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            "You may stop using the Service and delete your account at any time from your account " +
-            "settings. We may suspend or terminate your access if you violate these Terms, to comply " +
-            "with law, or to protect the Service, other users, or third parties.",
-        },
-        {
-          kind: "paragraph",
-          text:
-            "On termination, your right to use the Service ends. Deleting your account removes your " +
-            "content and credentials as described in our Privacy Policy; some records, such as " +
-            "financial records, are retained in anonymized form as required. Provisions that by their " +
-            "nature should survive termination will survive, including payment obligations, " +
-            "disclaimers, limitations of liability, indemnification, and the dispute-resolution terms.",
-        },
+        { kind: "paragraph", key: "legal.terms.termination.b1" },
+        { kind: "paragraph", key: "legal.terms.termination.b2" },
       ],
     },
     {
-      heading: "Disclaimers",
+      id: "disclaimers",
+      heading: "legal.terms.disclaimers.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `THE SERVICE AND ALL OUTPUTS ARE PROVIDED "AS IS" AND "AS AVAILABLE" WITHOUT WARRANTIES OF ` +
-            `ANY KIND, WHETHER EXPRESS, IMPLIED, OR STATUTORY, INCLUDING IMPLIED WARRANTIES OF ` +
-            `MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. We do not ` +
-            `warrant that the Service will be uninterrupted, secure, or error-free, or that outputs ` +
-            `will be accurate or reliable. Some jurisdictions do not allow the exclusion of certain ` +
-            `warranties, so some of the above may not apply to you.`,
-        },
+        { kind: "paragraph", key: "legal.terms.disclaimers.b1" },
       ],
     },
     {
-      heading: "Limitation of liability",
+      id: "limitation-of-liability",
+      heading: "legal.terms.limitation_of_liability.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `TO THE MAXIMUM EXTENT PERMITTED BY LAW, ${C.serviceName} AND ITS SUPPLIERS WILL NOT BE ` +
-            `LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR EXEMPLARY DAMAGES, OR FOR ` +
-            `ANY LOST PROFITS, REVENUES, DATA, OR GOODWILL, ARISING OUT OF OR RELATED TO YOUR USE OF ` +
-            `THE SERVICE.`,
-        },
-        {
-          kind: "paragraph",
-          text:
-            "TO THE MAXIMUM EXTENT PERMITTED BY LAW, OUR TOTAL LIABILITY FOR ALL CLAIMS RELATING TO " +
-            "THE SERVICE WILL NOT EXCEED THE GREATER OF THE AMOUNTS YOU PAID US IN THE THREE MONTHS " +
-            "BEFORE THE EVENT GIVING RISE TO THE LIABILITY, OR ONE HUNDRED U.S. DOLLARS (USD 100). " +
-            "These limitations apply even if a remedy fails of its essential purpose. Some " +
-            "jurisdictions do not allow certain limitations, so some of the above may not apply to you.",
-        },
+        { kind: "paragraph", key: "legal.terms.limitation_of_liability.b1" },
+        { kind: "paragraph", key: "legal.terms.limitation_of_liability.b2" },
       ],
     },
     {
-      heading: "Indemnification",
+      id: "indemnification",
+      heading: "legal.terms.indemnification.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `You will defend, indemnify, and hold harmless ${C.serviceName} and its officers, ` +
-            `employees, and agents from and against any claims, damages, liabilities, and expenses ` +
-            `(including reasonable legal fees) arising out of or related to Your Content, your use of ` +
-            `the Service, your violation of these Terms, or your violation of any law or third-party ` +
-            `right.`,
-        },
+        { kind: "paragraph", key: "legal.terms.indemnification.b1" },
       ],
     },
     {
-      heading: "Changes to these Terms",
+      id: "changes-to-these-terms",
+      heading: "legal.terms.changes_to_these_terms.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            "We may update these Terms from time to time. If we make material changes, we will take " +
-            "reasonable steps to notify you, for example by email or through an in-Service notice. " +
-            "Changes take effect when posted unless we state otherwise, and your continued use of the " +
-            "Service after that constitutes acceptance.",
-        },
+        { kind: "paragraph", key: "legal.terms.changes_to_these_terms.b1" },
       ],
     },
     {
-      heading: "Governing law and disputes",
+      id: "governing-law-and-disputes",
+      heading: "legal.terms.governing_law_and_disputes.heading",
       blocks: [
-        {
-          kind: "paragraph",
-          text:
-            `These Terms are governed by the laws of ${C.governingLaw}, without regard to its ` +
-            `conflict-of-law rules. To the extent permitted by law, you and ${C.serviceName} agree to ` +
-            `the exclusive jurisdiction of the courts located in ${C.venue} for any dispute arising ` +
-            `out of or relating to these Terms or the Service. Nothing in this section limits any ` +
-            `mandatory consumer-protection rights you have under the law of your place of residence.`,
-        },
+        { kind: "paragraph", key: "legal.terms.governing_law_and_disputes.b1" },
       ],
     },
     {
-      heading: "Miscellaneous",
+      id: "miscellaneous",
+      heading: "legal.terms.miscellaneous.heading",
       blocks: [
         {
           kind: "list",
           items: [
-            "These Terms, together with our Privacy Policy, are the entire agreement between you and us regarding the Service and supersede any prior agreements on that subject.",
-            "If any provision is found unenforceable, the remaining provisions stay in effect.",
-            "Our failure to enforce a provision is not a waiver of it.",
-            "You may not assign these Terms without our prior written consent; we may assign them to an affiliate or in connection with a merger, acquisition, or sale of assets.",
-            "Nothing in these Terms creates any agency, partnership, or joint venture between you and us.",
+            "legal.terms.miscellaneous.b1_1",
+            "legal.terms.miscellaneous.b1_2",
+            "legal.terms.miscellaneous.b1_3",
+            "legal.terms.miscellaneous.b1_4",
+            "legal.terms.miscellaneous.b1_5",
           ],
         },
       ],

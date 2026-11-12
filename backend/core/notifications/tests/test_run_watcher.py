@@ -14,10 +14,9 @@ from core.constants import (
     TQDM_N_KEY,
     TQDM_TOTAL_KEY,
 )
-from core.notifications.catalog import BUDGET_NEAR, NEEDS_INPUT, NEW_BEST, STUCK
+from core.notifications.catalog import BUDGET_NEAR, FINISHED, NEW_BEST, STUCK
 from core.notifications.notifier import (
     notify_run_budget,
-    notify_run_needs_input,
     notify_run_new_best,
     notify_run_stuck,
 )
@@ -120,28 +119,28 @@ def _watcher(store: Any, sent: _Sent, *, off: tuple[str, ...] = (), **overrides:
 def test_events_switched_off_everywhere_emit_nothing() -> None:
     """An event with every grid cell off is never emitted."""
     sent = _Sent()
-    watcher = _watcher(_ClaimStore(), sent, off=(NEW_BEST, STUCK, BUDGET_NEAR, NEEDS_INPUT))
+    watcher = _watcher(_ClaimStore(), sent, off=(NEW_BEST, STUCK, BUDGET_NEAR))
 
     watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.1})
     watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.9})
     watcher.observe_spend(100, 100)
-    watcher.notify_needs_input()
 
     assert sent.calls == []
     assert watcher.spend_check_due() is False
 
 
 def test_for_run_skips_only_when_no_in_run_event_reaches_the_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A watcher is built unless every in-run event is off everywhere, or there is no owner."""
+    """A watcher is built unless every in-run event is off everywhere, or there is no owner.
+
+    Finished alone builds no watcher: the watcher never sends that event.
+    """
     monkeypatch.setattr(watcher_module, "notification_settings", lambda _u: _settings())
     assert RunNotificationWatcher.for_run(_JOB, _USER, _ClaimStore()) is not None
     assert RunNotificationWatcher.for_run(_JOB, None, _ClaimStore()) is None
 
-    monkeypatch.setattr(
-        watcher_module,
-        "notification_settings",
-        lambda _u: _settings(off=(NEW_BEST, STUCK, BUDGET_NEAR, NEEDS_INPUT)),
-    )
+    only_finished = _settings(off=(NEW_BEST, STUCK, BUDGET_NEAR))
+    assert only_finished.any_enabled(FINISHED)
+    monkeypatch.setattr(watcher_module, "notification_settings", lambda _u: only_finished)
     assert RunNotificationWatcher.for_run(_JOB, _USER, _ClaimStore()) is None
 
 
@@ -219,27 +218,6 @@ def test_budget_alert_fires_once_at_the_fraction() -> None:
     assert sent.calls[0][1] == (_JOB, _USER, 80, 100)
 
 
-def test_needs_input_fires_once() -> None:
-    """A budget pause mails the owner once per run."""
-    sent = _Sent()
-    watcher = _watcher(_ClaimStore(), sent)
-
-    watcher.notify_needs_input()
-    watcher.notify_needs_input()
-
-    assert sent.kinds() == [notify_run_needs_input]
-
-
-def test_needs_input_carries_spend_and_limit() -> None:
-    """The pause event passes what was spent and the limit it hit."""
-    sent = _Sent()
-    watcher = _watcher(_ClaimStore(), sent)
-
-    watcher.notify_needs_input(120.0, 100)
-
-    assert sent.calls[0][1] == (_JOB, _USER, 120.0, 100)
-
-
 def test_store_without_claim_support_sends_nothing() -> None:
     """Without a durable guard the watcher prefers silence over repeats."""
     sent = _Sent()
@@ -252,7 +230,6 @@ def test_store_without_claim_support_sends_nothing() -> None:
     )
 
     watcher.observe_progress(PROGRESS_BASELINE, {})
-    watcher.notify_needs_input()
 
     assert sent.calls == []
 

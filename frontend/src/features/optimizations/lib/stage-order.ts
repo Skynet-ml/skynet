@@ -19,41 +19,15 @@ const STAGE_ORDER: readonly PipelineStage[] = [
   "evaluating",
 ];
 
-// A DSPy run measures its baseline on the test split, so a run without one
-// goes straight from splitting to the optimizer.
-function hasTestSplit(
-  job: OptimizationStatusResponse,
-  payload: OptimizationPayloadResponse | null | undefined,
-): boolean {
-  const splits = job.progress_events?.find((e) => e.event === "dataset_splits_ready");
-  if (splits) return splits.metrics?.test_examples !== 0;
-  const fractions = payload?.payload.split_fractions as { test?: number } | undefined;
-  return fractions?.test !== 0;
-}
-
 /**
- * The stages a run passes through before its optimizer starts, besides
- * validation. Black-box runs have none: they never split cases and score
- * the starting point in the final evaluation.
- */
-export function preparationStages(
-  job: OptimizationStatusResponse,
-  payload: OptimizationPayloadResponse | null | undefined,
-): PipelineStage[] {
-  if (job.optimization_type === "blackbox") return [];
-  return hasTestSplit(job, payload) ? ["splitting", "baseline"] : ["splitting"];
-}
-
-/**
- * The engine of a single-engine black-box run, or null for the auto strategy
- * (and for DSPy runs). The run's own lane event wins; before it lands, the
+ * The engine of a single-engine run, or null for the auto strategy. The run's
+ * own lane event wins; before it lands, the
  * submitted strategy and then the result name the engine.
  */
 export function singleEngineOf(
   job: OptimizationStatusResponse,
   payload: OptimizationPayloadResponse | null | undefined,
 ): string | null {
-  if (job.optimization_type !== "blackbox") return null;
   const singleLane = job.progress_events?.find(
     (e) => e.event === "lane_started" && e.metrics?.phase === "single",
   );
@@ -80,10 +54,10 @@ export function plannedStageKeys(
 ): PipelineStage[] {
   // The auto strategy races explore lanes, then refines the winner with GEPA.
   const middle: PipelineStage[] =
-    job.optimization_type === "blackbox" && singleEngineOf(job, payload) === null
-      ? ["optimizing", "refining"]
-      : ["optimizing"];
-  return ["validating", ...preparationStages(job, payload), ...middle, "evaluating"];
+    singleEngineOf(job, payload) === null ? ["optimizing", "refining"] : ["optimizing"];
+  // Runs never split cases up front and score the starting point in the final
+  // evaluation, so there is no splitting or baseline stage.
+  return ["validating", ...middle, "evaluating"];
 }
 
 /**

@@ -8,9 +8,6 @@ with no database. The approval tests drive the generalist's gate directly.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
-from types import SimpleNamespace
 from typing import Any
 
 import dspy
@@ -21,7 +18,6 @@ from fastapi.testclient import TestClient
 from mcp.types import Tool as McpTool
 from mcp.types import ToolAnnotations
 
-from ...service_gateway.agents import react_serve
 from ...service_gateway.agents.generalist import (
     _ALWAYS_CONFIRM_TOOLS,
     _ALWAYS_TOOLS,
@@ -127,10 +123,23 @@ def _area_tabs(job_store: Any = None) -> set[str]:
     return {row["tab"] for row in TestClient(app).get("/agent/settings").json()["settings"]}
 
 
-def test_list_settings_keeps_hosted_tabs_on_the_hosted_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hosted service always lists the security and billing areas."""
+def test_list_settings_keeps_every_tab_on_the_hosted_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hosted service hides no tab, so it lists every settings area."""
     monkeypatch.setattr(agent_settings_module.settings, "local_mode", False)
-    assert {"security", "billing"} <= _area_tabs()
+    assert _area_tabs() == {spec.tab for spec in agent_settings_module._SETTINGS.values()}
+
+
+@pytest.mark.parametrize("local_mode", [False, True])
+def test_tools_know_no_agent_engine_setting(monkeypatch: pytest.MonkeyPatch, local_mode: bool) -> None:
+    """No app has an Agent tab or an agent engine setting, so the tools reject both as unknown."""
+    monkeypatch.setattr(agent_settings_module.settings, "local_mode", local_mode)
+    client, calls = _client()
+    rows = client.get("/agent/settings").json()["settings"]
+    assert "agent_engine" not in {row["key"] for row in rows}
+    assert client.get("/agent/settings/agent_engine").status_code == 422
+    assert client.post("/agent/settings/agent_engine", json={"values": {"engine": "codex"}}).status_code == 422
+    assert client.post("/agent/open-page", json={"tab": "agent"}).status_code == 422
+    assert calls == []
 
 
 def test_list_settings_hides_hosted_tabs_in_an_unlinked_mac_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,9 +302,41 @@ def test_open_page_returns_navigation() -> None:
     assert client.post("/agent/open-page", json={"path": "/optimizations"}).json() == {
         "navigate": {"kind": "route", "path": "/optimizations"}
     }
-    for path in ("//evil.example", "https://evil.example", "/a?b=1", "javascript:alert(1)", ""):
+    for path in ("//evil.example", "https://evil.example", "javascript:alert(1)", ""):
         assert client.post("/agent/open-page", json={"path": path}).status_code == 422
     assert client.post("/agent/open-page", json={"tab": "secret"}).status_code == 422
+
+
+def test_open_page_keeps_a_narrow_query_string() -> None:
+    """A plain query string opens, an open-redirect shape does not (SKY-631)."""
+    client, _ = _client()
+    assert client.post("/agent/open-page", json={"path": "/tagger?dataset=abc-123"}).json() == {
+        "navigate": {"kind": "route", "path": "/tagger?dataset=abc-123"}
+    }
+    for path in (
+        "//evil.com",
+        "/tagger?next=https://x",
+        "/tagger?next=//evil.com",
+        "/tagger?a=b\\c",
+        "/tagger?a=user@evil.com",
+        "/tagger?a=b#frag",
+        "/tagger#frag",
+        "/tagger?",
+        "/tagger?a=1?b=2",
+        "/tagger?a=%2F%2Fevil.com",
+    ):
+        assert client.post("/agent/open-page", json={"path": path}).status_code == 422, path
+
+
+def test_open_page_keeps_a_query_string_only_for_the_tagger() -> None:
+    """Only /tagger takes a query, so a setup route keeps its exact path (SKY-651)."""
+    client, _ = _client()
+    for path in ("/tagger?new=1", "/tagger?dataset=0123abcd"):
+        assert client.post("/agent/open-page", json={"path": path}).json() == {
+            "navigate": {"kind": "route", "path": path}
+        }, path
+    for path in ("/submit?folder=x", "/optimizations?a=1", "/tagger/x?a=1"):
+        assert client.post("/agent/open-page", json={"path": path}).status_code == 422, path
 
 
 def test_mask_secrets_keeps_flags_and_masks_shapes() -> None:
@@ -324,7 +365,8 @@ def test_settings_tools_are_on_the_generalist_roster() -> None:
     """Every settings tool is offered, with the right approval class."""
     assert set(_ALWAYS_TOOLS) >= _SETTINGS_TOOLS
     assert "change_setting" in _DESTRUCTIVE_TOOLS
-    assert {"change_protected_setting"} == _ALWAYS_CONFIRM_TOOLS
+    # request_secret (SKY-641) also asks in every trust mode: its card is where the user types the value.
+    assert {"change_protected_setting", "request_secret"} == _ALWAYS_CONFIRM_TOOLS
 
 
 def test_router_tags_every_route_for_the_agent() -> None:
@@ -445,46 +487,3 @@ def test_training_ground_live_roster_drops_protected_tool(monkeypatch: pytest.Mo
     monkeypatch.setattr(run_react, "_list_live_tool_specs", listing)
     tools = run_react._list_live_tools("http://mcp.local/mcp", None)
     assert [tool.name for tool in tools] == ["list_settings"]
-
-
-class _RosterSeenError(Exception):
-    """Stop the react-serve driver once it built its roster."""
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["ask", "auto_safe", "yolo"])
-async def test_react_serve_roster_drops_protected_tool(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    """A served react chat can rename tools or run in YOLO, so it never gets the protected tool."""
-    seen: list[str] = []
-
-    @contextlib.asynccontextmanager
-    async def session(_url: str, auth_header: str | None = None) -> AsyncIterator[Any]:
-        """Yield a fake MCP session whose listing holds the protected tool."""
-
-        async def list_tools() -> Any:
-            """Return the fake listing."""
-            return SimpleNamespace(tools=_mcp_specs())
-
-        yield SimpleNamespace(list_tools=list_tools)
-
-    def capture(_hashes: Any, tools: list[dspy.Tool], strict: bool) -> None:
-        """Record the roster the driver built, then stop the turn."""
-        seen.extend(tool.name for tool in tools)
-        raise _RosterSeenError
-
-    monkeypatch.setattr(react_serve, "_mcp_session", session)
-    monkeypatch.setattr(react_serve, "_assert_tool_set_matches", capture)
-    with pytest.raises(_RosterSeenError):
-        await react_serve._drive_react_chat(
-            signature_cls=object,
-            program_state_json="{}",
-            react_overlay=SimpleNamespace(tool_source={}, tool_schema_hashes={}),
-            user_message="hi",
-            trust_mode=mode,
-            registry=ApprovalRegistry(),
-            emit=lambda _event: None,
-            lm=object(),
-            mcp_url="http://mcp.local/mcp",
-            auth_header=None,
-        )
-    assert seen == ["list_settings"]

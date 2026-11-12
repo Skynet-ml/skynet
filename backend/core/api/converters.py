@@ -9,12 +9,11 @@ from typing import Any
 
 from ..billing.credential_safety import scrub_model_config
 from ..constants import (
-    OPTIMIZATION_TYPE_RUN,
+    OPTIMIZATION_TYPE_BLACKBOX,
     PAYLOAD_OVERVIEW_COLUMN_MAPPING,
     PAYLOAD_OVERVIEW_COMPOSITION,
     PAYLOAD_OVERVIEW_DATASET_ROWS,
     PAYLOAD_OVERVIEW_DESCRIPTION,
-    PAYLOAD_OVERVIEW_GENERATION_MODELS,
     PAYLOAD_OVERVIEW_MODEL_NAME,
     PAYLOAD_OVERVIEW_MODEL_SETTINGS,
     PAYLOAD_OVERVIEW_MODULE_KWARGS,
@@ -23,13 +22,10 @@ from ..constants import (
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
     PAYLOAD_OVERVIEW_REFLECTION_MODEL,
-    PAYLOAD_OVERVIEW_REFLECTION_MODELS,
     PAYLOAD_OVERVIEW_SOURCE_DATASET_ID,
     PAYLOAD_OVERVIEW_TASK_FINGERPRINT,
     PAYLOAD_OVERVIEW_TASK_MODEL,
-    PAYLOAD_OVERVIEW_TOTAL_PAIRS,
     PAYLOAD_OVERVIEW_USERNAME,
-    TQDM_REMAINING_KEY,
 )
 from ..models import OptimizationStatus
 
@@ -190,22 +186,6 @@ def job_owner(job_data: dict) -> str | None:
     return None
 
 
-def extract_estimated_remaining(job_data: dict) -> str | None:
-    """Read the tqdm-derived remaining-time metric and format it as ``HH:MM:SS``.
-
-    Args:
-        job_data: Raw job dict; the ``latest_metrics`` field is consulted.
-
-    Returns:
-        ``HH:MM:SS`` string, or ``None`` when no usable remaining-time value is present.
-    """
-    metrics = job_data.get("latest_metrics") or {}
-    val = metrics.get(TQDM_REMAINING_KEY)
-    if isinstance(val, (int, float)) and val >= 0:
-        return _seconds_to_hhmmss(val)
-    return None
-
-
 def overview_to_base_fields(overview: dict) -> dict:
     """Map payload-overview keys to the flat field names expected by response models.
 
@@ -216,10 +196,8 @@ def overview_to_base_fields(overview: dict) -> dict:
         Dict keyed by response-model field names with values pulled from the overview.
     """
     model_settings = overview.get(PAYLOAD_OVERVIEW_MODEL_SETTINGS)
-    generation_models = overview.get(PAYLOAD_OVERVIEW_GENERATION_MODELS)
-    reflection_models = overview.get(PAYLOAD_OVERVIEW_REFLECTION_MODELS)
     return {
-        "optimization_type": overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN),
+        "optimization_type": overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_BLACKBOX),
         "name": overview.get(PAYLOAD_OVERVIEW_NAME),
         "description": overview.get(PAYLOAD_OVERVIEW_DESCRIPTION),
         "pinned": overview.get("pinned", False),
@@ -235,16 +213,5 @@ def overview_to_base_fields(overview: dict) -> dict:
         "model_settings": scrub_model_config(model_settings) if isinstance(model_settings, dict) else model_settings,
         "reflection_model_name": overview.get(PAYLOAD_OVERVIEW_REFLECTION_MODEL),
         "task_model_name": overview.get(PAYLOAD_OVERVIEW_TASK_MODEL),
-        "total_pairs": overview.get(PAYLOAD_OVERVIEW_TOTAL_PAIRS),
-        "generation_models": (
-            [scrub_model_config(model) if isinstance(model, dict) else model for model in generation_models]
-            if isinstance(generation_models, list)
-            else generation_models
-        ),
-        "reflection_models": (
-            [scrub_model_config(model) if isinstance(model, dict) else model for model in reflection_models]
-            if isinstance(reflection_models, list)
-            else reflection_models
-        ),
         "task_fingerprint": overview.get(PAYLOAD_OVERVIEW_TASK_FINGERPRINT),
     }

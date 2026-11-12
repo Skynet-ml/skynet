@@ -18,8 +18,36 @@ const MAX_CELLS = 4_000_000;
  *   Every line of both texts in order, each marked kept, added or removed.
  */
 export function lineDiff(before: string, after: string): DiffLine[] {
-  const a = before ? before.split("\n") : [];
-  const b = after ? after.split("\n") : [];
+  return diffTokens(before ? before.split("\n") : [], after ? after.split("\n") : []);
+}
+
+/** A run of words in a word diff: kept, added or removed. */
+export type DiffPart = { type: "same" | "add" | "del"; text: string };
+
+/**
+ * Diff two texts word by word, keeping the whitespace between words.
+ *
+ * Args:
+ *   before: The old text.
+ *   after: The new text.
+ *
+ * Returns:
+ *   Runs of kept, added and removed text that rebuild both texts in order;
+ *   neighbouring runs of one type are merged.
+ */
+export function wordDiff(before: string, after: string): DiffPart[] {
+  const split = (text: string) => text.split(/(\s+)/).filter(Boolean);
+  const out: DiffPart[] = [];
+  for (const token of diffTokens(split(before), split(after))) {
+    if (token.type === "gap") continue;
+    const last = out[out.length - 1];
+    if (last && last.type === token.type) last.text += token.text;
+    else out.push({ type: token.type, text: token.text });
+  }
+  return out;
+}
+
+function diffTokens(a: readonly string[], b: readonly string[]): DiffLine[] {
   if (a.length * b.length > MAX_CELLS) {
     return [
       ...a.map((text) => ({ type: "del" as const, text })),

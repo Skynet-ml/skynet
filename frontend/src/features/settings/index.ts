@@ -1,5 +1,10 @@
 export { UserPrefsProvider, useUserPrefs } from "./hooks/use-user-prefs";
 export { SettingsModalProvider, useSettingsModal } from "./hooks/use-settings-modal";
 export { SettingsModal } from "./components/SettingsModal.lazy";
-export { agentSubscriptionFor, parseAgentPreferencePatch, readPref } from "./lib/prefs";
-export { SETTINGS_TABS, visibleSettingsTabs, type SettingsTab } from "./lib/tabs";
+export {
+  composerSeed,
+  parseAgentPreferencePatch,
+  readPref,
+  rememberComposerPick,
+} from "./lib/prefs";
+export { SETTINGS_TABS, visibleSettingsTabs } from "./lib/tabs";

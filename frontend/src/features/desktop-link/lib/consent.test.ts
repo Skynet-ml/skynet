@@ -4,9 +4,6 @@ import test from "node:test";
 import {
   approvedCallbackUrl,
   callbackUrl,
-  DESKTOP_SKIP_PATH,
-  isDesktopAppUserAgent,
-  returnsToDesktopLink,
   deniedCallbackUrl,
   errorMessageKey,
   isAppCallback,
@@ -205,35 +202,4 @@ test("scope lines and error codes map to message keys", () => {
   assert.equal(errorMessageKey(undefined, 429), "desktop_link.error.rate_limit");
   assert.equal(errorMessageKey(undefined, 500), "desktop_link.error.generic");
   assert.equal(errorMessageKey("desktop.session_required", 403), "desktop_link.error.generic");
-});
-
-test("only the Mac app's user agent counts as the desktop app", () => {
-  assert.ok(
-    isDesktopAppUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Electron/33.0.0 Safari/537.36 SkynetDesktop",
-    ),
-  );
-  assert.equal(
-    isDesktopAppUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15"),
-    false,
-  );
-  assert.equal(isDesktopAppUserAgent(""), false);
-  assert.equal(DESKTOP_SKIP_PATH, "/desktop/link/skip");
-});
-
-test("login detects a return to the consent page on the same origin only", () => {
-  const origin = "https://skynetml.com";
-  const back = `${origin}/desktop/link?redirect_uri=${encodeURIComponent(CALLBACK)}&state=s`;
-  assert.ok(returnsToDesktopLink(`?callbackUrl=${encodeURIComponent(back)}`, origin));
-  assert.ok(returnsToDesktopLink(`?passkey_offer=1&callbackUrl=${encodeURIComponent("/desktop/link?state=s")}`, origin));
-  for (const search of [
-    "",
-    "?callbackUrl=",
-    `?callbackUrl=${encodeURIComponent(`${origin}/settings`)}`,
-    `?callbackUrl=${encodeURIComponent(`${origin}/desktop/link/skip`)}`,
-    `?callbackUrl=${encodeURIComponent("https://evil.com/desktop/link")}`,
-    `?callbackUrl=${encodeURIComponent("//evil.com/desktop/link")}`,
-  ]) {
-    assert.equal(returnsToDesktopLink(search, origin), false, search);
-  }
 });

@@ -1,46 +1,262 @@
-"""Score repository versions in the trusted parent's box, where the run's secrets live.
+"""Score repository versions in the trusted parent's boxes, where the run's secrets live.
 
-The guest that hosts the coding agent never sees the secrets or this box: it
-posts each version through the parent's evaluator capability, and the parent
-lays it out on a copy of the already set-up tree, then calls the user's
-``score(repo_path)`` (or ``score(repo_path, case)``) on it.
+The guest that hosts the coding agent never sees the secrets or these boxes:
+it posts each version through the parent's evaluator capability, and the
+parent lays it out on a copy of the already set-up tree, then calls the
+user's ``score(repo_path)`` (or ``score(repo_path, case)``).
+
+Each evaluation gets two fresh boxes (SKY-398). The candidate box C holds
+the prepared tree with the version laid out, and runs the ``[run]`` entry on
+the case's ``input`` only (E42). The parent reads its output, then ends C;
+every process the version started ends with it. The metric box M holds only
+the metric files and the runner, never the repository tree, and opens while
+C runs. M gets the metric files and C's output only after C ended, and runs
+``score(repo_path, case, output)`` with ``repo_path`` the folder that holds
+the metric files at their repository paths (E41). A check that needs the
+version's code belongs in the ``[run]`` entry: without one, the metric sees
+no version code at all. A run that times out, raises, returns no JSON, is
+killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
+feedback, and the metric is not called. A nonzero exit of a command entry is
+an output like any other. Neither box gets the run's secrets: only the model
+route reaches the box.
 
 A scorer returns a score with its feedback, like any scorer, and may return
 per-case results under ``cases``, a mapping of case name to
 ``{"score", "feedback"}``. The run's score stays the top-level number; each
 case becomes a named score that every engine reflects on and keeps on its
 Pareto front.
+
+A run whose ``optimize.toml`` has ``[target.<name>]`` stages opens one offline
+box for each stage for each candidate evaluation, all before the scorer runs
+(E29). The scorer reaches them with ``call(name, input)``: the call is a
+framed line on the scorer's stdout, the parent runs the stage in its box, and
+writes the answer back into the metric box. That relay is the stages' only
+way out (E27).
+
+The same relay carries the metric's requests to the run's ``[services.<name>]``
+that have a url (E45). The parent checks that the calling role lists the
+service (E55), fills the service's ``${NAME}`` headers and query with
+:func:`relay_request` (each secret only to its own host and the run's allowed
+hosts, a Skynet key metered, E49-E53), calls the url with no redirects, and
+removes every filled value from the answer's headers and body before the box
+gets it (E56). The version's ``[run]`` entry reaches its own services the same
+way, checked against the ``[run]`` role. No box ever holds those
+secrets. Catalog connectors do not go through the relay.
+
+A stage whose own MCP file holds a server gets a relay of its own for each
+call in its stage box: the call's runner serves the same loopback proxy on a
+free port of its own, with its own copy of the MCP file, so calls run in
+parallel (SKY-624). The parent reads the call's frames from its output under
+the call's own prefix, checks each one against the ``[target.<name>]`` role
+only, and writes the answer into the call's own folder in that box.
 """
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import contextvars
+import functools
+import hashlib
 import json
+import logging
 import math
+import re
 import shlex
+import string
 import threading
-from collections.abc import Mapping
-from typing import Any
+import uuid
+from collections.abc import Generator, Iterator, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote, urlencode
 
+import httpx
+
+from ....billing.budgets import BudgetError, BudgetInsufficientError
+from ....billing.env_connectors import relay_request
+from ....billing.mcp_broker import _pinned_address, _PinnedTransport
 from ....billing.model_dispatch import ModelHTTPResult
+from ....billing.model_gateway import _tool_target
+from ....billing.operation_pricing import UnpricedOperationError
+from ....billing.runtime import BudgetRuntime, UsagePendingError
+from ....billing.signals import BudgetReached
+from ....billing.usage_tags import LANE_KEY, box_tag, current_tags
+from ....sandbox.snapshots import snapshot_cache_key
+from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
-from .repo_workspace import REPO_DIR, RepoWorkspace, redact
-from .rule_judge import ILLEGAL_APPROACH_KEY, ILLEGAL_SCORE, RuleJudge, RuleJudgeUnavailableError
-from .sandbox import SandboxSession
-from .sandbox_scorer import RUNNER_SOURCE
+from .harness import ENV_API_KEY, ENV_MODEL
+from .protocol import STATUS_KEY
+from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
+from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
+from .repo_tree import archive_chunks, drop_paths
+from .repo_workspace import (
+    GIT,
+    METRIC_DIR,
+    METRIC_REPO_DIR,
+    REPO_DIR,
+    WORK_DIR,
+    CandidateBox,
+    Checkout,
+    MetricBox,
+    RepoSetupError,
+    RepoWorkspace,
+    redact,
+)
+from .rule_judge import RuleJudge
+from .sandbox_contract import SandboxRuntime, SandboxSession
+from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
+
+if TYPE_CHECKING:
+    from ....worker.scoped_relay import CallRecorder, CallStart
+
+logger = logging.getLogger(__name__)
 
 CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
 CALLS_DIR = f"{REPO_DIR}/calls"
-# The guest waits for the version's checkout and the scorer together; copying a
-# prepared tree with its installed dependencies can take a while, so its relay
-# gets an allowance on top of the scorer's own timeout.
-SETUP_ALLOWANCE_SECONDS = 1_800.0
+METRIC_RUNNER_PATH = f"{METRIC_DIR}/app_runner.py"
+METRIC_CALLS_DIR = f"{METRIC_DIR}/calls"
+# The version's code can write next to the runner and into $HOME, so the
+# runner starts without its own folder, user site-packages or PYTHON* env on
+# its path: a planted json.py or .pth would run before any check (E38, E40).
+# -I drops PYTHONDONTWRITEBYTECODE and PYTHONUNBUFFERED, so -B and -u keep them.
+_ISOLATED = "-I -B -u"
+# The supervisor needs the standard library alone. Without site-packages, a .pth
+# that an earlier call's version code planted there cannot patch the clock that
+# times the [run] entry. The supervisor starts a function entry with python3
+# from PATH, so the entry still gets the [setup] packages (SKY-642).
+_NO_SITE = "-S"
+# The supervisor starts with the image's root-owned base interpreter, not a
+# PATH lookup: /app/.venv/bin is group-writable for the box user, so a version
+# could replace its python3 for the next case. A host without this path (local
+# tests) falls back to PATH (SKY-642).
+_BASE_PYTHON = "/usr/local/bin/python3"
+# The supervisor runs as root, but the box user can rewrite the runner file
+# between the write and the run (a process an earlier case left). So root reads
+# the file once, checks its hash against the parent's copy, and runs those
+# same bytes (SKY-398).
+_SUPERVISOR_BOOT = (
+    "import hashlib,sys;p=sys.argv[1];s=open(p,'rb').read();"
+    "hashlib.sha256(s).hexdigest()==sys.argv[2] or sys.exit('The supervisor file changed before it ran.');"
+    "sys.argv=[p]+sys.argv[3:];g=sys.modules['__main__'].__dict__;g['__file__']=p;"
+    "exec(compile(s,p,'exec'),g)"
+)
+_RUNNER_SHA256 = hashlib.sha256(RUNNER_SOURCE.encode("utf-8")).hexdigest()
+STAGE_DIR = ".app-stage"
+_STAGE_TREE = f"{STAGE_DIR}/tree"
+# Each stage call's folder is ``<this>/<call id>``, relative to the box; a
+# call with a relay gets its answers in a ``relay`` folder inside it.
+_STAGE_CALLS_DIR = f"{STAGE_DIR}/calls"
+# The box's working directory, seen from the stage tree that each call runs in.
+_FROM_STAGE_TREE = "../.."
+# The exit code of a stage box from the stage snapshot that has no tree, so
+# the scorer can tell a bad snapshot from a version that does not apply.
+_NO_STAGE_TREE_EXIT = 97
+# Unpacking the tree and applying the version in a stage box; the box's hold
+# covers this on top of the scorer's own timeout.
+_STAGE_LAYOUT_SECONDS = 600.0
+# The guest waits for the version's checkout, its stage boxes' layout and the
+# scorer together; copying a prepared tree with its installed dependencies can
+# take a while, so its relay gets an allowance on top of the scorer's own
+# timeout. The guest does not know whether the run has stages, so every
+# repository run gets the layout time too; it only matters when the parent hangs.
+SETUP_ALLOWANCE_SECONDS = 1_800.0 + _STAGE_LAYOUT_SECONDS
+_STAGE_ERROR_CHARS = 500
+_SERVICE_TIMEOUT_SECONDS = 120.0
+# The answer is written into the scorer box, base64-encoded.
+_SERVICE_BODY_BYTES = 4 * 1024 * 1024
+# An MCP event stream can stay open for the whole run, so streams get their own threads, apart
+# from the call pool; this caps how many one relay keeps open at a time.
+_MCP_STREAMS = 4
+# The answer's headers travel to relay_request with its body, so the
+# redaction covers both; httpx header lines never hold this separator.
+_HEAD_END = b"\r\n\r\n"
+_HTTP_METHOD = re.compile(r"[A-Z]{1,16}")
+# Connection framing is the relay's own on each side; httpx decodes the body.
+_HOP_HEADERS = frozenset(
+    {"connection", "content-length", "host", "keep-alive", "proxy-authorization", "te", "transfer-encoding", "upgrade"}
+)
+_DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection", "keep-alive", "transfer-encoding"})
+# The answer must come back decoded and whole, or the masker cannot find a filled secret in it.
+_GUEST_DROPPED_HEADERS = frozenset({"accept-encoding", "range"})
+# A server may decode a path again, so a fully decoded service path may hold only plain URL path characters.
+_SERVICE_PATH_CHARS = frozenset(string.ascii_letters + string.digits + "-._~!$&'()*+,=:@/")
+# A service's query secrets ride through relay_request as declared values under this mark, so
+# they get the same host checks, record and answer mask as header secrets. No header name
+# holds it: the parser allows only letters, digits and '-' there (SKY-630).
+_QUERY_MARK = "?"
+# The version's [run] entry and the metric run in separate boxes, each with
+# its own relay, so each frame is checked against its own role (E37, SKY-398).
+_METRIC_ROLE = "metric"
+_RUN_ROLE = "run"
+# Each stage's role is ``target.<name>``, checked against its own MCP file only (SKY-611).
+_TARGET_ROLE = "target."
+# The candidate supervisor's own allowance on top of the [run] timeout: it
+# still has to kill the entry's process group and write its output.
+_RUN_STOP_SECONDS = 60.0
+_RUN_FEEDBACK_CHARS = 2_000
+RUN_FAILED = "Run failed: "
+# SKY-221: the side info ``status`` of a case whose entry failed. The final run
+# reads it, not the feedback, because pending rule-judge notes go in front of
+# the feedback.
+RUN_FAILED_STATUS = "run_failed"
+# The proposer gets only these keys, so the scorer's other side information
+# (weights, formulas, metric source) never reveals the metric (SKY-353).
+_PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
+# A traceback names the metric's files and quotes its source lines, and on
+# Python 3.11+ adds caret lines under them; every indented line goes. An
+# exception group draws the same frames behind "| " margins.
+_TRACEBACK = re.compile(
+    r"^[ +|]*(?:Exception Group )?Traceback \(most recent call last\):\n"
+    r"|^(?P<margin>[ |]*?)  File \".*\n(?:(?P=margin)    .*\n)*",
+    re.MULTILINE,
+)
+_FRAME_FILE = re.compile(r'File "([^"]*)"')
 
 
 class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
+
+
+class _StageSnapshotError(RepoScoreError):
+    """Stage boxes from the stage snapshot did not open or did not hold the tree."""
+
+
+class _AnswerTooLargeError(Exception):
+    """A service answered with more than the relay passes on."""
+
+
+class _UnreachableError(Exception):
+    """A service's host resolves to an address the relay must not reach."""
+
+
+def _streamed(stack: contextlib.ExitStack, head: bytes, chunks: Iterator[bytes]) -> Generator[bytes, None, None]:
+    """Yield an MCP event stream's header lines, then its body as it arrives, and close its connection at the end.
+
+    Args:
+        stack: The open client, response and transport of the stream.
+        head: The header lines and the blank line after them.
+        chunks: The response body.
+
+    Yields:
+        The head first, then each body chunk.
+
+    Raises:
+        _AnswerTooLargeError: When the body passes 4 MiB in all.
+    """
+    with stack:
+        yield head
+        size = 0
+        for chunk in chunks:
+            size += len(chunk)
+            # The whole stream counts: a long-lived stream holds a pool worker and the run record keeps its body.
+            if size > _SERVICE_BODY_BYTES:
+                raise _AnswerTooLargeError
+            yield chunk
 
 
 def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
@@ -83,118 +299,741 @@ class RepoScorer:
         *,
         timeout_seconds: float,
         rule_judge: RuleJudge | None = None,
+        gateway: ScorerGateway | None = None,
+        stages: Mapping[str, TargetStage] | None = None,
+        stage_runtime: SandboxRuntime | None = None,
+        stage_archive: Path | None = None,
+        hidden_paths: tuple[str, ...] = (),
+        max_concurrency: int = 1,
+        services: Mapping[str, ServiceSpec] | None = None,
+        service_roles: Mapping[str, tuple[str, ...]] | None = None,
+        mcp_roles: Mapping[str, RoleEnvironment] | None = None,
+        run_entry: str | tuple[str, ...] | None = None,
+        run_timeout: float = 60.0,
+        secret_bindings: Mapping[str, str] | None = None,
+        secret_hosts: Mapping[str, str] | None = None,
+        secret_allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
+        budget: BudgetRuntime | None = None,
+        recorder: CallRecorder | None = None,
     ) -> None:
         """Bind the user's scorer code to a repository workspace.
 
         Args:
             workspace: Parent-owned box holding the pristine tree.
-            code: Scorer source defining ``score(repo_path)`` or ``score(repo_path, case)``.
+            code: Scorer source defining ``score(repo_path)``, ``score(repo_path, case)``
+                or ``score(repo_path, case, output)``.
             timeout_seconds: Longest one scorer call may run, setup excluded.
             rule_judge: The repository's constraints-file enforcement, when it
                 has an ``optimize.toml``: path-rule refusals then get the fixed
-                illegal-action message, and every changed version passes the
-                final rule judge before it is scored.
+                illegal-action message, and the watch hook's warnings open
+                the next scoring feedback. It never changes a score.
+            gateway: The run's scoped model route from the trusted parent.
+                The scorer's ``llm()`` and the version's own code reach it
+                with ``APP_API_KEY`` and ``APP_MODEL``; the box itself stays
+                offline and talks to the parent through the model mailbox.
+            stages: The ``[target.<name>]`` stages the scorer may ``call``;
+                none keeps the scorer as it was.
+            stage_runtime: Opens the stage boxes; required with stages.
+            stage_archive: The tree each stage box gets, without the hidden
+                metric files; required with stages.
+            hidden_paths: Metric files and the exploit folder, dropped from
+                each version before a stage box applies it.
+            max_concurrency: How many calls to one stage run at the same time.
+            services: The run's ``[services.<name>]``; those with a url
+                go through the relay, and their secrets stay out of the box.
+            service_roles: The services each role lists, by role name;
+                ``run`` for the ``[run]`` entry and ``metric`` for the scorer.
+            mcp_roles: Each role with the servers of its own MCP file, by
+                role name (``run``, ``metric`` and ``target.<name>``); each
+                server goes through the relay, and its secrets stay out of
+                the box.
+            run_entry: The ``[run]`` entry: ``path/file.py:function`` or a
+                command; ``None`` runs no version code before the metric.
+            run_timeout: Longest one ``[run]`` call may run.
+            secret_bindings: ``user`` or ``managed`` for each secret name.
+            secret_hosts: The one host each secret may go to, from the
+                repository's ``optimize.toml``.
+            secret_allowed_hosts: Each user secret's ``allowed_hosts`` from
+                the run.
+            budget: The run budget, which meters a call with a Skynet key.
+            recorder: Writes each relayed service and MCP call into the run
+                record; ``None`` records nothing.
+
+        Raises:
+            ValueError: When stages are given without a runtime or a tree.
         """
+        if stages and (stage_runtime is None or stage_archive is None):
+            raise ValueError("Target stages need a runtime and a tree to open their boxes with.")
+        self._stages = dict(stages or {})
+        self._stage_runtime = stage_runtime
+        self._stage_archive = stage_archive
+        self._hidden = hidden_paths
+        self._max_concurrency = max(1, max_concurrency)
+        self._services = {name: spec for name, spec in (services or {}).items() if spec.url is not None}
+        self._declared = dict(services or {})
+        self._service_roles = dict(service_roles or {})
+        self._mcp_roles = dict(mcp_roles or {})
+        self._secret_bindings = dict(secret_bindings or {})
+        self._secret_hosts = dict(secret_hosts or {})
+        self._secret_allowed_hosts = dict(secret_allowed_hosts or {})
+        self._budget = budget
+        self._recorder = recorder
+        self._run_entry = run_entry
+        self._run_timeout = run_timeout
         self._workspace = workspace
+        self._gateway = gateway
         self._code = code
         self._timeout_seconds = timeout_seconds
         self._rule_judge = rule_judge
         self._root: str | None = None
         self._calls = 0
         self._lock = threading.Lock()
+        # The stage tree's own snapshot, built from ``stage_archive`` only: a
+        # snapshot of the scorer box would carry the metric into candidate code.
+        self._stage_snapshot_key = snapshot_cache_key(
+            image_digest="", setup_command="", install_command="", lock_files={"stage-tree": uuid.uuid4().hex}
+        )
+        self._stage_snapshot_id: str | None = None
+        self._stage_snapshot_done = False
+        self._stage_snapshot_lock = threading.Lock()
 
     def score(self, patch: str, case: Any = None) -> dict[str, Any]:
-        """Check out one version and score it.
+        """Run one version in its own candidate box, then score it in its own metric box.
+
+        The metric box opens while the candidate box runs, but gets the
+        metric files and the candidate's output only after the candidate box
+        ended (SKY-398). Both boxes close when the evaluation ends, also on a
+        failure, so each releases or settles its own hold.
 
         Args:
             patch: The version as a git patch against the starting commit.
             case: The case to score it on, when the run has cases.
 
         Returns:
-            ``{"score": ..., **side_info}``, secrets redacted; an illegal
-            approach gets a score of 0 with the judge's reason, unscored.
+            ``{"score": ..., **side_info}``, secrets redacted.
 
         Raises:
             RepoScoreError: When the version breaks the path rules or does not
-                apply, changes a protected file while it runs, the rule judge
-                cannot check it, or the scorer fails or returns no score.
+                apply, changes a protected file while it runs, or the scorer
+                fails or returns no score.
+            BudgetReached: When the run's budget stopped a box, model, service or MCP call.
+            BudgetError: When a box, model, service or MCP call had insufficient budget coverage.
+            UsagePendingError: When a box, model, service or MCP call needs reconciliation.
+            UnpricedOperationError: When the parent cannot bound a box, model, service or MCP call.
         """
+        gateway = self._gateway
         secrets = list(self._workspace.secrets.values())
+        if gateway is not None and gateway.api_key:
+            secrets.append(gateway.api_key)
         judge = self._rule_judge
-        # The judge runs outside the lock: a slow verdict must not hold up the
-        # checkout and scoring of other versions.
-        if judge is not None and patch.strip() and not self._workspace.violations(patch):
-            try:
-                verdict = judge.judge_version(patch)
-            except RuleJudgeUnavailableError as error:
-                raise RepoScoreError(str(error)) from error
-            if verdict.violated:
-                return {
-                    "score": ILLEGAL_SCORE,
-                    "feedback": verdict.feedback,
-                    ILLEGAL_APPROACH_KEY: {"rule": verdict.rule, "reason": verdict.reason},
-                }
-        # Checkout and scoring share one lock: the next version's checkout
-        # replaces the tree this one is scored on.
         with self._lock:
-            checkout = self._workspace.checkout(patch)
-            if checkout.path is None:
-                if judge is not None and checkout.blocked:
-                    raise RepoScoreError(judge.blocked(checkout.problems))
-                raise RepoScoreError(" ".join(checkout.problems))
-            session = self._workspace.session()
-            root = self._box_root(session)
+            opened = self._workspace.open_candidate(patch)
+            if isinstance(opened, Checkout):
+                if judge is not None and opened.blocked:
+                    raise RepoScoreError(judge.blocked(opened.problems))
+                raise RepoScoreError(" ".join(opened.problems))
             self._calls += 1
-            call_dir = f"{root}/{CALLS_DIR}/{self._calls:06d}"
-            session.write_files(
-                {
-                    f"{CALLS_DIR}/{self._calls:06d}/{runner.INPUT_FILE}": json.dumps(
-                        {"code": self._code, "candidate": f"{root}/{checkout.path}", "case": case, "gateway": None}
-                    )
-                }
-            )
-            unstamped = self._workspace.stamp_before_run()
-            if unstamped:
-                raise RepoScoreError(unstamped)
+            # A refusal from the candidate box can name its paths; the metric box sets its own root later.
+            self._root = opened.root
+            call = f"{CALLS_DIR}/{self._calls:06d}"
+            # Importing a package would otherwise write __pycache__ into the
+            # tree and fail the protected-path check. Skipping the bytecode
+            # beats ignoring __pycache__, where a version could plant a .pyc
+            # that the judge then loads. No run secret reaches a box (E38).
+            env = {**self._model_env(), "PYTHONDONTWRITEBYTECODE": "1"}
+            # The pool thread does not inherit the usage-scope contextvar, so
+            # the metric box's hold is tagged from a copy of this context.
+            opener = ThreadPoolExecutor(max_workers=1, thread_name_prefix="metric-box")
+            metric_box = opener.submit(contextvars.copy_context().run, self._open_parked_metric)
+            try:
+                try:
+                    ran = self._run_candidate(opened, call, case, env, secrets) if self._run_entry is not None else None
+                finally:
+                    # A budget error from the close must not leave the metric box parked.
+                    try:
+                        opened.close()
+                    finally:
+                        self._unpark(metric_box)
+                if ran is not None and ran.get("error"):
+                    error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
+                    error = error[len(RUN_FAILED) :]
+                    return {
+                        "score": 0.0,
+                        "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
+                        STATUS_KEY: RUN_FAILED_STATUS,
+                    }
+                metric = metric_box.result()
+                try:
+                    return self._score_in_metric_box(metric, patch, call, case, env, secrets, ran)
+                finally:
+                    metric.close()
+            finally:
+                opener.shutdown(wait=True)
+                if metric_box.exception() is None:
+                    # Closing twice is a no-op; this closes a box no path above used.
+                    metric_box.result().close()
+
+    def _open_parked_metric(self) -> MetricBox:
+        """Open the metric box and park it in the run budget until the candidate box ended.
+
+        The open metric box only waits for the candidate box, so the run
+        budget may stop a run whose candidate box waits on a model call (SKY-647).
+
+        Returns:
+            The open metric box.
+        """
+        metric = self._workspace.open_metric()
+        park = getattr(self._budget, "park", None)
+        if park is not None and metric.key is not None:
+            park(box_tag(metric.key))
+        return metric
+
+    def _unpark(self, metric_box: Future[MetricBox]) -> None:
+        """Wait for the metric box to open, then end its park, once the candidate box ended.
+
+        Args:
+            metric_box: The metric box being opened; a failed open parked nothing.
+        """
+        if metric_box.exception() is None:
+            key = metric_box.result().key
+            if key is not None and getattr(self._budget, "park", None) is not None:
+                self._budget.unpark(box_tag(key))
+
+    def _score_in_metric_box(
+        self,
+        metric: MetricBox,
+        patch: str,
+        call: str,
+        case: Any,
+        env: Mapping[str, str],
+        secrets: list[str],
+        ran: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Install the metric files in the metric box and call the metric on the candidate's output.
+
+        Args:
+            metric: The evaluation's open metric box.
+            patch: The version, for the stage boxes.
+            call: This call's folder name.
+            case: The case being scored.
+            env: The model route, the box's only environment from the parent.
+            secrets: Values to keep out of anything that leaves the box.
+            ran: The ``[run]`` entry's ``{"output", "error"}``, or ``None`` without a ``[run]`` entry.
+
+        Returns:
+            ``{"score": ..., **side_info}``, secrets redacted.
+
+        Raises:
+            RepoScoreError: When the metric files cannot be installed, or the
+                scorer fails or returns no score.
+            BudgetReached: And the other budget errors, from a stage box or a relayed call.
+        """
+        try:
+            metric.install_metric_files()
+        except RepoSetupError as error:
+            logger.warning("The metric files did not install: %s", redact(str(error), secrets))
+            raise RepoScoreError("The metric files could not be installed, so the version has no score.") from None
+        session, root = metric.session, metric.root
+        self._root = root
+        session.write_files({METRIC_RUNNER_PATH: RUNNER_SOURCE})
+        folder = f"{METRIC_CALLS_DIR}/{call.rsplit('/', 1)[1]}"
+        document: dict[str, Any] = {
+            "code": self._code,
+            "candidate": metric.repo_path,
+            "case": case,
+            "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
+            runner.METRIC_SITE_PARAM: metric.site_path,
+        }
+        if ran is not None:
+            document["output"] = ran.get("output")
+            elapsed = ran.get(runner.ELAPSED_PARAM)
+            if isinstance(elapsed, int | float) and math.isfinite(elapsed) and elapsed >= 0:
+                document[runner.ELAPSED_PARAM] = float(elapsed)
+        with self._stage_relay(patch, f"{folder}/stages", box=session) as relay:
+            if relay is not None:
+                document["stages"] = relay.config(root)
+            session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
             # A sink makes the session stream stderr live, which is where log() events travel.
             with sandbox_log.event_scope(source="scorer"):
                 result = session.run(
-                    f"cd {shlex.quote(checkout.path)} && python3 {shlex.quote(f'{root}/{RUNNER_PATH}')}"
-                    f" {shlex.quote(call_dir)}",
-                    # Importing a protected package would otherwise write
-                    # __pycache__ into it and fail the protected-path check.
-                    # Skipping the bytecode beats ignoring __pycache__, where a
-                    # version could plant a .pyc that the judge then loads.
-                    env={**self._workspace.secrets, "PYTHONDONTWRITEBYTECODE": "1"},
+                    f"cd {shlex.quote(metric.repo_path)} && python3 {_ISOLATED}"
+                    f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
+                    env=env,
                     timeout_seconds=self._timeout_seconds,
-                    on_output=sandbox_log.ignore_output,
+                    on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                 )
-            if result.timed_out:
-                raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-            tampered = self._workspace.protected_changes()
-            if tampered:
-                # The version's code names these files and can read the secrets.
-                reason = redact(" ".join(tampered), secrets)
-                raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
-            text = session.read_file(f"{CALLS_DIR}/{self._calls:06d}/{runner.OUTPUT_FILE}")
+        if result.timed_out:
+            raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
+        if relay is not None and relay.unchecked:
+            raise RepoScoreError("A stage answer could not be delivered, so the version has no score.")
+        text = session.read_file(f"{folder}/{runner.OUTPUT_FILE}")
+        # The metric's errors can print or quote its source, so the guest
+        # gets only a fixed message; the details stay in the server log (SKY-353).
         if text is None:
-            output = redact((result.stderr or result.stdout)[-2_000:], secrets)
-            raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}): {output}")
+            logger.warning(
+                "Repository scorer did not finish (exit %s): %s",
+                result.exit_code,
+                redact((result.stderr or result.stdout)[-2_000:], secrets),
+            )
+            raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}).")
         output = json.loads(redact(text, secrets))
-        if output.get("error") or output.get("score") is None:
-            raise RepoScoreError(str(output.get("error") or "The scorer returned no score."))
+        _raise_control(output)
+        _raise_control({"control": relay.first_control() if relay is not None else None})
+        if output.get("error"):
+            logger.warning("Repository scorer raised: %s", output["error"])
+            raise RepoScoreError("The scorer raised an error, so the version has no score.")
+        if output.get("score") is None:
+            raise RepoScoreError("The scorer returned no score.")
+        try:
+            score = float(output["score"])
+        except (TypeError, ValueError):
+            # The error text would echo the value, which the metric's code controls.
+            raise RepoScoreError("The scorer returned a score that is not a number.") from None
         side_info = fold_case_scores(output.get("side_info") or {})
-        return {**side_info, "score": float(output["score"])}
+        # SKY-221: only a crashed [run] entry above sets this status, so the
+        # metric's own ``status`` key cannot mark a scored case as a failure.
+        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
+            del side_info[STATUS_KEY]
+        return {**side_info, "score": score}
 
-    def prepare(self) -> None:
-        """Set the repository up and take its box offline before any version is sent.
+    def _run_candidate(
+        self,
+        candidate: CandidateBox,
+        call: str,
+        case: Any,
+        env: Mapping[str, str],
+        secrets: list[str],
+    ) -> dict[str, Any]:
+        """Run the ``[run]`` entry on the case's input in the candidate box.
+
+        The box holds no metric file and no earlier call; the caller ends it
+        after this returns, and with it every process the entry left.
+
+        Args:
+            candidate: The evaluation's open candidate box.
+            call: This call's folder, relative to the box.
+            case: The case being scored; only its ``input`` reaches the entry.
+            env: The model route, the box's only environment from the parent.
+            secrets: Values to keep out of anything that leaves the box.
+
+        Returns:
+            ``{"output", "error", "elapsed_s"}`` from the supervisor.
 
         Raises:
-            RepoSetupError: When the repository cannot be unpacked or set up.
-            NetworkCutoffError: When the box's network cannot be switched off and confirmed.
+            RepoScoreError: When the version changed a protected file, or the
+                supervisor did not exit cleanly.
+            BudgetReached: When the run's budget stopped a service or MCP call.
+            BudgetError: When a service or MCP call had insufficient budget coverage.
+            UsagePendingError: When a service or MCP call needs reconciliation.
+            UnpricedOperationError: When the parent cannot bound a service or MCP call.
+        """
+        session, root = candidate.session, candidate.root
+        supervisor = f"{call}/candidate"
+        payload: dict[str, Any] = {
+            "entry": self._run_entry if isinstance(self._run_entry, str) else list(self._run_entry or ()),
+            "input": case.get("input") if isinstance(case, Mapping) else case,
+            "timeout": self._run_timeout,
+            "stages": None,
+        }
+        session.write_files({RUNNER_PATH: RUNNER_SOURCE})
+        with self._service_relay(_RUN_ROLE, f"{supervisor}/stages", candidate=candidate) as relay:
+            if relay is not None:
+                payload["stages"] = relay.config(root)
+            session.write_files({f"{supervisor}/{runner.INPUT_FILE}": json.dumps(payload)})
+            unstamped = candidate.stamp_before_run()
+            if unstamped:
+                raise RepoScoreError(unstamped)
+            frames: list[str] = []
+            forward = relay.output if relay is not None else sandbox_log.ignore_output
+            pending = [""]
+
+            def output(stream: str, data: str) -> None:
+                """Keep each result frame of the supervisor's stdout, and pass all output on.
+
+                Args:
+                    stream: ``stdout`` or ``stderr``.
+                    data: The next piece of output.
+                """
+                if stream == "stdout":
+                    lines = (pending[0] + data).split("\n")
+                    pending[0] = lines.pop()
+                    prefix = runner.RESULT_PREFIX
+                    frames.extend(line[len(prefix) :] for line in lines if line.startswith(prefix))
+                forward(stream, data)
+
+            with sandbox_log.event_scope(source="run"):
+                result = session.run(
+                    f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                    # exec leaves no shell parent that the entry could trace
+                    # to fake the supervisor's exit code.
+                    f'; cd {shlex.quote(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
+                    f" -c {shlex.quote(_SUPERVISOR_BOOT)} {shlex.quote(f'{root}/{RUNNER_PATH}')} {_RUNNER_SHA256}"
+                    f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
+                    env=env,
+                    timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
+                    on_output=output,
+                    # Root runs the wrapper and the supervisor; the supervisor
+                    # starts the entry as the tree's owner. On Vercel the
+                    # wrapper's output files are then root's own in sticky
+                    # /tmp, so the entry cannot replace them (SKY-398).
+                    sudo=True,
+                )
+        self._check_changes(relay, secrets, candidate)
+        try:
+            ran = json.loads(frames[0]) if len(frames) == 1 else None
+        except ValueError:
+            ran = None
+        # The result comes only from the supervisor's stdout, which the entry
+        # never holds: a process the entry left can rewrite any file of the box
+        # user (SKY-398). The supervisor refuses to start when that stdout is a
+        # file the entry's user could replace. A second frame means that some
+        # other process reached that stdout, so no frame counts. It counts only
+        # when the supervisor exited cleanly (SKY-642).
+        if not result.ok or not isinstance(ran, dict):
+            logger.warning(
+                "The [run] supervisor did not exit cleanly (exit %s): %s",
+                result.exit_code,
+                redact((result.stderr or result.stdout)[-2_000:], secrets),
+            )
+            raise RepoScoreError("The [run] supervisor did not finish cleanly, so the version has no score.")
+        _raise_control({"control": relay.control if relay is not None else None})
+        return ran
+
+    def _check_changes(self, relay: _StageRelay | None, secrets: list[str], candidate: CandidateBox) -> None:
+        """Refuse the version when its code changed a protected file while it ran.
+
+        Args:
+            relay: The finished call's relay, whose answers checked the files too.
+            secrets: Values to keep out of the refusal.
+            candidate: The candidate box the version ran in.
+
+        Raises:
+            RepoScoreError: When a file changed, or a check could not run.
+        """
+        judge = self._rule_judge
+        unchecked = relay is not None and relay.unchecked
+        # After a failed answer check the answer went in by a file write, which moves
+        # every ctime, so only the checks the answers passed can still name a change.
+        final = () if unchecked else candidate.protected_changes()
+        # Each relay answer checks again, so a lasting change would repeat once per answer.
+        changes = tuple(dict.fromkeys((*(relay.changes if relay is not None else ()), *final)))
+        if changes:
+            # The version's code names these files and can read the secrets.
+            reason = redact(" ".join(changes), secrets)
+            raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
+        if unchecked:
+            raise RepoScoreError("A relay answer could not be checked or delivered, so the version has no score.")
+
+    def _model_env(self) -> dict[str, str]:
+        """Return the env that points code in the box at the run's model route.
+
+        Returns:
+            ``APP_API_KEY`` and ``APP_MODEL``, or nothing without a route.
+        """
+        gateway = self._gateway
+        if gateway is None or not gateway.api_key:
+            return {}
+        return {ENV_API_KEY: gateway.api_key, ENV_MODEL: gateway.model}
+
+    @contextlib.contextmanager
+    def _stage_relay(self, patch: str, response_dir: str, *, box: SandboxSession) -> Iterator[_StageRelay | None]:
+        """Open this evaluation's stage boxes, lay the version out in each, and relay calls to them.
+
+        Every box opens before the scorer's first sample, or none stays open
+        (E29, E32). Each box has its own hold, keyed to this evaluation and
+        its stage (E31), and every box closes when the evaluation ends, also
+        on a failure. When the boxes from the stage snapshot do not open or
+        do not hold the tree, the scorer drops the snapshot and tries once more
+        with unpacked boxes. A version that does not apply keeps the snapshot.
+
+        Args:
+            patch: The version being scored.
+            response_dir: The call's answer folder, relative to the metric box.
+            box: The metric box, where the relay writes its answers.
+
+        Yields:
+            The relay, or ``None`` when the run has no stages and the metric reaches no service or MCP server.
+
+        Raises:
+            RepoScoreError: When a stage box cannot open for a reason other
+                than the budget, or cannot lay out the version.
+            BudgetReached: When the budget refuses a stage box.
+            BudgetError: When a stage box's hold does not fit the budget.
+            UsagePendingError: When earlier usage still needs reconciliation.
+            UnpricedOperationError: When the parent cannot bound a stage box.
+        """
+        if not self._stages:
+            with self._service_relay(_METRIC_ROLE, response_dir, box=box) as relay:
+                yield relay
+            return
+        snapshot_id = self._stage_snapshot()
+        try:
+            relay = self._open_stages(patch, response_dir, snapshot_id, box)
+        except _StageSnapshotError:
+            # A bad snapshot would fail every later candidate, so this scorer
+            # drops it and unpacks the tree in each stage box from now on.
+            logger.warning("Stage boxes from the stage snapshot failed; stage boxes unpack the tree")
+            with self._stage_snapshot_lock:
+                bad, self._stage_snapshot_id = self._stage_snapshot_id, None
+                if bad is not None:
+                    self._release_stage_snapshot()
+            relay = self._open_stages(patch, response_dir, None, box)
+        try:
+            yield relay
+        finally:
+            relay.close()
+
+    def _open_stages(self, patch: str, response_dir: str, snapshot_id: str | None, box: SandboxSession) -> _StageRelay:
+        """Open one evaluation's stage boxes and lay the version out in each.
+
+        Args:
+            patch: The version being scored.
+            response_dir: The call's answer folder, relative to the scorer box.
+            snapshot_id: The stage snapshot the boxes start from, or ``None``
+                to unpack the tree in each box.
+            box: The metric box, where the relay writes its answers.
+
+        Returns:
+            The relay over the open boxes; the caller closes it.
+
+        Raises:
+            _StageSnapshotError: When a box from the stage snapshot cannot open
+                for a reason other than the budget, or holds no tree.
+            RepoScoreError: When an unpacked stage box cannot open for a reason
+                other than the budget, or a box cannot lay out the version.
+            BudgetReached: And the other budget errors, from a stage box.
+        """
+        evaluation_id = uuid.uuid4().hex
+        specs = {
+            name: stage_spec(
+                name,
+                stage,
+                evaluation_id=evaluation_id,
+                lifetime_seconds=self._timeout_seconds + _STAGE_LAYOUT_SECONDS,
+                tags={},
+                snapshot_id=snapshot_id,
+            )
+            for name, stage in self._stages.items()
+        }
+        try:
+            boxes = open_stage_boxes(self._stage_runtime, specs)
+        except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+            raise
+        except Exception as error:
+            logger.warning("Stage boxes did not open: %s", error)
+            failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
+            raise failure("The stage boxes could not open, so the version has no score.") from None
+        relay = self._relay(boxes, response_dir, box=box)
+        try:
+            kept = drop_paths(patch, self._hidden)
+            try:
+                with ThreadPoolExecutor(max_workers=len(boxes), thread_name_prefix="stage-layout") as pool:
+                    laid_out = list(
+                        pool.map(lambda box: self._lay_out(box, kept, restored=snapshot_id is not None), boxes.values())
+                    )
+            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError, _StageSnapshotError):
+                raise
+            except Exception as error:
+                logger.warning("Stage box layout failed: %s", error)
+                laid_out = [False]
+            if not all(laid_out):
+                raise RepoScoreError("A stage box could not lay out the version, so it has no score.")
+        except BaseException:
+            relay.close()
+            raise
+        return relay
+
+    @contextlib.contextmanager
+    def _service_relay(
+        self,
+        role: str,
+        response_dir: str,
+        *,
+        box: SandboxSession | None = None,
+        candidate: CandidateBox | None = None,
+    ) -> Iterator[_StageRelay | None]:
+        """Relay one call's service and MCP requests, checked against one role, with no stage boxes.
+
+        Args:
+            role: ``run`` for the ``[run]`` entry, ``metric`` for the scorer.
+            response_dir: The call's answer folder, relative to the box.
+            box: The metric box, where the relay writes its answers.
+            candidate: The candidate box, which checks its protected files
+                with each answer it writes.
+
+        Yields:
+            The relay, or ``None`` when the role lists no service with a url
+            and its MCP file holds no server.
+        """
+        services = any(name in self._services for name in self._service_roles.get(role, ()))
+        if not services and not self._mcp_role(role).mcp_servers:
+            yield None
+            return
+        relay = self._relay({}, response_dir, role=role, box=box, candidate=candidate)
+        try:
+            yield relay
+        finally:
+            relay.close()
+
+    def _relay(
+        self,
+        boxes: Mapping[str, SandboxSession],
+        response_dir: str,
+        *,
+        role: str = _METRIC_ROLE,
+        box: SandboxSession | None = None,
+        candidate: CandidateBox | None = None,
+    ) -> _StageRelay:
+        """Build the relay for one call, checking service and MCP requests against one role.
+
+        Each stage box whose stage has MCP servers gets its own relay for the
+        ``target.<name>`` role, which makes one relay for each call. All are
+        built here, in the scorer thread, so each records the scorer's candidate.
+
+        Args:
+            boxes: Each stage's open box, by stage name.
+            response_dir: The call's answer folder, relative to the box.
+            role: The role whose services and MCP servers the caller may reach.
+            box: The metric or stage box this relay answers in.
+            candidate: The candidate box this relay answers in, through its
+                protected-file check; used when ``box`` is ``None``.
+
+        Returns:
+            The relay for this call.
+        """
+        stage_relays = {
+            name: self._relay({}, _STAGE_CALLS_DIR, role=f"{_TARGET_ROLE}{name}", box=stage_box)
+            for name, stage_box in boxes.items()
+            if self._mcp_role(f"{_TARGET_ROLE}{name}").mcp_servers
+        }
+        return _StageRelay(
+            boxes,
+            self._stages,
+            response_dir=response_dir,
+            max_concurrency=self._max_concurrency,
+            env=self._model_env(),
+            candidate=candidate,
+            services=self._declared,
+            role=role,
+            allowed=self._service_roles.get(role, ()),
+            mcp=self._mcp_role(role),
+            secrets=self._workspace.secrets,
+            bindings=self._secret_bindings,
+            secret_hosts=self._secret_hosts,
+            allowed_hosts=self._secret_allowed_hosts,
+            budget=self._budget,
+            recorder=self._recorder,
+            box=box,
+            stage_relays=stage_relays,
+        )
+
+    def _mcp_role(self, role: str) -> RoleEnvironment:
+        """Return one role with the servers of its own MCP file, or an empty role.
+
+        Args:
+            role: ``run``, ``metric`` or ``target.<name>``.
+
+        Returns:
+            The role's environment.
+        """
+        return self._mcp_roles.get(role) or RoleEnvironment()
+
+    def _stage_snapshot(self) -> str | None:
+        """Return the stage tree's after-setup snapshot, built once for this scorer.
+
+        A builder box gets only the stage archive and the runner, never the
+        scorer's tree, so the snapshot holds no metric file. Each stage box
+        then starts from it and only applies the version.
+
+        Returns:
+            The snapshot id, or ``None`` when the runtime has no snapshots or
+            the build failed; stage boxes then unpack the tree themselves.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the builder box.
+        """
+        take = getattr(self._stage_runtime, "snapshot", None)
+        if take is None or not getattr(self._stage_runtime, "supports_snapshots", False) or not self._stages:
+            return None
+        with self._stage_snapshot_lock:
+            if self._stage_snapshot_done:
+                return self._stage_snapshot_id
+            name, stage = next(iter(self._stages.items()))
+            spec = stage_spec(
+                name,
+                stage,
+                evaluation_id=f"snapshot-{uuid.uuid4().hex}",
+                lifetime_seconds=_STAGE_LAYOUT_SECONDS,
+                tags={},
+            )
+            try:
+                box = self._stage_runtime.open(spec)
+                try:
+                    if self._lay_out(box, "", restored=False):
+                        self._stage_snapshot_id = take(box, self._stage_snapshot_key)
+                finally:
+                    box.close()
+            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+                raise
+            except Exception as error:
+                # Only the type: the provider's text can name the snapshot.
+                logger.warning("The stage snapshot failed (%s); stage boxes unpack the tree", type(error).__name__)
+                self._stage_snapshot_id = None
+            self._stage_snapshot_done = True
+            return self._stage_snapshot_id
+
+    def _lay_out(self, box: SandboxSession, patch: str, *, restored: bool = False) -> bool:
+        """Unpack the tree without the hidden metric into one stage box and apply the version.
+
+        Stage boxes get no setup command, so the tree runs with the image's
+        own tools only.
+
+        Args:
+            box: One open stage box.
+            patch: The version, hidden paths already dropped.
+            restored: The box started from the stage snapshot, which holds the
+                tree and the runner, so only the version is written.
+
+        Returns:
+            Whether the tree and the version are in place.
+
+        Raises:
+            _StageSnapshotError: When a box from the stage snapshot holds no tree.
+        """
+        parts = []
+        if not restored:
+            for index, chunk in enumerate(archive_chunks(self._stage_archive)):
+                name = f"{STAGE_DIR}/tree.{index:04d}.b64"
+                box.write_files({name: chunk})
+                parts.append(name)
+            box.write_files({f"{STAGE_DIR}/{RUNNER_PATH.rsplit('/', 1)[1]}": RUNNER_SOURCE})
+        box.write_files({f"{STAGE_DIR}/version.patch": patch})
+        if restored:
+            unpack = f"test -d {_STAGE_TREE} || exit {_NO_STAGE_TREE_EXIT};"
+        else:
+            files = " ".join(shlex.quote(part) for part in parts)
+            unpack = f"mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
+        result = box.run(
+            f"set -e; {unpack}"
+            f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
+            timeout_seconds=_STAGE_LAYOUT_SECONDS,
+        )
+        if restored and result.exit_code == _NO_STAGE_TREE_EXIT:
+            raise _StageSnapshotError("A stage box from the stage snapshot has no tree, so the version has no score.")
+        if not result.ok:
+            logger.warning(
+                "Stage box layout failed (exit %s): %s", result.exit_code, (result.stderr or result.stdout)[-2_000:]
+            )
+        return result.ok
+
+    def prepare(self) -> None:
+        """Set the repository and the metric packages up before any version is sent.
+
+        Raises:
+            RepoSetupError: When the repository or the metric packages cannot be set up.
         """
         with self._lock:
-            self._workspace.session()
+            self._workspace.prepare()
 
     def dispatch(self, body: Mapping[str, Any]) -> ModelHTTPResult:
         """Answer one guest scoring request through the evaluator capability.
@@ -217,34 +1056,1146 @@ class RepoScorer:
             document = self.score(candidate, body.get("case"))
         except RepoScoreError as error:
             # Plain text: the guest's relay client quotes the body in its error.
-            return ModelHTTPResult(422, "text/plain; charset=utf-8", str(error).encode())
+            return ModelHTTPResult(422, "text/plain; charset=utf-8", _scrub(str(error), self._root).encode())
+        document = _for_proposer(document, self._root, self._hidden)
         notes = self._rule_judge.take_notes() if self._rule_judge is not None else []
         if notes:
             feedback = document.get("feedback")
             document["feedback"] = "\n\n".join([*notes, *([str(feedback)] if feedback else [])])
         return ModelHTTPResult(200, "application/json", json.dumps(document).encode())
 
-    def _box_root(self, session: SandboxSession) -> str:
-        """Return the box's working directory, installing the runner on first use.
-
-        Args:
-            session: The workspace's open box.
-
-        Returns:
-            The absolute directory relative paths in the box resolve against.
+    def close(self) -> None:
+        """Delete the workspace's saved states and this scorer's snapshots.
 
         Raises:
-            RepoScoreError: When the box cannot report its directory.
+            BudgetReached: And the other budget errors, from a snapshot delete.
         """
-        if self._root is None:
-            located = session.run("pwd", timeout_seconds=30)
-            root = located.stdout.strip()
-            if not located.ok or not root.startswith("/"):
-                raise RepoScoreError("The scoring box could not report its working directory.")
-            session.write_files({RUNNER_PATH: RUNNER_SOURCE})
-            self._root = root
-        return self._root
+        self._workspace.close()
+        self._workspace.release_snapshot()
+        with self._stage_snapshot_lock:
+            self._stage_snapshot_id = None
+            self._release_stage_snapshot()
+
+    def _release_stage_snapshot(self) -> None:
+        """Delete the stage snapshot; the caller holds ``_stage_snapshot_lock``.
+
+        The key is this scorer's own, so no other box needs the snapshot. A
+        budget error is raised; any other failure is left for the run end.
+
+        Raises:
+            BudgetReached: And the other budget errors, from the snapshot delete.
+        """
+        release = getattr(self._stage_runtime, "release_snapshot", None)
+        if release is None:
+            return
+        try:
+            release(self._stage_snapshot_key)
+        except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+            raise
+        except Exception as error:
+            logger.warning("The stage snapshot was not deleted (%s); the run end retries it", type(error).__name__)
+
+
+def _control_answer(error: BaseException) -> dict[str, Any] | None:
+    """Return the control answer for a budget stop, the same codes as a stage call gets.
+
+    Args:
+        error: The exception a relayed call raised.
+
+    Returns:
+        ``{"status": 503, "error", "control"}``, or ``None`` when the error is not a budget stop.
+    """
+    if isinstance(error, BudgetReached):
+        code = "budget_reached"
+    elif isinstance(error, BudgetInsufficientError):
+        code = "budget_insufficient"
+    elif isinstance(error, UnpricedOperationError):
+        code = "unpriced_operation"
+    elif isinstance(error, BudgetError | UsagePendingError):
+        code = "usage_pending"
+    else:
+        return None
+    return {
+        "status": 503,
+        "error": f"The run's budget stopped the request: {code}.",
+        "control": {"code": code, "message": str(error)},
+    }
+
+
+def _decoded(path: str) -> str:
+    """Return a path without its query, percent-decoded until nothing changes.
+
+    A server may decode ``%252e`` to ``%2e`` and then to ``.``, so one pass is not enough.
+
+    Args:
+        path: A path, with or without a query.
+
+    Returns:
+        The fully decoded path.
+    """
+    path = path.partition("?")[0]
+    while (decoded := unquote(path)) != path:
+        path = decoded
+    return path
+
+
+def _unsafe_path(path: str) -> bool:
+    """Check a relative service path for anything a server could read as a way out of the service.
+
+    Only the characters of ``_SERVICE_PATH_CHARS`` may stay after full
+    decoding. So ``?``, ``#``, ``\\``, ``;``, ``%``, spaces, control
+    characters and all non-ASCII characters fail: a server that decodes
+    again could read them as a query, a separator or a dot.
+
+    Args:
+        path: The path after the service name, with its query.
+
+    Returns:
+        True when the decoded path has a character outside the allowlist,
+        or a ``.`` or ``..`` segment.
+    """
+    path = _decoded(path)
+    return not _SERVICE_PATH_CHARS.issuperset(path) or bool({".", ".."} & set(path.split("/")))
+
+
+def _under(target: httpx.URL, base: httpx.URL) -> bool:
+    """Check that a request url stays under the service's declared path, as a directory.
+
+    It compares the paths as :func:`_unsafe_path` reads them, fully decoded.
+
+    Args:
+        target: The url the relay is about to call.
+        base: The service's declared url.
+
+    Returns:
+        True when the target path is the base path or below it: base
+        ``/api`` allows ``/api`` and ``/api/x``, not ``/apix``.
+    """
+    root = _decoded(base.raw_path.decode("ascii")).rstrip("/")
+    path = _decoded(target.raw_path.decode("ascii"))
+    return path == root or path.startswith(root + "/")
+
+
+class _SecretQueryTransport(httpx.BaseTransport):
+    """Add a service's filled query secrets to each request, below the client (SKY-630).
+
+    The client logs and raises with its own request url, so the secret is
+    added only to the copy that goes to the wire. A guest parameter with a
+    declared name, in any case, is dropped first, so the guest can never
+    replace the secret.
+    """
+
+    def __init__(self, transport: httpx.BaseTransport, query: Mapping[str, str]) -> None:
+        """Wrap a transport.
+
+        Args:
+            transport: The pinned transport that sends the request.
+            query: The declared parameters with their secrets filled in.
+        """
+        self._transport = transport
+        self._query = dict(query)
+        self._names = {name.lower() for name in query}
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Send the request with the guest's other parameters and the filled secrets.
+
+        Args:
+            request: The request the client built from the guest's path.
+
+        Returns:
+            The upstream response.
+        """
+        # Some servers also split on ';', so a guest "a=1;key=x" must not slip a declared name past.
+        kept = [
+            part
+            for part in re.split(r"[&;]", request.url.query.decode("ascii"))
+            if part and unquote(part.partition("=")[0].replace("+", " ")).lower() not in self._names
+        ]
+        query = "&".join([*kept, urlencode(self._query)])
+        return self._transport.handle_request(
+            httpx.Request(
+                request.method,
+                request.url.copy_with(query=query.encode("ascii")),
+                headers=request.headers,
+                stream=request.stream,
+                extensions=request.extensions,
+            )
+        )
 
     def close(self) -> None:
-        """Destroy the workspace box."""
-        self._workspace.close()
+        """Close the wrapped transport."""
+        self._transport.close()
+
+
+def _json_object(body: bytes) -> dict[str, Any]:
+    """Read an MCP request body as one JSON-RPC object, for its run-call target.
+
+    Args:
+        body: The guest's request body.
+
+    Returns:
+        The object, or ``{}`` for a batch, an empty body or text that is not JSON.
+    """
+    try:
+        message = json.loads(body)
+    except ValueError:
+        return {}
+    return message if isinstance(message, dict) else {}
+
+
+class _StageRelay:
+    """Answer one scorer call's ``call(name, input)``, service and MCP frames.
+
+    Calls to one stage run in parallel, each in its own process and folder,
+    up to ``max_concurrency`` at a time (E34), also when the stage's MCP file
+    holds a server (SKY-624). Service requests run in their own pool with the
+    same limit. An MCP GET event stream passes on in its own thread, up to
+    ``_MCP_STREAMS`` at a time, so it never holds that pool. A stage with MCP
+    servers has its own relay, which makes one relay for each call with
+    :meth:`for_call`: that relay reads the call's frames under its own prefix
+    and answers them in the call's own folder in the stage box.
+    """
+
+    def __init__(
+        self,
+        boxes: Mapping[str, SandboxSession],
+        stages: Mapping[str, TargetStage],
+        *,
+        response_dir: str,
+        max_concurrency: int,
+        env: Mapping[str, str],
+        candidate: CandidateBox | None = None,
+        services: Mapping[str, ServiceSpec] | None = None,
+        role: str = _METRIC_ROLE,
+        allowed: tuple[str, ...] = (),
+        mcp: RoleEnvironment | None = None,
+        secrets: Mapping[str, str] | None = None,
+        bindings: Mapping[str, str] | None = None,
+        secret_hosts: Mapping[str, str] | None = None,
+        allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
+        budget: BudgetRuntime | None = None,
+        recorder: CallRecorder | None = None,
+        box: SandboxSession | None = None,
+        stage_relays: Mapping[str, _StageRelay] | None = None,
+    ) -> None:
+        """Bind the open stage boxes to the scorer box that waits for their answers.
+
+        Args:
+            boxes: Each stage's open box, by stage name.
+            stages: Each stage's settings, by stage name.
+            response_dir: The call's answer folder, relative to the scorer box.
+            max_concurrency: How many calls to one stage run at the same time.
+            env: The run's model route, so stage code reaches models only
+                through the parent's mailbox.
+            candidate: The candidate box, which checks its protected files
+                and writes each answer into the box; ``None`` with ``box``.
+            services: The run's ``[services]`` tables, by name.
+            role: The role that each service request is checked against:
+                ``run`` for the ``[run]`` entry, ``metric`` for the scorer (E37).
+            allowed: The services that ``role`` lists.
+            mcp: ``role`` with the servers of its own MCP file; no other
+                role's server is reachable (E55).
+            secrets: The run's secret values, filled into service headers
+                here in the parent.
+            bindings: ``user`` or ``managed`` for each secret name.
+            secret_hosts: The one host each secret may go to.
+            allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
+            budget: The run budget, which meters a call with a Skynet key.
+            recorder: Writes each relayed call into the run record under
+                ``role``; ``None`` records nothing.
+            box: The metric or stage box whose frames this relay answers,
+                in that box; ``None`` answers in ``candidate``.
+            stage_relays: Each stage's own relay, by stage name, for the
+                stages whose MCP file holds a server; this relay closes them.
+                For a stage relay, ``response_dir`` is the stage's calls folder.
+        """
+        self._boxes = dict(boxes)
+        self._box = box
+        self._stage_relays = dict(stage_relays or {})
+        self._stages = stages
+        self._response_dir = response_dir
+        self._env = dict(env)
+        # A fresh nonce for each evaluation: version code cannot forge a frame
+        # it never saw, and a frame from an earlier call never matches.
+        self._prefix = f"APP_STAGE_{uuid.uuid4().hex}:"
+        self._max_concurrency = max_concurrency
+        self._pools = {
+            name: ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix=f"stage-{name}")
+            for name in self._boxes
+        }
+        # The relay of each stage call that for_call made, so close and first_control reach them.
+        self._calls: list[_StageRelay] = []
+        self._refusals = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stage-refusal")
+        self._declared = dict(services or {})
+        self._services = {name: spec for name, spec in self._declared.items() if spec.url is not None}
+        self._role = role
+        self._allowed = tuple(allowed)
+        self._mcp = mcp or RoleEnvironment()
+        self._secrets = dict(secrets or {})
+        # Values stage code can print or echo: the run's secrets and its box's model route key.
+        self._stage_secrets = [*self._secrets.values(), self._env.get(ENV_API_KEY, "")]
+        self._bindings = dict(bindings or {})
+        self._secret_hosts = dict(secret_hosts or {})
+        self._allowed_hosts = dict(allowed_hosts or {})
+        self._budget = budget
+        # The relay's calls run on pool threads, which do not inherit the usage-scope
+        # contextvar, so the candidate is read here, in the scorer thread that holds it.
+        tags = current_tags()
+        tagged = tags.get("candidate")
+        self._recorder = (
+            recorder.bind(
+                role=role,
+                candidate_id=recorder.candidate_id
+                or (call_candidate_key(tagged, tags.get(LANE_KEY)) if tagged else None),
+            )
+            if recorder is not None
+            else None
+        )
+        self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
+        self._stream_pool = ThreadPoolExecutor(max_workers=_MCP_STREAMS, thread_name_prefix="stage-mcp-stream")
+        self._streams_lock = threading.Lock()
+        self._open_streams: set[str] = set()
+        # The streams whose box-side reader left; each stops at its next event.
+        self._abandoned: set[str] = set()
+        # One partial line for each output source: parallel stage calls stream apart.
+        self._pending: dict[str, str] = {}
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+        self._candidate = candidate
+        self._answer_lock = threading.Lock()
+        self._closed = False
+        self.changes: list[str] = []
+        # A failed check is not tampering, so it never reaches the rule judge.
+        self.unchecked = False
+        # The first budget stop of a service or MCP call: the parent raises it after the call,
+        # whatever the box does with its 503.
+        self.control: dict[str, str] | None = None
+
+    def config(self, root: str) -> dict[str, Any]:
+        """Describe the relay to the runner in the box this relay serves (the scorer's or a stage's).
+
+        Args:
+            root: That box's working directory.
+
+        Returns:
+            ``{"prefix", "response_dir", "names", "services", "mcp", "mcp_file", "port", "role"}``
+            for the call's input; ``services`` and ``mcp`` list what the role
+            may call, by name only. ``mcp_file`` is the role's own
+            ``.mcp.json``, which staging rewrote to loopback urls on
+            ``RELAY_PORT``. For a stage's relay ``port`` is ``0``: each call's
+            runner takes a free port and writes its own copy of that file.
+            ``role`` goes into every frame, and the relay refuses a frame of another role.
+        """
+        return {
+            "prefix": self._prefix,
+            "response_dir": f"{root}/{self._response_dir}",
+            "names": list(self._boxes),
+            "services": [name for name in self._services if name in self._allowed],
+            "mcp": [server.name for server in self._mcp.mcp_servers],
+            "mcp_file": self._mcp.mcp,
+            # Parallel calls share a stage box, so no call may hold the fixed port (SKY-624).
+            # The metric relays write to the metric box too (SKY-398), so only the role marks a stage's relay.
+            "port": 0 if self._role.startswith(_TARGET_ROLE) else runner.RELAY_PORT,
+            "role": self._role,
+        }
+
+    def for_call(self, identity: str) -> _StageRelay:
+        """Make the relay of one stage call, with its own prefix and answer folder in the stage box.
+
+        The new relay keeps this relay's role, MCP file, secrets, budget and
+        already bound recorder, so a call on a pool thread still records the
+        scorer's candidate.
+
+        Args:
+            identity: The stage call's id, also its folder name.
+
+        Returns:
+            The call's relay; the caller closes it when the call ends.
+        """
+        relay = _StageRelay(
+            {},
+            self._stages,
+            response_dir=f"{self._response_dir}/{identity}/relay",
+            max_concurrency=self._max_concurrency,
+            env=self._env,
+            candidate=self._candidate,
+            services=self._declared,
+            role=self._role,
+            allowed=self._allowed,
+            mcp=self._mcp,
+            secrets=self._secrets,
+            bindings=self._bindings,
+            secret_hosts=self._secret_hosts,
+            allowed_hosts=self._allowed_hosts,
+            budget=self._budget,
+            recorder=self._recorder,
+            box=self._box,
+        )
+        with self._answer_lock:
+            self._calls.append(relay)
+        return relay
+
+    def first_control(self) -> dict[str, str] | None:
+        """Return this relay's first budget stop, or else the first one a stage's or a call's relay kept.
+
+        A stage's MCP stream can end in a budget stop after its call returned,
+        so the evaluation reads the stage and call relays too when it ends.
+
+        Returns:
+            The control answer, or ``None`` when no relayed call hit a stop.
+        """
+        with self._answer_lock:
+            control = self.control
+            relays = [*self._stage_relays.values(), *self._calls]
+        return control or next((found for relay in relays if (found := relay.first_control())), None)
+
+    def output(self, stream: str, data: str, *, source: str = "") -> None:
+        """Take the scorer's output as it streams and hand each call frame to its stage's pool.
+
+        The mailbox calls this under its own lock, so it only queues work.
+
+        Args:
+            stream: ``stdout`` or ``stderr``.
+            data: The next piece of output.
+            source: The command the output comes from, so the partial lines
+                of two parallel stage calls never join; ``""`` for the scorer.
+        """
+        if stream != "stdout":
+            sandbox_log.ignore_output(stream, data)
+            return
+        with self._lock:
+            lines = (self._pending.get(source, "") + data).split("\n")
+            self._pending[source] = lines.pop()
+            for line in lines:
+                # Another thread of the scorer may have left a partial line just before the frame.
+                start = line.find(self._prefix)
+                if start < 0:
+                    sandbox_log.ignore_output(stream, line + "\n")
+                    continue
+                if start:
+                    sandbox_log.ignore_output(stream, line[:start] + "\n")
+                try:
+                    frame = json.loads(line[start + len(self._prefix) :])
+                    identity = frame["id"]
+                    kind = next((key for key in ("service", "mcp", "stop") if key in frame), "stage")
+                    name = frame[kind]
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if (
+                    not isinstance(identity, str)
+                    or len(identity) != 32
+                    or any(char not in "0123456789abcdef" for char in identity)
+                    or identity in self._seen
+                ):
+                    continue
+                self._seen.add(identity)
+                if frame.get("role") != self._role:
+                    # A [run] frame in the metric box, or a metric frame in the candidate box (SKY-398).
+                    if kind != "stop":
+                        self._refusals.submit(self._answer, identity, self._role_refusal(frame.get("role")))
+                    continue
+                if kind == "stop":
+                    with self._streams_lock:
+                        if isinstance(name, str) and name in self._open_streams:
+                            self._abandoned.add(name)
+                    continue
+                if kind != "stage":
+                    refusal = self._refusal(name) if kind == "service" else self._mcp_refusal(name)
+                    if refusal is None:
+                        handler = self._service if kind == "service" else self._mcp_call
+                        self._service_pool.submit(handler, name, identity, frame)
+                    else:
+                        self._refusals.submit(
+                            self._refuse, "host" if kind == "service" else "mcp", name, identity, refusal
+                        )
+                    continue
+                pool = self._pools.get(name) if isinstance(name, str) else None
+                if pool is None:
+                    self._refusals.submit(self._refuse_stage, name, identity, frame.get("input"))
+                else:
+                    pool.submit(self._call, name, identity, frame.get("input"))
+
+    def _role_refusal(self, role: Any) -> dict[str, Any]:
+        """Return the answer to a frame that names another role than this relay's box.
+
+        Args:
+            role: The role the frame names; box code controls it.
+
+        Returns:
+            A 403 answer with an error that names the box's role.
+        """
+        named = role if isinstance(role, str) and len(role) <= 100 else "no role"
+        return {
+            "status": 403,
+            "error": f"This box runs the [{self._role}] role; a frame for {named!r} is refused here.",
+        }
+
+    def _refuse(self, kind: str, name: Any, identity: str, refusal: Mapping[str, Any]) -> None:
+        """Record a service or MCP call the role may not make, then answer the guest with the refusal.
+
+        Args:
+            kind: ``host`` for a service, ``mcp`` for an MCP server, for the run record.
+            name: The service or server the frame names; the record's target.
+            identity: The request's id, also its answer name.
+            refusal: The 403 or 404 answer, whose error names the fix.
+        """
+        if self._recorder is not None:
+            self._recorder.record(
+                self._recorder.start(),
+                kind=kind,
+                target=str(name),
+                status="refused",
+                failure_reason=refusal["error"],
+                # The frame's name comes from box code and can be any value it holds (SKY-637).
+                secrets=self._stage_secrets,
+            )
+        self._answer(identity, refusal)
+
+    def _refusal(self, name: Any) -> dict[str, Any] | None:
+        """Check that the calling role may reach a service through the relay.
+
+        Args:
+            name: The service the frame names.
+
+        Returns:
+            The refusal answer, or ``None`` when the request may go out.
+        """
+        if not isinstance(name, str):
+            return {"status": 404, "error": f"Unknown service {name!r}."}
+        try:
+            service_endpoint(f"[{self._role}]", RoleEnvironment(services=self._allowed), self._declared, name)
+        except RoleRelayError as error:
+            return {"status": 404 if name not in self._declared else 403, "error": str(error)}
+        return None
+
+    def _mcp_refusal(self, name: Any) -> dict[str, Any] | None:
+        """Check that the server is in the calling role's own MCP file.
+
+        Args:
+            name: The server the frame names.
+
+        Returns:
+            The refusal answer, or ``None`` when the request may go out.
+        """
+        if not isinstance(name, str):
+            return {"status": 404, "error": f"Unknown MCP server {name!r}."}
+        try:
+            mcp_endpoint(f"[{self._role}]", self._mcp, name)
+        except RoleRelayError as error:
+            return {"status": 403, "error": str(error)}
+        return None
+
+    def _mcp_call(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
+        """Send one MCP request and write the response for the caller.
+
+        Args:
+            name: The server, already checked against the role's MCP file.
+            identity: The request's id, also its answer name.
+            frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
+        """
+        label = f"MCP server {name!r}"
+        # Only a GET listener streams. Its place is taken before the request goes out, so a
+        # refused listener never reaches the server; a POST answer ends after its result.
+        listener = frame.get("method") == "GET"
+        if listener:
+            with self._streams_lock:
+                opened = len(self._open_streams) < _MCP_STREAMS
+                if opened:
+                    self._open_streams.add(identity)
+            if not opened:
+                self._answer(
+                    identity, {"status": 503, "error": f"{label} has {_MCP_STREAMS} event streams open already."}
+                )
+                return
+        try:
+            url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
+            response = self._request(url, headers, label, frame, kind="mcp", server=name)
+        except (BudgetReached, Exception) as error:
+            response = self._stopped(error)
+            if response is None:
+                # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
+                logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
+                response = {"status": 502, "error": f"{label} could not be reached."}
+        stream = response.pop("stream", None)
+        if stream is None:
+            if listener:
+                with self._streams_lock:
+                    self._open_streams.discard(identity)
+                    self._abandoned.discard(identity)
+            self._answer(identity, response)
+            return
+        submitted = False
+        try:
+            if self._answer(identity, response):
+                self._stream_pool.submit(self._stream_parts, name, identity, stream)
+                submitted = True
+        except RuntimeError:
+            pass  # The relay closed between the answer and the submit.
+        finally:
+            # A failed answer (a ServiceError from the box, say) must still free the place, or
+            # four such failures refuse every later listener until the relay closes.
+            if not submitted:
+                self._end_stream(identity, stream)
+
+    def _end_stream(self, identity: str, stream: Generator[bytes, None, None]) -> None:
+        """Close an MCP event stream and free its place.
+
+        Args:
+            identity: The request's id.
+            stream: The masked body.
+        """
+        stream.close()
+        with self._streams_lock:
+            self._open_streams.discard(identity)
+            self._abandoned.discard(identity)
+
+    def _stream_parts(self, name: str, identity: str, stream: Generator[bytes, None, None]) -> None:
+        """Write each masked part of an MCP event stream as its own answer, then an end part.
+
+        Part ``n`` goes to ``<identity>.<n>.json`` with ``"more": true``; the
+        last part has ``"more": false``, and an ``error`` when the stream broke.
+        The stream stops with no last part when the box's reader left.
+
+        Args:
+            name: The MCP server.
+            identity: The request's id.
+            stream: The masked body after the first answer.
+        """
+        part = 0
+        ending: dict[str, Any] = {"more": False}
+        try:
+            for chunk in stream:
+                part += 1
+                if identity in self._abandoned or not self._answer(
+                    f"{identity}.{part}", {"body": base64.b64encode(chunk).decode("ascii"), "more": True}
+                ):
+                    return
+        except _AnswerTooLargeError:
+            ending["error"] = f"MCP server {name!r} answered with more than 4 MiB."
+        except Exception as error:
+            # Only the type, as in _mcp_call.
+            logger.warning("MCP server %s stream failed in the parent: %s", name, type(error).__name__)
+            ending["error"] = f"MCP server {name!r} stream broke."
+        finally:
+            self._end_stream(identity, stream)
+        self._answer(f"{identity}.{part + 1}", ending)
+
+    def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
+        """Send one service request and write the response for the scorer.
+
+        Args:
+            name: The service.
+            identity: The request's id, also its answer name.
+            frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
+        """
+        try:
+            spec = self._services[name]
+            response = self._request(str(spec.url), spec.request_headers, f"Service {name!r}", frame, query=spec.query)
+        except (BudgetReached, Exception) as error:
+            response = self._stopped(error)
+            if response is None:
+                # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
+                logger.warning("Service %s request failed in the parent: %s", name, type(error).__name__)
+                response = {"status": 502, "error": f"Service {name!r} could not be reached."}
+        self._answer(identity, response)
+
+    def _stopped(self, error: BaseException) -> dict[str, Any] | None:
+        """Keep the first budget stop of a service or MCP call and return its answer.
+
+        Args:
+            error: The exception the call raised.
+
+        Returns:
+            The control answer, or ``None`` when the error is not a budget stop.
+        """
+        response = _control_answer(error)
+        if response is None:
+            return None
+        with self._answer_lock:
+            self.control = self.control or response["control"]
+        return response
+
+    def _request(
+        self,
+        origin: str,
+        declared: Mapping[str, str],
+        label: str,
+        frame: Mapping[str, Any],
+        *,
+        kind: str = "host",
+        server: str = "",
+        query: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Call a service's or MCP server's url through :func:`relay_request`, so its secrets stay in the parent.
+
+        ``relay_request`` fills the declared headers and query, refuses a secret outside
+        its host or the run's allowed hosts, meters a Skynet key, and removes
+        every filled value from the answer. The host must resolve to public
+        addresses only, the connection stays on that address and origin, and
+        redirects come back to the guest unchanged.
+
+        Args:
+            origin: The declared url; the guest's path goes after it.
+            declared: The declared headers, with ``${SECRET}`` placeholders.
+            label: ``Service '<name>'`` or ``MCP server '<name>'``, for the errors.
+            frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
+            kind: ``host`` for a service, ``mcp`` for an MCP server, for the run record.
+            server: The MCP server's name, so its record target is
+                ``server@host/tool``; ``""`` for a service.
+            query: The service's declared query parameters, each one
+                ``${SECRET}``; they replace any guest parameter of the same name.
+
+        Returns:
+            ``{"status", "headers", "body"}`` with a base64 body, or
+            ``{"status", "error"}`` when the request cannot go out.
+
+        Raises:
+            binascii.Error: When the frame's body is not base64.
+            _UnreachableError: When the host resolves to a private, loopback or
+                link-local address.
+            httpx.HTTPError: When the service cannot be reached.
+        """
+        method, path = frame.get("method"), frame.get("path", "")
+        if not isinstance(method, str) or not _HTTP_METHOD.fullmatch(method) or not isinstance(path, str):
+            return {"status": 400, "error": f"{label} got a malformed request."}
+        # An empty path is the declared url itself: an MCP endpoint may not answer with a slash added.
+        url = origin.rstrip("/") + "/" + path.lstrip("/") if path else origin
+        base, target = httpx.URL(origin), httpx.URL(url)
+        # The secret headers go with every path, so a service and an MCP server get the same path check.
+        if (
+            (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
+            or _unsafe_path(path)
+            or not _under(target, base)
+        ):
+            return {"status": 400, "error": f"{label} got a path outside its url."}
+        overrides = {key.lower() for key in declared}
+        guest = [
+            (pair[0], pair[1])
+            for pair in frame.get("headers") or ()
+            if isinstance(pair, list | tuple)
+            and len(pair) == 2
+            and all(isinstance(part, str) for part in pair)
+            and pair[0].lower() not in _HOP_HEADERS | _GUEST_DROPPED_HEADERS
+            and pair[0].lower() not in overrides
+        ]
+        body = base64.b64decode(frame.get("body") or "", validate=True)
+        record_target = _tool_target(server, origin, _json_object(body)) if server else ""
+        status: list[int] = []
+
+        def send(address: str, filled: dict[str, str], content: bytes) -> bytes | Generator[bytes, None, None]:
+            """Send the filled request once and return its header lines and body together.
+
+            Args:
+                address: The declared url with the guest's path.
+                filled: The declared headers with their secrets filled in, and
+                    the filled query parameters under ``_QUERY_MARK``.
+                content: The guest's body.
+
+            Returns:
+                The answer's header lines, a blank line, then its body; for an
+                MCP event stream, an iterator that yields them as they arrive.
+
+            Raises:
+                _UnreachableError: When the host resolves to a private, loopback
+                    or link-local address.
+                _AnswerTooLargeError: When the body passes 4 MiB.
+            """
+            try:
+                pinned = _pinned_address(origin, False, label=f"{label} url")
+            except ValueError as error:
+                # Not a secret refusal: relay_request's ValueError means only that.
+                raise _UnreachableError(str(error)) from error
+            secret_query = {key[1:]: value for key, value in filled.items() if key.startswith(_QUERY_MARK)}
+            filled = {key: value for key, value in filled.items() if not key.startswith(_QUERY_MARK)}
+            transport: httpx.BaseTransport = _PinnedTransport(origin, pinned)
+            if secret_query:
+                transport = _SecretQueryTransport(transport, secret_query)
+            with contextlib.ExitStack() as stack:
+                stack.callback(transport.close)
+                client = stack.enter_context(
+                    httpx.Client(
+                        transport=transport, follow_redirects=False, trust_env=False, timeout=_SERVICE_TIMEOUT_SECONDS
+                    )
+                )
+                response = stack.enter_context(
+                    client.stream(method, address, headers=[*guest, *filled.items()], content=content)
+                )
+                head = (
+                    b"".join(
+                        key + b": " + value + b"\r\n"
+                        for key, value in response.headers.raw
+                        if key.decode("latin-1").lower() not in _DECODED_HEADERS
+                    )
+                    + _HEAD_END[2:]
+                )
+                if (
+                    kind == "mcp"
+                    and method == "GET"
+                    and response.headers.get("content-type", "").lower().startswith("text/event-stream")
+                ):
+                    # A GET event stream may stay open for the whole run, so its events pass on as they come;
+                    # a POST event stream ends after its result, so it is read whole like any other answer.
+                    status.append(response.status_code)
+                    return _streamed(stack.pop_all(), head, response.iter_bytes())
+                answer = bytearray()
+                for chunk in response.iter_bytes():
+                    answer.extend(chunk)
+                    if len(answer) > _SERVICE_BODY_BYTES:
+                        raise _AnswerTooLargeError
+                status.append(response.status_code)
+                return head + bytes(answer)
+
+        try:
+            answer = relay_request(
+                url=url,
+                headers={**declared, **{_QUERY_MARK + key: value for key, value in (query or {}).items()}},
+                body=body,
+                user_secrets=self._secrets,
+                bindings=self._bindings,
+                secret_hosts=self._secret_hosts,
+                allowed_hosts=self._allowed_hosts,
+                send=send,
+                runtime=self._budget,
+                recorder=self._recorder,
+                kind=kind,
+                target=record_target,
+                # Box code can put its model route key into a tool call or a request body (SKY-637).
+                record_secrets=self._stage_secrets,
+            )
+        except _AnswerTooLargeError:
+            return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
+        except (BudgetError, UnpricedOperationError):
+            # These are ValueErrors too, but a budget stop, not a secret refusal.
+            raise
+        except ValueError as error:
+            # relay_request names the secret and the host, never a value.
+            return {"status": 403, "error": f"{label} was refused: {error}"}
+        if isinstance(answer, bytes):
+            head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
+            more: dict[str, Any] = {}
+        else:
+            # The masker may hold the head back with the first event; read on until the head is whole.
+            buffered = b"\r\n"
+            try:
+                for chunk in answer:
+                    buffered += chunk
+                    if _HEAD_END in buffered:
+                        break
+            except _AnswerTooLargeError:
+                return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
+            except BaseException:
+                answer.close()
+                raise
+            head, _, content = buffered.partition(_HEAD_END)
+            more = {"more": True, "stream": answer}
+        return {
+            "status": status[0],
+            "headers": [list(line.decode("latin-1").split(": ", 1)) for line in head.split(b"\r\n") if b": " in line],
+            "body": base64.b64encode(content).decode("ascii"),
+            **more,
+        }
+
+    def _call(self, name: str, identity: str, value: Any) -> None:
+        """Run one stage call in its box and write the answer for the scorer.
+
+        Args:
+            name: The stage.
+            identity: The call's id, also its folder and answer name.
+            value: The JSON input.
+        """
+        started = self._recorder.start() if self._recorder is not None else None
+        try:
+            response = self._run(name, identity, value)
+        except BudgetReached as error:
+            response = {"control": {"code": "budget_reached", "message": str(error)}}
+        except BudgetInsufficientError as error:
+            response = {"control": {"code": "budget_insufficient", "message": str(error)}}
+        except UnpricedOperationError as error:
+            response = {"control": {"code": "unpriced_operation", "message": str(error)}}
+        except (BudgetError, UsagePendingError) as error:
+            response = {"control": {"code": "usage_pending", "message": str(error)}}
+        except Exception as error:
+            logger.warning("Stage %s call failed in the parent: %s", name, error)
+            response = {"error": f"Stage {name!r} could not run."}
+        self._record_stage(started, name, value, response)
+        self._answer(identity, response)
+
+    def _refuse_stage(self, name: Any, identity: str, value: Any) -> None:
+        """Record a call to a stage this run does not have, then answer the scorer with the refusal.
+
+        Args:
+            name: The stage the frame names; the record's target.
+            identity: The call's id, also its answer name.
+            value: The JSON input.
+        """
+        response = {"error": f"Unknown stage {name!r}."}
+        started = self._recorder.start() if self._recorder is not None else None
+        self._record_stage(started, str(name), value, response, status="refused")
+        self._answer(identity, response)
+
+    def _record_stage(
+        self,
+        started: CallStart | None,
+        name: str,
+        value: Any,
+        response: Mapping[str, Any],
+        *,
+        status: str | None = None,
+    ) -> None:
+        """Write one stage call into the run record (E28).
+
+        Args:
+            started: When the call started; None when nothing records.
+            name: The stage.
+            value: The JSON input.
+            response: The answer the scorer gets.
+            status: The status to record; None derives it from the answer.
+        """
+        if self._recorder is None or started is None:
+            return
+        control = response.get("control")
+        reason = response.get("error") or (control.get("message") if isinstance(control, Mapping) else None)
+        if status is None:
+            status = "ok" if "output" in response else "refused" if control else "failed"
+        self._recorder.record(
+            started,
+            kind="stage",
+            target=name,
+            status=status,
+            request=json.dumps(value, default=str),
+            response=json.dumps(response, default=str),
+            failure_reason=None if status == "ok" else str(reason or "The stage gave no answer."),
+            secrets=self._stage_secrets,
+        )
+
+    def _run(self, name: str, identity: str, value: Any) -> dict[str, Any]:
+        """Run one stage call in the stage's box, with a relay of its own when the stage has MCP servers.
+
+        The call's relay closes when the call ends.
+
+        Args:
+            name: The stage.
+            identity: The call's id, also its folder name.
+            value: The JSON input.
+
+        Returns:
+            ``{"output": ...}``, or ``{"error": ...}`` when the stage failed,
+            passed its timeout, or returned no valid JSON.
+        """
+        stage_relay = self._stage_relays.get(name)
+        relay = stage_relay.for_call(identity) if stage_relay is not None else None
+        try:
+            return self._run_in_box(name, identity, value, relay)
+        finally:
+            if relay is not None:
+                relay.close()
+
+    def _run_in_box(self, name: str, identity: str, value: Any, relay: _StageRelay | None) -> dict[str, Any]:
+        """Run one stage call in the stage's box, behind the call's own relay when the stage has one.
+
+        A Python entry runs through the runner's stage mode; a command reads
+        the input on stdin and writes its JSON output on stdout.
+
+        Args:
+            name: The stage.
+            identity: The call's id, also its folder name.
+            value: The JSON input.
+            relay: The call's relay, or ``None`` when the stage's MCP file holds no server.
+
+        Returns:
+            ``{"output": ...}``, or ``{"error": ...}`` when the stage failed,
+            passed its timeout, or returned no valid JSON.
+        """
+        stage, box = self._stages[name], self._boxes[name]
+        folder = f"{_STAGE_CALLS_DIR}/{identity}"
+        files = {f"{folder}/{runner.INPUT_FILE}": json.dumps(value)}
+        if relay is not None:
+            files[f"{folder}/{runner.STAGE_RELAY_FILE}"] = json.dumps(relay.config(_FROM_STAGE_TREE))
+        box.write_files(files)
+        relative = f"../calls/{identity}"
+        stage_runner = f"python3 ../{RUNNER_PATH.rsplit('/', 1)[1]}"
+        if isinstance(stage.entry, str):
+            command = f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_FLAG} {relative} {shlex.quote(stage.entry)}"
+        elif relay is not None:
+            # The runner serves the stage's relay, then runs the command with the same files.
+            command = (
+                f"cd {_STAGE_TREE} && {stage_runner} {runner.STAGE_COMMAND_FLAG} {relative} {shlex.join(stage.entry)}"
+            )
+        else:
+            command = (
+                f"cd {_STAGE_TREE} && {shlex.join(stage.entry)}"
+                f" < {relative}/{runner.INPUT_FILE} > {relative}/{runner.OUTPUT_FILE}"
+            )
+        sink = functools.partial(relay.output, source=identity) if relay is not None else sandbox_log.ignore_output
+        result = box.run(command, env=self._env, timeout_seconds=stage.timeout, on_output=sink)
+        if relay is not None and relay.control is not None:
+            # A budget stop of the stage's own MCP call stops the scorer too, whatever the stage did with its 503.
+            with self._answer_lock:
+                self.control = self.control or relay.control
+            return {"control": relay.control}
+        if result.timed_out:
+            return {"error": f"Stage {name!r} passed its {stage.timeout:g}s timeout."}
+        if not result.ok:
+            # Masked before the cut, so a secret across the cut leaves no part of itself.
+            tail = redact((result.stderr or result.stdout).strip(), self._stage_secrets)[-_STAGE_ERROR_CHARS:]
+            return {"error": f"Stage {name!r} failed (exit {result.exit_code}): {tail}"}
+        text = box.read_file(f"{folder}/{runner.OUTPUT_FILE}")
+        try:
+            output = json.loads(text) if text else None
+        except ValueError:
+            output = None
+        if isinstance(stage.entry, str):
+            if isinstance(output, dict) and "output" in output:
+                return {"output": output["output"]}
+            if isinstance(output, dict) and output.get("error"):
+                return {"error": f"Stage {name!r} raised {output['error']}"}
+            return {"error": f"Stage {name!r} returned no valid output."}
+        if text is None or not text.strip():
+            return {"error": f"Stage {name!r} returned no output."}
+        if output is None and text.strip() != "null":
+            return {"error": f"Stage {name!r} returned output that is not JSON."}
+        return {"output": output}
+
+    def _answer(self, identity: str, response: Mapping[str, Any]) -> bool:
+        """Write one answer where the waiting caller reads it: the scorer's ``call`` or a stage's MCP proxy.
+
+        Args:
+            identity: The call's id.
+            response: ``{"output"}``, ``{"error"}``, ``{"control"}``, or a
+                service's ``{"status", ...}``.
+
+        Returns:
+            False when the relay is closed and wrote nothing, so a stream stops.
+        """
+        with self._answer_lock:
+            if self._closed:
+                return False
+            if self._box is not None or self._candidate is None:
+                # The protected-file check covers the candidate box; the metric
+                # box holds no repository and a stage box only runs the version.
+                if self._box is not None:
+                    self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
+                return True
+            changes = self._candidate.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
+            if changes is None:
+                # The scorer may wait until its own timeout; either way the version gets no score.
+                self.unchecked = True
+            else:
+                self.changes.extend(changes)
+            return True
+
+    def close(self) -> None:
+        """Stop queued calls, keep late answers out of the box, and close every stage box."""
+        with self._answer_lock:
+            self._closed = True
+            relays = [*self._stage_relays.values(), *self._calls]
+        for relay in relays:
+            relay.close()
+        for pool in (*self._pools.values(), self._refusals, self._service_pool, self._stream_pool):
+            pool.shutdown(wait=False, cancel_futures=True)
+        for box in self._boxes.values():
+            with contextlib.suppress(Exception):
+                box.close()
+
+
+def _scrub(text: str, root: str | None, hidden: tuple[str, ...] | list[str] = ()) -> str:
+    """Remove traceback frames and the scorer box's absolute paths from text the proposer reads.
+
+    "Run failed" feedback keeps the frames in the version's own files, so the
+    proposer can find the line that broke (E41); every other frame goes.
+
+    Args:
+        text: An error or a feedback string from the scorer box.
+        root: The box's working directory; ``None`` before it is known.
+        hidden: The metric files and exploit folder; their frames always go.
+
+    Returns:
+        The text with repository-relative paths and without the metric's frames.
+    """
+    text = text if text.endswith("\n") else f"{text}\n"
+    if text.startswith(RUN_FAILED):
+        text = _TRACEBACK.sub(lambda match: _repo_frame(match.group(0), root, hidden), text)
+    else:
+        text = _TRACEBACK.sub("", text)
+    text = text.rstrip("\n")
+    if root:
+        text = (
+            text.replace(f"{root}/{WORK_DIR}/", "")
+            .replace(f"{root}/{WORK_DIR}", ".")
+            .replace(f"{root}/{METRIC_REPO_DIR}/", "")
+            .replace(f"{root}/{METRIC_REPO_DIR}", ".")
+            .replace(f"{root}/", "")
+            .replace(root, "")
+        )
+    return text
+
+
+def _repo_frame(block: str, root: str | None, hidden: tuple[str, ...] | list[str]) -> str:
+    """Return one traceback frame if it is in a version file, else nothing.
+
+    Args:
+        block: A ``_TRACEBACK`` match: the header line, or one frame with its source lines.
+        root: The box's working directory; ``None`` before it is known.
+        hidden: The metric files and exploit folder.
+
+    Returns:
+        The block unchanged when it is the header or a frame in a visible
+        repository file, else ``""``.
+    """
+    found = _FRAME_FILE.search(block)
+    if found is None:
+        return block
+    path = found.group(1)
+    work = f"{root}/{WORK_DIR}/" if root else None
+    if work and path.startswith(work):
+        path = path[len(work) :]
+    # Frames in the runner, the standard library or packages say nothing
+    # about the version and name box paths; "<frozen ...>" frames are noise.
+    elif path.startswith(("/", "<")):
+        return ""
+    if any(path == entry.rstrip("/") or path.startswith(f"{entry.rstrip('/')}/") for entry in hidden):
+        return ""
+    return block
+
+
+def _for_proposer(
+    document: Mapping[str, Any], root: str | None, hidden: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
+    """Keep only the score, the feedback and the named scores of a scoring result.
+
+    Args:
+        document: What :meth:`RepoScorer.score` returned.
+        root: The box's working directory, scrubbed from the feedback.
+        hidden: The metric files and exploit folder, whose frames never reach the proposer.
+
+    Returns:
+        The reply the guest receives.
+    """
+    reply = {key: document[key] for key in _PROPOSER_KEYS if key in document}
+    if isinstance(reply.get("feedback"), str):
+        reply["feedback"] = _scrub(reply["feedback"], root, hidden)
+    if isinstance(reply.get("scores"), Mapping):
+        reply["scores"] = {
+            name: _named_score(entry, root, hidden) if isinstance(entry, Mapping) else entry
+            for name, entry in reply["scores"].items()
+        }
+    return reply
+
+
+def _named_score(
+    entry: Mapping[str, Any], root: str | None, hidden: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
+    """Keep only the score and the scrubbed feedback of one named score.
+
+    Args:
+        entry: One value of the result's ``scores`` mapping.
+        root: The box's working directory, scrubbed from the feedback.
+        hidden: The metric files and exploit folder.
+
+    Returns:
+        The named score the guest receives.
+    """
+    kept = {key: entry[key] for key in ("score", "feedback") if key in entry}
+    if isinstance(kept.get("feedback"), str):
+        kept["feedback"] = _scrub(kept["feedback"], root, hidden)
+    return kept

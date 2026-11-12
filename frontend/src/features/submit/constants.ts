@@ -1,4 +1,4 @@
-import type { ModelConfig, SplitFractions } from "@/shared/types/api";
+import type { ModelConfig } from "@/shared/types/api";
 import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
 import { msg } from "@/shared/lib/messages";
 
@@ -8,8 +8,6 @@ export const emptyModelConfig = (): ModelConfig => ({
   name: "",
   token_source: "managed",
 });
-
-export const defaultSplit: SplitFractions = { train: 0.7, val: 0.15, test: 0.15 };
 
 // Labels are thunks, not pre-resolved strings: `msg()` reads the active locale's
 // catalog, which is delivered out of band and is empty at module-eval time on the

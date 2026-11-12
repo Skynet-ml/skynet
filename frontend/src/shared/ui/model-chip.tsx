@@ -33,7 +33,7 @@ interface ModelChipProps {
   config: ModelConfig;
   /** Names the role for assistive tech; the surface shows it above the chip. */
   roleLabel?: string;
-  /** Hide sampling and reasoning settings when the runtime owns them. */
+  /** Hide sampling settings when the runtime owns them; reasoning effort still shows. */
   modelDefaultsOnly?: boolean;
   onClick: () => void;
   onClone?: () => void;
@@ -121,9 +121,7 @@ export function ModelChip({
   tooltip,
   className,
 }: ModelChipProps) {
-  const effort = modelDefaultsOnly
-    ? undefined
-    : (config.extra?.reasoning_effort as string | undefined);
+  const effort = config.extra?.reasoning_effort as string | undefined;
   const temperature = modelDefaultsOnly ? undefined : config.temperature;
   const maxTokens = modelDefaultsOnly ? undefined : config.max_tokens;
   const name =

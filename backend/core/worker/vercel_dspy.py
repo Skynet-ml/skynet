@@ -1,4 +1,4 @@
-"""Supervise the unchanged DSPy service through a parent-owned Vercel sandbox."""
+"""Supervise the protected optimizer through a parent-owned Vercel sandbox."""
 
 from __future__ import annotations
 
@@ -8,16 +8,18 @@ import logging
 import re
 import secrets
 import shlex
+import time
 from pathlib import Path
 from typing import Any
 
 from ..billing.runtime import UsagePendingError
 from ..billing.signals import BudgetReached
 from ..brand import APP_NAME
-from ..exceptions import InfrastructureInterruptionError
+from ..exceptions import InfrastructureInterruptionError, ServiceError
+from ..models.blackbox import BLACKBOX_HARNESS_CODEX
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, archive_chunks
-from ..service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSpec
 from .constants import EVENT_ERROR, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
@@ -26,7 +28,7 @@ from .sandbox_protocol import SANDBOX_PROTOCOL
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_EVENT = "checkpoint_file"
-_CHECKPOINT_PATH = re.compile(r"(?:(?:pair_\d+|gepa)/)?gepa_state\.bin\Z")
+_CHECKPOINT_PATH = re.compile(r"(?:gepa/)?gepa_state\.bin\Z")
 BROKEN_IMAGE_MESSAGE = "The sandbox image cannot start its optimizer; rebuild the sandbox image."
 OUTDATED_IMAGE_MESSAGE = (
     f"The sandbox image is older than this version of {APP_NAME}; rebuild and re-pin the sandbox image."
@@ -37,6 +39,7 @@ PROTOCOL_PROBE = (
 _PROBE_TIMEOUT_SECONDS = 120.0
 _MISSING_CORE_MODULE = re.compile(r"(?:ModuleNotFoundError|ImportError): .*\bcore\.")
 _DIAGNOSTIC_LINES = 40
+DEADLINE_MESSAGE = "The cloud sandbox reached its time limit of {lifetime:.0f} s."
 
 
 def _save_checkpoint(directory: Path, event: dict[str, Any]) -> None:
@@ -55,6 +58,23 @@ def _save_checkpoint(directory: Path, event: dict[str, Any]) -> None:
     temporary = target.with_suffix(".incoming")
     temporary.write_bytes(data)
     temporary.replace(target)
+
+
+def _starts_codex(payload: dict[str, Any]) -> bool:
+    """Tell whether the optimizer in this box can start a contained Codex proposer.
+
+    Args:
+        payload: The black-box run payload.
+
+    Returns:
+        True for a sandbox proposer on the Codex harness, outside a setup check.
+    """
+    if "_preflight" in payload:
+        return False
+    proposer = payload.get("proposer")
+    if not isinstance(proposer, dict) or proposer.get("host_cli") is not None:
+        return False
+    return proposer.get("harness", BLACKBOX_HARNESS_CODEX) == BLACKBOX_HARNESS_CODEX
 
 
 def _guest_failure(result: CommandResult) -> Exception:
@@ -136,6 +156,14 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             raise TypeError("The Vercel optimizer requires a trusted sandbox descriptor.")
         runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
         lifetime = float(descriptor["lifetime_seconds"])
+        # Read before the open, so the provider's lifetime clock never starts
+        # earlier than this one and a stop at the real lifetime end always
+        # counts as the time limit (SKY-586). A clock read after the open
+        # could start later than the box and miss it. The cost: a real failure
+        # that comes less than the open duration (checkpoint reads, budget
+        # reservation, create retries up to the provider's create timeout)
+        # before the lifetime end also counts as the time limit.
+        opened_at = time.monotonic()
         nonce = secrets.token_hex(24)
         checkpoint_root = Path(guest_payload["_gepa_log_dir"]) if guest_payload.get("_gepa_log_dir") else None
         checkpoints = {}
@@ -145,15 +173,33 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
                 if _CHECKPOINT_PATH.fullmatch(relative):
                     checkpoints[relative] = base64.b64encode(path.read_bytes()).decode()
             guest_payload["_gepa_log_dir"] = "checkpoints"
+        # The proposer runs as a contained subprocess of this box, so the box
+        # itself carries the proposer's granted hosts (E57). A repository's
+        # setup, targets and metric run in parent-owned boxes, never here. A
+        # setup check never runs the proposer and gets no host grant, so its
+        # box stays offline.
+        staged = guest_payload.get(REPO_SNAPSHOT_KEY)
+        hosts = (
+            tuple(staged.get("proposer_hosts") or ())
+            if isinstance(staged, dict) and "_preflight" not in guest_payload
+            else ()
+        )
         session = runtime.open(
             SandboxSpec(
                 lifetime_seconds=lifetime,
                 image=descriptor["image"],
-                network_disabled=True,
+                network_disabled=not hosts,
+                allowed_hosts=hosts,
                 operation_key=f"dspy:{artifact_id}",
             )
         )
         _require_image_protocol(session, lifetime)
+        # A Codex proposer runs as a contained subprocess of this box and
+        # cannot run as root, so the parent writes and checks the root-owned
+        # file here, before the optimizer starts (SKY-389). Other runs skip
+        # the write; the guest check still fails closed if Codex starts.
+        if _starts_codex(guest_payload):
+            session.write_codex_requirements()
         session_root = f".app-dspy-{nonce}"
         snapshot = guest_payload.pop(REPO_SNAPSHOT_KEY, None)
         if isinstance(snapshot, dict):
@@ -211,12 +257,20 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
         command = f"PYTHONPATH=/app python3 -m core.worker.isolated_runner {shlex.quote(request_path)}"
         if "_preflight" in guest_payload:
             event_queue.put({"type": "preflight_phase", "phase": "evaluator"})
-        result = session.run(
-            command,
-            env={"PYTHONUNBUFFERED": "1", "LITELLM_LOCAL_MODEL_COST_MAP": "True"},
-            timeout_seconds=lifetime,
-            on_output=output,
-        )
+        try:
+            result = session.run(
+                command,
+                env={"PYTHONUNBUFFERED": "1", "LITELLM_LOCAL_MODEL_COST_MAP": "True"},
+                timeout_seconds=lifetime,
+                on_output=output,
+            )
+        except ServiceError as error:
+            # The provider ends the box at its lifetime (the run deadline,
+            # SKY-572) and the parent reports only a generic session stop. A
+            # stop before the lifetime ends is a real failure and stays one.
+            if time.monotonic() - opened_at < lifetime:
+                raise
+            raise InfrastructureInterruptionError(DEADLINE_MESSAGE.format(lifetime=lifetime)) from error
         if not terminal or not result.ok:
             raise _guest_failure(result)
     except BudgetReached as error:

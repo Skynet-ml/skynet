@@ -29,11 +29,11 @@ export function getDashboardStats({
 }: GetDashboardStatsArgs): DashboardStats {
   if (!data) return null;
 
-  // "Shared with me" is a stable property of the caller, not of the active
-  // tab or filter, so it always comes from the counts payload.
+  // The job list combines both sources; analytics uses its selected source below.
   const shared = counts?.shared ?? 0;
 
-  if (activeTab === "analytics" && analyticsData) {
+  if (activeTab === "analytics") {
+    if (!analyticsData) return null;
     return {
       total: analyticsData.filtered_total,
       success: analyticsData.success_count,
@@ -41,7 +41,7 @@ export function getDashboardStats({
       failed: analyticsData.failed_count,
       cancelled: analyticsData.status_counts.cancelled ?? 0,
       stopped: analyticsData.status_counts.stopped ?? 0,
-      shared,
+      shared: analyticsData.access_usage.reduce((sum, row) => sum + (row.name === "mine" ? 0 : row.value), 0),
     };
   }
 

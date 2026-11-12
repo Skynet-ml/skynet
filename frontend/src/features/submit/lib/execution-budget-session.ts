@@ -2,11 +2,6 @@ import type {
   ExecutionBudget,
   ExecutionBudgetRef,
 } from "../../../shared/types/execution-budget.ts";
-import type {
-  PreflightScope,
-  WizardPreflightResponse,
-} from "../../../shared/types/wizard-preflight.ts";
-import type { StoredPreflightEvidence } from "./preflight-outcome.ts";
 
 /** Shared durable metadata; workflow snapshots never own separate spending pools. */
 export interface WizardBudgetDraft {
@@ -18,32 +13,6 @@ export interface WizardBudgetDraft {
   budgetCreateUncapped?: boolean;
   submissionIdempotencyKey?: string;
   submissionFingerprint?: string;
-  // A passed setup check is server evidence claimed against this budget, not
-  // config, so it rides here beside the budget it belongs to rather than in a
-  // workflow snapshot. A restored draft rehydrates it; a changed budget drops it.
-  preflightEvidence?: Partial<Record<PreflightScope, StoredPreflightEvidence>>;
-}
-
-const PREFLIGHT_SCOPES = ["evaluation", "execution"] as const;
-
-/** Accept only well-formed evidence whose response still carries the budget it was claimed against. */
-function readStoredEvidence(
-  raw: WizardBudgetDraft["preflightEvidence"],
-): WizardBudgetDraft["preflightEvidence"] {
-  if (!raw || typeof raw !== "object") return undefined;
-  const entries = PREFLIGHT_SCOPES.flatMap((scope) => {
-    const stored = raw[scope];
-    const response = stored?.response as WizardPreflightResponse | undefined;
-    return stored &&
-      typeof stored.identity === "string" &&
-      stored.identity &&
-      response &&
-      typeof response === "object" &&
-      typeof response.budget?.id === "string"
-      ? ([[scope, stored]] as const)
-      : [];
-  });
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 export interface BudgetSessionDependencies {
@@ -78,11 +47,9 @@ function errorNumber(error: unknown, key: string): number | null {
 }
 
 /** Retain safe shared fields when accepting an older or partially written draft. */
-export function readBudgetDraft(raw: WizardBudgetDraft): WizardBudgetDraft {
+function readBudgetDraft(raw: WizardBudgetDraft): WizardBudgetDraft {
   const ref = raw.executionBudgetRef;
-  const preflightEvidence = readStoredEvidence(raw.preflightEvidence);
   return {
-    ...(preflightEvidence ? { preflightEvidence } : {}),
     ...(ref && typeof ref.id === "string" && Number.isInteger(ref.revision)
       ? { executionBudgetRef: { id: ref.id, revision: ref.revision } }
       : {}),
@@ -223,17 +190,6 @@ export class ExecutionBudgetSession {
     await this.save();
     this.assertActive();
     return this.draft.submissionIdempotencyKey!;
-  }
-
-  /** Keep a passed setup check with the budget it was claimed against, so a restored draft can reuse it. */
-  async recordEvidence(scope: PreflightScope, evidence: StoredPreflightEvidence): Promise<void> {
-    this.assertActive();
-    if (this.draft.preflightEvidence?.[scope]?.identity === evidence.identity) return;
-    this.draft = {
-      ...this.draft,
-      preflightEvidence: { ...this.draft.preflightEvidence, [scope]: evidence },
-    };
-    await this.save();
   }
 
   async adopt(budget: ExecutionBudget): Promise<void> {

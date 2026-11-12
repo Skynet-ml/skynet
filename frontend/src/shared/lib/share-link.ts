@@ -45,11 +45,10 @@ export function hostedAppUrl(path: string): string | null {
 }
 
 /**
- * Public URL of a shared agent chat. The hosted app uses its own origin. In
- * the Mac app the chat is published to the linked hosted account, so the link
- * points at the hosted app. Null when no link can work.
+ * Public URL of a shared agent chat, on the hosted app's own origin. The link
+ * opens the chat in Skynet, so it needs the hosted backend; the Mac app does
+ * not share chats and gets null.
  */
 export function sharedChatUrl(token: string): string | null {
-  const path = `/share/chat/${encodeURIComponent(token)}`;
-  return isLocalMode() ? hostedAppUrl(path) : shareLinkUrl(path);
+  return shareLinkUrl(`/share/chat/${encodeURIComponent(token)}`);
 }

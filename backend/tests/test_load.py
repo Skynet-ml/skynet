@@ -177,7 +177,7 @@ def _optimize_payload(username: str) -> dict:
         "username": username,
         "task": {
             "objective": "Answer in one word.",
-            "artifact": {"kind": "prompt", "starting_version": "Answer briefly: "},
+            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
         },
         "data": {
             "mode": "pairs",

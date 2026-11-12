@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,7 @@ from core.constants import (
     DETAIL_BASELINE,
     DETAIL_OPTIMIZED,
     PROGRESS_BASELINE,
+    PROGRESS_CANDIDATE,
     PROGRESS_EVALUATION_STARTED,
     PROGRESS_LANE_COMPLETED,
     PROGRESS_LANE_HANDOFF,
@@ -26,13 +30,15 @@ from core.constants import (
     TQDM_TOTAL_KEY,
 )
 from core.exceptions import ServiceError
+from core.models import blackbox as blackbox_models
 from core.models.blackbox import (
     BLACKBOX_ENGINE_BEST_OF_N,
     BLACKBOX_ENGINE_GEPA,
+    BLACKBOX_HARNESSES,
     BlackboxRunRequest,
+    BlackboxRunResponse,
 )
 from core.models.results import ModelTokenUsage
-from core.models.unified import UnifiedCase, UnifiedRunRequest
 
 from .. import autoresearch as autoresearch_mod
 from .. import autosaddler as autosaddler_mod
@@ -43,12 +49,21 @@ from .. import shinka_evolve as shinka_evolve_mod
 from ..agent_runs import PHASE_BASELINE, PHASE_FINAL
 from ..auto import LaneOutcome
 from ..harness import GatewayConfig
+from ..harnesses import REGISTRY
 from ..native_runtime import NativeOptions
-from ..protocol import Candidate, EngineContext, EvalServer, Result, Task, candidate_key
-from ..sandbox import LocalSubprocessRuntime
+from ..protocol import (
+    METRIC_ERROR,
+    UNSCORED,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    Task,
+    candidate_key,
+)
+from ..sandbox import LocalSubprocessSession
 from ..sandbox_scorer import ScorerGateway, ScorerUsage
 from ..service import run_blackbox_optimization, validate_blackbox_payload
-from ..workspace_scorer import build_workspace_scorer
 from .mocks import (
     AGENT_OUTPUT_SCORER_CODE,
     VOWEL_SCORER_CODE,
@@ -57,7 +72,7 @@ from .mocks import (
     FakeSandboxRuntime,
     vowel_scorer,
 )
-from .test_reward import GEOCODE_METRIC
+from .test_repo_scorer import _probed
 
 _CASES = [{"target": "aeiou", "i": i} for i in range(10)]
 
@@ -237,7 +252,6 @@ def test_run_scores_baseline_and_best_in_a_separate_final_run(fake_lm: FakeRefle
     assert [(lane.engine, lane.phase, lane.status) for lane in response.lanes] == [
         (BLACKBOX_ENGINE_BEST_OF_N, "single", "completed")
     ]
-    assert response.num_lm_calls == len(fake_lm.history) > 0
     assert response.total_tokens == 15 * len(fake_lm.history)
     assert [(u.model, u.input_tokens, u.output_tokens) for u in response.usage_by_model] == [
         ("fake/model", 10 * len(fake_lm.history), 5 * len(fake_lm.history))
@@ -340,6 +354,37 @@ def test_byok_reflection_budget_does_not_limit_model_calls(
     assert all(ctx.native_options.max_token_cost is None for _, ctx in fake_native_proposers)
 
 
+def test_native_proposers_receive_the_reflection_reasoning_effort(
+    fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
+) -> None:
+    """The effort chosen for the optimization model passes validation and reaches every native proposer."""
+    run_blackbox_optimization(
+        _payload(
+            strategy={"mode": "auto"},
+            budget={"max_scorer_runs": 24},
+            max_cost_cents=100,
+            reflection_model_config={"name": "fake/model", "extra": {"reasoning_effort": "high"}},
+        ),
+        artifact_id="job-effort",
+        gepa_log_dir_path=str(tmp_path),
+    )
+    assert fake_native_proposers
+    assert all(ctx.native_options.reasoning_effort == "high" for _, ctx in fake_native_proposers)
+
+
+def test_native_proposers_keep_the_default_effort_without_a_choice(
+    fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
+) -> None:
+    """A run with no chosen effort hands the native proposers none."""
+    run_blackbox_optimization(
+        _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100),
+        artifact_id="job-no-effort",
+        gepa_log_dir_path=str(tmp_path),
+    )
+    assert fake_native_proposers
+    assert all(ctx.native_options.reasoning_effort is None for _, ctx in fake_native_proposers)
+
+
 def test_legacy_auto_byok_reflection_with_cost_limit(
     fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
 ) -> None:
@@ -355,33 +400,6 @@ def test_legacy_auto_byok_reflection_with_cost_limit(
     assert response.strategy_mode == "auto"
     assert fake_native_proposers
     assert all(ctx.native_options.max_token_cost is not None for _, ctx in fake_native_proposers)
-
-
-def test_legacy_byok_task_usage_does_not_consume_budget(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Keep a BYOK task model out of the legacy budget checks."""
-    task_lm = FakeReflectionLM()
-    original = service_mod.job_spec_from_payload
-
-    def job_from_payload(payload: BlackboxRunRequest) -> service_mod.JobSpec:
-        """Add a BYOK task model to the job."""
-        job = original(payload)
-        job.extra_lms = [task_lm]
-        job.extra_lm_sources = ["byok"]
-        return job
-
-    def strategy(_strategy: Any, _task: Task, _server: EvalServer, ctx: EngineContext, *_args: Any, **_kwargs: Any):
-        """Exercise both budget checks after task model usage."""
-        task_lm.history.append({"usage": {"prompt_tokens": 1000000, "completion_tokens": 1000000}})
-        service_mod.dspy.settings.callbacks[0]._check()
-        ctx.check_budget()
-        assert ctx.remaining_cost_usd() > 0
-        return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
-
-    monkeypatch.setattr(service_mod, "job_spec_from_payload", job_from_payload)
-    monkeypatch.setattr(service_mod, "run_strategy", strategy)
-    run_blackbox_optimization(_payload(max_cost_cents=1), artifact_id="byok-task", gepa_log_dir_path=str(tmp_path))
 
 
 @pytest.mark.parametrize("source", ["byok", "managed"])
@@ -540,7 +558,7 @@ def test_regression_guard_restores_the_seed(
     assert response.engine_used == BLACKBOX_ENGINE_BEST_OF_N
 
 
-_ILLEGAL_WINS_ON_SCORE_CODE = """
+_OLD_JUDGE_KEY_CODE = """
 def score(candidate, case=None):
     if candidate == "xyz":
         return {"score": 0.0, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
@@ -548,10 +566,10 @@ def score(candidate, case=None):
 """
 
 
-def test_regression_guard_refuses_an_illegal_winner_with_a_higher_score(
+def test_a_judge_key_in_side_info_never_changes_the_winner(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A judge-rejected winner never wins, even when its fixed score beats negative legal scores."""
+    """No judge prunes the final selection: an ``illegal_approach`` key is plain side info (SKY-349)."""
     monkeypatch.setattr(
         service_mod,
         "run_strategy",
@@ -562,133 +580,53 @@ def test_regression_guard_refuses_an_illegal_winner_with_a_higher_score(
     )
 
     response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _ILLEGAL_WINS_ON_SCORE_CODE}),
+        _payload(scorer={"kind": "python", "metric_code": _OLD_JUDGE_KEY_CODE}),
         artifact_id="job-3b",
         gepa_log_dir_path=str(tmp_path),
     )
 
-    assert response.regression_guard_applied is True
-    assert response.best_candidate == "hello world"
-    assert response.best_score == response.baseline_score == pytest.approx(-3.2)
-
-
-_LEGAL_RUNNER_UP_CODE = """
-def score(candidate, case=None):
-    if candidate == "xyz":
-        return {"score": 0.0, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
-    if candidate == "legal-better":
-        return {"score": -2.0, "feedback": "legal improvement"}
-    return {"score": -3.2, "feedback": "legal"}
-"""
-
-
-def test_a_rejected_winner_gives_way_to_the_best_legal_version(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With negative scores, a judge-rejected winner yields to the best legal version, not the seed."""
-
-    def search(
-        strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
-    ) -> tuple[Result, list[object]]:
-        """Score a legal improvement and a rejected version, then return the server's top score."""
-        server.evaluate("legal-better")
-        server.evaluate("xyz")
-        return Result(best_candidate=server.best_candidate, best_score=server.best_score, total_evals=server.used), []
-
-    monkeypatch.setattr(service_mod, "run_strategy", search)
-
-    response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _LEGAL_RUNNER_UP_CODE}),
-        artifact_id="job-3c",
-        gepa_log_dir_path=str(tmp_path),
-    )
-
     assert response.regression_guard_applied is False
-    assert response.best_candidate == "legal-better"
-    assert response.best_score == pytest.approx(-2.0)
+    assert response.best_candidate == "xyz"
+    assert response.best_score == pytest.approx(0.0)
     assert response.baseline_score == pytest.approx(-3.2)
 
 
-_CRASHING_RUNNER_UP_CODE = """
+_ALWAYS_CRASHING_CASE_CODE = """
 def score(candidate, case=None):
-    if candidate == "broken":
-        raise RuntimeError("syntax error in the version")
-    if candidate == "xyz":
-        return {"score": -0.5, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
-    if candidate == "legal-better":
-        return {"score": -2.0, "feedback": "legal improvement"}
-    return {"score": -3.2, "feedback": "legal"}
+    if case and case.get("i") == 1:
+        raise IndexError("edge case")
+    return {"score": 1.0 if candidate == "better" else 0.5, "feedback": "ok"}
 """
 
 
-def test_a_version_that_crashed_the_scorer_is_not_the_legal_fallback(
+def test_a_case_that_crashes_for_every_version_publishes_the_seed(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A crashed version's 0.0 floor beats negative legal scores, yet the fallback skips it."""
+    """When one case crashes for every version, each version has a metric_error, so the seed stays (SKY-367).
 
-    def search(
-        strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
-    ) -> tuple[Result, list[object]]:
-        """Score a legal improvement, a rejected version and a crashing one; return the rejected one."""
-        server.evaluate("legal-better")
-        server.evaluate("xyz")
-        server.evaluate("broken")
-        return Result(best_candidate="xyz", best_score=-0.5, total_evals=server.used), []
-
-    monkeypatch.setattr(service_mod, "run_strategy", search)
-
-    response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _CRASHING_RUNNER_UP_CODE}),
-        artifact_id="job-3d",
-        gepa_log_dir_path=str(tmp_path),
-    )
-
-    assert response.regression_guard_applied is False
-    assert response.best_candidate == "legal-better"
-    assert response.best_score == pytest.approx(-2.0)
-
-
-_PARTLY_CRASHING_RUNNER_UP_CODE = """
-def score(candidate, case=None):
-    if candidate == "flaky":
-        if case and case.get("i") == 0:
-            raise IndexError("edge case")
-        return {"score": -1.0, "feedback": "ok"}
-    if candidate == "xyz":
-        return {"score": 0.0, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
-    if candidate == "legal-better":
-        return {"score": -2.0, "feedback": "legal improvement"}
-    return {"score": -3.2, "feedback": "legal"}
-"""
-
-
-def test_a_version_that_crashed_on_an_earlier_case_is_not_the_legal_fallback(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A version that crashed on one case but not the last is still skipped as the fallback."""
+    This pins a known coverage gap: the search still ranks by the scored
+    cases, but final selection excludes every version with a metric_error.
+    """
     cases = [{"i": 0}, {"i": 1}]
 
     def search(
         strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
     ) -> tuple[Result, list[object]]:
-        """Score each version on every case, with the flaky one crashing on the first; return the rejected one."""
+        """Score a better version on every case and return it."""
         for case in cases:
-            server.evaluate("legal-better", case)
-            server.evaluate("xyz", case)
-            server.evaluate("flaky", case)
-        return Result(best_candidate="xyz", best_score=0.0, total_evals=server.used), []
+            server.evaluate("better", case)
+        return Result(best_candidate="better", best_score=1.0, total_evals=server.used), []
 
     monkeypatch.setattr(service_mod, "run_strategy", search)
 
     response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _PARTLY_CRASHING_RUNNER_UP_CODE}, cases=cases),
-        artifact_id="job-3e",
+        _payload(scorer={"kind": "python", "metric_code": _ALWAYS_CRASHING_CASE_CODE}, cases=cases),
+        artifact_id="job-3f",
         gepa_log_dir_path=str(tmp_path),
     )
 
-    assert response.regression_guard_applied is False
-    assert response.best_candidate == "legal-better"
-    assert response.best_score == pytest.approx(-2.0)
+    assert response.best_candidate == "hello world"
+    assert response.best_score == response.baseline_score == 0.5
 
 
 def test_seedless_run_without_cases_scores_the_version_alone(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
@@ -913,24 +851,6 @@ def test_combined_usage_preserves_distinct_native_model_keys() -> None:
     assert native.usage_by_model["fake/model"] == {"prompt_tokens": 3, "completion_tokens": 1}
 
 
-def test_native_call_count_sums_in_sandbox_requests() -> None:
-    """Proposer CLI requests made inside the sandbox count toward the run's LM calls."""
-    native = NativeOptions(
-        runtime="vercel",
-        model="fake/model",
-        gateway=GatewayConfig(url="https://unused.example/v1", api_key="test-key"),
-        max_token_cost=1.0,
-        usage_by_model={
-            "fake/model": {"prompt_tokens": 3, "calls": 4},
-            "native/other-model": {"prompt_tokens": 7, "calls": 2},
-            "native/legacy": {"prompt_tokens": 1},
-        },
-    )
-
-    assert service_mod._native_call_count(native) == 6
-    assert service_mod._native_call_count(None) == 0
-
-
 @pytest.mark.parametrize(
     ("strategy", "native"),
     [
@@ -947,9 +867,10 @@ def test_native_call_count_sums_in_sandbox_requests() -> None:
         {"temperature": 0.2},
         {"max_tokens": 4096},
         {"base_url": "https://models.example/v1"},
-        {"extra": {"reasoning_effort": "high"}},
+        {"extra": {"top_p": 0.9}},
+        {"extra": {"reasoning_effort": "high$(id)"}},
     ],
-    ids=["temperature", "max-tokens", "base-url", "extra"],
+    ids=["temperature", "max-tokens", "base-url", "extra", "unknown-effort"],
 )
 def test_native_model_controls_are_rejected_without_restricting_direct_engines(
     monkeypatch: pytest.MonkeyPatch, strategy: dict[str, str], native: bool, model_options: dict[str, Any]
@@ -975,6 +896,94 @@ def test_native_model_controls_are_rejected_without_restricting_direct_engines(
             validate_blackbox_payload(payload)
     else:
         validate_blackbox_payload(payload)
+
+
+@pytest.mark.parametrize("strategy", [{"mode": "auto"}, {"mode": "single", "engine": "meta_harness"}])
+@pytest.mark.parametrize(
+    ("declared", "effort", "accepted"),
+    [
+        (("low", "high"), "max", False),
+        (("low", "high"), "high", True),
+        (("low", "high"), None, True),
+        (("low", "high"), "", True),
+        (None, "max", True),
+        (None, "", True),
+    ],
+    ids=["unsupported", "supported", "default", "empty", "undeclared", "empty-undeclared"],
+)
+def test_submit_checks_the_effort_against_the_proposer_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: dict[str, str],
+    declared: tuple[str, ...] | None,
+    effort: str | None,
+    accepted: bool,
+) -> None:
+    """Refuse at submit an effort level the proposer harness does not declare, before any paid work.
+
+    Args:
+        monkeypatch: Pytest fixture that swaps the registry entry and runtime capabilities.
+        strategy: Auto or a single native engine; both run the proposer harness.
+        declared: The harness's supported levels; ``None`` declares no list.
+        effort: The chosen effort level; ``None`` or an empty string keeps the harness default.
+        accepted: Whether the submission passes validation.
+    """
+    monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
+    monkeypatch.setitem(REGISTRY, "fake", replace(REGISTRY["codex"], id="fake", supported_efforts=declared))
+    monkeypatch.setattr(blackbox_models, "BLACKBOX_HARNESSES", (*BLACKBOX_HARNESSES, "fake"))
+    extra = {"reasoning_effort": effort} if effort is not None else {}
+    payload = _payload(
+        strategy=strategy,
+        max_cost_cents=100,
+        scorer={"kind": "remote", "url": "https://scorer.example"},
+        reflection_model_config={"name": "fake/model", "extra": extra},
+        proposer={"harness": "fake"},
+    )
+
+    if accepted:
+        validate_blackbox_payload(payload)
+    else:
+        with pytest.raises(ServiceError, match="fake proposer does not support the 'max' effort level"):
+            validate_blackbox_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("harness", "effort", "accepted"),
+    [
+        ("antigravity_sdk", "none", False),
+        ("antigravity_sdk", "max", False),
+        ("antigravity_sdk", "minimal", True),
+        ("antigravity_sdk", "xhigh", True),
+        ("pi", "max", True),
+        ("prime", "xhigh", True),
+        ("code_puppy", "minimal", True),
+        ("openhands_sdk", "none", True),
+    ],
+)
+def test_submit_checks_the_effort_against_the_real_harness_spec(
+    monkeypatch: pytest.MonkeyPatch, harness: str, effort: str, accepted: bool
+) -> None:
+    """Refuse at submit a level the built-in harness spec does not declare (SKY-590).
+
+    Args:
+        monkeypatch: Pytest fixture that swaps the runtime capabilities.
+        harness: A built-in proposer harness.
+        effort: The chosen effort level.
+        accepted: Whether the submission passes validation.
+    """
+    monkeypatch.setattr(service_mod, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
+    payload = _payload(
+        strategy={"mode": "auto"},
+        max_cost_cents=100,
+        scorer={"kind": "remote", "url": "https://scorer.example"},
+        reflection_model_config={"name": "fake/model", "extra": {"reasoning_effort": effort}},
+        proposer={"harness": harness},
+    )
+
+    if accepted:
+        validate_blackbox_payload(payload)
+    else:
+        with pytest.raises(ServiceError, match=f"{harness} proposer does not support the '{effort}' effort level"):
+            validate_blackbox_payload(payload)
 
 
 def test_scorer_llm_usage_is_billed_with_the_run(
@@ -1007,7 +1016,6 @@ def test_scorer_llm_usage_is_billed_with_the_run(
     usage = {u.model: (u.input_tokens, u.output_tokens) for u in response.usage_by_model}
     assert usage["fake/judge"] == (3 * calls, calls)
     assert usage["fake/model"] == (10 * len(fake_lm.history), 5 * len(fake_lm.history))
-    assert response.num_lm_calls == len(fake_lm.history) + calls
     assert response.total_tokens == 15 * len(fake_lm.history) + 4 * calls
 
 
@@ -1138,6 +1146,7 @@ def test_service_hands_the_progress_sink_to_the_engine_context(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The job's progress sink rides into the engine context so trajectory events stream live."""
+    events: list[tuple[str, dict[str, Any]]] = []
     captured: dict[str, Any] = {}
 
     def fake_run_strategy(strategy: Any, task: Any, server: Any, ctx: Any, cb: Any = None, *, caps: Any = None) -> Any:
@@ -1148,11 +1157,13 @@ def test_service_hands_the_progress_sink_to_the_engine_context(
     monkeypatch.setattr(service_mod, "run_strategy", fake_run_strategy)
 
     def sink(event: str, metrics: dict[str, Any]) -> None:
-        """Discard events."""
+        """Record events."""
+        events.append((event, metrics))
 
     run_blackbox_optimization(_payload(), artifact_id="job-cb", progress_callback=sink, gepa_log_dir_path=str(tmp_path))
+    captured["ctx"].progress_callback("trajectory", {"score": 0.5})
 
-    assert captured["ctx"].progress_callback is sink
+    assert events[-1] == ("trajectory", {"score": 0.5})
 
 
 @pytest.mark.parametrize("concurrency", [1, 2])
@@ -1452,6 +1463,7 @@ def test_budget_stop_preserves_only_evaluated_incumbent_and_skips_final_test(fak
         assert response.best_candidate == "tested candidate"
         assert response.best_score is None
         assert response.details["optimizer_best_score"] == 0.7
+        assert response.details["failed_cases"] is None
         assert caught.value.evidence["candidate_origin"] == "optimized"
     else:
         response = caught.value.result
@@ -1521,7 +1533,7 @@ def test_proposer_accepts_any_offered_harness_and_rejects_unlaunchable_ones() ->
     custom = _payload(proposer={"harness": "custom", "run_command": "my-agent {prompt_file}"})
     assert custom.proposer.run_command == "my-agent {prompt_file}"
     with pytest.raises(ValueError, match="harness"):
-        _payload(proposer={"harness": "aider"})
+        _payload(proposer={"harness": "no_such_harness"})
     with pytest.raises(ValueError, match="run_command"):
         _payload(proposer={"harness": "custom"})
 
@@ -1552,8 +1564,8 @@ def test_shinka_duplicate_rejection_names_its_embeddings_route() -> None:
     assert unscoped == {"model": "openai/text-embedding-3-small", "url": "https://gw.example/v1", "token": "run-key"}
 
 
-def test_engine_catalog_for_a_repository_offers_every_engine_but_not_auto() -> None:
-    """A repository run can pick any single engine the deployment offers, ShinkaEvolve included, never Auto."""
+def test_engine_catalog_for_a_repository_offers_every_engine_and_auto() -> None:
+    """A repository run can pick Auto or any single engine the deployment offers, ShinkaEvolve included."""
     catalog = service_mod.engine_catalog("repo")
 
     available = {entry.id for entry in catalog.engines if entry.available}
@@ -1562,61 +1574,533 @@ def test_engine_catalog_for_a_repository_offers_every_engine_but_not_auto() -> N
     shinka = next(entry for entry in catalog.engines if entry.id == "shinka_evolve")
     assert shinka.available is (shinka.id in text_available)
     assert "gepa" in available
-    assert catalog.auto_available is False
-    assert catalog.auto_unavailable_reason
+    text_catalog = service_mod.engine_catalog("text")
+    assert catalog.auto_available is text_catalog.auto_available
+    assert catalog.auto_unavailable_reason == text_catalog.auto_unavailable_reason
     assert all(entry.unavailable_reason for entry in catalog.engines if not entry.available)
 
 
-GEOCODE_SLOW_RUN = (
-    "import time\n"
-    "from skynet import llm\n"
-    "def run(artifact, input):\n"
-    "    if 'slowly' in artifact:\n"
-    "        time.sleep(0.15)\n"
-    "    return llm(artifact, input['message'])\n"
-)
+_DEEP_NEGATIVE_CODE = """
+def score(candidate, case=None):
+    if candidate == "broken":
+        raise RuntimeError("syntax error in the version")
+    if candidate == "legal-better":
+        return {"score": -2e9, "feedback": "legal improvement"}
+    return {"score": -3e9, "feedback": "legal"}
+"""
 
 
-def test_geocoding_final_runs_keep_raw_observations_for_both_versions() -> None:
-    """Baseline and winner run the same cases under one gateway; each case keeps raw time, cost and components."""
-    payload = UnifiedRunRequest.model_validate(
-        {
-            "task": {"objective": "geocode", "artifact": {"kind": "prompt", "starting_version": "Think slowly."}},
-            "data": {
-                "mode": "pairs",
-                "cases": [
-                    {"input": {"message": "Tel Aviv"}, "expected": {"coordinates": "32.0853,34.7818"}},
-                    {"input": {"message": "Springfield"}, "expected": {"coordinates": "42.1,-72.59|32.0853,34.7818"}},
-                ],
-                "input_fields": ["message"],
-            },
-            "optimizer": {"choice": "best_of_n"},
-            "models": {"reflection_model": {"name": "openrouter/task"}},
-            "workspace": {"run_code": GEOCODE_SLOW_RUN, "metric_code": GEOCODE_METRIC, "metric_timeout_seconds": 30},
-        }
-    )
-    cases = [UnifiedCase.model_validate(case) for case in payload.data.cases]
-    with FakeGateway("32.0853,34.7818", cost=0.0004) as gateway:
-        scorer = build_workspace_scorer(
-            payload, GatewayConfig(url=gateway.url, api_key="k"), protected=False, runtime=LocalSubprocessRuntime()
+def test_a_crashed_version_is_never_chosen_even_when_every_valid_score_is_deeply_negative(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deeply negative valid scores never let a metric_error version win, show a number or log one."""
+
+    def search(
+        strategy: object, task: object, server: EvalServer, ctx: Any, cb: object = None, *, caps: object = None
+    ) -> tuple[Result, list[LaneOutcome]]:
+        """Score a valid version and a crashing one; return the crashed one, as a confused engine would."""
+        server.evaluate("legal-better")
+        broken_score, broken_side_info = server.evaluate("broken")
+        assert broken_score is None
+        assert broken_side_info["status"] == METRIC_ERROR
+        ctx.progress_callback(PROGRESS_OPTIMIZER, {"score": UNSCORED, "candidate": "broken"})
+        lane = LaneOutcome(
+            engine=BLACKBOX_ENGINE_BEST_OF_N,
+            phase="explore",
+            status="completed",
+            best_score=UNSCORED,
+            best_candidate="broken",
         )
-        try:
-            baseline = service_mod._final_run(
-                scorer, "Think slowly.", cases, label="starting point", phase=PHASE_BASELINE
-            )
-            best = service_mod._final_run(scorer, "Answer.", cases, label="optimized version", phase=PHASE_FINAL)
-        finally:
-            scorer.close()
-    rows = service_mod._case_results(baseline, best)
+        result = Result(
+            best_candidate="broken",
+            best_score=UNSCORED,
+            total_evals=server.used,
+            metadata={"candidate_tree": [{"candidate": "broken", "parents": [], "val_score": UNSCORED}]},
+        )
+        return result, [lane]
 
-    assert len(rows) == 2
-    for row in rows:
-        assert row.baseline_observation["timing"]["task_ms"] >= 150
-        assert row.best_observation["timing"]["task_ms"] < row.baseline_observation["timing"]["task_ms"]
-        for observed in (row.baseline_observation, row.best_observation):
-            assert observed["cost"]["usd"] == pytest.approx(0.0004)
-            assert observed["conditions"] == rows[0].baseline_observation["conditions"]
-    assert set(best.named) == {"accuracy", "speed", "cost"}
-    assert best.named["accuracy"].score == pytest.approx(1.0)
-    assert best.named["speed"].score > baseline.named["speed"].score
-    assert best.score > baseline.score
+    monkeypatch.setattr(service_mod, "run_strategy", search)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    response = run_blackbox_optimization(
+        _payload(scorer={"kind": "python", "metric_code": _DEEP_NEGATIVE_CODE}),
+        artifact_id="job-floor",
+        progress_callback=lambda event, metrics: events.append((event, metrics)),
+        gepa_log_dir_path=str(tmp_path),
+    )
+
+    assert response.best_candidate == "legal-better"
+    assert response.best_score == pytest.approx(-2e9)
+    broken = next(version for version in response.versions if version.candidate == "broken")
+    assert broken.score is None
+    assert broken.mean_score is None
+    assert broken.side_info["status"] == METRIC_ERROR
+    assert "RuntimeError: syntax error in the version" in broken.side_info["error"]
+    assert response.lanes[0].best_score is None
+    assert response.candidate_tree[0].val_score is None
+    assert response.details["optimizer_best_score"] is None
+    assert (PROGRESS_OPTIMIZER, {"score": None, "candidate": "broken"}) in events
+    assert UNSCORED not in [value for _, metrics in events for value in metrics.values()]
+
+
+def _crash_metric_on(monkeypatch: pytest.MonkeyPatch, crashing: set[str]) -> None:
+    """Make the metric crash on ``crashing`` and make the search return "winner".
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        crashing: The versions the metric crashes on.
+    """
+    real_build_scorer = service_mod.build_scorer
+
+    def build_scorer(*args: Any, **kwargs: Any) -> Any:
+        """Wrap the real scorer so the metric crashes on the winner."""
+        inner = real_build_scorer(*args, **kwargs)
+
+        class Crashing:
+            """Report a metric error on the winner, like the workspace scorer does."""
+
+            usage = inner.usage
+
+            def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+                """Return a metric error for the winner, else the real score.
+
+                Args:
+                    candidate: The version to score.
+                    case: The case, if any.
+
+                Returns:
+                    The score and side info.
+                """
+                if candidate in crashing:
+                    return None, {"error": "KeyError: 'answer'", "status": METRIC_ERROR}
+                return inner(candidate, case)
+
+            def close(self) -> None:
+                """Close the wrapped scorer."""
+                inner.close()
+
+        return Crashing()
+
+    monkeypatch.setattr(service_mod, "build_scorer", build_scorer)
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(best_candidate="winner", best_score=1.0, total_evals=0),
+            [],
+        ),
+    )
+
+
+def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A winner the metric crashes on in the final run gets no score, never 0, and the seed stays."""
+    _crash_metric_on(monkeypatch, {"winner"})
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
+        response = run_blackbox_optimization(_payload(), artifact_id="job-final-crash", gepa_log_dir_path=str(tmp_path))
+
+    assert any(
+        "optimized version has no score: metric_error" in record.getMessage()
+        and "KeyError: 'answer'" in record.getMessage()
+        for record in caplog.records
+    )
+    assert response.regression_guard_applied is True
+    assert response.best_candidate == "hello world"
+    assert response.best_score == response.baseline_score
+    assert response.best_score is not None
+
+
+def test_a_run_fails_when_the_metric_crashes_on_the_winner_and_the_seed(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kept seed has no valid case either, so the run fails with the cause (SKY-221)."""
+    _crash_metric_on(monkeypatch, {"winner", "hello world"})
+
+    with pytest.raises(ServiceError, match=r"starting point failed on every case .*KeyError: 'answer'"):
+        run_blackbox_optimization(_payload(), artifact_id="job-final-crash", gepa_log_dir_path=str(tmp_path))
+
+
+_RUN_FAILS_CODE = """
+def score(candidate, case=None):
+    if candidate in FAILING and (case is None or case["i"] % FAILED_EVERY == 0):
+        return 0.0, {
+            "feedback": "Run failed: Traceback (most recent call last):\\nConnectionError: egress blocked",
+            "status": "run_failed",
+        }
+    return VALID_SCORE, {"feedback": "ok"}
+"""
+
+# Enough cases that every split, fixed by the seed, has odd and even cases.
+_MANY_CASES = [{"target": "aeiou", "i": i} for i in range(40)]
+
+
+def _run_fails_code(failing: set[str], every: int = 1, valid_score: float = 0.5) -> str:
+    """Build a scorer whose run entry crashes for some versions on some cases.
+
+    Args:
+        failing: The versions whose run crashes.
+        every: The run crashes on cases whose index is a multiple of this.
+        valid_score: The score of every run that does not crash.
+
+    Returns:
+        The scorer code.
+    """
+    return (
+        _RUN_FAILS_CODE.replace("FAILING", repr(sorted(failing)))
+        .replace("FAILED_EVERY", str(every))
+        .replace("VALID_SCORE", repr(valid_score))
+    )
+
+
+def _winner_strategy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Make the search return "winner" without scoring anything.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+
+    Returns:
+        A list that gets one entry each time the search starts.
+    """
+    calls: list[str] = []
+
+    def search(
+        strategy: object, task: object, server: object, ctx: object, cb: object = None, *, caps: object = None
+    ) -> tuple[Result, list[LaneOutcome]]:
+        """Record the call and return the winner."""
+        calls.append("search")
+        return Result(best_candidate="winner", best_score=1.0, total_evals=0), []
+
+    monkeypatch.setattr(service_mod, "run_strategy", search)
+    return calls
+
+
+def _failure_counts(caplog: pytest.LogCaptureFixture, label: str) -> list[tuple[int, int]]:
+    """Return the (failed, runs) pairs that the run logged for ``label``.
+
+    Args:
+        caplog: The test's log capture.
+        label: The version label, for example "starting point".
+
+    Returns:
+        One pair for each logged partial failure.
+    """
+    return [
+        (int(match[1]), int(match[2]))
+        for record in caplog.records
+        if (match := re.search(rf"^{label} failed on (\d+) of (\d+) run\(s\)", record.getMessage()))
+    ]
+
+
+def _run_as_repository(payload: BlackboxRunRequest, tmp_path: Path, artifact_id: str) -> BlackboxRunResponse:
+    """Run ``payload`` with its python scorer in the place of the repository scorer.
+
+    A real repository run needs a repository box and a native proposer. Here
+    the python scorer stands in for the repository scorer's reply, so the run
+    honors its ``run_failed`` status the way it honors the repository scorer's.
+
+    Args:
+        payload: The job; its python scorer returns what the repository scorer would.
+        tmp_path: Private optimizer workspace.
+        artifact_id: Job id.
+
+    Returns:
+        The run's response.
+    """
+    return service_mod.run_job(
+        service_mod.job_spec_from_payload(payload),
+        service_mod.build_scorer(payload.scorer, job_id=artifact_id),
+        service_mod.legacy_case_splits(list(payload.cases or []), payload.seed),
+        artifact_id=artifact_id,
+        started=time.perf_counter(),
+        progress_callback=None,
+        gepa_log_dir_path=str(tmp_path),
+        repo_scorer=True,
+    )
+
+
+def test_a_repository_run_where_every_case_fails_ends_as_failed(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run entry that crashes on every case fails the run after the search, with the cause (SKY-221).
+
+    The search still runs: it could fix a starting point that crashes.
+    """
+    calls = _winner_strategy(monkeypatch)
+
+    with pytest.raises(ServiceError, match=r"failed on every case .*ConnectionError: egress blocked"):
+        _run_as_repository(
+            _payload(scorer={"kind": "python", "metric_code": _run_fails_code({"hello world", "winner"})}),
+            tmp_path,
+            "job-all-fail",
+        )
+
+    assert calls == ["search"]
+
+
+def test_a_repository_run_where_some_cases_fail_succeeds_and_reports_the_count(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Some failed cases keep the run and its score; the response and the log give the count (SKY-221)."""
+    calls = _winner_strategy(monkeypatch)
+    code = _run_fails_code({"hello world", "winner"}, every=2)
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
+        response = _run_as_repository(
+            _payload(scorer={"kind": "python", "metric_code": code}, cases=_MANY_CASES), tmp_path, "job-some-fail"
+        )
+
+    report_on = service_mod.report_cases(service_mod.legacy_case_splits(list(_MANY_CASES), 1))
+    failed = sum(1 for case in report_on if case["i"] % 2 == 0)
+    assert calls == ["search"]
+    assert response.best_score is not None
+    assert 0 < failed < len(report_on)
+    assert response.details["failed_cases"] == failed
+    assert _failure_counts(caplog, "optimized version") == [(failed, len(report_on))]
+
+
+def test_a_run_where_every_case_scores_a_valid_zero_succeeds(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A valid 0.0 on every case is a score, not a failure, so the run succeeds (SKY-221)."""
+    calls = _winner_strategy(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
+        response = _run_as_repository(
+            _payload(scorer={"kind": "python", "metric_code": _run_fails_code(set(), valid_score=0.0)}),
+            tmp_path,
+            "job-zero",
+        )
+
+    assert calls == ["search"]
+    assert response.baseline_score == 0.0
+    assert response.best_score == 0.0
+    assert response.details["failed_cases"] == 0
+    assert _failure_counts(caplog, "optimized version") == []
+
+
+def test_a_repository_run_keeps_the_starting_point_when_the_winner_fails_on_every_case(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression guard keeps a valid starting point over a winner whose run crashes on every case (SKY-221).
+
+    The seed scores a valid 0.0, as high as the crashed winner, so only the
+    failure count makes the guard keep the seed and the run succeeds.
+    """
+    calls = _winner_strategy(monkeypatch)
+    code = _run_fails_code({"winner"}, valid_score=0.0)
+
+    response = _run_as_repository(_payload(scorer={"kind": "python", "metric_code": code}), tmp_path, "job-winner-fail")
+
+    assert calls == ["search"]
+    assert response.regression_guard_applied is True
+    assert response.best_candidate == "hello world"
+    assert response.best_score == 0.0
+    assert response.details["failed_cases"] == 0
+
+
+def test_a_user_scorer_status_never_fails_a_run(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user's own scorer that returns ``status: run_failed`` keeps its valid scores (SKY-221).
+
+    Only the repository scorer sets that status, so a user's key cannot fail the run.
+    """
+    calls = _winner_strategy(monkeypatch)
+
+    response = run_blackbox_optimization(
+        _payload(scorer={"kind": "python", "metric_code": _run_fails_code({"hello world", "winner"})}),
+        artifact_id="job-user-status",
+        gepa_log_dir_path=str(tmp_path),
+    )
+
+    assert calls == ["search"]
+    assert response.baseline_score == 0.0
+    assert response.best_score == 0.0
+    assert response.details["failed_cases"] == 0
+
+
+def test_a_repository_metric_status_never_marks_a_failed_run(tmp_path: Path) -> None:
+    """The repository scorer drops a metric's own ``status: run_failed``, so the case keeps its score (SKY-221)."""
+    code = "def score(repo_path, case=None):\n    return {'score': 0.5, 'feedback': 'ok', 'status': 'run_failed'}\n"
+    scorer = _probed(tmp_path, None, code=code)
+
+    def relayed(candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score one case the way ``RemoteScorer`` reads the repository scorer's reply."""
+        return scorer_mod.normalize_score(json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body))
+
+    try:
+        scorer.prepare()
+        run = service_mod._final_run(
+            relayed,
+            "",
+            [{"input": 1}, {"input": 2}],
+            label="starting point",
+            phase=PHASE_BASELINE,
+            repo_scorer=True,
+        )
+    finally:
+        scorer.close()
+
+    assert run.score == 0.5
+    assert run.failures == []
+
+
+class _PendingNote:
+    """Stand in for the rule judge with one note the agent has not read yet."""
+
+    def take_notes(self) -> list[str]:
+        """Return the pending note.
+
+        Returns:
+            One rule warning.
+        """
+        return ["Rule warning: do not edit the tests."]
+
+
+def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rule-judge note before "Run failed" feedback does not hide the failure (SKY-221 review F3).
+
+    The repository scorer answers through ``RepoScorer.dispatch``, and the job
+    reads that answer through the relay and ``normalize_score``. A local box
+    refuses root, so the [run] supervisor runs as the test's user here; the
+    Docker tests prove the root supervisor (SKY-398).
+    """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user; ``sudo`` is ignored."""
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+    scorer = _probed(tmp_path, "src/cand.py:boom")
+    scorer._rule_judge = _PendingNote()
+
+    def relayed(candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score one case the way ``RemoteScorer`` reads the repository scorer's reply."""
+        return scorer_mod.normalize_score(json.loads(scorer.dispatch({"candidate": candidate, "case": case}).body))
+
+    try:
+        scorer.prepare()
+        run = service_mod._final_run(
+            relayed,
+            "",
+            [{"input": 1}, {"input": 2}],
+            label="starting point",
+            phase=PHASE_BASELINE,
+            concurrency=1,
+            repo_scorer=True,
+        )
+    finally:
+        scorer.close()
+
+    assert all(feedback.startswith("Rule warning: do not edit the tests.") for _, feedback in run.cases)
+    assert len(run.failures) == run.runs == 2
+    with pytest.raises(
+        ServiceError, match=r"starting point failed on every case \(2 of 2\).*RuntimeError: candidate broke"
+    ):
+        service_mod._raise_if_every_run_failed(run, "starting point")
+
+
+def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest.LogCaptureFixture) -> None:
+    """One metric_error case nulls the version's final score and named scores, and the log shows the error."""
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Crash the metric on the first case; score the second."""
+        if case["n"] == 1:
+            return None, {"error": "ValueError: bad input", "status": METRIC_ERROR}
+        return 0.8, {"feedback": "ok", "scores": {"accuracy": {"score": 0.8, "feedback": "close"}}}
+
+    with caplog.at_level(logging.DEBUG, logger="core.service_gateway.optimization.blackbox.service"):
+        run = service_mod._final_run(scorer, "v", [{"n": 1}, {"n": 2}], label="optimized version", phase=PHASE_FINAL)
+
+    assert run.score is None
+    assert run.named == {}
+    assert run.cases == [(None, "ValueError: bad input"), (0.8, "ok")]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "optimized version final run 1/2 metric_error: ValueError: bad input" in messages
+    assert any("optimized version has no score: metric_error" in message for message in messages)
+
+
+def test_progress_events_never_show_an_unscored_value() -> None:
+    """A mean over one unscored case, and the unscored case itself, reach users as no score."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    sink = service_mod._without_unscored(lambda event, metrics: events.append((event, metrics)))
+    assert sink is not None
+    unscored_mean = (0.5 + 0.25 + UNSCORED) / 3
+    assert unscored_mean == UNSCORED
+
+    sink(
+        PROGRESS_CANDIDATE,
+        {
+            "candidate_id": "1",
+            "score": unscored_mean,
+            "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": UNSCORED}],
+            "discovered_at_evals": 3,
+        },
+    )
+    sink(PROGRESS_OPTIMIZER, {"last_score": -0.5, "best_score": 0.5, "n": 3})
+
+    assert events == [
+        (
+            PROGRESS_CANDIDATE,
+            {
+                "candidate_id": "1",
+                "score": None,
+                "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": None}],
+                "discovered_at_evals": 3,
+            },
+        ),
+        (PROGRESS_OPTIMIZER, {"last_score": -0.5, "best_score": 0.5, "n": 3}),
+    ]
+
+
+def test_result_details_never_show_an_unscored_value(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine's metadata (AutoResearch's Pareto front) reaches the details with unscored values as null."""
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(
+                best_candidate="hello world",
+                best_score=0.6,
+                total_evals=0,
+                metadata={"frontier": [{"id": "c001", "score": UNSCORED}, {"id": "c002", "score": 0.6}]},
+            ),
+            [],
+        ),
+    )
+
+    response = run_blackbox_optimization(_payload(), artifact_id="job-frontier", gepa_log_dir_path=str(tmp_path))
+
+    assert response.details["frontier"] == [{"id": "c001", "score": None}, {"id": "c002", "score": 0.6}]
+
+
+def test_stored_result_with_removed_keys_still_loads() -> None:
+    """Load a result stored with keys the response model no longer declares."""
+    stored = {
+        "optimizer_name": "auto",
+        "strategy_mode": "auto",
+        "engine_used": "gepa",
+        "best_candidate": "Be brief.",
+        "runtime_seconds": 1.0,
+        "optimizer_resolved": "gepa",
+        "program_artifact": {"program_state_json": {}},
+    }
+    response = BlackboxRunResponse.model_validate(stored)
+    assert response.best_candidate == "Be brief."
+    assert "program_artifact" not in response.model_dump()

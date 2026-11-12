@@ -36,7 +36,6 @@ const NODE_CORE_STROKE = "color-mix(in srgb, var(--foreground) 16%, transparent)
 const NODE_CORE_STROKE_HOVER = "color-mix(in srgb, var(--foreground) 42%, transparent)";
 const NODE_CORE_STROKE_SELECTED = "var(--foreground)";
 const DONUT_PASS_FILL = "var(--tree-pass)";
-const DONUT_FAIL_FILL = "var(--tree-fail)";
 const DONUT_RING_THICKNESS = 8;
 // Track under the black-box score arc — same brown as the lineage edges.
 const SCORE_TRACK_STROKE = "color-mix(in srgb, var(--muted-foreground) 14%, transparent)";
@@ -77,11 +76,7 @@ interface View {
 
 // Which visual layers of the tree are currently shown; every legend entry
 // doubles as the toggle for its layer.
-type RingMode = "pass_fail" | "score";
-
 interface LayerVisibility {
-  pass: boolean;
-  fail: boolean;
   score: boolean;
   winner: boolean;
   rejected: boolean;
@@ -96,21 +91,17 @@ export interface TrajectoryTreeProps {
   newestId: string | null;
   onSelectCandidate: (id: string) => void;
   onSelectRejected: (rejectionId: string) => void;
-  // Black-box scorers grade each case on their own scale rather than
-  // pass/fail, so those runs swap the per-example split for a single arc
-  // that fills with the candidate's aggregate score.
-  ringMode?: RingMode;
 }
 
 function clampScale(k: number): number {
   return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, k));
 }
 
-// The pass/fail ring is a stroked circle: `pathLength` normalizes the
+// The score ring is a stroked circle: `pathLength` normalizes the
 // circumference to `total` units so each segment spans exactly its fraction,
-// and the dash offset rotates the split to start at 12 o'clock (a circle's
-// path begins at 3 o'clock). A full ring (all-pass / all-fail) is just an
-// undashed stroke — no closed-arc special case needed.
+// and the dash offset rotates the arc to start at 12 o'clock (a circle's
+// path begins at 3 o'clock). A full ring is just an undashed stroke — no
+// closed-arc special case needed.
 const RING_R = TRAJECTORY_LAYOUT.nodeRadius - DONUT_RING_THICKNESS / 2;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_R;
 const RING_SEG_GAP_PX = 1.2;
@@ -167,31 +158,7 @@ function LayerFade({
   );
 }
 
-function renderRing(
-  node: TrajectoryNode,
-  showPass: boolean,
-  showFail: boolean,
-  reduceMotion: boolean,
-): React.ReactNode {
-  // Always the aggregate pass-fraction split, never per-example ticks — the
-  // ring must read identically at every zoom level.
-  const passes = node.per_example.filter((e) => e.score > 0).length;
-  const total = node.per_example.length;
-  return (
-    <>
-      <LayerFade show={showPass} reduceMotion={reduceMotion}>
-        {passes > 0 ? ringSegment(node, "pass", DONUT_PASS_FILL, 0, passes, total) : null}
-      </LayerFade>
-      <LayerFade show={showFail} reduceMotion={reduceMotion}>
-        {passes < total
-          ? ringSegment(node, "fail", DONUT_FAIL_FILL, passes, total - passes, total)
-          : null}
-      </LayerFade>
-    </>
-  );
-}
-
-// A black-box scorer has no pass/fail verdict, so the ring is one arc on a
+// A scorer has no pass/fail verdict, so the ring is one arc on a
 // faint track that fills to the candidate's aggregate score.
 function renderScoreRing(
   node: TrajectoryNode,
@@ -277,7 +244,6 @@ export function TrajectoryTree({
   newestId,
   onSelectCandidate,
   onSelectRejected,
-  ringMode = "pass_fail",
 }: TrajectoryTreeProps) {
   const reduceMotion = useReducedMotion();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -287,8 +253,6 @@ export function TrajectoryTree({
   const [isDragging, setIsDragging] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [layers, setLayers] = useState<LayerVisibility>({
-    pass: true,
-    fail: true,
     score: true,
     winner: true,
     rejected: true,
@@ -598,9 +562,6 @@ export function TrajectoryTree({
             selectedId={selectedId}
             hoveredId={hoveredId}
             newestId={newestId}
-            ringMode={ringMode}
-            showPass={layers.pass}
-            showFail={layers.fail}
             showScore={layers.score}
             showWinner={layers.winner}
             showRejected={layers.rejected}
@@ -647,44 +608,13 @@ export function TrajectoryTree({
 
       <div className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex justify-center">
         <div className="pointer-events-auto inline-flex flex-wrap items-center gap-x-1 gap-y-1 rounded-lg border border-border/70 bg-background/85 px-2 py-1 text-[11px] font-medium text-muted-foreground/90 backdrop-blur-sm">
-          {ringMode === "pass_fail" ? (
-            <>
-              <LegendToggle
-                pressed={layers.pass}
-                onToggle={() => toggleLayer("pass")}
-                swatch={
-                  <span
-                    className="inline-block size-2.5 rounded-full"
-                    style={{ background: DONUT_PASS_FILL }}
-                  />
-                }
-                label={msg("trajectory.minibatch.pass_label")}
-              />
-              <LegendDivider />
-              <LegendToggle
-                pressed={layers.fail}
-                onToggle={() => toggleLayer("fail")}
-                swatch={
-                  <span
-                    className="inline-block size-2.5 rounded-full"
-                    style={{ background: DONUT_FAIL_FILL }}
-                  />
-                }
-                label={msg("trajectory.minibatch.fail_label")}
-              />
-              <LegendDivider />
-            </>
-          ) : (
-            <>
-              <LegendToggle
-                pressed={layers.score}
-                onToggle={() => toggleLayer("score")}
-                swatch={<ScoreSwatch />}
-                label={msg("trajectory.blackbox.legend.score")}
-              />
-              <LegendDivider />
-            </>
-          )}
+          <LegendToggle
+            pressed={layers.score}
+            onToggle={() => toggleLayer("score")}
+            swatch={<ScoreSwatch />}
+            label={msg("trajectory.blackbox.legend.score")}
+          />
+          <LegendDivider />
           <LegendToggle
             pressed={layers.winner}
             onToggle={() => toggleLayer("winner")}
@@ -750,9 +680,6 @@ interface TreeContentProps {
   selectedId: string | null;
   hoveredId: string | null;
   newestId: string | null;
-  ringMode: RingMode;
-  showPass: boolean;
-  showFail: boolean;
   showScore: boolean;
   showWinner: boolean;
   showRejected: boolean;
@@ -775,9 +702,6 @@ const TreeContent = memo(function TreeContent({
   selectedId,
   hoveredId,
   newestId,
-  ringMode,
-  showPass,
-  showFail,
   showScore,
   showWinner,
   showRejected,
@@ -928,10 +852,7 @@ const TreeContent = memo(function TreeContent({
             : isHovered
               ? NODE_CORE_STROKE_HOVER
               : NODE_CORE_STROKE;
-          const hasRing = ringMode === "score" || node.per_example.length > 0;
-          const innerRadius = hasRing
-            ? TRAJECTORY_LAYOUT.nodeRadius - DONUT_RING_THICKNESS
-            : TRAJECTORY_LAYOUT.nodeRadius;
+          const innerRadius = TRAJECTORY_LAYOUT.nodeRadius - DONUT_RING_THICKNESS;
           const winnerShown = node.isWinner && showWinner;
           return (
             <motion.g
@@ -1029,11 +950,7 @@ const TreeContent = memo(function TreeContent({
                   />
                 </LayerFade>
               ) : null}
-              {!hasRing
-                ? null
-                : ringMode === "score"
-                  ? renderScoreRing(node, node.score / scoreScale, showScore, reduceMotion)
-                  : renderRing(node, showPass, showFail, reduceMotion)}
+              {renderScoreRing(node, node.score / scoreScale, showScore, reduceMotion)}
               <circle
                 cx={node.x}
                 cy={node.y}

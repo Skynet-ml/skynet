@@ -17,7 +17,8 @@ include = ["core*"]
 ]
 "core.i18n_locales" = ["*.json"]
 "core.local" = ["assets/*.webp"]
-"core.service_gateway.optimization.blackbox" = ["shinka_requirements.txt"]
+"core.service_gateway.optimization.blackbox" = ["shinka_requirements.txt", "autosaddler_requirements.txt"]
+"core.sandbox.providers" = ["singularity_bootstrap.sh"]
 
 [project]
 name = "skynet"
@@ -52,7 +53,7 @@ dependencies = [
     # Vercel Sandbox SDK: throwaway microVMs for black-box agent targets. The
     # leaf package, not the ``vercel`` umbrella — that one pins cbor2>=6, which
     # forces webauthn down a release, and pulls queue/cache/telemetry we never use.
-    "vercel-sandbox>=0.4.0",
+    "vercel-sandbox>=0.10.0,<0.11",
     "litellm>=1.88.6",
     "click>=8.3.3",
     "sqlalchemy>=2.0",
@@ -88,6 +89,13 @@ dependencies = [
     # Browser web push (VAPID) for the Chrome notification channel
     # (core.notifications.channels.ChromeChannel).
     "pywebpush>=2.0",
+    # core.sandbox retry backoff (SKY-408). It came in only through dspy; a
+    # direct dependency keeps it if dspy drops it.
+    "tenacity>=9.1",
+    # No core.sandbox module imports anyio yet. It stays direct for a later
+    # sync bridge into the async sandbox interface, and it came in only
+    # through httpx.
+    "anyio>=4.14",
 ]
 
 [project.optional-dependencies]
@@ -122,6 +130,76 @@ render = [
     "pillow>=13.0.0",
     "networkx>=3",
 ]
+langsmith = [
+    # LangSmith sandbox provider (core.sandbox.providers.langsmith); not
+    # allowed in production. The sandbox client ships in the base package; the
+    # floor is the release whose sandbox API and errors the provider uses.
+    "langsmith>=0.14.17",
+]
+e2b = [
+    # The E2B sandbox provider (core.sandbox.providers.e2b). It is not
+    # allowed in production; the factory refuses it there.
+    "e2b>=2.52",
+]
+daytona = [
+    # SBX-25b: the dev-only Daytona sandbox provider (core.sandbox.providers.daytona).
+    "daytona>=0.210.0",
+]
+modal = [
+    # The dev-only Modal sandbox provider (core.sandbox.providers.modal).
+    "modal>=1.6",
+]
+runloop = [
+    # Runloop devbox sandbox provider (SKY-456). Imported lazily by
+    # core.sandbox.providers.runloop; the default legacy backend never needs it.
+    # The 3.x floor is the tested line; the provider passes allow_runloop_mirrors.
+    "runloop-api-client>=3.0.0,<4",
+]
+kernel = [
+    # Kernel browser VM sandbox provider (SKY-479). Imported lazily by
+    # core.sandbox.providers.kernel; the default legacy backend never needs it.
+    "kernel>=0.123.0",
+]
+mosaic = [
+    # Mosaic microVM sandbox provider (SKY-476). Imported lazily by
+    # core.sandbox.providers.mosaic; the default legacy backend never needs it.
+    "mosaic-sandbox>=0.15.1,<0.16",
+]
+prime = [
+    # Prime Intellect sandbox provider (SKY-475). Imported lazily by
+    # core.sandbox.providers.prime; the default legacy backend never needs it.
+    # The 0.5 line has the async set_network and wait_for_creation calls that the provider uses.
+    "prime-sandboxes>=0.5.8,<0.6",
+]
+sail = [
+    # Sail sandbox provider (SKY-478). Imported lazily by
+    # core.sandbox.providers.sail; the default legacy backend never needs it.
+    "sail>=0.13.0",
+]
+sbx = [
+    # Docker sbx Cloud provider (SKY-482): parses the multipart file downloads.
+    # The factory refuses this provider in production.
+    "python-multipart>=0.0.31",
+]
+ec2 = [
+    # AWS EC2 sandbox provider (SKY-458). Imported lazily by
+    # core.sandbox.providers.ec2; the factory refuses it in production.
+    # The floor is Harbor 0.25.0's. litellm already pulls boto3 into the lock.
+    "boto3>=1.41.5",
+]
+smol = [
+    # smolmachines microVM sandbox provider (SKY-477). Imported lazily by
+    # core.sandbox.providers.smol; the default legacy backend never needs it.
+    # The markers are Harbor's: the SDK ships only for these platforms. No
+    # `tunnel` extra: it pins websockets<16, and one universal lock would then
+    # downgrade websockets for every install. The provider opens no ports.
+    "smolmachines>=1.20.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')",
+]
+gke = [
+    # GKE sandbox provider (SKY-459). Optional import in
+    # core.sandbox.providers.gke; the factory loads it lazily.
+    "kubernetes>=32.0.0",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
@@ -137,14 +215,16 @@ render = [
 override-dependencies = [
     "gepa[dspy] @ git+https://github.com/gepa-ai/gepa@0632cdb5dcc052e690eab439e1b4a7e3e9cfe407",
 ]
+# prime-sandboxes 0.5.x pins connectrpc<0.12, and current e2b needs a newer
+# connectrpc. Without this, one universal lock downgrades e2b for every install.
+# The two provider extras resolve separately and cannot be installed together.
+conflicts = [
+    [{ extra = "prime" }, { extra = "e2b" }],
+]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 120
-# Notebook cells get rewritten by Jupyter and have non-standard import order
-# from kernel context; skip them. ``skynet_client.py`` is regular Python and
-# stays in scope.
-extend-exclude = ["usage_guide/*.ipynb"]
 
 [tool.ruff.lint]
 # Lean modern set: PEP 8 errors/style + naming + import order + pyupgrade,
@@ -185,7 +265,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["core", "skynet_client"]
+known-first-party = ["core"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests intentionally violate some rules for clarity:
@@ -216,7 +296,7 @@ classmethod-decorators = [
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-exclude = ["usage_guide/", ".venv/"]
+exclude = [".venv/"]
 
 [tool.pytest.ini_options]
 # Unit tests live next to the code they cover under ``core/<subpkg>/tests/``
@@ -228,7 +308,7 @@ exclude = ["usage_guide/", ".venv/"]
 #   pytest tests/test_llm_integration.py -v  # nightly paid tier
 #   pytest tests/ -m "not slow" -v           # skip long-running LLM tests
 #
-testpaths = ["core", "tests"]
+testpaths = ["core", "tests", "scripts"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = ["--strict-markers"]

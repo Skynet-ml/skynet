@@ -4,9 +4,11 @@ Build `backend/Dockerfile` from the same source and dependency lock as the API/w
 
 ## Vercel images
 
-Push a **linux/amd64** image to the selected project's Vercel Container Registry (VCR), wait for its repository state to become **Ready**, and resolve the immutable digest. Set both `DSPY_SANDBOX_IMAGE` and `VERCEL_SANDBOX_IMAGE` to that verified image when using the shared backend profile. Each must contain `@sha256:` followed by the complete 64-character digest. Configure `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID` only on the parent. A GHCR reference or a mutable `:latest` tag is not a protected runtime profile.
+Push a **linux/amd64** image to the selected project's Vercel Container Registry (VCR), wait for its repository state to become **Ready**, and resolve the immutable digest. Set `VERCEL_SANDBOX_IMAGE` to that verified image. It must contain `@sha256:` followed by the complete 64-character digest. Configure `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID` only on the parent. A GHCR reference or a mutable `:latest` tag is not a protected runtime profile.
 
 When extending a VCR image with zstd layers, publish through the Vercel CLI’s OCI Buildx exporter. Preserve the original compression media types when reusing layers; legacy Docker pushes can relabel zstd blobs as gzip. Verify a real sandbox command after publication even when the image is Ready.
+
+Build the sandbox image with `--build-arg INCLUDE_SHINKA_EVOLVE=1`. Vercel runs commands as the image's `USER` (`appuser`, UID 1001) and runs a `sudo: true` command through the box's own `sudo` binary. The image ships no `sudo`, on purpose: Codex runs as `appuser` with its own sandbox off, so any root path in the box would let the model rewrite `/etc/codex/requirements.toml` (SKY-389). Instead, the image build writes that file root-owned and mode 0644, and the parent only reads it back before Codex starts. Only a box that lacks the file, such as the local Docker box with its empty `/etc/codex` mount, gets the root write; on a Vercel image without the file, Codex setup fails closed.
 
 Vercel does not execute Docker `CMD` or `ENTRYPOINT`; Skynet starts the runner explicitly. `WORKDIR` is honored. The image is the whole optimizer: the guest runs the image's own `/app` copy of the backend with the image's Python and dependencies, and the parent ships only the request. The two share one contract, `SANDBOX_PROTOCOL` in `core/worker/sandbox_protocol.py`, covering the request and event shapes; bump it whenever either changes, including an added request field, which an older image's models drop without an error (`core/worker/tests/test_sandbox_protocol.py` pins the request shapes per protocol). Before sending a request, the worker reads the image's own protocol from that module and refuses an image that lacks it (built before it existed) or speaks another one, asking for a rebuild. Worker dependency or Python updates never block a sandbox. A run records the image it first opens on the job (`sandbox_image`), and every later sandbox for that run, including a resume after a redeploy, boots from that image; its GEPA checkpoints are tied to that image alone, not to the worker. Rebuild and re-pin the image to ship optimizer code changes to new runs. Image publication and dependency installation alone do not establish that a live setup check succeeded. [Vercel image documentation](https://vercel.com/docs/sandbox/concepts/images)
 
@@ -16,11 +18,11 @@ Each paid Continue check and each submitted run creates exactly one outer Vercel
 
 ## Local Docker sandbox (local mode)
 
-With `APP_LOCAL_MODE=1` (the Mac app), the protected parent opens its boxes as containers on the local Docker daemon instead of Vercel microVMs. `DockerSandboxRuntime` in `core/service_gateway/optimization/blackbox/docker_sandbox.py` implements the same `SandboxRuntime` contract, so the model mailbox, the sandbox broker and the guest protocol do not change. Hosted deployments (local mode off) still accept only Vercel.
+With `APP_LOCAL_MODE=1` (the Mac app), the protected parent opens its boxes as containers on the local Docker daemon instead of Vercel microVMs. The async Docker provider in `core/sandbox/providers/docker.py` implements the same `SandboxEnvironment` contract as the Vercel provider, and the sync bridge in `blackbox/sandbox_runtime.py` opens both, so the model mailbox, the sandbox broker and the guest protocol do not change. Hosted deployments (local mode off) still accept only Vercel.
 
-- **Image.** `APP_LOCAL_SANDBOX_IMAGE` holds a local image id (`sha256:<64 hex>`), built from `backend/Dockerfile` and read with `docker image inspect --format '{{.Id}}'`. In local mode only this bare id is accepted, for every workflow. The current Dockerfile installs x64-only harness packages, so on Apple silicon build it with `--platform linux/amd64`.
+- **Image.** `APP_LOCAL_SANDBOX_IMAGE` holds a local image id (`sha256:<64 hex>`), built from `backend/Dockerfile` and read with `docker image inspect --format '{{.Id}}'`. In local mode only this bare id is accepted. The current Dockerfile installs x64-only harness packages, so on Apple silicon build it with `--platform linux/amd64`.
 - **CLI.** `APP_DOCKER_BIN` selects the Docker CLI (default `docker`). OrbStack works through the same CLI.
-- **Isolation.** Each box runs `docker run -d --rm --init --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 1024 --cpus <vcpus> --memory <vcpus × 2048>m`, with no published ports. Only the tmpfs mounts `/workspace` (the working directory and `HOME`) and `/tmp` are writable. The box's only process is `sleep <lifetime>`, so the container and every command in it end at the wall-time limit. Commands run through `docker exec` with `timeout --signal=KILL`.
+- **Isolation.** Each box runs `docker run -d --rm --init --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 1024 --cpus <vcpus> --memory <vcpus × 2048>m`, with no published ports. Only the tmpfs mounts `/workspace` (the working directory and `HOME`) and `/tmp` are writable. The box's only process is `sleep <lifetime>`, so the container and every command in it end at the wall-time limit. Commands run through `docker exec` in their own process group, and a timeout kills that whole group.
 - **Streaming.** Command output is read line by line while the command runs, so the model mailbox answers guest model requests mid-command. File writes use a separate `docker exec` with a tar stream and can run beside an in-flight command.
 - **Setup boxes and registries.** A box that needs package registries during setup (`allowed_hosts`, set to `PACKAGE_REGISTRY_HOSTS`) never joins Docker's `bridge`: on Docker Desktop that network reaches services that listen only on the Mac's loopback, through `host.docker.internal` (192.168.65.254), and the internet at large. Instead the box gets its own `docker network create --internal` network with no route to the internet or to the Mac's loopback. That network's gateway address is the Docker VM itself, so services that listen on the VM (for example rpcbind on port 111) stay reachable from the box. Its only way to the internet is an egress proxy sidecar (`docker_egress_proxy.py`, standard library only) that runs on the box's own image, joins that network and `bridge`, and runs with a read-only root, no capabilities and user 65534. The box reaches it through `HTTPS_PROXY`/`HTTP_PROXY` (both cases, plus `npm_config_https_proxy`/`npm_config_proxy`), which pip, uv, npm, yarn, cargo, go and git read. The proxy tunnels only `CONNECT <exact allowlisted host>:443`, and only when every address the host resolves to is public; it then connects to that checked address. It refuses any other host or port, any plain HTTP request, raw IPs, and names that resolve to the Docker host range, private, loopback or link-local addresses. A tool that ignores the proxy variables finds no route and fails. When the workspace switches the box offline, it disconnects the box, probes that the hosts are unreachable, and removes the proxy and the network.
 - **Labels.** Every box, egress proxy and setup network has `skynet=blackbox` and `skynet.job=<owner>`. When a job ends abnormally, the worker removes the job's leftover containers by the `skynet.job` label and then its networks. A killed backend runs no such cleanup: `--rm` and the `sleep` lifetime remove the box and its proxy, but the setup network stays, and each one holds a /16 of Docker's address pool. So in local mode the worker removes every `skynet=blackbox` network with no attached container when it starts. It skips networks younger than 5 minutes, because a box that is still opening has a network with no container yet, maybe in another worker or backend on the same Docker daemon. It logs a failure and goes on. The desktop shell's quit sweep removes containers by the `skynet.job` label only, not networks.
@@ -28,6 +30,31 @@ With `APP_LOCAL_MODE=1` (the Mac app), the protected parent opens its boxes as c
 - **Preflight.** `docker_sandbox_unavailable_reason` reports `sandbox.docker_unavailable` when the CLI is missing or the daemon does not answer, and `sandbox.docker_image_missing` when the image id is unset or not present.
 
 Known gaps against Vercel: the setup box's egress has no byte cap (Vercel's `SANDBOX_NETWORK_BYTES_CAP`), and the proxy allows port 443 only. The box and command environment reach each command over stdin, never as `docker` arguments, because the box environment can hold the gateway key. tmpfs pages count toward the container's memory limit.
+
+## Repository scoring boxes
+
+A repository run scores each version in two new boxes (SKY-398). The
+candidate box opens from the saved after-setup state and runs the `[run]`
+entry. The metric box opens from the saved metric state and holds only the
+metric files and the runner. Each box has its own `operation_key`, so each
+reserves its own hold. On Vercel the saved states are snapshots. In local
+Docker mode they are tar files that the parent keeps, because a box keeps
+`--read-only` and the parent does not use `docker commit`. `SandboxSpec`
+names the state in `snapshot_id` or `snapshot_archive`. The opener checks the
+prepared tree's digest before it lays out a version.
+
+The parent starts the `[run]` supervisor with `sudo: true`, through the model
+mailbox, so the entry keeps its model route. On Vercel the exec wrapper sends
+the supervisor's stdout to a root-owned `/tmp/.app-output-<token>.out` file.
+The supervisor checks that file, then starts the entry as the owner of the
+candidate tree, so the entry cannot write the wrapper's files. In a local
+Docker box the supervisor's stdout is a pipe and its root has no
+capabilities, so it cannot switch users and the entry runs as the
+supervisor's user. A root with capabilities switches users also with a pipe.
+Only the supervisor command gets a root model proxy. That proxy starts from
+`/usr/local/bin/python3` and runs only the proxy and config bytes whose
+digests the parent sent. `test_metric_isolation.py` proves the user switch on Docker with a
+privileged `docker exec` that stands in for Vercel's root.
 
 ## Offline dependencies
 
@@ -41,10 +68,13 @@ Known gaps against Vercel: the setup box's egress has no byte cap (Vercel's `SAN
 | Codex | `@openai/codex@0.153.0` |
 | OpenCode | `opencode-ai@1.18.27` |
 | Prime Agent | `prime-agent@0.9.7` (release tarball), with a prebuilt Python kernel at `/opt/prime-agent/kernel-venv` |
+| Node for eve | `24.21.0` at `/opt/node24/bin/node`; eve only, because eve needs Node 24 or later |
+| eve | `eve@1.0.0-rc.6`, with `ai@7.0.165`, `@ai-sdk/openai-compatible@3.0.87` and `zod@4.6.7` |
 | ShinkaEvolve | `shinka-evolve==0.0.7` and its exact closure from `core/service_gateway/optimization/blackbox/shinka_requirements.txt`, in its own venv at `/opt/shinka/venv`; sandbox image builds only, with `--build-arg INCLUDE_SHINKA_EVOLVE=1` |
+| AutoSaddler | `microsoft/AutoSaddler@9df6d2e3` and its exact closure from `core/service_gateway/optimization/blackbox/autosaddler_requirements.txt`, in its own venv at `/opt/autosaddler/venv`; every image build (SKY-645) |
 | Deno, for the Flex-capable profile | `2.6.6`, with the prewarmed `/app/.deno` Pyodide cache |
 
-`sandbox-runtime/package-lock.json` locks the CLI dependency graph and package integrity. Prime Agent and its three `@earendil-works/*` runtime packages resolve from Prime Intellect's release host rather than the npm registry; lockfile integrity still applies. The Prime Agent kernel is built with the image's Python from the pinned `sandbox-runtime/prime-agent-kernel.txt`, and the Prime launch sets `PRIME_AGENT_KERNEL_PYTHON` to it so it never bootstraps over the network. ShinkaEvolve's pinned closure conflicts with the backend's own dependencies, so a sandbox image built with `--build-arg INCLUDE_SHINKA_EVOLVE=1` builds it into `/opt/shinka/venv` with the image's Python. The switch is off by default, so API/worker images omit the ~700 MB layer and its GPL packages; a protected ShinkaEvolve run uses that interpreter (`native_runtime.SHINKA_IMAGE_PYTHON`) and the native readiness check reports `shinka_ready` from it. An image without it reports `shinka_ready=false`: a single ShinkaEvolve run is refused and Auto drops its ShinkaEvolve lane. Python dependencies come from `uv.lock` or the selected complete requirements lock.
+`sandbox-runtime/package-lock.json` locks the CLI dependency graph and package integrity. Pi 0.87.1 publishes an `npm-shrinkwrap.json` that pins its whole tree, `@earendil-works/pi-ai@0.87.1` included, although its `package.json` asks for `^0.87.1`. npm applies that shrinkwrap both to this lockfile and to the launch-time `npm install -g` fallback outside protected runs, so both resolve the same versions. A dependency's shrinkwrap takes precedence over root `overrides`, so an override here cannot change them. Prime Agent and its three `@earendil-works/*` runtime packages resolve from Prime Intellect's release host rather than the npm registry; lockfile integrity still applies. The Prime Agent kernel is built with the image's Python from the pinned `sandbox-runtime/prime-agent-kernel.txt`, and the Prime launch sets `PRIME_AGENT_KERNEL_PYTHON` to it so it never bootstraps over the network. ShinkaEvolve's pinned closure conflicts with the backend's own dependencies, so a sandbox image built with `--build-arg INCLUDE_SHINKA_EVOLVE=1` builds it into `/opt/shinka/venv` with the image's Python. The switch is off by default, so API/worker images omit the ~700 MB layer and its GPL packages; a protected ShinkaEvolve run uses that interpreter (`native_runtime.SHINKA_IMAGE_PYTHON`) and the native readiness check reports `shinka_ready` from it. An image without it reports `shinka_ready=false`: a single ShinkaEvolve run is refused and Auto drops its ShinkaEvolve lane. The eve launch builds a temporary project outside the workspace. When the image has eve, the project links each preinstalled package into its own `node_modules`, so `eve build` runs with no registry. Its tools run in the run workspace through a Skynet sandbox provider. Python dependencies come from `uv.lock` or the selected complete requirements lock.
 
 Codex uses Responses and disables transport retries/websockets in its generated provider configuration. OpenCode's pinned package bundles its OpenAI-compatible provider; the protected profile disables model-catalog refresh, updates, default auth plugins, and language-server downloads. Built-in readiness checks verify exact CLI versions in the selected sandbox. Authored dependency commands run in the same offline Vercel boundary and may use only packages already installed in the pinned image. Scorer and agent dependencies are installed during their paid Continue check; command syntax that requires a real candidate remains separately verified without inventing one. Missing offline dependencies fail setup clearly. The submitted run repeats preparation in its own sandbox so readiness evidence never substitutes for run isolation.
 
@@ -64,13 +94,22 @@ User-selected remote evaluators keep their original `POST {candidate, case}` pro
 
 External evaluator and MCP service fees are outside Skynet Total. Their relay still checks the owning execution generation and cancellation state; it does not invent zero-cost provider receipts. Every Anything setup and run requires the deployment's managed Vercel profile. The external endpoint call leaves through the trusted parent relay, while optimizer and target execution remain inside the sandbox boundary. A supplied seed is scored on a non-held-out case, and an HTTP failure remains a failed check with the original status. Seedless setup verifies endpoint readiness and clearly defers the actual request until a real candidate exists.
 
+## Skynet-keyed connectors
+
+`core/billing/env_connectors.py` lists the hosted MCP connectors that Skynet pays for: `maps` (Google Maps Grounding Lite), `web_search` (Firecrawl) and `browser` (Browserbase). Each catalog entry gives the hosted MCP URL, the config setting that holds Skynet's key, the allowed tool names and the USD price of one call.
+
+- A run asks for connectors with `env_connectors: ["maps", ...]`. The parent gateway opens one `McpToolsBroker` for each connector, with its own scoped token, beside any user `live_mcp` roster. The guest gets only `_skynet_connector_routes` (gateway URL and token). It never gets the provider URL or the key.
+- A connector with no key in config (`GOOGLE_MAPS_API_KEY`, `FIRECRAWL_API_KEY`, `BROWSERBASE_API_KEY`) is not offered. Setup fails with a message that names each missing connector and its setting.
+- Each `tools/call` reserves the tool's catalog price through `operation_quote` before the provider sees it, and settles that price as a `tool` cost with the connector name as its role. A call that does not fit the budget is refused before dispatch. A call that fails before the broker sends the tool request (an admission stop, a connection or `initialize` failure) releases its hold. A call that fails or is interrupted after the send settles at the catalog price, because connectors have no usage reconciler. Tool listing is free. A tool name outside the catalog is refused.
+- The broker redacts each key header and query value from tool results. Keys never enter the payload, the run record or an error message.
+- Applying connector lists to boxes and the guest environment wiring belong to SKY-354.
+
 ## Recovery contract
 
 An interrupted run is never restarted automatically: a worker shutdown, a lost lease, or a dropped sandbox leaves the run failed with `stop_reason=interrupted`. The owner chooses what happens next: Resume, Retry, or Clone.
 
 | Path | Manual Resume |
 | --- | --- |
-| DSPy GEPA, including independent GEPA grid pairs | Exact compatible persisted GEPA state |
 | Anything, single GEPA engine | Exact compatible persisted GEPA state |
 | Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve, Auto/omni, other optimizers | Not supported; Retry or Clone instead |
 

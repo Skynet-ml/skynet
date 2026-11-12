@@ -15,8 +15,6 @@ import {
   PushPin,
   Repeat,
   Pause,
-  GridFour,
-  CaretLeft,
   Copy,
   ArrowCounterClockwise,
   Play,
@@ -45,7 +43,9 @@ import {
   restartJob,
   resumeJob,
   listFolders,
+  unhideSharedItem,
 } from "@/shared/lib/api";
+import { runHref, sourceFromParam } from "@/shared/lib/api-route";
 import type { RunFolder, SidebarJobItem } from "@/shared/lib/api";
 import {
   STATUS_DOT_COLOR,
@@ -56,8 +56,19 @@ import { PingDot } from "@/shared/ui/ping-dot";
 import { useJobsStream } from "@/shared/hooks/use-jobs-stream";
 import { toast } from "react-toastify";
 import { useSession } from "next-auth/react";
-import { groupJobsByRecency } from "@/features/sidebar";
+import {
+  allLoaded,
+  appendRuns,
+  countFrom,
+  groupJobsByRecency,
+  loadRuns,
+  refreshLimit,
+  runKey,
+  useHostedRetry,
+} from "@/features/sidebar";
 import { AccountMenu } from "@/shared/layout/account-menu";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { useIsCurrentSide, useSourceSwap } from "@/shared/hooks/use-source-swap";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ShareDialog } from "@/features/optimizations";
 import { StorageMeter } from "@/features/storage";
@@ -88,6 +99,8 @@ import {
 import { DEFAULT_RUN_VIEW, applyRunView, parseRunView, type RunView } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
+import { SharedItemMenuItems, useSharedItemActions } from "@/shared/ui/shared-item-menu";
+import { topFolderName } from "@/shared/lib/shared-with-me";
 
 const NAV_ITEMS = perLocale(() =>
   APP_PAGES.filter((page) => page.sidebar).map((page) => ({
@@ -129,9 +142,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const activePairParam = searchParams.get("pair");
-  const parsedPair = activePairParam != null ? parseInt(activePairParam, 10) : NaN;
-  const activePairIndex = Number.isFinite(parsedPair) ? parsedPair : null;
+  const activeSource = sourceFromParam(searchParams.get("source"));
   const { data: session } = useSession();
   const sessionUser = sessionIdentity(session);
   const isAdmin = (session?.user as { role?: string } | undefined)?.role === "admin";
@@ -271,11 +282,11 @@ export function Sidebar() {
   );
 
   // Sidebar infinite scroll: fetchData (polling + external invalidation)
-  // re-requests ``max(PAGE_SIZE, loadedItemsRef.current)`` rows so a
+  // re-requests each side's loaded row count (at least PAGE_SIZE) so a
   // background 30s refresh doesn't truncate the user's scrolled position
   // back to page 1. The ref lives outside React state so fetchData doesn't
-  // need to be re-created when the loaded count changes.
-  const loadedItemsRef = React.useRef(0);
+  // need to be re-created when the loaded rows change.
+  const loadedItemsRef = React.useRef<SidebarJobItem[]>([]);
   // Synchronous in-flight guard: setLoadingMore is async, so the observer
   // can fire twice before React re-renders. The ref blocks the second call.
   const loadingMoreRef = React.useRef(false);
@@ -292,36 +303,48 @@ export function Sidebar() {
     }
   }, []);
 
+  const hostedRetry = useHostedRetry();
+  const { web } = useResourceMode();
+  // The side the listed runs belong to; the other side's runs never show.
+  const [jobsSide, setJobsSide] = React.useState(web);
+  const swapping = useSourceSwap(web) || jobsSide !== web;
+  const isCurrentSide = useIsCurrentSide(web);
   const fetchData = React.useCallback(async () => {
     void fetchFolders();
     try {
-      const limit = Math.min(200, Math.max(PAGE_SIZE, loadedItemsRef.current));
-      const res =
-        tab === "shared"
-          ? await listJobsSharedWithMe({ limit, offset: 0 })
-          : await listJobsSidebar({
+      // A linked Mac lists the side picked in the header.
+      const res = await loadRuns((source) => {
+        const limit = refreshLimit(loadedItemsRef.current, source, PAGE_SIZE, 200);
+        return tab === "shared"
+          ? listJobsSharedWithMe({ limit, offset: 0, source })
+          : listJobsSidebar({
               username: isAdmin ? undefined : sessionUser || undefined,
               limit,
               offset: 0,
+              source,
             });
-      // Drop the response if the user has since toggled away — applying it
-      // would clobber the newer tab's list with stale rows.
-      if (tabRef.current !== tab) return;
+      }, web, !web);
+      // Drop the response if the user has since toggled away (tab or side) —
+      // applying it would clobber the newer list with stale rows.
+      if (tabRef.current !== tab || !isCurrentSide(web)) return;
+      hostedRetry.failed(res.hostedFailed);
       setJobs(res.items);
+      setJobsSide(web);
       setActiveCount(res.items.filter((j) => isActiveStatus(j.status)).length);
-      setLoadedAll(res.items.length >= res.total);
-      loadedItemsRef.current = res.items.length;
+      setLoadedAll(allLoaded(res.items, res.totals));
+      loadedItemsRef.current = res.items;
       switchingRef.current = false;
       setRenderedTab(tab);
     } catch (err) {
       console.warn("sidebar fetch failed:", err);
+      if (isCurrentSide(web)) setJobsSide(web);
     }
-  }, [sessionUser, isAdmin, tab, fetchFolders]);
+  }, [sessionUser, isAdmin, tab, fetchFolders, hostedRetry.failed, web, isCurrentSide]);
 
   React.useEffect(() => {
     // Dep change (login / admin toggle) — reset depth so the next fetch
     // starts fresh at one page.
-    loadedItemsRef.current = 0;
+    loadedItemsRef.current = [];
     void fetchData();
     const tick = () => {
       if (document.visibilityState === "visible") void fetchData();
@@ -341,6 +364,12 @@ export function Sidebar() {
     };
   }, [fetchData]);
 
+  // A hosted retry or a relink refetches the loaded depth; it must not reset
+  // the pages the user has scrolled to.
+  React.useEffect(() => {
+    if (hostedRetry.reloadKey) void fetchData();
+  }, [hostedRetry.reloadKey]);
+
   // Live updates while jobs are active: subscribe to the shared dashboard SSE
   // stream (3s server cadence) so the running badge and per-job status pills
   // refresh within seconds of a job finishing instead of waiting up to 30s for
@@ -356,22 +385,27 @@ export function Sidebar() {
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const res =
-        tab === "shared"
-          ? await listJobsSharedWithMe({ limit: PAGE_SIZE, offset: jobs.length })
-          : await listJobsSidebar({
-              username: isAdmin ? undefined : sessionUser || undefined,
-              limit: PAGE_SIZE,
-              offset: jobs.length,
-            });
+      // Each side pages from the number of its own runs already loaded.
+      const res = await loadRuns(
+        (source) =>
+          tab === "shared"
+            ? listJobsSharedWithMe({ limit: PAGE_SIZE, offset: countFrom(jobs, source), source })
+            : listJobsSidebar({
+                username: isAdmin ? undefined : sessionUser || undefined,
+                limit: PAGE_SIZE,
+                offset: countFrom(jobs, source),
+                source,
+              }),
+        web,
+        !web,
+      );
+      if (!isCurrentSide(web)) return;
       setJobs((prev) => {
-        // Dedupe by optimization_id in case a new job was inserted above
-        // the offset between the previous fetch and this one.
-        const existing = new Set(prev.map((j) => j.optimization_id));
-        const appended = res.items.filter((j) => !existing.has(j.optimization_id));
-        const merged = [...prev, ...appended];
-        loadedItemsRef.current = merged.length;
-        setLoadedAll(merged.length >= res.total);
+        // Dedupe in case a new job was inserted above the offset between the
+        // previous fetch and this one.
+        const merged = appendRuns(prev, res.items);
+        loadedItemsRef.current = merged;
+        setLoadedAll(allLoaded(merged, res.totals));
         return merged;
       });
     } catch (err) {
@@ -380,7 +414,7 @@ export function Sidebar() {
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [loadedAll, isAdmin, sessionUser, jobs.length, tab]);
+  }, [loadedAll, isAdmin, sessionUser, jobs, tab, web, isCurrentSide]);
 
   // Infinite-scroll sentinel. The sidebar scrolls in its own container
   // (``listRef``), so the observer's root must point at that element — not
@@ -399,7 +433,7 @@ export function Sidebar() {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [loadedAll, loadMore, jobs.length]);
+  }, [loadedAll, loadMore, jobs.length, swapping]);
 
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ id: string } | null>(null);
   const [deleteLoading, setDeleteLoading] = React.useState(false);
@@ -414,12 +448,13 @@ export function Sidebar() {
     if (!deleteConfirm) return;
     const { id } = deleteConfirm;
     setDeleteLoading(true);
-    setJobs((prev) => prev.filter((j) => j.optimization_id !== id));
+    // Only local rows offer delete, so the deleted row is the local one.
+    setJobs((prev) => prev.filter((j) => runKey(j) !== `local:${id}`));
     try {
       await deleteJob(id);
       toast.success(msg("sidebar.delete.success"));
       window.dispatchEvent(new Event("optimizations-changed"));
-      if (pathname === `/optimizations/${id}`) router.push("/");
+      if (pathname === `/optimizations/${id}` && activeSource === "local") router.push("/");
     } catch {
       toast.error(msg("sidebar.delete.failed"));
       void fetchData();
@@ -466,6 +501,13 @@ export function Sidebar() {
   // ``?folder=<id>`` (set by the share-link claim page) opens that folder and
   // every ancestor, on whichever tab the folder lives.
   const folderParam = searchParams.get("folder");
+  // Opening a folder link shows the folder again if the caller hid it from view.
+  const unhiddenFolderParamRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!folderParam || unhiddenFolderParamRef.current === folderParam) return;
+    unhiddenFolderParamRef.current = folderParam;
+    void unhideSharedItem("folders", folderParam).then(fetchFolders, () => {});
+  }, [folderParam, fetchFolders]);
   // Applied once per param value, so the 30s refresh doesn't re-open a folder
   // the user has since collapsed.
   const handledFolderParamRef = React.useRef<string | null>(null);
@@ -503,7 +545,10 @@ export function Sidebar() {
     () =>
       applyRunView(
         groupByFolder
-          ? jobs.filter((j) => !j.folder_id || !visibleFolderIds.has(j.folder_id))
+          ? jobs.filter(
+              // Folders are local; hosted runs always stay in the flat list.
+              (j) => j.source === "hosted" || !j.folder_id || !visibleFolderIds.has(j.folder_id),
+            )
           : jobs,
         view,
       ),
@@ -534,13 +579,16 @@ export function Sidebar() {
     [folderDialog, toggleFolder, handleTabChange],
   );
 
-  const renderJob = (job: SidebarJobItem, isShared: boolean) => (
+  const isOpenRun = (job: SidebarJobItem) =>
+    pathname === `/optimizations/${job.optimization_id}` &&
+    activeSource === (job.source ?? "local");
+  const renderJob = (job: SidebarJobItem, isShared: boolean, inheritedFrom?: string | null) => (
     <JobRow
-      key={job.optimization_id}
+      key={runKey(job)}
       job={job}
       isShared={isShared}
-      isActive={pathname === `/optimizations/${job.optimization_id}`}
-      activePair={pathname === `/optimizations/${job.optimization_id}` ? activePairIndex : null}
+      inheritedFrom={inheritedFrom}
+      isActive={isOpenRun(job)}
       onDelete={handleDelete}
       onRefresh={fetchData}
       onMove={() =>
@@ -565,7 +613,7 @@ export function Sidebar() {
 
   const deleteJobInfo = React.useMemo(() => {
     if (!deleteConfirm) return null;
-    const job = jobs.find((j) => j.optimization_id === deleteConfirm.id);
+    const job = jobs.find((j) => runKey(j) === `local:${deleteConfirm.id}`);
     if (!job) return { name: deleteConfirm.id, id: deleteConfirm.id };
     const name =
       job.name ||
@@ -721,88 +769,107 @@ export function Sidebar() {
           data-setup="runs"
         >
           <div ref={listRef} className="flex-1 overflow-y-auto px-3 pt-1 pb-2 no-scrollbar">
-            <AnimatePresence mode="wait" initial={false}>
-              <motion.div
-                key={renderedTab}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.14, ease: "easeOut" }}
-              >
-                {showFolders && (
-                  <div className="mb-2">
-                    <FolderTree
-                      folders={rootFolders}
-                      childMap={childMap}
-                      expanded={expandedFolders}
-                      onToggle={toggleFolder}
-                      view={view}
-                      version={folderVersion}
-                      renderRun={(job) => renderJob(job, job.role != null && job.role !== "owner")}
-                      onAction={setFolderDialog}
-                    />
-                  </div>
-                )}
-                {/* One flat list, not a div per group, so a run keeps its
-                    element when a sort moves it under another heading. */}
-                <AnimatePresence initial={false}>
-                  {groupedJobs.flatMap((group, groupIdx) => [
-                    <motion.p
-                      key={`group:${group.label}`}
-                      layout="position"
-                      initial={ROW_MOTION.initial}
-                      animate={ROW_MOTION.animate}
-                      exit={ROW_MOTION.exit}
-                      transition={rowTransition(0)}
-                      className={cn(
-                        "flex items-center gap-1.5 text-[0.625rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/60 px-2 py-1.5",
-                        groupIdx > 0 && "mt-2",
-                      )}
-                    >
-                      <span>{group.label}</span>
-                      <span className="tabular-nums text-muted-foreground/40 font-normal">
-                        {group.jobs.length}
-                      </span>
-                    </motion.p>,
-                    ...group.jobs.map((job, idx) => (
-                      <motion.div
-                        key={job.optimization_id}
-                        layout="position"
-                        initial={ROW_MOTION.initial}
-                        animate={ROW_MOTION.animate}
-                        exit={ROW_MOTION.exit}
-                        transition={rowTransition(idx)}
-                      >
-                        {renderJob(job, renderedTab === "shared")}
-                      </motion.div>
-                    )),
-                  ])}
-                </AnimatePresence>
-                {groupedJobs.length > 0 && <div className="h-2" aria-hidden="true" />}
-                {loadedAll && groupedJobs.length === 0 && !showFolders && jobs.length > 0 && (
-                  <p className="px-2 py-6 text-center text-[0.6875rem] text-muted-foreground/60">
-                    {msg("sidebar.filter.no_match")}
-                  </p>
-                )}
-                {loadedAll && groupedJobs.length === 0 && !showFolders && jobs.length === 0 && (
-                  <EmptyState
-                    icon={PaperPlaneTilt}
-                    iconWrap="tile"
-                    title={msg(
-                      renderedTab === "shared" ? "sidebar.shared.empty" : "sidebar.mine.empty",
+            {!swapping && (
+              <div className="swap-in">
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.div
+                    key={renderedTab}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.14, ease: "easeOut" }}
+                  >
+                    {showFolders && (
+                      <div className="mb-2">
+                        <FolderTree
+                          folders={rootFolders}
+                          childMap={childMap}
+                          expanded={expandedFolders}
+                          onToggle={toggleFolder}
+                          view={view}
+                          version={folderVersion}
+                          renderRun={(job) =>
+                            renderJob(
+                              job,
+                              job.role != null && job.role !== "owner",
+                              job.folder_id ? topFolderName(folders, job.folder_id) : null,
+                            )
+                          }
+                          onAction={setFolderDialog}
+                        />
+                      </div>
                     )}
-                    className="px-1 py-10 [&_p]:text-balance"
-                  />
-                )}
-              </motion.div>
-            </AnimatePresence>
-            {loadingMore && jobs.length === 0 && <SidebarRunsSkeleton groups={runGroupsHint} />}
+                    {/* One flat list, not a div per group, so a run keeps its
+                        element when a sort moves it under another heading. */}
+                    <AnimatePresence initial={false}>
+                      {groupedJobs.flatMap((group, groupIdx) => [
+                        <motion.p
+                          key={`group:${group.label}`}
+                          layout="position"
+                          initial={ROW_MOTION.initial}
+                          animate={ROW_MOTION.animate}
+                          exit={ROW_MOTION.exit}
+                          transition={rowTransition(0)}
+                          className={cn(
+                            "flex items-center gap-1.5 text-[0.625rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/60 px-2 py-1.5",
+                            groupIdx > 0 && "mt-2",
+                          )}
+                        >
+                          <span>{group.label}</span>
+                          <span className="tabular-nums text-muted-foreground/40 font-normal">
+                            {group.jobs.length}
+                          </span>
+                        </motion.p>,
+                        ...group.jobs.map((job, idx) => (
+                          <motion.div
+                            key={runKey(job)}
+                            layout="position"
+                            initial={ROW_MOTION.initial}
+                            animate={ROW_MOTION.animate}
+                            exit={ROW_MOTION.exit}
+                            transition={rowTransition(idx)}
+                          >
+                            {renderJob(job, renderedTab === "shared")}
+                          </motion.div>
+                        )),
+                      ])}
+                    </AnimatePresence>
+                    {groupedJobs.length > 0 && <div className="h-2" aria-hidden="true" />}
+                    {loadedAll && groupedJobs.length === 0 && !showFolders && jobs.length > 0 && (
+                      <p className="px-2 py-6 text-center text-[0.6875rem] text-muted-foreground/60">
+                        {msg("sidebar.filter.no_match")}
+                      </p>
+                    )}
+                    {loadedAll &&
+                      !hostedRetry.pending &&
+                      groupedJobs.length === 0 &&
+                      !showFolders &&
+                      jobs.length === 0 && (
+                      <EmptyState
+                        icon={PaperPlaneTilt}
+                        iconWrap="tile"
+                        title={msg(
+                          renderedTab === "shared" ? "sidebar.shared.empty" : "sidebar.mine.empty",
+                        )}
+                        className="px-1 py-10 [&_p]:text-balance"
+                      />
+                    )}
+                  </motion.div>
+                </AnimatePresence>
+              </div>
+            )}
+            {(swapping || ((loadingMore || hostedRetry.pending) && jobs.length === 0)) && (
+              <SidebarRunsSkeleton groups={runGroupsHint} />
+            )}
             {loadingMore && jobs.length > 0 && (
               <div className="px-1 pt-1 pb-2" aria-hidden="true">
                 <SidebarMoreSkeleton />
               </div>
             )}
-            {!loadedAll && <div ref={sentinelRef} aria-hidden="true" className="h-1 w-full" />}
+            {/* No paging during a Local/Web swap: the rows on hand belong to the other side. */}
+            {!loadedAll && !swapping && (
+              <div ref={sentinelRef} aria-hidden="true" className="h-1 w-full" />
+            )}
           </div>
         </div>
 
@@ -978,16 +1045,17 @@ function NavItem({
 function JobRow({
   job,
   isShared,
+  inheritedFrom,
   isActive,
-  activePair,
   onDelete,
   onRefresh,
   onMove,
 }: {
   job: SidebarJobItem;
   isShared: boolean;
+  /** Folder whose share gives this run's access; the row then offers no grant controls. */
+  inheritedFrom?: string | null;
   isActive: boolean;
-  activePair: number | null;
   onDelete: (e: React.MouseEvent, id: string) => void;
   onRefresh: () => void;
   onMove: () => void;
@@ -997,11 +1065,7 @@ function JobRow({
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [renaming, setRenaming] = React.useState(false);
   const [renameValue, setRenameValue] = React.useState("");
-  const [expanded, setExpanded] = React.useState(isActive && activePair !== null);
   const renameRef = React.useRef<HTMLInputElement>(null);
-  const isGridSearch = job.optimization_type === "grid_search" && (job.total_pairs ?? 0) > 0;
-  // Grid searches are retired: the backend refuses to clone, retry or resume one.
-  const canRerun = job.optimization_type !== "grid_search";
   const displayName =
     job.name ||
     [job.module_name, job.optimizer_name].filter(Boolean).join(" · ") ||
@@ -1012,6 +1076,15 @@ function JobRow({
   // owner-only (and a shared-with-me row is never one the caller owns). On the
   // "mine" tab the caller is always owner/admin, so everything is allowed.
   const canEdit = !isShared || job.role === "editor" || job.role === "owner";
+  const shared = useSharedItemActions(
+    { kind: "optimizations", id: job.optimization_id, name: displayName, role: job.role },
+    {
+      onChanged: () => window.dispatchEvent(new Event("optimizations-changed")),
+      onRemoved: () => {
+        if (isActive) router.push("/");
+      },
+    },
+  );
 
   React.useEffect(() => {
     if (renaming) renameRef.current?.focus();
@@ -1170,7 +1243,7 @@ function JobRow({
         )}
       >
         <Link
-          href={`/optimizations/${job.optimization_id}`}
+          href={runHref(job.optimization_id, job.source)}
           className="flex min-h-[44px] min-w-0 flex-1 items-center gap-2 overflow-hidden lg:min-h-0"
         >
           <span
@@ -1179,27 +1252,15 @@ function JobRow({
           >
             {displayName}
           </span>
-          {isGridSearch && (
-            <span
-              className={cn(
-                "inline-flex items-center gap-0.5 text-[9px] font-semibold px-1 py-0.5 rounded shrink-0",
-                isActive
-                  ? "bg-muted text-muted-foreground"
-                  : "bg-muted/40 text-muted-foreground/60",
-              )}
-              title={formatMsg("auto.features.sidebar.components.sidebar.template.2", {
-                p1: job.total_pairs ?? "?",
-              })}
-            >
-              <GridFour className="size-2.5" />
-              {job.total_pairs ?? "?"}
-            </span>
-          )}
           {job.automated && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="inline-flex shrink-0 items-center text-primary">
-                  <Repeat className="size-3.5" weight="bold" aria-label={msg("sidebar.automated")} />
+                  <Repeat
+                    className="size-3.5"
+                    weight="bold"
+                    aria-label={msg("sidebar.automated")}
+                  />
                 </span>
               </TooltipTrigger>
               <TooltipContent side="right">{msg("sidebar.automated")}</TooltipContent>
@@ -1210,106 +1271,80 @@ function JobRow({
           )}
           <StatusDot status={job.status} />
         </Link>
-        {isGridSearch && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setExpanded((o) => !o);
-            }}
-            className={cn(
-              "shrink-0",
-              isActive
-                ? "text-muted-foreground hover:text-foreground"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            aria-label={
-              expanded
-                ? msg("auto.features.sidebar.components.sidebar.literal.11")
-                : msg("auto.features.sidebar.components.sidebar.literal.12")
-            }
-          >
-            <CaretLeft
-              className={cn("size-3.5 transition-transform duration-200", expanded && "-rotate-90")}
-            />
-          </Button>
-        )}
-        <PopoverPrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>
-          <PopoverPrimitive.Trigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              onClick={(e) => {
-                e.stopPropagation();
-              }}
-              className={cn(
-                "shrink-0",
-                isActive
-                  ? "text-muted-foreground hover:text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-              autoTooltip={false}
-              aria-label={formatMsg("auto.features.sidebar.components.sidebar.template.3", {
-                p1: displayName,
-              })}
-            >
-              <DotsThree
+        {/* Row actions call local routes, so hosted runs offer none. */}
+        {job.source !== "hosted" && (
+          <PopoverPrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>
+            <PopoverPrimitive.Trigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={(e) => {
+                  e.stopPropagation();
+                }}
                 className={cn(
-                  "size-3.5 transition-colors duration-150 motion-reduce:transition-none",
-                  menuOpen && "text-foreground",
+                  "shrink-0",
+                  isActive
+                    ? "text-muted-foreground hover:text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
-                aria-hidden="true"
-              />
-            </Button>
-          </PopoverPrimitive.Trigger>
-          <PopoverPrimitive.Portal>
-            <PopoverPrimitive.Content
-              align="end"
-              side="bottom"
-              sideOffset={6}
-              collisionPadding={8}
-              className={COMPACT_POPOVER_PANEL_CLASS}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {!isShared && (
-                <PopoverPrimitive.Close asChild>
-                  <button
-                    type="button"
-                    onClick={handleShare}
-                    className={COMPACT_POPOVER_ITEM_CLASS}
-                  >
-                    <ShareNetwork className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
-                    <span className="flex-1 text-start">
-                      {msg("auto.features.sidebar.components.sidebar.7")}
-                    </span>
-                  </button>
-                </PopoverPrimitive.Close>
-              )}
+                autoTooltip={false}
+                aria-label={formatMsg("auto.features.sidebar.components.sidebar.template.3", {
+                  p1: displayName,
+                })}
+              >
+                <DotsThree
+                  className={cn(
+                    "size-3.5 transition-colors duration-150 motion-reduce:transition-none",
+                    menuOpen && "text-foreground",
+                  )}
+                  aria-hidden="true"
+                />
+              </Button>
+            </PopoverPrimitive.Trigger>
+            <PopoverPrimitive.Portal>
+              <PopoverPrimitive.Content
+                align="end"
+                side="bottom"
+                sideOffset={6}
+                collisionPadding={8}
+                className={COMPACT_POPOVER_PANEL_CLASS}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {!isShared && (
+                  <PopoverPrimitive.Close asChild>
+                    <button
+                      type="button"
+                      onClick={handleShare}
+                      className={COMPACT_POPOVER_ITEM_CLASS}
+                    >
+                      <ShareNetwork className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+                      <span className="flex-1 text-start">
+                        {msg("auto.features.sidebar.components.sidebar.7")}
+                      </span>
+                    </button>
+                  </PopoverPrimitive.Close>
+                )}
 
-              {canEdit && (
-                <PopoverPrimitive.Close asChild>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      setRenameValue(job.name ?? displayName);
-                      setRenaming(true);
-                    }}
-                    className={COMPACT_POPOVER_ITEM_CLASS}
-                  >
-                    <PencilSimple className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
-                    <span className="flex-1 text-start">
-                      {msg("auto.features.sidebar.components.sidebar.8")}
-                    </span>
-                  </button>
-                </PopoverPrimitive.Close>
-              )}
+                {canEdit && (
+                  <PopoverPrimitive.Close asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setRenameValue(job.name ?? displayName);
+                        setRenaming(true);
+                      }}
+                      className={COMPACT_POPOVER_ITEM_CLASS}
+                    >
+                      <PencilSimple className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+                      <span className="flex-1 text-start">
+                        {msg("auto.features.sidebar.components.sidebar.8")}
+                      </span>
+                    </button>
+                  </PopoverPrimitive.Close>
+                )}
 
-              {canRerun && (
                 <PopoverPrimitive.Close asChild>
                   <button
                     type="button"
@@ -1322,179 +1357,148 @@ function JobRow({
                     </span>
                   </button>
                 </PopoverPrimitive.Close>
-              )}
 
-              {canEdit && (
-                <PopoverPrimitive.Close asChild>
-                  <button type="button" onClick={onMove} className={COMPACT_POPOVER_ITEM_CLASS}>
-                    <FolderOpen className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
-                    <span className="flex-1 text-start">{msg("folders.move_run")}</span>
-                  </button>
-                </PopoverPrimitive.Close>
-              )}
-
-              {canEdit &&
-                canRerun &&
-                (job.status === "failed" ||
-                  job.status === "cancelled" ||
-                  job.status === "paused") &&
-                (job.resumable ? (
+                {canEdit && (
                   <PopoverPrimitive.Close asChild>
-                    <button
-                      type="button"
-                      onClick={handleResume}
-                      className={COMPACT_POPOVER_ITEM_CLASS}
-                    >
-                      <Play
-                        className={cn(COMPACT_POPOVER_ICON_CLASS, isRtl && "-scale-x-100")}
-                        aria-hidden="true"
-                      />
-                      <span className="flex-1 text-start">{msg("sidebar.resume")}</span>
+                    <button type="button" onClick={onMove} className={COMPACT_POPOVER_ITEM_CLASS}>
+                      <FolderOpen className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+                      <span className="flex-1 text-start">{msg("folders.move_run")}</span>
                     </button>
                   </PopoverPrimitive.Close>
-                ) : (
-                  <PopoverPrimitive.Close asChild>
-                    <button
-                      type="button"
-                      onClick={handleRetry}
-                      className={COMPACT_POPOVER_ITEM_CLASS}
-                    >
-                      <ArrowCounterClockwise
-                        className={COMPACT_POPOVER_ICON_CLASS}
-                        aria-hidden="true"
-                      />
-                      <span className="flex-1 text-start">{msg("sidebar.rerun")}</span>
-                    </button>
-                  </PopoverPrimitive.Close>
-                ))}
+                )}
 
-              {canEdit && isActiveStatus(job.status) && (
-                <>
-                  {job.pausable && (
+                {canEdit &&
+                  (job.status === "failed" ||
+                    job.status === "cancelled" ||
+                    job.status === "paused") &&
+                  (job.resumable ? (
                     <PopoverPrimitive.Close asChild>
                       <button
                         type="button"
-                        onClick={handlePause}
+                        onClick={handleResume}
                         className={COMPACT_POPOVER_ITEM_CLASS}
                       >
-                        <Pause className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
-                        <span className="flex-1 text-start">{msg("optimization.pause")}</span>
+                        <Play
+                          className={cn(COMPACT_POPOVER_ICON_CLASS, isRtl && "-scale-x-100")}
+                          aria-hidden="true"
+                        />
+                        <span className="flex-1 text-start">{msg("sidebar.resume")}</span>
                       </button>
                     </PopoverPrimitive.Close>
-                  )}
+                  ) : (
+                    <PopoverPrimitive.Close asChild>
+                      <button
+                        type="button"
+                        onClick={handleRetry}
+                        className={COMPACT_POPOVER_ITEM_CLASS}
+                      >
+                        <ArrowCounterClockwise
+                          className={COMPACT_POPOVER_ICON_CLASS}
+                          aria-hidden="true"
+                        />
+                        <span className="flex-1 text-start">{msg("sidebar.rerun")}</span>
+                      </button>
+                    </PopoverPrimitive.Close>
+                  ))}
+
+                {canEdit && isActiveStatus(job.status) && (
+                  <>
+                    {job.pausable && (
+                      <PopoverPrimitive.Close asChild>
+                        <button
+                          type="button"
+                          onClick={handlePause}
+                          className={COMPACT_POPOVER_ITEM_CLASS}
+                        >
+                          <Pause className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+                          <span className="flex-1 text-start">{msg("optimization.pause")}</span>
+                        </button>
+                      </PopoverPrimitive.Close>
+                    )}
+                    <PopoverPrimitive.Close asChild>
+                      <button
+                        type="button"
+                        onClick={handleCancel}
+                        className={cn(
+                          COMPACT_POPOVER_ITEM_CLASS,
+                          "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10",
+                        )}
+                      >
+                        <XCircle
+                          className={cn(COMPACT_POPOVER_ICON_CLASS, "text-destructive")}
+                          aria-hidden="true"
+                        />
+                        <span className="flex-1 text-start">
+                          {msg("auto.app.optimizations.id.page.literal.5")}
+                        </span>
+                      </button>
+                    </PopoverPrimitive.Close>
+                  </>
+                )}
+
+                {canEdit && (
+                  <>
+                    <div role="separator" className="mx-3.5 my-1 border-t border-border/40" />
+                    <PopoverPrimitive.Close asChild>
+                      <button
+                        type="button"
+                        onClick={handlePin}
+                        className={COMPACT_POPOVER_ITEM_CLASS}
+                      >
+                        <PushPin
+                          className={cn(
+                            COMPACT_POPOVER_ICON_CLASS,
+                            job.pinned && "text-foreground",
+                          )}
+                          aria-hidden="true"
+                        />
+                        <span className="flex-1 text-start">
+                          {job.pinned
+                            ? msg("auto.features.sidebar.components.sidebar.literal.13")
+                            : msg("auto.features.sidebar.components.sidebar.literal.14")}
+                        </span>
+                      </button>
+                    </PopoverPrimitive.Close>
+                  </>
+                )}
+
+                {!isShared && (
                   <PopoverPrimitive.Close asChild>
                     <button
                       type="button"
-                      onClick={handleCancel}
+                      onClick={(e) => {
+                        setMenuOpen(false);
+                        onDelete(e, job.optimization_id);
+                      }}
                       className={cn(
                         COMPACT_POPOVER_ITEM_CLASS,
                         "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10",
                       )}
                     >
-                      <XCircle
+                      <Trash
                         className={cn(COMPACT_POPOVER_ICON_CLASS, "text-destructive")}
                         aria-hidden="true"
                       />
                       <span className="flex-1 text-start">
-                        {msg("auto.app.optimizations.id.page.literal.5")}
+                        {msg("auto.features.sidebar.components.sidebar.10")}
                       </span>
                     </button>
                   </PopoverPrimitive.Close>
-                </>
-              )}
+                )}
 
-              {canEdit && (
-                <>
-                  <div role="separator" className="mx-3.5 my-1 border-t border-border/40" />
-                  <PopoverPrimitive.Close asChild>
-                    <button
-                      type="button"
-                      onClick={handlePin}
-                      className={COMPACT_POPOVER_ITEM_CLASS}
-                    >
-                      <PushPin
-                        className={cn(COMPACT_POPOVER_ICON_CLASS, job.pinned && "text-foreground")}
-                        aria-hidden="true"
-                      />
-                      <span className="flex-1 text-start">
-                        {job.pinned
-                          ? msg("auto.features.sidebar.components.sidebar.literal.13")
-                          : msg("auto.features.sidebar.components.sidebar.literal.14")}
-                      </span>
-                    </button>
-                  </PopoverPrimitive.Close>
-                </>
-              )}
-
-              {!isShared && (
-                <PopoverPrimitive.Close asChild>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      setMenuOpen(false);
-                      onDelete(e, job.optimization_id);
-                    }}
-                    className={cn(
-                      COMPACT_POPOVER_ITEM_CLASS,
-                      "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10",
-                    )}
-                  >
-                    <Trash
-                      className={cn(COMPACT_POPOVER_ICON_CLASS, "text-destructive")}
-                      aria-hidden="true"
-                    />
-                    <span className="flex-1 text-start">
-                      {msg("auto.features.sidebar.components.sidebar.10")}
-                    </span>
-                  </button>
-                </PopoverPrimitive.Close>
-              )}
-            </PopoverPrimitive.Content>
-          </PopoverPrimitive.Portal>
-        </PopoverPrimitive.Root>
+                {isShared && (
+                  <>
+                    <div role="separator" className="mx-3.5 my-1 border-t border-border/40" />
+                    <SharedItemMenuItems actions={shared} inheritedFrom={inheritedFrom} />
+                  </>
+                )}
+              </PopoverPrimitive.Content>
+            </PopoverPrimitive.Portal>
+          </PopoverPrimitive.Root>
+        )}
       </div>
 
-      <AnimatePresence>
-        {expanded && isGridSearch && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
-          >
-            <div className="ps-6 pe-2 pb-1">
-              {Array.from({ length: job.total_pairs ?? 0 }, (_, i) => {
-                const isPairActive = isActive && activePair === i;
-                const pairStatus = derivePairStatus(
-                  i,
-                  job.status,
-                  job.completed_pairs ?? 0,
-                  job.failed_pairs ?? 0,
-                );
-                return (
-                  <Link
-                    key={i}
-                    href={`/optimizations/${job.optimization_id}?pair=${i}`}
-                    className={cn(
-                      "flex items-center gap-2 rounded-md px-2 py-1.5 text-[0.625rem] transition-all duration-150",
-                      isPairActive
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold"
-                        : "text-muted-foreground/70 hover:bg-sidebar-accent/30 hover:text-foreground",
-                    )}
-                  >
-                    <StatusDot status={pairStatus} />
-                    <span>
-                      {msg("auto.features.sidebar.components.sidebar.6")}
-                      {i + 1}
-                    </span>
-                  </Link>
-                );
-              })}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {isShared && shared.dialog}
 
       {!isShared && (
         <ShareDialog
@@ -1506,17 +1510,6 @@ function JobRow({
       )}
     </div>
   );
-}
-
-function derivePairStatus(
-  index: number,
-  parentStatus: string,
-  completedPairs: number,
-  failedPairs: number,
-): string {
-  if (index < completedPairs) return "success";
-  if (index < completedPairs + failedPairs) return "failed";
-  return parentStatus;
 }
 
 function StatusDot({ status }: { status: string }) {

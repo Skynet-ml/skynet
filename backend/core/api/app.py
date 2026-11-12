@@ -2,7 +2,7 @@
 
 This module now contains *only* the app-lifecycle concerns:
 
-* DI wiring (``ServiceRegistry`` + ``DspyService`` + ``job_store``)
+* DI wiring (``ServiceRegistry`` + ``job_store``)
 * Background worker lifespan + SIGTERM handling
 * CORS middleware + cache headers
 * Consistent JSON error response shape
@@ -54,6 +54,7 @@ from ..billing import (
     warn_if_local_key_uncapped,
 )
 from ..billing.data_policy import configure_data_policy
+from ..billing.mcp_oauth_client import configure_mcp_connections
 from ..brand import APP_NAME
 from ..config import LOCAL_MODE_LOOPBACK_HOSTS, settings
 from ..connectors.registry import oauth_config_problems
@@ -62,7 +63,6 @@ from ..exceptions import AppError
 from ..models import HEALTH_STATUS_OK, HealthResponse, QueueStatusResponse
 from ..notifications import configure_notification_preferences, start_notification_hold_sweeper
 from ..registry import ServiceRegistry
-from ..service_gateway import DspyService
 from ..service_gateway.embedding_pipeline import (
     backfill_missing_conversation_embeddings,
     purge_orphan_conversation_embeddings,
@@ -92,13 +92,14 @@ from .observability import (
 )
 from .rate_limit import build_login_throttle
 from .remote_mcp import mount_remote_mcp
+from .remote_mcp_repo import register_repo_tools
+from .remote_mcp_routes import register_route_tools
 from .routers.account_data import create_account_data_router
 from .routers.account_security import create_account_security_router
 from .routers.accounts import create_accounts_router
 from .routers.admin import create_admin_router
 from .routers.admin_dashboard import create_admin_dashboard_router
 from .routers.agent_attachments import create_agent_attachments_router
-from .routers.agent_engine import create_agent_engine_router
 from .routers.agent_history import create_agent_history_router
 from .routers.agent_settings import create_agent_settings_router
 from .routers.analytics import create_analytics_router
@@ -119,9 +120,14 @@ from .routers.execution_runtimes import create_execution_runtimes_router
 from .routers.experience import create_experience_router
 from .routers.folders import create_folders_router
 from .routers.generalist_agent import create_generalist_agent_router
+from .routers.hardening import create_hardening_router
+from .routers.local_cli_usage import create_local_cli_usage_router
 from .routers.local_hosted_link import create_local_hosted_link_router
+from .routers.local_hosted_proxy import create_local_hosted_proxy_router
 from .routers.local_notifications import create_local_notifications_router
 from .routers.local_runtime import create_local_runtime_router
+from .routers.managed_inference import create_managed_inference_router
+from .routers.mcp_connections import create_mcp_connections_router
 from .routers.mcp_oauth import create_mcp_oauth_router
 from .routers.mcp_probe import create_mcp_probe_router
 from .routers.model_privacy import create_model_privacy_router
@@ -135,7 +141,9 @@ from .routers.registry import create_registry_router
 from .routers.saved_secrets import create_saved_secrets_router
 from .routers.scorer_dependencies import create_scorer_dependencies_router
 from .routers.serve import create_serve_router
+from .routers.setup_draft import create_setup_draft_router
 from .routers.share import create_share_router
+from .routers.shared_with_me import create_shared_with_me_router
 from .routers.submissions import create_submissions_router
 from .routers.tagger_assist import create_tagger_assist_router
 from .routers.tagging_session_share import create_tagging_session_share_router
@@ -180,8 +188,6 @@ _SCALAR_PUBLIC_PATHS = frozenset(
         "/optimizations/{optimization_id}/summary",
         "/optimizations/{optimization_id}/logs",
         "/optimizations/{optimization_id}/payload",
-        "/optimizations/{optimization_id}/artifact",
-        "/optimizations/{optimization_id}/grid-result",
         # Live progress
         "/optimizations/{optimization_id}/stream",
         # Lifecycle
@@ -511,7 +517,7 @@ _OPENAPI_TAGS = [
     {
         "name": "Optimizations",
         "description": (
-            "Submit, list, inspect, and manage optimization runs for prompts, code, text, DSPy programs, and repositories."
+            "Submit, list, inspect, and manage optimization runs. Every run optimizes the code in a repository."
         ),
     },
     {"name": "Inference", "description": "Run the optimized artifact of a finished run."},
@@ -703,19 +709,12 @@ class SSEFriendlyGZipMiddleware(GZipMiddleware):
 
 def create_app(
     registry: ServiceRegistry | None = None,
-    *,
-    service: DspyService | None = None,
-    service_kwargs: dict | None = None,
 ) -> FastAPI:
     """Assemble and return the fully-configured FastAPI application.
 
     Args:
         registry: Optional pre-built :class:`ServiceRegistry`; a fresh one is
             created when omitted.
-        service: Optional pre-built :class:`DspyService`; constructed from
-            ``registry`` and ``service_kwargs`` when omitted.
-        service_kwargs: Optional kwargs forwarded to :class:`DspyService`
-            when building the default instance.
 
     Returns:
         The fully wired :class:`FastAPI` application.
@@ -727,14 +726,11 @@ def create_app(
     # rather than empty lists (shared with the standalone worker entrypoint,
     # which needs identical wiring).
     wire_registry_aliases(registry)
-    service = service or DspyService(
-        registry,
-        **(service_kwargs or {}),
-    )
 
     job_store = get_job_store()
     configure_notification_preferences(job_store.engine)
     configure_data_policy(job_store.engine)
+    configure_mcp_connections(job_store.engine)
 
     worker: BackgroundWorker | None = None
     queue_metrics_refresher = None
@@ -785,7 +781,7 @@ def create_app(
         pending_ids = []
         if settings.worker_enabled:
             pending_ids = job_store.recover_pending_jobs()
-            worker = get_worker(job_store, service=service, pending_optimization_ids=pending_ids)
+            worker = get_worker(job_store, pending_optimization_ids=pending_ids)
         else:
             # Split deployment: this pod serves the API only; job execution
             # runs in dedicated worker replicas (worker_main.py) so request
@@ -811,7 +807,7 @@ def create_app(
         # email/push/Slack wait so reading the inbox first can cancel them).
         notification_hold_sweeper = start_notification_hold_sweeper(getattr(job_store, "engine", None))
         # Runs due continuous-optimization checks; one replica per tick holds its lock.
-        continuous_sweeper = start_continuous_sweeper(job_store, service)
+        continuous_sweeper = start_continuous_sweeper(job_store)
         warn_if_local_key_uncapped()
         if settings.event_loop_lag_monitor_enabled:
             loop_lag_monitor = start_event_loop_lag_monitor()
@@ -923,7 +919,7 @@ def create_app(
         redoc_url=None,
         description=(
             f"HTTP API for **{APP_NAME}**. Submit optimization runs for "
-            "prompts, code, text, DSPy programs, and repositories, poll "
+            "the code in a repository, poll "
             "their status, read the results, and run the optimized "
             "artifact. Send an API token "
             "from Settings > API as a Bearer token. Guides: "
@@ -1336,6 +1332,7 @@ def create_app(
     # via closure, which a module-level dependency can't reach).
     app.state.job_store = job_store
     app.include_router(create_models_router(), tags=["Models"])
+    app.include_router(create_managed_inference_router(job_store=job_store), tags=["Models"])
     app.include_router(
         create_admin_router(job_store=job_store, directory_client=build_directory_client()),
         tags=["Admin"],
@@ -1363,22 +1360,25 @@ def create_app(
     )
     app.include_router(create_account_security_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_local_runtime_router(), tags=["Auth"])
+    app.include_router(create_local_cli_usage_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_local_hosted_link_router(job_store=job_store), tags=["Auth"])
+    app.include_router(create_local_hosted_proxy_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_account_data_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_notification_preferences_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_local_notifications_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_notifications_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_experience_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_model_privacy_router(job_store=job_store), tags=["Settings"])
-    app.include_router(create_agent_engine_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_package_registry_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_scorer_dependencies_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_datasets_router(job_store=job_store), tags=["Datasets"])
     app.include_router(create_dataset_library_router(job_store=job_store), tags=["Datasets"])
     app.include_router(create_dataset_share_router(job_store=job_store), tags=["Datasets"])
     app.include_router(create_folders_router(job_store=job_store), tags=["Folders"])
+    app.include_router(create_shared_with_me_router(job_store=job_store), tags=["Folders"])
     app.include_router(create_continuous_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_connectors_router(job_store=job_store), tags=["Connectors"])
+    app.include_router(create_mcp_connections_router(), tags=["Connectors"])
     app.include_router(create_saved_secrets_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_tagging_session_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_tagging_session_share_router(job_store=job_store), tags=["Optimizations"])
@@ -1391,9 +1391,11 @@ def create_app(
     app.include_router(create_agent_settings_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_telemetry_router(job_store=job_store), tags=["Telemetry"])
     app.include_router(create_wizard_router(), tags=["Wizard"])
+    app.include_router(create_setup_draft_router(job_store=job_store), tags=["Wizard"])
+    app.include_router(create_hardening_router(job_store=job_store), tags=["Hardening"])
     app.include_router(create_workflows_router(job_store=job_store), tags=["Workflows"])
     app.include_router(
-        create_submissions_router(service=service, job_store=job_store),
+        create_submissions_router(job_store=job_store),
         tags=["Optimizations"],
     )
     app.include_router(create_analytics_router(job_store=job_store), tags=["Analytics"])
@@ -1421,6 +1423,14 @@ def create_app(
         mount_mcp_on_app(app)
     except ImportError as exc:
         logger.warning("FastMCP not available, skipping /mcp mount: %s", exc)
-    mount_remote_mcp(app, service=service, job_store=job_store, get_worker=lambda: worker)
+    mount_remote_mcp(
+        app,
+        job_store=job_store,
+        get_worker=lambda: worker,
+        extensions=[
+            partial(register_repo_tools, job_store=job_store),
+            register_route_tools(app),
+        ],
+    )
 
     return app

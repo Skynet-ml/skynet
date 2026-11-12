@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import threading
+import io
+import tarfile
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -39,7 +40,8 @@ from core.billing.protected_credentials import scrub_execution_credentials
 from core.billing.runtime import BudgetRuntime, PaidResult
 from core.billing.service import StripeBillingService
 from core.billing.signals import BudgetReached
-from core.models import UnifiedRunRequest
+from core.i18n_keys import I18nKey
+from core.models import BlackboxRunRequest
 from core.storage.models import (
     Base,
     BillingCustomerModel,
@@ -51,8 +53,9 @@ from core.storage.models import (
 )
 from core.storage.preflights import PreflightStore, WizardPreflightModel
 from core.storage.remote import RemoteDBJobStore
+from core.worker import repo_gate
 
-ROUTE = "/optimize"
+ROUTE = "/blackbox/run"
 
 
 class _SQLiteJobStore(RemoteDBJobStore):
@@ -142,6 +145,22 @@ class _Harness:
             return session.scalar(select(func.count()).select_from(model))
 
 
+def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], SimpleNamespace]:
+    """Return the repository payload as staged, with a fixture environment.
+
+    Args:
+        payload: Protected repository payload.
+        **kwargs: Owner and budget binding, unused by the fixture.
+
+    Returns:
+        The payload with a repository environment, and a stand-in checkout with no files or secrets.
+    """
+    payload["target"]["repo"]["environment"] = {"setup_command": "npm ci"}
+    return payload, SimpleNamespace(
+        snapshot=SimpleNamespace(archive=None), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+    )
+
+
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harness]:
     """Serve public routes with real persistence and no worker or paid provider traffic.
@@ -171,9 +190,12 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
     monkeypatch.setattr(preflight_execution, "ModelGateway", _Gateway)
     monkeypatch.setattr(preflight_execution, "bind_protected_sandbox", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight_execution, "_verify_anything", verify_anything)
-    # The unified sandbox verifier is replaced the same way so no sandbox or
-    # provider is reached.
-    monkeypatch.setattr(preflight_execution, "_verify_unified", verify_anything)
+    # Repository staging clones from GitHub inside a sandbox; the fixture
+    # keeps the payload and only records the environment the check reports.
+    monkeypatch.setattr(preflight_execution, "stage_repository", _stage_without_sandbox)
+    monkeypatch.setattr(preflight_execution, "check_repository", lambda *args, **kwargs: [])
+    monkeypatch.setattr(preflight_execution, "infer_repo_setup", lambda *args, **kwargs: None)
+    monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
     # Holds here are sized against tight budgets in raw provider cost; the markup is pricing policy, tested in core/billing.
     monkeypatch.setattr(submissions.settings, "usage_markup", 1.0)
     monkeypatch.setattr(submissions.settings, "worker_enabled", False)
@@ -184,7 +206,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
     monkeypatch.setattr(submissions.settings, "openrouter_api_key", SecretStr("fixture-only"))
     monkeypatch.setattr(submissions.settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
     app = FastAPI()
-    app.include_router(submissions.create_submissions_router(service=object(), job_store=store))
+    app.include_router(submissions.create_submissions_router(job_store=store))
     app.include_router(create_execution_budgets_router(job_store=store))
     app.include_router(create_wizard_preflight_router(job_store=store))
     app.include_router(create_optimizations_meta_router(job_store=store))
@@ -196,7 +218,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
 
 
 def _payload(*, total: int = 20) -> dict[str, Any]:
-    """Build a valid unified request body with no budget or verification metadata.
+    """Build a valid repository request body with no budget or verification metadata.
 
     Args:
         total: Approved total setup and run allowance.
@@ -206,23 +228,23 @@ def _payload(*, total: int = 20) -> dict[str, Any]:
     """
     return {
         "username": "spoofed-owner",
-        "task": {
-            "objective": "Answer the question in one word.",
-            "artifact": {"kind": "prompt", "starting_version": "Answer briefly: "},
+        "name": "repo-run",
+        "objective": "Make the tests pass.",
+        "recipe": "repo",
+        "scorer": {"kind": "python", "metric_code": "def score(repo_path, case=None):\n    return 1.0"},
+        "strategy": {"mode": "single", "engine": "gepa"},
+        "target": {
+            "kind": "repo",
+            "repo": {
+                "provider": "github",
+                "repository": "example/site",
+                "branch": "main",
+                "commit": "0" * 40,
+                "editable_paths": ["src", "README.md"],
+            },
+            "setup_command": "npm ci",
         },
-        "data": {
-            "mode": "pairs",
-            "cases": [{"input": {"question": f"Q{index}?"}, "expected": "A"} for index in range(10)],
-            "input_fields": ["question"],
-        },
-        "optimizer": {"choice": "gepa"},
-        "models": {"reflection_model": {"name": "fixture/text"}, "task_model": {"name": "fixture/task"}},
-        "workspace": {
-            "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
-            "metric_code": (
-                "def score(input, output, expected=None):\n    return float(output == expected), {'feedback': ''}\n"
-            ),
-        },
+        "reflection_model_config": {"name": "fixture/text"},
         "max_cost_cents": total,
     }
 
@@ -246,7 +268,7 @@ def _prepare(harness: _Harness) -> tuple[dict, dict]:
         "/wizard/preflight",
         json={
             "scope": "execution",
-            "workflow": "unified",
+            "workflow": "anything",
             "payload": payload,
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -261,6 +283,86 @@ def _prepare(harness: _Harness) -> tuple[dict, dict]:
         "preflight_id": checked["id"],
         "preflight_fingerprint": checked["fingerprint"],
     }, checked
+
+
+_MAPS_TOML = (
+    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("repo_fields", "secrets", "expected"),
+    [
+        (
+            {"secret_bindings": {"GOOGLE_MAPS_KEY": "managed"}},
+            {},
+            I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE,
+        ),
+        (
+            {"secrets": [{"name": "GOOGLE_MAPS_KEY", "value": "fixture-only", "allowed_hosts": []}]},
+            {"GOOGLE_MAPS_KEY": "fixture-only"},
+            I18nKey.REPO_GATE_SECRET_HOST_UNLISTED,
+        ),
+        (
+            {"secrets": [{"name": "GOOGLE_MAPS_KEY", "value": "fixture-only", "allowed_hosts": ["api.example.com"]}]},
+            {"GOOGLE_MAPS_KEY": "fixture-only"},
+            I18nKey.REPO_GATE_SECRET_HOST_NOT_ALLOWED,
+        ),
+    ],
+)
+def test_the_setup_check_gates_secret_bindings_and_allowed_hosts(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repo_fields: dict[str, Any],
+    secrets: dict[str, str],
+    expected: I18nKey,
+) -> None:
+    """The setup check reads bindings and allowed hosts before staging empties the secret list (E50, E52)."""
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("optimize.toml")
+        info.size = len(_MAPS_TOML)
+        packed.addfile(info, io.BytesIO(_MAPS_TOML))
+
+    def stage(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], SimpleNamespace]:
+        """Empty the secret list the way real staging does, and hand back the packed tree.
+
+        Args:
+            payload: Protected repository payload.
+            **kwargs: Owner and budget binding, unused by the fixture.
+
+        Returns:
+            The payload and a stand-in checkout with the tree and the resolved secrets.
+        """
+        payload["target"]["repo"]["secrets"] = []
+        return payload, SimpleNamespace(
+            snapshot=SimpleNamespace(archive=archive), secrets=secrets, close_scorers=lambda: None, cleanup=lambda: None
+        )
+
+    monkeypatch.setattr(preflight_execution, "stage_repository", stage)
+    monkeypatch.setattr(preflight_execution, "check_repository", repo_gate.check_repository)
+    monkeypatch.setattr(repo_gate, "managed_key_host", lambda host: False)
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="repo-gate-secrets")
+    payload = _payload()
+    payload["target"]["repo"].update(repo_fields)
+
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": {**payload, "execution_budget_id": budget.id, "execution_budget_revision": budget.revision},
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    checked = response.json()
+    assert checked["status"] == "failed"
+    assert expected in [check.get("message_code") for check in checked["checks"]]
 
 
 def test_anything_evaluation_protects_the_declared_scorer_model(
@@ -446,7 +548,7 @@ def test_invalid_evidence_cannot_queue(harness: _Harness, attack: str) -> None:
     elif attack == "fingerprint":
         payload["preflight_fingerprint"] = "0" * 64
     elif attack == "changed":
-        payload["task"]["objective"] = "A different objective"
+        payload["objective"] = "A different objective"
     elif attack == "foreign":
         harness.username = "bob"
     else:
@@ -500,7 +602,7 @@ def test_a_check_stopped_by_the_limit_says_the_limit_is_too_low(
         """Stop like a limit or a wallet that cannot cover one model call."""
         raise stop("The next operation needs more than the limit allows.")
 
-    monkeypatch.setattr(preflight_execution, "_verify_unified", stopped)
+    monkeypatch.setattr(preflight_execution, "_verify_anything", stopped)
     response = harness.client.post(ROUTE, json=_payload(total=1))
     assert response.status_code == 409, response.text
     assert response.json()["detail"].startswith(detail)
@@ -529,7 +631,7 @@ def test_attachment_rolls_back_job_when_budget_already_attached(harness: _Harnes
             preflight_id=payload["preflight_id"],
             preflight_fingerprint=payload["preflight_fingerprint"],
             preflight_payload=existing["payload"],
-            preflight_workflow="unified",
+            preflight_workflow="anything",
         )
     assert harness.count(JobModel) == 1
     with pytest.raises(KeyError):
@@ -633,11 +735,10 @@ def test_concurrent_attachment_keeps_one_complete_root(harness: _Harness) -> Non
         harness: Real file-backed store and completed setup evidence.
     """
     payload, _checked = _prepare(harness)
-    typed = UnifiedRunRequest.model_validate(payload)
+    typed = BlackboxRunRequest.model_validate(payload)
     typed.username = "alice"
     normalize_model_token_sources(typed)
-    submissions._default_unified_seed(typed)
-    canonical = submissions._protected_submission(typed, harness.store, "unified")
+    canonical = submissions._protected_submission(typed, harness.store, "anything")
     assert canonical is not None
 
     def attach(identity: str) -> str:
@@ -653,7 +754,7 @@ def test_concurrent_attachment_keeps_one_complete_root(harness: _Harness) -> Non
                 preflight_id=payload["preflight_id"],
                 preflight_fingerprint=payload["preflight_fingerprint"],
                 preflight_payload=canonical,
-                preflight_workflow="unified",
+                preflight_workflow="anything",
             )
             return identity
         except BudgetConflictError:
@@ -705,163 +806,6 @@ def test_legacy_commitment_is_counted_once_during_protected_submission(harness: 
     assert StripeBillingService(engine=harness.store.engine).spendable_cents("alice") == 39
 
 
-class _HeldCheck:
-    """Hold the paid setup check open until the test releases it."""
-
-    def __init__(self, harness: _Harness) -> None:
-        """Wrap the harness's measured setup adapter.
-
-        Args:
-            harness: Real API fixture whose setup check is held.
-        """
-        self.started = threading.Event()
-        self.release = threading.Event()
-        verify = harness.verify
-
-        def held(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            """Signal the check started, then wait for the release."""
-            self.started.set()
-            assert self.release.wait(timeout=30)
-            return verify(*args, **kwargs)
-
-        harness.verify = held
-
-
-def test_same_key_retry_during_running_check_returns_the_original_run(harness: _Harness) -> None:
-    """Join a dropped request's running check instead of refusing or paying for a second one.
-
-    Args:
-        harness: Real persistence with a held setup check.
-    """
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "dropped"}
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        first = executor.submit(harness.client.post, ROUTE, json=_payload(), headers=headers)
-        assert held.started.wait(timeout=10)
-        with ThreadPoolExecutor(max_workers=1) as retrying:
-            retry = retrying.submit(harness.client.post, ROUTE, json=_payload(), headers=headers)
-            held.release.set()
-            retried = retry.result(timeout=30)
-        original = first.result(timeout=30)
-
-    assert original.status_code == retried.status_code == 201, (original.text, retried.text)
-    assert retried.json()["optimization_id"] == original.json()["optimization_id"]
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == harness.count(WizardPreflightModel) == 1
-
-
-def test_slow_check_answers_202_and_a_same_key_retry_collects_the_run(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Answer before a proxy timeout, then hand the finished run to the client's retry.
-
-    Args:
-        harness: Real persistence with a held setup check.
-        monkeypatch: Shorten the in-request wait.
-    """
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 0.2)
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "slow"}
-    try:
-        accepted = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    finally:
-        held.release.set()
-
-    assert accepted.status_code == 202, accepted.text
-    assert accepted.headers["Retry-After"] == "5"
-    assert accepted.json()["code"] == "submission.in_progress"
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 30.0)
-    collected = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert collected.status_code == 201, collected.text
-    replayed = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert replayed.status_code == 201, replayed.text
-    assert replayed.json()["optimization_id"] == collected.json()["optimization_id"]
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 1
-
-
-def test_failed_check_after_202_is_reported_to_the_retry_without_running_again(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Deliver a background check's failure to the retry instead of paying for the check twice.
-
-    Args:
-        harness: Real persistence with a held, failing setup check.
-        monkeypatch: Shorten the in-request wait.
-    """
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 0.2)
-    harness.result_status = "failed"
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "fails"}
-    try:
-        accepted = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    finally:
-        held.release.set()
-
-    assert accepted.status_code == 202, accepted.text
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 30.0)
-    refused = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"].startswith("Payload validation failed")
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == 0
-
-
-def test_keyless_failed_check_after_202_is_reported_to_an_identical_retry(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Deliver a keyless request's background failure to its identical retry without a second check.
-
-    Args:
-        harness: Real persistence with a held, failing setup check.
-        monkeypatch: Shorten the in-request wait.
-    """
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 0.2)
-    harness.result_status = "failed"
-    held = _HeldCheck(harness)
-    try:
-        accepted = harness.client.post(ROUTE, json=_payload())
-    finally:
-        held.release.set()
-
-    assert accepted.status_code == 202, accepted.text
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 30.0)
-    refused = harness.client.post(ROUTE, json=_payload())
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"].startswith("Payload validation failed")
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == 0
-
-
-def test_same_key_retry_on_another_replica_answers_202_while_the_check_runs(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Report a check another process still runs as in progress, not a refusal or a duplicate.
-
-    Args:
-        harness: Real persistence with a held setup check.
-        monkeypatch: Give the retry its own process-local submission registry.
-    """
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "replica"}
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        first = executor.submit(harness.client.post, ROUTE, json=_payload(), headers=headers)
-        assert held.started.wait(timeout=10)
-        monkeypatch.setattr(submissions, "_IN_FLIGHT_SUBMISSIONS", submissions._InFlightSubmissions())
-        try:
-            elsewhere = harness.client.post(ROUTE, json=_payload(), headers=headers)
-        finally:
-            held.release.set()
-        original = first.result(timeout=30)
-
-    assert elsewhere.status_code == 202, elsewhere.text
-    assert original.status_code == 201, original.text
-    collected = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert collected.json()["optimization_id"] == original.json()["optimization_id"]
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 1
-
-
 def test_parallel_submissions_with_their_own_keys_both_start(harness: _Harness) -> None:
     """Start two different simultaneous submissions from one account without a server error.
 
@@ -882,12 +826,12 @@ def test_parallel_submissions_with_their_own_keys_both_start(harness: _Harness) 
     assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 2
 
 
-def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
+def _check_models(harness: _Harness, reflection: dict[str, Any]) -> tuple[Any, str]:
     """Run the wizard's Ready-to-run check with the given model roles.
 
     Args:
         harness: Funded real API fixture.
-        models: The unified ``models`` block to check.
+        reflection: The reflection model to check.
 
     Returns:
         The HTTP response and the status of the check's durable row.
@@ -895,7 +839,7 @@ def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
     budget = harness.budgets.create(harness.username, 20, idempotency_key="models")
     payload = {
         **_payload(),
-        "models": models,
+        "reflection_model_config": reflection,
         "execution_budget_id": budget.id,
         "execution_budget_revision": budget.revision,
     }
@@ -903,7 +847,7 @@ def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
         "/wizard/preflight",
         json={
             "scope": "execution",
-            "workflow": "unified",
+            "workflow": "anything",
             "payload": payload,
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -914,32 +858,24 @@ def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
     return response, status
 
 
-def test_local_check_accepts_subscription_task_and_reflection_models(
+def test_local_check_accepts_a_subscription_reflection_model(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Finish a local Ready-to-run check whose roles both run on a subscription CLI.
+    """Finish a local Ready-to-run check whose reflection model runs on a subscription CLI.
 
     Args:
         harness: Real setup and wallet services.
         monkeypatch: Turns local mode on.
     """
     monkeypatch.setattr(submissions.settings, "local_mode", True)
-    subscription = {"token_source": "subscription", "cli_provider": "claude"}
-    models = {
-        "reflection_model": {"name": "anthropic/claude-sonnet-4.6", **subscription},
-        "task_model": {"name": "anthropic/claude-haiku-4.5", **subscription},
-    }
+    reflection = {"name": "anthropic/claude-sonnet-4.6", "token_source": "subscription", "cli_provider": "claude"}
 
-    response, status = _check_models(harness, models)
+    response, status = _check_models(harness, reflection)
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "succeeded", response.json()
     assert status == "succeeded"
-    sent = harness.calls[0]["payload"]["models"]
-    assert {role: sent[role]["token_source"] for role in ("reflection_model", "task_model")} == {
-        "reflection_model": "subscription",
-        "task_model": "subscription",
-    }
+    assert harness.calls[0]["payload"]["reflection_model_config"]["token_source"] == "subscription"
 
 
 def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running(
@@ -954,12 +890,9 @@ def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running
     view = SimpleNamespace(provider="openai", api_base=None, status="verified")
     vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
     monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
-    models = {
-        "reflection_model": {"name": "fixture/text"},
-        "task_model": {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"},
-    }
+    reflection = {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"}
 
-    response, status = _check_models(harness, models)
+    response, status = _check_models(harness, reflection)
 
     assert response.status_code == 200, response.text
     body = response.json()

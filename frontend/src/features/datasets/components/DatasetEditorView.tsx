@@ -49,6 +49,7 @@ import {
   listDatasetOptimizations,
   listDatasets,
   setApiAuthToken,
+  unhideSharedItem,
   type DatasetColumnSchema,
   type DatasetOptimizationRef,
   type DatasetSummary,
@@ -274,7 +275,11 @@ export function DatasetEditorView() {
       .catch(() => {
         if (!cancelled) setState({ mode: "notfound" });
       });
-    listDatasets()
+    // The library list skips datasets the caller hid, and the role comes from
+    // that list, so opening the dataset shows it again first.
+    unhideSharedItem("datasets", id)
+      .catch(() => {})
+      .then(() => listDatasets())
       .then((res) => !cancelled && setSummary(res.datasets.find((d) => d.id === id) ?? null))
       .catch(() => {});
     listDatasetOptimizations(id)

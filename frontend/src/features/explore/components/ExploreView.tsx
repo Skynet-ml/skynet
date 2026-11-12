@@ -127,8 +127,6 @@ export function ExploreView() {
     {
       models: query.models,
       optimizers: query.optimizers,
-      types: query.types,
-      modules: query.modules,
       dateFrom: query.dateFrom,
       dateTo: query.dateTo,
     },
@@ -180,16 +178,12 @@ export function ExploreView() {
     onShowMore,
     selectedModels: query.models,
     selectedOptimizers: query.optimizers,
-    selectedTypes: query.types,
-    selectedModules: query.modules,
     dateFrom: query.dateFrom,
     dateTo: query.dateTo,
     resultTotal: response.total,
     resultsLoading: response.loading,
     onChangeModels: actions.setModels,
     onChangeOptimizers: actions.setOptimizers,
-    onChangeTypes: actions.setTypes,
-    onChangeModules: actions.setModules,
     onChangeDateRange: actions.setDateRange,
     onClearAll: actions.clearFilters,
   };
@@ -229,8 +223,6 @@ export function ExploreView() {
           <FilterSummary
             models={query.models}
             optimizers={query.optimizers}
-            types={query.types}
-            modules={query.modules}
             dateFrom={query.dateFrom}
             dateTo={query.dateTo}
             onOpen={() => onDrawerOpenChange(true)}
@@ -353,11 +345,7 @@ function ListPane({
     }
     if (isShared && !response.isActive) {
       return (
-        <EmptyState
-          variant="list"
-          title={msg("explore.corpus.shared.empty")}
-          className="pt-4"
-        />
+        <EmptyState variant="list" title={msg("explore.corpus.shared.empty")} className="pt-4" />
       );
     }
     return (

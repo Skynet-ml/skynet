@@ -1,0 +1,5 @@
+name = "skynet-ci"
+
+[entrypoint]
+  kind = "dang"
+  source = "./sdk/entrypoint"

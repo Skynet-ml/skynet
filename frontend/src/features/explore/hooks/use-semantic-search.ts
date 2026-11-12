@@ -17,9 +17,7 @@ export interface SearchQueryState {
   /** Active categorical filter values. */
   models: string[];
   optimizers: string[];
-  types: string[];
   tasks: string[];
-  modules: string[];
   /** ISO date (YYYY-MM-DD), inclusive. */
   dateFrom: string | null;
   dateTo: string | null;
@@ -87,9 +85,7 @@ function readState(
     page: Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : DEFAULT_PAGE,
     models: parseCsv(params.get("models")),
     optimizers: parseCsv(params.get("optimizers")),
-    types: parseCsv(params.get("types")),
     tasks: parseCsv(params.get("tasks")),
-    modules: parseCsv(params.get("modules")),
     dateFrom: params.get("from"),
     dateTo: params.get("to"),
     corpus:
@@ -102,9 +98,7 @@ function hasAnyFilter(state: SearchQueryState): boolean {
   if (state.text.trim().length > 0) return true;
   if (state.models.length > 0) return true;
   if (state.optimizers.length > 0) return true;
-  if (state.types.length > 0) return true;
   if (state.tasks.length > 0) return true;
-  if (state.modules.length > 0) return true;
   if (state.dateFrom) return true;
   if (state.dateTo) return true;
   return false;
@@ -118,9 +112,7 @@ export interface SearchActions {
   setCorpus: (corpus: ExploreCorpus) => void;
   setModels: (models: string[]) => void;
   setOptimizers: (optimizers: string[]) => void;
-  setTypes: (types: string[]) => void;
   setTasks: (tasks: string[]) => void;
-  setModules: (modules: string[]) => void;
   setDateRange: (from: string | null, to: string | null) => void;
   /** Clears the metadata filters but keeps the free-text query. */
   clearFilters: () => void;
@@ -236,9 +228,7 @@ export function useSemanticSearch(opts: UseSemanticSearchOptions): {
           for (const key of [
             "models",
             "optimizers",
-            "types",
             "tasks",
-            "modules",
             "from",
             "to",
           ]) {
@@ -248,9 +238,7 @@ export function useSemanticSearch(opts: UseSemanticSearchOptions): {
 
       setModels: (models: string[]) => writeList("models", models),
       setOptimizers: (optimizers: string[]) => writeList("optimizers", optimizers),
-      setTypes: (types: string[]) => writeList("types", types),
       setTasks: (tasks: string[]) => writeList("tasks", tasks),
-      setModules: (modules: string[]) => writeList("modules", modules),
 
       setDateRange: (from: string | null, to: string | null) =>
         updateUrl((p) => {
@@ -265,9 +253,7 @@ export function useSemanticSearch(opts: UseSemanticSearchOptions): {
           for (const key of [
             "models",
             "optimizers",
-            "types",
             "tasks",
-            "modules",
             "from",
             "to",
             "page",
@@ -282,9 +268,7 @@ export function useSemanticSearch(opts: UseSemanticSearchOptions): {
             "q",
             "models",
             "optimizers",
-            "types",
             "tasks",
-            "modules",
             "from",
             "to",
             "page",
@@ -299,9 +283,7 @@ export function useSemanticSearch(opts: UseSemanticSearchOptions): {
   const appliedFilterCount =
     query.models.length +
     query.optimizers.length +
-    query.types.length +
     query.tasks.length +
-    query.modules.length +
     (query.dateFrom ? 1 : 0) +
     (query.dateTo ? 1 : 0);
 
@@ -322,9 +304,7 @@ export function useSemanticSearch(opts: UseSemanticSearchOptions): {
           query: query.text.trim() || undefined,
           models: query.models.length ? query.models : undefined,
           optimizers: query.optimizers.length ? query.optimizers : undefined,
-          optimization_types: query.types.length ? query.types : undefined,
           tasks: query.tasks.length ? query.tasks : undefined,
-          modules: query.modules.length ? query.modules : undefined,
           date_from: query.dateFrom ?? undefined,
           date_to: query.dateTo ?? undefined,
           sort: query.sort,

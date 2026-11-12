@@ -14,21 +14,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 (globalThis as { React?: typeof React }).React = React;
 const { TooltipProvider } = await import("@/shared/ui/primitives/tooltip");
 const { OverviewTab } = await import("./OverviewTab");
-const { GridOverview } = await import("./GridOverview");
 const { OVERVIEW_FIXTURES, overviewFixture } = await import("./__fixtures__/overview");
 
 type Fixture = (typeof OVERVIEW_FIXTURES)[number];
 
 function render(fixture: Fixture): string {
-  const inner = fixture.expect.grid ? (
-    <GridOverview job={fixture.job} onPairSelect={() => {}} />
-  ) : (
+  const inner = (
     <OverviewTab
       job={fixture.job}
       isActive={false}
       scorePoints={fixture.scorePoints}
-      activePairIndex={null}
-      onPairSelect={() => {}}
       payload={fixture.payload}
     />
   );
@@ -49,16 +44,11 @@ void describe("finished-run Overview fixtures", () => {
 
       assert.ok(!html.includes("optimization.result."), "no Guided result card copy");
 
-      if (!expect.grid) {
-        assert.ok(html.includes("data-stage-tracker"), "pipeline stages");
-      }
+      assert.ok(html.includes("data-stage-tracker"), "pipeline stages");
 
       for (const cls of [BASELINE_CARD, OPTIMIZED_CARD, IMPROVEMENT_CARD]) {
         assert.equal(html.includes(cls), expect.scoreCards, `score card class: ${cls}`);
       }
-
-      const loggedRows = html.match(/<th scope="row"/g)?.length ?? 0;
-      assert.equal(loggedRows, expect.loggedMetricRows, "logged-metric rows");
 
       assert.ok(
         !html.includes("auto.features.optimizations.components.overviewtab.1<"),
@@ -67,24 +57,17 @@ void describe("finished-run Overview fixtures", () => {
       assert.ok(!html.includes("run-overview-classic"), "no scoped 10-09 palette");
       assert.ok(!html.includes("optimization.blackbox.stats.scorer_runs"), "no scorer-run card");
       assert.equal(/stage\.hillClimbing/i.test(html), expect.climb, "hill-climb stage");
-
-      if (expect.grid) {
-        for (const pair of fixture.job.grid_result?.pair_results ?? []) {
-          assert.ok(html.includes(pair.generation_model.split("/").pop() ?? ""), "pair model");
-        }
-      }
     });
   }
 
   void it("shows the score progression card only when there is a series", () => {
-    assert.ok(render(overviewFixture("dspy-single-module")).includes("overviewtab.4"));
-    assert.ok(!render(overviewFixture("dspy-no-baseline")).includes("overviewtab.4"));
+    const fixture = overviewFixture("oa-gepa");
+    assert.ok(render(fixture).includes("overviewtab.4"));
+    assert.ok(!render({ ...fixture, scorePoints: [] }).includes("overviewtab.4"));
   });
 
-  void it("formats DSPy scores as percentages and black-box scores raw", () => {
-    const dspy = render(overviewFixture("dspy-single-module"));
-    assert.ok(dspy.includes(">42.0%<") || dspy.includes(">42%<"), "DSPy baseline percent");
-    const html = render(overviewFixture("oa-gepa-prompt"));
+  void it("formats scores raw", () => {
+    const html = render(overviewFixture("oa-gepa"));
     assert.ok(html.includes(">0.42<") && html.includes(">0.78<"), "raw black-box scores");
   });
 });
@@ -114,7 +97,7 @@ void describe("detail page result layout", () => {
       "the FadeIn wrapper renders only with the notice, so no empty gap sits above the summary",
     );
 
-    const fixture = overviewFixture("oa-gepa-prompt");
+    const fixture = overviewFixture("oa-gepa");
     const job = {
       ...fixture.job,
       blackbox_result: {

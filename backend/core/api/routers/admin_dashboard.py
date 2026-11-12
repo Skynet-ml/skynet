@@ -28,8 +28,9 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 TOP_LIMIT = 10
 RUN_FAILED_EVENT = "run_failed"
 # Clawbacks are negative rows too, but they reverse a top-up rather than
-# charge for usage, so they stay out of the usage total.
-_NON_USAGE_DEBITS = ("refund", "dispute")
+# charge for usage, so they stay out of the usage total. A closure row
+# forfeits a deleted account's balance (SKY-567); it is not usage either.
+_NON_USAGE_DEBITS = ("refund", "dispute", "closure")
 
 
 class AdminDashboardTotals(BaseModel):
@@ -143,7 +144,6 @@ def read_dashboard(session: Session, *, days: int, now: datetime) -> AdminDashbo
         select(JobModel.username, func.min(JobModel.completed_at).label("first_at"))
         .where(
             JobModel.status == OptimizationStatus.success.value,
-            JobModel.parent_optimization_id.is_(None),
             JobModel.username.is_not(None),
             JobModel.completed_at.is_not(None),
         )
@@ -174,9 +174,7 @@ def read_dashboard(session: Session, *, days: int, now: datetime) -> AdminDashbo
     failed: Counter[date] = Counter()
     other: Counter[date] = Counter()
     for status, created, username in session.execute(
-        select(JobModel.status, JobModel.created_at, JobModel.username).where(
-            JobModel.created_at >= cutoff, JobModel.parent_optimization_id.is_(None)
-        )
+        select(JobModel.status, JobModel.created_at, JobModel.username).where(JobModel.created_at >= cutoff)
     ):
         if username in internal:
             continue

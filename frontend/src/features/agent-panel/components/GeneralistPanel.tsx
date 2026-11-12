@@ -2,17 +2,26 @@
 
 import { CountBadge } from "@/shared/ui/count-badge";
 import * as React from "react";
+import { toast } from "react-toastify";
 import { useCompletionNotification } from "@/shared/hooks/use-completion-notification";
 import { createPortal } from "react-dom";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { toast } from "react-toastify";
 import {
+  Brain,
+  ChatText,
   ClockCounterClockwise,
+  Copy,
+  Cpu,
+  DownloadSimple,
+  Gear,
   SidebarSimple,
+  PencilSimple,
   Plus,
   MagicWand,
   ShareNetwork,
+  X,
 } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
@@ -24,18 +33,47 @@ import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { LineCommentLinkContext } from "@/shared/ui/agent/user-bubble";
+import { joinLineComments, withLineComments, type LineComment } from "@/shared/ui/agent/line-comments";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
-import type { AgentToolCall } from "@/shared/ui/agent/types";
+import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
+import {
+  resolveSlashOption,
+  slashEfforts,
+  slashKeepsFast,
+  slashModels as slashListedModels,
+  type SlashCommand,
+} from "@/shared/ui/agent/slash-commands";
+import { chatToMarkdown } from "@/shared/lib/chat-export";
+import { cliEffort, liveEffort } from "@/shared/lib/effort-slider";
+import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
+import { effortLabel, effortsFor, supportsEffortSlider } from "@/shared/lib/model-efforts";
+import {
+  catalogFallbackModel,
+  modelDisplayName,
+  modelProviderSlug,
+} from "@/shared/lib/model-provider";
+import { ProviderLogo } from "@/shared/ui/provider-logo";
+import type { CatalogModel } from "@/shared/types/api";
+import { QuestionChoices } from "@/shared/ui/agent/question-choices";
+import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { SubmitSplashOverlay, SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 import { cn } from "@/shared/lib/utils";
+import { SETUP_CHAT_KEPT_EVENT, SETUP_SUBMITTED_EVENT } from "@/shared/lib/setup-draft";
+import { sessionIdentity } from "@/shared/lib/session-identity";
 import { formatMsg } from "@/shared/lib/messages";
 
-import { useLocalAgentMenuModels } from "@/features/local-runtime";
+import {
+  isCliProvider,
+  menuModelGroup,
+  menuPickState,
+  RETIRED_AUTO_MODEL,
+  useLocalAgentMenuModels,
+} from "@/features/local-runtime";
 import {
   SETTINGS_TABS,
-  agentSubscriptionFor,
   parseAgentPreferencePatch,
   useSettingsModal,
   useUserPrefs,
@@ -49,20 +87,46 @@ import { useColorTheme } from "@/shared/providers/theme-provider";
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import { createConversationShare, getConversation } from "../lib/conversation-api";
-import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
-import { sharedChatUrl } from "@/shared/lib/share-link";
+import { getConversation, isHostedConversation, loadConversation } from "../lib/conversation-api";
+import { isLocalMode } from "@/shared/lib/runtime-env";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
+import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
 import {
-  SCREEN_CHATS_KEY,
   SCREEN_KICKOFF,
-  decodeScreenChats,
-  encodeScreenChats,
+  SETUP_CHAT_KEY,
+  adoptedSetupChatId,
+  autoFeedbackAction,
+  backRequest,
+  decodeSetupChat,
+  encodeSetupChat,
+  handedOverSetupChat,
   hideKickoffs,
+  isSavedSetupChat,
+  keepHiddenTurns,
+  legacySetupChatId,
+  newSetupChatId,
+  newSetupChatStart,
+  opensSetup,
+  opensWithKickoff,
   parseScreenNav,
-  switchScreenChat,
+  registerSetupChatFlush,
+  setupChatGone,
+  setupChatLedger,
+  setupChatSnapshot,
+  setupChatUnchanged,
+  storedKickedScreens,
+  trackAutoTurn,
+  trackKickoffTurn,
+  unansweredTurn,
+  type AutoTurn,
+  type KickoffTurn,
+  type SetupChat,
 } from "../lib/screen-agent";
+import { latestTurnEdits, messageEdits, turnState, type FileEdit } from "../lib/turn-edits";
+import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
+import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
 import { DATASET_UPLOAD_EXTENSIONS } from "@/shared/lib/parse-dataset";
@@ -73,12 +137,14 @@ import { MAX_WIDTH, MIN_WIDTH, NARROW_VIEWPORT_QUERY } from "../constants";
 import { ApprovalCard } from "./ApprovalCard";
 import { ConversationDrawer } from "./ConversationDrawer";
 import { DatasetUploadCard, type ConfirmedDataset } from "./DatasetUploadCard";
+import { EditedFilesCard } from "./EditedFilesCard";
 import { LibraryDatasetCard, type ConfirmedLibraryDataset } from "./LibraryDatasetCard";
 import { InferenceFormCard } from "./InferenceFormCard";
 import { MinimizedPill } from "./MinimizedPill";
 import { PresenceStrip } from "./PresenceStrip";
 import { ToolCallRow } from "./ToolCallRow";
-import { ToolsCarousel } from "./ToolsCarousel";
+import { ChatSourceContext } from "./JobSummaryCard";
+import { ToolsShowcase } from "./ToolsShowcase";
 import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
 import { AGENT_PROMPT_EVENT, takeQueuedAgentPrompt } from "../lib/prompt-queue";
@@ -87,7 +153,6 @@ import { parseAgentNavigation, parseAppearancePatch } from "../lib/settings-acti
 const REQUEST_DATASET_TOOL = "request_user_dataset_datasets_request_upload_post";
 const REQUEST_LIBRARY_TOOL = "request_user_dataset_from_library";
 const REQUEST_INFERENCE_TOOL = "request_user_inference";
-const REQUEST_PAIR_INFERENCE_TOOL = "request_user_pair_inference";
 
 // Tools that keep their own interactive card instead of folding into the
 // turn's activity line as a plain step.
@@ -95,12 +160,12 @@ const RICH_CARD_TOOLS = new Set<string>([
   REQUEST_DATASET_TOOL,
   REQUEST_LIBRARY_TOOL,
   REQUEST_INFERENCE_TOOL,
-  REQUEST_PAIR_INFERENCE_TOOL,
 ]);
 
 // Submit tools whose success should mirror the manual wizard submit button:
 // play the splash banner, then route to the new optimization's details.
 const SUBMIT_TOOLS: ReadonlySet<string> = new Set(["submit_unified_run_optimize_post"]);
+const NO_COMMENTS: readonly LineComment[] = [];
 
 /** Whether a file opens the dataset column-mapping card instead of being read as text. */
 function isDatasetFile(file: File): boolean {
@@ -191,24 +256,80 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const screen = wizardCtx?.wizardScreen;
     if (screen == null) return merged;
     const issue = wizardCtx?.screenIssue;
-    return issue
-      ? { ...merged, wizard_screen: screen, screen_issue: issue }
-      : { ...merged, wizard_screen: screen };
+    const back = wizardCtx?.returnScreen;
+    const check = wizardCtx?.setupCheckIssue?.feedback;
+    return {
+      ...merged,
+      wizard_screen: screen,
+      ...(issue ? { screen_issue: issue } : {}),
+      ...(back ? { return_screen: back } : {}),
+      ...(check ? { setup_check: check } : {}),
+    };
   })();
-  // Each wizard screen has its own agent and its own chat. Moving to a
-  // screen resumes the chat held there, or opens a fresh one whose agent
-  // starts by itself; an agent's Back leaves the earlier screen its request.
+  // The setup has one agent and one chat, which lives as long as the draft:
+  // a reload or a return to a left setup brings it back, and submitting or
+  // starting a new setup drops it from the setup. The server saves it like
+  // any other chat, so it can be shared, and the tab's copy finds it again.
+  // Each screen the wizard reaches gives the agent a turn of its own; an
+  // agent's Back leaves the earlier screen its request.
   const shownScreen = wizardCtx?.wizardScreen ?? null;
-  const screenChatsRef = React.useRef(new Map<string, string>());
+  const inSetup = shownScreen !== null;
+  const setupChatRef = React.useRef<string | null>(null);
+  // The chat whose agent opened the setup: the wizard keeps it as the setup chat (SKY-631).
+  const setupHandoffRef = React.useRef<{ id: string | null } | null>(null);
+  const pathname = usePathname();
+  // A user who leaves /submit before the wizard mounts (the draft dialog) drops
+  // the mark, so a setup opened by hand later starts its own chat.
+  React.useEffect(() => {
+    if (!opensSetup(pathname ?? "")) setupHandoffRef.current = null;
+  }, [pathname]);
+  const setupMessagesRef = React.useRef<AgentMessage[]>([]);
   const screenOpeningRef = React.useRef<string | null>(null);
   const shownScreenRef = React.useRef<string | null>(null);
+  const kickedScreensRef = React.useRef(new Set<string>());
+  // Counts each setup chat opening, so a late server load can tell it is stale.
+  const setupRunRef = React.useRef(0);
+  // A kickoff turn counts as done for the tab's copy only once it finished,
+  // so a reload in the middle of it runs it again.
+  const kickoffTurnRef = React.useRef<KickoffTurn | null>(null);
   const [kickoffScreen, setKickoffScreen] = React.useState<string | null>(null);
-  const keepScreenChats = React.useCallback(() => {
+  // The copy keeps each write's before-state, so a reload still shows what each turn edited.
+  const writeBeforeRef = React.useRef(wizardCtx?.writeBefore ?? {});
+  React.useEffect(() => {
+    writeBeforeRef.current = wizardCtx?.writeBefore ?? {};
+  }, [wizardCtx?.writeBefore]);
+  const restoreWriteBefore = wizardCtx?.restoreWriteBefore;
+  const keepSetupChat = React.useCallback((id: string | null) => {
+    setupChatRef.current = id;
     try {
-      window.sessionStorage.setItem(SCREEN_CHATS_KEY, encodeScreenChats(screenChatsRef.current));
+      if (id) {
+        const messages = setupMessagesRef.current;
+        const chat = {
+          id,
+          kicked: storedKickedScreens(kickedScreensRef.current, kickoffTurnRef.current),
+          messages,
+          ledger: setupChatLedger(messages, writeBeforeRef.current),
+        };
+        try {
+          window.sessionStorage.setItem(SETUP_CHAT_KEY, encodeSetupChat(chat));
+        } catch {
+          // Storage full: the screens already started still count after a
+          // reload, even though the messages do not fit.
+          window.sessionStorage.setItem(
+            SETUP_CHAT_KEY,
+            encodeSetupChat({ id, kicked: chat.kicked, messages: [] }),
+          );
+        }
+      } else window.sessionStorage.removeItem(SETUP_CHAT_KEY);
     } catch {
-      // Storage full or blocked: a reload then starts the screen's chat fresh.
+      // Storage full or blocked: a reload then starts the setup's chat fresh,
+      // not from an older copy.
+      try {
+        window.sessionStorage.removeItem(SETUP_CHAT_KEY);
+      } catch {}
     }
+    // A chat-only turn changes no answer, so the wizard saves the draft on this signal.
+    window.dispatchEvent(new Event(SETUP_CHAT_KEPT_EVENT));
   }, []);
 
   // Agent-submit splash: a successful submit tool plays the same full-screen
@@ -217,6 +338,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // so it owns this overlay regardless of which page the agent submitted from.
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { data: session } = useSession();
+  const account = sessionIdentity(session) || null;
   const [submitSplash, setSubmitSplash] = React.useState(false);
   const splashTimersRef = React.useRef<Array<ReturnType<typeof setTimeout>>>([]);
   React.useEffect(() => () => splashTimersRef.current.forEach(clearTimeout), []);
@@ -224,6 +347,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const startSubmitSplash = React.useCallback(
     (optimizationId: string) => {
       setSubmitSplash(true);
+      // The left setup is gone now: the root deletes the server draft, and an
+      // open wizard keeps no draft when it unmounts.
+      window.dispatchEvent(new CustomEvent(SETUP_SUBMITTED_EVENT, { detail: { account } }));
       // Drop the replay cache now so a later /submit visit can't re-stage the
       // just-submitted dataset (the backend evicts it on submit anyway).
       try {
@@ -246,12 +372,19 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }, SUBMIT_SPLASH_HOLD_MS);
       splashTimersRef.current.push(routeTimer);
     },
-    [router, wizardCtx],
+    [account, router, wizardCtx],
   );
 
-  const { openTo: openSettingsTo } = useSettingsModal();
+  const { openTo: openSettingsTo, setOpen: setSettingsOpen } = useSettingsModal();
   const { setTheme } = useColorTheme();
-  const { setLocale } = useLocale();
+  const { locale, setLocale } = useLocale();
+
+  // The form's state as of the last write, so a write's card shows what each
+  // field held when it landed rather than when the turn began.
+  const liveStateRef = React.useRef<Record<string, unknown>>({ ...wizardCtx?.state });
+  React.useEffect(() => {
+    liveStateRef.current = { ...wizardCtx?.state };
+  }, [wizardCtx?.state]);
 
   const handleToolEnd = React.useCallback(
     (ev: ToolEndPayload, ctx: SessionEventContext) => {
@@ -273,7 +406,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         const nav = parseAgentNavigation(ev.result);
         if (nav?.kind === "settings" && Object.hasOwn(SETTINGS_TABS, nav.tab))
           openSettingsTo(nav.tab);
-        else if (nav?.kind === "route") router.push(nav.path);
+        else if (nav?.kind === "route") {
+          if (!wizardCtx?.wizardScreen && opensSetup(nav.path)) {
+            setupHandoffRef.current = { id: ctx.conversationId };
+          }
+          router.push(nav.path);
+        }
       }
       if (ev.status === "ok" && SUBMIT_TOOLS.has(ev.tool)) {
         const optimizationId = extractOptimizationId(ev.result);
@@ -281,7 +419,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }
       if (!wizardCtx) return;
       const patch = extractWizardPatch(ev.result);
-      if (Object.keys(patch).length > 0) wizardCtx.applyAgentPatch(patch);
+      if (Object.keys(patch).length > 0) {
+        // Every write, not only the form's own tool: the coding agent's files
+        // need their before-state for the "Edited N files" card.
+        wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
+        wizardCtx.applyAgentPatch(patch);
+        liveStateRef.current = { ...liveStateRef.current, ...patch };
+      }
       const nav = ev.status === "ok" ? parseScreenNav(ev.result) : null;
       if (nav) {
         screenOpeningRef.current = nav.action === "back" && nav.request ? nav.request : null;
@@ -296,18 +440,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const handleConversationMeta = React.useCallback(
     (id: string, title: string, ctx: SessionEventContext) => {
       store.upsertFromMeta(id, title);
+      const adopted = adoptedSetupChatId(setupChatRef.current, id, ctx.isActive);
+      if (adopted) keepSetupChat(adopted);
       if (!ctx.isActive) return;
-      if (shownScreenRef.current) {
-        screenChatsRef.current.set(shownScreenRef.current, id);
-        keepScreenChats();
-      }
       store.setActiveId(id);
       // The user is actively in this conversation — every new turn is "seen"
       // by definition. Without this, the row would render as unread the
       // moment the server bumps its updated_at.
       store.markSeen(id);
     },
-    [store, keepScreenChats],
+    [store, keepSetupChat],
   );
 
   const agent = useGeneralistAgent({
@@ -316,8 +458,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onToolEnd: handleToolEnd,
     onConversationMeta: handleConversationMeta,
   });
-  const localMenu = useLocalAgentMenuModels(agentSubscriptionFor("generalist"), agent.model);
+  // Declared before the screen effect: a setup chat's server load reads it.
+  const liveChatRef = React.useRef({ id: agent.conversationId, messages: agent.messages, busy: false });
+  // The setup chat whose server copy loads now; it shows no Share until the load ends.
+  const [setupLoad, setSetupLoad] = React.useState<string | null>(null);
   const streaming = agent.status === "streaming";
+  const choices = askedChoices(agent.messages);
   // Each conversation on view gets fresh turn components, so one chat's
   // timers and "already shown" text never carry into another. A new chat
   // getting its id from its first turn is still the same chat.
@@ -375,33 +521,28 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // Honour ?chat=<id> deep-links (e.g. the storage page's chat rows): open the
   // panel onto that conversation, then strip the param so a refresh or back-nav
   // doesn't reopen it. The panel is client-only and globally mounted, so this
-  // works from whichever route the link was clicked on.
+  // works from whichever route the link was clicked on. The setup's panel
+  // holds only the setup chat, so a link waits until the setup closes.
   const chatDeepLinkRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     const chatId = searchParams.get("chat");
-    if (!chatId || chatDeepLinkRef.current === chatId) return;
+    if (inSetup || !chatId || chatDeepLinkRef.current === chatId) return;
     chatDeepLinkRef.current = chatId;
     setOpen(true);
     void handlePickConversation(chatId);
     router.replace(window.location.pathname, { scroll: false });
-  }, [searchParams, setOpen, handlePickConversation, router]);
+  }, [inSetup, searchParams, setOpen, handlePickConversation, router]);
 
   const handleNewConversation = React.useCallback(() => {
-    if (shownScreenRef.current) {
-      screenChatsRef.current.delete(shownScreenRef.current);
-      keepScreenChats();
-    }
     agent.newSession();
     store.setActiveId(null);
-  }, [agent, store, keepScreenChats]);
+  }, [agent, store]);
 
-  // Swap the chat when the screen on view changes. Off the wizard the chat
-  // on view stays put. The conversation id is read through a ref so a turn
-  // landing mid-switch cannot re-run this for the same screen.
-  const conversationIdRef = React.useRef(agent.conversationId);
+  // The conversation id is read through a ref so a turn landing mid-switch
+  // cannot re-run the screen effect for the same screen.
   const reopenedScreen = wizardCtx?.reopenedScreen ?? null;
   const reopenedScreenRef = React.useRef(reopenedScreen);
-  // Declared before the screen-switch effect, so it is current when that runs.
+  // Declared before the screen effect, so it is current when that runs.
   React.useEffect(() => {
     reopenedScreenRef.current = reopenedScreen;
   }, [reopenedScreen]);
@@ -409,94 +550,365 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   React.useEffect(() => {
     restoredSetupRef.current = wizardCtx?.restoredSetup ?? false;
   }, [wizardCtx?.restoredSetup]);
+  const autoFeedback = wizardCtx?.autoFeedback ?? null;
+  const autoFeedbackRef = React.useRef(autoFeedback);
+  const sentFeedbackRef = React.useRef(autoFeedback?.id ?? 0);
+  const autoTurnRef = React.useRef<AutoTurn | null>(null);
   React.useEffect(() => {
-    conversationIdRef.current = agent.conversationId;
-  }, [agent.conversationId]);
-  const { activateConversation, openConversation, newSession, send: sendToAgent } = agent;
-  const setActiveConversation = store.setActiveId;
-  React.useEffect(() => {
-    if (shownScreen === null) return;
-    const from = shownScreenRef.current;
-    shownScreenRef.current = shownScreen;
-    if (from === null && screenChatsRef.current.size === 0) {
-      // A reload that reopened the setup brings each screen's chat back
-      // with it; any other setup starts with none. Gate on the wizard's
-      // restored flag rather than the reopened screen: this panel's chunk
-      // loads lazily, so the wizard may already have moved off that screen
-      // (clearing it) before this effect first runs.
-      if (restoredSetupRef.current) {
-        let saved: string | null = null;
-        try {
-          saved = window.sessionStorage.getItem(SCREEN_CHATS_KEY);
-        } catch {
-          // Blocked storage: the screens start fresh.
-        }
-        screenChatsRef.current = decodeScreenChats(saved);
-      } else keepScreenChats();
-    }
-    const next = switchScreenChat(
-      screenChatsRef.current,
-      from,
-      conversationIdRef.current,
-      shownScreen,
-    );
-    keepScreenChats();
-    if (next.kind === "stay") return;
-    const opening = screenOpeningRef.current;
-    screenOpeningRef.current = null;
-    const sendOpening = () => {
-      if (opening) sendToAgent(opening, undefined, { hidden: true });
-    };
-    if (next.kind === "fresh") {
-      newSession();
-      setActiveConversation(null);
-      if (opening) sendOpening();
-      else if (shownScreen !== reopenedScreenRef.current) setKickoffScreen(shownScreen);
-      return;
-    }
-    const id = next.conversationId;
-    setActiveConversation(id);
-    if (activateConversation(id)) {
-      sendOpening();
-      return;
-    }
-    void getConversation(id).then((detail) => {
-      if (shownScreenRef.current !== shownScreen) return;
-      if (detail) openConversation(id, hideKickoffs(detail.messages));
-      else newSession();
-      sendOpening();
-    });
-  }, [
-    shownScreen,
+    autoFeedbackRef.current = autoFeedback;
+  }, [autoFeedback]);
+  const {
     activateConversation,
     openConversation,
     newSession,
+    discardConversation,
+    discardActive,
+    send: sendToAgent,
+  } = agent;
+  const setActiveConversation = store.setActiveId;
+  const removeConversation = store.remove;
+  // The server has no conversation under the setup chat's id (deleted
+  // elsewhere). Its messages move to a new browser id, so the next turn saves
+  // a new conversation and does not fail on the old one.
+  const restartSetupChat = React.useCallback(
+    (messages: AgentMessage[]) => {
+      setupMessagesRef.current = messages;
+      keepSetupChat(newSetupChatId());
+      openConversation(null, messages, { moveQueue: true });
+    },
+    [keepSetupChat, openConversation],
+  );
+  // The server refuses a turn as not_found before it does any work, so the
+  // new chat can send the refused turn again.
+  const retryInNewSetupChat = React.useCallback(
+    (messages: AgentMessage[]) => {
+      const { kept, turn } = unansweredTurn(messages);
+      restartSetupChat(kept);
+      if (!turn) return;
+      const screen = shownScreenRef.current;
+      // Tracked like the first kickoff, so a reload while it runs sends it again.
+      if (turn.hidden && turn.content === SCREEN_KICKOFF && screen) {
+        kickoffTurnRef.current = { screen, from: kept.length, started: false };
+      }
+      sendToAgent(turn.content, undefined, { hidden: turn.hidden ?? false });
+    },
+    [restartSetupChat, sendToAgent],
+  );
+  // The server's copy of a reopened setup chat replaces the tab's copy only
+  // while no turn changed it. A 404 restarts the chat on view, even after a
+  // turn; a running turn on it fails with not_found and restarts it then.
+  // Any other failure keeps the id, so a server error starts no second chat.
+  const settleSetupLoad = React.useCallback(
+    (
+      opened: { id: string; messages: AgentMessage[] },
+      load: { detail: { messages: AgentMessage[] } | null; missing: boolean },
+    ) => {
+      const live = liveChatRef.current;
+      if (load.detail) {
+        if (setupChatUnchanged(setupChatRef.current, live, opened)) {
+          openConversation(opened.id, keepHiddenTurns(hideKickoffs(load.detail.messages), opened.messages));
+        }
+      } else if (load.missing && setupChatRef.current === opened.id && live.id === opened.id && !live.busy) {
+        restartSetupChat(live.messages);
+      }
+    },
+    [openConversation, restartSetupChat],
+  );
+  // Before the first turn saves it, the setup chat has only a browser id, so
+  // it is found as the chat on view: the setup's panel shows no other chat.
+  const endSetupChat = React.useCallback(
+    (id: string | null) => {
+      if (!id) return;
+      if (isSavedSetupChat(id)) discardConversation(id);
+      else discardActive();
+    },
+    [discardConversation, discardActive],
+  );
+  // Open the setup's chat: a new one, or the tab's copy. A copy the server
+  // saved shows at once, so a turn sent meanwhile goes to it; its kickoff
+  // waits for the server's copy, which may replace it.
+  const openSetupChat = React.useCallback(
+    async (saved: { id: string; messages: AgentMessage[] } | null, kickoff: string | null) => {
+      const run = ++setupRunRef.current;
+      // An older run's load may still block Share; it no longer clears it.
+      setSetupLoad(null);
+      if (!saved) {
+        // The first turn saves the chat and gives it the server's id.
+        keepSetupChat(newSetupChatId());
+        newSession();
+      } else if (!isSavedSetupChat(saved.id)) {
+        openConversation(null, saved.messages);
+      } else if (!activateConversation(saved.id)) {
+        openConversation(saved.id, saved.messages);
+        setSetupLoad(saved.id);
+        const load = await loadConversation(saved.id);
+        if (run === setupRunRef.current) setSetupLoad(null);
+        // A load for a setup that closed or opened again must not touch the
+        // new one. A restart to a new id during the load keeps the setup.
+        if (run !== setupRunRef.current || setupChatRef.current === null) return;
+        settleSetupLoad(saved, load);
+      }
+      // A screen change during the load set that screen's own kickoff, and a
+      // return to this screen during the load already sent its kickoff.
+      if (kickoff && shownScreenRef.current === kickoff && !kickedScreensRef.current.has(kickoff)) {
+        setKickoffScreen(kickoff);
+      }
+    },
+    [keepSetupChat, newSession, openConversation, activateConversation, settleSetupLoad],
+  );
+  React.useEffect(() => {
+    const from = shownScreenRef.current;
+    shownScreenRef.current = shownScreen;
+    if (from === shownScreen) return;
+    const opening = screenOpeningRef.current;
+    screenOpeningRef.current = null;
+    if (shownScreen === null) {
+      // The wizard closed without a reload. Its chat ends too; a setup the
+      // user left keeps a copy in its draft for a return.
+      const id = setupChatRef.current;
+      keepSetupChat(null);
+      kickedScreensRef.current = new Set();
+      kickoffTurnRef.current = null;
+      sentFeedbackRef.current = autoFeedbackRef.current?.id ?? 0;
+      autoTurnRef.current = null;
+      endSetupChat(id);
+      newSession();
+      setActiveConversation(null);
+      return;
+    }
+    if (from !== null) {
+      if (opening) sendToAgent(backRequest(opening), undefined, { hidden: true });
+      else if (!kickedScreensRef.current.has(shownScreen) && opensWithKickoff(shownScreen)) {
+        setKickoffScreen(shownScreen);
+      }
+      return;
+    }
+    // The wizard just mounted. Gate on its restored flag rather than the
+    // reopened screen: this panel's chunk loads lazily, so the wizard may
+    // already have moved off that screen (clearing it) before this runs.
+    let saved: SetupChat | null = null;
+    try {
+      const raw = window.sessionStorage.getItem(SETUP_CHAT_KEY);
+      saved = decodeSetupChat(raw);
+      // A much older build kept only the id of a setup chat it saved on the
+      // server, and that chat goes. Setup chats this build saves stay in the
+      // chat history, like other chats.
+      const legacy = legacySetupChatId(raw);
+      if (legacy) void removeConversation(legacy);
+    } catch {
+      // Blocked storage: the setup starts a new chat.
+    }
+    const handoff = setupHandoffRef.current;
+    setupHandoffRef.current = null;
+    if (!saved || !restoredSetupRef.current) {
+      // A kept chat this setup does not reopen lost its draft (a cloned run
+      // reloads from its source run, not the tab's draft), so it goes too.
+      const handed = handedOverSetupChat(handoff, liveChatRef.current);
+      if (saved && saved.id !== handed?.id) discardConversation(saved.id);
+      const start = newSetupChatStart(shownScreen, reopenedScreenRef.current);
+      kickedScreensRef.current = new Set(start.kicked);
+      if (handed) {
+        // The chat that asked for the setup goes on in it, with its turn
+        // still running; the screen's kickoff waits for that turn to end.
+        setupRunRef.current++;
+        setSetupLoad(null);
+        setupMessagesRef.current = handed.messages;
+        keepSetupChat(handed.id);
+        if (start.kickoff) setKickoffScreen(shownScreen);
+        return;
+      }
+      setActiveConversation(null);
+      setupMessagesRef.current = [];
+      void openSetupChat(null, start.kickoff ? shownScreen : null);
+      return;
+    }
+    setActiveConversation(null);
+    const id = saved.id;
+    kickedScreensRef.current = new Set(saved.kicked);
+    setupMessagesRef.current = saved.messages;
+    if (saved.ledger) {
+      writeBeforeRef.current = { ...saved.ledger, ...writeBeforeRef.current };
+      restoreWriteBefore?.(saved.ledger);
+    }
+    keepSetupChat(id);
+    // A reload in the middle of this screen's kickoff left it out of the copy.
+    const kickoff = !saved.kicked.includes(shownScreen) && opensWithKickoff(shownScreen);
+    void openSetupChat({ id, messages: saved.messages }, kickoff ? shownScreen : null);
+  }, [
+    shownScreen,
+    newSession,
+    discardConversation,
     sendToAgent,
     setActiveConversation,
-    keepScreenChats,
+    removeConversation,
+    keepSetupChat,
+    restoreWriteBefore,
+    openSetupChat,
+    endSetupChat,
   ]);
 
-  // A fresh screen's agent opens the chat by itself: it fills the screen from
-  // what it already knows and continues, or asks the one thing it lacks. It
-  // waits for the chat to be on view (Manual hides it) and never talks over
-  // a chat that already started. A cloned run arrives filled in, so its
-  // agents wait for the user, as the task interview does. It also waits for
-  // the screen left behind to finish its turn: two turns running tool calls
-  // at once left one of them hanging on a call that never returned.
+  // The tab's copy of the setup chat follows each settled turn; a turn still
+  // streaming is written only when the page goes away (flushSetupChat), since
+  // its text changes with every chunk.
+  const agentMessages = agent.messages;
+  const agentConversationId = agent.conversationId;
+  // A chat on the web account must not stage rows or act on the Mac's data.
+  // A new chat starts on the side picked in the header.
+  const { web } = useResourceMode();
+  const webChat =
+    agentConversationId !== null ? isHostedConversation(agentConversationId) : web;
+  const localMenu = useLocalAgentMenuModels(agent.model, webChat);
+  React.useEffect(() => {
+    liveChatRef.current = { id: agentConversationId, messages: agentMessages, busy: activeBusy };
+    kickoffTurnRef.current = trackKickoffTurn(kickoffTurnRef.current, activeBusy);
+    const id = setupChatRef.current;
+    if (!id || agentConversationId !== id || activeBusy) return;
+    setupMessagesRef.current = agentMessages;
+    keepSetupChat(id);
+  }, [agentMessages, agentConversationId, activeBusy, keepSetupChat]);
+  const agentErrorCode = agent.errorCode;
+  React.useEffect(() => {
+    if (setupChatGone(setupChatRef.current, agentConversationId, agentErrorCode)) {
+      retryInNewSetupChat(liveChatRef.current.messages);
+    }
+  }, [agentConversationId, agentErrorCode, retryInNewSetupChat]);
+  React.useEffect(
+    () =>
+      registerSetupChatFlush(() => {
+        const id = setupChatRef.current;
+        const live = liveChatRef.current;
+        if (!id || live.id !== id) return;
+        const kickoffFrom = kickoffTurnRef.current?.from ?? null;
+        setupMessagesRef.current = setupChatSnapshot(live.messages, kickoffFrom, Date.now());
+        keepSetupChat(id);
+      }),
+    [keepSetupChat],
+  );
+
+  // A screen the agent has not had a turn on (Check aside) opens with one: it fills the
+  // screen from what it already knows and continues, or asks the one thing
+  // it lacks. It waits for the chat to be on view (Manual hides it) and for
+  // every turn to finish: two turns running tool calls at once left one of
+  // them hanging on a call that never returned. A cloned run arrives filled
+  // in, so its agent stays silent until the user writes to it.
   const cloned = searchParams.has("clone");
-  const chatEmpty = agent.messages.length === 0 && agent.status === "idle";
+  const userSpoke = agent.messages.some((m) => m.role === "user" && !m.hidden);
   const backgroundBusy = agent.backgroundBusyCount > 0;
   React.useEffect(() => {
     if (kickoffScreen === null) return;
-    if (kickoffScreen !== shownScreen || !chatEmpty || cloned) {
+    if (kickoffScreen !== shownScreen || (cloned && !userSpoke)) {
       setKickoffScreen(null);
       return;
     }
-    if (!panelDock || backgroundBusy) return;
+    if (!panelDock || activeBusy || backgroundBusy) return;
     setKickoffScreen(null);
+    kickedScreensRef.current.add(kickoffScreen);
+    kickoffTurnRef.current = {
+      screen: kickoffScreen,
+      from: liveChatRef.current.messages.length,
+      started: false,
+    };
     sendToAgent(SCREEN_KICKOFF, undefined, { hidden: true });
-  }, [kickoffScreen, shownScreen, chatEmpty, cloned, panelDock, backgroundBusy, sendToAgent]);
+  }, [
+    kickoffScreen,
+    shownScreen,
+    cloned,
+    userSpoke,
+    panelDock,
+    activeBusy,
+    backgroundBusy,
+    sendToAgent,
+  ]);
 
+  // What the wizard tells the agent by itself (a failed setup check) goes out
+  // as a turn once the chat is on view and the agent is free, so the user
+  // sees the whole exchange. A cloned run's agent stays silent until the
+  // user writes to it, so it gets none of them.
+  React.useEffect(() => {
+    if (!inSetup || !autoFeedback || autoFeedback.id === sentFeedbackRef.current) return;
+    const action = autoFeedbackAction({
+      docked: panelDock !== null,
+      busy: activeBusy || backgroundBusy,
+      silent: cloned && !userSpoke,
+    });
+    if (action === "wait") return;
+    sentFeedbackRef.current = autoFeedback.id;
+    if (action === "skip") return;
+    autoTurnRef.current = { id: autoFeedback.id, started: false };
+    sendToAgent(autoFeedback.text);
+  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, cloned, userSpoke, sendToAgent]);
+  // The wizard checks the code again only once the agent finished the turn
+  // the failed check started, not on the end of some other turn.
+  const setFinishedAutoFeedback = wizardCtx?.setFinishedAutoFeedback;
+  React.useEffect(() => {
+    const next = trackAutoTurn(autoTurnRef.current, activeBusy);
+    autoTurnRef.current = next.turn;
+    if (next.ended !== null) setFinishedAutoFeedback?.(next.ended);
+  }, [activeBusy, setFinishedAutoFeedback]);
+
+  // The form holds the fields a running write is changing, and the Metric
+  // screen waits for the agent before it checks its code again.
+  const setAgentBusy = wizardCtx?.setAgentBusy;
+  React.useEffect(() => {
+    if (!inSetup || !setAgentBusy) return;
+    setAgentBusy(activeBusy);
+    return () => setAgentBusy(false);
+  }, [inSetup, activeBusy, setAgentBusy]);
+  const setAgentWritingFields = wizardCtx?.setAgentWritingFields;
+  const writingKey = inSetup ? writingFields(agent.messages).join(",") : "";
+  React.useEffect(() => {
+    setAgentWritingFields?.(writingKey ? writingKey.split(",") : []);
+  }, [writingKey, setAgentWritingFields]);
+  // The Changes pane's "Last turn" reads the newest turn that edited files.
+  const writeBefore = wizardCtx?.writeBefore;
+  const repoBase = wizardCtx?.repoBase;
+  const setLastTurnEdits = wizardCtx?.setLastTurnEdits;
+  React.useEffect(() => {
+    if (!inSetup || !setLastTurnEdits || !writeBefore) return;
+    setLastTurnEdits(latestTurnEdits(agent.messages, writeBefore, repoBase));
+  }, [inSetup, agent.messages, writeBefore, repoBase, setLastTurnEdits]);
+  // Undo and Reapply act on the newest turn that edited files, through the Changes pane.
+  const draftFiles = wizardCtx?.draftFiles ?? null;
+  const ideBusy = wizardCtx?.agentBusy ?? false;
+  const newestEdited = React.useMemo(() => {
+    if (!inSetup || !writeBefore) return null;
+    for (let i = agent.messages.length - 1; i >= 0; i--) {
+      const message = agent.messages[i]!;
+      if (messageEdits(message, writeBefore, repoBase).length > 0) return message;
+    }
+    return null;
+  }, [inSetup, agent.messages, writeBefore, repoBase]);
+  const renderEditedFiles = React.useCallback(
+    (message: AgentMessage) => {
+      if (!writeBefore) return null;
+      const edits = messageEdits(message, writeBefore, repoBase);
+      if (edits.length === 0) return null;
+      const writeTurn = (turn: readonly FileEdit[], side: "before" | "after") => {
+        if (!draftFiles?.write(turn, side)) return;
+        toast(
+          msg(side === "before" ? "agent.edited_files.reverted" : "agent.edited_files.reapplied"),
+        );
+      };
+      return (
+        <EditedFilesCard
+          edits={edits}
+          onView={wizardCtx?.viewChanges ?? null}
+          undo={
+            draftFiles && message === newestEdited
+              ? {
+                  state: turnState(edits, draftFiles.text),
+                  disabled: ideBusy,
+                  onUndo: () => writeTurn(edits, "before"),
+                  onReapply: () => writeTurn(edits, "after"),
+                }
+              : null
+          }
+        />
+      );
+    },
+    [writeBefore, repoBase, wizardCtx?.viewChanges, draftFiles, newestEdited, ideBusy],
+  );
+  const setupCheckIssue = inSetup ? (wizardCtx?.setupCheckIssue ?? null) : null;
   // Deleting the conversation you're currently viewing must drop you back to a
   // clean slate — otherwise the panel keeps showing the just-deleted thread and
   // the next message would try to append to a row that no longer exists (404).
@@ -521,6 +933,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   const handleDatasetConfirm = React.useCallback(
     async (callId: string, confirmed: ConfirmedDataset) => {
+      // A web chat must not stage rows or change the Mac's wizard.
+      if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
       // Stage the rows on the backend before notifying the agent so the
       // very next turn's wizard_state carries ``staged_dataset_id``. The
@@ -594,11 +1008,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         : undefined;
       agent.send(note, wizardOverride);
     },
-    [agent, wizardCtx],
+    [agent, wizardCtx, webChat],
   );
 
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
+      if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
       // By-reference twin of handleDatasetConfirm: no staging call — the run
       // materializes rows from ``source_dataset_id`` on submit. Set the same
@@ -631,15 +1046,22 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       };
       agent.send(note, wizardOverride);
     },
-    [agent, wizardCtx],
+    [agent, wizardCtx, webChat],
   );
 
+  const lineComments = wizardCtx?.lineComments ?? NO_COMMENTS;
+  const clearLineComments = wizardCtx?.clearLineComments;
   const handleSubmit = React.useCallback(() => {
     const trimmed = draft.trim();
-    if (!trimmed) return;
-    agent.send(trimmed);
+    if (!trimmed && lineComments.length === 0) return;
+    agent.send(joinLineComments(trimmed, lineComments));
     setDraft("");
-  }, [agent, draft]);
+    clearLineComments?.();
+  }, [agent, draft, lineComments, clearLineComments]);
+  const midTurn = React.useMemo(
+    () => withLineComments(agent.midTurn, lineComments, clearLineComments),
+    [agent.midTurn, lineComments, clearLineComments],
+  );
 
   // Prompts other features queue (the first-login setup) open the panel and
   // go out as if typed; one queued before the lazy panel mounted drains here.
@@ -704,10 +1126,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         return (
           <DatasetUploadCard
             call={call}
+            disabled={webChat}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
             onConfirm={(confirmed) => handleDatasetConfirm(call.id, confirmed)}
           />
         );
+      }
+      // A web chat's library and inference cards would act on the Mac's data.
+      if (webChat && (call.tool === REQUEST_LIBRARY_TOOL || call.tool === REQUEST_INFERENCE_TOOL)) {
+        return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={null} />;
       }
       if (call.tool === REQUEST_LIBRARY_TOOL) {
         return (
@@ -718,7 +1145,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           />
         );
       }
-      if (call.tool === REQUEST_INFERENCE_TOOL || call.tool === REQUEST_PAIR_INFERENCE_TOOL) {
+      // The question shows as the reply; its answers show under the chat.
+      if (call.tool === ASK_USER_TOOL) return null;
+      if (call.tool === REQUEST_INFERENCE_TOOL) {
         return <InferenceFormCard call={call} disabled={streaming} />;
       }
       const renderer = getToolRenderer(call.tool);
@@ -728,38 +1157,248 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, streaming],
+    [handleDatasetConfirm, handleLibraryPick, streaming, webChat],
   );
 
   // Every call is a step in the turn's activity group except the ones the
-  // user acts on: the request cards and the submit summary, which links to
-  // the new run.
+  // user acts on or reads at a glance: the request cards, the submit summary,
+  // which links to the new run, and each wizard write with its old and new values.
   const isStepCall = React.useCallback((call: AgentToolCall) => {
-    if (RICH_CARD_TOOLS.has(call.tool)) return false;
-    return !(SUBMIT_TOOLS.has(call.tool) && call.status !== "running");
+    if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;
+    const card = SUBMIT_TOOLS.has(call.tool) || isWizardWrite(call.tool);
+    return !(card && call.status !== "running");
   }, []);
+  // A folded turn hides every tool but the requests the user must answer.
+  const isPinnedCall = React.useCallback(
+    (call: AgentToolCall) => RICH_CARD_TOOLS.has(call.tool),
+    [],
+  );
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
 
-  // In the Mac app the local backend publishes the chat to the linked hosted
-  // account on each click, so the link opens for anyone and shows the latest
-  // messages. Without a linked account no link can work, so the button hides.
-  const canShare = useHostedFeaturesAvailable();
-  const handleShareConversation = React.useCallback(async () => {
-    const id = agent.conversationId;
-    if (!id) return;
-    const token = await createConversationShare(id);
-    const url = token ? sharedChatUrl(token) : null;
-    if (!url) {
-      toast.error(msg("share.error"));
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.success(msg("share.link_copied"));
-    } catch {
-      toast.error(msg("clipboard.copy_failed"));
-    }
-  }, [agent.conversationId]);
+  // A share link opens the chat in hosted Skynet, so only the hosted app
+  // shares chats; the Mac app has no share button (SKY-294).
+  const canShare = !isLocalMode();
+  const [shareOpen, setShareOpen] = React.useState(false);
+
+  // Pi runs its built-in slash commands only in its own terminal, so the
+  // composer runs the ones that fit a hosted chat on this panel's controls
+  // (SKY-604). /model and /thinking list what the model menu lists.
+  const [catalogAll, setCatalogAll] = React.useState<CatalogModel[] | undefined>(undefined);
+  React.useEffect(() => {
+    let cancelled = false;
+    const cached = cachedCatalog();
+    if (cached) setCatalogAll(cached.models);
+    getModelCatalog()
+      .then((c) => {
+        if (!cancelled) setCatalogAll(c.models);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const catalogModels = React.useMemo(() => slashListedModels(catalogAll ?? []), [catalogAll]);
+  const localModels = React.useMemo(
+    () => (localMenu.models ? slashListedModels(localMenu.models) : undefined),
+    [localMenu.models],
+  );
+  const slashModels = localModels ?? catalogModels;
+  // The model menu's pick rule: a retired "auto" pick, one the list does not
+  // show, or one without the effort slider counts as no pick.
+  const savedModel = agent.model === RETIRED_AUTO_MODEL ? null : agent.model;
+  const pickSource = localMenu.allModels ?? localMenu.models ?? catalogAll;
+  const pickRow = pickSource?.find((m) => m.value === savedModel);
+  const slashPick =
+    menuPickState(savedModel, pickSource?.filter(supportsEffortSlider), localMenu.side).unlisted ||
+    (!!pickRow && !supportsEffortSlider(pickRow))
+      ? null
+      : savedModel;
+  // /model offers what the model menu lists: its featured shortlist (the
+  // first 50 when the catalog flags none) and a current pick outside it.
+  const slashMenuModels = React.useMemo(() => {
+    if (localModels) return localModels;
+    const featured = catalogModels.filter((m) => m.featured);
+    const rows = featured.length ? featured : catalogModels.slice(0, 50);
+    const extra =
+      slashPick && !rows.some((m) => m.value === slashPick)
+        ? catalogModels.find((m) => m.value === slashPick)
+        : undefined;
+    return extra ? [extra, ...rows] : rows;
+  }, [localModels, catalogModels, slashPick]);
+  const canShareChat =
+    canShare &&
+    !webChat &&
+    !!agent.conversationId &&
+    agent.conversationId !== setupLoad &&
+    agent.messages.length > 0;
+  const slashCommands = React.useMemo(() => {
+    const effective =
+      slashPick ??
+      (localModels ? localModels[0] : catalogFallbackModel(slashModels))?.value ??
+      null;
+    const current = slashModels.find((m) => m.value === effective);
+    const efforts = slashEfforts(effective, slashModels);
+    // As the model menu shows it: a local CLI model checks the level it runs,
+    // so a saved level above the model's top checks the top.
+    const shownEffort =
+      current && isCliProvider(menuModelGroup(current))
+        ? cliEffort(agent.reasoningEffort, efforts)
+        : liveEffort(agent.reasoningEffort);
+    const commands: SlashCommand[] = [
+      {
+        name: "model",
+        argHint: "<model>",
+        description: msg("agent.slash.model"),
+        icon: Cpu,
+        current: effective ?? undefined,
+        options: slashMenuModels.map((m) => ({
+          value: m.value,
+          label: modelDisplayName(m.value, slashModels),
+          icon: <ProviderLogo slug={modelProviderSlug(m.value)} size={16} />,
+        })),
+      },
+    ];
+    // A command the chat cannot run now is hidden, not left out: a typed
+    // call then shows an error instead of going to the agent as text.
+    commands.push({
+      name: "thinking",
+      argHint: "<level>",
+      description: msg("agent.slash.thinking"),
+      icon: Brain,
+      hidden: !efforts.length,
+      current: shownEffort ?? "default",
+      options: [
+          { value: "default", label: msg("agent.model_menu.effort_default") },
+        ...efforts.map((e) => ({ value: e, label: effortLabel(e) })),
+      ],
+    });
+    commands.push(
+      { name: "new", description: msg("agent.slash.new"), icon: Plus, hidden: inSetup },
+      {
+        name: "resume",
+        description: msg("agent.slash.resume"),
+        icon: ClockCounterClockwise,
+        hidden: inSetup,
+      },
+      {
+        name: "name",
+        argHint: "<name>",
+        description: msg("agent.slash.name"),
+        icon: PencilSimple,
+        hidden: inSetup || !agent.conversationId,
+      },
+      {
+        name: "share",
+        description: msg("agent.slash.share"),
+        icon: ShareNetwork,
+        hidden: !canShareChat,
+      },
+      {
+        name: "copy",
+        description: msg("agent.slash.copy"),
+        icon: Copy,
+        hidden: !agent.messages.length,
+      },
+      {
+        name: "export",
+        description: msg("agent.slash.export"),
+        icon: DownloadSimple,
+        hidden: !agent.messages.length,
+      },
+    );
+    commands.push({ name: "settings", description: msg("agent.slash.settings"), icon: Gear });
+    return commands;
+  }, [
+    slashPick,
+    agent.reasoningEffort,
+    agent.conversationId,
+    agent.messages.length,
+    localModels,
+    slashModels,
+    slashMenuModels,
+    inSetup,
+    canShareChat,
+    locale,
+  ]);
+
+  const runSlash = React.useCallback(
+    (command: SlashCommand, arg: string) => {
+      switch (command.name) {
+        case "model":
+        case "thinking": {
+          const value = resolveSlashOption(arg, command.options ?? []);
+          if (!value) {
+            toast.error(formatMsg("agent.slash.pick_value", { command: `\u2066/${command.name}\u2069` }));
+            return;
+          }
+          if (command.name === "thinking") {
+            agent.setReasoningEffort(value === "default" ? null : value);
+            return;
+          }
+          // The same rule as a pick in the model menu: a level or fast mode
+          // the new model does not take goes back to its default.
+          agent.setModel(value);
+          const picked = slashModels.find((m) => m.value === value);
+          const effort = liveEffort(agent.reasoningEffort);
+          if (
+            !picked?.supports_thinking ||
+            (effort !== null && !effortsFor(value, slashModels).includes(effort))
+          )
+            agent.setReasoningEffort(null);
+          const cliRow = !!picked && isCliProvider(menuModelGroup(picked));
+          if (agent.fastMode && !slashKeepsFast(value, picked, cliRow)) agent.setFastMode(false);
+          return;
+        }
+        case "new":
+          handleNewConversation();
+          return;
+        case "resume":
+          setDrawerOpen(true);
+          return;
+        case "name":
+          if (!arg || !agent.conversationId) {
+            toast.error(msg("agent.slash.name_needed"));
+            return;
+          }
+          void store.rename(agent.conversationId, arg);
+          return;
+        case "share":
+          setShareOpen(true);
+          return;
+        case "copy": {
+          const last = agent.messages.findLast((m) => m.role === "assistant" && m.content.trim());
+          if (!last) return;
+          navigator.clipboard.writeText(last.content).then(
+            () => toast.success(msg("agent.slash.copied")),
+            () => toast.error(msg("clipboard.copy_failed")),
+          );
+          return;
+        }
+        case "export": {
+          const title = store.conversations.find((c) => c.id === agent.conversationId)?.title;
+          const blob = new Blob([chatToMarkdown(agent.messages, "messages", title)], {
+            type: "text/markdown",
+          });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "skynet-chat.md";
+          link.click();
+          // Revoke after the click's download starts, as api.ts does.
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+          return;
+        }
+        case "settings":
+          setSettingsOpen(true);
+          return;
+      }
+    },
+    [agent, slashModels, handleNewConversation, store, setSettingsOpen],
+  );
+  const slash = React.useMemo(
+    () => ({ commands: slashCommands, run: runSlash }),
+    [slashCommands, runSlash],
+  );
 
   const emptyState = (
     <EmptyState
@@ -803,13 +1442,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   </TooltipContent>
                 </Tooltip>
                 <PopoverContent side="bottom" align="center" sideOffset={8} className="p-0">
-                  <ToolsCarousel />
+                  <ToolsShowcase />
                 </PopoverContent>
               </Popover>
             </div>
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          <CopyChatMenu messages={agent.messages} />
+          {/* The setup's chat is the draft's own: no history or second chat. */}
+          {!inSetup && (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -842,14 +1484,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               )}
             </TooltipContent>
           </Tooltip>
-          {canShare && agent.conversationId && agent.messages.length > 0 && (
+          )}
+          {canShareChat && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon-xs"
-                  onClick={() => void handleShareConversation()}
+                  onClick={() => setShareOpen(true)}
                   className="text-muted-foreground hover:text-foreground"
                   aria-label={msg("shared.agent.share_conversation")}
                 >
@@ -861,7 +1504,14 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               </TooltipContent>
             </Tooltip>
           )}
-          {agent.messages.length > 0 && (
+          {canShare && agent.conversationId && (
+            <ShareChatDialog
+              conversationId={agent.conversationId}
+              open={shareOpen}
+              onOpenChange={setShareOpen}
+            />
+          )}
+          {!inSetup && agent.messages.length > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -913,6 +1563,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
       <AgentThread
         className="overscroll-contain"
+        streaming={streaming}
         isEmpty={agent.messages.length === 0}
         emptyState={emptyState}
         scrollDeps={[
@@ -924,59 +1575,110 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           agent.pendingApproval?.id ?? "",
         ]}
       >
-        <ChatTranscript
-          key={chatView.key}
-          messages={agent.messages}
-          streaming={streaming}
-          editAndResend={agent.editAndResend}
-          renderToolCall={renderToolCall}
-          isStepCall={isStepCall}
-          stepKind={stepKind}
-          onRunCode={handleRunCode}
-          animatePairs
-          trailing={() => (
-            <>
-              {agent.pendingApproval && (
-                <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
-              )}
-              {agent.error && (
-                <ChatErrorBanner
-                  message={agent.error}
-                  retryLabel={msg(
-                    "auto.features.agent.panel.components.generalistpanel.error_retry",
+        <ChatSourceContext.Provider value={webChat ? "hosted" : "local"}>
+          <LineCommentLinkContext.Provider value={wizardCtx?.viewChanges ?? null}>
+            <ChatTranscript
+              key={chatView.key}
+              messages={agent.messages}
+              streaming={streaming}
+              editAndResend={agent.editAndResend}
+              renderToolCall={renderToolCall}
+              isStepCall={isStepCall}
+              isPinnedCall={isPinnedCall}
+              stepKind={stepKind}
+              onRunCode={handleRunCode}
+              renderAfterContent={inSetup ? renderEditedFiles : undefined}
+              animatePairs
+              trailing={({ isEditingAny }) => (
+                <>
+                  {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
+                    <QuestionChoices
+                      options={choices}
+                      onSelect={(label) => agent.send(label)}
+                      hint={msg("agent.choices.hint")}
+                      ariaLabel={msg("agent.choices.label")}
+                    />
                   )}
-                  onRetry={
-                    agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
-                      ? undefined
-                      : agent.retry
-                  }
-                  action={
-                    agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                      <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
-                        {msg("billing.action.add_funds")}
-                      </Button>
-                    ) : undefined
-                  }
-                />
+                  {agent.pendingApproval && (
+                    <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
+                  )}
+                  {agent.error && (
+                    <ChatErrorBanner
+                      message={agent.error}
+                      retryLabel={msg(
+                        "auto.features.agent.panel.components.generalistpanel.error_retry",
+                      )}
+                      onRetry={
+                        agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
+                          ? undefined
+                          : agent.retry
+                      }
+                      action={
+                        agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
+                          <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
+                            {msg("billing.action.add_funds")}
+                          </Button>
+                        ) : undefined
+                      }
+                    />
+                  )}
+                </>
               )}
-            </>
-          )}
-        />
+            />
+          </LineCommentLinkContext.Provider>
+        </ChatSourceContext.Provider>
       </AgentThread>
 
+      {setupCheckIssue && !activeBusy && (
+        <div className="mx-3 mb-1.5 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-xs">
+          <span className="text-destructive">
+            {formatMsg("agent.setup_check.failed_chip", { count: setupCheckIssue.count })}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-xs"
+            onClick={() => agent.send(setupCheckIssue.feedback)}
+          >
+            {msg("agent.setup_check.ask_fix")}
+          </Button>
+        </div>
+      )}
       <Composer
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}
         onStop={agent.stop}
-        placeholder={msg(
-          // Hidden wizard kickoff turns run before the user types, so they do not count.
-          !agent.messages.some((m) => m.role === "user" && !m.hidden)
-            ? "agent.generalist.first_placeholder"
-            : "auto.features.agent.panel.components.generalistpanel.literal.5",
-        )}
+        placeholder={
+          lineComments.length > 0
+            ? formatMsg("agent.line_comments.send_with", { count: lineComments.length })
+            : msg(
+                // Hidden wizard kickoff turns run before the user types, so they do not count.
+                !agent.messages.some((m) => m.role === "user" && !m.hidden)
+                  ? "agent.generalist.first_placeholder"
+                  : "auto.features.agent.panel.components.generalistpanel.literal.5",
+              )
+        }
+        sendsEmpty={lineComments.length > 0}
+        chips={
+          lineComments.length > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 py-0.5 ps-2 pe-1 text-xs text-foreground">
+              <ChatText className="size-3.5 text-muted-foreground" aria-hidden />
+              {formatMsg("shared.agent.line_comments.count", { count: lineComments.length })}
+              <button
+                type="button"
+                onClick={clearLineComments}
+                aria-label={msg("shared.agent.line_comments.remove")}
+                className="flex size-4 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-3" aria-hidden />
+              </button>
+            </span>
+          )
+        }
         streaming={activeBusy}
-        midTurn={agent.midTurn}
+        midTurn={midTurn}
+        slash={slash}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
           <ComposerModelMenu
@@ -987,7 +1689,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             fast={agent.fastMode}
             onFastChange={agent.setFastMode}
             models={localMenu.models}
-            openRouterEngine={localMenu.openRouterEngine}
+            allModels={localMenu.allModels}
+            side={localMenu.side}
           />
         }
         // Dataset files keep their column-mapping card; any other file is
@@ -1026,14 +1729,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                 />
               </PopoverContent>
             </Popover>
-            <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />
+            {/* The setup agent works without approvals, so the trust mode does not apply. */}
+            {!inSetup && <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />}
           </>
         }
         sendAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.6")}
         stopAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.7")}
       />
 
-      <PresenceStrip active={streaming} hue={hue} />
+      <PresenceStrip active={streaming} hue={inSetup ? undefined : hue} />
     </div>
   );
 
@@ -1130,6 +1834,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onOpenChange={setDrawerOpen}
         conversations={store.conversations}
         loading={store.loading}
+        swapping={store.swapping}
         activeId={agent.conversationId ?? store.activeId}
         unreadIds={store.unreadIds}
         busyIds={agent.busyConversationIds}

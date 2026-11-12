@@ -1,35 +1,19 @@
 /**
- * Unified (wizard v2) run contract. Mirrors `backend/core/models/unified.py`
- * field for field (snake_case), plus the pure optimizer rules the backend
- * applies, so the wizard shows the same choices the server will accept.
+ * Wizard v2 optimizer rules and the run types the wizard and stored-run views
+ * share. The optimizer rules mirror the backend, so the wizard shows the same
+ * choices the server will accept.
  */
-import type {
-  BlackboxBudget,
-  BlackboxProposer,
-  BlackboxShinkaSettings,
-  ModelConfig,
-  ScorerDependencyLock,
-  SplitFractions,
-} from "@/shared/types/api";
-
-export type ArtifactKind = "prompt" | "code" | "dspy_program" | "text";
 export type DataMode = "single" | "pairs";
 export type OptimizerChoice =
   | "auto"
-  | "dspy_gepa"
-  | "dspy_miprov2"
-  | "dspy_bootstrap_fewshot"
   | "gepa"
   | "best_of_n"
   | "autoresearch"
   | "meta_harness"
   | "autosaddler"
   | "shinka_evolve";
-export type OptimizerFamily = "auto" | "dspy" | "blackbox";
-export type UnifiedCandidate = string | Record<string, string>;
+export type OptimizerFamily = "auto" | "blackbox";
 
-export const UNIFIED_PAYLOAD_KIND = "unified_v1";
-export const DSPY_OPTIMIZERS = ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"] as const;
 export const BLACKBOX_OPTIMIZERS = [
   "gepa",
   "best_of_n",
@@ -38,113 +22,40 @@ export const BLACKBOX_OPTIMIZERS = [
   "autosaddler",
   "shinka_evolve",
 ] as const;
-// "auto" counts because both of its resolutions consume feedback text.
-const FEEDBACK_OPTIMIZERS: ReadonlySet<string> = new Set(["dspy_gepa", "gepa", "auto"]);
+// "auto" counts because its resolution consumes feedback text.
+const FEEDBACK_OPTIMIZERS: ReadonlySet<string> = new Set(["gepa", "auto"]);
 export const MIN_PAIRS_FOR_HELD_OUT = 5;
-export const CONTRACT_SAMPLE_MAX = 5;
 
-/** Optimizer choices that fit an artifact kind and data mode, `"auto"` first. */
-export function optimizersFor(kind: ArtifactKind, mode: DataMode): OptimizerChoice[] {
-  if (kind === "dspy_program") {
-    return mode === "pairs"
-      ? ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
-      : ["auto", "dspy_gepa"];
-  }
+/** The optimizer choices a repository run accepts: Auto and the six repository engines. */
+export function optimizersFor(): OptimizerChoice[] {
   return ["auto", ...BLACKBOX_OPTIMIZERS];
 }
 
-/** The optimizer that actually runs: Auto is DSPy GEPA on a DSPy program, else the black-box Auto strategy. */
-export function resolveOptimizer(choice: OptimizerChoice, kind: ArtifactKind): string {
-  if (choice === "auto") return kind === "dspy_program" ? "dspy_gepa" : "auto";
+/** A stored optimizer id as a current choice; any unknown value gives null. */
+export function storedOptimizerChoice(value: unknown): OptimizerChoice | null {
+  if (typeof value !== "string") return null;
+  return value === "auto" || (BLACKBOX_OPTIMIZERS as readonly string[]).includes(value)
+    ? (value as OptimizerChoice)
+    : null;
+}
+
+/** The optimizer that actually runs: the choice itself, Auto included. */
+export function resolveOptimizer(choice: OptimizerChoice): string {
   return choice;
 }
 
 export function optimizerFamily(resolved: string): OptimizerFamily {
-  if ((DSPY_OPTIMIZERS as readonly string[]).includes(resolved)) return "dspy";
-  if (resolved === "auto") return "auto";
-  return "blackbox";
+  return resolved === "auto" ? "auto" : "blackbox";
 }
 
 /** Whether the resolved optimizer reads the metric's feedback text. */
-export function usesFeedback(choice: OptimizerChoice, kind: ArtifactKind): boolean {
-  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice, kind));
+export function usesFeedback(choice: OptimizerChoice): boolean {
+  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice));
 }
 
 export interface UnifiedCase {
   input: Record<string, unknown>;
   expected?: unknown;
-}
-
-export interface UnifiedArtifact {
-  kind: ArtifactKind;
-  starting_version: UnifiedCandidate;
-}
-
-export interface UnifiedTask {
-  objective: string;
-  background?: string;
-  artifact: UnifiedArtifact;
-}
-
-export interface UnifiedData {
-  mode: DataMode;
-  cases?: UnifiedCase[] | null;
-  staged_dataset_id?: string | null;
-  input_fields?: string[];
-  expected_field?: string | null;
-  split?: SplitFractions;
-  shuffle?: boolean;
-}
-
-export interface UnifiedOptimizer {
-  choice: OptimizerChoice;
-  budget: BlackboxBudget;
-  proposer?: BlackboxProposer;
-  shinka?: BlackboxShinkaSettings | null;
-  dspy_kwargs?: Record<string, unknown>;
-}
-
-export interface UnifiedModels {
-  task_model?: ModelConfig | null;
-  reflection_model: ModelConfig;
-  metric_model?: ModelConfig | null;
-  extra_reflection_models?: ModelConfig[];
-}
-
-export interface UnifiedWorkspace {
-  /** `run.py`. */
-  run_code: string;
-  /** `metric.py`. */
-  metric_code: string;
-  /** Every other workspace file, relative path to text; only the run code can import them. */
-  files?: Record<string, string>;
-  metric_timeout_seconds?: number;
-  install_command?: string | null;
-  dependency_lock?: ScorerDependencyLock | null;
-}
-
-export interface UnifiedRunRequest {
-  payload_kind: "unified_v1";
-  name?: string | null;
-  description?: string | null;
-  username?: string | null;
-  task: UnifiedTask;
-  data: UnifiedData;
-  optimizer: UnifiedOptimizer;
-  models: UnifiedModels;
-  workspace: UnifiedWorkspace;
-  seed?: number | null;
-  token_source?: "managed" | "byok" | "subscription";
-  is_private?: boolean;
-  economy_mode?: boolean;
-  preflight_id?: string | null;
-  preflight_fingerprint?: string | null;
-  execution_budget_id?: string | null;
-  execution_budget_revision?: number | null;
-  execution_budget_generation?: number | null;
-  max_cost_cents?: number | null;
-  estimated_cents_low?: number | null;
-  estimated_cents_high?: number | null;
 }
 
 /** How a unified run's cases were split; selection and reporting may use different splits. */
@@ -169,9 +80,8 @@ export interface OptimizerOption {
 }
 
 export interface OptimizerCatalogResponse {
-  artifact_kind: ArtifactKind;
   data_mode: DataMode;
-  /** The run code's entry point; the same for every artifact kind and optimizer. */
+  /** The run code's entry point; the same for every optimizer. */
   run_entry: string;
   /** The metric's exact signature, as the coding agent is told; the same for every optimizer. */
   metric_signature: string;
@@ -180,192 +90,4 @@ export interface OptimizerCatalogResponse {
   auto_resolves_to: string[];
   sandbox_available: boolean;
   sandbox_reason?: string | null;
-}
-
-export type ContractCheckKey =
-  | "workspace.run_signature"
-  | "workspace.files"
-  | "metric.signature"
-  | "metric.model"
-  | "workspace.run"
-  | "metric.shape";
-
-export interface ContractCheckItem {
-  key: ContractCheckKey;
-  status: "passed" | "failed" | "pending" | "skipped";
-  /** Hebrew base rendering; render `message_code` in the active locale instead. */
-  message: string;
-  /** Backend i18n code for `message`, resolved with `tI18n`; absent on older servers. */
-  message_code?: string | null;
-  message_params?: Record<string, string | number>;
-  sample_index?: number | null;
-  /** Exact error text, trimmed to frames from the user's own code. */
-  detail?: string | null;
-}
-
-export interface ContractSample {
-  index: number;
-  input_preview: string;
-  output_preview?: string | null;
-  score?: number | null;
-  feedback_preview?: string | null;
-  duration_ms?: number | null;
-}
-
-export interface ContractCheckRequest {
-  spec: UnifiedRunRequest;
-  sample_count?: number;
-}
-
-export interface ContractCheckResponse {
-  ok: boolean;
-  optimizer_resolved: string;
-  checks: ContractCheckItem[];
-  samples: ContractSample[];
-  fingerprint: string;
-  /** Whether the metric calls a model, from the server's introspection; absent on older servers. */
-  uses_llm?: boolean;
-  /** Each Python file's lint, so each file shows its own findings; absent on older servers. */
-  files?: WorkspaceFileLint[];
-  /** The sandboxed check's redacted terminal log; absent on the static check and older servers. */
-  terminal?: CheckTerminalLog | null;
-}
-
-/** A Check row the terminal log files its events under. */
-export type CheckTerminalPhase = "budget" | "sandbox" | "evaluator";
-
-interface CheckTerminalEventBase {
-  /** Milliseconds since the check started. */
-  t: number;
-  phase: CheckTerminalPhase;
-  /** Zero-based evaluator sample the event belongs to. */
-  sample?: number;
-}
-
-/**
- * One line of the Check's live log. Output is already redacted and clipped by
- * the server; `note` codes are worded by the client.
- */
-export type CheckTerminalEvent = CheckTerminalEventBase &
-  (
-    | { kind: "note"; note: string; params?: Record<string, string | number> }
-    | { kind: "command"; id: number; label: string }
-    | { kind: "output"; id: number; stream: "stdout" | "stderr" | "log"; text: string }
-    | {
-        kind: "exit";
-        id: number;
-        duration_ms: number;
-        exit_code?: number;
-        timed_out?: boolean;
-        error?: string;
-      }
-    | {
-        kind: "sample";
-        total: number;
-        state: "running" | "done" | "failed";
-        score?: number;
-        error?: string;
-        duration_ms?: number;
-      }
-  );
-
-export interface CheckTerminalLog {
-  version: number;
-  events: CheckTerminalEvent[];
-  /** Phases whose output hit the server's cap. */
-  truncated: CheckTerminalPhase[];
-  /** Set when an identical earlier check answered, so this is its stored log. */
-  reused?: boolean;
-}
-
-/** Lint lines are `"<path>:<line>:<col> <rule> <message>"`. */
-export interface WorkspaceFileLint {
-  path: string;
-  errors: string[];
-  warnings: string[];
-}
-
-/** One file's verdict from the coding agent's `verify_code` check. */
-export interface FileVerification {
-  path: string;
-  ok: boolean;
-  errors: string[];
-  warnings: string[];
-}
-
-export interface UnifiedChatTurn {
-  role: "user" | "assistant";
-  content: string;
-}
-
-export interface InterviewOption {
-  label: string;
-  description?: string;
-}
-
-export interface TaskInterviewRequest {
-  turns?: UnifiedChatTurn[];
-  objective?: string;
-  background?: string;
-  artifact_kind?: ArtifactKind | null;
-  starting_version?: UnifiedCandidate | null;
-  sample_cases?: Array<Record<string, unknown>>;
-  locale?: string | null;
-  model?: string | null;
-  reasoning_effort?: string | null;
-  /** Runs a local CLI model in its fast mode; the backend ignores it elsewhere. */
-  fast_mode?: boolean;
-}
-
-export interface TaskInterviewTurnResult {
-  message: string;
-  options: InterviewOption[];
-  done: boolean;
-  objective: string;
-  background: string;
-  artifact_kind?: ArtifactKind | null;
-  starting_version?: UnifiedCandidate | null;
-  artifact_rationale: string;
-  model?: string | null;
-  served_model?: string | null;
-}
-
-export interface InputsInferenceRequest {
-  objective: string;
-  background?: string;
-  artifact_kind: ArtifactKind;
-  starting_version?: UnifiedCandidate | null;
-  columns?: string[];
-  sample_rows?: Array<Record<string, unknown>>;
-  row_count?: number;
-  user_note?: string;
-  locale?: string | null;
-  model?: string | null;
-}
-
-export interface InputsInferenceResponse {
-  mode: DataMode;
-  input_fields: string[];
-  expected_field?: string | null;
-  single_input?: Record<string, unknown> | null;
-  rationale: string;
-  suggested_split: SplitFractions;
-  held_out_count: number;
-  warnings: string[];
-  model?: string | null;
-}
-
-export interface UnifiedAuthoringContext {
-  task: UnifiedTask;
-  data_mode: DataMode;
-  input_fields?: string[];
-  expected_field?: string | null;
-  sample_cases?: Array<Record<string, unknown>>;
-  optimizer: OptimizerChoice;
-  reflection_name?: string | null;
-  focus?: "run" | "metric";
-  /** "repo" for a repository run: no run code, the agent writes only the repository scorer. */
-  target?: "artifact" | "repo";
-  /** A repository run's file paths, which the agent may open read-only. */
-  repo_files?: string[];
 }

@@ -170,65 +170,6 @@ def _raw_usages(lms: list) -> list[ModelUsage]:
         return []
 
 
-def meter_llm_usage(
-    engine,
-    username: str,
-    breakdown: Mapping[str, tuple[int, int]],
-    *,
-    description: str,
-    token_source: str = TOKEN_SOURCE_MANAGED,
-) -> int:
-    """Debit a per-model token breakdown that was harvested elsewhere.
-
-    The sandboxed scorer dry run reads its ``llm()`` usage inside the child
-    process and hands back only the numbers, so there is no LM object for
-    :func:`meter_llm_run` to harvest. Same best-effort contract: never raises.
-
-    Args:
-        engine: SQLAlchemy engine backing the billing tables; ``None`` skips.
-        username: Account the usage is billed to.
-        breakdown: ``model → (input_tokens, output_tokens)`` as the LM reports it.
-        description: Human label for the ledger row.
-        token_source: Billing source for the call.
-
-    Returns:
-        The cents charged, or ``0`` when nothing was billed.
-    """
-    if engine is None or not username or not breakdown:
-        return 0
-    service = StripeBillingService(engine=engine)
-    usages = usages_from_breakdown(breakdown)
-    try:
-        rekeyed: dict[str, tuple[int, int]] = {}
-        for key, in_out in breakdown.items():
-            normalized = _normalize_model_key(key)
-            prior = rekeyed.get(normalized, (0, 0))
-            rekeyed[normalized] = (prior[0] + in_out[0], prior[1] + in_out[1])
-        usages = usages_from_breakdown(rekeyed)
-        return service.debit_run(
-            username,
-            usages,
-            model=next(iter(rekeyed)),
-            description=description,
-            token_source=token_source,
-        )
-    except Exception:
-        logger.exception(
-            "failed to debit LLM usage for %s (%s); charging at fallback price: %s",
-            username,
-            description,
-            _usage_summary(usages),
-        )
-        return debit_at_fallback_price(
-            service,
-            username,
-            usages,
-            model=usages[0].model if usages else None,
-            description=description,
-            token_source=token_source,
-        )
-
-
 def estimate_run_cents(language_models, token_source: str = TOKEN_SOURCE_MANAGED) -> int:
     """Price the billable usage a set of LMs has accumulated so far.
 
@@ -293,7 +234,8 @@ def meter_llm_run(
     """
     if engine is None or not username:
         return 0
-    lms = _coerce_lms(language_models)
+    # Hosted inference settles against the linked account before returning its response.
+    lms = [lm for lm in _coerce_lms(language_models) if not getattr(lm, "hosted_inference", False)]
     if not lms:
         return 0
     service = StripeBillingService(engine=engine)

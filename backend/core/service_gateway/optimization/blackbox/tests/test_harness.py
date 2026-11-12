@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -22,13 +24,16 @@ from core.models.blackbox import (
 
 from ..harness import (
     ANSWER_FILE,
+    MCP_HARNESSES,
     PRIME_AGENT_IMAGE_KERNEL,
     PRIME_AGENT_TARBALL,
     PRIME_AGENT_VERSION,
     PROMPT_FILE,
     GatewayConfig,
+    _with_relay_config,
     build_launch,
     launch_payload,
+    pi_editor_launch,
 )
 from ..harness_bridge import (
     parse_codex_output,
@@ -36,6 +41,7 @@ from ..harness_bridge import (
     parse_pi_output,
     parse_plain_output,
 )
+from ..harnesses import REGISTRY
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
 
@@ -144,6 +150,20 @@ def test_codex_launch_writes_a_gateway_config_toml() -> None:
     assert launch.parse_output is parse_codex_output
 
 
+def test_codex_launch_turns_off_tools_the_gateway_cannot_price() -> None:
+    """Codex config disables web search and multi-agent tools, so only function and custom tools reach the gateway."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, reasoning_effort="high")
+
+    config = tomllib.loads(launch.files[".app/codex/config.toml"])
+    assert config["web_search"] == "disabled"
+    assert config["features"]["multi_agent"] is False
+    assert config["model"] == "target-model"
+    assert config["model_reasoning_effort"] == "high"
+    assert config["model_providers"]["app"]["wire_api"] == "responses"
+    assert config["model_providers"]["app"]["supports_websockets"] is False
+    assert "-c 'web_search=\"disabled\"' -c features.multi_agent=false " in launch.run_command
+
+
 def test_opencode_launch_names_the_gateway_model() -> None:
     """OpenCode writes opencode.json and runs the skynet/<model> selection."""
     launch = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY)
@@ -156,9 +176,120 @@ def test_opencode_launch_names_the_gateway_model() -> None:
     assert launch.parse_output is parse_opencode_output
 
 
+@pytest.mark.parametrize("effort", ["high", "none", "max"])
+def test_codex_launch_sets_the_chosen_reasoning_effort(effort: str) -> None:
+    """Codex reads the effort from its config; it passes the seven declared levels unchanged.
+
+    Args:
+        effort: The optimization model's effort level.
+    """
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, reasoning_effort=effort)
+
+    config = tomllib.loads(launch.files[".app/codex/config.toml"])
+    assert config["model_reasoning_effort"] == effort
+    assert config["model_providers"]["app"]["env_key"] == "APP_API_KEY"
+
+
+def test_codex_launch_keeps_its_default_effort_without_a_choice() -> None:
+    """With no effort chosen the config names none, so Codex keeps its own default."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY)
+
+    assert "model_reasoning_effort" not in tomllib.loads(launch.files[".app/codex/config.toml"])
+
+
 @pytest.mark.parametrize(
-    "harness", [BLACKBOX_HARNESS_PI, BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_OPENCODE, BLACKBOX_HARNESS_PRIME]
+    ("harness", "models_file"),
+    [(BLACKBOX_HARNESS_PI, ".app/pi/models.json"), (BLACKBOX_HARNESS_PRIME, ".app/prime/models.json")],
 )
+@pytest.mark.parametrize(
+    ("url", "effort", "suffix"),
+    [
+        ("https://gw.example/v1", "high", ":high"),
+        ("https://gw.example/v1", "none", ":off"),
+        ("https://gw.example/v1", "xhigh", ":xhigh"),
+        ("https://gw.example/v1", "max", ":max"),
+        ("https://openrouter.ai/api/v1", "medium", ":medium"),
+        ("https://openrouter.ai/api/v1", "none", ":off"),
+    ],
+)
+def test_pi_family_launch_selects_the_chosen_thinking_level(
+    harness: str, models_file: str, url: str, effort: str, suffix: str
+) -> None:
+    """A chosen effort marks the model reasoning-capable, replaces the default level and maps it to the wire value.
+
+    Args:
+        harness: Pi or Prime Agent.
+        models_file: Where the harness reads its models.json.
+        url: Gateway URL.
+        effort: The optimization model's effort level.
+        suffix: The thinking suffix the model argument carries.
+    """
+    launch = build_launch(_target(harness), GatewayConfig(url=url, api_key="k"), reasoning_effort=effort)
+
+    entry = json.loads(launch.files[models_file])["providers"]["app"]["models"][0]
+    assert entry["reasoning"] is True
+    assert entry["thinkingLevelMap"] == {suffix[1:]: effort}
+    assert f'--model "$APP_MODEL{suffix}"' in launch.run_command
+
+
+def test_opencode_launch_sets_the_chosen_reasoning_effort() -> None:
+    """OpenCode's gateway model carries the effort as a model option; the command is unchanged."""
+    default = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY)
+    chosen = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY, reasoning_effort="high")
+
+    model = json.loads(chosen.files["opencode.json"])["provider"]["app"]["models"]["target-model"]
+    assert model == {"name": "target-model", "options": {"reasoningEffort": "high"}}
+    assert chosen.run_command == default.run_command
+
+
+def test_opencode_launch_keeps_its_default_effort_without_a_choice() -> None:
+    """With no effort chosen the OpenCode model entry names only the model."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY)
+
+    model = json.loads(launch.files["opencode.json"])["provider"]["app"]["models"]["target-model"]
+    assert model == {"name": "target-model"}
+
+
+def test_custom_launch_exposes_the_chosen_effort_only_as_an_environment_variable() -> None:
+    """A custom harness reads the effort from its environment; the command text never carries it."""
+    target = _target(BLACKBOX_HARNESS_CUSTOM, run_command="agent {model}")
+
+    chosen = build_launch(target, _GATEWAY, reasoning_effort="high")
+    default = build_launch(target, _GATEWAY)
+
+    assert chosen.env["APP_REASONING_EFFORT"] == chosen.env["SKYNET_REASONING_EFFORT"] == "high"
+    assert chosen.run_command == default.run_command == "agent target-model"
+    assert "APP_REASONING_EFFORT" not in default.env
+    assert "SKYNET_REASONING_EFFORT" not in default.env
+
+
+@pytest.mark.parametrize(("effort", "suffix"), [("high", ":high"), ("none", ":off")])
+def test_pi_editor_launch_selects_the_chosen_thinking_level(effort: str, suffix: str) -> None:
+    """ShinkaEvolve's Pi editor applies the effort the way Pi's catalog launch does.
+
+    Args:
+        effort: The optimization model's effort level.
+        suffix: The thinking suffix the model argument carries.
+    """
+    launch = pi_editor_launch("m", _GATEWAY, reasoning_effort=effort)
+
+    entry = json.loads(launch.files[".app/pi/models.json"])["providers"]["app"]["models"][0]
+    assert entry["reasoning"] is True
+    assert entry["thinkingLevelMap"] == {suffix[1:]: effort}
+    assert f'--model "$APP_MODEL{suffix}"' in launch.run_command
+
+
+def test_pi_editor_launch_keeps_the_default_without_a_choice() -> None:
+    """With no effort chosen the Pi editor launch is the one it was before efforts existed."""
+    launch = pi_editor_launch("m", _GATEWAY)
+
+    entry = json.loads(launch.files[".app/pi/models.json"])["providers"]["app"]["models"][0]
+    assert entry["reasoning"] is False
+    assert "thinkingLevelMap" not in entry
+    assert '--model "$APP_MODEL"' in launch.run_command
+
+
+@pytest.mark.parametrize("harness", list(REGISTRY))
 def test_protected_harness_uses_offline_dependencies_and_local_relay(tmp_path: Path, harness: str) -> None:
     """Execute generated config substitution without invoking a CLI or contacting a provider."""
     launch = build_launch(_target(harness, run_command="true"), _GATEWAY, protected=True)
@@ -180,6 +311,33 @@ def test_protected_harness_uses_offline_dependencies_and_local_relay(tmp_path: P
         content = (tmp_path / name).read_text()
         assert _GATEWAY.url not in content
         assert "http://127.0.0.1:3210/v1" in content
+
+
+def test_relay_rewrite_reads_and_writes_the_config_as_utf8(tmp_path: Path) -> None:
+    """Rewrite a config with non-ASCII text as UTF-8, never in the box locale's encoding (SKY-595).
+
+    ``PYTHONWARNDEFAULTENCODING`` makes Python warn on every text read or write
+    with no ``encoding=``, and the warnings filter makes that warning fail the run.
+    """
+    gateway = GatewayConfig(url="https://gw.example/caf\u00e9/v1", api_key="secret-key")
+    relay = "http://127.0.0.1:3210/v1"
+    (tmp_path / "config.json").write_text(f'{{"name": "caf\u00e9", "url": "{gateway.url}"}}', encoding="utf-8")
+
+    subprocess.run(
+        _with_relay_config("true", {"config.json": ""}, gateway),
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
+            "APP_BUDGET_RELAY_URL": relay,
+            "PYTHONWARNDEFAULTENCODING": "1",
+            "PYTHONWARNINGS": "error::EncodingWarning",
+        },
+        timeout=10,
+        check=True,
+    )
+
+    assert (tmp_path / "config.json").read_text(encoding="utf-8") == f'{{"name": "caf\u00e9", "url": "{relay}"}}'
 
 
 def test_prime_agent_launch_reuses_the_pi_gateway_config_in_its_own_agent_dir() -> None:
@@ -383,7 +541,7 @@ def test_parse_opencode_output_reads_text_parts_and_step_usage() -> None:
 
 @pytest.mark.parametrize(
     ("harness", "output_format"),
-    [("pi", "pi"), ("codex", "codex"), ("opencode", "opencode"), ("prime", "pi")],
+    [(spec.id, spec.output_format) for spec in REGISTRY.values()],
 )
 def test_launch_payload_names_the_parser_for_every_built_in_harness(harness: str, output_format: str) -> None:
     """Serialize a launch so the sandbox bridge can pick the right output parser by name."""
@@ -392,3 +550,116 @@ def test_launch_payload_names_the_parser_for_every_built_in_harness(harness: str
     assert payload["run_command"]
     assert payload["instructions_file"]
     assert set(payload) == {"instructions_file", "run_command", "install_command", "files", "env", "output_format"}
+
+
+@pytest.mark.parametrize("harness", [spec_id for spec_id in REGISTRY if spec_id not in MCP_HARNESSES])
+def test_a_proposer_mcp_file_stops_every_other_harness_by_name(harness: str) -> None:
+    """Only the MCP harnesses load the [proposer] MCP servers, so any other harness stops before a model call."""
+    with pytest.raises(ServiceError, match=f"The {harness} proposer harness cannot load the \\[proposer\\] mcp"):
+        build_launch(_target(harness), _GATEWAY, protected=True, mcp_servers=("search",))
+
+
+def test_the_mcp_harness_list_names_every_harness_that_loads_the_relay_urls() -> None:
+    """Name exactly the harnesses that write the relay urls into their config (SKY-618, SKY-619, SKY-620, SKY-621)."""
+    assert MCP_HARNESSES == (
+        "codex",
+        "opencode",
+        "opencode_v2",
+        "qwen_code",
+        "cline",
+        "kimi_code",
+        "openhands",
+        "hermes",
+        "goose",
+        "openhands_sdk",
+        "antigravity_sdk",
+        "deerflow",
+        "eve",
+        "fabric",
+        "code_puppy",
+        "grok_build",
+    )
+
+
+@pytest.mark.parametrize("harness", MCP_HARNESSES)
+def test_an_unprotected_mcp_harness_cannot_load_proposer_mcp_servers(harness: str) -> None:
+    """Without the box's proxy no request carries the relay token, so the launch stops.
+
+    Args:
+        harness: An MCP harness id.
+    """
+    with pytest.raises(ServiceError, match=f"The {harness} proposer harness"):
+        build_launch(_target(harness), _GATEWAY, mcp_servers=("search",))
+
+
+def test_opencode_lists_each_proposer_mcp_server_at_the_gateway_relay_path() -> None:
+    """Give each [proposer] server one remote entry with only a gateway relay url (SKY-618)."""
+    launch = build_launch(
+        _target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY, protected=True, mcp_servers=("search", "my tools")
+    )
+    config = json.loads(launch.files["opencode.json"])
+
+    assert config["mcp"] == {
+        "search": {"type": "remote", "url": "https://gw.example/v1/mcp/search", "enabled": True, "oauth": False},
+        "my tools": {"type": "remote", "url": "https://gw.example/v1/mcp/my%20tools", "enabled": True, "oauth": False},
+    }
+    assert _GATEWAY.api_key not in launch.files["opencode.json"]
+
+
+def test_opencode_without_proposer_mcp_servers_lists_none() -> None:
+    """Leave MCP out of the config when the proposer's file lists no server."""
+    assert "mcp" not in json.loads(build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY).files["opencode.json"])
+
+
+def test_protected_opencode_points_its_mcp_servers_at_the_box_proxy(tmp_path: Path) -> None:
+    """The relay rewrite maps each server's url to the proxy's ``/v1/mcp/<name>`` path (SKY-618)."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY, protected=True, mcp_servers=("search",))
+    (tmp_path / "opencode.json").write_text(launch.files["opencode.json"])
+    subprocess.run(
+        _with_relay_config("true", launch.files, _GATEWAY),
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
+            "APP_BUDGET_RELAY_URL": "http://127.0.0.1:3210/v1",
+        },
+        timeout=10,
+        check=True,
+    )
+
+    config = json.loads((tmp_path / "opencode.json").read_text())
+    assert config["mcp"]["search"]["url"] == "http://127.0.0.1:3210/v1/mcp/search"
+
+
+def test_a_proposer_mcp_file_stops_a_custom_or_host_harness_by_name() -> None:
+    """A custom command and a host CLI cannot load the relay's servers either."""
+    with pytest.raises(ServiceError, match="The custom proposer harness"):
+        build_launch(
+            _target(BLACKBOX_HARNESS_CUSTOM, run_command="true"), _GATEWAY, protected=True, mcp_servers=("search",)
+        )
+    with pytest.raises(ServiceError, match="The host CLI claude proposer harness"):
+        build_launch(
+            _target(BLACKBOX_HARNESS_CODEX), _GATEWAY, protected=True, host_cli="claude", mcp_servers=("search",)
+        )
+
+
+def test_protected_codex_points_its_mcp_servers_at_the_box_proxy(tmp_path: Path) -> None:
+    """The relay rewrite maps each server's url to the proxy's ``/v1/mcp/<name>`` path (SKY-610)."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, protected=True, mcp_servers=("search",))
+    (tmp_path / ".app" / "codex").mkdir(parents=True)
+    config_path = tmp_path / ".app" / "codex" / "config.toml"
+    config_path.write_text(launch.files[".app/codex/config.toml"])
+    subprocess.run(
+        _with_relay_config("true", launch.files, _GATEWAY),
+        shell=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.defpath}",
+            "APP_BUDGET_RELAY_URL": "http://127.0.0.1:3210/v1",
+        },
+        timeout=10,
+        check=True,
+    )
+
+    config = tomllib.loads(config_path.read_text())
+    assert config["mcp_servers"]["search"]["url"] == "http://127.0.0.1:3210/v1/mcp/search"

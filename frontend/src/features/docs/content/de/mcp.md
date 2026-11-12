@@ -61,7 +61,7 @@ Kein Werkzeug lädt Guthaben auf, ändert Ihr Guthaben oder ändert Abrechnungse
 4. Der Agent ruft `get_run` auf, bis der Durchlauf endet. Die Endstatus sind `success`, `failed`, `cancelled` und `stopped`.
 
 > [!TIP]
-> Nennen Sie dem Agenten Ihr Ausgabenlimit im Prompt, zum Beispiel „Optimiere diesen Prompt. Gib höchstens 10 $ aus.“ Der Agent verwendet dieses Limit dann in `start_run`.
+> Nennen Sie dem Agenten Ihr Ausgabenlimit im Prompt, zum Beispiel „Optimiere dieses Repository. Gib höchstens 10 $ aus.“ Der Agent verwendet dieses Limit dann in `start_run`.
 
 Der Durchlauf stoppt, wenn er sein Ausgabenlimit erreicht. Wie Skynet einen Durchlauf abrechnet, lesen Sie unter [Abrechnung](/docs/concepts/billing).
 

@@ -23,7 +23,7 @@ from core.service_gateway.optimization.unified.metric_model import (
     resolve_metric_model_dict,
     scan_metric_llm,
 )
-from core.worker.unified_aliases import alias_blackbox_metric_model, alias_unified_model_roles
+from core.worker.unified_aliases import alias_blackbox_metric_model
 
 
 @pytest.mark.parametrize("case", json.loads(Path(__file__).with_name("metric_model_parity.json").read_text()))
@@ -67,7 +67,6 @@ def test_metric_api_documents_arguments_and_return(function: object) -> None:
 def test_no_obsolete_preserve_argument() -> None:
     """Expose one stored-model policy to all callers."""
     assert "preserve_metric_model" not in inspect.signature(resolve_metric_model_dict).parameters
-    assert "preserve_metric_model" not in inspect.signature(alias_unified_model_roles).parameters
 
 
 def test_worker_blackbox_alias_resolves_scorer_before_credentials() -> None:
@@ -221,15 +220,6 @@ def test_rebound_helper_is_ambiguous(code: str) -> None:
     assert scan.non_literal
     models = UnifiedModels.model_validate({"reflection_model": {"name": "r"}})
     assert resolve_metric_model(models, code) == "contract.metric_model_declaration"
-
-
-def test_worker_aliases_injected_llm_to_reflection() -> None:
-    """Route an injected helper through the reflection model on the worker."""
-    code = "def score(c, case=None):\n    return llm('x')"
-    payload = {"models": {"reflection_model": {"name": "openai/reflection"}}, "workspace": {"metric_code": code}}
-    alias_unified_model_roles(payload)
-    assert payload["models"]["metric_model"]["name"] == "openai/reflection"
-    assert payload["scorer"]["model"] == payload["models"]["metric_model"]
 
 
 @pytest.mark.parametrize(
@@ -492,68 +482,3 @@ def test_none_model_uses_reflection_and_does_not_conflict() -> None:
     assert resolve_metric_model(models, "from skynet import llm\nllm(model=None); llm(model='a')") == (
         "contract.metric_model_declaration"
     )
-
-
-@pytest.mark.parametrize("provider", sorted(_PROVIDER_PROBES))
-def test_declared_byok_model_uses_same_connection_as_picked_model(provider: str) -> None:
-    """Resolve every provider through the same bridge for picked and declared roles."""
-    model = f"{BYOK_TO_LITELLM_PROVIDER.get(provider, provider)}/example"
-    payload = {
-        "token_source": "byok",
-        "models": {"task_model": {"name": model}, "reflection_model": {"name": "openrouter/reflection"}},
-        "workspace": {"metric_code": f"from skynet import llm\nllm(model={model!r})"},
-    }
-    alias_unified_model_roles(payload)
-    vault = Mock()
-    vault.resolve_connection.return_value = SimpleNamespace(secret="test-key", api_base=None, params={})
-    inject_byok_connections(payload, username="test", vault=vault, default_token_source="byok")
-    assert payload["task_model_config"]["extra"] == payload["scorer"]["model"]["extra"]
-    calls = vault.resolve_connection.call_args_list
-    assert calls[0].args[1] == calls[-1].args[1] == provider
-
-
-def test_alias_resolves_before_protection_and_is_idempotent() -> None:
-    """Alias the derived model by identity for protection's nested updates."""
-    payload = {
-        "models": {"reflection_model": {"name": "r"}},
-        "workspace": {"metric_code": "from skynet import llm\nllm(model='openai/a')"},
-    }
-    alias_unified_model_roles(payload)
-    first = payload["models"]["metric_model"]
-    assert first["name"] == "openai/a"
-    assert payload["scorer"]["model"] is first
-    alias_unified_model_roles(payload)
-    assert payload["models"]["metric_model"] == first
-    assert payload["scorer"]["model"] is payload["models"]["metric_model"]
-    payload["workspace"]["metric_code"] = "from skynet import llm\nllm(model=x)"
-    with pytest.raises(ValueError, match="string literal"):
-        alias_unified_model_roles(payload)
-
-
-@pytest.mark.parametrize("code", ["from skynet import llm\nllm('x')", "pass"])
-def test_worker_alias_keeps_legacy_model(code: str) -> None:
-    """Both setup and execution preserve an old model selection."""
-    old = {"name": "anthropic/old", "token_source": "byok", "byok_provider": "anthropic"}
-    payload = {
-        "models": {"reflection_model": {"name": "openai/reflection"}, "metric_model": old},
-        "workspace": {"metric_code": code},
-    }
-    alias_unified_model_roles(payload)
-    assert payload["models"]["metric_model"] == old
-    assert payload["scorer"]["model"] is old
-    alias_unified_model_roles(payload)
-    assert payload["models"]["metric_model"] == old
-
-
-def test_worker_alias_rejects_unsafe_or_conflicting_declarations() -> None:
-    """Reject unknown options and declarations that conflict with stored models."""
-    payload = {
-        "models": {"reflection_model": {"name": "openai/reflection"}, "metric_model": {"name": "old"}},
-        "workspace": {"metric_code": "from skynet import llm\nllm(model='new')"},
-    }
-    with pytest.raises(ValueError, match="conflicts"):
-        alias_unified_model_roles(payload)
-    assert payload["models"]["metric_model"]["name"] == "old"
-    payload["workspace"]["metric_code"] = "from skynet import llm\nllm(model=choice)"
-    with pytest.raises(ValueError, match="string literal"):
-        alias_unified_model_roles(payload)

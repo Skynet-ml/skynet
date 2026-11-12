@@ -10,12 +10,8 @@ import {
 } from "@/shared/ui/primitives/card";
 import { Label } from "@/shared/ui/primitives/label";
 import { HelpTip } from "@/shared/ui/help-tip";
-import { TEXTAREA_SURFACE_CLASS } from "@/shared/ui/primitives/textarea";
 import { cn } from "@/shared/lib/utils";
 import { tip as tipText, type TooltipKey } from "@/shared/lib/tooltips";
-
-// Kept as a class string so ExpandableTextarea callers can share the Textarea look.
-export const TEXTAREA_CLASS = TEXTAREA_SURFACE_CLASS;
 
 export function StepCard({
   title,

@@ -15,40 +15,6 @@ export function scorerCallsModel(code: string): boolean {
   return scanMetricModel(code).uses;
 }
 
-interface MetricModelEvidence {
-  workspace: {
-    metricCode: string;
-    lastCheck: { uses_llm?: boolean } | null;
-    lastCheckSnapshot: string | null;
-  };
-}
-
-function checkedMetricCode(snapshot: string | null): string | null {
-  if (!snapshot) return null;
-  try {
-    const parsed: unknown = JSON.parse(snapshot);
-    return parsed && typeof parsed === "object" && "metricCode" in parsed
-      ? String((parsed as { metricCode: unknown }).metricCode)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Estimate whether the metric calls a model for run costs. The sandboxed
- * check's `uses_llm` wins while it was run on this exact metric code.
- */
-export function metricUsesModel(state: MetricModelEvidence): boolean {
-  const { metricCode, lastCheck, lastCheckSnapshot } = state.workspace;
-  if (
-    typeof lastCheck?.uses_llm === "boolean" &&
-    checkedMetricCode(lastCheckSnapshot) === metricCode
-  )
-    return lastCheck.uses_llm;
-  return scorerCallsModel(metricCode);
-}
-
 /** Make the runtime's legacy injected helpers explicit without moving future imports. */
 export function withScorerImports(code: string): string {
   const executable = executablePython(code);

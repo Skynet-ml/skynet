@@ -12,7 +12,6 @@ from core.notifications.notifier import (
     notify_ownership_transfer,
     notify_role_change,
     notify_run_budget,
-    notify_run_needs_input,
     notify_run_new_best,
     notify_run_stuck,
     notify_share_invite,
@@ -95,7 +94,6 @@ def test_cancelled_and_unknown_statuses_emit_nothing(sent: _Recorder, caplog: py
         (lambda: notify_run_new_best("run9", "alice", 0.8, 0.5), "new_best", {"score": 0.8}),
         (lambda: notify_run_stuck("run9", "alice", 0.5, 0.25), "stuck", {"score": 0.5}),
         (lambda: notify_run_budget("run9", "alice", 800, 1000), "budget_near", {"spent": 8.0, "limit": 10.0}),
-        (lambda: notify_run_needs_input("run9", "alice", 1200, 1000), "needs_input", {"spent": 12.0, "limit": 10.0}),
     ],
 )
 def test_in_run_events_carry_their_facts(sent: _Recorder, emit, event: str, facts: dict) -> None:

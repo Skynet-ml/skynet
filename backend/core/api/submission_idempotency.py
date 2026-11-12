@@ -39,7 +39,7 @@ def resolve_submission_replay_keys(
     Args:
         payload: Typed request before budget, setup evidence, or seed mutation.
         username: Authenticated account owning the request and replay scope.
-        workflow: DSPy or Anything request family.
+        workflow: Request family that scopes the synthesized key.
         supplied_key: Optional caller-provided ``Idempotency-Key`` header.
 
     Returns:

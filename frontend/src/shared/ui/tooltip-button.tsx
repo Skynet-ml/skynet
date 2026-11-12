@@ -13,6 +13,7 @@ interface TooltipButtonProps {
   /** Tooltip body. Pass `null` to skip the tooltip wrapper entirely. */
   tooltip: React.ReactNode;
   side?: "top" | "right" | "bottom" | "left";
+  align?: "start" | "center" | "end";
   /** Tooltip text direction; useful for RTL apps that want LTR tooltip strings. */
   dir?: "ltr" | "rtl";
   delayDuration?: number;
@@ -33,6 +34,7 @@ interface TooltipButtonProps {
 export function TooltipButton({
   tooltip,
   side = "bottom",
+  align,
   dir,
   delayDuration,
   children,
@@ -43,10 +45,36 @@ export function TooltipButton({
     <TooltipProvider delayDuration={delayDuration}>
       <Tooltip>
         <TooltipTrigger asChild>{children}</TooltipTrigger>
-        <TooltipContent side={side} dir={dir} className={contentClassName}>
+        <TooltipContent side={side} align={align} dir={dir} className={contentClassName}>
           {tooltip}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
+  );
+}
+
+/**
+ * The shared two-line tooltip body: a title, then an optional muted detail.
+ * Centered under an icon-only trigger; start-aligned when the tooltip opens
+ * from the start edge of a text label.
+ */
+export function TooltipBody({
+  title,
+  detail,
+  centered = false,
+}: {
+  title: React.ReactNode;
+  detail?: React.ReactNode;
+  centered?: boolean;
+}) {
+  return (
+    <span
+      className={
+        centered ? "flex flex-col items-center gap-0.5 text-center" : "flex flex-col gap-0.5 text-start"
+      }
+    >
+      <span className="font-semibold">{title}</span>
+      {detail ? <span className="font-normal text-muted-foreground">{detail}</span> : null}
+    </span>
   );
 }

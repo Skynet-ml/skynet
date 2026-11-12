@@ -11,8 +11,11 @@ Two deliberate exceptions to "hard delete everything":
 
 * Financial records (``billing_customers``, ``wallet_ledger``) and the quota
   audit trail are *anonymized*, not deleted — their retention has an accounting
-  and audit basis, so the identity link is severed to a stable, PII-free
-  tombstone token while the rows themselves survive.
+  and audit basis, so the identity link is severed to a PII-free tombstone
+  token, unique to each deletion, while the rows themselves survive.
+  The wallet (``billing_customers``) is also *closed*: its spendable balance
+  and free grant go to zero, and a ``closure`` ledger row records the
+  forfeited balance.
 * Product telemetry keeps its aggregate rows but drops the ``username`` that
   tied them to a person, leaving only the already-anonymous per-browser id.
 
@@ -25,14 +28,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import case, delete, select, update
 from sqlalchemy.orm import Session
 
+from ..billing.service import LOCAL_CUSTOMER_PREFIX, local_customer_id
 from ..notifications.preferences import settings_from_row
 from ..storage.models import (
     AgentConversationModel,
@@ -52,7 +57,6 @@ from ..storage.models import (
     DesktopLinkModel,
     DesktopTokenModel,
     GepaCheckpointModel,
-    GridPairResultModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -67,6 +71,7 @@ from ..storage.models import (
     PackageRegistryPreferenceModel,
     ProgressEventModel,
     PushSubscriptionModel,
+    SetupDraftModel,
     SlackConnectionModel,
     TaggingSessionModel,
     TaggingSessionShareGrantModel,
@@ -114,11 +119,10 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def _anonymized_username(username: str) -> str:
-    """Derive the stable, PII-free tombstone that replaces a deleted identity.
+    """Derive the stable, PII-free tombstone prefix for a deleted identity.
 
-    The token is a truncated SHA-256 of the username, so the same person maps
-    to the same token across every retained table (keeping the financial trail
-    internally joinable) while carrying no recoverable email.
+    The token is a truncated SHA-256 of the username, so every deletion of the
+    same person shares this prefix while carrying no recoverable email.
 
     Args:
         username: The account's lowercased-email identity.
@@ -128,6 +132,23 @@ def _anonymized_username(username: str) -> str:
     """
     digest = hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
     return f"deleted-user-{digest}"
+
+
+def _deletion_tombstone(username: str) -> str:
+    """Build the tombstone for one deletion of ``username``.
+
+    One email can be deleted, signed up again and deleted again. The wallet
+    keeps its tombstone as its primary key, so each deletion needs its own
+    name (SKY-602). The random part makes it unique; the hash part still
+    links every deletion of one email.
+
+    Args:
+        username: The account's lowercased-email identity.
+
+    Returns:
+        A ``deleted-user-<hash>-<random>`` token with no personal data.
+    """
+    return f"{_anonymized_username(username)}-{secrets.token_hex(4)}"
 
 
 def export_account(session: Session, username: str) -> dict[str, Any]:
@@ -415,6 +436,20 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         for connector in connector_rows
     ]
 
+    draft_row = session.get(SetupDraftModel, username)
+    setup_draft = (
+        None
+        if draft_row is None or draft_row.deleted
+        else {
+            "left_at": draft_row.left_at,
+            "values": draft_row.draft_values,
+            "chat": draft_row.chat,
+            "staged_dataset_id": draft_row.staged_dataset_id,
+            "revision": draft_row.revision,
+            "updated_at": _iso(draft_row.updated_at),
+        }
+    )
+
     return {
         "export_format": EXPORT_FORMAT,
         "exported_at": _iso(datetime.now(UTC)),
@@ -424,6 +459,7 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         "datasets": datasets_out,
         "tagging_sessions": tagging_out,
         "agent_conversations": conversations_out,
+        "setup_draft": setup_draft,
         "billing": billing,
         "api_token": api_token,
         "desktop_links": desktop_links,
@@ -479,20 +515,11 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         result = session.execute(statement, execution_options={"synchronize_session": False})
         anonymized += result.rowcount or 0
 
-    owned_job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
-    child_job_ids = (
-        list(
-            session.scalars(select(JobModel.optimization_id).where(JobModel.parent_optimization_id.in_(owned_job_ids)))
-        )
-        if owned_job_ids
-        else []
-    )
-    job_ids = list({*owned_job_ids, *child_job_ids})
+    job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
     if job_ids:
         _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
         _run_delete(delete(LogEntryModel).where(LogEntryModel.optimization_id.in_(job_ids)))
         _run_delete(delete(GepaCheckpointModel).where(GepaCheckpointModel.optimization_id.in_(job_ids)))
-        _run_delete(delete(GridPairResultModel).where(GridPairResultModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
         _run_delete(delete(JobModel).where(JobModel.optimization_id.in_(job_ids)))
@@ -580,6 +607,7 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(UserQuotaOverrideModel).where(UserQuotaOverrideModel.username == username))
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
+    _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
     _run_delete(delete(NotificationModel).where(NotificationModel.username == username))
     _run_delete(delete(PushSubscriptionModel).where(PushSubscriptionModel.username == username))
@@ -590,10 +618,43 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
 
     _run_delete(delete(PackageRegistryPreferenceModel).where(PackageRegistryPreferenceModel.username == username))
 
-    tombstone = _anonymized_username(username)
+    tombstone = _deletion_tombstone(username)
     _run_anonymize(update(TelemetryEventModel).where(TelemetryEventModel.username == username).values(username=None))
+    # SKY-567: close the wallet instead of deleting it. The row keeps its
+    # Stripe customer id so a later refund or dispute webhook still finds it.
+    # A zero balance and grant keep it out of the outstanding liability, and
+    # the closure ledger row records the forfeited balance for audit.
+    forfeited = session.scalar(
+        select(BillingCustomerModel.balance_cents).where(BillingCustomerModel.username == username).with_for_update()
+    )
+    if forfeited:
+        session.add(
+            WalletLedgerModel(
+                username=tombstone,
+                delta_cents=-int(forfeited),
+                kind="closure",
+                description="Account deleted",
+                created_at=datetime.now(UTC),
+            )
+        )
     _run_anonymize(
-        update(BillingCustomerModel).where(BillingCustomerModel.username == username).values(username=tombstone)
+        update(BillingCustomerModel)
+        .where(BillingCustomerModel.username == username)
+        .values(
+            username=tombstone,
+            # A new account of the same email gets the same local placeholder,
+            # and the column is unique, so the closed wallet gives it up (SKY-602).
+            stripe_customer_id=case(
+                (
+                    BillingCustomerModel.stripe_customer_id.startswith(LOCAL_CUSTOMER_PREFIX),
+                    local_customer_id(tombstone),
+                ),
+                else_=BillingCustomerModel.stripe_customer_id,
+            ),
+            balance_cents=0,
+            grant_remaining=0,
+            updated_at=datetime.now(UTC),
+        )
     )
     _run_anonymize(update(WalletLedgerModel).where(WalletLedgerModel.username == username).values(username=tombstone))
     _run_anonymize(update(UserQuotaAuditModel).where(UserQuotaAuditModel.actor == username).values(actor=tombstone))

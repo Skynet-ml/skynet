@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import base64
+import http.server
 import json
+import os
+import shutil
 import socket
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import quote, quote_plus
 
 import httpx
 import pytest
@@ -21,12 +27,17 @@ from sqlalchemy.orm import Session
 
 from core.api.errors import DomainError
 from core.api.preflight_execution import _verify_model_routes
+from core.billing import guest_model_proxy, mcp_oauth_client, model_dispatch
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
-from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS, CONNECTORS_KEY
+from core.billing.guest_model_proxy import MCP_PATH, MCP_TOKEN_ENV, METHOD_HEADER, SERVICES_ENV
+from core.billing.mcp_oauth_client import McpOAuthError
+from core.billing.model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
+    MCP_RELAY_ROUTE_KEY,
     PARENT_HOSTS_KEY,
     ROUTE_KEY,
     SHINKA_EMBEDDING_MODEL,
@@ -39,18 +50,30 @@ from core.billing.protected_credentials import (
     protect_execution_credentials,
     resolve_execution_credentials,
 )
-from core.billing.runtime import BudgetRuntime, OperationCompletedError
-from core.billing.usage_tags import CALLER_PROPOSER, KIND_EMBEDDING, USAGE_TAGS_HEADER, encode_tags
-from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.billing.runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
+from core.billing.usage_tags import (
+    CALLER_PROPOSER,
+    USAGE_TAGS_HEADER,
+    encode_tags,
+    usage_scope,
+    with_tags_header,
+)
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from core.exceptions import InfrastructureInterruptionError, ServiceError
+from core.models.blackbox import BlackboxTarget
 from core.provider_registry import BYOK_PROVIDER_SLUGS
+from core.service_gateway.optimization.blackbox import harness_bridge, runner
 from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
+from core.service_gateway.optimization.blackbox.harness import GatewayConfig, build_launch, launch_payload
 from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
+from core.service_gateway.optimization.blackbox.repo_constraints import McpServer, RoleEnvironment, ServiceSpec
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
-from core.worker.scoped_relay import model_forwarder
+from core.storage.run_call_store import PostgresRunCallStore
+from core.worker import scoped_relay
+from core.worker.scoped_relay import NO_CANDIDATE_ID, CallRecorder, McpRelay, model_forwarder
 
 IMAGE = "fixture@sha256:" + "a" * 64
 CATALOG = {
@@ -735,6 +758,79 @@ def test_byok_only_supplies_default_output_limit_for_anthropic_messages(
     assert sent[0].get("max_tokens") == expected
 
 
+def test_anthropic_byok_messages_moves_completion_limit_to_max_tokens(gateway: ModelGateway) -> None:
+    """Forward the caller's max_completion_tokens to Anthropic as max_tokens only."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the exact forwarded request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "generation", "usage": {}})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": 50})
+    assert sent[0] == {"model": route["model"], "max_tokens": 50}
+
+
+@pytest.mark.parametrize("limit", [0, -1, "50", True, 1.5])
+def test_anthropic_byok_messages_rejects_invalid_completion_limit(gateway: ModelGateway, limit: object) -> None:
+    """Refuse an invalid max_completion_tokens on /messages before any provider call."""
+    sent: list[httpx.Request] = []
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={}))
+    )
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    with pytest.raises(UnpricedOperationError, match="positive output token limit"):
+        gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": limit})
+    assert sent == []
+
+
+_STREAM_WITHOUT_DONE = (
+    b'data: {"id":"gen-1","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+    b'data: {"id":"gen-1","choices":[{"delta":{},"finish_reason":"stop"}],'
+    b'"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n'
+)
+
+
+def test_byok_stream_without_done_line_ends_at_finish_reason(gateway: ModelGateway) -> None:
+    """Pass a BYOK stream that closes with a finish_reason chunk and no [DONE] line."""
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=_STREAM_WITHOUT_DONE
+            )
+        )
+    )
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["openai"],
+    )
+    result = gateway._routes[route["token"]].dispatch(
+        "/chat/completions", {"model": route["model"], "stream": True, "max_tokens": 5}
+    )
+    assert result.status == 200
+    assert response_complete(_STREAM_WITHOUT_DONE, "text/event-stream") is False
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -1033,6 +1129,26 @@ def test_selected_tools_keep_credentials_outside_guest_and_cannot_call_models(
     assert state.json()["blocked_reason"] == "generation_fenced"
 
 
+@pytest.mark.parametrize("entry", sorted({*CONNECTORS, *(c.name for c in CONNECTORS.values())}))
+def test_no_catalog_entry_reaches_connector_routes(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Fill the connector routes key only from an OAuth connection, never from a catalog host or name (E49)."""
+    # Another test in the same worker can leave a fake engine bound here, and a
+    # bound engine turns every unknown name into a mock URL (SKY-397).
+    monkeypatch.setattr(mcp_oauth_client, "_engine", None)
+    for connector in CONNECTORS.values():
+        monkeypatch.setattr(settings, connector.key_setting, SecretStr(f"{connector.name}-parent-secret"))
+    forged = {entry: {"url": "https://forged.example/mcp", "token": "forged"}}
+    with pytest.raises(McpOAuthError) as caught:
+        gateway.protect_payload({CONNECTORS_KEY: [entry], CONNECTOR_ROUTES_KEY: forged}, managed_key="upstream-secret")
+    assert caught.value.code == "mcp_connection.unknown_connector"
+    assert gateway._connectors == {}
+    assert gateway._connector_tokens == {}
+    passed = gateway.protect_payload({CONNECTOR_ROUTES_KEY: forged}, managed_key="upstream-secret")
+    assert CONNECTOR_ROUTES_KEY not in passed
+
+
 def test_remote_runtime_streams_and_metered_mailbox_scrubs_protocol(gateway: ModelGateway) -> None:
     """Round-trip a real guest model request without exposing protocol data in output."""
     gateway.bind_sandbox(
@@ -1172,6 +1288,327 @@ def test_mailbox_retries_have_independent_coverage_and_duplicate_frames_do_not_r
     ]
 
 
+class _OneCallSession:
+    """Emit one mailbox frame and keep the parent's answer."""
+
+    def __init__(self, document: dict[str, Any]) -> None:
+        """Hold the one frame and an inspectable in-memory guest filesystem.
+
+        Args:
+            document: The mailbox request frame the guest sends.
+        """
+        self.document = document
+        self.files: dict[str, str] = {}
+
+    def write_files(self, files: dict[str, str]) -> None:
+        """Persist supervisor inputs and responses by guest path."""
+        self.files.update(files)
+
+    def run(self, _command: str, **kwargs: Any) -> CommandResult:
+        """Send the one model request frame."""
+        config_path = next(path for path in self.files if path.endswith("/config.json"))
+        prefix = json.loads(self.files[config_path])["prefix"]
+        kwargs["on_output"]("stdout", prefix + json.dumps(self.document) + "\n")
+        return CommandResult(exit_code=0)
+
+    def answer(self) -> dict[str, Any]:
+        """Return the parent's answer to the frame."""
+        name = f"{self.document['id']}.json"
+        return json.loads(next(text for path, text in self.files.items() if path.endswith(name)))
+
+
+def _costless_responses_call(
+    gateway: ModelGateway, generation: Callable[[int], httpx.Response]
+) -> tuple[dict[str, Any], int]:
+    """Send one guest Responses call whose stream ends with token usage and no cost.
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+        generation: Answers the n-th ``/generation`` lookup, counted from 1.
+
+    Returns:
+        The mailbox answer and the number of ``/generation`` lookups.
+    """
+    final = {
+        "id": "gen-codex-1",
+        "status": "completed",
+        "output": [],
+        "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+    }
+    answer, lookups, _ = _responses_call(gateway, final, generation)
+    return answer, lookups
+
+
+def _responses_call(
+    gateway: ModelGateway, final: dict[str, Any], generation: Callable[[int], httpx.Response]
+) -> tuple[dict[str, Any], int, httpx.Headers]:
+    """Send one guest Responses call whose stream ends with the given final response.
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+        final: The ``response`` object of the closing ``response.completed`` event.
+        generation: Answers the n-th ``/generation`` lookup, counted from 1.
+
+    Returns:
+        The mailbox answer, the number of ``/generation`` lookups, and the
+        headers the provider received on the Responses call.
+    """
+    gateway._client.close()
+    lookups = 0
+    sent: list[httpx.Headers] = []
+    created = {
+        "type": "response.created",
+        "sequence_number": 0,
+        "response": {"id": final["id"], "status": "in_progress"},
+    }
+    delta = {
+        "type": "response.output_text.delta",
+        "sequence_number": 1,
+        "item_id": "msg-1",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "ok",
+    }
+    completed = {"type": "response.completed", "sequence_number": 2, "response": final}
+    stream = (
+        ": OPENROUTER PROCESSING\n\n"
+        f"event: response.created\ndata: {json.dumps(created)}\n\n"
+        f"event: response.output_text.delta\ndata: {json.dumps(delta)}\n\n"
+        f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
+        "data: [DONE]\n\n"
+    ).encode()
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Serve prices, the Responses stream, and the scripted generation lookups."""
+        nonlocal lookups
+        if request.url.path.endswith("/endpoints"):
+            return httpx.Response(200, json={"data": CATALOG})
+        if request.url.path == "/api/v1/generation":
+            lookups += 1
+            return generation(lookups)
+        assert request.url.path == "/api/v1/responses"
+        sent.append(request.headers)
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream; charset=utf-8"})
+
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
+    route = protected["model_config"]["extra"][ROUTE_KEY]
+    body = {"model": "fixture/text", "input": [{"role": "user", "content": "propose"}], "stream": True}
+    session = _OneCallSession(
+        {
+            "id": "c" * 32,
+            "path": "/v1/responses",
+            "body": base64.b64encode(json.dumps(body).encode()).decode(),
+            "headers": {"authorization": f"Bearer {route['token']}"},
+        }
+    )
+    ModelMailbox(gateway.dispatch_guest, concurrency=1).run(session, "ignored")
+    return session.answer(), lookups, sent[0]
+
+
+def _openrouter_response(metadata: bool) -> dict[str, Any]:
+    """Build a final OpenRouter Responses object in the documented shape.
+
+    The usage follows the Responses ``Usage`` schema: ``is_byok`` is optional
+    and absent here, and ``upstream_inference_cost`` is a number. The id uses
+    the documented ``resp_`` prefix, which ``/generation`` does not accept.
+
+    Args:
+        metadata: Include the opt-in ``openrouter_metadata`` with ``is_byok``.
+
+    Returns:
+        The ``response`` object of a ``response.completed`` event.
+    """
+    final: dict[str, Any] = {
+        "id": "resp_0a1b2c3d4e5f",
+        "object": "response",
+        "created_at": 1700000000,
+        "completed_at": 1700000004,
+        "model": "fixture/text",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg-1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+            }
+        ],
+        "usage": {
+            "input_tokens": 12,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 15,
+            "cost": 0.002,
+            "cost_details": {
+                "upstream_inference_cost": 0.002,
+                "upstream_inference_input_cost": 0.0012,
+                "upstream_inference_output_cost": 0.0008,
+            },
+        },
+    }
+    if metadata:
+        final["openrouter_metadata"] = {
+            "attempt": 1,
+            "endpoints": {
+                "available": [{"model": "fixture/text", "provider": "Fixture", "selected": True}],
+                "total": 1,
+            },
+            "is_byok": False,
+            "region": "iad",
+            "requested": "fixture/text",
+            "strategy": "direct",
+            "summary": "available=1, selected=Fixture",
+        }
+    return final
+
+
+def test_a_real_shape_responses_stream_settles_from_its_metadata(gateway: ModelGateway) -> None:
+    """Settle a managed Responses call from its own receipt when only the metadata names BYOK (SKY-664).
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+    """
+    answer, lookups, headers = _responses_call(gateway, _openrouter_response(metadata=True), lambda _n: _not_found())
+
+    assert answer["status"] == 200, base64.b64decode(answer["body"])
+    assert headers["x-openrouter-metadata"] == "enabled"
+    assert lookups == 0
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.setup_spent_cents == Decimal("0.2")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.pending_operations == 0
+
+
+def test_an_ambiguous_responses_receipt_with_a_resp_id_is_held_without_lookups(
+    gateway: ModelGateway, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hold a call whose BYOK scope stays unknown, and skip lookups /generation cannot answer (SKY-664).
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+        caplog: Captures the dispatch warning.
+    """
+    with caplog.at_level("WARNING", logger=model_dispatch.__name__):
+        answer, lookups, _ = _responses_call(gateway, _openrouter_response(metadata=False), lambda _n: _not_found())
+
+    assert answer["status"] == 424
+    assert lookups == 0
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    assert any("/generation does not accept this id" in record.getMessage() for record in caplog.records)
+
+
+def _generation_record(model: str = "fixture/text") -> httpx.Response:
+    """Answer a generation lookup with a confirmed $0.002 bill.
+
+    Args:
+        model: The model the record names.
+
+    Returns:
+        The provider's generation answer.
+    """
+    record = {
+        "id": "gen-codex-1",
+        "model": model,
+        "api_type": "responses",
+        "provider_name": "Fixture",
+        "streamed": True,
+        "native_tokens_prompt": 12,
+        "native_tokens_completion": 3,
+        "native_tokens_reasoning": 0,
+        "total_cost": 0.002,
+        "usage": 0.002,
+        "upstream_inference_cost": 0.0012,
+        "is_byok": False,
+    }
+    return httpx.Response(200, json={"data": record})
+
+
+def _not_found() -> httpx.Response:
+    """Answer a generation lookup the way OpenRouter does before it indexes the bill."""
+    return httpx.Response(404, json={"error": {"message": "Generation not found"}})
+
+
+def test_responses_stream_without_cost_settles_when_a_later_generation_lookup_finds_it(
+    gateway: ModelGateway,
+) -> None:
+    """Settle a Codex Responses call whose cost OpenRouter indexes only after the first lookup (SKY-657).
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+    """
+    answer, lookups = _costless_responses_call(gateway, lambda n: _not_found() if n == 1 else _generation_record())
+
+    assert answer["status"] == 200, base64.b64decode(answer["body"])
+    assert lookups == 2
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.setup_spent_cents == Decimal("0.2")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.pending_operations == 0
+
+
+def test_a_generation_model_mismatch_is_not_retried(gateway: ModelGateway) -> None:
+    """Hold a call at once when the generation record names another model; time cannot change it.
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+    """
+    answer, lookups = _costless_responses_call(gateway, lambda _n: _generation_record("fixture/other"))
+
+    assert answer["status"] == 424
+    assert lookups == 1
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.pending_operations == 1
+
+
+def test_an_unindexed_generation_is_retried_then_held_with_its_reason_logged(
+    gateway: ModelGateway, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ask once and once per backoff delay, then hold the call and log why no cost came back.
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+        caplog: Captures the dispatch warning.
+    """
+    with caplog.at_level("WARNING", logger=model_dispatch.__name__):
+        answer, lookups = _costless_responses_call(gateway, lambda _n: _not_found())
+
+    assert answer["status"] == 424
+    assert json.loads(base64.b64decode(answer["body"]))["error"]["type"] == "usage_pending"
+    assert lookups == 1 + len(model_dispatch.GENERATION_LOOKUP_DELAYS) == 4
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    assert any(
+        "an answer with no cost" in record.getMessage() and "HTTP 404" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_mailbox_names_this_calls_pending_usage_not_previous_usage() -> None:
+    """Tell the guest that its own call's usage is pending, not some earlier call's (SKY-657)."""
+
+    def dispatch(*_args: Any) -> ModelHTTPResult:
+        """Fail the way the runtime fails a dispatched call without a confirmed cost."""
+        raise UsagePendingError("Provider usage is not yet confirmed; the reservation remains active.")
+
+    session = _OneCallSession(
+        {"id": "d" * 32, "path": "/v1/responses", "body": base64.b64encode(b"{}").decode(), "headers": {}}
+    )
+    ModelMailbox(dispatch, concurrency=1).run(session, "ignored")
+
+    answer = session.answer()
+    error = json.loads(base64.b64decode(answer["body"]))["error"]
+    assert answer["status"] == 424
+    assert error["type"] == "usage_pending"
+    assert "Previous" not in error["message"]
+    assert error["message"].startswith("Provider usage is not yet confirmed")
+
+
 def test_cost_ceiling_is_the_total_or_what_the_account_can_fund(gateway: ModelGateway) -> None:
     """Hand a guest a capped budget's total and an uncapped budget's account allowance.
 
@@ -1245,6 +1682,28 @@ def test_parent_registry_box_is_funded_but_unreachable_from_the_guest_route(gate
     gateway.parent_sandbox_runtime()
 
 
+def test_a_guest_box_reaches_only_the_hosts_the_gateway_granted(gateway: ModelGateway) -> None:
+    """Refuse guest hosts before the grant and outside it, and open a box to a granted registry (E57)."""
+    with pytest.raises(ValueError, match="no sandbox broker"):
+        gateway.allow_guest_hosts(PROPOSER_REGISTRY_HOSTS)
+    gateway.bind_sandbox(
+        SandboxBroker(LocalSubprocessRuntime(), image=IMAGE, max_lifetime_seconds=20),
+        image=IMAGE,
+        lifetime_seconds=20,
+    )
+    protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
+    descriptor = protected["_budget_gateway_descriptor"]
+    remote = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
+    with pytest.raises(ServiceError, match="network access"):
+        remote.open(SandboxSpec(lifetime_seconds=20, image=IMAGE, allowed_hosts=("pypi.org",)))
+
+    gateway.allow_guest_hosts(PROPOSER_REGISTRY_HOSTS)
+
+    remote.open(SandboxSpec(lifetime_seconds=20, image=IMAGE, allowed_hosts=("pypi.org",))).close()
+    with pytest.raises(ServiceError, match="network access"):
+        remote.open(SandboxSpec(lifetime_seconds=20, image=IMAGE, allowed_hosts=("raw.githubusercontent.com",)))
+
+
 EMBEDDING_CATALOG = {
     "id": SHINKA_EMBEDDING_MODEL,
     "architecture": {"output_modalities": ["embeddings"]},
@@ -1308,7 +1767,7 @@ def test_shinka_novelty_adds_a_billed_embeddings_route(gateway: ModelGateway, no
     assert "provider-secret" not in json.dumps(protected)
     forward = model_forwarder(protected)
     body = {"model": SHINKA_EMBEDDING_MODEL, "input": ["def f(): pass"]}
-    tags = {USAGE_TAGS_HEADER: encode_tags({"caller": CALLER_PROPOSER, "kind": KIND_EMBEDDING})}
+    tags = {USAGE_TAGS_HEADER: encode_tags({"caller": CALLER_PROPOSER, "kind": "embedding"})}
     with pytest.raises(ValueError, match="unknown metered model capability"):
         forward(route["token"], "/v1/embeddings", body, {})
     with pytest.raises(ValueError, match="unknown metered model capability"):
@@ -1338,7 +1797,7 @@ def test_shinka_novelty_adds_a_billed_embeddings_route(gateway: ModelGateway, no
         [evidence] = session.scalars(select(ExecutionUsageEvidenceModel)).all()
     assert operation.state == "settled"
     assert operation.role == "optimization"
-    assert evidence.evidence["tags"] == {"caller": CALLER_PROPOSER, "kind": KIND_EMBEDDING}
+    assert evidence.evidence["tags"] == {"caller": CALLER_PROPOSER, "kind": "embedding"}
 
 
 def test_readiness_probes_skip_the_novelty_embeddings_route(gateway: ModelGateway) -> None:
@@ -1500,3 +1959,1402 @@ def test_a_role_observer_sees_each_answered_model_call_of_that_role_only(gateway
     assert response.status_code == 200
     assert mailbox.status == 200
     assert [call["messages"][0]["content"] for call in seen] == ["step one", "step two"]
+
+
+# A quote makes the JSON-escaped form differ from the raw one (E52 rule 3).
+_UPSTREAM_KEY = 'upstream-"secret'
+
+
+def _record_calls(gateway: ModelGateway) -> PostgresRunCallStore:
+    """Bind the gateway to a run-call recorder on its own ledger database.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+
+    Returns:
+        The store the gateway now writes run calls into.
+    """
+    store = PostgresRunCallStore(gateway.runtime.service.engine)
+    gateway.recorder = CallRecorder(store, "job-1", "", "")
+    return store
+
+
+def test_each_model_call_writes_one_run_call_that_holds_no_secret(gateway: ModelGateway) -> None:
+    """Record HTTP and mailbox model calls while an echo provider sends both secrets back.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    def echo(request: httpx.Request) -> httpx.Response:
+        """Answer with the upstream credential and the guest body, like a careless echo server.
+
+        Args:
+            request: The provider request.
+
+        Returns:
+            The catalog for a GET, otherwise the echo.
+        """
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": CATALOG})
+        return httpx.Response(
+            200,
+            json={
+                "id": "fixture-generation",
+                "usage": {"cost": "0.001"},
+                "echo": {"authorization": request.headers["authorization"], "body": request.content.decode()},
+                "choices": [{"message": {"content": "OK"}}],
+            },
+        )
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(echo))
+    store = _record_calls(gateway)
+    route = gateway.register(
+        model="fixture/text", api_key=_UPSTREAM_KEY, role="optimization", policy=ChargePolicy("managed_model")
+    )
+    body = {"model": "fixture/text", "max_tokens": 16, "messages": [{"role": "user", "content": route["token"]}]}
+
+    reply = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json=body,
+        trust_env=False,
+    )
+    mailbox = gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
+
+    assert reply.status_code == mailbox.status == 200
+    assert _UPSTREAM_KEY in mailbox.body.decode().replace('\\"', '"')
+    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert [(call["kind"], call["target"], call["role"], call["status"]) for call in calls] == [
+        ("model", "fixture/text", "optimization", "ok"),
+        ("model", "fixture/text", "optimization", "ok"),
+    ]
+    stored = json.dumps(calls)
+    for secret in (route["token"], _UPSTREAM_KEY, json.dumps(_UPSTREAM_KEY)[1:-1], "secret"):
+        assert secret not in stored
+    assert all("[REDACTED]" in call["request"] and "[REDACTED]" in call["response"] for call in calls)
+    assert all(call["duration_ms"] >= 0 and call["started_at"] for call in calls)
+    spent = gateway.runtime.service.get(gateway.runtime.budget_id, "alice").setup_spent_cents
+    assert spent > 0
+    assert all(call["cost_usd"] > 0 for call in calls)
+    assert sum(call["cost_usd"] for call in calls) == pytest.approx(float(spent) / 100)
+
+
+def test_a_byok_model_call_is_recorded_with_no_cost(gateway: ModelGateway) -> None:
+    """Leave the cost of a BYOK call empty, because the provider bills the user's own key.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Answer a BYOK call with the provider's own usage, which Skynet does not charge.
+
+        Args:
+            request: The provider request.
+
+        Returns:
+            The model answer.
+        """
+        return httpx.Response(
+            200, json={"id": "byok-generation", "usage": {"cost": "0.001"}, "choices": [{"message": {"content": "OK"}}]}
+        )
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    store = _record_calls(gateway)
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    body = {"model": "fixture/text", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+
+    reply = gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
+
+    assert reply.status == 200
+    (call,) = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (call["kind"], call["status"], call["cost_usd"]) == ("model", "ok", None)
+
+
+def test_each_call_is_recorded_under_the_candidate_its_usage_tags_name(gateway: ModelGateway) -> None:
+    """List a box call, a mailbox call and an in-process call under their real candidate ids.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Answer the catalog read and each model call.
+
+        Args:
+            request: The provider request.
+
+        Returns:
+            The catalog for a GET, otherwise one short answer.
+        """
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": CATALOG})
+        return httpx.Response(
+            200,
+            json={"id": "fixture-generation", "usage": {"cost": "0.001"}, "choices": [{"message": {"content": "OK"}}]},
+        )
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(answer))
+    store = _record_calls(gateway)
+    route = gateway.register(model="fixture/text", api_key="k", role="task", policy=ChargePolicy("managed_model"))
+    body = {"model": "fixture/text", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+
+    box = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers=with_tags_header({"Authorization": f"Bearer {route['token']}"}, {"candidate": 7}),
+        json=body,
+        trust_env=False,
+    )
+    mailbox = gateway.dispatch_guest(
+        route["token"], "/v1/chat/completions", body, with_tags_header({}, {"candidate": 8})
+    )
+    with usage_scope(candidate=9):
+        in_process = gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
+    proposer = gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
+
+    assert box.status_code == mailbox.status == in_process.status == proposer.status == 200
+    for candidate in ("7", "8", "9", NO_CANDIDATE_ID):
+        [call] = store.list_calls("job-1", candidate)
+        assert (call["kind"], call["role"], call["status"]) == ("model", "task", "ok")
+    assert store.list_calls("job-1", "") == []
+
+
+def test_a_refused_and_a_failed_model_call_are_recorded_with_their_reason(gateway: ModelGateway) -> None:
+    """Write a budget refusal and a provider failure as run calls, and still raise them.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Route:
+        """Refuse the first call for budget, then fail the next one."""
+
+        model = "fixture/text"
+        role = "task"
+        errors: list[Exception] = [
+            BudgetInsufficientError("The next operation needs up to 135 cents."),
+            RuntimeError("provider closed the stream"),
+        ]
+
+        def dispatch(self, path: str, body: Any, **kwargs: Any) -> ModelHTTPResult:
+            """Raise the next error."""
+            raise self.errors.pop(0)
+
+    store = _record_calls(gateway)
+    gateway._routes["fixture-token"] = _Route()  # type: ignore[assignment]
+    try:
+        with pytest.raises(BudgetInsufficientError):
+            gateway.dispatch_guest("fixture-token", "/v1/chat/completions", {"model": "fixture/text"}, {})
+        with pytest.raises(RuntimeError):
+            gateway.dispatch_guest("fixture-token", "/v1/chat/completions", {"model": "fixture/text"}, {})
+    finally:
+        del gateway._routes["fixture-token"]
+
+    refused, failed = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (refused["kind"], refused["role"], refused["status"]) == ("model", "task", "refused")
+    assert refused["failure_reason"] == "BudgetInsufficientError"
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "RuntimeError: provider closed the stream"
+    assert "fixture-token" not in json.dumps([refused, failed])
+
+
+def test_tool_and_evaluator_calls_are_recorded_without_their_bound_secrets(gateway: ModelGateway) -> None:
+    """Record a tool call by tool name and an evaluator call, with the bound header and URL key masked.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Tools:
+        """Echo the bound credentials back, like a careless MCP server."""
+
+        url = "https://tools.example/mcp?key=endpoint-secret"
+        headers = {"Authorization": "Bearer tool-secret"}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with the bound credentials."""
+            return ModelHTTPResult(200, "application/json", json.dumps({"echo": [self.url, self.headers]}).encode())
+
+    class _Evaluator:
+        """Fail like a scorer that crashed."""
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with a server error."""
+            return ModelHTTPResult(500, "application/json", b'{"error": "scorer crashed"}')
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    evaluator = gateway.bind_evaluator(_Evaluator())
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    reply = httpx.post(
+        f"{gateway.url}/_mcp", headers={"Authorization": f"Bearer {gateway._tool_token}"}, json=call, trust_env=False
+    )
+    gateway.dispatch_guest(evaluator["token"], "/v1/_evaluator", {"candidate": "diff"}, {})
+
+    assert reply.status_code == 200
+    tool, scored = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (tool["kind"], tool["target"], tool["status"], tool["cost_usd"]) == (
+        "mcp",
+        "roster@tools.example/lookup",
+        "ok",
+        None,
+    )
+    assert scored["cost_usd"] is None
+    assert (scored["kind"], scored["status"], scored["failure_reason"]) == ("evaluator", "500", "HTTP 500")
+    stored = json.dumps([tool, scored])
+    for secret in ("tool-secret", "endpoint-secret", gateway._tool_token, evaluator["token"]):
+        assert secret not in stored
+
+
+def test_two_servers_with_the_same_tool_name_get_two_targets(gateway: ModelGateway) -> None:
+    """Name the server in each tool call's target, so two ``lookup`` tools stay apart, even on one host (E49 item 4).
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Tools:
+        """Answer every tool call."""
+
+        headers = None
+
+        def __init__(self, url: str) -> None:
+            """Keep the server endpoint.
+
+            Args:
+                url: The MCP endpoint.
+            """
+            self.url = url
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with an empty result."""
+            return ModelHTTPResult(200, "application/json", b"{}")
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools("https://tools.example/mcp")  # type: ignore[assignment]
+    for name, url in (
+        ("docs", "https://docs.example:8443/v1/mcp/path-key"),
+        ("alpha", "https://shared.example/a/mcp"),
+        ("beta", "https://shared.example/b/mcp"),
+    ):
+        gateway._connectors[f"{name}-token"] = _Tools(url)  # type: ignore[assignment]
+        gateway._connector_tokens[name] = f"{name}-token"
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    for token in (gateway._tool_token, "docs-token", "alpha-token", "beta-token"):
+        gateway.dispatch_guest(token, "/v1/_mcp", call, {})
+    gateway.dispatch_guest("docs-token", "/v1/_mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, {})
+
+    assert [call["target"] for call in store.list_calls("job-1", NO_CANDIDATE_ID)] == [
+        "roster@tools.example/lookup",
+        "docs@docs.example:8443/lookup",
+        "alpha@shared.example/lookup",
+        "beta@shared.example/lookup",
+        "docs@docs.example:8443/tools/list",
+    ]
+
+
+def test_a_tool_that_echoes_bare_credential_parts_leaks_none_of_them(gateway: ModelGateway) -> None:
+    """Mask the bare bearer key, the URL password and the encoded query key a tool echoes.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Tools:
+        """Echo each credential part alone, the way a server prints its request."""
+
+        url = "https://svc:url-password@tools.example/mcp?key=query%2Fsecret"
+        headers = {"Authorization": "Bearer bare-tool-key"}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with the parts of the bound credentials."""
+            echo = ["bare-tool-key", "url-password", "query/secret", "/mcp?key=query%2Fsecret"]
+            return ModelHTTPResult(200, "application/json", json.dumps({"echo": echo}).encode())
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    assert gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {}).status == 200
+
+    [tool] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    stored = json.dumps(tool)
+    for secret in ("bare-tool-key", "url-password", "query/secret", "query%2Fsecret"):
+        assert secret not in stored
+
+
+def test_a_query_key_in_a_failed_tool_url_is_masked_in_the_record(gateway: ModelGateway) -> None:
+    """Mask a URL query key that comes back in the error text, as sent and as the tool re-encodes it.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+    azure = "Zm9v+YmFy/YmF6PQ=="
+    tool_url = f"https://tools.example/mcp?key={quote_plus(azure)}"
+
+    class _Tools:
+        """Fail the way httpx reports an error status: the text holds the full URL."""
+
+        url = tool_url
+        headers: dict[str, str] = {}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Raise an error whose text holds the URL and the key re-encoded with ``quote``."""
+            request = httpx.Request("POST", tool_url)
+            response = httpx.Response(401, request=request)
+            message = f"401 for url '{tool_url}', key {quote(azure)}"
+            raise httpx.HTTPStatusError(message, request=request, response=response)
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    with pytest.raises(httpx.HTTPStatusError):
+        gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {})
+
+    [tool] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (tool["kind"], tool["status"]) == ("mcp", "failed")
+    assert tool["failure_reason"].count("[REDACTED]") == 2
+    stored = json.dumps(tool)
+    for form in (azure, quote_plus(azure), quote(azure, safe="")):
+        assert form not in stored
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ReadTimeout("read timed out"), KeyboardInterrupt(), SystemExit(1)],
+    ids=["timeout", "interrupt", "exit"],
+)
+def test_a_tool_call_that_times_out_or_is_stopped_is_recorded(gateway: ModelGateway, error: BaseException) -> None:
+    """Record a timeout or a worker stop as failed, without the bound key, then raise it again.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        error: What stops the call.
+    """
+
+    class _Tools:
+        """Stop while the tool server answers."""
+
+        url = "https://tools.example/mcp"
+        headers = {"Authorization": "Bearer stopped-tool-key"}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Raise the stop."""
+            raise error
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    with pytest.raises(type(error)):
+        gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {})
+
+    [tool] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (tool["kind"], tool["status"]) == ("mcp", "failed")
+    assert tool["failure_reason"].startswith(type(error).__name__)
+    assert "stopped-tool-key" not in json.dumps(tool)
+
+
+def test_a_gateway_without_a_recorder_writes_no_run_call(gateway: ModelGateway) -> None:
+    """Setup work binds no recorder, so a model call leaves the run record empty.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+    store = PostgresRunCallStore(gateway.runtime.service.engine)
+    route = gateway.register(
+        model="fixture/text", api_key="upstream-secret", role="task", policy=ChargePolicy("managed_model")
+    )
+    body = {"model": "fixture/text", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+
+    assert gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {}).status == 200
+    assert store.list_calls("job-1", "") == []
+
+
+_MCP_KEY = "mcp-secret-value-4242"
+_MCP_HOST = "mcp.example.test"
+
+
+class _McpServer:
+    """Serve a small MCP streamable HTTP server that echoes the key it gets back to the caller."""
+
+    def __init__(self) -> None:
+        """Start the server on a free loopback port."""
+        self.requests: list[tuple[str, str, str]] = []
+        # Seconds a GET stream stays quiet after its first event.
+        self.hold = 0.0
+        mcp = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Answer initialize with a session, a later POST and a GET only inside it, and DELETE to end it."""
+
+            def log_message(self, format: str, *args: object) -> None:
+                """Keep the test output quiet."""
+
+            def _session(self) -> bool:
+                """Record the request and refuse one outside the session.
+
+                Returns:
+                    Whether the request carries the session id.
+                """
+                session = self.headers.get("Mcp-Session-Id", "")
+                mcp.requests.append((self.command, self.path, session))
+                if session == "session-1":
+                    return True
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+
+            def do_POST(self) -> None:
+                """Open the session on initialize, or answer a call inside it with the key it got."""
+                message = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                if message.get("method") == "initialize":
+                    mcp.requests.append((self.command, self.path, ""))
+                elif not self._session():
+                    return
+                payload = json.dumps(
+                    {"jsonrpc": "2.0", "id": message.get("id"), "result": {"seen": self.headers["Authorization"]}}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Mcp-Session-Id", "session-1")
+                self.send_header("X-Echo", self.headers["Authorization"])
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self) -> None:
+                """Send two events, the second with the key, then end the stream."""
+                if not self._session():
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for event in (b"data: first\n\n", b"data: " + self.headers["Authorization"].encode() + b"\n\n"):
+                    self.wfile.write(event)
+                    self.wfile.flush()
+                    time.sleep(mcp.hold)
+
+            def do_DELETE(self) -> None:
+                """End the session."""
+                if self._session():
+                    self.send_response(204)
+                    self.end_headers()
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_port
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def mcp_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[_McpServer]:
+    """Start the MCP server and let the relay reach its test host on loopback.
+
+    Args:
+        monkeypatch: Pins the test host to 127.0.0.1, as DNS would pin a public host.
+
+    Yields:
+        The running server.
+    """
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    server = _McpServer()
+    yield server
+    server.close()
+
+
+def _proposer_relay(port: int) -> McpRelay:
+    """Return a ``[proposer]`` relay whose MCP file holds one ``search`` server that needs the key.
+
+    Args:
+        port: The MCP server's port.
+
+    Returns:
+        The relay.
+    """
+    server = McpServer(
+        name="search", url=f"http://{_MCP_HOST}:{port}/mcp", headers={"Authorization": "Bearer ${MCP_KEY}"}
+    )
+    return McpRelay(
+        "[proposer]",
+        RoleEnvironment(mcp=".mcp.json", mcp_servers=(server,)),
+        secrets={"MCP_KEY": _MCP_KEY},
+        secret_hosts={"MCP_KEY": _MCP_HOST},
+        allowed_hosts={"MCP_KEY": (_MCP_HOST,)},
+    )
+
+
+def test_a_box_uses_its_proposer_mcp_server_through_the_mailbox_relay(
+    gateway: ModelGateway, mcp_server: _McpServer
+) -> None:
+    """A box POSTs, keeps the session, reads a GET event stream and ends it, and never sees the key.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    store = _record_calls(gateway)
+    gateway.bind_sandbox(
+        SandboxBroker(
+            LocalSubprocessRuntime(),
+            image=IMAGE,
+            max_lifetime_seconds=30,
+            command_runner=ModelMailbox(gateway.dispatch_guest).run,
+        ),
+        image=IMAGE,
+        lifetime_seconds=30,
+    )
+    protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
+    descriptor = protected["_budget_gateway_descriptor"]
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    # The box's MCP client sends no Authorization: the proxy adds the relay token from its environment.
+    source = (
+        "import json, os, urllib.request\n"
+        "url=os.environ['OPENAI_BASE_URL']+'/mcp/search'\n"
+        "def call(method, body=None, session=None):\n"
+        "    headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'}\n"
+        "    if session: headers['Mcp-Session-Id']=session\n"
+        "    data=json.dumps(body).encode() if body is not None else None\n"
+        "    return urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=headers))\n"
+        "first=call('POST', {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}})\n"
+        "session=first.headers['Mcp-Session-Id']\n"
+        "out={'session': session, 'init': json.load(first), 'echo': first.headers.get('X-Echo')}\n"
+        "out['tool']=json.load(call('POST', {'jsonrpc':'2.0','id':2,'method':'tools/call',"
+        "'params':{'name':'lookup','arguments':{}}}, session))\n"
+        "stream=call('GET', session=session)\n"
+        "out['type']=stream.headers['Content-Type']\n"
+        "out['events']=stream.read().decode()\n"
+        "out['delete']=call('DELETE', session=session).status\n"
+        "print(json.dumps(out))\n"
+    )
+    runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
+    session = runtime.open(SandboxSpec(lifetime_seconds=30, image=IMAGE, network_disabled=True))
+    session.write_files({"check.py": source})
+    try:
+        result = session.run("python3 check.py", env={MCP_TOKEN_ENV: route["token"]}, timeout_seconds=25)
+    finally:
+        session.close()
+
+    assert result.ok, result.stderr
+    out = json.loads(result.stdout)
+    assert out["session"] == "session-1"
+    assert out["init"]["result"] == {"seen": "[REDACTED]"}
+    assert out["echo"] is None
+    assert out["tool"]["result"] == {"seen": "[REDACTED]"}
+    assert out["type"] == "text/event-stream"
+    assert out["events"] == "data: first\n\ndata: [REDACTED]\n\n"
+    assert out["delete"] == 204
+    assert _MCP_KEY not in result.stdout + result.stderr
+    assert mcp_server.requests == [
+        ("POST", "/mcp", ""),
+        ("POST", "/mcp", "session-1"),
+        ("GET", "/mcp", "session-1"),
+        ("DELETE", "/mcp", "session-1"),
+    ]
+    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert [(call["kind"], call["role"], call["target"], call["status"]) for call in calls] == [
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/initialize", "ok"),
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/lookup", "ok"),
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/", "ok"),
+        ("mcp", "proposer", f"search@{_MCP_HOST}:{mcp_server.port}/", "ok"),
+    ]
+    assert _MCP_KEY not in json.dumps(calls, default=str)
+    assert route["token"] not in json.dumps(calls, default=str)
+
+
+# APP_TEST_CODEX can point at the pinned install (npm i @openai/codex@<CODEX_VERSION>).
+_CODEX = os.environ.get("APP_TEST_CODEX") or shutil.which("codex")
+
+
+class _ToolMcpServer:
+    """Serve an MCP streamable HTTP server with one ``lookup`` tool, as a real client expects."""
+
+    def __init__(self) -> None:
+        """Start the server on a free loopback port."""
+        self.methods: list[str] = []
+        mcp = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Answer initialize, tools/list and tools/call, and refuse the optional GET stream."""
+
+            def log_message(self, format: str, *args: object) -> None:
+                """Keep the test output quiet."""
+
+            def _reply(self, status: int, payload: dict[str, Any] | None = None) -> None:
+                """Send one JSON answer inside the session.
+
+                Args:
+                    status: HTTP status.
+                    payload: JSON-RPC answer, or ``None`` for an empty body.
+                """
+                body = json.dumps(payload).encode() if payload is not None else b""
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Mcp-Session-Id", "session-1")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:
+                """Answer one JSON-RPC message."""
+                message = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                method = message.get("method", "")
+                mcp.methods.append(method)
+                if "id" not in message:
+                    self._reply(202)
+                    return
+                if method == "initialize":
+                    result: dict[str, Any] = {
+                        "protocolVersion": message["params"].get("protocolVersion", "2025-06-18"),
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "search", "version": "1.0.0"},
+                    }
+                elif method == "tools/list":
+                    schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+                    result = {"tools": [{"name": "lookup", "description": "Look a word up.", "inputSchema": schema}]}
+                elif method == "tools/call":
+                    result = {"content": [{"type": "text", "text": "lookup-answer-7"}], "isError": False}
+                else:
+                    result = {}
+                self._reply(200, {"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+            def do_GET(self) -> None:
+                """Refuse the optional server event stream, as the MCP spec permits."""
+                mcp.methods.append("GET")
+                self.send_response(405)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_DELETE(self) -> None:
+                """End the session."""
+                mcp.methods.append("DELETE")
+                self.send_response(204)
+                self.end_headers()
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_port
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _responses_turn(body: dict[str, Any]) -> bytes:
+    """Answer one Responses API turn: call the ``lookup`` tool, then finish once its output is back.
+
+    Args:
+        body: The model request Codex sent.
+
+    Returns:
+        The turn as server-sent events.
+    """
+    if any(item.get("type") == "function_call_output" for item in body.get("input", [])):
+        item: dict[str, Any] = {
+            "type": "message",
+            "id": "m1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "done"}],
+        }
+    else:
+        # Newer Codex groups a server's tools under one namespace; older Codex lists each as mcp__<server>__<tool>.
+        tool = next(tool for tool in body.get("tools", []) if "lookup" in json.dumps(tool))
+        item = {"type": "function_call", "id": "f1", "call_id": "c1", "arguments": json.dumps({"query": "word"})}
+        if tool.get("type") == "namespace":
+            item.update(namespace=tool["name"], name="lookup")
+        else:
+            item["name"] = tool["name"]
+    usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    events = [
+        {"type": "response.created", "response": {"id": "r1"}},
+        {"type": "response.output_item.done", "item": item},
+        {"type": "response.completed", "response": {"id": "r1", "usage": usage}},
+    ]
+    return b"".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode() for event in events)
+
+
+@pytest.mark.skipif(_CODEX is None, reason="codex is not installed")
+def test_installed_codex_lists_and_calls_a_proposer_mcp_tool_through_the_box_relay(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drive the real Codex in a mailbox box: it lists and calls the [proposer] tool through the relay (SKY-610).
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        monkeypatch: Pins the test host to 127.0.0.1, as DNS would pin a public host.
+        tmp_path: Home for the box's Codex state.
+    """
+    assert _CODEX is not None
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    server = _ToolMcpServer()
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_proposer_relay(server.port))
+    model_requests: list[dict[str, Any]] = []
+
+    def dispatch(token: str, path: str, body: Any, headers: dict[str, str]) -> ModelHTTPResult:
+        """Send MCP paths to the gateway relay, and answer model paths with a scripted Codex turn."""
+        if path.startswith(MCP_PATH):
+            return gateway.dispatch_guest(token, path, body, headers)
+        model_requests.append(body)
+        return ModelHTTPResult(200, "text/event-stream", _responses_turn(body))
+
+    launch = build_launch(
+        BlackboxTarget(kind="agent", harness="codex", model="fake-model"),
+        GatewayConfig(url="http://127.0.0.1:9/v1", api_key="k"),
+        protected=True,
+        mcp_servers=("search",),
+    )
+    driver = (
+        "import json, pathlib, harness_bridge\n"
+        "proposer=json.loads(pathlib.Path('proposer.json').read_text())\n"
+        "outcome=harness_bridge.run_session(proposer, workspace=pathlib.Path('work'), prompt='Look the word up.',"
+        " model='fake-model', session_dir=pathlib.Path('session'), timeout_seconds=120, api_key='k')\n"
+        "print(json.dumps({'code': outcome.returncode, 'stderr': outcome.stderr[-2000:]}))\n"
+    )
+    session = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=150, image=IMAGE))
+    session.write_files(
+        {
+            "harness_bridge.py": Path(harness_bridge.__file__).read_text(),
+            "proposer.json": json.dumps(launch_payload(launch)),
+            "drive.py": driver,
+        }
+    )
+    path = f"{Path(_CODEX).parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    try:
+        result = ModelMailbox(dispatch).run(
+            session,
+            "python3 drive.py",
+            env={MCP_TOKEN_ENV: route["token"], "PATH": path, "HOME": str(tmp_path)},
+            timeout_seconds=140,
+        )
+    finally:
+        session.close()
+        server.close()
+
+    assert result.ok, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1])["code"] == 0
+    assert {"initialize", "tools/list", "tools/call"} <= set(server.methods)
+    outputs = [
+        item["output"]
+        for request in model_requests
+        for item in request.get("input", [])
+        if item.get("type") == "function_call_output"
+    ]
+    assert any("lookup-answer-7" in json.dumps(output) for output in outputs)
+    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert f"search@{_MCP_HOST}:{server.port}/lookup" in [call["target"] for call in calls]
+    assert _MCP_KEY not in json.dumps(model_requests) + json.dumps(calls, default=str)
+
+
+def test_the_mcp_relay_records_each_call_under_the_run_and_the_tagged_candidate(
+    gateway: ModelGateway, mcp_server: _McpServer
+) -> None:
+    """An HTTP MCP call writes one record with the run id and the candidate its usage tags name.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    tags = with_tags_header({}, {"candidate": "7", "lane": "gepa"})
+
+    reply = httpx.post(
+        f"{route['url']}/mcp/search",
+        headers={"Authorization": f"Bearer {route['token']}", **tags},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        trust_env=False,
+    )
+
+    assert reply.status_code == 200
+    assert reply.headers["Mcp-Session-Id"] == "session-1"
+    assert "X-Echo" not in reply.headers
+    assert _MCP_KEY not in reply.text
+    [call] = store.list_calls("job-1", "gepa:7")
+    assert (call["kind"], call["role"], call["status"]) == ("mcp", "proposer", "ok")
+    assert store.list_calls("job-1", NO_CANDIDATE_ID) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("other", "MCP server 'other' is not in .mcp.json, the [proposer] MCP file. Add it there."),
+        ("..%2F_sandbox", "MCP server '../_sandbox' is not in .mcp.json"),
+        ("search%3Fx", "MCP server 'search?x' is not in .mcp.json"),
+    ],
+)
+def test_the_mcp_relay_refuses_a_server_outside_the_role_file(
+    gateway: ModelGateway, mcp_server: _McpServer, name: str, message: str
+) -> None:
+    """A server of another file, or a path that tries to leave the prefix, gets a 403 that names the file.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        name: The server segment the box asks for.
+        message: The start of the refusal.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+
+    reply = httpx.post(
+        f"{route['url']}/mcp/{name}",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        trust_env=False,
+    )
+
+    assert reply.status_code == 403
+    assert reply.json()["error"]["message"].startswith(message)
+    assert mcp_server.requests == []
+    [call] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (call["kind"], call["role"], call["status"]) == ("mcp", "proposer", "refused")
+    assert call["failure_reason"].startswith(message)
+
+
+def test_an_mcp_relay_token_of_another_run_opens_nothing(gateway: ModelGateway, mcp_server: _McpServer) -> None:
+    """Another run's relay token, and a model route token, get a 401 here, and nothing reaches the server.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    store = _record_calls(gateway)
+    gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    other = ModelGateway(gateway.runtime)
+    try:
+        foreign = other.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    finally:
+        other.close()
+    model = gateway.register(
+        model="fixture/text", api_key="upstream-secret", role="task", policy=ChargePolicy("managed_model")
+    )
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+
+    for token in (foreign["token"], model["token"], "not-a-token"):
+        reply = httpx.post(
+            f"{gateway.url}/mcp/search", headers={"Authorization": f"Bearer {token}"}, json=body, trust_env=False
+        )
+        assert reply.status_code == 401
+        with pytest.raises(ValueError, match="Unknown scoped MCP relay route"):
+            gateway.dispatch_guest(token, "/v1/mcp/search", json.dumps(body).encode(), {})
+    with pytest.raises(ValueError, match="parent box reaches only"):
+        gateway.dispatch_route(foreign["token"], "/v1/mcp/search", body, {})
+    assert mcp_server.requests == []
+    assert store.list_calls("job-1", NO_CANDIDATE_ID) == []
+
+
+def test_the_forwarder_passes_mcp_methods_session_and_event_streams_to_the_gateway(
+    gateway: ModelGateway, mcp_server: _McpServer
+) -> None:
+    """The scoped relay forwards the raw body, the method and the session header, and streams a GET.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+    """
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    dispatch = model_forwarder({MCP_RELAY_ROUTE_KEY: route})
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).encode()
+
+    first = dispatch(route["token"], "/v1/mcp/search", body, {METHOD_HEADER: "POST"})
+    session = {"mcp-session-id": dict(first.headers)["mcp-session-id"]}
+    stream = dispatch(route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", **session})
+    events = first.body + b"".join(stream.stream)
+    ended = dispatch(route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "DELETE", **session})
+
+    assert (first.status, stream.status, ended.status) == (200, 200, 204)
+    assert stream.content_type == "text/event-stream"
+    assert b"data: first" in events
+    assert _MCP_KEY.encode() not in events
+    assert [request[0] for request in mcp_server.requests] == ["POST", "GET", "DELETE"]
+    with pytest.raises(ValueError, match="unknown metered model capability"):
+        dispatch(route["token"], "/v1/chat/completions", {"model": "fixture/text"}, {})
+
+
+def test_a_listener_closed_before_it_reads_frees_its_stream_place(mcp_server: _McpServer) -> None:
+    """Closing an event stream that nobody read frees its place, so a fifth listener still opens.
+
+    Args:
+        mcp_server: The echoing MCP server.
+    """
+    relay = _proposer_relay(mcp_server.port)
+
+    statuses = []
+    for _ in range(5):
+        answer = relay.dispatch("search", "GET", b"", {"mcp-session-id": "session-1"}, None)
+        statuses.append(answer.status)
+        assert answer.stream is not None
+        answer.stream.close()
+
+    assert statuses == [200] * 5
+
+
+def test_the_forwarder_closes_an_unread_gateway_stream(
+    gateway: ModelGateway, mcp_server: _McpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the forwarder's event stream before any read closes its gateway connection once.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        monkeypatch: Counts the connection closes.
+    """
+    closes: list[bool] = []
+    close = scoped_relay._close_gateway_stream
+
+    def counted(client: httpx.Client, response: httpx.Response) -> None:
+        """Close the connection and count it.
+
+        Args:
+            client: The client that holds the connection.
+            response: The open event stream.
+        """
+        close(client, response)
+        closes.append(response.is_closed)
+
+    monkeypatch.setattr(scoped_relay, "_close_gateway_stream", counted)
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+    dispatch = model_forwarder({MCP_RELAY_ROUTE_KEY: route})
+
+    answer = dispatch(route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", "mcp-session-id": "session-1"})
+    assert answer.stream is not None
+    answer.stream.close()
+    answer.stream.close()
+
+    assert closes == [True]
+
+
+class _Pings:
+    """Keep an MCP event stream alive with a ping every 50 ms, as a server may, and note when it closes."""
+
+    def __init__(self) -> None:
+        """Start with the stream open."""
+        self.closed_at: float | None = None
+
+    def __iter__(self) -> _Pings:
+        """Return the stream as its own iterator."""
+        return self
+
+    def __next__(self) -> bytes:
+        """Return the next ping.
+
+        Returns:
+            One ping comment.
+
+        Raises:
+            StopIteration: When the stream is closed.
+        """
+        if self.closed_at is not None:
+            raise StopIteration
+        time.sleep(0.05)
+        return b": ping\n\n"
+
+    def close(self) -> None:
+        """Close the stream, once."""
+        if self.closed_at is None:
+            self.closed_at = time.monotonic()
+
+
+def test_the_mailbox_stops_a_pinged_stream_when_the_box_reader_leaves() -> None:
+    """A box that stops reading a pinged event stream makes the parent close it while the command still runs."""
+    pings = _Pings()
+
+    def dispatch(token: str, path: str, body: Any, headers: dict[str, str]) -> ModelHTTPResult:
+        """Answer the GET with an endless pinged stream.
+
+        Args:
+            token: The relay token.
+            path: The MCP path.
+            body: The raw body.
+            headers: The request headers.
+
+        Returns:
+            The stream answer.
+        """
+        assert path == "/v1/mcp/search"
+        return ModelHTTPResult(200, "text/event-stream", b"", stream=pings)
+
+    source = (
+        "import os, socket, time, urllib.parse\n"
+        "url=urllib.parse.urlsplit(os.environ['OPENAI_BASE_URL'])\n"
+        "sock=socket.create_connection((url.hostname, url.port))\n"
+        "sock.sendall(b'GET /v1/mcp/search HTTP/1.1\\r\\nHost: x\\r\\nAccept: text/event-stream\\r\\n\\r\\n')\n"
+        "print(b'ping' in sock.recv(4096) or b'ping' in sock.recv(4096), flush=True)\n"
+        "sock.close()\n"
+        "time.sleep(4)\n"
+    )
+    session = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=30))
+    session.write_files({"check.py": source})
+    try:
+        result = ModelMailbox(dispatch).run(session, "python3 check.py", timeout_seconds=25)
+        ended = time.monotonic()
+    finally:
+        session.close()
+
+    assert result.ok, result.stderr
+    assert result.stdout.strip() == "True"
+    assert pings.closed_at is not None
+    assert pings.closed_at < ended - 1
+
+
+def test_a_quiet_upstream_stream_ends_cleanly_at_the_gateway(
+    gateway: ModelGateway, mcp_server: _McpServer, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An event stream whose server goes quiet past the read timeout ends without a handler traceback.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        mcp_server: The echoing MCP server.
+        monkeypatch: Shortens the relay's read timeout.
+        capfd: Captures the handler's error output.
+    """
+    monkeypatch.setattr(scoped_relay, "_SERVICE_TIMEOUT_SECONDS", 0.5)
+    mcp_server.hold = 3.0
+    route = gateway.bind_mcp_relay(_proposer_relay(mcp_server.port))
+
+    with httpx.stream(
+        "GET",
+        f"{route['url']}/mcp/search",
+        headers={"Authorization": f"Bearer {route['token']}", "Mcp-Session-Id": "session-1"},
+        trust_env=False,
+        timeout=10,
+    ) as reply:
+        events = reply.read()
+
+    assert reply.status_code == 200
+    assert events == b"data: first\n\n"
+    assert "Traceback" not in capfd.readouterr().err
+    answer = gateway.dispatch_guest(
+        route["token"], "/v1/mcp/search", b"", {METHOD_HEADER: "GET", "mcp-session-id": "session-1"}
+    )
+    assert answer.status == 200
+    assert answer.stream is not None
+    answer.stream.close()
+
+
+_SERVICE_KEY = "service-secret-value-5151"
+_SERVICE_HOST = "svc.example.test"
+
+
+class _EchoService:
+    """Serve a small HTTP service that echoes each request, the key it gets included, back to the caller."""
+
+    def __init__(self) -> None:
+        """Start the service on a free loopback port."""
+        self.requests: list[tuple[str, str]] = []
+        service = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Echo the method, path, headers and body as JSON, and redirect ``/api/redirect``."""
+
+            def log_message(self, format: str, *args: object) -> None:
+                """Keep the test output quiet."""
+
+            def _echo(self) -> None:
+                """Answer with the request as JSON, and the key in a response header too."""
+                service.requests.append((self.command, self.path))
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+                if self.path == "/api/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/api/landed")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                payload = json.dumps(
+                    {"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("X-Echo", self.headers.get("Authorization", ""))
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self) -> None:
+                """Echo a GET."""
+                self._echo()
+
+            def do_POST(self) -> None:
+                """Echo a POST."""
+                self._echo()
+
+            def do_PUT(self) -> None:
+                """Echo a PUT."""
+                self._echo()
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_port
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop the service."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def echo_service(monkeypatch: pytest.MonkeyPatch) -> Iterator[_EchoService]:
+    """Start the echoing service and let the relay reach its test host on loopback.
+
+    Args:
+        monkeypatch: Pins the test host to 127.0.0.1, as DNS would pin a public host.
+
+    Yields:
+        The running service.
+    """
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    service = _EchoService()
+    yield service
+    service.close()
+
+
+def _service_relay(port: int) -> McpRelay:
+    """Return a ``[proposer]`` relay that lists the ``echo`` service but not ``other``.
+
+    Args:
+        port: The echoing service's port.
+
+    Returns:
+        The relay.
+    """
+    url = f"http://{_SERVICE_HOST}:{port}/api"
+    return McpRelay(
+        "[proposer]",
+        RoleEnvironment(services=("echo",)),
+        secrets={"SVC_KEY": _SERVICE_KEY},
+        secret_hosts={"SVC_KEY": _SERVICE_HOST},
+        allowed_hosts={"SVC_KEY": (_SERVICE_HOST,)},
+        services={
+            "echo": ServiceSpec(secrets=("SVC_KEY",), url=url, headers={"Authorization": "Bearer ${SVC_KEY}"}),
+            "other": ServiceSpec(url=url),
+        },
+    )
+
+
+def test_a_box_calls_its_proposer_service_through_the_mailbox_relay(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """A box reaches only its listed service at a loopback url, never sees the key, and gets redirects unfollowed.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    store = _record_calls(gateway)
+    gateway.bind_sandbox(
+        SandboxBroker(
+            LocalSubprocessRuntime(),
+            image=IMAGE,
+            max_lifetime_seconds=30,
+            command_runner=ModelMailbox(gateway.dispatch_guest).run,
+        ),
+        image=IMAGE,
+        lifetime_seconds=30,
+    )
+    protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
+    descriptor = protected["_budget_gateway_descriptor"]
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    source = (
+        "import json, os, urllib.error, urllib.request\n"
+        "class Keep(urllib.request.HTTPRedirectHandler):\n"
+        "    def redirect_request(self, *args, **kwargs):\n"
+        "        return None\n"
+        "opener=urllib.request.build_opener(Keep)\n"
+        "url=os.environ['SKYNET_SERVICE_ECHO_URL']\n"
+        "def call(address, method='GET', data=None):\n"
+        "    request=urllib.request.Request(address, data=data, method=method, headers={'X-Custom':'yes'})\n"
+        "    try:\n"
+        "        reply=opener.open(request)\n"
+        "    except urllib.error.HTTPError as error:\n"
+        "        reply=error\n"
+        "    return {'status':reply.status,'headers':dict(reply.headers),'body':reply.read().decode()}\n"
+        "out={'url':url,'post':call(url+'lookup?q=1','POST',b'{\"a\": 1}'),'redirect':call(url+'redirect')}\n"
+        "base=url.rsplit('/echo/',1)[0]\n"
+        "out['other']=call(base+'/other/')\n"
+        "out['missing']=call(base+'/missing/')\n"
+        "print(json.dumps(out))\n"
+    )
+    runtime = RemoteSandboxRuntime(descriptor["url"], descriptor["control_token"])
+    session = runtime.open(SandboxSpec(lifetime_seconds=30, image=IMAGE, network_disabled=True))
+    session.write_files({"check.py": source})
+    try:
+        result = session.run(
+            "python3 check.py", env={MCP_TOKEN_ENV: route["token"], SERVICES_ENV: '["echo"]'}, timeout_seconds=25
+        )
+    finally:
+        session.close()
+
+    assert result.ok, result.stderr
+    out = json.loads(result.stdout)
+    assert out["url"].startswith("http://127.0.0.1:")
+    assert out["url"].endswith("/v1/service/echo/")
+    post = out["post"]
+    echoed = json.loads(post["body"])
+    sent = {key.lower(): value for key, value in echoed["headers"].items()}
+    assert post["status"] == 200
+    assert (echoed["method"], echoed["path"], echoed["body"]) == ("POST", "/api/lookup?q=1", '{"a": 1}')
+    assert sent["authorization"] == "[REDACTED]"
+    assert sent["x-custom"] == "yes"
+    assert not {METHOD_HEADER, MODEL_ATTEMPT_HEADER, USAGE_TAGS_HEADER} & set(sent)
+    assert post["headers"]["X-Echo"] == "[REDACTED]"
+    assert out["redirect"]["status"] == 302
+    assert out["redirect"]["headers"]["Location"] == "/api/landed"
+    assert out["other"]["status"] == 403
+    assert "Add it: [proposer] services" in out["other"]["body"]
+    assert out["missing"]["status"] == 404
+    assert "Add a [services.missing] table" in out["missing"]["body"]
+    assert echo_service.requests == [("POST", "/api/lookup?q=1"), ("GET", "/api/redirect")]
+    assert _SERVICE_KEY not in result.stdout + result.stderr
+    assert route["token"] not in result.stdout
+    calls = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert [(call["kind"], call["role"], call["target"], call["status"]) for call in calls] == [
+        ("host", "proposer", _SERVICE_HOST, "ok"),
+        ("host", "proposer", _SERVICE_HOST, "ok"),
+        ("host", "proposer", "other", "refused"),
+        ("host", "proposer", "missing", "refused"),
+    ]
+    assert _SERVICE_KEY not in json.dumps(calls, default=str)
+    assert route["token"] not in json.dumps(calls, default=str)
+
+
+def test_a_service_call_is_recorded_under_the_tagged_candidate(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """An HTTP service call writes one record with the run id and the candidate its usage tags name.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    tags = with_tags_header({}, {"candidate": "7", "lane": "gepa"})
+
+    reply = httpx.get(
+        f"{route['url']}/service/echo/item",
+        headers={"Authorization": f"Bearer {route['token']}", **tags},
+        trust_env=False,
+    )
+
+    assert reply.status_code == 200
+    assert reply.json()["path"] == "/api/item"
+    assert _SERVICE_KEY not in reply.text
+    [call] = store.list_calls("job-1", "gepa:7")
+    assert (call["kind"], call["role"], call["status"]) == ("host", "proposer", "ok")
+    assert store.list_calls("job-1", NO_CANDIDATE_ID) == []
+
+
+def test_the_forwarder_passes_a_service_method_and_body_to_the_gateway(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """The scoped relay forwards a service PUT with its raw body, and refuses a path that leaves the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    dispatch = model_forwarder({MCP_RELAY_ROUTE_KEY: route})
+
+    answer = dispatch(route["token"], "/v1/service/echo/item", b"raw bytes", {METHOD_HEADER: "PUT"})
+
+    echoed = json.loads(answer.body)
+    assert answer.status == 200
+    assert (echoed["method"], echoed["path"], echoed["body"]) == ("PUT", "/api/item", "raw bytes")
+    assert _SERVICE_KEY.encode() not in answer.body
+    with pytest.raises(ValueError, match="outside the service relay"):
+        dispatch(route["token"], "/v1/service/echo/../x", b"", {METHOD_HEADER: "GET"})
+    assert echo_service.requests == [("PUT", "/api/item")]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/service/echo/../x",
+        "/v1/service/echo/a/%2e%2e/x",
+        "/v1/service/echo/%2E%2E",
+        "/v1/service/echo/%252e%252e/x",
+        "/v1/service/echo/./x",
+        "/v1/service/echo/..\\x",
+        "/v1/service/echo/..%5cx",
+        "/v1/service/echo/..;/x",
+        "/v1/service/echo/x/..%5c..%5cadmin",
+        "/v1/service/echo/..%00/admin",
+        "/v1/service/echo/a;b",
+        "/v1/service/echo/..%3F",
+        "/v1/service/echo/..%3Fx",
+        "/v1/service/echo/..%253F/x",
+        "/v1/service/echo/..%23",
+        "/v1/service/echo/..%2523",
+        "/v1/service/echo/x/..%3F/..%3F",
+        "/v1/service/echo/%c0%ae%c0%ae/x",
+        "/v1/service/echo/a%20b",
+        "/v1/service/echo/%EF%BC%8E%EF%BC%8E/x",
+    ],
+)
+def test_the_mailbox_path_refuses_a_service_path_that_leaves_the_service(
+    gateway: ModelGateway, echo_service: _EchoService, path: str
+) -> None:
+    """A dot segment, raw or percent-encoded, gets a 400 and a refused record, and never reaches the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+        path: The path the box asks for.
+    """
+    store = _record_calls(gateway)
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+
+    answer = gateway.dispatch_guest(route["token"], path, b"", {METHOD_HEADER: "GET"})
+
+    assert answer.status == 400
+    assert b"a path outside its url" in answer.body
+    assert echo_service.requests == []
+    [call] = store.list_calls("job-1", NO_CANDIDATE_ID)
+    assert (call["kind"], call["role"], call["target"], call["status"]) == ("host", "proposer", "echo", "refused")
+
+
+def test_the_mailbox_path_reaches_a_sub_path_and_drops_encoding_and_range(
+    gateway: ModelGateway, echo_service: _EchoService
+) -> None:
+    """A deeper path under the service passes; the guest's accept-encoding and range never reach the service.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+        echo_service: The echoing service.
+    """
+    route = gateway.bind_mcp_relay(_service_relay(echo_service.port))
+    headers = {METHOD_HEADER: "GET", "Accept-Encoding": "x-guest-encoding", "Range": "bytes=0-3", "X-Custom": "yes"}
+
+    answer = gateway.dispatch_guest(route["token"], "/v1/service/echo/v2/a..b/item.json", b"", headers)
+
+    echoed = json.loads(answer.body)
+    sent = {key.lower(): value for key, value in echoed["headers"].items()}
+    assert answer.status == 200
+    assert echoed["path"] == "/api/v2/a..b/item.json"
+    assert "range" not in sent
+    assert "x-guest-encoding" not in sent.get("accept-encoding", "")
+    assert sent["x-custom"] == "yes"
+    assert _SERVICE_KEY.encode() not in answer.body
+
+
+def test_the_box_service_variable_matches_the_runner() -> None:
+    """The box proxy names each service variable as the runner does, so a role's code reads one name everywhere."""
+    for name in ("echo", "geo-coder", "maps.v2"):
+        assert guest_model_proxy.service_env_name(name) == runner.service_env_name(name)

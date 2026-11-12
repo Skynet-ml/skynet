@@ -6,15 +6,19 @@ import { ArrowUpRight } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
 import { TERMS } from "@/shared/lib/terms";
-import { formatPercent, modelDisplayName, moduleLabel } from "@/shared/lib/formatters";
+import { formatPercent, modelDisplayName } from "@/shared/lib/formatters";
 import { getStatusLabel } from "@/shared/constants/job-status";
 import { StatusBadge } from "@/shared/ui/status-badge";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
 
 import type { AgentToolCall } from "@/shared/ui/agent/types";
+import { runHref, type ApiSource } from "@/shared/lib/api-route";
 
 import { ToolCallRow } from "./ToolCallRow";
 import { GainPill, StatTile, TypeBadge, computeGain } from "./result-card-atoms";
+
+/** Where the chat on view lives: a web chat's run links open the hosted run. */
+export const ChatSourceContext = React.createContext<ApiSource>("local");
 
 interface JobSummaryCardProps {
   call: AgentToolCall;
@@ -49,6 +53,7 @@ function buildSummary(job: OptimizationSummaryResponse | null, isRunning: boolea
 export function JobSummaryCard({ call }: JobSummaryCardProps) {
   const job = extractJob(call);
   const summary = buildSummary(job, call.status === "running");
+  const source = React.useContext(ChatSourceContext);
 
   if (!job) {
     return <ToolCallRow call={call} summary={summary} />;
@@ -66,7 +71,7 @@ export function JobSummaryCard({ call }: JobSummaryCardProps) {
           {job.name?.trim() || job.optimization_id.slice(0, 8)}
         </span>
         <StatusBadge status={job.status} compact />
-        <TypeBadge type={job.optimization_type} />
+        <TypeBadge />
       </div>
 
       {hasScore && (
@@ -88,11 +93,6 @@ export function JobSummaryCard({ call }: JobSummaryCardProps) {
       )}
 
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-        <StatTile
-          label={msg("auto.features.agent.panel.components.resultcards.module")}
-          value={job.module_name ? moduleLabel(job.module_name) : null}
-          valueDir="auto"
-        />
         <StatTile label={TERMS.optimizer} value={job.optimizer_name} valueDir="auto" />
         <StatTile
           label={TERMS.model}
@@ -113,7 +113,7 @@ export function JobSummaryCard({ call }: JobSummaryCardProps) {
       )}
 
       <Link
-        href={`/optimizations/${job.optimization_id}`}
+        href={runHref(job.optimization_id, source)}
         className="inline-flex items-center gap-1 text-[0.6875rem] font-medium text-foreground/70 transition-colors hover:text-foreground"
       >
         {msg("auto.features.agent.panel.components.resultcards.open")}

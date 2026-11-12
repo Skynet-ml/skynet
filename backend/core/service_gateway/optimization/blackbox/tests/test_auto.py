@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +16,7 @@ from gepa.oa.ensemble import optimize_best_of
 
 from core.billing.usage_tags import current_tags
 from core.exceptions import ServiceError
-from core.models.blackbox import BlackboxStrategy
+from core.models.blackbox import BlackboxLaneResult, BlackboxStrategy
 
 from ...budget_stop import BudgetReached
 from .. import auto
@@ -452,3 +453,78 @@ def test_single_engine_calls_carry_no_lane(tmp_path: Path, monkeypatch: pytest.M
     )
     assert ledger
     assert all("lane" not in tags for tags, _ in ledger)
+
+
+def test_auto_budget_stop_evidence_keeps_a_crashed_lane_out_of_strict_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lane that hands off the seed at -inf stores no score, so the stop evidence fits JSONB (SKY-367).
+
+    Args:
+        tmp_path: Artifact directory.
+        monkeypatch: Patch fixture.
+    """
+    crashed, stopping = AUTO_ENGINES[0], AUTO_ENGINES[-1]
+
+    class StoppingEngine(FixtureEngine):
+        """Rank by the mean of the scored cases, and stop the budget in one lane."""
+
+        def run(self, task: Any, server: Any, ctx: EngineContext | None = None) -> Any:
+            """Score each case, then return the version or stop the budget.
+
+            Args:
+                task: Scheduler-selected task.
+                server: Scoring allowance.
+                ctx: Run accounting context.
+
+            Returns:
+                The version at the mean of its scored cases, as an engine that fills null scores would.
+
+            Raises:
+                BudgetReached: In the stopping lane.
+            """
+            candidate = f"{task.seed_candidate}:{self.name}"
+            scores = [server.evaluate(candidate, {"i": i})[0] for i in range(2)]
+            if self.name == stopping:
+                raise BudgetReached("budget")
+            scored = [value for value in scores if value is not None]
+            return Result(candidate, sum(scored) / len(scored), len(scores))
+
+    def crash_one_lane(candidate: str, example: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise on case 1 of the crashed lane's version, else score as the fixture does.
+
+        Args:
+            candidate: Candidate containing the engine identifier.
+            example: Dataset example.
+
+        Returns:
+            Deterministic score and empty feedback.
+
+        Raises:
+            RuntimeError: On case 1 of the crashed lane's version.
+        """
+        if crashed in candidate and example == {"i": 1}:
+            raise RuntimeError("scorer bug")
+        return score(candidate, example)
+
+    monkeypatch.setattr(auto, "get_engine", lambda name, caps: StoppingEngine(name))
+    with pytest.raises(BudgetReached) as stopped:
+        auto.run_strategy(
+            BlackboxStrategy(),
+            Task("seed"),
+            EvalServer(crash_one_lane, max_evals=100),
+            make_ctx(str(tmp_path)),
+            caps=CAPS,
+        )
+
+    evidence = stopped.value.evidence
+    lanes = evidence["_lanes"]
+    stored = [
+        BlackboxLaneResult(engine=lane.engine, phase=lane.phase, status=lane.status, best_score=lane.best_score)
+        for lane in lanes
+    ]
+    json.dumps([row.model_dump(mode="json") for row in stored], allow_nan=False)
+    json.dumps(evidence["completed_lanes"], allow_nan=False)
+    assert next(lane for lane in lanes if lane.engine == crashed).best_score is None
+    assert crashed not in {row["engine"] for row in evidence["completed_lanes"]}
+    assert evidence["completed_lanes"]

@@ -37,7 +37,7 @@ from ....config import Settings, app_env, settings
 from ....exceptions import ServiceError
 from ....models.common import ModelConfig
 from ...language_models import usage_by_model_from_history
-from . import check_terminal, package_setup, runner, sandbox_log
+from . import package_setup, runner, sandbox_log
 from .agent_eval import gateway_from_settings
 from .harness import ENV_API_KEY
 from .heartbeat import heartbeat
@@ -47,7 +47,6 @@ from .sandbox import (
     SandboxRuntime,
     SandboxSession,
     SandboxSpec,
-    scorer_runtime_from_settings,
     unique_sandbox_name,
 )
 
@@ -56,9 +55,6 @@ logger = logging.getLogger(__name__)
 RUNNER_FILE = "app_runner.py"
 RUNNER_SOURCE = Path(runner.__file__).read_text(encoding="utf-8")
 CALLS_DIR = "calls"
-_DEFAULT_PROBE_TIMEOUT_SECONDS = 45.0
-# A probe's box only has to outlive one call plus interpreter start-up.
-_PROBE_LIFETIME_ALLOWANCE_SECONDS = 120.0
 # apt plus a few wheels finish in about a minute; a stalled mirror must not eat the box's lifetime.
 _INSTALL_TIMEOUT_SECONDS = 600.0
 DEPENDENCIES_DIR = ".app-dependencies"
@@ -195,8 +191,8 @@ def scorer_gateway(config: ModelConfig, settings: Settings) -> ScorerGateway:
 class ScorerUsage:
     """Token ledger for one scorer's ``llm()`` calls, shaped like a ``dspy.LM`` for the usage helpers.
 
-    ``model`` and ``history`` are all that ``usage_by_model_from_history``,
-    ``lm_call_count`` and the cost ceiling read off a language model.
+    ``model`` and ``history`` are all that ``usage_by_model_from_history``
+    and the cost ceiling read off a language model.
     """
 
     def __init__(self, model: str) -> None:
@@ -303,12 +299,17 @@ def _raise_control(result: Mapping[str, Any]) -> None:
     raise UsagePendingError(message)
 
 
+class _BoxClosedError(ServiceError):
+    """A parallel call closed the box while this call still ran in it."""
+
+
 class SandboxPythonScorer:
     """A python scorer that runs inside a sandbox: one box per job, one runner call per evaluation.
 
-    Calls are serialized; the engines' concurrency applies to agent targets,
-    which open their own boxes. ``usage`` is the ledger the run bills, or
-    ``None`` when the scorer has no model.
+    Calls share the box and run in parallel, each in its own call folder, so
+    the engines' ``max_concurrency`` bounds them. Only opening the box and
+    installing packages are serialized. ``usage`` is the ledger the run
+    bills, or ``None`` when the scorer has no model.
     """
 
     def __init__(
@@ -373,9 +374,9 @@ class SandboxPythonScorer:
         )
         self._session: SandboxSession | None = None
         self._calls = 0
+        # ``_lock`` guards the box and the dependency lock only; the calls
+        # themselves run outside it, and the counter only needs uniqueness.
         self._lock = threading.Lock()
-        # ``_lock`` serializes whole calls for the engines; the counter only
-        # needs uniqueness, so concurrent contract-check invokes use their own.
         self._calls_lock = threading.Lock()
         self.usage: ScorerUsage | None = ScorerUsage(gateway.billing_model) if gateway is not None else None
 
@@ -421,17 +422,27 @@ class SandboxPythonScorer:
             blocked = self._extend(candidate)
             if blocked is not None:
                 return ScorerProbeResult(score=None, side_info={}, error=blocked)
-            try:
-                result = self._invoke(payload)
-            except (ServiceError, BudgetError, UsagePendingError):
+            session = self._open()
+        try:
+            result = self._invoke(payload)
+        except _BoxClosedError:
+            if self._protected:
                 raise
-            except Exception:
-                if self._protected:
-                    raise
-                # The box died under us (lifetime reached, host recycled): one fresh box, one more try.
-                logger.warning("scorer sandbox failed; reopening", exc_info=True)
-                self._discard()
-                result = self._invoke(payload)
+            # A sibling call saw the box die and closed it; this call's result is lost with it.
+            logger.warning("scorer sandbox closed by a parallel call; retrying")
+            result = self._invoke(payload)
+        except (ServiceError, BudgetError, UsagePendingError):
+            raise
+        except Exception:
+            if self._protected:
+                raise
+            # The box died under us (lifetime reached, host recycled): one fresh box, one more try.
+            logger.warning("scorer sandbox failed; reopening", exc_info=True)
+            with self._lock:
+                # A parallel call may have reopened it already; that new box stays.
+                if self._session is session:
+                    self._discard()
+            result = self._invoke(payload)
         _raise_control(result)
         entries = list(result.get("usage") or [])
         if self.usage is not None:
@@ -462,8 +473,7 @@ class SandboxPythonScorer:
             "mode": "readiness",
             "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
         }
-        with self._lock:
-            result = self._invoke(payload)
+        result = self._invoke(payload)
         _raise_control(result)
         readiness = result.get("readiness")
         if result.get("error") or not isinstance(readiness, dict) or not readiness.get("ready"):
@@ -485,12 +495,15 @@ class SandboxPythonScorer:
             The runner's ``output.json`` content, or a timeout error in its shape.
 
         Raises:
+            _BoxClosedError: When a parallel call closed the box while this call ran.
             ServiceError: When the runner produced no output.
         """
-        session = self._open()
+        with self._lock:
+            session = self._open()
         with self._calls_lock:
             self._calls += 1
-            call_dir = f"{CALLS_DIR}/{self._calls:06d}"
+            number = self._calls
+        call_dir = f"{CALLS_DIR}/{number:06d}"
         started = time.perf_counter()
         session.write_files(
             {f"{call_dir}/{runner.INPUT_FILE}": json.dumps(payload, default=runner.side_info_json_default)}
@@ -511,8 +524,16 @@ class SandboxPythonScorer:
                 on_output=sandbox_log.ignore_output,
             )
         logger.debug(
-            "scorer call %d finished in %.1fs (exit %s)", self._calls, time.perf_counter() - started, result.exit_code
+            "scorer call %d finished in %.1fs (exit %s)", number, time.perf_counter() - started, result.exit_code
         )
+        text = None if result.timed_out else session.read_file(f"{call_dir}/{runner.OUTPUT_FILE}")
+        if text is None:
+            with self._lock:
+                closed = self._session is not session
+            # Closing the box kills this call's process (a false timeout) or loses its output
+            # file. A call that already wrote its output keeps it, so its model calls run once.
+            if closed:
+                raise _BoxClosedError(f"scorer sandbox call {number} lost its box to a parallel call")
         if result.timed_out:
             return {
                 "score": None,
@@ -520,7 +541,6 @@ class SandboxPythonScorer:
                 "error": f"scorer exceeded the {self._timeout_seconds:g}s timeout",
                 "usage": [],
             }
-        text = session.read_file(f"{call_dir}/{runner.OUTPUT_FILE}")
         if text is None:
             raise ServiceError(
                 f"scorer sandbox failed (exit {result.exit_code}): {_tail(result.stderr or result.stdout)}"
@@ -535,10 +555,8 @@ class SandboxPythonScorer:
             name = _sandbox_name(self._job_id)
             logger.info("scorer sandbox: opening %s (lifetime %.0fs)", name or "a box", self._spec.lifetime_seconds)
             opened = time.perf_counter()
-            check_terminal.note("box_opening")
             session = self._runtime.open(replace(self._spec, name=name))
             logger.info("scorer sandbox: ready in %.1fs", time.perf_counter() - opened)
-            check_terminal.note("box_ready", seconds=round(time.perf_counter() - opened, 1))
             try:
                 session.write_files({RUNNER_FILE: RUNNER_SOURCE, runner.CODE_FILE: self._code})
                 self._install(session)
@@ -656,56 +674,3 @@ class SandboxPythonScorer:
             self._session = None
             session.close()
             logger.info("scorer sandbox: closed after %d call(s)", self._calls)
-
-
-def probe_scorer(
-    *,
-    scorer_code: str,
-    candidate: Any,
-    case: Any = None,
-    scorer_model: dict[str, Any] | None = None,
-    timeout_seconds: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,
-    runtime: SandboxRuntime | None = None,
-    install_command: str | None = None,
-) -> ScorerProbeResult:
-    """Score one candidate with python scorer code in a throwaway sandbox.
-
-    A scorer that raised on the candidate is reported via
-    ``ScorerProbeResult.error`` — not as an exception from this function.
-    Infrastructure, budget, and pending-usage signals propagate to setup.
-
-    Args:
-        scorer_code: User-authored scorer source.
-        candidate: The version to score.
-        case: The case to score it on, if any.
-        scorer_model: Serialized ``ModelConfig`` for the scorer's ``llm()``
-            helper, if a model was chosen.
-        timeout_seconds: Longest the call may run.
-        runtime: Where the box is opened; the configured runtime when unset.
-        install_command: Shell command run once in the box before the call.
-
-    Returns:
-        The score and side information, or the scorer's error, plus what
-        its ``llm()`` calls consumed.
-
-    Raises:
-        ServiceError: When the gateway cannot be resolved or the box fails.
-        BudgetError: When covered funding does not permit the probe.
-        UsagePendingError: When execution or final runtime billing remains uncertain.
-    """
-    gateway = scorer_gateway(ModelConfig.model_validate(scorer_model), settings) if scorer_model else None
-    scorer = SandboxPythonScorer(
-        scorer_code,
-        runtime=runtime or scorer_runtime_from_settings(settings),
-        gateway=gateway,
-        timeout_seconds=timeout_seconds,
-        lifetime_seconds=timeout_seconds
-        + _PROBE_LIFETIME_ALLOWANCE_SECONDS
-        + (_INSTALL_TIMEOUT_SECONDS if (install_command or "").strip() else 0.0),
-        job_id="probe",
-        install_command=install_command,
-    )
-    try:
-        return scorer.run(candidate, case)
-    finally:
-        scorer.close()

@@ -26,11 +26,9 @@ const { sharedChatUrl } = await import("./share-link.ts");
 
 (globalThis as unknown as { window: unknown }).window = { location: { origin: "https://web.example.test" } };
 
-test("a chat link uses the page origin on hosted and the hosted app in the Mac app", () => {
+test("a chat link uses the page origin on hosted and no link in the Mac app", () => {
   env.__shareTestEnv.localMode = false;
   assert.equal(sharedChatUrl("tok/1"), "https://web.example.test/share/chat/tok%2F1");
   env.__shareTestEnv.localMode = true;
-  assert.equal(sharedChatUrl("tok"), "https://app.example.test/share/chat/tok");
-  env.__shareTestEnv.hostedAppUrl = "http://127.0.0.1:3000";
   assert.equal(sharedChatUrl("tok"), null);
 });

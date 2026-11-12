@@ -98,7 +98,7 @@ Un'esecuzione deve sapere quali colonne sono input e quale colonna è l'output a
 
 Nella procedura guidata di invio, il passaggio «Come leggere i dati» mostra ogni colonna con tre scelte:
 
-- **Input**: il programma riceve questo valore.
+- **Input**: il tuo scorer riceve questo valore in `case["input"]`.
 - **Output**: la risposta attesa con cui lo scorer confronta l'output.
 - **Salta**: l'esecuzione ignora questa colonna.
 

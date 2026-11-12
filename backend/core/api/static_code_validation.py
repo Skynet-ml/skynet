@@ -140,6 +140,11 @@ def inspect_signature(code: str) -> SignatureShape | None:
     )
 
 
+# ``metric`` is the retired DSPy entry point; the workspace metric and a
+# repository run's scorer both define ``score``, often beside helpers.
+METRIC_ENTRY_NAMES = frozenset({"metric", "score"})
+
+
 def inspect_metric(code: str) -> MetricShape:
     """Read the declared metric's positional interface without creating a callable.
 
@@ -154,18 +159,23 @@ def inspect_metric(code: str) -> MetricShape:
     """
     tree = _parse(code, "metric")
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
-    candidates = [node for node in functions if node.name == "metric"]
+    candidates = [node for node in functions if node.name in METRIC_ENTRY_NAMES]
     candidates.extend(
         statement.value
         for statement in tree.body
         if isinstance(statement, ast.Assign)
         and isinstance(statement.value, ast.Lambda)
-        and any(isinstance(target, ast.Name) and target.id == "metric" for target in statement.targets)
+        and any(isinstance(target, ast.Name) and target.id in METRIC_ENTRY_NAMES for target in statement.targets)
     )
     if not candidates and len(functions) == 1:
         candidates = functions
+    if len(candidates) > 1:
+        # Older metrics define ``metric`` beside a helper named ``score``.
+        named_metric = [node for node in functions if node.name == "metric"]
+        if len(named_metric) == 1:
+            candidates = named_metric
     if len(candidates) != 1:
-        raise StaticCodeError("metric_code must declare a callable named 'metric'.")
+        raise StaticCodeError("metric_code must declare a callable named 'metric' or 'score'.")
     function = candidates[0]
     if isinstance(function, ast.AsyncFunctionDef):
         raise StaticCodeError("The metric must be synchronous; async functions cannot supply a score directly.")

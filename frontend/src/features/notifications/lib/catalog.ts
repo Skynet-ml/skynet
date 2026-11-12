@@ -15,7 +15,6 @@ import type { MessageKey } from "@/shared/lib/messages";
 
 /** Grid row order: what needs the user first, product news last. */
 export const EVENT_TYPES: readonly NotificationEventType[] = [
-  "needs_input",
   "budget_near",
   "failed",
   "finished",
@@ -54,7 +53,7 @@ export function channelHeld(
  * Channels every server delivers on. Slack is live only where the server has
  * a Slack app set up; elsewhere its column stays visible and disabled.
  */
-export const LIVE_CHANNELS: ReadonlySet<GridChannel> = new Set(["inbox", "email", "chrome"]);
+const LIVE_CHANNELS: ReadonlySet<GridChannel> = new Set(["inbox", "email", "chrome"]);
 
 /** Whether a channel's column is usable on this server. */
 export function channelLive(channel: GridChannel, slackConfigured: boolean): boolean {
@@ -62,20 +61,19 @@ export function channelLive(channel: GridChannel, slackConfigured: boolean): boo
 }
 
 /**
- * In the Mac app, why a channel's column is off: the column stays visible
- * and disabled with this reason. Null when it works, or on a hosted server.
+ * Only native macOS delivery depends on local configuration. Account channels
+ * use hosted settings, even when the Mac has no local provider credentials.
  */
 export function localOffReason(
   channel: GridChannel,
   local: LocalNotificationChannels | null,
 ): MessageKey | null {
-  if (!local || channel === "inbox") return null;
+  if (!local || channel !== "macos") return null;
   return local.channels[channel] === false ? "notifications.local.not_configured" : null;
 }
 
 /**
- * Whether a cell shows as on. In the Mac app a channel that is not set up
- * shows off, but the saved value stays, so it is back on once set up.
+ * Preserve hosted preferences. Only unavailable native delivery shows off.
  */
 export function cellShownOn(
   stored: boolean,
@@ -86,27 +84,31 @@ export function cellShownOn(
 }
 
 /**
- * The message keys of a column header's tooltip, joined with ": ". Hosted
- * keeps its own wording for an unset Slack; the Mac app names the channel
- * and why it is off.
+ * Whether the grid's Slack cells take effect. Only the web account holds the
+ * Slack install, so a grid on the Mac's own side (Local picked, or no link)
+ * never posts to Slack.
+ */
+export function slackGridReady(slackConfigured: boolean, localGrid: boolean): boolean {
+  return slackConfigured && !localGrid;
+}
+
+/**
+ * Use hosted Slack availability and local native delivery availability.
  */
 export function channelHeaderTip(
   channel: GridChannel,
   slackReady: boolean,
   local: LocalNotificationChannels | null,
+  localGrid = false,
 ): MessageKey[] {
-  if (!local) {
+  if (channel === "slack" && localGrid) return ["notifications.slack.local_grid"];
+  if (channel !== "macos") {
     return channelLive(channel, slackReady)
       ? [CHANNEL_KEYS[channel]]
       : ["notifications.slack.unavailable"];
   }
   const off = localOffReason(channel, local);
   return off ? [CHANNEL_KEYS[channel], off] : [CHANNEL_KEYS[channel]];
-}
-
-/** In the Mac app, the columns that are not set up on this Mac, in column order. */
-export function localOffChannels(local: LocalNotificationChannels | null): GridChannel[] {
-  return LOCAL_CHANNELS.filter((channel) => localOffReason(channel, local) !== null);
 }
 
 /**
@@ -116,19 +118,6 @@ export function localOffChannels(local: LocalNotificationChannels | null): GridC
 export function maybeLocalHost(hostname: string): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
 }
-
-/** Urgent events skip the hold and go out at once on every enabled channel. */
-export const URGENT_EVENTS: ReadonlySet<NotificationEventType> = new Set([
-  "needs_input",
-  "budget_near",
-]);
-
-export const FOCUSED_EVENTS: ReadonlySet<NotificationEventType> = new Set([
-  "needs_input",
-  "budget_near",
-  "failed",
-  "finished",
-]);
 
 /** Whether a grid cell exists at all: product news only ever lands in the inbox. */
 export function cellExists(event: NotificationEventType, channel: GridChannel): boolean {
@@ -144,15 +133,11 @@ export function cellEditable(
 ): boolean {
   // News is always in the inbox: the backend adds every entry for every user.
   if (event === "product_news") return false;
-  if (local) return localOffReason(channel, local) === null;
+  if (channel === "macos") return local !== null && localOffReason(channel, local) === null;
   return channelLive(channel, slackConfigured);
 }
 
 export const EVENT_KEYS: Record<NotificationEventType, { label: MessageKey; tip: MessageKey }> = {
-  needs_input: {
-    label: "notifications.event.needs_input",
-    tip: "notifications.event.needs_input_tip",
-  },
   budget_near: {
     label: "notifications.event.budget_near",
     tip: "notifications.event.budget_near_tip",
@@ -229,16 +214,12 @@ export function itemLine(item: NotificationItem, fmt: FactFormatters): ItemLine 
         ? { key: "notifications.item.stuck_plain", params: {} }
         : { key: "notifications.item.stuck", params: { score: fmt.score(score) } };
     case "budget_near":
-    case "needs_input": {
-      const base = item.event_type;
-      if (spent === null || limit === null) {
-        return { key: `notifications.item.${base}_plain` as MessageKey, params: {} };
-      }
-      return {
-        key: `notifications.item.${base}` as MessageKey,
-        params: { spent: fmt.usd(spent), limit: fmt.usd(limit) },
-      };
-    }
+      return spent === null || limit === null
+        ? { key: "notifications.item.budget_near_plain", params: {} }
+        : {
+            key: "notifications.item.budget_near",
+            params: { spent: fmt.usd(spent), limit: fmt.usd(limit) },
+          };
     case "shared": {
       const actor = typeof facts.actor === "string" && facts.actor ? facts.actor : null;
       if (!actor) return { key: "notifications.item.shared_plain", params: {} };

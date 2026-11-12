@@ -7,6 +7,8 @@ import io
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -18,6 +20,7 @@ import time
 import urllib.parse
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +42,7 @@ from core.billing.host_agent import (
     host_agent_failure,
     host_cli_argv,
     host_proposer,
+    host_reasoning_effort,
     run_host_agent,
 )
 from core.billing.model_gateway import ModelGateway
@@ -264,6 +268,100 @@ def test_unknown_permission_is_refused(tmp_path: Path) -> None:
     """A permission outside the table never reaches a CLI."""
     with pytest.raises(host_agent.HostAgentRequestError):
         host_cli_argv("claude", "root", "bin", tmp_path, None)
+
+
+_HIGH_EFFORT_FLAGS = [("codex", ["-c", 'model_reasoning_effort="high"']), ("claude", ["--effort", "high"])]
+
+
+@pytest.mark.parametrize(("cli", "flags"), _HIGH_EFFORT_FLAGS)
+def test_argv_passes_the_effort_the_way_each_cli_reads_it(cli: str, flags: list[str], tmp_path: Path) -> None:
+    """Codex exec takes the effort as a config override, Claude Code as its --effort flag.
+
+    Args:
+        cli: The host CLI.
+        flags: The arguments that carry the effort.
+        tmp_path: Workspace parent.
+    """
+    plain = host_cli_argv(cli, "full_access", "bin", tmp_path, "m")  # type: ignore[arg-type]
+    chosen = host_cli_argv(cli, "full_access", "bin", tmp_path, "m", effort="high")  # type: ignore[arg-type]
+
+    assert chosen == [*plain, *flags]
+
+
+@pytest.mark.parametrize(
+    ("cli", "model", "effort", "expected"),
+    [
+        ("codex", "subscription/codex/openai/gpt-6.1-sol", "xhigh", "xhigh"),
+        ("claude", "subscription/claude/anthropic/claude-opus-5.5", "max", "max"),
+        # Opus 4.5 tops out at high, so Max runs there.
+        ("claude", "anthropic/claude-opus-4.5", "max", "high"),
+        ("claude", "anthropic/claude-opus-4.5", "xhigh", None),
+        # Sonnet 4.5 takes no effort at all.
+        ("claude", "anthropic/claude-sonnet-4.5", "high", None),
+        ("codex", "subscription/codex/openai/gpt-6.1-sol", "minimal", None),
+        # The CLI's own default model has no known levels.
+        ("codex", "", "high", None),
+        ("codex", "subscription/codex/openai/gpt-6.1-sol", None, None),
+    ],
+)
+def test_effort_keeps_only_levels_the_cli_takes_for_the_model(
+    cli: str, model: str, effort: str | None, expected: str | None
+) -> None:
+    """The run's effort reaches the CLI only as a level that CLI lists for the model.
+
+    Args:
+        cli: The host CLI.
+        model: The proposer model id the guest sends.
+        effort: The run's stored effort.
+        expected: The level the CLI receives, or None.
+    """
+    assert host_agent._effort_arg(cli, model, effort) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("cli", "flags"), _HIGH_EFFORT_FLAGS)
+def test_capability_runs_the_cli_at_the_stored_effort(
+    cli: str,
+    flags: list[str],
+    gateway: ModelGateway,
+    local: Settings,
+    guest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The effort from the run settings reaches the CLI; a guest-sent effort does not.
+
+    Args:
+        cli: The host CLI.
+        flags: The arguments that carry the effort.
+        gateway: The parent gateway.
+        local: Local-mode settings.
+        guest: Guest workspace.
+        tmp_path: Where the fake CLI records its argv.
+        monkeypatch: Pytest fixture for the fake CLI's name.
+    """
+    monkeypatch.setenv("FAKE_CLI_NAME", cli)
+    model = {"codex": "subscription/codex/openai/gpt-6.1-sol", "claude": "anthropic/claude-opus-5.5"}[cli]
+    body = {"model": model, "reasoning_effort": "low", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    token = bind_host_agent(gateway, local, cli=cli, permission="workspace_only", reasoning_effort="high")
+    assert _post(gateway, token, body).status_code == 200
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert argv[-len(flags) :] == flags
+    assert "low" not in argv
+
+
+def test_capability_keeps_the_cli_default_effort_without_a_choice(
+    gateway: ModelGateway, local: Settings, guest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run with no stored effort starts the CLI with no effort argument."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "anthropic/claude-opus-5.5", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
+    assert _post(gateway, token, body).status_code == 200
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert "--effort" not in argv
+    assert not any("model_reasoning_effort" in arg for arg in argv)
 
 
 @pytest.mark.parametrize("cli", ["codex", "claude"])
@@ -759,6 +857,51 @@ def test_capped_turn_fails_the_run_with_its_reset_time(
     assert "claude" in message
 
 
+def test_turn_that_no_cli_started_is_marked_for_the_usage_panel(
+    gateway: ModelGateway, local: Settings, guest: Path, database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that a saved cap stops before the CLI starts records ``dispatched: false``; the guest never sees the marker."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    monkeypatch.setenv("FAKE_CLI_MODE", "limit")
+    token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    ran = _post(gateway, token, body)
+    skipped = _post(gateway, token, body)
+
+    assert ran.status_code == skipped.status_code == 429
+    assert host_agent.NOT_STARTED_KEY not in skipped.json()
+    records = run_usage.load_records(database, str(gateway.runtime.budget_id))
+    assert sorted(record.evidence.get("dispatched", True) for record in records) == [False, True]
+
+
+def test_only_a_cli_that_could_not_start_is_marked_not_started(
+    local: Settings, guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed start is not local use; a cleanup error after the CLI ran still is."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    def broken_cleanup(*args: object, **kwargs: object) -> None:
+        """Fail like a ``ps`` fork error after the CLI ran."""
+        raise OSError("fork failed")
+
+    monkeypatch.setattr(host_agent, "_stop_turn", broken_cleanup)
+    ran = run_host_agent(body, local, cli="claude", permission="workspace_only")
+    monkeypatch.setattr(host_agent.subprocess, "Popen", broken_cleanup)
+    refused = run_host_agent(body, local, cli="claude", permission="workspace_only")
+
+    assert (ran["status"], host_agent.NOT_STARTED_KEY in ran) == ("error", False)
+    assert (refused["status"], refused.get(host_agent.NOT_STARTED_KEY)) == ("error", True)
+
+
+def test_failed_start_keeps_the_missing_binary_in_the_message(tmp_path: Path) -> None:
+    """The start error names the binary, so the user can see which CLI is missing."""
+    missing = str(tmp_path / "no-such-cli")
+    with pytest.raises(host_agent.CliStartError, match="no-such-cli"):
+        host_agent.run_group([missing], cwd=tmp_path, env=dict(os.environ), stdin="", timeout=1)
+
+
 def test_oversized_workspace_is_refused(gateway: ModelGateway, local: Settings, tmp_path: Path) -> None:
     """A request above 32 MB is refused with 413 before any CLI runs."""
     token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
@@ -845,6 +988,11 @@ def test_proposer_settings_decide_the_host_cli() -> None:
     assert host_proposer({"optimizer": {}}) is None
     attach_host_agent_token(unified, "host")
     assert route[HOST_AGENT_TOKEN_KEY] == "host"
+    assert host_reasoning_effort(unified) is None
+    unified["models"]["reflection_model"]["extra"]["reasoning_effort"] = "high"  # type: ignore[index]
+    assert host_reasoning_effort(unified) == "high"
+    assert host_reasoning_effort({"reflection_model_config": {"extra": {"reasoning_effort": "low"}}}) == "low"
+    assert host_reasoning_effort({"reflection_model_config": {"extra": {"reasoning_effort": ""}}}) is None
     with pytest.raises(ValueError, match="route"):
         attach_host_agent_token({"proposer": {"host_cli": "claude"}}, "host")
 
@@ -1299,3 +1447,397 @@ def test_tool_roots_never_open_the_home_or_a_folder_in_it(tmp_path: Path) -> Non
     for root in roots:
         assert not (real_home + os.sep).startswith(root.rstrip(os.sep) + os.sep)
         assert root != os.path.realpath(home / ".cargo")
+
+
+# The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
+_HIDDEN = ["optimize.toml", "metric", ".optimize/exploits", "reference/answers.json", "data/cases.jsonl"]
+
+
+def test_claude_turns_deny_each_hidden_path_by_exact_name(tmp_path: Path) -> None:
+    """Deny Read and Edit on each hidden path and its contents, and Bash only for full access."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    rules = host_agent.claude_hidden_rules(workspace, _HIDDEN, full=False)
+    root = os.path.realpath(workspace)
+    for hidden in _HIDDEN:
+        for tool in ("Read", "Edit"):
+            assert f"{tool}(/{root}/{hidden})" in rules
+            assert f"{tool}(/{root}/{hidden}/**)" in rules
+    assert not any(rule.startswith("Bash(") for rule in rules)
+    assert "Bash(*optimize.toml*)" in host_agent.claude_hidden_rules(workspace, _HIDDEN, full=True)
+    assert not any("**/*" in rule or rule.endswith("(/**)") for rule in rules)
+
+    argv = host_cli_argv("claude", "workspace_only", "bin", workspace, "m", hidden_rules=rules)
+    denied = [argv[index + 1] for index, part in enumerate(argv) if part == "--disallowedTools"]
+    assert denied == rules
+
+
+def test_claude_permission_denials_become_refusals_with_tool_and_kind(tmp_path: Path) -> None:
+    """Map each Claude permission denial on a hidden path to its tool and kind, and skip other denials."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "permission_denials": [
+                {"tool_name": "Read", "tool_input": {"file_path": f"{workspace}/optimize.toml"}},
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "metric"}},
+                {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com"}},
+            ],
+        }
+    )
+
+    refusals = host_agent.host_refusals("claude", stdout, tmp_path, workspace, _HIDDEN)
+
+    assert refusals == [{"tool": "Read", "kind": "config"}, {"tool": "Grep", "kind": "scoring"}]
+    assert host_agent.host_refusals("claude", stdout, tmp_path, workspace, ()) == []
+
+
+def test_claude_denials_in_another_case_or_through_home_become_refusals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Map a Claude denial whose path uses another root case, a ``~`` or ``$HOME`` form, to its kind.
+
+    The real Claude CLI refuses these forms too (see
+    ``test_installed_claude_refuses_hidden_paths_in_any_case_and_through_home``).
+    """
+    monkeypatch.setattr(host_agent, "_FOLD_CASE", True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first, rest = os.path.realpath(workspace).lstrip("/").split("/", 1)
+    paths = [
+        f"/{first.upper()}/{rest}/optimize.toml",
+        f"{os.path.realpath(workspace)}/METRIC/score.py".upper(),
+        "~/../workspace/optimize.toml",
+    ]
+    denials = [{"tool_name": "Read", "tool_input": {"file_path": path}} for path in paths]
+    denials.append({"tool_name": "Bash", "tool_input": {"command": "cat $HOME/../workspace/data/cases.jsonl"}})
+    stdout = json.dumps({"type": "result", "permission_denials": denials})
+
+    refusals = host_agent.host_refusals("claude", stdout, tmp_path, workspace, _HIDDEN)
+
+    kinds = ["config", "scoring", "config", "scoring"]
+    assert refusals == [{"tool": tool, "kind": kind} for tool, kind in zip(["Read"] * 3 + ["Bash"], kinds, strict=True)]
+
+
+def test_claude_denials_the_check_cannot_name_become_unknown_refusals(tmp_path: Path) -> None:
+    """Keep the turn when a denial is above a guard cost cap, or is a Bash denial after a ``cd``."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    denials = [
+        {"tool_name": "Bash", "tool_input": {"command": "echo " + "w " * 40_000}},
+        {"tool_name": "Bash", "tool_input": {"command": "cat cases.jsonl"}},
+        {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com"}},
+    ]
+    stdout = json.dumps({"type": "result", "permission_denials": denials})
+
+    refusals = host_agent.host_refusals("claude", stdout, tmp_path, workspace, _HIDDEN)
+
+    assert refusals == [{"tool": "Bash", "kind": "unknown"}, {"tool": "Bash", "kind": "unknown"}]
+
+
+_CLAUDE = os.environ.get("APP_TEST_CLAUDE") or shutil.which("claude")
+
+
+def _fake_anthropic(tool_call: dict, results: list[dict]) -> ThreadingHTTPServer:
+    """Start a fake Messages API that asks for one tool call, then ends the turn.
+
+    Args:
+        tool_call: ``{"name", "input"}`` of the tool call to ask for.
+        results: Receives the tool result Claude sends back.
+
+    Returns:
+        The running server.
+    """
+
+    def stream(block: dict, stop: str) -> bytes:
+        """Encode one assistant message as a Messages API event stream.
+
+        Args:
+            block: The single content block.
+            stop: The stop reason.
+
+        Returns:
+            The event-stream body.
+        """
+        if block["type"] == "text":
+            start, delta = {"type": "text", "text": ""}, {"type": "text_delta", "text": block["text"]}
+        else:
+            start = {"type": "tool_use", "id": "toolu_1", "name": block["name"], "input": {}}
+            delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
+        usage = {"input_tokens": 1, "output_tokens": 1}
+        message = {"id": "m1", "type": "message", "role": "assistant", "model": "m", "content": [], "usage": usage}
+        events = [
+            {"type": "message_start", "message": {**message, "stop_reason": None}},
+            {"type": "content_block_start", "index": 0, "content_block": start},
+            {"type": "content_block_delta", "index": 0, "delta": delta},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": stop}, "usage": {"output_tokens": 1}},
+            {"type": "message_stop"},
+        ]
+        return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        """Answer the CLI's Messages API requests."""
+
+        def log_message(self, *_args: object) -> None:
+            """Keep the test output quiet."""
+
+        def do_POST(self) -> None:
+            """Ask for the tool call once, then end the turn after its result."""
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+            if "count_tokens" in self.path:
+                data, kind = json.dumps({"input_tokens": 1}).encode(), "application/json"
+            else:
+                sent = [
+                    part
+                    for message in body.get("messages", [])
+                    if isinstance(message.get("content"), list)
+                    for part in message["content"]
+                    if part.get("type") == "tool_result"
+                ]
+                results.extend(sent[-1:])
+                if body.get("tools") and not sent:
+                    data = stream({"type": "tool_use", **tool_call}, "tool_use")
+                else:
+                    data = stream({"type": "text", "text": "done"}, "end_turn")
+                kind = "text/event-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.skipif(_CLAUDE is None, reason="claude is not installed")
+@pytest.mark.skipif(sys.platform != "darwin", reason="the host agent runs on macOS")
+@pytest.mark.parametrize(
+    ("form", "denied"),
+    [("root-case", True), ("upper-case", True), ("home", True), ("other-file", False)],
+)
+def test_installed_claude_refuses_hidden_paths_in_any_case_and_through_home(
+    tmp_path: Path, form: str, denied: bool
+) -> None:
+    """Run the real Claude CLI with the turn's deny rules and a fake model that reads one path.
+
+    Claude matches the rules without case and expands ``~``, so another root
+    case, an upper-case path and a ``~`` path are refused. A file that is not
+    hidden still reads.
+
+    Args:
+        form: The form of the path the fake model reads.
+        denied: Whether Claude must refuse the read.
+    """
+    turn = tmp_path / "turn"
+    home, workspace = turn / "home", turn / "workspace"
+    home.mkdir(parents=True)
+    workspace.mkdir()
+    (workspace / "optimize.toml").write_text("HIDDEN_SENTINEL\n", encoding="utf-8")
+    (workspace / "notes.txt").write_text("VISIBLE_SENTINEL\n", encoding="utf-8")
+    real = os.path.realpath(workspace)
+    first, rest = real.lstrip("/").split("/", 1)
+    path = {
+        "root-case": f"/{first.upper()}/{rest}/optimize.toml",
+        "upper-case": f"{real}/optimize.toml".upper(),
+        "home": "~/../workspace/optimize.toml",
+        "other-file": f"/{first.upper()}/{rest}/notes.txt",
+    }[form]
+    results: list[dict] = []
+    server = _fake_anthropic({"name": "Read", "input": {"file_path": path}}, results)
+    rules = host_agent.claude_hidden_rules(workspace, ["optimize.toml"], full=True)
+    argv = host_cli_argv(
+        "claude", "full_access", str(_CLAUDE), workspace, "claude-sonnet-4-5", CLAUDE_ARGS, None, rules
+    )
+    env = {name: value for name, value in os.environ.items() if not name.startswith(("ANTHROPIC_", "CLAUDE"))}
+    env.update(
+        HOME=str(home),
+        ANTHROPIC_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+        ANTHROPIC_API_KEY="test-placeholder",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+    )
+    try:
+        completed = subprocess.run(
+            argv, input="go", cwd=workspace, env=env, capture_output=True, text=True, timeout=120, check=False
+        )
+    finally:
+        server.shutdown()
+
+    document = json.loads(completed.stdout)
+    assert len(results) == 1, completed.stderr
+    content = json.dumps(results[0])
+    assert "HIDDEN_SENTINEL" not in content
+    assert bool(document.get("permission_denials")) is denied
+    assert ("VISIBLE_SENTINEL" in content) is (not denied)
+    expected = [{"tool": "Read", "kind": "config"}] if denied else []
+    assert host_agent.host_refusals("claude", completed.stdout, turn, workspace, ["optimize.toml"]) == expected
+
+
+@pytest.mark.skipif(_CLAUDE is None, reason="claude is not installed")
+@pytest.mark.skipif(sys.platform != "darwin", reason="the host agent runs on macOS")
+@pytest.mark.parametrize(
+    ("command", "denied"),
+    [
+        ("cd eval && cat cases.jsonl", True),
+        ("cat ./eval//cases.jsonl", True),
+        ("cat eval/./cases.jsonl", True),
+        ("cd eval && python3 -c \"print(open('cases.jsonl').read())\"", True),
+        ("python3 -c \"print(open('eval/./cases.jsonl').read())\"", True),
+        ("cat notes.txt", False),
+    ],
+)
+def test_installed_claude_bash_guard_refuses_nested_hidden_paths(tmp_path: Path, command: str, denied: bool) -> None:
+    """Run the real Claude CLI with the turn's Bash guard hook and a fake model that runs one command.
+
+    A Bash deny rule matches only the command text, and Claude applies its
+    Read rules only to the paths it parses from a command, so a script that
+    opens a nested hidden file passes both. The guard hook resolves the path
+    and refuses each form.
+
+    Args:
+        command: The shell command the fake model runs.
+        denied: Whether the guard must refuse the command.
+    """
+    turn = tmp_path / "turn"
+    home, workspace = turn / "home", turn / "workspace"
+    home.mkdir(parents=True)
+    (workspace / "eval").mkdir(parents=True)
+    (workspace / "eval" / "cases.jsonl").write_text("HIDDEN_SENTINEL\n", encoding="utf-8")
+    (workspace / "notes.txt").write_text("VISIBLE_SENTINEL\n", encoding="utf-8")
+    hidden = ["eval/cases.jsonl"]
+    results: list[dict] = []
+    server = _fake_anthropic({"name": "Bash", "input": {"command": command}}, results)
+    guard_args = host_agent.install_claude_guard(turn, workspace, hidden)
+    argv = host_cli_argv(
+        "claude",
+        "full_access",
+        str(_CLAUDE),
+        workspace,
+        "claude-sonnet-4-5",
+        (*CLAUDE_ARGS, *guard_args),
+        None,
+        host_agent.claude_hidden_rules(workspace, hidden, full=True),
+    )
+    env = {name: value for name, value in os.environ.items() if not name.startswith(("ANTHROPIC_", "CLAUDE"))}
+    env.update(
+        HOME=str(home),
+        ANTHROPIC_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+        ANTHROPIC_API_KEY="test-placeholder",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+    )
+    try:
+        completed = subprocess.run(
+            argv, input="go", cwd=workspace, env=env, capture_output=True, text=True, timeout=120, check=False
+        )
+    finally:
+        server.shutdown()
+
+    assert len(results) == 1, completed.stderr
+    content = json.dumps(results[0])
+    assert "HIDDEN_SENTINEL" not in content
+    assert ("VISIBLE_SENTINEL" in content) is (not denied)
+    expected = [{"tool": "Bash", "kind": "scoring"}] if denied else []
+    assert host_agent.host_refusals("claude", completed.stdout, turn, workspace, hidden) == expected
+
+
+def test_codex_turns_install_a_guard_hook_that_refuses_hidden_paths(tmp_path: Path) -> None:
+    """Write the Codex hooks file, refuse a hidden read through it, and read back only tool and kind."""
+    turn = tmp_path / "turn"
+    workspace = turn / "work"
+    codex_home = turn / "codex"
+    workspace.mkdir(parents=True)
+    codex_home.mkdir()
+
+    roots = host_agent.install_codex_guard(turn, workspace, codex_home, _HIDDEN)
+
+    hook = json.loads((codex_home / "hooks.json").read_text())["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["type"] == "command"
+    argv = shlex.split(hook["command"])
+    if sys.platform == "darwin":
+        argv = host_agent.confine(
+            argv, home=Path.home(), writable=[str(turn)], readable=roots, hidden=(tempfile.gettempdir(),)
+        )
+
+    def call(command: str) -> dict:
+        """Send one Codex tool call to the hook.
+
+        Args:
+            command: The shell command of the call.
+
+        Returns:
+            The hook's answer.
+        """
+        request = json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": command}})
+        completed = subprocess.run(argv, input=request, capture_output=True, text=True, timeout=30, check=True)
+        return json.loads(completed.stdout or "{}")
+
+    denied = call("cat data/cases.jsonl")
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert call("ls src") == {}
+    expected = [{"tool": "exec_command", "kind": "scoring"}]
+    if sys.platform == "darwin":
+        # The default macOS file system opens DATA/CASES.JSONL as data/cases.jsonl.
+        assert call("cat DATA/CASES.JSONL")["hookSpecificOutput"]["permissionDecision"] == "deny"
+        expected *= 2
+    assert host_agent.host_refusals("codex", "", turn, workspace, _HIDDEN) == expected
+    assert "cases" not in (turn / "guard" / "refusals.jsonl").read_text()
+
+
+@pytest.mark.parametrize("hidden", [(), ("optimize.toml",)])
+def test_codex_turns_trust_the_guard_hook_only_when_paths_are_hidden(
+    local: Settings, guest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hidden: tuple[str, ...]
+) -> None:
+    """Codex skips an untrusted hooks.json hook, so a guarded turn passes the trust flag and no other turn does.
+
+    Args:
+        hidden: The run's hidden paths.
+    """
+    monkeypatch.setenv("FAKE_CLI_NAME", "codex")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    document = run_host_agent(body, local, cli="codex", permission="workspace_only", hidden_paths=hidden)
+
+    assert document["status"] == "ok", document
+    assert document["refusals"] == []
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert ("--dangerously-bypass-hook-trust" in argv) == bool(hidden)
+
+
+@pytest.mark.parametrize(
+    ("permission", "hidden", "guarded"),
+    [
+        ("full_access", ("optimize.toml",), True),
+        ("full_access", (), False),
+        ("workspace_only", ("optimize.toml",), False),
+    ],
+)
+def test_claude_turns_load_the_bash_guard_hook_only_with_bash_and_hidden_paths(
+    local: Settings,
+    guest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    permission: str,
+    hidden: tuple[str, ...],
+    guarded: bool,
+) -> None:
+    """Pass the guard's settings file to a full_access Claude turn with hidden paths, and to no other turn.
+
+    Args:
+        permission: The turn's permission mode.
+        hidden: The run's hidden paths.
+        guarded: Whether the turn must load the guard hook.
+    """
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    document = run_host_agent(body, local, cli="claude", permission=permission, hidden_paths=hidden)
+
+    assert document["status"] == "ok", document
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert ("--settings" in argv) is guarded
+    if guarded:
+        settings_path = argv[argv.index("--settings") + 1]
+        assert settings_path.endswith("/guard/settings.json")

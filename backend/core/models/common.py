@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import REMOVED_CLI_PROVIDER, REMOVED_CLI_PROVIDER_MESSAGE
 
-OptimizationType = Literal["run", "grid_search", "blackbox"]
-Composition = Literal["single", "workflow"]
+OptimizationType = Literal["blackbox"]
+Composition = Literal["single"]
 
 
 def refuse_removed_cli(value: Any) -> Any:

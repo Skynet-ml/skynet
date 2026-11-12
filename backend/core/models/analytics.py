@@ -23,9 +23,6 @@ class AnalyticsSummaryResponse(BaseModel):
     min_improvement: float | None = None
     avg_runtime: float | None = None
     total_dataset_rows: int = 0
-    total_pairs: int = 0
-    completed_pairs: int = 0
-    failed_pairs: int = 0
     # True when the underlying scan hit the per-request job cap and the
     # aggregation may be incomplete; the dashboard surfaces a banner.
     truncated: bool = False
@@ -83,7 +80,6 @@ class DashboardAnalyticsJob(BaseModel):
     elapsed_seconds: float | None = None
     dataset_rows: int | None = None
     optimization_type: OptimizationType | None = None
-    best_pair_label: str | None = None
     created_at: str | None = None
 
 
@@ -161,7 +157,7 @@ class DashboardAnalyticsResponse(BaseModel):
     # to that tier via the `access` filter param. Empty when no caller context.
     access_usage: list[DashboardAnalyticsNameValue] = Field(default_factory=list)
 
-    # Module (DSPy program type) usage across the filtered runs.
+    # Module name usage across the filtered runs (``blackbox`` for every run).
     module_counts: dict[str, int] = Field(default_factory=dict)
 
     success_count: int = 0
@@ -176,8 +172,6 @@ class DashboardAnalyticsResponse(BaseModel):
     best_improvement: float | None = None
     avg_runtime_seconds: float | None = None
     total_dataset_rows: int = 0
-    total_pairs_run: int = 0
-    grid_search_count: int = 0
     single_run_count: int = 0
 
     # Fixed-edge distributions that stay readable at any run count: how

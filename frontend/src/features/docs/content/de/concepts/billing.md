@@ -91,15 +91,26 @@ Wenn ein Modellaufruf Ihren Schlüssel verwendet:
 
 Gebühren eines externen Scorers oder MCP-Anbieters gehen direkt an diesen Anbieter. Sie sind nicht Teil des Ausgabenlimits des Durchlaufs.
 
+## Modellaufrufe aus Ihrem Code
+
+Ihr Repository-Code und Ihr Scorer können ein Modell über das Modell-Gateway von Skynet aufrufen. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization).
+
+- Ein Aufruf über die Schlüssel von Skynet wird wie jeder andere Modellaufruf auf das Laufbudget angerechnet. Der Nutzungsaufschlag gilt.
+- Ein Aufruf über Ihren eigenen Schlüssel (BYOK) geht an Ihren Anbieterschlüssel. Skynet erhebt dafür keine Modellgebühr.
+
 ## Sandbox-Nutzung
 
-Ihr Ausführungscode und Ihre Metrik laufen in einer Sandbox. Skynet misst die Sandbox-Rechenzeit:
+Ihr Repository-Code und Ihr Scorer laufen in einer Sandbox. Skynet misst die Sandbox-Rechenzeit:
 
 1. Bevor eine Sandbox startet, reserviert Skynet einen Betrag aus dem Limit des Durchlaufs.
 2. Wenn die Sandbox fertig ist, berechnet Skynet die endgültige Nutzung, die der Sandbox-Anbieter meldet.
 3. Der Nutzungsaufschlag gilt für Sandbox-Rechenzeit.
 
 Sandbox-Rechenzeit ist Teil des Ausgabenlimits des Durchlaufs, auch wenn die Modellaufrufe Ihren eigenen Schlüssel verwenden.
+
+## Bereitstellung (Serving)
+
+Jeder Aufruf des Serve-Endpunkts eines abgeschlossenen Durchlaufs wird einzeln abgerechnet. Der Aufrufer zahlt aus seinem eigenen Guthaben. Setzen Sie `max_cost_cents` in der Anfrage, um einen Aufruf zu begrenzen. Lesen Sie [Ergebnisse](/docs/guides/results).
 
 ## Tarife
 

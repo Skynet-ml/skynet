@@ -8,9 +8,22 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 
-from ..github_repo import GITHUB_HOST, RepoFetchError, fetch_snapshot, git_auth_env, patched_repo_zip
+from ...api.errors import DomainError
+from .. import transport
+from ..github_repo import (
+    GITHUB_HOST,
+    RepoFetchError,
+    RepoRateLimitError,
+    commit_summary,
+    fetch_snapshot,
+    git_auth_env,
+    list_commits,
+    patched_repo_zip,
+    resolve_commit,
+)
 
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
 
@@ -110,3 +123,81 @@ def test_patched_zip_refuses_a_patch_that_does_not_apply(tmp_path: Path) -> None
 
     with pytest.raises(RepoFetchError):
         patched_repo_zip("acme/app", pinned, patch, None, tmp_path / "work", remote=f"file://{app}")
+
+
+def test_list_commits_reads_the_branch_and_trims_titles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub commits keep the first message line and the committer date."""
+    sha = "d" * 40
+    body = [{"sha": sha, "commit": {"message": "Add cases\n\nbody", "committer": {"date": "2026-11-03T09:00:00Z"}}}]
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the request and return one page of commits."""
+        seen.append(request)
+        return httpx.Response(200, json=body)
+
+    monkeypatch.setattr(transport, "CLIENT", httpx.Client(transport=httpx.MockTransport(answer)))
+    assert list_commits("tok", "acme/app", "dev") == [
+        {"sha": sha, "title": "Add cases", "date": "2026-11-03T09:00:00Z"}
+    ]
+    assert seen[0].url.path == "/repos/acme/app/commits"
+    assert seen[0].url.params["sha"] == "dev"
+
+
+def test_resolve_commit_without_a_token_calls_anonymously(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A public repository pins its default branch with no Authorization header (SKY-568)."""
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the request and answer the repository and commit lookups."""
+        seen.append(request)
+        if request.url.path == "/repos/acme/app":
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(200, json={"sha": "e" * 40})
+
+    monkeypatch.setattr(transport, "CLIENT", httpx.Client(transport=httpx.MockTransport(answer)))
+
+    assert resolve_commit(None, "acme/app", None) == "e" * 40
+    assert [request.url.path for request in seen] == ["/repos/acme/app", "/repos/acme/app/commits/main"]
+    assert all("authorization" not in request.headers for request in seen)
+
+
+def test_commit_summary_drops_a_commit_without_an_id() -> None:
+    """A commit with no id is skipped, and a long title is cut."""
+    assert commit_summary(None, "msg", None) is None
+    assert len(commit_summary("e" * 40, "x" * 500, None)["title"]) == 120
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "code"),
+    [
+        (403, {"X-RateLimit-Remaining": "0"}, "connectors.rate_limited"),
+        (429, {}, "connectors.rate_limited"),
+        (403, {}, "connectors.rejected"),
+        (403, {"X-RateLimit-Remaining": "12"}, "connectors.rejected"),
+    ],
+)
+def test_a_spent_rate_limit_is_not_a_refusal(status: int, headers: dict[str, str], code: str) -> None:
+    """A 429, or a 403 with no calls left, reports the rate limit; any other 403 stays a refusal (SKY-568)."""
+    with pytest.raises(DomainError) as raised:
+        transport.raise_for_status(httpx.Response(status, headers=headers), "github")
+
+    assert raised.value.code == code
+
+
+def test_resolve_commit_reports_the_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spent rate limit says so, not that the repository is missing; only an anonymous read advises to connect."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Answer like GitHub after the anonymous quota is spent."""
+        return httpx.Response(403, headers={"X-RateLimit-Remaining": "0"}, json={"message": "API rate limit exceeded"})
+
+    monkeypatch.setattr(transport, "CLIENT", httpx.Client(transport=httpx.MockTransport(answer)))
+
+    with pytest.raises(RepoRateLimitError) as anonymous:
+        resolve_commit(None, "acme/app", None)
+    with pytest.raises(RepoRateLimitError) as linked:
+        resolve_commit("gh-token", "acme/app", None)
+
+    assert str(anonymous.value) == "GitHub's rate limit is reached. Try again later. Connect GitHub to raise the limit."
+    assert str(linked.value) == "GitHub's rate limit is reached. Try again later."

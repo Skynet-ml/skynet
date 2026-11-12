@@ -24,6 +24,7 @@ def _model(value: str, price: float) -> CatalogModel:
         provider="openrouter",
         available=True,
         featured=True,
+        supports_thinking=True,
         input_cost_per_token=price / 2,
         output_cost_per_token=price / 2,
     )
@@ -76,18 +77,6 @@ def test_small_candidates_skip_unbenchmarked_and_non_openrouter(scores: dict[str
     scores.update({"openrouter/a": 40.0, "openai/c": 40.0})
     catalog = ModelCatalogResponse(models=models, providers=[])
     assert [m.value for m in interview_model.small_candidates(catalog)] == ["openrouter/a"]
-
-
-def test_reply_ms_takes_the_fastest_healthy_endpoint() -> None:
-    """Endpoints below the uptime floor or without stats are ignored."""
-    endpoints = [
-        _endpoint(100, 150, uptime=90.0),
-        _endpoint(500, 150),
-        _endpoint(300, 75),
-        {"latency_last_30m": None},
-    ]
-    assert interview_model.reply_ms(endpoints) == pytest.approx(1500.0)
-    assert interview_model.reply_ms([]) is None
 
 
 def test_endpoint_speed_reports_the_fastest_healthy_endpoint() -> None:

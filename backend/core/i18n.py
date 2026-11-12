@@ -3,7 +3,7 @@
 The canonical catalog lives at ``i18n/locales/he.json`` in the repo root, and
 ``scripts/generate_i18n.py`` copies it into ``backend/core/i18n_locales/he.json``
 so wheel installs keep the catalog inside the package. Backend modules keep
-using ``t(key, **params)`` and the short constants below, but the Hebrew
+using ``t(key, **params)`` and the ``TERM_*`` constants below, but the Hebrew
 strings and domain terms are no longer mirrored in Python code.
 
 The formatter is intentionally small: it supports ``{name}`` params plus
@@ -60,11 +60,6 @@ _TERM_KEYS: dict[str, str] = {
     "PAUSE_REASON": "pauseReason",
 }
 
-_CONSTANT_KEYS: dict[str, str] = {
-    "CLONE_NAME_PREFIX": "cloneNamePrefix",
-    "RETRY_NAME_PREFIX": "retryNamePrefix",
-}
-
 
 @lru_cache(maxsize=1)
 def _catalog() -> dict[str, Any]:
@@ -103,19 +98,6 @@ def _messages() -> dict[str, str]:
     return messages
 
 
-def _backend_constants() -> dict[str, str]:
-    """Return the ``backend.constants`` section of the catalog (or an empty dict).
-
-    Returns:
-        Mapping of constant key → Hebrew literal, or ``{}`` when missing.
-    """
-    backend = _catalog().get("backend", {})
-    constants = backend.get("constants", {}) if isinstance(backend, dict) else {}
-    if not isinstance(constants, dict):
-        return {}
-    return constants
-
-
 def _sample_datasets() -> dict[str, dict[str, Any]]:
     """Return the ``backend.sampleDatasets`` section of the catalog.
 
@@ -149,21 +131,8 @@ def term(key: str) -> str:
     return value if isinstance(value, str) else key
 
 
-def _constant(key: str) -> str:
-    """Resolve a backend-only string constant from the catalog.
-
-    Args:
-        key: Identifier under ``backend.constants`` in the catalog.
-
-    Returns:
-        The Hebrew constant, or ``key`` itself when no entry exists.
-    """
-    value = _backend_constants().get(key)
-    return value if isinstance(value, str) else key
-
-
 def __getattr__(name: str) -> Any:
-    """Resolve TERM_* / SAMPLE_DATASETS / constant attributes on first access.
+    """Resolve TERM_* and SAMPLE_DATASETS attributes on first access.
 
     Lazy module-level lookup (PEP 562) keeps imports cheap when callers only
     need ``t()`` — without this every ``import core.i18n`` would parse the
@@ -182,8 +151,6 @@ def __getattr__(name: str) -> Any:
         return _sample_datasets()
     if name in _TERM_KEYS:
         return term(_TERM_KEYS[name])
-    if name in _CONSTANT_KEYS:
-        return _constant(_CONSTANT_KEYS[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

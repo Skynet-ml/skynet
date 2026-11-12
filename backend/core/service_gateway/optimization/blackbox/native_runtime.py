@@ -14,6 +14,7 @@ import tarfile
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from importlib.metadata import distribution
 from pathlib import Path
@@ -21,8 +22,9 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from .... import run_log
+from ....billing.guest_model_proxy import MCP_TOKEN_ENV, SERVICES_ENV
 from ....billing.host_agent import HOST_AGENT_TOKEN_KEY
-from ....billing.model_gateway import raise_gateway_stop
+from ....billing.model_gateway import MCP_RELAY_ROUTE_KEY, raise_gateway_stop
 from ....billing.pricing import model_token_costs
 from ....billing.runtime import UsagePendingError
 from ....billing.usage_tags import CALLER_PROPOSER, KIND_MUTATION, USAGE_TAGS_HEADER, encode_tags, usage_scope
@@ -41,10 +43,12 @@ from .sandbox import (
     SandboxRuntime,
     SandboxSession,
     SandboxSpec,
+    check_codex_requirements,
     current_sandbox_runtime,
     sandbox_runtime_from_settings,
     sandbox_unavailable_reason,
     unique_sandbox_name,
+    write_codex_requirements,
 )
 from .upstream import (
     AUTORESEARCH_SOURCE,
@@ -124,38 +128,14 @@ _AUTOSADDLER_PLUGIN_DIR = "autosaddler_plugin"
 # fully pinned, dependency-free install of exactly what the v2 core imports.
 AUTOSADDLER_PYTHON_FLOOR = (3, 12)
 _AUTOSADDLER_PYTHON = "3.12.12"
-_AUTOSADDLER_PINS = (
-    f"autosaddler @ https://github.com/microsoft/AutoSaddler/archive/{AUTOSADDLER_REVISION}.tar.gz",
-    "annotated-types==0.8.0",
-    "anyio==4.15.1",
-    "attrs==26.1.0",
-    "cffi==2.1.1",
-    "click==8.5.0",
-    "cryptography==50.0.1",
-    "h11==0.16.0",
-    "httpcore2==2.13.0",
-    "httpx2==2.13.0",
-    "idna==3.19",
-    "jsonschema==4.26.0",
-    "jsonschema-specifications==2025.9.1",
-    "mcp==2.2.0",
-    "mcp-types==2.2.0",
-    "opentelemetry-api==1.44.0",
-    "pycparser==3.0",
-    "pydantic==2.13.5",
-    "pydantic_core==2.46.5",
-    "PyJWT==2.14.0",
-    "python-multipart==0.0.32",
-    "PyYAML==6.0.3",
-    "referencing==0.37.0",
-    "rpds-py==2026.6.3",
-    "sniffio==1.3.1",
-    "sse-starlette==3.4.11",
-    "starlette==1.6.0",
-    "truststore==0.10.4",
-    "typing_extensions==4.16.0",
-    "typing-inspection==0.4.4",
-    "uvicorn==0.53.0",
+_AUTOSADDLER_REQUIREMENTS_FILE = "autosaddler_requirements.txt"
+# The protected image bakes the same pins into their own venv (backend/Dockerfile),
+# because a protected sandbox has no network to build it at run time (SKY-645).
+AUTOSADDLER_IMAGE_PYTHON = "/opt/autosaddler/venv/bin/python"
+_AUTOSADDLER_PINS = tuple(
+    line
+    for line in Path(__file__).with_name(_AUTOSADDLER_REQUIREMENTS_FILE).read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.startswith("#")
 )
 
 
@@ -171,8 +151,9 @@ class NativeOptions:
     budget_route: dict[str, str] | None = field(default=None, repr=False)
     sandbox_runtime: SandboxRuntime | None = None
     # A repository run's packed tree: ``chunks`` (files on this machine),
-    # ``editable_paths``, ``readonly_paths`` and ``constrained`` (a
-    # constraints file governs the run).
+    # ``editable_paths``, ``readonly_paths``, ``constrained`` (a
+    # constraints file governs the run) and ``proposer_hosts`` (what the
+    # proposer box may reach besides the relay).
     repo: dict[str, Any] | None = None
     # ShinkaEvolve's evolution settings, and its optimization models in bandit
     # order: each ``{"model", "url", "token"}`` names one scoped gateway route.
@@ -180,6 +161,8 @@ class NativeOptions:
     shinka_models: tuple[dict[str, str], ...] = field(default=(), repr=False)
     # The embeddings route ShinkaEvolve's duplicate rejection uses, when it is on.
     shinka_embedding: dict[str, str] | None = field(default=None, repr=False)
+    # The optimization model's effort level, which the proposer CLI applies.
+    reasoning_effort: str | None = None
     usage_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
     usage_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -377,9 +360,10 @@ def _bootstrap_command(
             '"$HOME/.local/bin/uv" python find 3.11.9 > native-python.txt; fi; '
             "node -e 'if (+process.versions.node.split(\".\")[0] < 22) process.exit(1)'; " + harness_install
         )
-    elif shinka:
+    elif own_venv:
+        image_python = SHINKA_IMAGE_PYTHON if shinka else AUTOSADDLER_IMAGE_PYTHON
         prepare += (
-            f"if [ -x {SHINKA_IMAGE_PYTHON} ]; then printf '%s\\n' {SHINKA_IMAGE_PYTHON} > native-python.txt; "
+            f"if [ -x {image_python} ]; then printf '%s\\n' {image_python} > native-python.txt; "
             "else command -v python3 > native-python.txt; fi; "
         )
     else:
@@ -490,19 +474,19 @@ def check_native_runtime(options: NativeOptions) -> dict[str, Any]:
                 + _failure_detail(installed, install_timeout)
             )
         probe = (
-            "import importlib.util,json,os,subprocess,sys; "
+            "import json,os,subprocess,sys; "
             "import native_runner, autosaddler_runner, shinka_runner, native_engines; "
             "native_engines.check_assets(); "
-            f"autosaddler=sys.version_info >= {AUTOSADDLER_PYTHON_FLOOR!r} "
-            "and importlib.util.find_spec('autosaddler') is not None; "
-            f"shinka_python={SHINKA_IMAGE_PYTHON!r} if os.access({SHINKA_IMAGE_PYTHON!r},os.X_OK) else sys.executable; "
-            "shinka=subprocess.run([shinka_python,'-c',"
+            "own_venv=lambda python,package: subprocess.run("
+            "[python if os.access(python,os.X_OK) else sys.executable,'-c',"
             + repr(
                 "import importlib.util,sys; "
                 f"sys.exit(0 if sys.version_info >= {AUTOSADDLER_PYTHON_FLOOR!r} "
-                "and importlib.util.find_spec('shinka') else 1)"
+                "and importlib.util.find_spec(sys.argv[1]) else 1)"
             )
-            + "],capture_output=True,timeout=20).returncode == 0; "
+            + ",package],capture_output=True,timeout=20).returncode == 0; "
+            f"autosaddler=own_venv({AUTOSADDLER_IMAGE_PYTHON!r},'autosaddler'); "
+            f"shinka=own_venv({SHINKA_IMAGE_PYTHON!r},'shinka'); "
             "print(json.dumps({'ready':True,'autosaddler':autosaddler,'shinka':shinka}))"
         )
         remaining = lifetime - (time.monotonic() - started) - 1
@@ -554,6 +538,7 @@ class _EvaluatorMailbox:
         progress_callback: Any = None,
         check_budget: Any = None,
         str_mode: bool = True,
+        cases: Sequence[Any] = (),
     ) -> None:
         """Bind the transport to one parent evaluator.
 
@@ -564,8 +549,10 @@ class _EvaluatorMailbox:
             progress_callback: Optional job trajectory sink.
             check_budget: Direct cumulative-spend guard, including on reader threads.
             str_mode: Whether the task admits only text candidates rather than named parts.
+            cases: The full train cases, by position; the guest names a case only by its id.
         """
         self.str_mode = str_mode
+        self.cases = [_plain_case(case) for case in cases]
         self.session = session
         self.server = server
         self.nonce = nonce
@@ -676,7 +663,10 @@ class _EvaluatorMailbox:
         per_example = event.get("per_example")
         parent_id = event.get("parent_id")
         generation = event.get("generation")
-        fields: dict[str, Any] = {"score": float(score), "total_evals": event.get("total_evals")}
+        # The child fills a crashed case with its version's mean (SKY-367).
+        # Final selection drops that version (SKY-350), so it shows no score.
+        shown = None if self.server.metric_error(event.get("candidate")) is not None else float(score)
+        fields: dict[str, Any] = {"score": shown, "total_evals": event.get("total_evals")}
         tool_calls = event.get("tool_calls")
         tool_note = ""
         if isinstance(tool_calls, int) and not isinstance(tool_calls, bool):
@@ -684,9 +674,9 @@ class _EvaluatorMailbox:
             fields.update(tool_calls=tool_calls, tool_cap_reached=cap_reached)
             tool_note = f"; the agent used {tool_calls} tool call(s)" + (", hitting the cap" if cap_reached else "")
         logger.info(
-            "Candidate %s scored %.4f after %s evaluations%s",
+            "Candidate %s scored %s after %s evaluations%s",
             candidate_id,
-            float(score),
+            "no score (a case crashed)" if shown is None else f"{shown:.4f}",
             event.get("total_evals"),
             tool_note,
             extra=run_log.event_extra(
@@ -701,8 +691,10 @@ class _EvaluatorMailbox:
             candidate_id=str(candidate_id),
             parent_id=_label(parent_id),
             generation=generation if isinstance(generation, int) and not isinstance(generation, bool) else 0,
-            score=float(score),
-            per_example=[
+            score=shown,
+            per_example=[]
+            if shown is None
+            else [
                 (str(example_id), float(value))
                 for example_id, value in (per_example if isinstance(per_example, list) else [])
                 if _finite(value)
@@ -759,10 +751,15 @@ class _EvaluatorMailbox:
                         raise ServiceError("Native evaluator request carries an invalid candidate shape.")
                     if self.check_budget is not None:
                         self.check_budget()
-                    with sandbox_log.event_scope(
-                        candidate=_label(request.get("candidate_id")), case=_label(request.get("case"))
+                    # The engine box waits while the parent scores this request, so the
+                    # scorer's model calls name it as the box that waits (SKY-647).
+                    with (
+                        sandbox_log.event_scope(
+                            candidate=_label(request.get("candidate_id")), case=_label(request.get("case"))
+                        ),
+                        usage_scope(box=getattr(self.session, "box", None)),
                     ):
-                        score, info = self.server.evaluate(candidate, request.get("example"))
+                        score, info = self.server.evaluate(candidate, self._full_case(request.get("example")))
                     if self.check_budget is not None:
                         self.check_budget()
                     self._forward_feedback(request, score, info)
@@ -779,6 +776,25 @@ class _EvaluatorMailbox:
                 self._responses[request_id] = json.dumps({"error": "The parent evaluator returned invalid feedback."})
         self.session.write_files({f"rpc/{request_id}.json": self._responses[request_id]})
 
+    def _full_case(self, example: Any) -> Any:
+        """Restore the full train case that a guest example names.
+
+        Args:
+            example: The guest's example: ``None``, or a dict with the case's position as ``id``.
+
+        Returns:
+            ``None`` for no example, else the full case with ``expected``.
+
+        Raises:
+            ServiceError: When the example names no known case.
+        """
+        if example is None:
+            return None
+        index = example.get("id") if isinstance(example, dict) else None
+        if type(index) is not int or not 0 <= index < len(self.cases):
+            raise ServiceError("Native evaluator request names an unknown case.")
+        return self.cases[index]
+
 
 def _plain_case(case: Any) -> Any:
     """Turn one train case into plain JSON data for the native box.
@@ -791,6 +807,29 @@ def _plain_case(case: Any) -> Any:
     """
     dump = getattr(case, "model_dump", None)
     return dump(mode="json") if callable(dump) else case
+
+
+def _guest_case(index: int, case: Any) -> dict[str, Any]:
+    """Build the view of one train case that a guest may hold.
+
+    The guest runs proposer and candidate code, so it gets only the case's
+    position and its input. Only the parent's metric side gets ``expected``
+    (E42, E61, E62). A dict with no ``input`` key is its own input without its
+    ``expected`` key. An empty ``input``, such as ``None``, becomes ``{}``.
+
+    Args:
+        index: The case's position in the task's cases.
+        case: A task case: a dict, or a model such as ``UnifiedCase``.
+
+    Returns:
+        ``{"id": index, "input": ...}``, or ``{"id": index}`` for a case that is not a dict.
+    """
+    plain = _plain_case(case)
+    if not isinstance(plain, dict):
+        return {"id": index}
+    if "input" in plain:
+        return {"id": index, "input": plain["input"] or {}}
+    return {"id": index, "input": {key: value for key, value in plain.items() if key != "expected"}}
 
 
 def native_task_payload(engine_id: str, task: Task) -> dict[str, Any]:
@@ -813,7 +852,7 @@ def native_task_payload(engine_id: str, task: Task) -> dict[str, Any]:
         "background": task.background or "",
         # The guest builds an upstream task, whose train and val sets
         # form one pool; the cases go in once, as its train set.
-        "train_set": [_plain_case(case) for case in task.cases] or None,
+        "train_set": [_guest_case(index, case) for index, case in enumerate(task.cases)] or None,
     }
     if set(document) != NATIVE_TASK_FIELDS:
         raise ServiceError("The native optimizer task carries fields it must not.")
@@ -969,6 +1008,8 @@ def _shinka_editor(options: NativeOptions, relay: str | None) -> dict[str, Any]:
             GatewayConfig(url=relay or route["url"], api_key=harness_bridge.KEY_TOKEN),
             headers=headers,
             protected=options.budget_route is not None,
+            # Only the reflection model, first in ``shinka_models``, may carry an effort.
+            reasoning_effort=options.reasoning_effort if index == 0 else None,
         )
         input_price, output_price = model_token_costs(route["model"])
         launches.append(
@@ -981,6 +1022,29 @@ def _shinka_editor(options: NativeOptions, relay: str | None) -> dict[str, Any]:
             }
         )
     return {"max_tool_calls": options.proposer.max_tool_calls, "launches": launches}
+
+
+def _require_codex_requirements(runtime: SandboxRuntime, session: SandboxSession) -> None:
+    """Make sure the root-owned Codex requirements file is in place before Codex starts.
+
+    A contained session runs inside an outer box whose parent already wrote the
+    file, and it cannot run as root, so it only reads the file back.
+
+    Args:
+        runtime: The runtime that opened ``session``.
+        session: The proposer's box.
+
+    Raises:
+        ServiceError: When the file cannot be written or does not match.
+    """
+    if getattr(runtime, "contained", False):
+        check_codex_requirements(session)
+        return
+    writer = getattr(session, "write_codex_requirements", None)
+    if writer is not None:
+        writer()
+    else:
+        write_codex_requirements(session)
 
 
 def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
@@ -1012,6 +1076,14 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         raise ServiceError("This agent proposer needs a repository checkout.")
     if shinka and not options.shinka_models:
         raise ServiceError("ShinkaEvolve needs at least one optimization model route.")
+    mcp_route = (options.budget_route or {}).get(MCP_RELAY_ROUTE_KEY) or {}
+    # The ShinkaEvolve runner never reads the proposer launch, so it would run
+    # without the tools the [proposer] mcp file lists; an Auto run loses only this lane (SKY-610).
+    if shinka and mcp_route.get("servers"):
+        raise ServiceError(
+            "ShinkaEvolve cannot load the [proposer] mcp servers yet. "
+            "Choose another engine, or remove [proposer] mcp from optimize.toml."
+        )
     if own_venv and options.repo is None and task.seed_candidate is None:
         # A blank run patches an empty starting text rather than refusing.
         task = replace(task, seed_candidate="")
@@ -1041,6 +1113,10 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
     relay = app_env("APP_BUDGET_RELAY_URL")
     proposer = options.proposer
     editor = _shinka_editor(options, relay) if shinka and (options.shinka or {}).get("editor") == "agent" else None
+    if mcp_route.get("servers") and not relay:
+        raise ServiceError("The [proposer] mcp servers require the box's mailbox relay.")
+    if mcp_route.get("services") and not relay:
+        raise ServiceError("The [proposer] services require the box's mailbox relay.")
     launch = build_launch(
         BlackboxTarget(
             kind="agent",
@@ -1053,29 +1129,42 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         protected=options.budget_route is not None,
         host_cli=proposer.host_cli,
         host_agent_token=(options.budget_route or {}).get(HOST_AGENT_TOKEN_KEY),
+        reasoning_effort=options.reasoning_effort,
+        mcp_servers=tuple(mcp_route.get("servers") or ()),
     )
     input_price, output_price = model_token_costs(options.model)
     # Runs carry no wall-clock cap of their own: the budget and evaluation
     # limits end them, and only the sandbox's platform lifetime bounds the box.
     lifetime = settings.vercel_sandbox_max_lifetime_seconds
+    network: dict[str, Any] = {}
+    if options.repo is not None:
+        # A repository's proposer reaches only its registries and listed hosts
+        # (E57). A box that calls the gateway directly needs its host too; a
+        # protected box reaches the model through the parent's mailbox.
+        hosts = set(options.repo.get("proposer_hosts") or ())
+        if runtime.injects_headers and gateway_host:
+            hosts.add(gateway_host)
+        network = {"allowed_hosts": tuple(sorted(hosts)), "network_disabled": not hosts}
     spec = SandboxSpec(
         lifetime_seconds=lifetime,
         env={"PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"},
         name=unique_sandbox_name(f"app-{engine_id}"),
         inject_headers=headers,
+        **network,
     )
     session = runtime.open(spec)
     final_result: Result | None = None
     opened = time.monotonic()
-    mailbox = _EvaluatorMailbox(
-        session,
-        server,
-        nonce,
-        getattr(ctx, "progress_callback", None),
-        getattr(ctx, "check_budget", None),
-        str_mode=task.str_mode,
-    )
     try:
+        mailbox = _EvaluatorMailbox(
+            session,
+            server,
+            nonce,
+            getattr(ctx, "progress_callback", None),
+            getattr(ctx, "check_budget", None),
+            str_mode=task.str_mode,
+            cases=task.cases,
+        )
         payload = {
             "nonce": nonce,
             "source": upstream_revision,
@@ -1097,6 +1186,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 "ralph": proposer.ralph,
                 "max_no_eval_seconds": proposer.max_no_eval_seconds,
                 "max_tool_calls": proposer.max_tool_calls,
+                # The guest's tool guard refuses each scoring-side path these hash (E62); no name enters the box (E61).
+                "hidden_hashes": dict((options.repo or {}).get("hidden_hashes") or {}),
             },
             "task": native_task_payload(engine_id, task),
         }
@@ -1131,6 +1222,8 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 "editable_paths": list(options.repo["editable_paths"]),
                 "readonly_paths": list(options.repo["readonly_paths"]),
                 "constrained": bool(options.repo.get("constrained")),
+                # The Shinka bundle refuses the model's opens and edits of these (E62).
+                "hidden_hashes": dict(options.repo.get("hidden_hashes") or {}),
             }
         document_text = json.dumps(payload, default=side_info_json_default)
         assert_metric_absent(document_text, task)
@@ -1155,6 +1248,10 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         if not installed.ok or installed.timed_out:
             detail = (installed.stderr or installed.stdout)[-2000:]
             raise ServiceError(f"Native optimizer runtime setup failed: {detail}")
+        # A host_cli proposer runs the host-agent shim, not Codex in this box, so it
+        # needs no requirements file (the parent's _starts_codex skips it too).
+        if not editor and proposer.harness == BLACKBOX_HARNESS_CODEX and proposer.host_cli is None:
+            _require_codex_requirements(runtime, session)
         env = {
             "ANTHROPIC_BASE_URL": (relay or options.gateway.url).removesuffix("/v1"),
             "ANTHROPIC_AUTH_TOKEN": _INJECTED_KEY_PLACEHOLDER if headers else options.gateway.api_key,
@@ -1163,6 +1260,10 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
             "CI": "1",
             "NO_COLOR": "1",
             **(with_legacy_env({"APP_BUDGET_RELAY_URL": relay}) if relay else {}),
+            # The box's proxy adds this token to each [proposer] MCP request (SKY-610).
+            **({MCP_TOKEN_ENV: mcp_route["token"]} if mcp_route.get("token") else {}),
+            # The box's proxy turns these names into SKYNET_SERVICE_<NAME>_URL on its own port (SKY-612).
+            **({SERVICES_ENV: json.dumps(mcp_route["services"])} if mcp_route.get("services") else {}),
         }
         if shinka:
             env.update(

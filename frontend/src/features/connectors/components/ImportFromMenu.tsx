@@ -17,7 +17,7 @@ import { useSettingsModal } from "@/features/settings";
 import { useConnectors } from "../hooks/use-connectors";
 import { ConnectorImportDialog } from "./ConnectorImportDialog";
 import { HuggingFaceImportDialog } from "./HuggingFaceImportDialog";
-import { PROVIDER_GROUPS, categoryLabel, providerMeta } from "./providers";
+import { IMPORT_GROUPS, categoryLabel, providerMeta } from "./providers";
 
 /** Props for {@link ImportFromMenu}. */
 export interface ImportFromMenuProps {
@@ -79,7 +79,7 @@ export function ImportFromMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-[15rem]">
-          {PROVIDER_GROUPS.map((group, index) => (
+          {IMPORT_GROUPS.map((group, index) => (
             <React.Fragment key={group.category}>
               {index > 0 && <DropdownMenuSeparator />}
               <DropdownMenuLabel>{categoryLabel(group.category)}</DropdownMenuLabel>

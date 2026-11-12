@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Iterator
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetConflictError, BudgetFencedError
 from core.storage.models import Base, BillingCustomerModel
-from core.storage.preflights import PreflightClaim, PreflightStore, WizardPreflightModel, verification_fingerprint
+from core.storage.preflights import PreflightClaim, PreflightStore, WizardPreflightModel
 
 PAYLOAD = {"seed_candidate": "real seed", "scorer": {"kind": "python", "metric_code": "def score(c): return 1"}}
 SUCCESS = {
@@ -269,20 +270,52 @@ def test_settlement_cannot_manufacture_success_for_unperformed_checks(
         store.finish(first.document["id"], claim_token=first.token, status="succeeded", result=SUCCESS)
 
 
-def test_heartbeat_keeps_live_owner_and_stops_cleanly_after_finish(store: PreflightStore) -> None:
+def test_heartbeat_keeps_live_owner_and_stops_cleanly_after_finish(
+    store: PreflightStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Renew through a real short lease and preserve a completed result inside the context.
 
     Args:
         store: Private setup fixture.
+        monkeypatch: Wraps renew so the test waits on real renewals instead of fixed sleeps.
     """
-    store.lease_seconds = 0.3
+    # SKY-404: a 0.3 s lease with fixed sleeps expired on slow CI before the first renewal.
+    store.lease_seconds = 1.5
+    renew = store.renew
+    renewed_past_claim_lease = threading.Event()
+    renewed_after_finish = threading.Event()
+    claim_lease_ends = math.inf
+    finished_at = math.inf
+
+    def recording_renew(identity: str, *, claim_token: str) -> bool:
+        """Delegate to the real renew and signal the renewals the test waits for.
+
+        Args:
+            identity: Claimed setup record.
+            claim_token: Private current-owner token.
+
+        Returns:
+            The real renew result.
+        """
+        started = time.monotonic()
+        renewed = renew(identity, claim_token=claim_token)
+        if renewed and time.monotonic() > claim_lease_ends:
+            renewed_past_claim_lease.set()
+        # A renewal that started before finish returned can commit while the row is still running.
+        if renewed and started > finished_at:
+            renewed_after_finish.set()
+        return renewed
+
+    monkeypatch.setattr(store, "renew", recording_renew)
     budget_id = _budget(store)
     claim = _claim(store, budget_id)
+    claim_lease_ends = time.monotonic() + store.lease_seconds
     with store.heartbeat(claim.document["id"], claim_token=claim.token):
-        time.sleep(0.45)
+        assert renewed_past_claim_lease.wait(timeout=4)
         assert _claim(store, budget_id).token is None
         finished = store.finish(claim.document["id"], claim_token=claim.token, status="succeeded", result=SUCCESS)
-        time.sleep(0.15)
+        finished_at = time.monotonic()
+        assert renewed_after_finish.wait(timeout=4)
     assert finished["status"] == "succeeded"
     with Session(store.engine) as session:
         row = session.get(WizardPreflightModel, claim.document["id"])
@@ -315,34 +348,6 @@ def test_stale_or_foreign_evidence_does_not_authorize_attachment(store: Prefligh
             )
 
 
-def test_unified_evaluation_fingerprint_tracks_code_and_sample_count(store: PreflightStore) -> None:
-    """A unified contract check's evidence changes with its code and sample count, so a stale pass is never reused."""
-    base = {
-        "payload_kind": "unified_v1",
-        "task": {"objective": "o"},
-        "workspace": {"run_code": "a", "metric_code": "m"},
-        "name": "cosmetic",
-    }
-
-    def digest(payload: dict[str, Any]) -> str:
-        """Fingerprint a unified evaluation payload.
-
-        Args:
-            payload: Canonical unified inputs.
-
-        Returns:
-            The evidence fingerprint.
-        """
-        with Session(store.engine) as session:
-            return verification_fingerprint(
-                session, username="alice", workflow="unified", scope="evaluation", payload=payload
-            )
-
-    assert digest(base) == digest({**base, "name": "renamed"})
-    assert digest(base) != digest({**base, "workspace": {"run_code": "b", "metric_code": "m"}})
-    assert digest(base) != digest({**base, "contract_sample_count": 5})
-
-
 def test_evaluation_pass_is_not_reused_after_the_limit_changes(store: PreflightStore) -> None:
     """A contract check that passed under one spending limit runs again under a new one.
 
@@ -352,7 +357,7 @@ def test_evaluation_pass_is_not_reused_after_the_limit_changes(store: PreflightS
     budget_id = _budget(store)
 
     def claim(revision: int) -> PreflightClaim:
-        """Claim the same unified evaluation under the budget's current revision.
+        """Claim the same evaluation under the budget's current revision.
 
         Args:
             revision: Budget revision the caller holds.
@@ -364,7 +369,7 @@ def test_evaluation_pass_is_not_reused_after_the_limit_changes(store: PreflightS
             username="alice",
             budget_id=budget_id,
             revision=revision,
-            workflow="unified",
+            workflow="anything",
             scope="evaluation",
             payload=PAYLOAD,
         )

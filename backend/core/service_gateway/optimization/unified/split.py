@@ -1,23 +1,20 @@
-"""Split a unified run's cases into train, validation and test, server side.
+"""Split a run's cases into train, validation and test, server side.
 
 This is the one place the held-out split is decided. Engines receive the
 train cases and the validation cases; selection (the winner and the
 regression guard) runs on validation, falling back to train when there is
 none; the reported scores are measured on test, falling back to validation.
-Test cases never reach an engine, a proposer or the contract check.
+Test cases never reach an engine or a proposer.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import random
 from dataclasses import dataclass
-from typing import Any
 
 from ....models.blackbox import UnifiedSplitCounts
 from ....models.common import SplitFractions
-from ....models.unified import MIN_PAIRS_FOR_HELD_OUT, DataMode, UnifiedCase, UnifiedRunRequest
+from ....models.unified import MIN_PAIRS_FOR_HELD_OUT, DataMode, UnifiedCase
 from ...datasets.split_counts import split_counts
 
 
@@ -29,58 +26,6 @@ class CaseSplits:
     val: list[UnifiedCase]
     test: list[UnifiedCase]
     counts: UnifiedSplitCounts
-
-
-def _case_json(case: Any) -> Any:
-    """Return a JSON-ready form of one case.
-
-    Args:
-        case: A :class:`UnifiedCase` or a raw case mapping.
-
-    Returns:
-        The case as plain data.
-    """
-    return case.model_dump(mode="json") if isinstance(case, UnifiedCase) else case
-
-
-def task_fingerprint(payload: UnifiedRunRequest) -> str:
-    """Hash what decides a run's split: its cases, objective and artifact.
-
-    The split seed comes from this, never from the optimization id, so a
-    resubmitted identical task gets the identical split.
-
-    Args:
-        payload: The unified run.
-
-    Returns:
-        The sha256 hex digest of the canonical JSON of the cases (or the
-        staged dataset id when cases travel by reference), the objective and
-        the artifact.
-    """
-    cases = payload.data.cases
-    body = {
-        "cases": [_case_json(case) for case in cases] if cases is not None else None,
-        "staged_dataset_id": payload.data.staged_dataset_id if cases is None else None,
-        "objective": payload.task.objective,
-        "artifact": payload.task.artifact.model_dump(mode="json"),
-    }
-    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def split_seed(payload: UnifiedRunRequest) -> int:
-    """Return the run's split seed: its explicit seed, else one derived from the task.
-
-    Args:
-        payload: The unified run.
-
-    Returns:
-        A non-negative 31-bit seed, byte-stable across processes.
-    """
-    if payload.seed is not None:
-        return payload.seed
-    digest = hashlib.sha256(task_fingerprint(payload).encode("utf-8")).digest()
-    return int.from_bytes(digest[:4], "big") % (2**31)
 
 
 def split_cases(
@@ -176,34 +121,3 @@ def report_cases(splits: CaseSplits) -> list[UnifiedCase]:
         Test cases, else validation cases, else the train cases.
     """
     return splits.test or splits.val or splits.train
-
-
-def report_matches_selection(splits: CaseSplits) -> bool:
-    """Return whether reporting reuses the selection cases, so one scoring pass serves both.
-
-    Args:
-        splits: The run's splits.
-
-    Returns:
-        True when the report and selection splits are the same cases.
-    """
-    return selection_cases(splits) == report_cases(splits)
-
-
-def contract_samples(splits: CaseSplits, k: int) -> list[UnifiedCase]:
-    """Pick up to ``k`` cases for the contract check, never from the test split.
-
-    Args:
-        splits: The run's splits.
-        k: How many samples to take.
-
-    Returns:
-        The first ``k`` distinct cases of train then validation.
-    """
-    samples: list[UnifiedCase] = []
-    for case in [*splits.train, *splits.val]:
-        if len(samples) >= k:
-            break
-        if not any(case is seen for seen in samples):
-            samples.append(case)
-    return samples

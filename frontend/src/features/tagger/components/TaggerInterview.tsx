@@ -47,7 +47,7 @@ import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
 import { ModelChip } from "@/shared/ui/model-chip";
 import { formatCentsUsd } from "@/features/billing";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
-import { agentSubscriptionFor } from "@/features/settings";
+import { useResourceMode } from "@/shared/ui/resource-mode-switch";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -144,10 +144,10 @@ export function TaggerInterview({
   onConfirmRubric,
 }: Props) {
   useCompletionNotification(busy, () => msg("notify.interview.turn"));
-  const localMenu = useLocalAgentMenuModels(
-    agentSubscriptionFor("tagger"),
-    interviewComposerModel(assist),
-  );
+  const { web } = useResourceMode();
+  // Interview turns run on this Mac's backend, which reaches the web account
+  // only through OpenRouter.
+  const localMenu = useLocalAgentMenuModels(interviewComposerModel(assist), web, true);
   const [draft, setDraft] = useState("");
   const done = assist.interview.done;
   // A synthetic session has no rows until the interview has specified them.
@@ -233,6 +233,7 @@ export function TaggerInterview({
           </div>
 
           <AgentThread
+            streaming={busy}
             scrollDeps={[messages.length, streamText, thinking?.reasoning]}
             isEmpty={messages.length === 0}
             emptyState={
@@ -296,7 +297,8 @@ export function TaggerInterview({
                 onFastChange={onSetInterviewFast}
                 defaultFlag="is_interview_default"
                 models={localMenu.models}
-                openRouterEngine={localMenu.openRouterEngine}
+                allModels={localMenu.allModels}
+                side={localMenu.side}
               />
             }
           />

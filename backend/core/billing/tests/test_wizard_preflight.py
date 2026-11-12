@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import copy
+import io
+import tarfile
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -26,8 +27,6 @@ from core.api.routers import submissions as submission_router
 from core.api.routers import wizard_preflight as preflight_router
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.billing.budgets import BudgetConflictError
-from core.billing.byok_vault import ProviderKeyVault
-from core.billing.model_gateway import ROUTE_KEY
 from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.protected_credentials import (
     ProtectedCredentialVault,
@@ -36,9 +35,11 @@ from core.billing.protected_credentials import (
 from core.billing.runtime import PaidResult, UsagePendingError
 from core.config import settings
 from core.i18n import t_locale
+from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
 from core.storage.models import Base, BillingCustomerModel, BillingProviderKeyModel
 from core.storage.preflights import PreflightStore, setup_seed
+from core.worker.repo_gate import GateFailure
 
 PAYLOAD = {
     "seed_candidate": "A real starting candidate",
@@ -147,6 +148,19 @@ def test_continue_reuses_matching_success_and_preserves_setup_spend(setup_client
     second = client.post("/wizard/preflight", json=_request(budget, {**PAYLOAD, "name": "Renamed", "is_private": True}))
     assert second.json()["id"] == first.json()["id"]
     assert second.json()["budget"]["setup_spent_cents"] == "1"
+    assert len(calls) == 1
+
+
+def test_checked_preflight_runs_the_route_check_for_other_callers(setup_client) -> None:
+    """Give the MCP preflight tool the route's own check and evidence, not a copy (SKY-600)."""
+    client, engine, calls = setup_client
+    budget = _budget(client)
+    first = client.post("/wizard/preflight", json=_request(budget)).json()
+    request = wizard_preflight.WizardPreflightRequest.model_validate(_request(budget))
+    response = preflight_router.checked_preflight(
+        request, AuthenticatedUser("alice", "user", ()), SimpleNamespace(engine=engine)
+    )
+    assert (response.id, response.status, response.may_advance) == (first["id"], "succeeded", True)
     assert len(calls) == 1
 
 
@@ -434,120 +448,79 @@ def test_unresolved_paid_usage_blocks_stage_advancement(setup_client, monkeypatc
     assert any(check["key"] == "usage" and check["status"] == "pending" for check in result["checks"])
 
 
-@pytest.mark.parametrize(
-    ("metric_call", "expected_model"),
-    [("llm(output, model='fixture/judge')", "fixture/judge"), ("llm(output)", "fixture/text")],
-)
-def test_unified_metric_model_gets_a_metered_route(
-    setup_client, monkeypatch: pytest.MonkeyPatch, metric_call: str, expected_model: str
+def test_preflight_shows_every_gate_failure_before_any_paid_setup(
+    setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Route a unified run's metric model like the worker does, then hand the guest no legacy aliases."""
-    client, _engine, _calls = setup_client
-    seen: list[dict] = []
+    """Refuse an unenforceable optimize.toml in the setup check, in the user's language, before the setup model runs."""
+    client, _engine, calls = setup_client
+    archive = tmp_path / "tree.tgz"
+    raw = (
+        b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n'
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
+        b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }\n'
+    )
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("optimize.toml")
+        info.size = len(raw)
+        packed.addfile(info, io.BytesIO(raw))
+    cleaned = []
+    staged = SimpleNamespace(
+        snapshot=SimpleNamespace(archive=archive),
+        secrets={},
+        close_scorers=lambda: cleaned.append("scorers"),
+        cleanup=lambda: cleaned.append("tree"),
+    )
+    inferred = []
+    monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
+    monkeypatch.setattr(wizard_preflight, "stage_repository", lambda payload, **kwargs: (payload, staged))
+    monkeypatch.setattr(wizard_preflight, "infer_repo_setup", lambda *args: inferred.append(args))
 
-    class _RoutingGateway(_Gateway):
-        """Stamp a route on the legacy scorer key only, as the real seam does."""
+    response = client.post("/wizard/preflight", json={**_request(_budget(client)), "locale": "he"})
 
-        def protect_payload(self, payload: dict, **kwargs) -> dict:
-            """Mark the model reachable through the legacy ``scorer`` key."""
-            result = copy.deepcopy(payload)
-            scorer = result.get("scorer")
-            if isinstance(scorer, dict) and isinstance(scorer.get("model"), dict):
-                scorer["model"].setdefault("extra", {})[ROUTE_KEY] = {"url": "http://parent", "token": "t"}
-            return result
-
-    def verify(gateway, payload, **kwargs) -> dict:
-        """Record what the guest would receive."""
-        seen.append(payload)
-        return {"checks": [{"key": "metric.contract", "status": "succeeded"}]}
-
-    monkeypatch.setattr(wizard_preflight, "ModelGateway", _RoutingGateway)
-    monkeypatch.setattr(wizard_preflight, "_verify_unified", verify)
-    budget = _budget(client)
-    payload = {
-        "task": {"objective": "Answer in one word.", "artifact": {"kind": "prompt", "starting_version": "Answer: "}},
-        "data": {
-            "mode": "pairs",
-            "cases": [{"input": {"question": f"Q{index}?"}, "expected": "A"} for index in range(10)],
-            "input_fields": ["question"],
-        },
-        "optimizer": {"choice": "gepa"},
-        "models": {
-            "reflection_model": {"name": "fixture/text"},
-            "task_model": {"name": "fixture/task"},
-        },
-        "workspace": {
-            "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
-            "metric_code": f"from skynet import llm\ndef score(input, output, expected=None):\n    return float({metric_call} == expected), {{}}\n",
-        },
-        "max_cost_cents": 20,
-    }
-    response = client.post("/wizard/preflight", json={**_request(budget, payload), "workflow": "unified"})
-    assert response.status_code == 200, response.text
-    assert ROUTE_KEY in seen[0]["models"]["metric_model"]["extra"]
-    assert seen[0]["models"]["metric_model"]["name"] == expected_model
-    assert not {"scorer", "task_model_config", "reflection_model_config"} & seen[0].keys()
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert [(check["key"], check["message_code"]) for check in body["checks"]] == [
+        ("setup", "repo_gate.unenforced_cloud"),
+        ("setup", "repo_gate.missing_secret"),
+    ]
+    assert body["checks"][0]["message"] == t_locale("he", "repo_gate.unenforced_cloud", key="[target.planner] network")
+    assert not inferred
+    assert not calls
+    assert body["budget"]["setup_spent_cents"] == "0"
+    assert cleaned == ["scorers", "tree"]
 
 
-def test_unified_byok_roles_are_aliased_before_setup_protection(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep task, reflection, and BYOK metric aliases available at setup protection."""
-    client, engine, _calls = setup_client
-    monkeypatch.setattr(settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
-    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
-    monkeypatch.setattr(ProviderKeyVault, "_probe", lambda *args, **kwargs: "verified")
-    ProviderKeyVault(engine=engine).save_key("alice", "openai", "metric-private", api_base="https://public.example/v1")
-    events: list[str] = []
-    alias = wizard_preflight.alias_unified_model_roles
+def test_a_payload_with_no_repository_reaches_the_gate_with_no_bindings(
+    setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The setup check reads secret bindings safely when the payload has no repository mapping (SKY-385)."""
+    client, _engine, calls = setup_client
+    staged = SimpleNamespace(
+        snapshot=SimpleNamespace(archive=tmp_path / "tree.tgz"),
+        secrets={},
+        close_scorers=lambda: None,
+        cleanup=lambda: None,
+    )
+    seen: list[dict[str, Any]] = []
 
-    def alias_spy(payload: dict) -> None:
-        """Record when the setup adds its aliases."""
-        events.append("alias")
-        alias(payload)
+    def gate(archive: Path, secrets: dict, **kwargs: Any) -> list[GateFailure]:
+        """Keep the gate inputs and refuse, so no paid setup runs."""
+        seen.append(kwargs)
+        return [
+            GateFailure("secrets", "cloud", "Secret X is missing.", I18nKey.REPO_GATE_MISSING_SECRET, {"name": "X"})
+        ]
 
-    class _RoutingGateway(_Gateway):
-        """Assert the protected boundary receives every aliased model."""
+    monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
+    monkeypatch.setattr(wizard_preflight, "stage_repository", lambda payload, **kwargs: (payload, staged))
+    monkeypatch.setattr(wizard_preflight, "check_repository", gate)
 
-        def protect_payload(self, payload: dict, **kwargs) -> dict:
-            """Check the roles and the resolved BYOK metric key."""
-            events.append("protect")
-            assert payload["task_model_config"] is payload["models"]["task_model"]
-            assert payload["reflection_model_config"] is payload["models"]["reflection_model"]
-            metric = payload["scorer"]["model"]
-            assert metric is payload["models"]["metric_model"]
-            assert metric["token_source"] == "byok"
-            assert metric["extra"]["api_key"] == "metric-private"
-            result = copy.deepcopy(payload)
-            result["scorer"]["model"]["extra"].pop("api_key")
-            return result
+    response = client.post("/wizard/preflight", json=_request(_budget(client)))
 
-    def verify(_gateway, payload, **kwargs) -> dict:
-        """Finish the setup without executing a sandbox."""
-        assert not {"scorer", "task_model_config", "reflection_model_config"} & payload.keys()
-        return {"checks": [{"key": "metric.contract", "status": "succeeded"}]}
-
-    monkeypatch.setattr(wizard_preflight, "alias_unified_model_roles", alias_spy)
-    monkeypatch.setattr(wizard_preflight, "ModelGateway", _RoutingGateway)
-    monkeypatch.setattr(wizard_preflight, "_verify_unified", verify)
-    payload = {
-        "task": {"objective": "Answer.", "artifact": {"kind": "prompt", "starting_version": "Answer: "}},
-        "data": {
-            "mode": "pairs",
-            "cases": [{"input": {"question": "Q"}, "expected": "A"}, {"input": {"question": "Q2"}, "expected": "A2"}],
-            "input_fields": ["question"],
-        },
-        "optimizer": {"choice": "gepa"},
-        "models": {
-            "task_model": {"name": "fixture/task"},
-            "reflection_model": {"name": "fixture/reflection"},
-            "metric_model": {"name": "openai/judge", "token_source": "byok", "byok_provider": "openai"},
-        },
-        "workspace": {
-            "run_code": "def run(artifact, input): return artifact",
-            "metric_code": "def score(input, output, expected=None): return 1.0, {}",
-        },
-        "max_cost_cents": 20,
-    }
-    response = client.post("/wizard/preflight", json={**_request(_budget(client), payload), "workflow": "unified"})
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "succeeded"
-    assert events == ["alias", "protect"]
+    assert response.status_code == 200
+    body = response.json()
+    assert [check.get("message_code") for check in body["checks"]] == ["repo_gate.missing_secret"]
+    assert [(kwargs["bindings"], kwargs["allowed_hosts"]) for kwargs in seen] == [({}, {})]
+    assert not calls

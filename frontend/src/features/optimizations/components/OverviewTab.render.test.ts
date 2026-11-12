@@ -23,7 +23,6 @@ void it("OverviewTab render tests pass", () => {
         JITI_ALIAS: JSON.stringify({
           "@/": `${path.join(frontend, "src")}/`,
           "react-loading-skeleton/dist/skeleton.css": stub,
-          "@xyflow/react/dist/style.css": stub,
         }),
       },
     },

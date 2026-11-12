@@ -1,28 +1,8 @@
 "use client";
 
 import type React from "react";
-import { Badge } from "@/shared/ui/primitives/badge";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
-import { formatBlackboxDelta, formatBlackboxScore, formatPercent } from "@/shared/lib";
-import { msg } from "@/shared/lib/messages";
-
-export function typeBadge(jobType: string) {
-  if (jobType === "grid_search") {
-    return (
-      <Badge variant="outline" className="border-primary-fill/30 text-primary">
-        {msg("auto.features.dashboard.lib.status.badges.1")}
-      </Badge>
-    );
-  }
-  if (jobType === "blackbox") {
-    return (
-      <Badge variant="outline" className="border-primary-fill/45 text-primary">
-        {msg("optimization.blackbox.badge")}
-      </Badge>
-    );
-  }
-  return <Badge variant="secondary">{msg("auto.features.dashboard.lib.status.badges.2")}</Badge>;
-}
+import { formatBlackboxDelta, formatBlackboxScore } from "@/shared/lib";
 
 export function formatScore(job: OptimizationSummaryResponse): React.ReactNode {
   const baseline = job.baseline_test_metric;
@@ -31,10 +11,9 @@ export function formatScore(job: OptimizationSummaryResponse): React.ReactNode {
 
   if (baseline == null && optimized == null) return "-";
 
-  // Black-box (and Auto) runs report raw scorer values, often 0–1, not a
-  // 0–100 percentage; format them the way the run page does.
-  const isBlackbox = job.optimization_type === "blackbox";
-  const fmtScore = isBlackbox ? formatBlackboxScore : formatPercent;
+  // Runs report raw scorer values, often 0–1, not a 0–100 percentage; format
+  // them the way the run page does.
+  const fmtScore = formatBlackboxScore;
 
   if (baseline != null && optimized != null && improvement != null) {
     const color =
@@ -43,9 +22,7 @@ export function formatScore(job: OptimizationSummaryResponse): React.ReactNode {
         : improvement < 0
           ? "text-[var(--danger)]"
           : "text-muted-foreground";
-    const delta = isBlackbox
-      ? formatBlackboxDelta(improvement)
-      : `${improvement > 0 ? "+" : ""}${improvement.toFixed(1)}%`;
+    const delta = formatBlackboxDelta(improvement);
     return (
       <span
         className="inline-flex items-center gap-1 text-xs whitespace-nowrap"

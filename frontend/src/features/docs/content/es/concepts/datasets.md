@@ -1,4 +1,4 @@
-Un conjunto de datos es una tabla de casos. Cada fila es un caso. Skynet ejecuta tu artefacto sobre los casos, puntúa cada salida y usa las puntuaciones para comparar versiones. Esta página explica cómo lee Skynet los casos, qué hacen los roles de columna y cómo divide los casos en los conjuntos de entrenamiento, validación y prueba.
+Un conjunto de datos es una tabla de casos. Cada fila es un caso. Skynet puntúa cada versión de tu repositorio sobre los casos con tu evaluador y usa las puntuaciones para comparar versiones. Esta página explica cómo lee Skynet los casos, qué hacen los roles de columna y cómo divide los casos en los conjuntos de entrenamiento, validación y prueba.
 
 ## Cargar los datos
 
@@ -17,8 +17,8 @@ En **Cómo leer los datos**, asigna un rol a cada columna:
 
 | Rol     | Qué hace Skynet con la columna                                   |
 | ------- | ---------------------------------------------------------------- |
-| Entrada | Pone el valor en `input`, que recibe tu código de ejecución      |
-| Salida  | Pone el valor en `expected`, que recibe tu métrica               |
+| Entrada | Pone el valor en `case["input"]`, que recibe tu evaluador      |
+| Salida  | Pone el valor en `case["expected"]`, que recibe tu evaluador               |
 | Omitir  | No usa la columna                                                |
 
 Cada columna tiene además un tipo: **Texto** o **Imagen**.
@@ -49,7 +49,7 @@ con los roles `message` = Entrada, `label` = Salida e `id` = Omitir, tu código 
 ```
 
 > [!TIP]
-> En tu métrica, lee el valor esperado por el nombre de la columna, por ejemplo `expected["label"]`.
+> En tu evaluador, lee el valor esperado por el nombre de la columna, por ejemplo `case["expected"]["label"]`.
 
 ## Modos de datos
 
@@ -111,7 +111,7 @@ En la selección manual, cada campo acepta una fracción de 0 a 1, en pasos de 0
 
 ## Muestras del contrato
 
-La comprobación del contrato del paso **Métrica y ejecución** ejecuta tu código sobre 3 casos de muestra. Skynet toma estas muestras solo de los casos de entrenamiento y validación, nunca de prueba.
+La comprobación del contrato del paso **Métrica y ejecución** ejecuta tu configuración y tu evaluador sobre la versión inicial, en 3 casos de muestra. Skynet toma estas muestras solo de los casos de entrenamiento y validación, nunca de prueba.
 
 ## Páginas relacionadas
 

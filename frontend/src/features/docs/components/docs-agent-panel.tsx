@@ -8,6 +8,7 @@ import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
 import { agentSteerChannel, newSteerKey, useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 import { AppMark } from "@/shared/ui/app-mark";
 import { EmptyState } from "@/shared/ui/empty-state";
@@ -425,6 +426,7 @@ export function DocsAgentPanel({
                   <span className="truncate text-[0.8125rem] font-medium leading-tight">{labels.agentTitle}</span>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  <CopyChatMenu messages={transcript} title={labels.agentTitle} />
                   {messages.length > 0 && (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -462,6 +464,7 @@ export function DocsAgentPanel({
 
               <AgentThread
                 className="overscroll-contain"
+                streaming={streaming}
                 isEmpty={messages.length === 0}
                 emptyState={<EmptyState icon={AppMark} variant="compact" title={labels.askAgentHint} />}
                 scrollDeps={[

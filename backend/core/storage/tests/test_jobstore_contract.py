@@ -232,13 +232,6 @@ def test_append_log_makes_entry_retrievable(store: FakeJobStore) -> None:
     assert logs[0]["level"] == "INFO"
 
 
-def test_append_log_pair_index_stored(store: FakeJobStore) -> None:
-    """``append_log`` persists a supplied ``pair_index`` value."""
-    store.seed_job("l2")
-    store.append_log("l2", level="DEBUG", logger_name="lg", message="m", pair_index=7)
-    assert store.get_logs("l2")[0]["pair_index"] == 7
-
-
 def test_get_logs_level_filter(store: FakeJobStore) -> None:
     """``get_logs`` respects the ``level`` filter."""
     store.seed_job("l3")

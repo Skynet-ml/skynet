@@ -1,11 +1,9 @@
 """Stream what an engine learns — each scorer call and each scored version — as trajectory events.
 
-DSPy runs feed the metric's feedback text into the candidate tree drawer
-through :data:`PROGRESS_MINIBATCH` events and every accepted program
-through :data:`PROGRESS_CANDIDATE` events. Black-box runs have no metric
-and no DSPy optimizer, so the scorer's side info and the engine's own
-versions stand in: this module puts them on the wire in the same shapes so
-the frontend renders both kinds of run identically, while the run is
+The candidate tree drawer shows the scorer's feedback text through
+:data:`PROGRESS_MINIBATCH` events and every accepted version through
+:data:`PROGRESS_CANDIDATE` events. This module puts the scorer's side info
+and the engine's own versions on the wire in those shapes, while the run is
 still going.
 """
 
@@ -221,22 +219,21 @@ def emit_scorer_feedback(
     progress_callback: Callable[[str, dict[str, Any]], None] | None,
     *,
     example_id: str,
-    score: float,
+    score: float | None,
     side_info: SideInfo,
     iteration: int | None = None,
     candidate_id: str | None = None,
 ) -> None:
     """Forward one scorer call as a mini-batch feedback event, if it said anything.
 
-    The event mirrors what DSPy runs emit per metric call, including the
-    proposal iteration the call belongs to, so the drawer can show a
-    candidate the feedback that led to it. Renders ride along whole under
+    The event carries the proposal iteration the call belongs to, so the
+    drawer can show a candidate the feedback that led to it. Renders ride along whole under
     ``images``, outside the feedback text cap.
 
     Args:
         progress_callback: The lane's progress sink, if any.
         example_id: Display id of the case the scorer graded (``"?"`` when none).
-        score: The score the scorer returned.
+        score: The score the scorer returned, ``None`` after a metric error.
         side_info: What the scorer returned next to the score.
         iteration: The version the call scores. Engines that score from
             worker threads pass it explicitly; unset, it is read from the
@@ -259,7 +256,6 @@ def emit_scorer_feedback(
                 "example_id": example_id,
                 "score": score,
                 "feedback": feedback,
-                "prediction": "",
                 "iteration": iteration,
                 "images": images,
                 "images_dropped": images_dropped,
@@ -321,7 +317,7 @@ def emit_candidate(
     candidate_id: str,
     parent_id: str | None,
     generation: int,
-    score: float,
+    score: float | None,
     per_example: list[tuple[str, float]],
     candidate: Candidate,
     discovered_at_evals: int,
@@ -336,7 +332,7 @@ def emit_candidate(
         candidate_id: The version's id within the lane.
         parent_id: The version it was proposed from; ``None`` for the first.
         generation: Depth in the tree — the parent's plus one, 0 for the first.
-        score: Its mean score.
+        score: Its mean score, or ``None`` for a version with a crashed case.
         per_example: ``(case id, score)`` per case scored.
         candidate: The version's text or parts.
         discovered_at_evals: Scorer runs the lane had spent when it was scored.

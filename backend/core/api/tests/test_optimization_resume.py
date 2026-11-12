@@ -9,12 +9,14 @@ discriminator that drives the Resume-vs-Restart affordance.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ...config import settings
-from ...constants import WORKER_RESTART_CAUSE
+from ...constants import OPTIMIZATION_TYPE_BLACKBOX, WORKER_RESTART_CAUSE
 from ...storage.tests.test_remote_jobstore import SQLiteJobStore, _fund_checkpoint, _fund_without_checkpoint
 from ..auth import AuthenticatedUser
 from ..routers._helpers import is_pausable, is_resumable, pausable_id_flags, resumable_id_flags
@@ -23,10 +25,27 @@ from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
 
 
+class _RepoJobStore(_BaseFakeJobStore):
+    """Seed repository runs by default: a stored DSPy run can no longer be re-queued (SKY-316)."""
+
+    def seed_job(self, optimization_id: str, **fields: Any) -> dict:
+        """Insert a job row whose overview marks a repository run unless the test sets one.
+
+        Args:
+            optimization_id: Identifier for the synthesised job.
+            **fields: Overrides applied on top of the default row.
+
+        Returns:
+            The stored job row.
+        """
+        fields.setdefault("payload_overview", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
+        return super().seed_job(optimization_id, **fields)
+
+
 @pytest.fixture
 def store() -> _BaseFakeJobStore:
     """Provide a fresh fake job store per test."""
-    return _BaseFakeJobStore()
+    return _RepoJobStore()
 
 
 @pytest.fixture
@@ -105,71 +124,6 @@ def test_resume_unknown_id_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-def _seed_grid(store: _BaseFakeJobStore, oid: str, *, status: str = "success") -> str:
-    """Seed a terminal grid whose pair 0 succeeded and pair 1 failed."""
-    store.seed_job(
-        oid,
-        status=status,
-        username="alice",
-        payload_overview={"optimization_type": "grid_search"},
-        result={
-            "pair_results": [
-                {"pair_index": 0, "generation_model": "g0", "reflection_model": "r0", "optimized_test_metric": 0.8},
-                {"pair_index": 1, "generation_model": "g1", "reflection_model": "r1", "error": "boom"},
-            ],
-            "total_pairs": 2,
-        },
-    )
-    return oid
-
-
-def test_grids_are_never_whole_job_resumable(store: _BaseFakeJobStore) -> None:
-    """A grid is resumed per pair (in its results), so the top-level flag stays False."""
-    _seed_grid(store, "g", status="failed")
-    store.save_grid_pair_result("g", 0, {"pair_index": 0})
-    store.save_gepa_checkpoint("g", b"S", iteration=1, pair_index=1)
-    assert is_resumable(store, store.get_job("g")) is False
-
-
-@pytest.mark.parametrize("action", ["resume", "restart", "retry"])
-def test_stored_grid_cannot_be_requeued(client: TestClient, store: _BaseFakeJobStore, action: str) -> None:
-    """A stored grid search stays readable but is never queued again.
-
-    Args:
-        client: Router client over the fake store.
-        store: Fake job store holding the stored grid.
-        action: Lifecycle action that would queue new work.
-    """
-    _seed_grid(store, "grid1", status="failed")
-    store.save_gepa_checkpoint("grid1", b"STATE", iteration=1)
-
-    resp = client.post(f"/optimizations/grid1/{action}")
-
-    assert resp.status_code == 409, resp.text
-    assert store.get_job("grid1")["status"] == "failed"
-
-
-def test_stored_grid_cannot_be_cloned(client: TestClient, store: _BaseFakeJobStore) -> None:
-    """Cloning a stored grid search is refused instead of creating a run that would fail.
-
-    Args:
-        client: Router client over the fake store.
-        store: Fake job store holding the stored grid.
-    """
-    _seed_grid(store, "grid2", status="success")
-    store.seed_job(
-        "grid2",
-        status="success",
-        username="alice",
-        payload={"generation_models": [{"name": "g0"}]},
-        payload_overview={"optimization_type": "grid_search"},
-    )
-
-    resp = client.post("/optimizations/grid2/clone", json={"count": 1})
-
-    assert resp.status_code == 409, resp.text
-
-
 def test_is_resumable_discriminator(store: _BaseFakeJobStore) -> None:
     """The flag is True only for terminal-failure + checkpoint + attempts under cap."""
     store.seed_job("a", status="failed", attempts=0, username="alice")
@@ -239,7 +193,7 @@ def test_paused_run_is_resumable_even_at_attempt_cap(store: _BaseFakeJobStore) -
 
 
 def test_is_pausable_discriminator(store: _BaseFakeJobStore) -> None:
-    """Pausable only for a running single run that already has a saved checkpoint."""
+    """Pausable only for a running run that already has a saved checkpoint."""
     store.seed_job("rp", status="running", username="alice")
     assert is_pausable(store, store.get_job("rp")) is False  # no checkpoint yet
     store.save_gepa_checkpoint("rp", b"x", 1)
@@ -249,13 +203,9 @@ def test_is_pausable_discriminator(store: _BaseFakeJobStore) -> None:
     store.save_gepa_checkpoint("fp", b"x", 1)
     assert is_pausable(store, store.get_job("fp")) is False  # not running
 
-    _seed_grid(store, "gp", status="running")
-    store.save_gepa_checkpoint("gp", b"x", 1, pair_index=0)
-    assert is_pausable(store, store.get_job("gp")) is False  # grids pause per the whole-job rule
-
 
 def test_pausable_id_flags_batches_sidebar_candidates(store: _BaseFakeJobStore) -> None:
-    """Flag only running non-grid rows that already have a checkpoint."""
+    """Flag only running rows that already have a checkpoint."""
     store.seed_job("ready", status="running", username="alice")
     store.save_gepa_checkpoint("ready", b"x", 1)
     store.seed_job("waiting", status="running", username="alice")
@@ -327,6 +277,7 @@ def test_resume_budget_projected_pause_requires_a_limit_above_the_projection(
     """
     store = SQLiteJobStore()
     store.create_job("pp")
+    store.set_payload_overview("pp", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
     store.update_job("pp", status="running")
     budgets = _fund_checkpoint(store, "pp", monkeypatch)
     budget_id = store.get_job("pp")["execution_budget_id"]
@@ -402,6 +353,7 @@ def test_resume_restarts_an_interrupted_run_without_a_checkpoint_in_its_own_budg
     """An interrupted run with no checkpoint offers Resume and starts again without using an attempt."""
     store = SQLiteJobStore()
     store.create_job("restart-me")
+    store.set_payload_overview("restart-me", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
     _fund_without_checkpoint(store, "restart-me")
     _stop_as_interrupted(store, "restart-me")
     job = store.get_job("restart-me")
@@ -426,6 +378,7 @@ def test_resume_of_an_interrupted_run_with_a_checkpoint_does_not_use_an_attempt(
     """
     store = SQLiteJobStore()
     store.create_job("resume-me")
+    store.set_payload_overview("resume-me", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
     _fund_checkpoint(store, "resume-me", monkeypatch)
     _stop_as_interrupted(store, "resume-me")
     assert is_resumable(store, store.get_job("resume-me")) is True
@@ -445,6 +398,7 @@ def test_resume_of_a_plain_failed_run_still_counts_attempts(monkeypatch: pytest.
     """
     store = SQLiteJobStore()
     store.create_job("plain")
+    store.set_payload_overview("plain", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
     _fund_checkpoint(store, "plain", monkeypatch)
     store.update_job("plain", status="failed", attempts=0)
     client = _owner_client(store, "resume-owner")
@@ -460,6 +414,7 @@ def test_resume_of_a_run_that_keeps_crashing_its_worker_counts_attempts_until_th
     """An interrupted stop with no worker-restart cause uses up an attempt on each resume, and the cap ends the loop."""
     store = SQLiteJobStore()
     store.create_job("crashes")
+    store.set_payload_overview("crashes", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
     _fund_without_checkpoint(store, "crashes")
     client = _owner_client(store, "restart-owner")
     statuses = []
@@ -490,6 +445,7 @@ def test_legacy_interrupted_marker_without_a_cause_is_not_exempt_from_the_cap() 
     """A stop marker stored without a cause counts like a crash, so the cap still blocks its resume."""
     store = SQLiteJobStore()
     store.create_job("legacy-stop")
+    store.set_payload_overview("legacy-stop", {"optimization_type": OPTIMIZATION_TYPE_BLACKBOX})
     _fund_without_checkpoint(store, "legacy-stop")
     store.update_job(
         "legacy-stop",

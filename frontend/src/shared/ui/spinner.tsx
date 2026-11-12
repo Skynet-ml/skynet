@@ -8,7 +8,7 @@ import { cn } from "@/shared/lib/utils";
 // Reduced motion slows the orbit instead of stopping it: the motion is the
 // message.
 
-export type SpinnerSize = "xs" | "sm" | "md" | "lg" | "xl";
+type SpinnerSize = "xs" | "sm" | "md" | "lg" | "xl";
 
 const SIZES: Record<SpinnerSize, { box: number; line: number }> = {
   xs: { box: 12, line: 1.5 },

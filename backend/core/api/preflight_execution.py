@@ -24,27 +24,20 @@ from ..billing.protected_credentials import (
     ProtectedCredentialVault,
     prepare_protected_credentials,
     protect_execution_credentials,
+    repo_secret_allowed_hosts,
     resolve_execution_credentials,
 )
 from ..billing.protected_execution import bind_protected_sandbox
 from ..billing.runtime import BudgetRuntime, UsagePendingError
-from ..billing.signals import BudgetReached
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import settings
 from ..constants import OPTIMIZATION_TYPE_BLACKBOX, TOKEN_SOURCE_MANAGED
 from ..models import BlackboxRunRequest
 from ..models.blackbox import BLACKBOX_ENGINE_SHINKA_EVOLVE
-from ..models.unified import (
-    CONTRACT_SAMPLE_COUNT_KEY,
-    CONTRACT_SAMPLE_MAX,
-    UNIFIED_PAYLOAD_KIND,
-    UnifiedRunRequest,
-    resolve_optimizer,
-)
-from ..service_gateway.optimization.blackbox import check_terminal
 from ..service_gateway.optimization.blackbox.native_runtime import NATIVE_ENGINES
-from ..service_gateway.optimization.blackbox.preflight import preflight_lifetime_seconds, verify_unified_in_sandbox
+from ..service_gateway.optimization.blackbox.preflight import preflight_lifetime_seconds
 from ..storage.preflights import PreflightStore
+from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
     StagedRepository,
     bind_repo_scorer,
@@ -52,7 +45,7 @@ from ..worker.repo_staging import (
     is_repo_payload,
     stage_repository,
 )
-from ..worker.unified_aliases import alias_blackbox_metric_model, alias_unified_model_roles, strip_unified_model_aliases
+from ..worker.unified_aliases import alias_blackbox_metric_model
 from ..worker.vercel_dspy import run_vercel_dspy
 from .agent_engine import fill_proposer_host_cli
 from .errors import DomainError
@@ -65,11 +58,10 @@ logger = logging.getLogger(__name__)
 
 class WizardPreflightRequest(BaseModel):
     scope: Literal["evaluation", "execution"]
-    workflow: Literal["anything", "unified"]
+    workflow: Literal["anything"]
     payload: dict[str, Any]
     execution_budget_id: str = Field(min_length=1, max_length=64)
     execution_budget_revision: int = Field(ge=1)
-    contract_sample_count: int | None = Field(default=None, ge=1, le=CONTRACT_SAMPLE_MAX)
     locale: str | None = Field(default=None, max_length=35)
 
     @field_validator("payload")
@@ -149,13 +141,12 @@ def _proposer_host_cli(payload: dict[str, Any]) -> str | None:
     """Read the proposer CLI a setup payload resolved.
 
     Args:
-        payload: A black-box (``proposer``) or unified (``optimizer.proposer``) payload.
+        payload: A black-box setup payload.
 
     Returns:
         The proposer's ``host_cli``, or ``None`` when the payload names none.
     """
-    optimizer = payload.get("optimizer")
-    proposer = payload.get("proposer") or (optimizer.get("proposer") if isinstance(optimizer, dict) else None)
+    proposer = payload.get("proposer")
     return proposer.get("host_cli") if isinstance(proposer, dict) else None
 
 
@@ -171,10 +162,7 @@ def _canonical_execution_payload(request: WizardPreflightRequest, username: str,
         The same canonical JSON shape the submission endpoint will attach.
     """
     payload = {**request.payload, "username": username}
-    if request.workflow == "anything":
-        typed = BlackboxRunRequest.model_validate(payload)
-    else:
-        typed = UnifiedRunRequest.model_validate(payload)
+    typed = BlackboxRunRequest.model_validate(payload)
     requested_source = typed.token_source
     model_configs, _ = normalize_model_token_sources(typed)
     fill_proposer_host_cli(job_store, username, typed)
@@ -314,98 +302,6 @@ def _verify_anything(gateway: ModelGateway, payload: dict[str, Any], *, scope: s
     return result
 
 
-def _verify_unified_direct(gateway: ModelGateway, payload: dict[str, Any], *, identity: str) -> dict[str, Any]:
-    """Run the evaluation-scope contract check in the parent, against one parent-owned box.
-
-    The guest path boots a whole optimizer interpreter in the outer sandbox
-    before the workspace harness — which the parent ships into the box anyway —
-    ever runs; that boot alone cost the Check tens of seconds. Only the
-    orchestration moves to the parent here: the user's code still runs inside
-    the protected box, metered through the same mailbox and budget.
-
-    Args:
-        gateway: Shared setup model and sandbox authority, already funded for
-            its own box.
-        payload: Canonical protected unified request.
-        identity: Stable preflight evidence identity, naming the workspace box.
-
-    Returns:
-        The same checks and ``workflow_result`` the guest path produced.
-
-    Raises:
-        BudgetInsufficientError: When the spending limit stopped the check.
-    """
-    report_preflight_phase("sandbox")
-    try:
-        return verify_unified_in_sandbox(
-            payload,
-            "evaluation",
-            identity=identity,
-            runtime=gateway.parent_sandbox_runtime(),
-            on_ready=lambda: report_preflight_phase("evaluator"),
-        )
-    except BudgetReached as error:
-        raise BudgetInsufficientError(str(error) or "The spending limit cannot cover setup.") from error
-    except Exception as error:
-        # A guest-era parity rule: when the limit refused one of the check's
-        # model calls, the failure is the budget's, not the code's.
-        if gateway.budget_refusal is not None:
-            raise BudgetInsufficientError(gateway.budget_refusal) from error
-        raise
-
-
-def _verify_unified(gateway: ModelGateway, payload: dict[str, Any], *, scope: str, identity: str) -> dict[str, Any]:
-    """Run a unified run's contract check, and its engine readiness in execution scope.
-
-    The contract check scores train and validation samples only. In evaluation
-    scope it runs in the parent against one parent-owned box; execution scope
-    keeps the guest, whose image runs the engines it probes.
-
-    Args:
-        gateway: Shared setup model and sandbox authority.
-        payload: Canonical protected unified request.
-        scope: Evaluation or complete execution readiness.
-        identity: Stable preflight evidence identity.
-
-    Returns:
-        Real checks, including ``metric.contract``, and the contract outcome
-        under ``workflow_result``. In execution scope a failed model route
-        returns its checks alone, without starting the sandbox.
-
-    Raises:
-        BudgetInsufficientError: When the limit cannot hold one model route's
-            check call; in execution scope this comes before the sandbox opens.
-    """
-    if scope == "evaluation":
-        return _verify_unified_direct(gateway, payload, identity=identity)
-    # Each route check holds a whole worst-case call, which a run needs too,
-    # so a limit that cannot fund one is refused here in seconds rather
-    # than after the minute-long contract check in the sandbox.
-    public = {key: value for key, value in payload.items() if not key.startswith("_")}
-    typed = UnifiedRunRequest.model_validate(public)
-    resolved = resolve_optimizer(typed.optimizer.choice, typed.task.artifact.kind)
-    native = resolved == "auto" or resolved in NATIVE_ENGINES - {BLACKBOX_ENGINE_SHINKA_EVOLVE}
-    route_checks = _verify_model_routes(gateway, native=native)
-    if any(check["status"] == "failed" for check in route_checks):
-        return {"checks": route_checks}
-    report_preflight_phase("sandbox")
-    events = _Events()
-    protected = {
-        **payload,
-        "payload_kind": UNIFIED_PAYLOAD_KIND,
-        "_optimization_type": OPTIMIZATION_TYPE_BLACKBOX,
-        "_preflight": {"scope": scope, "identity": identity},
-    }
-    run_vercel_dspy(protected, f"preflight-{identity}", events, "spawn")
-    result = events.evidence(gateway)
-    optimizer_index = next(
-        (index for index, check in enumerate(result["checks"]) if check.get("key") == "optimizer"),
-        len(result["checks"]),
-    )
-    result["checks"][optimizer_index:optimizer_index] = route_checks
-    return result
-
-
 class _Events:
     """Collect only terminal preflight results from an isolated runtime."""
 
@@ -462,9 +358,6 @@ class _Events:
 def run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -> WizardPreflightResponse:
     """Run canonical setup inputs under a shared authority for wizard and API callers.
 
-    A unified contract check records a live terminal transcript, stored with
-    its evidence so a deduplicated check replays it.
-
     Args:
         request: Canonical current inputs with explicit budget and scope.
         user: Authenticated owner, resolved before dispatch.
@@ -476,28 +369,16 @@ def run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) ->
     # Gate before the check claims evidence or spends: a hosted check must not
     # bill a subscription or host-CLI run as managed.
     enforce_raw_local_mode_sources(request.payload)
-    terminal = None
-    if request.workflow == "unified" and request.scope == "evaluation":
-        terminal = check_terminal.current_recorder()
-        if terminal is None:
-            terminal = check_terminal.CheckTerminalRecorder()
-    with check_terminal.recording(terminal):
-        return _run_preflight(request, user, job_store, terminal)
+    return _run_preflight(request, user, job_store)
 
 
-def _run_preflight(
-    request: WizardPreflightRequest,
-    user: Any,
-    job_store: Any,
-    terminal: check_terminal.CheckTerminalRecorder | None,
-) -> WizardPreflightResponse:
+def _run_preflight(request: WizardPreflightRequest, user: Any, job_store: Any) -> WizardPreflightResponse:
     """Claim, run and record one setup attempt, or return the evidence it duplicates.
 
     Args:
         request: Canonical current inputs with explicit budget and scope.
         user: Authenticated owner, resolved before dispatch.
         job_store: Authoritative ledger and evidence storage.
-        terminal: The check's live transcript, if this attempt records one.
 
     Returns:
         Durable scoped checks and current budget state.
@@ -505,16 +386,11 @@ def _run_preflight(
     report_preflight_phase("budget")
     budgets = BudgetService(engine=job_store.engine)
     evidence = PreflightStore(job_store.engine)
-    # A unified check runs the full workspace contract, so its inputs are complete at every scope.
-    if request.scope == "execution" or request.workflow == "unified":
+    if request.scope == "execution":
         request = request.model_copy(
             update={"payload": _canonical_execution_payload(request, user.username, job_store)}
         )
     host_cli = _proposer_host_cli(request.payload)
-    if request.workflow == "unified" and request.contract_sample_count is not None:
-        request = request.model_copy(
-            update={"payload": {**request.payload, CONTRACT_SAMPLE_COUNT_KEY: request.contract_sample_count}}
-        )
     try:
         snapshot = budgets.get(request.execution_budget_id, user.username)
         if snapshot.revision != request.execution_budget_revision:
@@ -541,23 +417,14 @@ def _run_preflight(
     except BudgetError as error:
         raise budget_http_error(error) from error
     if claim.token is None:
-        document = claim.document
-        if isinstance(document.get("terminal"), dict):
-            document = {**document, "terminal": {**document["terminal"], "reused": True}}
         return WizardPreflightResponse.model_validate(
-            {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
+            {**claim.document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
         )
-    if terminal is not None:
-        terminal.redact(check_terminal.secret_values(request.payload))
-        terminal.note("budget_ready", available_cents=int(snapshot.available_cents))
     try:
         with evidence.heartbeat(claim.document["id"], claim_token=claim.token):
             try:
                 source = copy.deepcopy(request.payload)
-                if request.workflow == "unified":
-                    alias_unified_model_roles(source)
-                elif request.workflow == "anything":
-                    alias_blackbox_metric_model(source)
+                alias_blackbox_metric_model(source)
                 parent_payload = resolve_execution_credentials(
                     source,
                     username=user.username,
@@ -583,8 +450,6 @@ def _run_preflight(
                 return WizardPreflightResponse.model_validate(
                     {**document, "budget": budget_response(snapshot), "proposer_host_cli": host_cli}
                 )
-            if terminal is not None:
-                terminal.redact(check_terminal.secret_values(parent_payload))
             parent_request = request.model_copy(update={"payload": parent_payload})
             status, result = _perform_preflight(
                 parent_request,
@@ -602,8 +467,6 @@ def _run_preflight(
                     result,
                     "Provider or sandbox usage is still awaiting final confirmation.",
                 )
-            if terminal is not None:
-                result = {**result, "terminal": terminal.snapshot()}
             document = evidence.finish(claim.document["id"], claim_token=claim.token, status=status, result=result)
     except BudgetError as error:
         raise budget_http_error(error) from error
@@ -643,8 +506,7 @@ def _perform_preflight(
     result: dict[str, Any] = {}
     try:
         remote_evaluation = (
-            request.workflow == "anything"
-            and request.scope == "evaluation"
+            request.scope == "evaluation"
             and payload.get("scorer", {}).get("kind") == "remote"
             and payload.get("target", {}).get("kind") != "agent"
         )
@@ -671,17 +533,11 @@ def _perform_preflight(
         bind_protected_sandbox(
             gateway,
             settings,
-            # Unified runs execute on the Anything image: the workspace harness and every engine ship there.
-            workflow="anything" if request.workflow == "unified" else request.workflow,
             owner_id=document["id"],
             lifetime_seconds=lifetime_seconds,
-            parent_hosts=(
-                PACKAGE_REGISTRY_HOSTS if request.workflow == "anything" and is_repo_payload(payload) else ()
-            ),
+            parent_hosts=PACKAGE_REGISTRY_HOSTS if is_repo_payload(payload) else (),
+            provider=payload.get("sandbox_provider"),
         )
-        if request.workflow == "unified" and request.scope == "evaluation":
-            # The contract check runs in the parent's own box, without a guest.
-            gateway.fund_parent_sandbox(())
         protected = gateway.protect_payload(
             payload,
             managed_key=settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else "",
@@ -690,25 +546,30 @@ def _perform_preflight(
             # outlive the check's sandbox, and leave an unsettled hold.
             allow_batch=False,
         )
-        if request.workflow == "unified":
-            strip_unified_model_aliases(protected)
-        terminal = check_terminal.current_recorder()
-        if terminal is not None:
-            terminal.redact(check_terminal.secret_values(protected))
-            if settings.openrouter_api_key is not None:
-                terminal.redact([settings.openrouter_api_key.get_secret_value()])
         # The ledger keys the run's sandbox hold by this identity, and a settled
         # or released hold from an earlier run would block a new dispatch under
         # the same key, so every run of the row carries its own number.
         identity = f"{document['id']}-{attempt}"
-        if request.workflow == "anything" and is_repo_payload(protected):
+        if is_repo_payload(protected):
             report_preflight_phase("sandbox")
+            # Staging empties the secret list, so read the gate's inputs first.
+            secret_bindings = dict((protected["target"].get("repo") or {}).get("secret_bindings") or {})
+            secret_allowed_hosts = repo_secret_allowed_hosts(protected)
             protected, staged = stage_repository(
                 protected,
                 username=user.username,
                 binding_id=request.execution_budget_id,
                 engine=engine,
             )
+            gate_failures = check_repository(
+                staged.snapshot.archive,
+                staged.secrets,
+                place=sandbox_place(settings.local_mode),
+                bindings=secret_bindings,
+                allowed_hosts=secret_allowed_hosts,
+            )
+            if gate_failures:
+                raise RepoGateError(gate_failures)
             infer_repo_setup(protected, staged, gateway)
             bind_repo_scorer(
                 protected,
@@ -717,12 +578,9 @@ def _perform_preflight(
                 owner_id=f"preflight-{identity}",
                 managed_key=settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else "",
             )
-        if request.workflow == "anything":
-            result = _verify_anything(gateway, protected, scope=request.scope, identity=identity)
-            if is_repo_payload(protected):
-                result["environment"] = protected["target"]["repo"]["environment"]
-        else:
-            result = _verify_unified(gateway, protected, scope=request.scope, identity=identity)
+        result = _verify_anything(gateway, protected, scope=request.scope, identity=identity)
+        if is_repo_payload(protected):
+            result["environment"] = protected["target"]["repo"]["environment"]
         states = {check["status"] for check in result["checks"]}
         if not states or not states.issubset({"failed", "pending", "succeeded"}):
             raise ValueError("Setup did not return a complete set of readiness checks.")
@@ -743,6 +601,17 @@ def _perform_preflight(
     except BudgetInsufficientError as error:
         field = BALANCE_FIELD if isinstance(error, AccountFundsError) else None
         result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), field)]}
+    except RepoGateError as error:
+        result = {
+            "checks": [
+                {
+                    **_check("setup", "failed", failure.reason),
+                    "message_code": failure.code,
+                    "message_params": failure.params,
+                }
+                for failure in error.failures
+            ]
+        }
     except DomainError as error:
         result = {
             "checks": [

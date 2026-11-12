@@ -10,15 +10,21 @@ the optimizations category sums.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.api.errors import DomainError
+from core.api.routers._helpers import enforce_storage_quota
 from core.config import settings
+from core.storage import remote as remote_store
 from core.storage.models import (
     EMBEDDING_DIM,
     AgentStagedDatasetModel,
@@ -27,6 +33,7 @@ from core.storage.models import (
     DatasetModel,
     JobEmbeddingModel,
     LogEntryModel,
+    RunCallModel,
     TaggingSessionModel,
 )
 from core.storage.remote import RemoteDBJobStore
@@ -153,6 +160,65 @@ def test_byproducts_fold_into_optimization_footprint(store: _SQLiteJobStore, mon
 
     item = compute_user_storage_category_items(store.engine, "alice", "optimizations")[0]
     assert item.bytes == usage.breakdown["optimizations"]
+
+
+def test_run_calls_fold_into_optimization_footprint(store: _SQLiteJobStore) -> None:
+    """Stored relay-call text counts toward the owning optimization; other users' calls do not."""
+    store.create_job("job-1", username="alice")
+    store.update_job("job-1", payload={"a": 1})
+    store.create_job("job-2", username="bob")
+
+    base = compute_user_storage(store.engine, "alice").breakdown["optimizations"]
+
+    request, response, target, failure = "q" * 300, "r" * 200, "https://api.example.test/v1", "timeout"
+    with store._session_factory() as session:
+        session.add(
+            RunCallModel(
+                optimization_id="job-1",
+                candidate_id="c1",
+                seq=1,
+                kind="model",
+                target=target,
+                started_at=datetime.now(UTC),
+                status="failed",
+                failure_reason=failure,
+                request=request,
+                request_bytes=10_000,
+                response=response,
+                response_bytes=10_000,
+            )
+        )
+        session.add(
+            RunCallModel(
+                optimization_id="job-1",
+                candidate_id="c1",
+                seq=2,
+                kind="model",
+                started_at=datetime.now(UTC),
+                status="ok",
+                request="a" * 50,
+            )
+        )
+        session.add(
+            RunCallModel(
+                optimization_id="job-2",
+                candidate_id="c1",
+                seq=1,
+                kind="model",
+                started_at=datetime.now(UTC),
+                status="ok",
+                request="b" * 999,
+            )
+        )
+        session.commit()
+
+    expected = base + len(request) + len(response) + len(target) + len(failure) + 50
+    usage = compute_user_storage(store.engine, "alice")
+    assert usage.breakdown["optimizations"] == expected
+    assert usage.total == expected
+
+    item = compute_user_storage_category_items(store.engine, "alice", "optimizations")[0]
+    assert item.bytes == expected
 
 
 def _insert_dataset(store: _SQLiteJobStore, *, dataset_id: str, owner: str, name: str, byte_size: int) -> None:
@@ -359,7 +425,9 @@ def test_category_items_lists_tagging_sessions(store: _SQLiteJobStore) -> None:
     items = compute_user_storage_category_items(store.engine, "alice", "tagging_sessions")
     assert [item.id for item in items] == ["ts-big", "ts-small"]
     assert {item.type for item in items} == {"tagging_session"}
-    assert sum(item.bytes for item in items) == compute_user_storage(store.engine, "alice").breakdown["tagging_sessions"]
+    assert (
+        sum(item.bytes for item in items) == compute_user_storage(store.engine, "alice").breakdown["tagging_sessions"]
+    )
 
 
 def test_storage_counts_cover_every_category(store: _SQLiteJobStore) -> None:
@@ -391,6 +459,76 @@ def test_storage_quota_override_absent_returns_none(store: _SQLiteJobStore) -> N
 def test_effective_storage_quota_falls_back_to_default(store: _SQLiteJobStore) -> None:
     """Without an override the effective budget is the global default."""
     assert store.get_effective_user_storage_quota("alice") == settings.user_storage_quota_bytes
+
+
+def test_local_mode_budget_is_used_bytes_plus_free_disk(
+    store: _SQLiteJobStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Mac app ignores the 500 MB web budget and admin overrides (SKY-344)."""
+    two_gb = 2 * 1024 * 1024 * 1024
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path))
+    monkeypatch.setattr(remote_store, "_local_postgres_free_bytes", lambda: None)
+    measured: list[Path] = []
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: measured.append(path) or SimpleNamespace(free=two_gb))
+    store.set_user_storage_quota_override("alice", 1, updated_by="admin")
+    _insert_dataset(store, dataset_id="ds-1", owner="alice", name="Set", byte_size=600 * 1024 * 1024)
+
+    budget = store.get_effective_user_storage_quota("alice")
+
+    assert budget == 600 * 1024 * 1024 + two_gb
+    assert budget > settings.user_storage_quota_bytes
+    assert measured == [tmp_path]
+
+
+def test_local_mode_gate_blocks_only_writes_larger_than_free_disk(
+    store: _SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local save passes the 500 MB mark, and fails only when the disk is full."""
+    free = 1024 * 1024 * 1024
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+    monkeypatch.setattr(remote_store, "_local_postgres_free_bytes", lambda: None)
+    measured: list[Path] = []
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: measured.append(path) or SimpleNamespace(free=free))
+
+    enforce_storage_quota(store, "alice", incoming_bytes=900 * 1024 * 1024)
+    with pytest.raises(DomainError) as exc:
+        enforce_storage_quota(store, "alice", incoming_bytes=free + 1)
+    assert exc.value.code == "user.storage.quota_exceeded"
+    assert set(measured) == {Path.home()}
+
+
+def test_local_mode_budget_uses_the_smaller_docker_disk(
+    store: _SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Docker disk has less room than the Mac disk, the budget shows the Docker room."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=200 * 1024**3))
+    monkeypatch.setattr(remote_store, "_local_postgres_free_bytes", lambda: 30 * 1024**3)
+
+    assert store.get_effective_user_storage_quota("alice") == 30 * 1024**3
+
+
+def test_local_postgres_free_bytes_reads_df_and_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Docker probe parses ``df`` output and returns None when Docker cannot answer."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="   Avail\n32212254720\n")
+
+    monkeypatch.setattr(remote_store.shutil, "which", lambda name: "/usr/local/bin/docker")
+    monkeypatch.setattr(remote_store.subprocess, "run", fake_run)
+    assert remote_store._local_postgres_free_bytes() == 32212254720
+    assert calls[0][:3] == ["/usr/local/bin/docker", "exec", "skynet-local-postgres"]
+
+    monkeypatch.setattr(remote_store.subprocess, "run", lambda args, **_: SimpleNamespace(returncode=1, stdout=""))
+    assert remote_store._local_postgres_free_bytes() is None
+
+    monkeypatch.setattr(remote_store.shutil, "which", lambda name: None)
+    assert remote_store._local_postgres_free_bytes() is None
 
 
 def test_storage_quota_override_replaces_default(store: _SQLiteJobStore) -> None:
@@ -456,40 +594,29 @@ def _set_subscription_status(
         session.commit()
 
 
-def test_pro_plan_lifts_storage_and_job_quota(store: _SQLiteJobStore) -> None:
-    """An entitled Pro account gets the Pro storage budget and the Pro job cap."""
-    _set_subscription_status(store, "alice", "active")
-    assert store.has_pro_plan("Alice") is True
-    assert store.get_effective_user_storage_quota("alice") == settings.pro_storage_quota_bytes
-    assert store.get_effective_user_quota("alice") == settings.pro_max_jobs_per_user
+@pytest.mark.parametrize("status", [None, "active", "trialing", "past_due", "canceled"])
+def test_historical_subscription_uses_common_limits(store: _SQLiteJobStore, status: str | None) -> None:
+    """Apply the same storage and job limits regardless of historical subscription status.
 
-
-def test_past_due_pro_plan_keeps_limits_inside_the_grace_period(store: _SQLiteJobStore) -> None:
-    """A subscription that just went past due still grants Pro limits."""
-    _set_subscription_status(store, "alice", "past_due", past_due_since=datetime.now(UTC) - timedelta(days=1))
-    assert store.has_pro_plan("alice") is True
-    assert store.get_effective_user_quota("alice") == settings.pro_max_jobs_per_user
-
-
-def test_past_due_pro_plan_lapses_after_the_grace_period(store: _SQLiteJobStore) -> None:
-    """Past the grace period a past-due subscription falls back to free limits."""
-    since = datetime.now(UTC) - timedelta(days=settings.pro_past_due_grace_days + 1)
-    _set_subscription_status(store, "alice", "past_due", past_due_since=since)
-    assert store.has_pro_plan("alice") is False
+    Args:
+        store: SQLite-backed store.
+        status: Archived subscription status.
+    """
+    _set_subscription_status(store, "alice", status)
     assert store.get_effective_user_storage_quota("alice") == settings.user_storage_quota_bytes
     assert store.get_effective_user_quota("alice") == settings.max_jobs_per_user
 
 
-def test_lapsed_pro_plan_falls_back_to_defaults(store: _SQLiteJobStore) -> None:
-    """A canceled subscription returns the account to the free limits."""
-    _set_subscription_status(store, "alice", "canceled")
-    assert store.has_pro_plan("alice") is False
-    assert store.get_effective_user_storage_quota("alice") == settings.user_storage_quota_bytes
-    assert store.get_effective_user_quota("alice") == settings.max_jobs_per_user
+def test_admin_overrides_remain_effective_with_historical_subscription(store: _SQLiteJobStore) -> None:
+    """Honor explicit storage and job overrides without consulting historical subscriptions.
 
-
-def test_admin_storage_override_beats_pro_plan(store: _SQLiteJobStore) -> None:
-    """An admin override still decides the budget for a Pro account."""
+    Args:
+        store: SQLite-backed store.
+    """
     _set_subscription_status(store, "alice", "active")
     store.set_user_storage_quota_override("alice", 4096)
+    store.set_user_quota_override("alice", 12)
     assert store.get_effective_user_storage_quota("alice") == 4096
+    assert store.get_effective_user_quota("alice") == 12
+    store.set_user_quota_override("alice", None)
+    assert store.get_effective_user_quota("alice") is None

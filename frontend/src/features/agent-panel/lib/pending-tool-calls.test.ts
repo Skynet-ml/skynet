@@ -9,6 +9,7 @@ import {
   isPendingToolCall,
   pendingToolCall,
   placeToolCall,
+  stopToolCalls,
 } from "./pending-tool-calls.ts";
 
 function started(id: string, tool: string, now: number): AgentToolCall {
@@ -33,6 +34,19 @@ test("a started call with no placeholder goes last", () => {
   assert.deepEqual(
     calls.map((row) => row.id),
     ["c1", "c2"],
+  );
+});
+
+test("a stopped turn leaves no row running", () => {
+  // A row left running kept the turn header's "Working for" clock going.
+  const done: AgentToolCall = { ...started("c0", "fetch", 1), status: "done", endedAt: 2 };
+  const calls = [done, started("c1", "search", 3), pendingToolCall("fetch", 0, 4)];
+  assert.deepEqual(
+    stopToolCalls(calls, 9).map((row) => [row.id, row.status, row.endedAt]),
+    [
+      ["c0", "done", 2],
+      ["c1", "error", 9],
+    ],
   );
 });
 

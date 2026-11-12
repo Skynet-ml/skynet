@@ -10,24 +10,17 @@
  * Kept import-free so the Node unit test can load it directly.
  */
 
-export const DESKTOP_CLIENT_ID = "skynet-desktop";
+const DESKTOP_CLIENT_ID = "skynet-desktop";
 
 // Same order as DESKTOP_SCOPES in backend/core/api/desktop_auth.py.
-export const DESKTOP_SCOPES = [
-  "identity",
-  "balance:read",
-  "sync",
-  "models",
-  "connectors",
-  "web",
-] as const;
+const DESKTOP_SCOPES = ["identity", "balance:read", "sync", "models", "connectors", "web"] as const;
 export type DesktopScope = (typeof DESKTOP_SCOPES)[number];
 
 // Same rule as _LOOPBACK_REDIRECT in the backend router.
 const LOOPBACK_CALLBACK =
   /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{3,4})\/local\/hosted-link\/callback$/;
 // Same value as APP_REDIRECT in the backend router; the browser asks to open the Mac app.
-export const APP_CALLBACK = "skynet://link/callback";
+const APP_CALLBACK = "skynet://link/callback";
 const CODE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const MAX_DEVICE_NAME = 128;
 
@@ -40,7 +33,7 @@ export type LinkRequest = {
   deviceName: string;
 };
 
-export type LinkRequestProblem = "invalid_redirect" | "invalid_request" | "invalid_scope";
+type LinkRequestProblem = "invalid_redirect" | "invalid_request" | "invalid_scope";
 
 export type ParsedLinkRequest =
   | { ok: true; request: LinkRequest }
@@ -130,26 +123,4 @@ export function errorMessageKey(code: string | undefined, status?: number): stri
   }
   if (code === "rate_limit.exceeded" || status === 429) return "desktop_link.error.rate_limit";
   return "desktop_link.error.generic";
-}
-
-// The Mac app loads the consent page in its own window and intercepts this
-// path to let the user go on without an account. No route serves it.
-export const DESKTOP_SKIP_PATH = "/desktop/link/skip";
-const DESKTOP_APP_UA_MARK = "SkynetDesktop";
-
-/** Whether the page runs inside the Mac app's window (its user agent carries the mark). */
-export function isDesktopAppUserAgent(userAgent: string): boolean {
-  return userAgent.includes(DESKTOP_APP_UA_MARK);
-}
-
-/** Whether a /login query returns the user to the consent page on ``origin``. */
-export function returnsToDesktopLink(search: string, origin: string): boolean {
-  const callback = new URLSearchParams(search).get("callbackUrl");
-  if (!callback) return false;
-  try {
-    const url = new URL(callback, origin);
-    return url.origin === origin && url.pathname === "/desktop/link";
-  } catch {
-    return false;
-  }
 }

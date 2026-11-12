@@ -18,7 +18,7 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.eval_server import EvalServer
 from gepa.oa.task import Task
 
-from core.service_gateway.optimization.blackbox import native_engines, repo_tree
+from core.service_gateway.optimization.blackbox import native_engines, native_runner, repo_tree
 
 FAKE_HEADER = (
     f"#!{sys.executable}\n"
@@ -394,6 +394,66 @@ def test_autoresearch_edits_a_repository_checkout_and_scores_its_patch(tmp_path:
     output = tmp_path / "out"
     engine.process_result(result, output)
     assert (output / "autoresearch" / "best_candidate.patch").read_text() == result.best_candidate
+
+
+def test_autoresearch_applies_a_non_empty_starting_patch_before_the_first_round(
+    tmp_path: Path, fake_home: Path
+) -> None:
+    """A repository run that starts from a patch puts it in ``repo/`` and names it in the brief."""
+    checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n", "README.md": "hi\n"})
+    (checkout / "src" / "app.py").write_text("seeded\n")
+    seed = subprocess.run(
+        ["git", "diff", "--binary", repo_tree.BASE_REF], cwd=checkout, check=True, capture_output=True, text=True
+    ).stdout
+    subprocess.run(["git", "checkout", "--", "."], cwd=checkout, check=True)
+    assert seed.strip()
+    task = Task(name="repo", seed_candidate=seed, objective="make it better")
+    seen: list[str] = []
+
+    def evaluate(candidate: str, example: dict[str, Any] | None = None) -> tuple[float, dict[str, Any]]:
+        """Record each scored patch."""
+        seen.append(candidate)
+        return 0.5, {"feedback": "ok"}
+
+    single = EvalServer(task, evaluate, BudgetTracker(max_evals=3))
+    single.start()
+    try:
+        _install_fake(
+            fake_home,
+            "def run(*argv):\n"
+            "    return subprocess.run(list(argv), capture_output=True, text=True)\n"
+            "if count == 1:\n"
+            "    assert pathlib.Path('repo/src/app.py').read_text() == 'seeded\\n'\n"
+            "    assert 'checkout.sh seed' in pathlib.Path('BRIEF.md').read_text()\n"
+            "    assert 'checkout.sh seed' in pathlib.Path('STATE.md').read_text()\n"
+            "    assert run('./eval.sh').returncode == 0\n"
+            "    assert run('./checkout.sh', 'base').returncode == 0\n"
+            "    assert pathlib.Path('repo/src/app.py').read_text() == 'x = 1\\n'\n"
+            "    assert run('./checkout.sh', 'seed').returncode == 0\n"
+            "    assert pathlib.Path('repo/src/app.py').read_text() == 'seeded\\n'\n"
+            "    pathlib.Path('checks-passed').write_text('yes')\n",
+        )
+        config = _config(
+            "autoresearch",
+            ralph=False,
+            repo={
+                "checkout": str(checkout),
+                "base": repo_tree.BASE_REF,
+                "editable_paths": ["src"],
+                "readonly_paths": [],
+                "tools": str(Path(repo_tree.__file__).parent),
+            },
+        )
+        config.run_dir = str(tmp_path / "run")
+        engine = native_engines.AutoResearchEngine(config)
+        engine.run(task, single)
+    finally:
+        single.stop()
+    assert engine.repo_seed is True
+    assert (engine.work_dir / "checks-passed").exists()
+    assert seen
+    assert repo_tree.patch_paths(seen[0]) == ["src/app.py"]
+    assert "+seeded" in seen[0]
 
 
 def _repo_config(tmp_path: Path, checkout: Path, **knobs: Any) -> OptimizeAnythingConfig:
@@ -947,3 +1007,54 @@ def test_a_budget_stop_is_not_a_cli_failure() -> None:
         native_engines.ProposerOutcome("s", 0.0, False, "done", budget_exhausted=False, killed=False, returncode=0),
     ):
         outcome.raise_if_failed("round1")
+
+
+def test_proposer_refusals_reach_the_run_log_as_tool_and_kind_only(caplog: pytest.LogCaptureFixture) -> None:
+    """Log each hidden-path refusal of a session as a warning run event, with no path."""
+    caplog.set_level(logging.INFO, logger=native_engines.run_log.name)
+
+    native_engines.log_refusals([{"tool": "Read", "kind": "config"}, {"tool": "bash", "kind": "scoring"}], session="s1")
+
+    events = [getattr(record, native_engines.RUN_LOG_ATTR, None) for record in caplog.records]
+    refusals = [event for event in events if event and event["event"] == "proposer.refusal"]
+    assert [event["fields"] for event in refusals] == [
+        {"tool": "Read", "kind": "config", "session": "s1"},
+        {"tool": "bash", "kind": "scoring", "session": "s1"},
+    ]
+    assert all(event["source"] == "proposer" for event in refusals)
+    assert {record.levelno for record in caplog.records} == {logging.WARNING}
+
+
+def test_every_native_engine_publishes_an_incumbent() -> None:
+    """The runner asks every engine for its incumbent when a budget stop or an error interrupts it."""
+    for engine in native_engines.ENGINES.values():
+        assert callable(getattr(engine, "incumbent", None)), engine.name
+
+
+@pytest.mark.parametrize(("stop_at_call", "expected"), [(2, None), (3, ("", 0.25))])
+def test_gepa_repo_budget_stop_keeps_the_stop_and_its_incumbent(
+    tmp_path: Path, fake_home: Path, stop_at_call: int, expected: tuple[str, float] | None
+) -> None:
+    """A parent budget stop mid-run leaves GEPA's best fully scored version, not an AttributeError (SKY-529)."""
+    task = Task(name="repo", seed_candidate="", objective="make it better", train_set=[{"id": "a"}, {"id": "b"}])
+    calls: list[str] = []
+
+    def evaluate(candidate: str, example: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        """Score like the parent, then refuse the call the budget cannot cover."""
+        calls.append(candidate)
+        if len(calls) == stop_at_call:
+            raise native_runner.BudgetStopped("The approved budget has been reached.")
+        return 0.25, {"feedback": f"case {example['id']} needs better code"}
+
+    server = EvalServer(task, evaluate, BudgetTracker(max_evals=12))
+    server.start()
+    try:
+        _install_fake(fake_home, "pathlib.Path('src/app.py').write_text('better\\n')\n")
+        engine = native_engines.GepaRepoEngine(_repo_config(tmp_path, _repo_checkout(tmp_path, {"src/app.py": "x\n"})))
+        with pytest.raises(native_runner.BudgetStopped):
+            engine.run(task, server)
+        assert engine.incumbent(server) == expected
+        kept = native_runner._budget_incumbent(engine, task, server, tmp_path / "out")
+        assert ((kept["best_candidate"], kept["best_score"]) if kept else None) == expected
+    finally:
+        server.stop()

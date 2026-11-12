@@ -10,7 +10,6 @@ import { modelDisplayName } from "@/shared/lib/model-provider";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import {
   BLACKBOX_OPTIMIZERS,
-  DSPY_OPTIMIZERS,
   type OptimizerChoice,
 } from "@/shared/types/unified-run";
 import { ArrowCounterClockwise, Cpu, Sparkle, Target } from "@/shared/ui/icons";
@@ -29,7 +28,7 @@ import { TOUCH_FIELD_SM } from "@/shared/ui/touch";
 
 import { useUserPrefs } from "../hooks/use-user-prefs";
 
-const ENGINES: readonly OptimizerChoice[] = ["auto", ...DSPY_OPTIMIZERS, ...BLACKBOX_OPTIMIZERS];
+const ENGINES: readonly OptimizerChoice[] = ["auto", ...BLACKBOX_OPTIMIZERS];
 // Mirrors the wizard's own default, the backend BlackboxBudget default.
 const DEFAULT_MAX_RUNS = 200;
 

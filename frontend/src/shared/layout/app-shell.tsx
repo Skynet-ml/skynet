@@ -18,8 +18,8 @@ import { JobsStreamProvider } from "@/shared/hooks/use-jobs-stream";
 import { PageContainer } from "@/shared/layout/page-container";
 import { MobileShell } from "@/shared/layout/mobile-shell";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
-import { BalanceChip } from "@/features/billing";
 import { NotificationBell } from "@/features/notifications";
+import { ResourceModeSwitch } from "@/shared/ui/resource-mode-switch";
 import {
   GeneralistPanel,
   GeneralistPanelProvider,
@@ -52,18 +52,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isPhone = useIsPhone();
   const { status } = useSession();
 
-  if (pathname === "/download") {
-    return (
-      <div className="min-h-dvh" dir={dir}>
-        {children}
-      </div>
-    );
-  }
-
   // Shared-optimization pages render bare — no sidebar, agent panel, or other
   // app chrome — to keep the focus on the shared item. The recipient is still
-  // authenticated (the route is login-gated like the rest of the app).
-  if (pathname.startsWith("/share/")) {
+  // authenticated (the route is login-gated like the rest of the app). A chat
+  // link opens in Skynet for a signed-in user, so it keeps the chrome; a
+  // signed-out reader has no session for the chrome's data (SKY-294).
+  const signedInChatLink = pathname.startsWith("/share/chat/") && status === "authenticated";
+  if (pathname.startsWith("/share/") && !signedInChatLink) {
     return (
       <main className="min-h-dvh" dir={dir}>
         {children}
@@ -93,12 +88,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // The legal pages are public, standalone English documents that ship their
-  // own header and footer, so they render bare (no sidebar or app chrome) and
-  // force dir="ltr" regardless of the UI locale.
+  // The legal pages are public, standalone documents that ship their own
+  // header and footer, so they render bare (no sidebar or app chrome). They
+  // follow the UI locale, so they take its text direction.
   if (pathname === "/terms" || pathname === "/privacy") {
     return (
-      <main className="min-h-dvh" dir="ltr">
+      <main className="min-h-dvh" dir={dir}>
         {children}
       </main>
     );
@@ -209,10 +204,7 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-1.5" dir={dir}>
-          {/* The balance sits in the global chrome so what a run may cost is
-              never more than a glance away; the chip's own popover carries the
-              breakdown and the wallet path. */}
-          <BalanceChip />
+          <ResourceModeSwitch />
           <NotificationBell />
           <Button
             type="button"

@@ -170,7 +170,6 @@ services:
       OPENAI_API_KEY: fake-loadtest-key
       OPENAI_API_BASE: http://mock-lm:9000/v1
       WORKER_CONCURRENCY: "4"
-      JOB_RUN_START_METHOD: spawn
       WORKER_POLL_INTERVAL: "1.0"
       LOG_LEVEL: WARNING
       LOG_FORMAT: text

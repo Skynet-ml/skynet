@@ -8,7 +8,19 @@ import {
 } from "./legacy-names.ts";
 import { COLOR_THEME_STORAGE_KEY } from "./color-theme.ts";
 import { LEGACY_LOCALE_COOKIE, LOCALE_COOKIE, LOCALE_COOKIE_MAX_AGE } from "./locale.ts";
-import { PREF_KEYS } from "../../features/settings/lib/prefs.ts";
+import { registerHooks } from "node:module";
+
+const unifiedRunUrl = new URL("../types/unified-run.ts", import.meta.url).href;
+
+// prefs.ts imports unified-run through the "@/" alias, which node cannot resolve alone.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "@/shared/types/unified-run") return { shortCircuit: true, url: unifiedRunUrl };
+    return nextResolve(specifier, context);
+  },
+});
+
+const { PREF_KEYS } = await import("../../features/settings/lib/prefs.ts");
 
 /** A Map-backed Storage that can be told to reject writes, like a full quota. */
 function memoryStorage(initial: Record<string, string> = {}, rejectWrites = false): Storage {

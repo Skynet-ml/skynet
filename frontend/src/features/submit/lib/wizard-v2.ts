@@ -2,8 +2,7 @@
  * Wizard v2 state: types, constants and pure helpers only.
  *
  * Four fixed steps (task, inputs, optimizer, metric) each own a slice. Editing
- * an earlier step never clears a later slice; a downstream break only makes
- * the contract check stale, which `contractSnapshot` detects.
+ * an earlier step never clears a later slice.
  */
 import type {
   BlackboxBudget,
@@ -14,21 +13,15 @@ import type {
 } from "@/shared/types/api";
 import type { ExperienceLevel } from "@/features/experience";
 import type { ExecutionBudget } from "@/shared/types/execution-budget";
-import type { ContinuousEnableRequest } from "@/shared/types/continuous";
 import {
   optimizersFor,
-  resolveOptimizer,
-  type ArtifactKind,
-  type ContractCheckResponse,
   type DataMode,
   type OptimizerCatalogResponse,
   type OptimizerChoice,
-  type TaskInterviewTurnResult,
   type UnifiedCase,
-  type UnifiedChatTurn,
-  type UnifiedRunRequest,
 } from "@/shared/types/unified-run";
 import type { TokenSourceMode } from "@/features/billing";
+import type { RepoHost } from "@/shared/lib/api";
 import type { RunFloor } from "./run-floor";
 
 export type WizardStepId = "task" | "inputs" | "optimizer" | "metric";
@@ -39,23 +32,43 @@ export const DEFAULT_UNIFIED_SPLIT: Readonly<SplitFractions> = {
   val: 0.15,
   test: 0.15,
 };
-export const DEFAULT_METRIC_TIMEOUT_SECONDS = 60;
+const DEFAULT_METRIC_TIMEOUT_SECONDS = 60;
 
 /**
- * A GitHub repository the run optimizes in place of an artifact. Empty
+ * A GitHub, GitLab or Bitbucket repository the run optimizes. Empty
  * branch and commit mean the default branch's head; an empty setup command
  * is inferred by the server's setup check.
  */
 export interface RepoDraft {
+  /** The host that holds the repository; a draft saved before other hosts existed is GitHub. */
+  provider?: RepoHost;
   repository: string;
   branch: string;
   commit: string;
   editablePaths: string[];
   setupCommand: string;
+  /** True when the wizard created this repository through `POST /connectors/github/repos`. */
+  createdBySkynet?: boolean;
+  /** Environment variables the repository needs, each with the hosts it may go to. */
+  secrets?: RepoSecretDraft[];
 }
 
+/**
+ * One secret of a repository run (SKY-381 E52). `allowedHosts` is the text the
+ * user typed; `parseAllowedHosts` turns it into the list the server takes.
+ */
+export interface RepoSecretDraft {
+  name: string;
+  value: string;
+  allowedHosts: string;
+  /** The setup check's fix message for this secret, shown on its row until the user edits it. */
+  hostIssue?: string;
+}
+
+export const emptyRepoSecret = (): RepoSecretDraft => ({ name: "", value: "", allowedHosts: "" });
+
 /** The whole repository, the editable paths a new repository run starts with. */
-export const WHOLE_REPOSITORY: readonly string[] = ["."];
+const WHOLE_REPOSITORY: readonly string[] = ["."];
 
 export const emptyRepoDraft = (): RepoDraft => ({
   repository: "",
@@ -68,12 +81,12 @@ export const emptyRepoDraft = (): RepoDraft => ({
 export interface TaskSlice {
   objective: string;
   background: string;
-  artifactKind: ArtifactKind | null;
-  startingVersion: string | Record<string, string> | null;
-  artifactRationale: string;
-  transcript: UnifiedChatTurn[];
-  /** Set for a repository run, which has no artifact or inputs of its own. */
-  repo: RepoDraft | null;
+  /** The repository the run optimizes. */
+  repo: RepoDraft;
+  /** The repository the user named in the interview, searched until one is chosen. */
+  repoQuery?: string;
+  /** The interview's call on whether the run needs example data; unset means unknown. */
+  needsData?: boolean;
 }
 
 export interface InputsSlice {
@@ -107,6 +120,8 @@ export interface OptimizerSlice {
   budgetUncapped: boolean;
   proposer: BlackboxProposer;
   shinka: BlackboxShinkaSettings | null;
+  /** The sandbox provider the user picked; null (or unset in an older draft) runs on the server default. */
+  sandboxProvider?: string | null;
 }
 
 export interface WorkspaceSlice {
@@ -118,8 +133,6 @@ export interface WorkspaceSlice {
   /** Every other workspace file, relative path to text (helpers `run.py` imports). */
   files: Record<string, string>;
   metricTimeoutSeconds: number;
-  lastCheck: ContractCheckResponse | null;
-  lastCheckSnapshot: string | null;
 }
 
 export interface MetaSlice {
@@ -155,14 +168,10 @@ export function initialWizardV2State(
     task: {
       objective: "",
       background: "",
-      artifactKind: null,
-      startingVersion: null,
-      artifactRationale: "",
-      transcript: [],
-      repo: null,
+      repo: emptyRepoDraft(),
     },
     inputs: {
-      mode: null,
+      mode: "single",
       cases: [],
       stagedDatasetId: null,
       datasetLabel: null,
@@ -194,6 +203,7 @@ export function initialWizardV2State(
         max_tool_calls: 100,
       },
       shinka: null,
+      sandboxProvider: null,
     },
     workspace: {
       runCode: "",
@@ -201,8 +211,6 @@ export function initialWizardV2State(
       metricModel: null,
       files: {},
       metricTimeoutSeconds: DEFAULT_METRIC_TIMEOUT_SECONDS,
-      lastCheck: null,
-      lastCheckSnapshot: null,
     },
     meta: {
       name: "",
@@ -221,103 +229,85 @@ const hasModel = (config: ModelConfig | null): boolean => Boolean(config?.name.t
  * move on. There is no separate confirm: Continue is the confirmation.
  */
 export function taskIssue(task: TaskSlice): string | null {
-  if (!task.objective.trim()) return "submit.v2.task.issue.objective";
-  if (task.repo) return repoIssue(task.repo);
-  if (!task.artifactKind) return "submit.v2.task.issue.kind";
-  const v = task.startingVersion;
-  const empty =
-    v === null ||
-    (typeof v === "string" ? !v.trim() : Object.values(v).every((part) => !part.trim()));
-  return empty ? "submit.v2.task.issue.starting" : null;
+  return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
 }
 
-export const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
-const COMMIT_SHA = /^[0-9a-f]{40}$/i;
+const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+// The server's REPO_PATH_PATTERN: a GitLab project can sit in nested subgroups.
+const GITLAB_PATH_PATTERN = /^[A-Za-z0-9_.-]{1,255}(\/[A-Za-z0-9_.-]{1,255}){1,20}$/;
 
-/** What a repository target still lacks, or null when it can run. */
+/** True when ``repository`` is a full path the host accepts: ``owner/name``, or GitLab's ``group/sub/name``. */
+export function isRepoPath(repository: string, host: RepoHost = "github"): boolean {
+  return (host === "gitlab" ? GITLAB_PATH_PATTERN : REPO_NAME_PATTERN).test(repository);
+}
+const COMMIT_SHA = /^[0-9a-f]{40}$/i;
+// The server's REPO_SECRET_NAME_PATTERN and REPO_SECRET_HOST_PATTERN
+// (backend/core/models/blackbox.py); keep them in step.
+const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const SECRET_HOST = /^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
+const MAX_ALLOWED_HOSTS = 20;
+const MAX_SECRET_VALUE = 16384;
+const MAX_SECRETS = 100;
+
+/**
+ * The allowed hosts as the server stores them: split on commas or spaces,
+ * lower case, without trailing dots, in order, without repeats.
+ */
+export function parseAllowedHosts(text: string): string[] {
+  const hosts = text
+    .split(/[\s,]+/)
+    .map((host) => host.replace(/\.+$/, "").toLowerCase())
+    .filter(Boolean);
+  return [...new Set(hosts)];
+}
+
+/** What a repository secret still lacks, or null when the server takes it. */
+function secretIssue(secret: RepoSecretDraft): string | null {
+  if (!SECRET_NAME.test(secret.name.trim())) return "submit.v2.repo.issue.secret_name";
+  if (!secret.value) return "submit.v2.repo.issue.secret_value";
+  // The server counts code points, not UTF-16 units.
+  if ([...secret.value].length > MAX_SECRET_VALUE) return "submit.v2.repo.issue.secret_value_long";
+  const hosts = parseAllowedHosts(secret.allowedHosts);
+  if (hosts.length > MAX_ALLOWED_HOSTS || hosts.some((host) => host.length > 253 || !SECRET_HOST.test(host)))
+    return "submit.v2.repo.issue.secret_hosts";
+  return null;
+}
+
+/**
+ * What a repository target still lacks, or null when it can run. It leaves
+ * out the secrets: their values are blank after a reload, and the file
+ * browser and hardening need only the repository fields.
+ */
 export function repoIssue(repo: RepoDraft): string | null {
-  if (!REPO_NAME_PATTERN.test(repo.repository.trim())) return "submit.v2.repo.issue.repository";
+  if (!isRepoPath(repo.repository.trim(), repo.provider)) return "submit.v2.repo.issue.repository";
   if (repo.commit.trim() && !COMMIT_SHA.test(repo.commit.trim()))
     return "submit.v2.repo.issue.commit";
   if (!repo.editablePaths.some((path) => path.trim())) return "submit.v2.repo.issue.paths";
   return null;
 }
 
-/**
- * The task fields an interview turn may write: only what it actually filled,
- * and nothing the user has edited by hand since. The rationale explains the
- * artifact kind, so it is kept only from a turn that names the kind the card
- * shows; an early turn otherwise fills it with "not yet known" filler.
- */
-export function taskInterviewPatch(
-  result: TaskInterviewTurnResult,
-  dirty: ReadonlySet<keyof TaskSlice>,
-): Partial<TaskSlice> {
-  const patch: Partial<TaskSlice> = {};
-  if (result.objective.trim() && !dirty.has("objective")) patch.objective = result.objective;
-  if (result.background.trim() && !dirty.has("background")) patch.background = result.background;
-  if (result.artifact_kind && !dirty.has("artifactKind")) {
-    patch.artifactKind = result.artifact_kind;
-    if (result.artifact_rationale.trim()) patch.artifactRationale = result.artifact_rationale;
+/** What a repository run's secrets still lack, or null when the server takes them. */
+function secretsIssue(secrets: RepoSecretDraft[]): string | null {
+  if (secrets.length > MAX_SECRETS) return "submit.v2.repo.issue.secret_count";
+  for (const secret of secrets) {
+    const issue = secretIssue(secret);
+    if (issue) return issue;
   }
-  if (result.starting_version != null && !dirty.has("startingVersion")) {
-    patch.startingVersion = result.starting_version;
-  }
-  return patch;
+  const names = secrets.map((secret) => secret.name.trim());
+  if (new Set(names).size !== names.length) return "submit.v2.repo.issue.secret_duplicate";
+  return null;
 }
 
-/** Whether the models the chosen artifact needs to run are set. */
+/** The draft with another repository picked; a new repository starts from its default branch. */
+export function withRepository(repo: RepoDraft, repository: string): RepoDraft {
+  if (repo.repository === repository) return repo;
+  // Another repository is not the one Skynet created, so the flag must not carry over.
+  return { ...repo, repository, branch: "", commit: "", ...(repo.createdBySkynet ? { createdBySkynet: false } : {}) };
+}
+
+/** Whether the models a repository run needs are set. */
 export function optimizerModelsReady(s: WizardV2State): boolean {
-  if (s.task.artifactKind === "dspy_program" && !hasModel(s.optimizer.taskModel)) return false;
   return hasModel(s.optimizer.reflectionModel);
-}
-
-/** The field a single-answer task's one input sits under. */
-export const QUESTION_INPUT_FIELD = "question";
-
-/**
- * Whether the run optimizes one answer itself (a solution, a summary, a
- * document): a text artifact with no table behind it. Its one input is the
- * original question, which the objective and background already hold, so the
- * Inputs step has nothing left to ask. A text task that brings a table keeps
- * the step.
- */
-export function isSingleAnswerTask(s: Pick<WizardV2State, "task" | "inputs">): boolean {
-  return (
-    !s.task.repo &&
-    s.task.artifactKind === "text" &&
-    s.inputs.mode !== "pairs" &&
-    s.inputs.datasetLabel === null &&
-    s.inputs.stagedDatasetId === null
-  );
-}
-
-/** A single-answer task's inputs: one case holding the question, its objective then its background. */
-export function questionInputs(
-  task: Pick<TaskSlice, "objective" | "background">,
-): Pick<InputsSlice, "mode" | "cases" | "inputFields" | "expectedField"> {
-  const question = [task.objective.trim(), task.background.trim()].filter(Boolean).join("\n\n");
-  return {
-    mode: "single",
-    cases: [{ input: { [QUESTION_INPUT_FIELD]: question } }],
-    inputFields: [QUESTION_INPUT_FIELD],
-    expectedField: null,
-  };
-}
-
-/**
- * The state the wizard shows and submits: a single-answer task with no case of
- * its own gets the one case built from its question, so it follows every edit
- * without being stored. A cloned run's case or a table is left alone, and a
- * user on the skipped Inputs step stands on the task.
- */
-export function withQuestionInputs(s: WizardV2State): WizardV2State {
-  if (!isSingleAnswerTask(s) || s.inputs.cases.length > 0) return s;
-  return {
-    ...s,
-    step: s.step === "inputs" ? "task" : s.step,
-    inputs: { ...s.inputs, ...questionInputs(s.task) },
-  };
 }
 
 /**
@@ -327,10 +317,11 @@ export function withQuestionInputs(s: WizardV2State): WizardV2State {
  * the run out of sight.
  */
 export function wizardSteps(s: WizardV2State, optimizerBlocked: boolean): readonly WizardStepId[] {
-  // A repository run is scored on the checkout itself, and a single-answer
-  // task's one input is its question, so neither has an Inputs step.
-  const skipInputs = Boolean(s.task.repo) || isSingleAnswerTask(s);
-  const all = skipInputs ? WIZARD_V2_STEPS.filter((step) => step !== "inputs") : WIZARD_V2_STEPS;
+  // A repository run is scored on the checkout itself, so it has an Inputs
+  // step only when the interview found it scores one case at a time.
+  const all = !s.task.needsData
+    ? WIZARD_V2_STEPS.filter((step) => step !== "inputs")
+    : WIZARD_V2_STEPS;
   if (s.level !== "guided" || optimizerBlocked || s.step === "optimizer") return all;
   return all.filter((step) => step !== "optimizer");
 }
@@ -425,11 +416,9 @@ export function withOptimizerPatch(
 export function presetEngine(
   choice: OptimizerChoice,
   engine: OptimizerChoice,
-  kind: ArtifactKind,
-  mode: DataMode,
 ): OptimizerChoice | null {
   if (choice !== "auto" || engine === "auto") return null;
-  return optimizersFor(kind, mode).includes(engine) ? engine : null;
+  return optimizersFor().includes(engine) ? engine : null;
 }
 
 /* ── Workspace files ─────────────────────────────────────────────────── */
@@ -437,14 +426,13 @@ export function presetEngine(
 /** The two files every workspace has; their text is `runCode` / `metricCode`. */
 export const RUN_FILE = "run.py";
 export const METRIC_FILE = "metric.py";
-export const FIXED_FILES: readonly string[] = [RUN_FILE, METRIC_FILE];
+const FIXED_FILES: readonly string[] = [RUN_FILE, METRIC_FILE];
 
 // Mirror backend/core/models/unified.py so a bad name is caught as it is typed.
-export const WORKSPACE_FILE_MAX_COUNT = 20;
-export const WORKSPACE_FILE_MAX_CHARS = 200_000;
+const WORKSPACE_FILE_MAX_COUNT = 20;
 const WORKSPACE_PATH_MAX_CHARS = 120;
 const WORKSPACE_PATH_MAX_DEPTH = 4;
-export const WORKSPACE_FILE_SUFFIXES: readonly string[] = [
+const WORKSPACE_FILE_SUFFIXES: readonly string[] = [
   ".py",
   ".txt",
   ".md",
@@ -486,21 +474,6 @@ export function workspacePathIssue(
   return null;
 }
 
-/** Every workspace file's path: run.py, metric.py, then the extra files by path. */
-export function workspacePaths(ws: Pick<WorkspaceSlice, "files">): string[] {
-  return [...FIXED_FILES, ...Object.keys(ws.files).sort()];
-}
-
-/** One file's text, or null for a path the workspace does not hold. */
-export function workspaceFileText(
-  ws: Pick<WorkspaceSlice, "runCode" | "metricCode" | "files">,
-  path: string,
-): string | null {
-  if (path === RUN_FILE) return ws.runCode;
-  if (path === METRIC_FILE) return ws.metricCode;
-  return ws.files[path] ?? null;
-}
-
 /** The patch that writes one file, creating an extra file that does not exist yet. */
 export function writeWorkspaceFile(
   ws: Pick<WorkspaceSlice, "files">,
@@ -523,73 +496,6 @@ export function deleteWorkspaceFile(
   return { files };
 }
 
-/** Recursively sorts object keys so equal values always serialize the same. */
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const entries = Object.keys(value as Record<string, unknown>)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value ?? null);
-}
-
-/** 32-bit FNV-1a of a string, as hex; keeps the snapshot short when the cases are large. */
-function fnv1a(text: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16);
-}
-
-/**
- * Stable JSON of everything a contract check depends on. A check is current
- * only while its stored snapshot equals this value for the live state.
- * The sandboxed check samples the cases through the split, and DSPy run code
- * calls the task model, so the data and both of those count too.
- */
-export function contractSnapshot(s: WizardV2State): string {
-  const kind = s.task.artifactKind;
-  return stableJson({
-    artifactKind: kind,
-    startingVersion: s.task.startingVersion,
-    mode: s.inputs.mode,
-    cases: s.inputs.cases.length > 0 ? fnv1a(stableJson(s.inputs.cases)) : null,
-    stagedDatasetId: s.inputs.cases.length > 0 ? null : s.inputs.stagedDatasetId,
-    inputFields: s.inputs.inputFields,
-    expectedField: s.inputs.expectedField,
-    split: s.inputs.split,
-    shuffle: s.inputs.shuffle,
-    resolvedOptimizer: kind ? resolveOptimizer(s.optimizer.choice, kind) : null,
-    taskModel: s.optimizer.taskModel?.name.trim() || null,
-    runCode: s.workspace.runCode,
-    metricCode: s.workspace.metricCode,
-    ...(s.workspace.metricModel && { metricModel: s.workspace.metricModel.name }),
-    // Left out when empty so a check stored before extra files existed stays current.
-    ...(Object.keys(s.workspace.files).length > 0 && { files: s.workspace.files }),
-    reflectionModel: s.optimizer.reflectionModel?.name ?? null,
-    metricTimeoutSeconds: s.workspace.metricTimeoutSeconds,
-    // The check runs under the spending limit, so a pass under one limit says
-    // nothing about another: a new limit runs the check again.
-    maxCostCents: s.optimizer.budgetUncapped ? null : s.optimizer.maxCostCents,
-    budgetUncapped: s.optimizer.budgetUncapped,
-  });
-}
-
-/**
- * The spec the sandboxed contract check sends: the server bills the check to
- * an execution budget and refuses one that names none.
- */
-export function withContractBudget(
-  spec: UnifiedRunRequest,
-  budget: Pick<ExecutionBudget, "id" | "revision">,
-): UnifiedRunRequest {
-  return { ...spec, execution_budget_id: budget.id, execution_budget_revision: budget.revision };
-}
-
 export interface WizardV2Context {
   state: WizardV2State;
   goTo(step: WizardStepId): void;
@@ -610,24 +516,12 @@ export interface WizardV2Context {
   resolvedOptimizer: string | null;
   optimizerCatalog: OptimizerCatalogResponse | null;
   optimizerCatalogLoading: boolean;
-  /** `lastCheckSnapshot !== contractSnapshot(state)`. */
-  contractStale: boolean;
-  /** An i18n key or the exact contract error text. */
+  /** An i18n key or the exact error text. */
   runBlockedReason: string | null;
-  /** The Metric step's coding agent reports whether it is writing the code. */
-  setAgentWriting(writing: boolean): void;
-  /** Whether the Inputs step's inference is still deciding the column roles. */
-  inputsInferring: boolean;
-  /** The Inputs step reports whether its inference is in flight. */
-  setInputsInferring(inferring: boolean): void;
-  buildPayload(): UnifiedRunRequest | null;
-  /** The wizard's execution budget, created on first use; the sandboxed check bills to it. */
+  /** The wizard's execution budget, created on first use. */
   ensureBudget(): Promise<ExecutionBudget>;
   submit(): Promise<void>;
   submitting: boolean;
-  /** The scheduled run set up on the last metric screen; it starts with the run. */
-  scheduledRun: ContinuousEnableRequest | null;
-  setScheduledRun(next: ContinuousEnableRequest | null): void;
   // TotalBudgetCard BudgetContext fields.
   /** The least the spending limit can be; null until the server's box hold loads. */
   runFloor: RunFloor | null;

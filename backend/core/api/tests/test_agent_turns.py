@@ -284,28 +284,21 @@ async def test_turn_is_metered_exactly_once_across_reconnects(monkeypatch: pytes
 
 _ALICE = AuthenticatedUser(username="alice", role="user", groups=())
 _MALLORY = AuthenticatedUser(username="mallory", role="user", groups=())
-_SEED_BODY = {
-    "dataset_columns": ["text", "label"],
-    "column_roles": {"text": "input", "label": "output"},
-    "sample_rows": [],
-    "user_message": "",
-}
+_INTAKE_BODY = {"phase": "billing"}
 
 
 def _app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    """Mount the code-agent router on a fresh registry with a three-event agent."""
+    """Mount the code-agent router on a fresh registry with a three-event intake turn."""
 
-    def fake_run(**_kwargs: Any) -> Any:
-        """Return a short agent stream ending in ``done``."""
+    async def fake_stream(**_kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Yield a short interview stream ending in ``done``."""
+        yield {"event": "message_patch", "data": {"chunk": "hi"}}
+        yield {"event": "done", "data": {"message": "hi"}}
 
-        async def gen() -> AsyncIterator[dict[str, Any]]:
-            yield {"event": "message_patch", "data": {"chunk": "hi"}}
-            yield {"event": "done", "data": {"signature_code": "s", "metric_code": "m"}}
-
-        return gen()
-
-    monkeypatch.setattr(code_agent_router, "run_code_agent", fake_run)
-    monkeypatch.setattr(code_agent_router, "route_menu_model", lambda model: model or "m")
+    monkeypatch.setattr(code_agent_router, "intake_turn_stream", fake_stream)
+    monkeypatch.setattr(code_agent_router, "gate_intake_turn", lambda *_args: (None, False))
+    monkeypatch.setattr(code_agent_router, "_intake_catalog", lambda: ([], []))
+    monkeypatch.setattr(code_agent_router, "route_interview_model", lambda model: model or "m")
     app = FastAPI()
     app.include_router(create_code_agent_router())
     app.dependency_overrides[get_authenticated_user] = lambda: _ALICE
@@ -322,7 +315,7 @@ def test_router_streams_ids_and_resumes_by_query_or_header(monkeypatch: pytest.M
     """The POST frames a turn with ids; GET resumes after ?after= or Last-Event-ID."""
     app = _app(monkeypatch)
     with TestClient(app) as client:
-        resp = client.post("/optimizations/ai-generate-code", json=_SEED_BODY)
+        resp = client.post("/account/intake-interview", json=_INTAKE_BODY)
         assert resp.status_code == 200
         text = resp.text
         assert text.startswith("id: 1\nevent: turn_started\n")
