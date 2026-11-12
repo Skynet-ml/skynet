@@ -751,8 +751,13 @@ class _EvaluatorMailbox:
                         raise ServiceError("Native evaluator request carries an invalid candidate shape.")
                     if self.check_budget is not None:
                         self.check_budget()
-                    with sandbox_log.event_scope(
-                        candidate=_label(request.get("candidate_id")), case=_label(request.get("case"))
+                    # The engine box waits while the parent scores this request, so the
+                    # scorer's model calls name it as the box that waits (SKY-647).
+                    with (
+                        sandbox_log.event_scope(
+                            candidate=_label(request.get("candidate_id")), case=_label(request.get("case"))
+                        ),
+                        usage_scope(box=getattr(self.session, "box", None)),
                     ):
                         score, info = self.server.evaluate(candidate, self._full_case(request.get("example")))
                     if self.check_budget is not None:

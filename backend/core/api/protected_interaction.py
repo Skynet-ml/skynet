@@ -70,6 +70,8 @@ class _InteractionRuntime(BudgetRuntime):
         cost_kind: str,
         role: str | None = None,
         attempt: int = 0,
+        box: str | None = None,
+        for_box: str | None = None,
     ) -> OperationSnapshot:
         """Reserve one physical operation under the interaction namespace.
 
@@ -79,6 +81,8 @@ class _InteractionRuntime(BudgetRuntime):
             cost_kind: Model or sandbox attribution.
             role: Optional model role.
             attempt: Physical retry counter.
+            box: Box id of the sandbox that makes the call, if any.
+            for_box: Box id of the sandbox that waits for that box, if any.
 
         Returns:
             Authoritative operation reservation.
@@ -89,6 +93,8 @@ class _InteractionRuntime(BudgetRuntime):
             cost_kind=cost_kind,
             role=role,
             attempt=attempt,
+            box=box,
+            for_box=for_box,
         )
 
 

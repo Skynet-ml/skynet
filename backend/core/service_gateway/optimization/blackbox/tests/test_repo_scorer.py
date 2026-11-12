@@ -33,7 +33,7 @@ from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.tests.test_env_connectors import MAPS_KEY, _operations, _runtime
 from core.billing.tests.test_model_gateway_transport import gateway  # noqa: F401 - pytest fixture
-from core.billing.usage_tags import usage_scope
+from core.billing.usage_tags import box_tag, usage_scope
 from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
@@ -141,6 +141,52 @@ def test_scores_the_baseline_and_a_version(scored: tuple[RepoScorer, Path, Path]
         "small": {"score": pytest.approx(0.35), "feedback": "small ok"},
         "large": {"score": pytest.approx(1.4), "feedback": "large ok"},
     }
+
+
+class _ParkLog:
+    """Record the park and unpark calls a scorer makes in its run budget."""
+
+    def __init__(self) -> None:
+        """Start with no calls."""
+        self.events: list[tuple[str, str]] = []
+
+    def park(self, box: str) -> None:
+        """Record one park."""
+        self.events.append(("park", box))
+
+    def unpark(self, box: str) -> None:
+        """Record one unpark."""
+        self.events.append(("unpark", box))
+
+
+def test_the_scorer_box_is_parked_only_between_evaluations(tmp_path: Path) -> None:
+    """The box is parked after setup and after each evaluation, also a failed one, and not while it closes (SKY-647)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "README": "r\n"})
+    budget = _ParkLog()
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True, operation_key="repo-scorer:owner"),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command="cat src/app.py > built.txt",
+            secrets={},
+        ),
+        SCORER,
+        timeout_seconds=60,
+        budget=budget,  # type: ignore[arg-type]
+    )
+    box = box_tag("repo-scorer:owner")
+    scorer.prepare()
+    assert budget.events == [("park", box)]
+    assert scorer.score("")["score"] == pytest.approx(0.1)
+    assert budget.events[1:] == [("unpark", box), ("park", box)]
+    with pytest.raises(RepoScoreError, match="README"):
+        scorer.score(_patch(tmp_path / "bad", archive, {"README": "changed\n"}))
+    assert budget.events[3:] == [("unpark", box), ("park", box)]
+    scorer.close()
+    assert budget.events[5:] == [("unpark", box)]
 
 
 def test_no_run_secret_reaches_the_scorer(scored: tuple[RepoScorer, Path, Path]) -> None:

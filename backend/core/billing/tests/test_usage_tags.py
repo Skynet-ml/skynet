@@ -9,6 +9,7 @@ from core.billing.usage_tags import (
     LEGACY_USAGE_TAGS_HEADER,
     TAG_KEYS,
     USAGE_TAGS_HEADER,
+    box_tag,
     current_tags,
     header_tags,
     parse_tags,
@@ -87,9 +88,18 @@ def test_with_tags_header_writes_the_merged_tags_under_both_names() -> None:
 
 def test_lane_is_a_known_key() -> None:
     """``lane`` survives cleaning and the header round trip; existing keys are unchanged."""
-    assert TAG_KEYS == ("stage", "pair", "candidate", "case", "caller", "kind", "lane")
+    assert TAG_KEYS == ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
     assert parse_tags('{"lane":"explore-gepa","stage":"training"}') == {"lane": "explore-gepa", "stage": "training"}
     assert header_tags(with_tags_header(None, {"lane": "continue-gepa"})) == {"lane": "continue-gepa"}
+
+
+def test_the_parent_box_tag_replaces_a_forged_one() -> None:
+    """A box's mailbox sends the parent's ``box`` tag over any ``box`` tag the guest wrote (SKY-647)."""
+    forged = with_tags_header(None, {"box": box_tag("sandbox:other"), "candidate": "3"})
+    headers = with_tags_header(forged, {"box": box_tag("sandbox:own")})
+
+    assert header_tags(headers) == {"box": box_tag("sandbox:own"), "candidate": "3"}
+    assert len(box_tag("sandbox:" + "x" * 200)) == 32
 
 
 def test_lane_follows_calls_into_child_threads() -> None:

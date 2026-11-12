@@ -14,6 +14,7 @@ import pytest
 
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.usage_tags import box_tag, current_tags, usage_scope
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.sandbox.snapshots import BuiltSnapshot, SnapshotCache
@@ -268,6 +269,44 @@ def test_broker_rejects_host_paths_and_closes_every_session_after_failure() -> N
         broker.handle("open", {**_open_payload(), "request_id": "three"})
 
 
+def test_each_box_mailbox_tags_its_model_calls_with_its_own_box() -> None:
+    """A box runs its mailbox under its own tag, and a parent box names the box it works for (SKY-647)."""
+    seen: list[tuple[str | None, str | None]] = []
+
+    def command_runner(session: FakeSession, command: str, **kwargs: Any) -> CommandResult:
+        """Capture the tags that the mailbox would send over the box's own tags."""
+        tags = current_tags()
+        seen.append((tags.get("box"), tags.get("for_box")))
+        return session.run(command, **kwargs)
+
+    runtime = FakeRuntime()
+    broker = SandboxBroker(
+        runtime,
+        image=IMAGE,
+        max_lifetime_seconds=120,
+        command_runner=command_runner,
+        parent_command_runner=command_runner,
+    )
+    guest = broker.handle("open", _open_payload())["sandbox_id"]
+    broker.run({"sandbox_id": guest, "command": "echo guest"})
+    parent = broker.parent_runtime(("pypi.org",)).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",), operation_key="scorer:k")
+    )
+    parent.run("echo parent")
+    # An evaluator request from the engine box runs the scorer box under the engine box's tag.
+    with usage_scope(box=box_tag("sandbox:one")):
+        parent.run("echo scorer")
+
+    assert [spec.operation_key for spec in runtime.specs] == ["sandbox:one", "scorer:k"]
+    assert seen == [
+        (box_tag("sandbox:one"), None),
+        (box_tag("scorer:k"), None),
+        (box_tag("scorer:k"), box_tag("sandbox:one")),
+    ]
+    assert current_tags() == {}
+    broker.close()
+
+
 def test_remote_round_trip_streams_output_and_supports_callback_file_actions() -> None:
     """Retain native evaluator mailbox callbacks across the parent control stream."""
     runtime = FakeRuntime()
@@ -303,6 +342,7 @@ def test_remote_round_trip_streams_output_and_supports_callback_file_actions() -
     with httpx.Client(transport=httpx.MockTransport(parent)) as client:
         remote = RemoteSandboxRuntime("http://127.0.0.1:9000/v1", "opaque-control", client=client)
         session = remote.open(SandboxSpec(lifetime_seconds=60))
+        assert [owned.box for owned in broker._sessions.values()] == [session.box]
         session.write_files({"input.txt": "hello"})
         assert session.read_file("input.txt") == "hello"
         output = []

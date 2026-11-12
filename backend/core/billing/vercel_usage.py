@@ -23,6 +23,7 @@ from .operation_pricing import (
     operation_quote,
 )
 from .runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
+from .usage_tags import box_tag
 
 _PRICING_URL = "https://vercel.com/docs/sandbox/pricing"
 _SCHEMA_URL = "https://github.com/vercel/sandbox/blob/main/packages/vercel-sandbox/src/api-client/validators.ts"
@@ -454,6 +455,7 @@ class VercelUsageReservation:
         self.vcpus = request["vcpus"]
         self.lifetime_ms = request["lifetime_ms"]
         self.quote = quote_vercel_sandbox(request)
+        self.box = box_tag(operation_key)
         if reserved is None:
             self.operation = runtime.reserve(
                 self.quote, operation_key=operation_key, cost_kind="sandbox", role="runtime"
@@ -468,7 +470,7 @@ class VercelUsageReservation:
             self.operation = reserved
         if self.operation.state == "settled":
             raise OperationCompletedError("This sandbox operation already completed; retrieve its saved result.")
-        runtime.pin(self.operation.id, cent_units(self.operation.max_cents))
+        runtime.pin(self.operation.id, cent_units(self.operation.max_cents), box=self.box)
         try:
             claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
         except BaseException:
@@ -564,7 +566,7 @@ class VercelUsageReservation:
             evidence={"provider": "vercel", "lifetime_ms": lifetime_ms, "request": quote.request_fingerprint},
             deadline=deadline,
         )
-        self.runtime.pin(self.operation.id, cent_units(extended.max_cents))
+        self.runtime.pin(self.operation.id, cent_units(extended.max_cents), box=self.box)
         self.lifetime_ms = lifetime_ms
 
     def confirm_extended(self, session: Any) -> None:
@@ -837,7 +839,9 @@ class VercelSnapshotReservation:
         self.operation = runtime.reserve(self.quote, operation_key=operation_key, cost_kind="sandbox", role="runtime")
         if self.operation.state == "settled":
             raise OperationCompletedError("This snapshot operation already completed.")
-        runtime.pin(self.operation.id, cent_units(self.operation.max_cents))
+        # The hold lasts for the whole run and no work runs in it, so it is
+        # never a box that could end (SKY-647).
+        runtime.pin(self.operation.id, cent_units(self.operation.max_cents), work=False)
         try:
             claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
         except BaseException:

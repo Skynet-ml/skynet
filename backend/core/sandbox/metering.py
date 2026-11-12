@@ -205,8 +205,8 @@ class PoolLease:
                     "Previous work is awaiting confirmed usage; its coverage is retained."
                 ) from error
             except BudgetInFlightError as error:
-                # A setup check's own open sandboxes never make room, so the
-                # lease gives up early exactly like a single reservation.
+                # The lease gives up early under the same rule as a single
+                # reservation. It serves no box, so it is never a box's waiting work.
                 refusal = runtime._wait_cannot_help(error)
                 if refusal is not None:
                     raise refusal from error
