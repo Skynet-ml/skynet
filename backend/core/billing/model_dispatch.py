@@ -53,6 +53,16 @@ FUNDS_REFUSAL_HOLD_SECONDS = 60.0
 GENERATION_LOOKUP_DELAYS = (0.5, 1.0, 2.0)
 GENERATION_LOOKUP_TIMEOUT_SECONDS = 10.0
 
+# OpenRouter's /generation accepts only this id shape (API reference,
+# getGeneration). A Responses answer names itself ``resp_...``, so a lookup by
+# that id can never find a bill, and asking again only delays the hold (SKY-664).
+_GENERATION_ID = re.compile(r"gen-[0-9A-Za-z-]{1,124}")
+
+# Responses usage may omit ``is_byok``, and then a cost with an upstream share
+# is ambiguous. This opt-in adds ``openrouter_metadata``, whose ``is_byok`` the
+# API reference marks as required (SKY-664).
+_METADATA_HEADER = {"X-OpenRouter-Metadata": "enabled"}
+
 FUNDS_BUSY = "provider_budget_busy"
 MANAGED_FUNDS_EXHAUSTED = "managed_funds_exhausted"
 BYOK_FUNDS_EXHAUSTED = "byok_funds_exhausted"
@@ -485,6 +495,8 @@ class ProviderDispatcher:
             headers["x-api-key"] = self._api_key
         else:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        if self.upstream == OPENROUTER and path == "/responses":
+            headers.update(_METADATA_HEADER)
         headers.update(
             {
                 name: value
@@ -574,7 +586,11 @@ class ProviderDispatcher:
             ):
                 amount = usage_charge(usage)
             if self.policy.kind != "byok_model" and self.upstream == OPENROUTER and amount is None and identity:
-                reconciled, reason, retry = self._lookup_generation(identity)
+                reconciled, reason, retry = (
+                    self._lookup_generation(identity)
+                    if _GENERATION_ID.fullmatch(identity)
+                    else (None, "nothing, because /generation does not accept this id", False)
+                )
                 for delay in GENERATION_LOOKUP_DELAYS:
                     if not retry:
                         break
