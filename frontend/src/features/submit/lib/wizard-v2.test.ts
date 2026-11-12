@@ -341,7 +341,6 @@ test("withRepository picks a repository from its default branch", () => {
     commit: "",
   });
   assert.equal(withRepository(pinned, "acme/old"), pinned);
-  assert.equal(withRepository(null, "acme/bot").repository, "acme/bot");
 });
 
 test("withRepository clears the created-by-Skynet flag for another repository", () => {

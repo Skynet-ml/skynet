@@ -66,7 +66,8 @@ export function SubmitEntry() {
       const left = draft?.values[WIZARD_SESSION_KEY] ?? null;
       const cloning = searchParams.has("clone");
       const usable = decodeWizardSession(left, accountId, steps) !== null;
-      if (draft && offersLeftSetup({ tab, left, account: accountId, steps, cloning })) setOffer(draft);
+      const offered = offersLeftSetup({ tab, leftReadable: usable, account: accountId, steps, cloning });
+      if (draft && offered) setOffer(draft);
       // A draft this build cannot read may come from a newer build on another
       // device, so only this browser's copy goes; the server keeps it.
       else if (draft && !usable) clearSetupDraft();

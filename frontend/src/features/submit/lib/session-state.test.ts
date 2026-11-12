@@ -16,7 +16,7 @@ registerHooks({
   },
 });
 
-const { WIZARD_V2_STEPS, emptyRepoDraft, initialWizardV2State } = await import("./wizard-v2.ts");
+const { WIZARD_V2_STEPS, emptyRepoDraft, initialWizardV2State, wizardSteps } = await import("./wizard-v2.ts");
 const { decodeWizardSession, encodeWizardSession, offersLeftSetup, setupWorthKeeping } =
   await import("./session-state.ts");
 
@@ -74,6 +74,22 @@ test("a DSPy program draft from before that target was retired moves onto a repo
   assert.equal(restored.task.background, "Support desk");
   assert.equal(restored.workspace.metricCode, "def metric(x):\n    return 1.0\n");
   assert.equal(restored.meta.name, "Refund bot");
+});
+
+test("a DSPy program draft left on Inputs reopens on the next step of the repository flow", () => {
+  const good = initialWizardV2State("guided");
+  const old = { ...good, step: "inputs", furthestStep: "inputs", task: { ...good.task, repo: null } };
+  const restored = decodeWizardSession(JSON.stringify({ account: "a", state: old }), "a", STEPS);
+
+  assert.ok(restored);
+  assert.equal(restored.step, "optimizer");
+  assert.equal(restored.furthestStep, "optimizer");
+  assert.ok(wizardSteps(restored, true).includes(restored.step));
+
+  const further = { ...old, furthestStep: "metric" };
+  const kept = decodeWizardSession(JSON.stringify({ account: "a", state: further }), "a", STEPS);
+  assert.equal(kept?.step, "optimizer");
+  assert.equal(kept?.furthestStep, "metric");
 });
 
 test("a repository draft keeps its optimizer and data mode", () => {
@@ -208,13 +224,14 @@ test("the left setup is offered only when no clone or readable tab setup takes i
   const left = encodeWizardSession("a@x.io", initialWizardV2State("guided"));
   const tab = encodeWizardSession("a@x.io", initialWizardV2State("guided"));
   const otherAccount = encodeWizardSession("b@x.io", initialWizardV2State("guided"));
-  const base = { tab: null, left, account: "a@x.io", steps: STEPS, cloning: false };
+  const leftReadable = decodeWizardSession(left, "a@x.io", STEPS) !== null;
+  const base = { tab: null, leftReadable, account: "a@x.io", steps: STEPS, cloning: false };
 
   assert.equal(offersLeftSetup(base), true);
   assert.equal(offersLeftSetup({ ...base, cloning: true }), false);
   assert.equal(offersLeftSetup({ ...base, tab }), false);
   assert.equal(offersLeftSetup({ ...base, tab: "{not json" }), true);
   assert.equal(offersLeftSetup({ ...base, tab: otherAccount }), true);
-  assert.equal(offersLeftSetup({ ...base, left: null }), false);
-  assert.equal(offersLeftSetup({ ...base, left: "{not json" }), false);
+  assert.equal(offersLeftSetup({ ...base, leftReadable: false }), false);
+  assert.equal(offersLeftSetup({ ...base, tab, leftReadable: false }), false);
 });

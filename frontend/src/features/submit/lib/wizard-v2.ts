@@ -299,11 +299,10 @@ function secretsIssue(secrets: RepoSecretDraft[]): string | null {
 }
 
 /** The draft with another repository picked; a new repository starts from its default branch. */
-export function withRepository(repo: RepoDraft | null, repository: string): RepoDraft {
-  const base = repo ?? emptyRepoDraft();
-  if (base.repository === repository) return base;
+export function withRepository(repo: RepoDraft, repository: string): RepoDraft {
+  if (repo.repository === repository) return repo;
   // Another repository is not the one Skynet created, so the flag must not carry over.
-  return { ...base, repository, branch: "", commit: "", ...(base.createdBySkynet ? { createdBySkynet: false } : {}) };
+  return { ...repo, repository, branch: "", commit: "", ...(repo.createdBySkynet ? { createdBySkynet: false } : {}) };
 }
 
 /** Whether the models a repository run needs are set. */

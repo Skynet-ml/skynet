@@ -82,8 +82,14 @@ export function decodeWizardSession(
   if (repo && typeof repo === "object") return restored;
   // A draft from before DSPy program setups were retired has no repository.
   // It moves onto a repository target and keeps its objective, metric and name.
+  // A repository run has no Inputs step until its interview finds one, so a
+  // draft left there moves on to the next step.
+  const next = steps[steps.indexOf("inputs") + 1] as WizardV2State["step"];
+  const moved = (id: WizardV2State["step"]) => (id === "inputs" && !restored.task.needsData ? next : id);
   return {
     ...restored,
+    step: moved(restored.step),
+    furthestStep: moved(restored.furthestStep),
     task: { ...restored.task, repo: emptyRepoDraft() },
     inputs: { ...restored.inputs, mode: "single" },
     optimizer: { ...restored.optimizer, choice: storedOptimizerChoice(restored.optimizer.choice) ?? "auto" },
@@ -95,11 +101,12 @@ export function decodeWizardSession(
  *
  * A clone starts from its source run, and a reload finds the tab's own setup,
  * so neither gets the offer. A tab copy this build cannot read does not count
- * as a reload, so it does not hide the left setup.
+ * as a reload, so it does not hide the left setup. The caller decodes the
+ * left setup once and passes whether it is readable.
  *
  * Args:
  *   input.tab: The tab's saved setup text, if any.
- *   input.left: The account's left setup text, if any.
+ *   input.leftReadable: Whether the account's left setup decodes.
  *   input.account: The signed-in account.
  *   input.steps: The wizard's step ids.
  *   input.cloning: Whether the page opens a clone of a run.
@@ -109,14 +116,14 @@ export function decodeWizardSession(
  */
 export function offersLeftSetup(input: {
   tab: string | null;
-  left: string | null;
+  leftReadable: boolean;
   account: string;
   steps: readonly string[];
   cloning: boolean;
 }): boolean {
-  const { tab, left, account, steps, cloning } = input;
+  const { tab, leftReadable, account, steps, cloning } = input;
   if (cloning || decodeWizardSession(tab, account, steps) !== null) return false;
-  return decodeWizardSession(left, account, steps) !== null;
+  return leftReadable;
 }
 
 /**
