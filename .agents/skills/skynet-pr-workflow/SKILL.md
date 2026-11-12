@@ -121,11 +121,16 @@ for review until the evidence is there.
 - Focus on concrete correctness, security, integration, concurrency and
   regression problems. No speculative findings or style preferences. Keep new
   defects apart from problems that existed before.
+- The review is about the code. It does not grade the PR body. The body is
+  for observability only. When the body is wrong or incomplete, the author
+  or the orchestrator fixes it in place. A body issue is never a finding,
+  never blocks approval and never starts a new review round
+  (Gilad, November 11, 2026).
 - Save the first reports, candidate decisions, ranking and rejected findings
   for audit.
 - A missing, failed, interrupted, stale or quota-limited review is not
   approval. **A new commit cancels the approval.** A change to the
-  description or evidence needs a new evidence check.
+  description keeps the approval.
 - Add a short review table: reviewer model, reviewed commit, verdict, report
   link.
 - Approval permits the automatic merge into `staging` (section 7). It never
