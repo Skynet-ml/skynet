@@ -76,12 +76,15 @@ import inspect
 import io
 import json
 import os
+import pwd
 import shutil
 import signal
 import site
 import ssl
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -131,7 +134,12 @@ RELAY_PORT = 47_311
 CANDIDATE_FLAG = "--candidate"
 # ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
 RUN_FLAG = "--run"
-RUN_DIR = "run"
+# The Vercel provider's exec wrapper writes the command's stdout, stderr and
+# exit code to these files (``OUTPUT_PREFIX`` and ``EXIT_PREFIX`` in
+# core/sandbox/providers/vercel.py). This file runs in the box on the standard
+# library alone, so it cannot import them; a test keeps the two equal.
+WRAPPER_OUTPUT_PREFIX = "/tmp/.app-output-"
+WRAPPER_EXIT_PREFIX = "/tmp/.app-exit-"
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
@@ -152,7 +160,8 @@ _STAGE_POLL_SECONDS = 0.05
 # Frames one ``log()`` event on stderr; the host turns each into a run-log line.
 EVENT_PREFIX = "APP_SCORER_EVENT "
 # Frames the candidate supervisor's result on its own stdout. The entry never
-# holds that stdout, so it cannot forge the result, unlike a file it can write (SKY-398).
+# holds that stdout and runs as another user, so it cannot forge the result,
+# unlike a file it can write (SKY-398).
 RESULT_PREFIX = "APP_RUN_RESULT "
 _EVENT_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 # The module scorer code imports those helpers from: ``from skynet import llm, Image``.
@@ -1333,9 +1342,18 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) >= 3 and args[0] == STAGE_COMMAND_FLAG:
         return run_stage_command(Path(args[1]), args[2:])
     if len(args) == 2 and args[0] == CANDIDATE_FLAG:
+        refused = unsafe_output()
+        if refused:
+            sys.stderr.write(refused + "\n")
+            return 3
         call_dir = Path(args[1])
         payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
-        _print_result(json.dumps(run_candidate(payload, call_dir)))
+        try:
+            result = run_candidate(payload, call_dir)
+        except EntryUserError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 3
+        _print_result(json.dumps(result))
         return 0
     if len(args) != 1:
         sys.stderr.write("usage: app_runner.py <call_dir>\n")
@@ -1413,6 +1431,122 @@ def refuse_processes() -> list[bool]:
     return refused
 
 
+class EntryUserError(Exception):
+    """The root supervisor found no user other than root to run the entry as."""
+
+
+def unsafe_output() -> str | None:
+    """Say why the supervisor's stdout could carry a forged result, or ``None`` when it is safe.
+
+    The parent reads the result frame from stdout alone. A pipe, socket or
+    device has its other end with the runtime, so the entry cannot replace
+    it. A file must be the Vercel exec wrapper's
+    ``/tmp/.app-output-<token>.out``. The token is a new ``uuid4``
+    (``os.urandom``) for each command, so no process can know the name
+    before the root wrapper creates the file. The file must belong to root,
+    have no group or other write bit and one link, and its own name must
+    reach it: a link that the redirect followed has another name. In sticky
+    ``/tmp`` the entry, which runs as another user, then cannot rename,
+    replace or write the file. The supervisor also creates the wrapper's
+    exit code file as root before the entry starts, so the entry cannot
+    create it first and write a forged exit code (SKY-398).
+
+    Returns:
+        The refusal, or ``None``.
+    """
+    try:
+        info = os.fstat(1)
+    except OSError:
+        return "The supervisor's stdout is closed."
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        path = str(Path("/proc/self/fd/1").readlink())
+        named = os.lstat(path)
+    except OSError:
+        return "The supervisor cannot check the file behind its stdout."
+    token = path[len(WRAPPER_OUTPUT_PREFIX) : -len(".out")]
+    if (
+        not path.startswith(WRAPPER_OUTPUT_PREFIX)
+        or not path.endswith(".out")
+        or len(token) != 32
+        or token.strip("0123456789abcdef")
+    ):
+        return f"The supervisor's stdout {path} is not a file of the exec wrapper."
+    if os.geteuid() != 0 or info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
+        return f"The supervisor's stdout {path} is not a root-only file."
+    if not stat.S_ISREG(named.st_mode) or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+        return f"The supervisor's stdout {path} is a link or was replaced."
+    # The parent reads the wrapper's files as the box user.
+    os.fchmod(1, 0o644)
+    with _quiet():
+        os.fchmod(2, 0o644)
+    try:
+        sentinel = os.open(WRAPPER_EXIT_PREFIX + token, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        return "The exec wrapper's exit code file exists before the entry started."
+    os.fchmod(sentinel, 0o644)
+    os.close(sentinel)
+    return None
+
+
+def _entry_user(env: dict[str, str]) -> dict[str, Any]:
+    """Choose the user the entry runs as, and set its environment to match.
+
+    A root supervisor whose stdout is the exec wrapper's root file (Vercel)
+    starts the entry as the owner of the candidate tree, its working
+    directory. The entry then cannot signal, trace or read the supervisor,
+    or change the wrapper's root files (SKY-398). A stdout pipe has no file
+    that the entry could replace, and a local Docker box drops the root
+    capabilities that a user switch needs. So with a pipe, or without root,
+    the entry runs as the supervisor's user.
+
+    Args:
+        env: The entry's environment; gets ``HOME``, ``USER`` and ``LOGNAME``.
+
+    Returns:
+        The ``subprocess.Popen`` arguments that switch the user, or none.
+
+    Raises:
+        EntryUserError: When root owns the candidate tree.
+    """
+    if os.geteuid() != 0 or not stat.S_ISREG(os.fstat(1).st_mode):
+        return {}
+    owner = Path().stat()
+    if owner.st_uid == 0:
+        raise EntryUserError("Root owns the candidate tree, so the [run] entry has no other user to run as.")
+    try:
+        account = pwd.getpwuid(owner.st_uid)
+    except KeyError:
+        pass
+    else:
+        env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    return {"user": owner.st_uid, "group": owner.st_gid, "extra_groups": []}
+
+
+def _read_answer(path: Path, user: Any) -> dict[str, Any]:
+    """Read a function entry's ``output.json`` without following a link the entry left.
+
+    Args:
+        path: The answer file.
+        user: The entry's uid, or ``None`` when it runs as the supervisor's user.
+
+    Returns:
+        The answer document.
+
+    Raises:
+        OSError: When the file is missing, a link, not a file, or not the entry's own.
+    """
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        # A root supervisor must not pass on a root file that the entry hard-linked here.
+        if not stat.S_ISREG(info.st_mode) or (user is not None and info.st_uid != user):
+            raise OSError(f"{path} is not the entry's own file")
+        answer = json.loads(handle.read().decode("utf-8"))
+    return answer if isinstance(answer, dict) else {}
+
+
 def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     """Run the ``[run]`` entry on one case's input in the candidate box.
 
@@ -1437,24 +1571,54 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     stages = payload.get("stages")
     if isinstance(stages, dict):
         env.update(_relay_env(StageClient(stages), stages))
-    run_dir = call_dir / RUN_DIR
-    run_dir.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(payload.get("input"))
+    switch = _entry_user(env)
+    # A new folder in sticky /tmp: the box user can rename anything in the
+    # call's folder, so a root supervisor must not write or chown there.
+    run_dir = Path(tempfile.mkdtemp(prefix=".app-run-"))
+    try:
+        return _run_entry(entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")))
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def _run_entry(
+    entry: Any, timeout: float, env: dict[str, str], switch: dict[str, Any], run_dir: Path, body: str
+) -> dict[str, Any]:
+    """Start the entry, wait for it, kill its process group, and read its output.
+
+    Args:
+        entry: A ``path/file.py:function`` string or a command list.
+        timeout: The entry's time limit in seconds.
+        env: The entry's environment.
+        switch: The ``subprocess.Popen`` arguments that switch the user.
+        run_dir: A new folder for a function entry's input and output.
+        body: The case input as JSON.
+
+    Returns:
+        ``{"output", "error", "elapsed_s"}``.
+    """
+    user = switch.get("user")
     captured: list[bytes] = []
     readers: list[threading.Thread] = []
-    # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
-    started = time.monotonic()
     try:
         if isinstance(entry, str):
             (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
+            if user is not None:
+                os.chown(run_dir, user, switch["group"])
+                os.chown(run_dir / INPUT_FILE, user, switch["group"])
             # The supervisor runs on the base interpreter without site-packages;
             # the entry is candidate code and needs the box's python3 from PATH,
             # where [setup] installed its packages (SKY-642).
             python = shutil.which("python3", path=env.get("PATH")) or sys.executable
             argv = [python, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
+            # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
+            started = time.monotonic()
             # Its prints go to stderr: the parent reads relay frames on stdout.
-            child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True)
+            child = subprocess.Popen(
+                argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True, **switch
+            )
         else:
+            started = time.monotonic()
             child = subprocess.Popen(
                 [str(part) for part in entry],
                 env=env,
@@ -1462,6 +1626,7 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
                 stdout=subprocess.PIPE,
                 stderr=2,
                 start_new_session=True,
+                **switch,
             )
             readers = [
                 threading.Thread(target=_feed, args=(child.stdin, body.encode("utf-8")), daemon=True),
@@ -1489,7 +1654,7 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
         result["error"] = f"killed by signal {_signal_name(-code)}"
     elif isinstance(entry, str):
         try:
-            answer = json.loads((run_dir / OUTPUT_FILE).read_text(encoding="utf-8"))
+            answer = _read_answer(run_dir / OUTPUT_FILE, user)
         except (OSError, ValueError):
             answer = {"error": f"exited with code {code} before it returned"}
         if "output" in answer:

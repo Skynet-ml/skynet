@@ -543,6 +543,15 @@ def test_an_empty_network_list_means_offline_and_a_missing_one_keeps_the_default
     assert default.proposer.network is None
 
 
+def test_a_metric_with_no_run_and_no_target_fails_the_setup_check() -> None:
+    """The metric box holds no repository files, so a metric with nothing to judge would score every version alike."""
+    with pytest.raises(ConstraintsError, match=r"\[metric\] has nothing to judge"):
+        parse_constraints(b'[metric]\nfiles = ["eval"]\n')
+
+    assert parse_constraints(b'[metric]\nfiles = ["eval"]\n[run]\nentry = "src/app.py:run"\n').run_entry
+    assert parse_constraints(b'[metric]\nfiles = ["eval"]\n[target.solver]\nentry = "solver.py:solve"\n').targets
+
+
 def test_a_file_with_no_target_parses() -> None:
     """The target section is optional."""
     assert parse_constraints(b"[proposer]\nservices = []\n").targets == {}
@@ -673,7 +682,7 @@ def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
     assert replace(constraints, rules=(), proposer=parsed.proposer, targets=parsed.targets) == parsed
 
 
-@pytest.mark.parametrize("raw", [b"[proposer]\n[metric]\n", b'[paths]\neditable = ["src"]\n'])
+@pytest.mark.parametrize("raw", [b'[proposer]\n[run]\nentry = "a.py:f"\n[metric]\n', b'[paths]\neditable = ["src"]\n'])
 def test_a_file_that_names_no_rule_file_reads_as_it_parses(tmp_path: Path, raw: bytes) -> None:
     """Without instructions or rule files, reading the snapshot adds nothing to the parsed file."""
     assert read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw})) == parse_constraints(raw)
@@ -839,7 +848,9 @@ def test_an_empty_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
 def test_a_missing_mcp_file_fails_with_a_reason(tmp_path: Path, label: str) -> None:
     """An mcp path that names no file in the snapshot fails the setup check (E46)."""
     entry = b'entry = "a.py:f"\n' if label == "run" else b""
-    raw = b"[" + label.encode() + b"]\n" + entry + b'mcp = "tools/.mcp.json"\n'
+    # A [metric] needs a [run] to judge (SKY-398).
+    run = b'[run]\nentry = "a.py:f"\n' if label == "metric" else b""
+    raw = run + b"[" + label.encode() + b"]\n" + entry + b'mcp = "tools/.mcp.json"\n'
 
     with pytest.raises(ConstraintsError, match=rf"\[{label}\] mcp names 'tools/\.mcp\.json', but .* no such file"):
         read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw, "tools/other.json": b"{}"}))
@@ -1278,7 +1289,7 @@ def test_a_secret_value_in_an_mcp_url_is_refused(tmp_path: Path, run: bytes, mes
 _STDIO_ROLES = {
     "[proposer]": b"[proposer]\n",
     "[run]": b'[run]\nentry = "a.py:f"\n',
-    "[metric]": b"[metric]\n",
+    "[metric]": b'[run]\nentry = "a.py:f"\n[metric]\n',
     "[target.planner]": b'[target.planner]\nentry = "p.py:plan"\n',
 }
 
@@ -1472,7 +1483,9 @@ def test_a_run_entry_that_names_a_shared_mcp_file_is_allowed() -> None:
 
 def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
     """One ``.mcp.json`` for ``[proposer]`` and ``[metric]`` is not inside a hidden folder, so it stays valid."""
-    constraints = parse_constraints(b'[proposer]\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n')
+    constraints = parse_constraints(
+        b'[proposer]\nmcp = ".mcp.json"\n\n[run]\nentry = "a.py:f"\n\n[metric]\nmcp = ".mcp.json"\n'
+    )
 
     assert constraints.proposer.mcp == ".mcp.json"
 
@@ -1480,13 +1493,13 @@ def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
 @pytest.mark.parametrize(
     ("toml", "editable"),
     [
-        ('[metric]\nfiles = ["eval"]\n', "eval"),
-        ('[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n', "eval"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
         ('[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
         ("", ".optimize/exploits"),
-        ('[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
         ("", "optimize.toml"),
-        ('[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
     ],
     ids=[
         "metric-folder",

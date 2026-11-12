@@ -51,13 +51,47 @@ from core.service_gateway.optimization.blackbox.rule_judge import (
     WATCH_EVERY_ACTIONS,
     WITHHELD_STEP,
 )
-from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
+from core.service_gateway.optimization.blackbox.sandbox import (
+    CommandResult,
+    LocalSubprocessRuntime,
+    LocalSubprocessSession,
+    SandboxSpec,
+)
 from core.service_gateway.optimization.blackbox.service import legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
 from core.worker import repo_staging, scoped_relay
 from core.worker.repo_gate import check_hidden
 from core.worker.scoped_relay import McpRelay
+
+
+@pytest.fixture(autouse=True)
+def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+    """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
 
 
 def _payload(commit: str | None) -> dict[str, Any]:

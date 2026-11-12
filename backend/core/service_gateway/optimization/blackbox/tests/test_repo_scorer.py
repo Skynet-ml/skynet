@@ -64,7 +64,7 @@ from ..rule_judge import (
     WATCH_EVERY_ACTIONS,
     RuleJudge,
 )
-from ..sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
+from ..sandbox import CommandResult, LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_contract import SandboxSession
 from ..service import run_blackbox_optimization
 from .test_repo_workspace import _archive, _patch
@@ -91,6 +91,35 @@ def score(repo_path, case=None, output=None):
         },
     }
 """
+
+
+@pytest.fixture(autouse=True)
+def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+    """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
 
 
 @pytest.fixture(autouse=True)
@@ -4181,3 +4210,18 @@ def test_a_metric_that_starts_a_process_after_the_run_is_refused(tmp_path: Path)
             scorer.score("", {"input": 1})
     finally:
         scorer.close()
+
+
+def test_the_root_supervisor_refuses_a_changed_runner_file(tmp_path: Path) -> None:
+    """A lingering process could change the runner file, so root runs it only when its hash matches (SKY-398)."""
+    path = tmp_path / "runner.py"
+    path.write_text(repo_scorer.RUNNER_SOURCE + "\nprint('PLANTED')\n", encoding="utf-8")
+    boot = [sys.executable, "-I", "-c", repo_scorer._SUPERVISOR_BOOT, str(path), repo_scorer._RUNNER_SHA256]
+
+    done = subprocess.run([*boot, "--help"], capture_output=True, text=True, timeout=60, check=False)
+
+    assert done.returncode != 0
+    assert "PLANTED" not in done.stdout
+    assert "The supervisor file changed before it ran." in done.stderr
+    path.write_text(repo_scorer.RUNNER_SOURCE, encoding="utf-8")
+    assert subprocess.run([*boot, "--help"], capture_output=True, timeout=60, check=False).stderr.find(b"changed") == -1

@@ -1390,6 +1390,16 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_entry,
         [path for path in metric_only if path is not None],
     )
+    run_vcpus = _vcpus(run_section["vcpus"], "[run]", "run") if "vcpus" in run_section else None
+    metric_vcpus = _vcpus(metric_section["vcpus"], "[metric]", "metric") if "vcpus" in metric_section else None
+    # The metric box holds no repository tree (SKY-398), so a metric with no [run]
+    # and no target stage sees nothing of the version and gives each one the same score.
+    if "metric" in document and run_entry is None and not targets:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [metric] has nothing to judge. The metric box holds no repository"
+            " files, so add a [run] section or a [target.<name>] stage whose outputs the metric scores.",
+            section="metric",
+        )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
@@ -1399,8 +1409,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_timeout=run_timeout,
         run_role=RoleEnvironment(**run_role),
         metric_role=RoleEnvironment(**metric_role),
-        run_vcpus=_vcpus(run_section["vcpus"], "[run]", "run") if "vcpus" in run_section else None,
-        metric_vcpus=_vcpus(metric_section["vcpus"], "[metric]", "metric") if "vcpus" in metric_section else None,
+        run_vcpus=run_vcpus,
+        metric_vcpus=metric_vcpus,
         instructions_file=instructions_file,
         proposer=RoleEnvironment(**proposer),
         targets=targets,

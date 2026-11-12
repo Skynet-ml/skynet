@@ -182,9 +182,10 @@ The metric cannot run version code. A check that needs the version's code
 belongs in a `[run]` entry: the entry runs the code in the candidate box, and
 the metric judges the entry's output. Setup warns when a metric file imports
 a repository module that is not a metric file. The warning names the module
-and the fix: move the check into a `[run]` entry. A repository without a
-`[run]` entry gets no version output, so its metric judges only the files it
-holds.
+and the fix: move the check into a `[run]` entry. The metric box holds no
+version file, so a `[metric]` needs a `[run]` section or a
+`[target.<name>]` stage whose outputs it scores. A `[metric]` with neither
+fails setup, because it would give each version the same score.
 
 The box user can be root. The boxes depend on the microVM boundary between
 boxes, not on file permissions inside a box.
@@ -240,25 +241,33 @@ for its exit code. These steps make the supervisor harder to change. They
 do not replace the separate boxes; see the residual risk below. Skynet
 trusts the supervisor's result only when the supervisor exits cleanly, so an
 entry that kills the supervisor gets no score. On Linux the supervisor
-sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
-`ptrace` and `/proc/<pid>/mem` access to it, also when Yama is off. It also
-blocks access to its open files through `/proc/<pid>/fd`, so the entry cannot
-open the supervisor's stdout there.
+sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks `ptrace` and
+`/proc/<pid>/mem` access to it, also when Yama is off. It also blocks access
+to its open files through `/proc/<pid>/fd`.
+
+On Vercel the supervisor runs as root (`sudo`). The box's exec wrapper sends
+its stdout to a root-owned file in `/tmp` whose name holds a new random
+token for each command. The supervisor checks that file before the entry
+starts: root owns it, no other user can write it, it is not a link, and its
+name matches the wrapper's. If a check fails, the supervisor stops and the
+case fails. The
+supervisor then starts the entry as the owner of the candidate tree, not as
+root. So the entry cannot signal, trace or read the supervisor, and it
+cannot replace or write the wrapper's output and exit code files (SKY-398).
+When the supervisor's stdout is a pipe, or the supervisor is not root (for
+example in a local Docker box, which drops the root capabilities), the entry
+runs as the supervisor's user. A pipe has no file that the entry could
+replace.
 
 Residual risk:
 
-- Code that gets root in the box (for example through `sudo`) could still
-  trace or change the supervisor process.
+- Code that gets root in the box could still trace or change the supervisor
+  process and its output files. If the tree owner can use `sudo` in the box,
+  the entry can get root. Then only the separate boxes and the microVM
+  boundary protect the metric and the score.
 - The `[run]` entry can plant a `.pth` file in the candidate box's
   site-packages. That file runs only in that candidate box. The box ends
   after the case, and the metric box never gets the file (SKY-398).
-- The box's command wrapper (`timeout` and the outer shell that records the
-  exit code) runs as the same user as the version's code. Where the box
-  allows same-user `ptrace` of that wrapper, version code could change the
-  exit code that Skynet reads for that case. The next case gets a new
-  candidate box (SKY-398). If such code writes a second result line to the
-  supervisor's stdout through that wrapper, no result line counts, and the
-  case gets no score.
 - Each case starts from the state that `[setup]` left. A cache that
   `[setup]` fills (for example a download or a model file) makes every case
   faster, but a case leaves nothing for the next case.

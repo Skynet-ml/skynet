@@ -31,7 +31,7 @@ from core.worker import repo_staging
 from ..preflight import verify_anything_in_sandbox
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
-from ..sandbox import LocalSubprocessRuntime, SandboxSpec
+from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 from .test_repo_workspace import _archive
 
@@ -95,6 +95,42 @@ def score(repo_path, case, output):
         "has_key": output["has_key"] and bool(os.environ.get("APP_API_KEY")),
     }}
 """
+
+
+@pytest.fixture(autouse=True)
+def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+
+    Returns:
+        The commands that asked for root, in order.
+    """
+    run = LocalSubprocessSession.run
+    root_commands: list[str] = []
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user, and record a root request.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Recorded, then ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        if sudo:
+            root_commands.append(command)
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+    return root_commands
 
 
 @pytest.fixture(autouse=True)
@@ -221,11 +257,15 @@ def _score(
 
 
 def test_a_managed_call_from_the_box_is_metered(
-    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path, root_commands_in_local_boxes: list[str]
 ) -> None:
     """Version code and the scorer's llm() reach the managed route; the parent pays and meters both."""
     model_gateway, sent = gateway
     result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY)
+    # The [run] supervisor runs as root, and the mailbox still wraps it, so the entry keeps its model route.
+    supervisors = [command for command in root_commands_in_local_boxes if "--candidate" in command]
+    assert supervisors
+    assert all(command.startswith("python3 -I .app-model-") for command in supervisors)
 
     document = result["document"]
     assert document["score"] == 1.0

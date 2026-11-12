@@ -347,8 +347,8 @@ def metric_import_warnings(archive: Path, metric_files: Collection[str]) -> list
         metric_files: The ``[metric] files`` paths: files or folders.
 
     Returns:
-        One warning for each metric file and module, which names the module
-        and the fix: move the check into a ``[run]`` entry.
+        One warning for each metric file and module, which names the module's
+        path in the tree and the fix: move the check into a ``[run]`` entry.
     """
     roots = [posixpath.normpath(path) for path in metric_files]
     with tarfile.open(archive) as packed:
@@ -380,7 +380,7 @@ def metric_import_warnings(archive: Path, metric_files: Collection[str]) -> list
             ]
             if found and not any(inside(candidate, roots) for candidate in found):
                 warnings.append(
-                    f"The metric file {path} imports the repository module '{module.lstrip('/')}'. The metric box"
+                    f"The metric file {path} imports the repository module '{found[0]}'. The metric box"
                     " holds only the metric files, so this import fails when the metric runs. Move the check"
                     " that needs this module into a [run] entry, and let the metric judge the entry's output."
                 )
@@ -412,8 +412,9 @@ def _imported_modules(tree: ast.AST, here: str) -> list[str]:
             # ``from . import name`` may name a module, not only a value.
             names = [posixpath.join(folder, alias.name) for alias in node.names] if not node.module else [folder]
             modules += ["/" + posixpath.normpath(name) for name in names]
-    # A relative import above the tree's root names nothing in the repository.
-    return [module for module in modules if module and not module.startswith(("/..", "/."))]
+    # A relative import above the tree's root names nothing in the repository. A
+    # dot folder such as ``.optimize`` is a real place, so only ``.`` and ``..`` drop.
+    return [module for module in modules if module and module not in ("/.", "/..") and not module.startswith("/../")]
 
 
 def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -> list[tuple[str, str]]:

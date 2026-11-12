@@ -55,6 +55,7 @@ import base64
 import contextlib
 import contextvars
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -132,6 +133,17 @@ _NO_SITE = "-S"
 # could replace its python3 for the next case. A host without this path (local
 # tests) falls back to PATH (SKY-642).
 _BASE_PYTHON = "/usr/local/bin/python3"
+# The supervisor runs as root, but the box user can rewrite the runner file
+# between the write and the run (a process an earlier case left). So root reads
+# the file once, checks its hash against the parent's copy, and runs those
+# same bytes (SKY-398).
+_SUPERVISOR_BOOT = (
+    "import hashlib,sys;p=sys.argv[1];s=open(p,'rb').read();"
+    "hashlib.sha256(s).hexdigest()==sys.argv[2] or sys.exit('The supervisor file changed before it ran.');"
+    "sys.argv=[p]+sys.argv[3:];g=sys.modules['__main__'].__dict__;g['__file__']=p;"
+    "exec(compile(s,p,'exec'),g)"
+)
+_RUNNER_SHA256 = hashlib.sha256(RUNNER_SOURCE.encode("utf-8")).hexdigest()
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # A stage box's relay answers, relative to the box; one folder for every call,
@@ -626,10 +638,16 @@ class RepoScorer:
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.
                     f'; cd {shlex.quote(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
-                    f" {shlex.quote(f'{root}/{RUNNER_PATH}')} {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
+                    f" -c {shlex.quote(_SUPERVISOR_BOOT)} {shlex.quote(f'{root}/{RUNNER_PATH}')} {_RUNNER_SHA256}"
+                    f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
                     on_output=output,
+                    # Root runs the wrapper and the supervisor; the supervisor
+                    # starts the entry as the tree's owner. On Vercel the
+                    # wrapper's output files are then root's own in sticky
+                    # /tmp, so the entry cannot replace them (SKY-398).
+                    sudo=True,
                 )
         self._check_changes(relay, secrets, candidate)
         try:
@@ -637,10 +655,11 @@ class RepoScorer:
         except ValueError:
             ran = None
         # The result comes only from the supervisor's stdout, which the entry
-        # never holds: a process the entry left can rewrite any file in the box
-        # (SKY-398). A second frame means that some other process reached that
-        # stdout (for example through a same-user wrapper's /proc/<pid>/fd), so
-        # no frame counts. It counts only when the supervisor exited cleanly (SKY-642).
+        # never holds: a process the entry left can rewrite any file of the box
+        # user (SKY-398). The supervisor refuses to start when that stdout is a
+        # file the entry's user could replace. A second frame means that some
+        # other process reached that stdout, so no frame counts. It counts only
+        # when the supervisor exited cleanly (SKY-642).
         if not result.ok or not isinstance(ran, dict):
             logger.warning(
                 "The [run] supervisor did not exit cleanly (exit %s): %s",

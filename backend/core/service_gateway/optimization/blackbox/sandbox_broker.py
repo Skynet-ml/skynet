@@ -41,6 +41,7 @@ class SandboxCommandRunner(Protocol):
         env: Mapping[str, str] | None,
         timeout_seconds: float | None,
         on_output: OutputSink | None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Execute through the trusted parent's model transport.
 
@@ -50,6 +51,7 @@ class SandboxCommandRunner(Protocol):
             env: Requested guest environment.
             timeout_seconds: Command deadline within the sandbox lifetime.
             on_output: Consumer for non-protocol output after model interception.
+            sudo: Run as root; only the parent's own commands ask for it.
 
         Returns:
             Guest command outcome.
@@ -176,18 +178,18 @@ class ParentSandboxSession:
             env: Extra environment for this command.
             timeout_seconds: Kill the command after this long.
             on_output: Receives output as it streams.
-            sudo: Run as root; only the parent's own setup commands ask for it.
+            sudo: Run as root; only the parent's own commands ask for it.
 
         Returns:
             The command's outcome.
         """
         options = {"env": env, "timeout_seconds": timeout_seconds, "on_output": on_output}
-        if sudo:
-            # A root setup command needs no model route, so it skips the mailbox.
-            return self._session.run(command, **options, sudo=True)
+        # The scorer's root supervisor starts a candidate that calls models (SKY-398),
+        # so a root command also goes through the mailbox.
+        root = {"sudo": True} if sudo else {}
         if self._command_runner is not None:
-            return self._command_runner(self._session, command, **options)
-        return self._session.run(command, **options)
+            return self._command_runner(self._session, command, **options, **root)
+        return self._session.run(command, **options, **root)
 
     def snapshot(self, cache: SnapshotCache, cache_key: str) -> str | None:
         """Save the box in a snapshot cache, when its runtime can save boxes.

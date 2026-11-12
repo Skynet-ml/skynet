@@ -845,10 +845,11 @@ _REPO_MODULES = {
 @pytest.mark.parametrize(
     ("source", "module"),
     [
-        (b"from app.core import run\n", "app.core"),
-        (b"import helpers\n", "helpers"),
-        (b"from util import util\n", "util"),
-        (b"from . import util\n", "eval/util"),
+        (b"from app.core import run\n", "src/app/core.py"),
+        (b"import helpers\n", "helpers.py"),
+        (b"from util import util\n", "eval/util.py"),
+        (b"from . import util\n", "eval/util.py"),
+        (b"from .util import util\n", "eval/util.py"),
     ],
 )
 def test_a_metric_that_imports_a_repo_module_gets_a_warning(tmp_path: Path, source: bytes, module: str) -> None:
@@ -876,6 +877,15 @@ def test_a_self_contained_metric_gets_no_warning(tmp_path: Path, source: bytes) 
     files = {**_REPO_MODULES, "eval/score.py": source, "eval/helper.py": b"x = 1\n"}
 
     assert repo_gate.metric_import_warnings(_archive(tmp_path, files), ["eval/score.py", "eval/helper.py"]) == []
+
+
+def test_a_metric_in_a_dot_folder_that_imports_a_repo_module_gets_a_warning(tmp_path: Path) -> None:
+    """A relative import from a dot folder such as ``.optimize`` still names a repository module."""
+    files = {".optimize/metric.py": b"from . import helpers\n", ".optimize/helpers.py": b"x = 1\n"}
+
+    [warning] = repo_gate.metric_import_warnings(_archive(tmp_path, files), [".optimize/metric.py"])
+
+    assert "'.optimize/helpers.py'" in warning
 
 
 def test_a_metric_folder_counts_as_metric_files(tmp_path: Path) -> None:

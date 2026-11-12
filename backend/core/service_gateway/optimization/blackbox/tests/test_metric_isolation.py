@@ -28,7 +28,7 @@ from ..native_runtime import NATIVE_TASK_FIELDS, assert_metric_absent, native_ta
 from ..protocol import EvalServer, Task
 from ..repo_scorer import RepoScoreError, RepoScorer, _StageRelay
 from ..repo_workspace import METRIC_DIR, METRIC_REPO_DIR, RepoWorkspace
-from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, SandboxSpec
+from ..sandbox import AsyncBridgeRuntime, CommandResult, LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
 from ..sandbox_scorer import RUNNER_FILE, SandboxPythonScorer
 from .test_native_runtime import FakeRuntime, FakeSession, _context
 from .test_repo_workspace import _archive
@@ -421,6 +421,35 @@ def _state_writes(box: _Recorded) -> dict[str, bytes]:
 
 
 @pytest.fixture(autouse=True)
+def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+    """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+
+
+@pytest.fixture(autouse=True)
 def _free_relay_port(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let each test's runner bind a free port, so parallel workers never share the fixed one.
 
@@ -654,6 +683,57 @@ def _containers(tag: str) -> list[str]:
         time.sleep(1)
 
 
+class _NoRoot:
+    """Open Docker boxes whose commands run as the box user, as the ``[run]`` supervisor did before SKY-398.
+
+    A local Docker box drops every root capability, so a root supervisor there
+    cannot switch the entry to the tree's owner, and the entry runs as a root
+    that cannot write the box user's home. The plant then fails in C already,
+    and the test would prove nothing about M.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        """Wrap a runtime.
+
+        Args:
+            inner: The Docker runtime.
+        """
+        self._inner = inner
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a box whose ``run`` ignores the root flag.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The box.
+        """
+        session = self._inner.open(spec)
+
+        class _Plain:
+            """Delegate to the box, and drop the root flag."""
+
+            def __getattr__(self, name: str) -> Any:
+                """Return the box's own attribute."""
+                return getattr(session, name)
+
+            def run(self, command: str, *, sudo: bool = False, **options: Any) -> CommandResult:
+                """Run the command as the box user.
+
+                Args:
+                    command: The shell command.
+                    sudo: Ignored.
+                    **options: The run options.
+
+                Returns:
+                    The command's result.
+                """
+                return session.run(command, **options)
+
+        return _Plain()
+
+
 _PTH_ENTRY = """
 import os
 import site
@@ -711,7 +791,12 @@ def test_a_planted_pth_file_does_not_run_in_the_metric_box(tmp_path: Path) -> No
     """Setup and the version plant .pth files in every site folder they can; none of them reaches M."""
     tag = uuid.uuid4().hex
     scorer = _docker_scorer(
-        tmp_path, AsyncBridgeRuntime("docker", image=_IMAGE), tag, _PTH_ENTRY, _PTH_METRIC, setup="python3 src/app.py"
+        tmp_path,
+        _NoRoot(AsyncBridgeRuntime("docker", image=_IMAGE)),
+        tag,
+        _PTH_ENTRY,
+        _PTH_METRIC,
+        setup="python3 src/app.py",
     )
     try:
         result = scorer.score("", {"input": 1})
@@ -876,6 +961,137 @@ def test_root_in_the_candidate_box_cannot_change_the_metric_box_or_the_score(tmp
     assert attack.stdout.splitlines()[0] == "0", attack
     assert json.loads(result["feedback"]) == {"digest": digest, "forged": []}
     assert result["score"] == 0.25
+    assert _containers(tag) == []
+
+
+_FORGE_ENTRY = """
+import glob
+import json
+import os
+
+FORGED = '\\\\n' + 'APP_RUN_RESULT ' + json.dumps({'output': 'FORGED'}) + '\\\\n'
+
+
+def run(value):
+    outs = glob.glob('/tmp/.app-output-*.out')
+    report = {'uid': os.getuid(), 'outs': len(outs)}
+    for out in outs:
+        token = out[len('/tmp/.app-output-'):-len('.out')]
+        forged = f'/tmp/forged-{token}'
+        with open(forged, 'w') as handle:
+            handle.write(FORGED)
+        for name, attack in (
+            ('rename', lambda: os.rename(forged, out)),
+            ('write', lambda: open(out, 'a').write(FORGED)),
+            ('exit', lambda: os.write(os.open('/tmp/.app-exit-' + token, os.O_WRONLY | os.O_CREAT), b'0')),
+        ):
+            try:
+                attack()
+                report[name] = 'done'
+            except OSError as error:
+                report[name] = error.errno
+    return report
+"""
+
+_FORGE_METRIC = """
+import errno
+import json
+
+
+def score(repo_path, case, output):
+    refused = all(output.get(name) in (errno.EPERM, errno.EACCES) for name in ('rename', 'write', 'exit'))
+    honest = output.get('uid') != 0 and output.get('outs') == 1 and refused
+    return (0.5 if honest else 0.0), json.dumps(output)
+"""
+
+
+class _VercelWrapper:
+    """Open Docker boxes whose ``[run]`` supervisor writes through the Vercel exec wrapper's root files.
+
+    Vercel's ``sudo`` gives root its capabilities, and a local Docker box drops
+    them all. So the supervisor runs in a ``docker exec --privileged`` root
+    process, which can switch the entry to the tree's owner as on Vercel.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        """Wrap a runtime.
+
+        Args:
+            inner: The Docker runtime.
+        """
+        self._inner = inner
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a box; a candidate box sends the supervisor's output to root files in sticky ``/tmp``.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The box.
+        """
+        session = self._inner.open(spec)
+
+        class _Wrapped:
+            """Delegate to the box, and run the supervisor the way ``vercel.py`` runs an exec."""
+
+            def __getattr__(self, name: str) -> Any:
+                """Return the box's own attribute."""
+                return getattr(session, name)
+
+            def run(self, command: str, **options: Any) -> CommandResult:
+                """Run the command as root with its output in the wrapper's files, then stream the file back.
+
+                Args:
+                    command: The shell command.
+                    **options: The run options.
+
+                Returns:
+                    The command's result, with the output file as its stdout.
+                """
+                if runner.CANDIDATE_FLAG not in command:
+                    return session.run(command, **options)
+                assert options["sudo"] is True
+                container = session.run("hostname").stdout.strip()
+                token = uuid.uuid4().hex
+                out, err = f"{runner.WRAPPER_OUTPUT_PREFIX}{token}.out", f"{runner.WRAPPER_OUTPUT_PREFIX}{token}.err"
+                exit_file = f"{runner.WRAPPER_EXIT_PREFIX}{token}"
+                wrapped = f"{{ {command}; }} > {out} 2> {err}; echo $? > {exit_file}"
+                env = [item for key, value in (options["env"] or {}).items() for item in ("-e", f"{key}={value}")]
+                done = subprocess.run(
+                    ["docker", "exec", "--privileged", "-u", "root", *env, container, "bash", "-c", wrapped],
+                    capture_output=True,
+                    text=True,
+                    timeout=options["timeout_seconds"],
+                    check=False,
+                )
+                # The parent reads the files as the box user, as vercel.py does.
+                stdout = session.run(f"cat {out}").stdout
+                stderr = session.run(f"cat {err}").stdout
+                options["on_output"]("stdout", stdout)
+                return CommandResult(exit_code=done.returncode, stdout=stdout, stderr=stderr)
+
+        return _Wrapped()
+
+
+@pytest.mark.docker
+@_docker
+def test_the_entry_cannot_replace_or_write_the_wrappers_root_output_files(tmp_path: Path) -> None:
+    """The entry runs as a non-root user, so it cannot rename over, write or pre-create the wrapper's files (SKY-398)."""
+    tag = uuid.uuid4().hex
+    scorer = _docker_scorer(
+        tmp_path, _VercelWrapper(AsyncBridgeRuntime("docker", image=_IMAGE)), tag, _FORGE_ENTRY, _FORGE_METRIC
+    )
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+
+    seen = json.loads(result["feedback"])
+    assert seen["uid"] != 0, seen
+    assert seen["outs"] == 1, seen
+    assert "FORGED" not in result["feedback"]
+    assert result["score"] == 0.5, seen
     assert _containers(tag) == []
 
 

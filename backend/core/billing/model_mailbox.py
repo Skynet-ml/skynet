@@ -47,6 +47,7 @@ class ModelMailbox:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: Callable[[str, str], None] | None = None,
+        sudo: bool = False,
     ) -> Any:
         """Wrap one sandbox command and service its model mailbox alongside output.
 
@@ -56,6 +57,7 @@ class ModelMailbox:
             env: Guest environment containing only scoped route credentials.
             timeout_seconds: Command limit already covered by the sandbox reservation.
             on_output: Existing progress or upstream evaluator mailbox callback.
+            sudo: Run the proxy and the command as root, as the scorer's supervisor needs (SKY-398).
 
         Returns:
             The sandbox's original command result.
@@ -74,6 +76,9 @@ class ModelMailbox:
                 config_path: json.dumps(
                     {"prefix": prefix, "response_dir": response_directory, "timeout_seconds": timeout_seconds or 600}
                 ),
+                # A root proxy would make this folder, and the parent could not write
+                # its answers into a root-owned folder. So the parent makes it first.
+                **({f"{response_directory}/.keep": ""} if sudo else {}),
             }
         )
         pending = {"stdout": "", "stderr": ""}
@@ -221,7 +226,13 @@ class ModelMailbox:
                 f" bash --noprofile --norc -c {shlex.quote(command)}"
             )
             try:
-                result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
+                result = session.run(
+                    wrapped,
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                    on_output=output,
+                    **({"sudo": True} if sudo else {}),
+                )
             finally:
                 finished.set()
             for future in futures:

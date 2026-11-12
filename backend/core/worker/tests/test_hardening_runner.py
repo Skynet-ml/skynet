@@ -28,7 +28,7 @@ from core.config import settings
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.service_gateway.optimization.blackbox import runner as runner_module
 from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
-from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime
+from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import hardening_runner
 from core.worker.hardening_job import HardeningWorkspace
@@ -57,6 +57,35 @@ _SCORER = {"metric_code": "def score(): return 1\n"}
 # A placeholder managed key, so a pass gets past the start checks.
 _KEYED = settings.model_copy(update={"openrouter_api_key": SecretStr("test-managed-key")})
 _END_STATUSES = ["done", "clean_stop", "budget_stop", "failed", "preflight_failed", "rejected", "stale"]
+
+
+@pytest.fixture(autouse=True)
+def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+    """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
 
 
 @pytest.fixture

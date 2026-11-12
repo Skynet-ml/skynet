@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from core.sandbox.providers import vercel
+
 from .. import runner
 from ..repo_constraints import McpServer, RoleEnvironment
 from ..repo_services import box_mcp_config
@@ -1415,3 +1417,40 @@ def test_the_metric_site_goes_before_the_image_packages(tmp_path: Path, monkeypa
     runner._add_metric_site(None)
 
     assert sys.path == ["/usr/lib/python313.zip", str(site), "/app/.venv/lib/python3.13/site-packages"]
+
+
+def test_the_wrapper_file_names_match_the_vercel_exec_wrapper() -> None:
+    """The supervisor checks the names that the Vercel exec wrapper writes, so the prefixes stay equal (SKY-398)."""
+    assert runner.WRAPPER_OUTPUT_PREFIX == vercel.OUTPUT_PREFIX
+    assert runner.WRAPPER_EXIT_PREFIX == vercel.EXIT_PREFIX
+
+
+_UNSAFE_OUTPUT = (
+    "import importlib.util,sys;"
+    "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
+    "sys.modules['r']=m;spec.loader.exec_module(m);sys.stderr.write(repr(m.unsafe_output()))"
+)
+
+
+def test_a_pipe_stdout_is_safe_for_the_result_frame() -> None:
+    """The runtime holds the other end of a pipe, so the entry cannot replace it."""
+    done = subprocess.run(
+        [sys.executable, "-c", _UNSAFE_OUTPUT, runner.__file__], capture_output=True, text=True, timeout=60, check=False
+    )
+
+    assert done.stderr == "None"
+
+
+def test_a_file_stdout_that_is_not_the_wrappers_root_file_is_refused(tmp_path: Path) -> None:
+    """A stdout file that the test's user owns, outside the wrapper's names, could carry a forged frame."""
+    with (tmp_path / "out").open("w") as out:
+        done = subprocess.run(
+            [sys.executable, "-c", _UNSAFE_OUTPUT, runner.__file__],
+            stdout=out,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    assert done.stderr.startswith("'The supervisor")
