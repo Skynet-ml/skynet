@@ -20,13 +20,9 @@
     },
     "backend": {
       "type": "object",
-      "required": ["constants", "sampleDatasets"],
+      "required": ["sampleDatasets"],
       "additionalProperties": false,
       "properties": {
-        "constants": {
-          "type": "object",
-          "additionalProperties": { "type": "string" }
-        },
         "sampleDatasets": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/sampleDataset" }

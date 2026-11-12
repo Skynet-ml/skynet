@@ -206,7 +206,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
     monkeypatch.setattr(submissions.settings, "openrouter_api_key", SecretStr("fixture-only"))
     monkeypatch.setattr(submissions.settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
     app = FastAPI()
-    app.include_router(submissions.create_submissions_router(service=object(), job_store=store))
+    app.include_router(submissions.create_submissions_router(job_store=store))
     app.include_router(create_execution_budgets_router(job_store=store))
     app.include_router(create_wizard_preflight_router(job_store=store))
     app.include_router(create_optimizations_meta_router(job_store=store))

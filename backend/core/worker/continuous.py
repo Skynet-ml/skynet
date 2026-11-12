@@ -12,9 +12,6 @@ compares with the current version's saved test score. A candidate that beats
 the current version waits for the customer's approval; nothing is ever
 deployed automatically.
 
-Skynet no longer starts DSPy runs, so a plan whose current version is a DSPy
-run skips its check and ends with the reason ``dspy_retired``.
-
 Each check spends against a monthly allowance and the existing wallet only.
 A new month resets the allowance, keeps every recorded cycle and its spend,
 leaves in-flight budgets untouched, never buys credit, and never lifts a
@@ -74,8 +71,6 @@ PAUSE_FUNDS = "funds"
 PAUSE_FAILING = "failing"
 # An ended plan whose first run kept no test cases apart, so no check could ever replace it.
 END_NO_TEST_SPLIT = "no_test_split"
-# An ended plan whose current version is a DSPy run; Skynet no longer starts DSPy runs (SKY-316).
-END_DSPY_RETIRED = "dspy_retired"
 SYSTEM_PAUSES = frozenset({PAUSE_ALLOWANCE, PAUSE_FUNDS})
 # A waiting plan whose first run did not succeed; kept so the owner sees why it never started.
 PLAN_ENDED = "ended"
@@ -331,19 +326,17 @@ _REPO_MODEL_FIELDS = {"reflection_model": "reflection_model_config"}
 
 
 def run_models(payload: dict[str, Any]) -> dict[str, Any]:
-    """Read a stored request's models as a unified ``models`` block.
+    """Read a stored repository request's models as one ``models`` block.
 
     A repository run has no task model: the code under optimization picks its
     own models, so only the reflection model can be switched.
 
     Args:
-        payload: A stored unified or repository request.
+        payload: A stored repository request.
 
     Returns:
         The model blocks by role, with the other models kept for the billing check.
     """
-    if not is_repo_payload(payload):
-        return payload.get("models") or {}
     models: dict[str, Any] = {role: payload.get(field) for role, field in _REPO_MODEL_FIELDS.items()}
     models["extra_reflection_models"] = payload.get("extra_reflection_model_configs") or []
     models["metric_model"] = (payload.get("scorer") or {}).get("model")
@@ -389,8 +382,8 @@ def held_out_fingerprint(payload: dict[str, Any] | None) -> str | None:
         payload: A stored request.
 
     Returns:
-        The fingerprint, or ``None`` for a DSPy request, or a repository request
-        with no pinned commit, inline cases or test cases.
+        The fingerprint, or ``None`` for a request that is not a repository
+        request, or that has no pinned commit, inline cases or test cases.
     """
     if payload and is_repo_payload(payload):
         return _repo_held_out_fingerprint(payload)
@@ -747,7 +740,6 @@ def _link_accepted(job_store: Any, session: Session, username: str, cycle: Conti
 
 def process_cycle(
     job_store: Any,
-    service: Any,
     cycle_id: str,
     *,
     now: datetime | None = None,
@@ -761,7 +753,6 @@ def process_cycle(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         cycle_id: The claimed cycle.
         now: Clock override for tests.
         pick_model: Finds a better model for one role.
@@ -799,11 +790,6 @@ def process_cycle(
         except KeyError:
             # Uncaught, the cycle would stay ``checking`` and hold back every later check.
             _fail_cycle(session, plan, cycle, "continuous.run_rejected", reason="the incumbent run was deleted")
-            return
-        if not is_repo_payload(incumbent["payload"]):
-            # A DSPy plan can never start a check again, so it ends instead of skipping forever.
-            _finish_cycle(session, cycle, CYCLE_SKIPPED, "optimization.dspy_run_retired")
-            _end_plan(plan, END_DSPY_RETIRED, now)
             return
         previous = cycle.snapshot or {}
         current_models = run_models(incumbent["payload"])
@@ -867,7 +853,7 @@ def process_cycle(
                 payload, username=plan_username, workflow=_workflow(payload), supplied_key=_run_key(cycle_id)
             ).budget,
         }
-    _submit_run(job_store, service, cycle_id, plan_username, payload, lease)
+    _submit_run(job_store, cycle_id, plan_username, payload, lease)
 
 
 def _workflow(payload: BlackboxRunRequest) -> str:
@@ -884,7 +870,6 @@ def _workflow(payload: BlackboxRunRequest) -> str:
 
 def _submit_run(
     job_store: Any,
-    service: Any,
     cycle_id: str,
     username: str,
     payload: BlackboxRunRequest,
@@ -899,7 +884,6 @@ def _submit_run(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         cycle_id: The check.
         username: Plan owner.
         payload: The run's request.
@@ -914,7 +898,6 @@ def _submit_run(
     try:
         response = submit_repo_payload(
             payload,
-            service=service,
             job_store=job_store,
             current_user=AuthenticatedUser(username, "user", ()),
             idempotency_key=_run_key(cycle_id),
@@ -1079,20 +1062,6 @@ def next_check_after(plan: ContinuousPlanModel, after: datetime) -> datetime:
     return next_runs(plan_rule(plan), after, anchor=plan_anchor(plan) or after)[0]
 
 
-def _end_plan(plan: ContinuousPlanModel, reason: str, now: datetime) -> None:
-    """End a plan for good, with the reason the owner sees.
-
-    Args:
-        plan: The plan, mutated in place.
-        reason: The end reason, kept in ``pause_reason``.
-        now: Current time.
-    """
-    plan.status = PLAN_ENDED
-    plan.pause_reason = reason
-    plan.next_check_at = None
-    plan.updated_at = now
-
-
 def settle_waiting(plan: ContinuousPlanModel, job_status: str | None, now: datetime, *, held_out: bool = True) -> None:
     """Start a waiting plan once its first run succeeded, or end it once that run ended otherwise.
 
@@ -1241,7 +1210,6 @@ def _reclaim_stale(job_store: Any, now: datetime) -> list[str]:
 
 def run_due_checks(
     job_store: Any,
-    service: Any,
     *,
     now: datetime | None = None,
     pick_model: ModelPicker = better_model,
@@ -1250,7 +1218,6 @@ def run_due_checks(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         now: Clock override for tests.
         pick_model: Finds a better model for one role.
 
@@ -1269,7 +1236,7 @@ def run_due_checks(
     checked = _reclaim_stale(job_store, now) + _claim_due(engine, now)
     for cycle_id in checked:
         try:
-            process_cycle(job_store, service, cycle_id, now=now, pick_model=pick_model)
+            process_cycle(job_store, cycle_id, now=now, pick_model=pick_model)
         except Exception:
             # The lease expires and a later sweep retries; the idempotency key
             # keeps that retry from starting or funding a second run.
@@ -1280,16 +1247,14 @@ def run_due_checks(
 class ContinuousSweeper:
     """Run :func:`run_due_checks` on a timer on one replica at a time."""
 
-    def __init__(self, job_store: Any, service: Any, interval_seconds: float = SWEEP_INTERVAL_SECONDS) -> None:
-        """Bind the sweeper to its store and service.
+    def __init__(self, job_store: Any, interval_seconds: float = SWEEP_INTERVAL_SECONDS) -> None:
+        """Bind the sweeper to its store.
 
         Args:
             job_store: Job store.
-            service: Optimization service handed to the in-process worker.
             interval_seconds: Seconds between sweeps.
         """
         self._job_store = job_store
-        self._service = service
         self._interval_seconds = interval_seconds
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1310,7 +1275,7 @@ class ContinuousSweeper:
         try:
             with advisory_lock(self._job_store.engine, CONTINUOUS_SWEEP_LOCK_KEY) as leader:
                 if leader:
-                    run_due_checks(self._job_store, self._service)
+                    run_due_checks(self._job_store)
         except Exception:
             logger.warning("Continuous sweep failed", exc_info=True)
 
@@ -1320,18 +1285,17 @@ class ContinuousSweeper:
             self.sweep_once()
 
 
-def start_continuous_sweeper(job_store: Any, service: Any) -> ContinuousSweeper | None:
+def start_continuous_sweeper(job_store: Any) -> ContinuousSweeper | None:
     """Start the continuous-optimization sweeper when the store has a database.
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
 
     Returns:
         The started sweeper, or ``None`` for a store without an engine.
     """
     if getattr(job_store, "engine", None) is None:
         return None
-    sweeper = ContinuousSweeper(job_store, service)
+    sweeper = ContinuousSweeper(job_store)
     sweeper.start()
     return sweeper

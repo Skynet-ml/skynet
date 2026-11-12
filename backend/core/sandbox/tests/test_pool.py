@@ -1,18 +1,20 @@
-"""Tests for the sandbox pool, the box hooks and the live counts."""
+"""Tests for the sandbox pool and the box hooks."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
+from collections import Counter
 from collections.abc import AsyncIterator
+from enum import StrEnum
 
 import pytest
 
 from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
 from core.sandbox import pool as pool_module
 from core.sandbox.errors import SandboxFatalError, SandboxTransientError
-from core.sandbox.hooks import BoxEvent, BoxEventInfo, BoxHooks, BoxState, LiveCounts
+from core.sandbox.hooks import BoxEvent, BoxEventInfo, BoxHooks
 from core.sandbox.pool import (
     CLAIMABLE_TRIAL_STATUSES,
     BoxOutcome,
@@ -26,6 +28,58 @@ from core.sandbox.pool import (
 from core.sandbox.retry import RetryPolicy
 from core.sandbox.tests.fake_provider import InMemorySandbox
 from core.sandbox.timeouts import Phase
+
+
+class BoxState(StrEnum):
+    """Name the live state of a box between its events."""
+
+    STARTING = "starting"
+    IDLE = "idle"
+    SETUP = "setup"
+    RUN = "run"
+    SCORE = "score"
+
+
+_STATE_AFTER: dict[BoxEvent, BoxState] = {
+    BoxEvent.STARTED: BoxState.STARTING,
+    BoxEvent.ENVIRONMENT_STARTED: BoxState.IDLE,
+    BoxEvent.SETUP_STARTED: BoxState.SETUP,
+    BoxEvent.SETUP_ENDED: BoxState.IDLE,
+    BoxEvent.RUN_STARTED: BoxState.RUN,
+    BoxEvent.RUN_ENDED: BoxState.IDLE,
+    BoxEvent.SCORE_STARTED: BoxState.SCORE,
+    BoxEvent.SCORE_ENDED: BoxState.IDLE,
+}
+
+
+class LiveCounts:
+    """Count the live boxes in each state from the box events the pool emits."""
+
+    def __init__(self) -> None:
+        """Start with no live boxes."""
+        self._states: dict[str, BoxState] = {}
+
+    async def __call__(self, info: BoxEventInfo) -> None:
+        """Move a box to the state after the event, or forget it when it ends.
+
+        Args:
+            info: The box event.
+        """
+        if info.event in (BoxEvent.ENDED, BoxEvent.CANCELLED):
+            self._states.pop(info.box_id, None)
+        else:
+            self._states[info.box_id] = _STATE_AFTER[info.event]
+
+    def snapshot(self) -> dict[BoxState, int]:
+        """Return the number of live boxes in each state, zero included."""
+        counts = Counter(self._states.values())
+        return {state: counts[state] for state in BoxState}
+
+    @property
+    def active(self) -> int:
+        """Return the number of live boxes in all states."""
+        return len(self._states)
+
 
 # A deadline for the waits on the pool, so a bug fails the test fast and
 # does not hang the run.

@@ -108,7 +108,7 @@ class _Env:
         Returns:
             Checked cycle ids.
         """
-        return continuous.run_due_checks(self.store, object(), now=now)
+        return continuous.run_due_checks(self.store, now=now)
 
     def count(self, model: Any) -> int:
         """Count rows of one table.
@@ -243,7 +243,7 @@ def _incumbent_payload() -> dict[str, Any]:
 
 
 def _result(baseline: float, best: float, *, test: int = 2, held_out: bool = True, guard: bool = False) -> dict:
-    """Build a finished unified run result.
+    """Build a finished repository run result.
 
     Args:
         baseline: Final-run score of the starting version.
@@ -337,7 +337,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
         """Render domain errors with their stable code."""
         return JSONResponse(status_code=exc.status_code, content={"code": exc.code, "params": exc.params})
 
-    app.include_router(submissions.create_submissions_router(service=object(), job_store=store))
+    app.include_router(submissions.create_submissions_router(job_store=store))
     app.include_router(create_continuous_router(job_store=store))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(fixture.username, fixture.role, ())
     environment = _Env(fixture, monkeypatch)
@@ -499,7 +499,7 @@ def test_enable_inspect_pause_resume_and_next_check(env: _Env) -> None:
     assert env.client.get(f"/optimizations/{source_id}/continuous").json()["plan"]["id"] == plan["id"]
 
 
-def test_only_a_successful_unified_run_can_enable(env: _Env) -> None:
+def test_only_a_successful_repository_run_can_enable(env: _Env) -> None:
     """A failed run is not eligible, and a plan needs at least one model switch on."""
     response = env.client.post("/blackbox/run", json=_incumbent_payload())
     optimization_id = response.json()["optimization_id"]
@@ -519,8 +519,8 @@ def test_only_a_successful_unified_run_can_enable(env: _Env) -> None:
         assert no_switch.status_code == 422, permitted
 
 
-def _make_dspy(env: _Env, optimization_id: str) -> None:
-    """Rewrite a stored run as a DSPy run, the kind Skynet stored before it became repository-only.
+def _make_text_target(env: _Env, optimization_id: str) -> None:
+    """Rewrite a stored run as a run whose target is a text, not a repository.
 
     Args:
         env: Test environment.
@@ -529,17 +529,17 @@ def _make_dspy(env: _Env, optimization_id: str) -> None:
     env.store.update_job(
         optimization_id,
         payload={
-            "name": "Old DSPy run",
-            "models": {"task_model": {"name": "fixture/task"}, "reflection_model": {"name": "fixture/text"}},
-            "data": {"cases": [{"question": "Q?", "answer": "A"}]},
+            "name": "Text run",
+            "target": {"kind": "text", "text": "Answer the question."},
+            "cases": [{"question": "Q?", "answer": "A"}],
         },
     )
 
 
-def test_a_dspy_run_cannot_enable_a_plan(env: _Env) -> None:
-    """A stored DSPy run stays readable but is never eligible, since Skynet no longer starts DSPy runs."""
+def test_a_run_without_a_repository_cannot_enable_a_plan(env: _Env) -> None:
+    """A run whose target is not a repository is never eligible, since a check copies a repository run."""
     optimization_id = _incumbent(env)
-    _make_dspy(env, optimization_id)
+    _make_text_target(env, optimization_id)
 
     state = env.client.get(f"/optimizations/{optimization_id}/continuous")
     assert state.status_code == 200
@@ -549,28 +549,6 @@ def test_a_dspy_run_cannot_enable_a_plan(env: _Env) -> None:
         json={"schedule": WEEKLY, "permitted": {"reflection_model": True}, "cycle_budget_cents": CYCLE_BUDGET},
     )
     assert (refused.status_code, refused.json()["code"]) == (409, "continuous.not_eligible")
-
-
-def test_a_plan_on_a_dspy_run_ends_instead_of_starting_a_run(env: _Env) -> None:
-    """A plan whose incumbent is a DSPy run skips its check, starts no run and ends for good."""
-    source_id = _incumbent(env)
-    _enable(env, source_id)
-    _make_dspy(env, source_id)
-    env.better()
-    jobs = env.count(JobModel)
-    budgets = env.count(ExecutionBudgetModel)
-
-    env.sweep(_due(env))
-
-    [cycle] = env.cycles()
-    assert (cycle.status, cycle.detail_code, cycle.optimization_id) == (
-        "skipped",
-        "optimization.dspy_run_retired",
-        None,
-    )
-    assert (env.count(JobModel), env.count(ExecutionBudgetModel)) == (jobs, budgets)
-    plan = env.plan()
-    assert (plan.status, plan.pause_reason, plan.next_check_at) == ("ended", "dspy_retired", None)
 
 
 def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env) -> None:
@@ -1229,7 +1207,7 @@ def test_a_crashed_check_never_takes_another_users_budget_with_its_key(env: _Env
     env.edit_cycle(claimed, snapshot={"budget_key": "shared-key"})
     BudgetService(engine=env.store.engine).create("bob", CYCLE_BUDGET, idempotency_key="shared-key")
 
-    continuous.process_cycle(env.store, object(), claimed)
+    continuous.process_cycle(env.store, claimed)
 
     [cycle] = env.cycles()
     assert (cycle.status, cycle.execution_budget_id) == ("skipped", None)
@@ -1414,7 +1392,7 @@ def test_another_users_run_with_a_checks_key_is_never_linked(env: _Env) -> None:
     assert forged.status_code == 201, forged.text
     env.harness.username = "alice"
 
-    continuous.process_cycle(env.store, object(), claimed)
+    continuous.process_cycle(env.store, claimed)
 
     [cycle] = env.cycles()
     assert cycle.status == "optimizing"
@@ -1699,7 +1677,7 @@ def test_a_worker_that_lost_its_lease_stops_before_it_submits(env: _Env) -> None
     )
     jobs = env.count(JobModel)
 
-    continuous._submit_run(env.store, object(), claimed, "alice", payload, cycle.lease_until - timedelta(minutes=1))
+    continuous._submit_run(env.store, claimed, "alice", payload, cycle.lease_until - timedelta(minutes=1))
 
     [after] = env.cycles()
     assert env.count(JobModel) == jobs
@@ -1770,7 +1748,7 @@ def test_a_waiting_check_is_reported_as_busy(env: _Env) -> None:
     continuous._claim_due(env.store.engine, now)
     env.edit_plan(next_check_at=now)
     [second] = continuous._claim_due(env.store.engine, now + timedelta(seconds=1))
-    continuous.process_cycle(env.store, object(), second, now=now)
+    continuous.process_cycle(env.store, second, now=now)
     assert {c.id: c.detail_code for c in env.cycles()}[second] == "continuous.skip_busy"
 
 
@@ -1887,6 +1865,17 @@ def _picks(*ranked: str) -> continuous.ModelPicker:
     """
 
     def pick(job_store: Any, username: str, current: dict[str, Any], skip: frozenset[str]) -> dict[str, Any] | None:
+        """Return the best ranked model that is not skipped and not the current one.
+
+        Args:
+            job_store: The job store; not read.
+            username: The plan owner; not read.
+            current: The current model, with its ``name``.
+            skip: Model names the plan skips.
+
+        Returns:
+            The picked model, or ``None`` when no model is left.
+        """
         name = next((name for name in ranked if name not in skip and name != current["name"]), None)
         return None if name is None else {"name": name, "byok_provider": None}
 
@@ -1918,7 +1907,7 @@ def test_a_replacement_billed_another_way_in_another_role_gives_the_next_best_it
 
 
 def test_a_repository_run_with_cases_can_enable_a_plan(env: _Env) -> None:
-    """A successful repository run with inline cases is eligible, the same as a unified run."""
+    """A successful repository run with inline cases is eligible."""
     source_id = _incumbent(env)
 
     assert env.client.get(f"/optimizations/{source_id}/continuous").json()["eligible"] is True

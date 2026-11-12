@@ -9,12 +9,12 @@ from core.api.routers import execution_runtimes
 
 def test_runtime_catalog_separates_runtime_capability_from_run_eligibility(monkeypatch) -> None:
     """Report transport support without claiming that a particular run can resume."""
-    monkeypatch.setattr(execution_runtimes, "protected_vercel_unavailable_reason", lambda _settings, _workflow: None)
+    monkeypatch.setattr(execution_runtimes, "protected_vercel_unavailable_reason", lambda _settings: None)
     monkeypatch.setattr(execution_runtimes.settings, "openrouter_api_key", SecretStr("configured"))
     monkeypatch.setattr(
         execution_runtimes,
         "runtime_cost_profile",
-        lambda _settings, _workflow, _runtime: {
+        lambda _settings, _runtime: {
             "billing_basis": "at_cost",
             "minimum_session_cents": "0.1",
             "maximum_session_cents": "10",
@@ -37,7 +37,7 @@ def test_unavailable_runtime_explains_why_it_cannot_host_restore(monkeypatch) ->
     monkeypatch.setattr(
         execution_runtimes,
         "protected_vercel_unavailable_reason",
-        lambda _settings, _workflow: "Managed sandbox unavailable",
+        lambda _settings: "Managed sandbox unavailable",
     )
     monkeypatch.setattr(execution_runtimes.settings, "openrouter_api_key", SecretStr("configured"))
 

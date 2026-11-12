@@ -12,7 +12,7 @@ import { Button } from "@/shared/ui/primitives/button";
 import { autoResizeTextarea } from "@/shared/ui/agent";
 import { formatOutput } from "@/shared/lib";
 import { formatMsg } from "@/shared/lib/messages";
-import { getPairServeInfo, getServeInfo, servePairProgram, serveProgram } from "@/shared/lib/api";
+import { getServeInfo, serveProgram } from "@/shared/lib/api";
 import type { AgentToolCall } from "@/shared/ui/agent/types";
 import type { ServeInfoResponse, ServeResponse } from "@/shared/types/api";
 
@@ -55,11 +55,6 @@ export function InferenceFormCard({ call, disabled }: InferenceFormCardProps) {
         ? args.id
         : "";
 
-  // When the agent used the grid-search trigger (request_user_pair_inference)
-  // the args carry a pair_index; the card then serves that single pair instead
-  // of the whole program. One card handles both modes.
-  const pairIndex = typeof args.pair_index === "number" ? args.pair_index : null;
-
   const initialResult = getInitialResult(call);
   const initialInputs = inputsFromArgs(args);
 
@@ -80,11 +75,7 @@ export function InferenceFormCard({ call, disabled }: InferenceFormCardProps) {
   React.useEffect(() => {
     if (!optimizationId) return;
     let cancelled = false;
-    const load =
-      pairIndex == null
-        ? getServeInfo(optimizationId)
-        : getPairServeInfo(optimizationId, pairIndex);
-    load
+    getServeInfo(optimizationId)
       .then((data) => {
         if (cancelled) return;
         setInfo(data);
@@ -96,7 +87,7 @@ export function InferenceFormCard({ call, disabled }: InferenceFormCardProps) {
     return () => {
       cancelled = true;
     };
-  }, [optimizationId, pairIndex]);
+  }, [optimizationId]);
 
   const fields = info?.input_fields ?? Object.keys(initialInputs);
 
@@ -115,10 +106,7 @@ export function InferenceFormCard({ call, disabled }: InferenceFormCardProps) {
       setRunning(true);
       setRunError(null);
       try {
-        const response =
-          pairIndex == null
-            ? await serveProgram(optimizationId, values, crypto.randomUUID())
-            : await servePairProgram(optimizationId, pairIndex, values, crypto.randomUUID());
+        const response = await serveProgram(optimizationId, values, crypto.randomUUID());
         setResult(response);
         setSubmittedInputs(values);
         for (const f of fields) {
@@ -134,7 +122,7 @@ export function InferenceFormCard({ call, disabled }: InferenceFormCardProps) {
         setRunning(false);
       }
     },
-    [collectValues, disabled, fields, optimizationId, pairIndex, running],
+    [collectValues, disabled, fields, optimizationId, running],
   );
 
   const outputFields =
@@ -157,13 +145,6 @@ export function InferenceFormCard({ call, disabled }: InferenceFormCardProps) {
                 <div className="text-[0.8125rem] font-semibold text-primary leading-tight">
                   {msg("auto.features.agent.panel.lib.tool.meta.literal.70")}
                 </div>
-                {pairIndex != null && (
-                  <Badge variant="secondary" size="sm">
-                    {formatMsg("auto.features.agent.panel.components.inferenceformcard.pair", {
-                      p1: pairIndex,
-                    })}
-                  </Badge>
-                )}
               </div>
             </div>
           </div>

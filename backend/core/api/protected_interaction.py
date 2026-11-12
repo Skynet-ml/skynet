@@ -380,7 +380,6 @@ def run_protected_interaction(
                         bind_protected_sandbox(
                             gateway,
                             settings,
-                            workflow="dspy",
                             owner_id=document["id"],
                             lifetime_seconds=INTERACTION_LIFETIME_SECONDS,
                         )

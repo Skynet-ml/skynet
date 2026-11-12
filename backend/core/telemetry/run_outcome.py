@@ -1,9 +1,9 @@
 """Derive the structural facts a run-outcome telemetry event carries.
 
 The worker emits ``run_completed`` / ``run_failed`` once per run. This module
-turns the stored result (DSPy, black-box/unified or grid shape), the stored
-payload and the terminating exception into flat, PII-free properties, so the
-metric SQL reads plain columns instead of parsing every result shape.
+turns the stored black-box result, the stored payload and the terminating
+exception into flat, PII-free properties, so the metric SQL reads plain
+columns instead of parsing every result shape.
 """
 
 from __future__ import annotations
@@ -79,10 +79,8 @@ def _split_test_count(split: Any) -> int | None:
 def score_facts(result: Mapping[str, Any] | None) -> dict[str, Any]:
     """Read baseline, optimized, lift and held-out facts from a stored result.
 
-    A grid result reads its ``best_pair`` scores with the grid-level split.
-    A unified black-box result is held out exactly when its report says so;
-    a DSPy result is held out when it has test rows and both test metrics.
-    A legacy black-box result has no split and is never held out.
+    A unified result is held out exactly when its report says so. A result
+    without a split is never held out.
 
     Args:
         result: The stored ``result`` mapping of a finished run.
@@ -93,27 +91,16 @@ def score_facts(result: Mapping[str, Any] | None) -> dict[str, Any]:
     """
     if not isinstance(result, Mapping):
         return {"baseline": None, "optimized": None, "lift": None, "held_out": False, "held_out_rows": None}
-    best_pair = result.get("best_pair")
-    scored = best_pair if isinstance(best_pair, Mapping) else result
-    baseline_raw, optimized_raw = result_scores(dict(scored))
+    baseline_raw, optimized_raw = result_scores(dict(result))
     baseline, optimized = _number(baseline_raw), _number(optimized_raw)
     lift = optimized - baseline if baseline is not None and optimized is not None else None
     split = result.get("split_counts")
-    held_out_rows = _split_test_count(split)
-    if isinstance(split, Mapping) and "held_out" in split:
-        held_out = split.get("held_out") is True
-    else:
-        held_out = (
-            bool(held_out_rows)
-            and _number(scored.get("baseline_test_metric")) is not None
-            and _number(scored.get("optimized_test_metric")) is not None
-        )
     return {
         "baseline": baseline,
         "optimized": optimized,
         "lift": lift,
-        "held_out": held_out,
-        "held_out_rows": held_out_rows,
+        "held_out": isinstance(split, Mapping) and split.get("held_out") is True,
+        "held_out_rows": _split_test_count(split),
     }
 
 
@@ -140,9 +127,9 @@ def _leaves(value: Any) -> Iterable[str]:
 def row_fingerprint(row: Any) -> str:
     """Fingerprint one row by its values, ignoring keys and nesting.
 
-    The wizard ships a sample as flat DSPy rows, as black-box cases or as
-    unified ``{"input", "expected"}`` cases; all three carry the same values,
-    so a value-only fingerprint matches a sample whichever shape staged it.
+    A bundled sample holds flat rows, and a stored payload holds black-box
+    cases that can nest the same values, so a value-only fingerprint matches
+    a sample whichever shape staged it.
 
     Args:
         row: One dataset row or case.
@@ -161,20 +148,12 @@ def payload_rows(payload: Mapping[str, Any] | None) -> list[Any]:
         payload: The stored job payload.
 
     Returns:
-        DSPy ``dataset`` rows, black-box ``cases``, or unified
-        ``data.cases``; empty when the payload holds none.
+        The black-box ``cases``; empty when the payload holds none.
     """
     if not isinstance(payload, Mapping):
         return []
-    data = payload.get("data")
-    for rows in (
-        payload.get("dataset"),
-        payload.get("cases"),
-        data.get("cases") if isinstance(data, Mapping) else None,
-    ):
-        if isinstance(rows, list) and rows:
-            return rows
-    return []
+    rows = payload.get("cases")
+    return rows if isinstance(rows, list) else []
 
 
 def is_sample_dataset(rows: list[Any], samples: Mapping[str, Mapping[str, Any]]) -> bool:

@@ -369,13 +369,13 @@ def _verified_byok_row(monkeypatch: pytest.MonkeyPatch) -> BillingProviderKeyMod
 
 
 def unified_payload(**overrides: Any) -> dict:
-    """Build a minimal valid ``/optimize`` body: a prompt optimized on six pairs.
+    """Build a retired unified DSPy run body: a prompt optimized on six pairs.
 
     Args:
         **overrides: Top-level keys replacing the defaults.
 
     Returns:
-        A dict matching ``UnifiedRunRequest``.
+        A dict in the shape old ``/optimize`` clients sent.
     """
     body: dict[str, Any] = {
         "name": "unified-run",
@@ -390,7 +390,7 @@ def unified_payload(**overrides: Any) -> dict:
             "cases": [{"input": {"question": f"Q{i}?"}, "expected": f"A{i}"} for i in range(6)],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "dspy_gepa"},
+        "optimizer": {"choice": "auto"},
         "models": {"reflection_model": {"name": "openai/gpt-4o-mini"}},
         "workspace": {"run_code": _RUN_CODE, "metric_code": _METRIC_CODE},
     }
@@ -429,7 +429,7 @@ def make_client(store: _FakeJobStore, *, monkeypatch: pytest.MonkeyPatch, balanc
     monkeypatch.setattr(_sub_mod, "_protected_submission", lambda *args, **kwargs: None)
 
     app = FastAPI()
-    app.include_router(create_submissions_router(service=object(), job_store=store))
+    app.include_router(create_submissions_router(job_store=store))
     bypass_auth(app)
 
     @app.exception_handler(HTTPException)
@@ -445,12 +445,18 @@ def make_client(store: _FakeJobStore, *, monkeypatch: pytest.MonkeyPatch, balanc
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_optimize_returns_410_and_stores_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A new DSPy program run is refused: Skynet optimizes repositories only (SKY-316)."""
+@pytest.mark.parametrize("body", [{}, unified_payload()], ids=["empty", "unified"])
+def test_optimize_returns_410_and_stores_nothing(monkeypatch: pytest.MonkeyPatch, body: dict) -> None:
+    """Refuse any ``/optimize`` body with 410: Skynet optimizes repositories only (SKY-316).
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        body: The request body; the route validates none.
+    """
     store = _FakeJobStore()
     client = make_client(store, monkeypatch=monkeypatch)
 
-    resp = client.post("/optimize", json=unified_payload())
+    resp = client.post("/optimize", json=body)
 
     assert resp.status_code == 410, resp.text
     assert resp.json()["code"] == "optimization.dspy_run_retired"

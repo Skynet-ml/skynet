@@ -148,9 +148,7 @@ def worker(store: FakeJobStore) -> BackgroundWorker:
     Returns:
         The worker.
     """
-    return BackgroundWorker(
-        job_store=cast(JobStore, store), num_workers=2, poll_interval=1.0, _allow_unprotected_test_execution=True
-    )
+    return BackgroundWorker(job_store=cast(JobStore, store), num_workers=2, poll_interval=1.0)
 
 
 def test_stop_blackbox_sandboxes_logs_the_boxes_it_stopped(worker: BackgroundWorker, store: FakeJobStore) -> None:
@@ -337,8 +335,8 @@ def test_sweep_runs_on_only_one_worker_at_a_time(store: FakeJobStore) -> None:
     """A second worker skips the sweep while a peer holds the advisory lock."""
     store.seed_job("done", status="success")
     store.engine = _FakePgEngine(["done"])  # type: ignore[attr-defined]
-    first = BackgroundWorker(job_store=cast(JobStore, store), _allow_unprotected_test_execution=True)
-    second = BackgroundWorker(job_store=cast(JobStore, store), _allow_unprotected_test_execution=True)
+    first = BackgroundWorker(job_store=cast(JobStore, store))
+    second = BackgroundWorker(job_store=cast(JobStore, store))
     peer_results: list[int] = []
     # The peer stops at the held lock, so it never re-enters the sync bridge
     # from the bridge's own thread.

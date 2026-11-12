@@ -3,8 +3,6 @@
  * share. The optimizer rules mirror the backend, so the wizard shows the same
  * choices the server will accept.
  */
-/** What the optimizer catalog is keyed on: a repository run. */
-export type OptimizerTarget = "repo";
 export type DataMode = "single" | "pairs";
 export type OptimizerChoice =
   | "auto"
@@ -82,7 +80,6 @@ export interface OptimizerOption {
 }
 
 export interface OptimizerCatalogResponse {
-  artifact_kind: OptimizerTarget;
   data_mode: DataMode;
   /** The run code's entry point; the same for every optimizer. */
   run_entry: string;

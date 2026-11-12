@@ -39,7 +39,6 @@ from core.models.blackbox import (
     BlackboxRunResponse,
 )
 from core.models.results import ModelTokenUsage
-from core.models.unified import UnifiedCase, UnifiedRunRequest
 
 from .. import autoresearch as autoresearch_mod
 from .. import autosaddler as autosaddler_mod
@@ -62,10 +61,9 @@ from ..protocol import (
     Task,
     candidate_key,
 )
-from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession
+from ..sandbox import LocalSubprocessSession
 from ..sandbox_scorer import ScorerGateway, ScorerUsage
 from ..service import run_blackbox_optimization, validate_blackbox_payload
-from ..workspace_scorer import build_workspace_scorer
 from .mocks import (
     AGENT_OUTPUT_SCORER_CODE,
     VOWEL_SCORER_CODE,
@@ -75,7 +73,6 @@ from .mocks import (
     vowel_scorer,
 )
 from .test_repo_scorer import _probed
-from .test_reward import GEOCODE_METRIC
 
 _CASES = [{"target": "aeiou", "i": i} for i in range(10)]
 
@@ -255,7 +252,6 @@ def test_run_scores_baseline_and_best_in_a_separate_final_run(fake_lm: FakeRefle
     assert [(lane.engine, lane.phase, lane.status) for lane in response.lanes] == [
         (BLACKBOX_ENGINE_BEST_OF_N, "single", "completed")
     ]
-    assert response.num_lm_calls == len(fake_lm.history) > 0
     assert response.total_tokens == 15 * len(fake_lm.history)
     assert [(u.model, u.input_tokens, u.output_tokens) for u in response.usage_by_model] == [
         ("fake/model", 10 * len(fake_lm.history), 5 * len(fake_lm.history))
@@ -404,33 +400,6 @@ def test_legacy_auto_byok_reflection_with_cost_limit(
     assert response.strategy_mode == "auto"
     assert fake_native_proposers
     assert all(ctx.native_options.max_token_cost is not None for _, ctx in fake_native_proposers)
-
-
-def test_legacy_byok_task_usage_does_not_consume_budget(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Keep a BYOK task model out of the legacy budget checks."""
-    task_lm = FakeReflectionLM()
-    original = service_mod.job_spec_from_payload
-
-    def job_from_payload(payload: BlackboxRunRequest) -> service_mod.JobSpec:
-        """Add a BYOK task model to the job."""
-        job = original(payload)
-        job.extra_lms = [task_lm]
-        job.extra_lm_sources = ["byok"]
-        return job
-
-    def strategy(_strategy: Any, _task: Task, _server: EvalServer, ctx: EngineContext, *_args: Any, **_kwargs: Any):
-        """Exercise both budget checks after task model usage."""
-        task_lm.history.append({"usage": {"prompt_tokens": 1000000, "completion_tokens": 1000000}})
-        service_mod.dspy.settings.callbacks[0]._check()
-        ctx.check_budget()
-        assert ctx.remaining_cost_usd() > 0
-        return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
-
-    monkeypatch.setattr(service_mod, "job_spec_from_payload", job_from_payload)
-    monkeypatch.setattr(service_mod, "run_strategy", strategy)
-    run_blackbox_optimization(_payload(max_cost_cents=1), artifact_id="byok-task", gepa_log_dir_path=str(tmp_path))
 
 
 @pytest.mark.parametrize("source", ["byok", "managed"])
@@ -882,24 +851,6 @@ def test_combined_usage_preserves_distinct_native_model_keys() -> None:
     assert native.usage_by_model["fake/model"] == {"prompt_tokens": 3, "completion_tokens": 1}
 
 
-def test_native_call_count_sums_in_sandbox_requests() -> None:
-    """Proposer CLI requests made inside the sandbox count toward the run's LM calls."""
-    native = NativeOptions(
-        runtime="vercel",
-        model="fake/model",
-        gateway=GatewayConfig(url="https://unused.example/v1", api_key="test-key"),
-        max_token_cost=1.0,
-        usage_by_model={
-            "fake/model": {"prompt_tokens": 3, "calls": 4},
-            "native/other-model": {"prompt_tokens": 7, "calls": 2},
-            "native/legacy": {"prompt_tokens": 1},
-        },
-    )
-
-    assert service_mod._native_call_count(native) == 6
-    assert service_mod._native_call_count(None) == 0
-
-
 @pytest.mark.parametrize(
     ("strategy", "native"),
     [
@@ -1065,7 +1016,6 @@ def test_scorer_llm_usage_is_billed_with_the_run(
     usage = {u.model: (u.input_tokens, u.output_tokens) for u in response.usage_by_model}
     assert usage["fake/judge"] == (3 * calls, calls)
     assert usage["fake/model"] == (10 * len(fake_lm.history), 5 * len(fake_lm.history))
-    assert response.num_lm_calls == len(fake_lm.history) + calls
     assert response.total_tokens == 15 * len(fake_lm.history) + 4 * calls
 
 
@@ -1630,64 +1580,6 @@ def test_engine_catalog_for_a_repository_offers_every_engine_and_auto() -> None:
     assert all(entry.unavailable_reason for entry in catalog.engines if not entry.available)
 
 
-GEOCODE_SLOW_RUN = (
-    "import time\n"
-    "import dspy\n"
-    "from skynet import llm\n"
-    "program = dspy.Predict('message -> coordinates')\n"
-    "def run(artifact, input):\n"
-    "    instructions = program.signature.instructions\n"
-    "    if 'slowly' in instructions:\n"
-    "        time.sleep(0.15)\n"
-    "    return llm(instructions, input['message'])\n"
-)
-
-
-def test_geocoding_final_runs_keep_raw_observations_for_both_versions() -> None:
-    """Baseline and winner run the same cases under one gateway; each case keeps raw time, cost and components."""
-    payload = UnifiedRunRequest.model_validate(
-        {
-            "task": {"objective": "geocode", "artifact": {"kind": "dspy_program", "starting_version": "Think slowly."}},
-            "data": {
-                "mode": "pairs",
-                "cases": [
-                    {"input": {"message": "Tel Aviv"}, "expected": {"coordinates": "32.0853,34.7818"}},
-                    {"input": {"message": "Springfield"}, "expected": {"coordinates": "42.1,-72.59|32.0853,34.7818"}},
-                ],
-                "input_fields": ["message"],
-            },
-            "optimizer": {"choice": "dspy_gepa"},
-            "models": {"reflection_model": {"name": "openrouter/task"}},
-            "workspace": {"run_code": GEOCODE_SLOW_RUN, "metric_code": GEOCODE_METRIC, "metric_timeout_seconds": 30},
-        }
-    )
-    cases = [UnifiedCase.model_validate(case) for case in payload.data.cases]
-    with FakeGateway("32.0853,34.7818", cost=0.0004) as gateway:
-        scorer = build_workspace_scorer(
-            payload, GatewayConfig(url=gateway.url, api_key="k"), protected=False, runtime=LocalSubprocessRuntime()
-        )
-        try:
-            baseline = service_mod._final_run(
-                scorer, "Think slowly.", cases, label="starting point", phase=PHASE_BASELINE
-            )
-            best = service_mod._final_run(scorer, "Answer.", cases, label="optimized version", phase=PHASE_FINAL)
-        finally:
-            scorer.close()
-    rows = service_mod._case_results(baseline, best)
-
-    assert len(rows) == 2
-    for row in rows:
-        assert row.baseline_observation["timing"]["task_ms"] >= 150
-        assert row.best_observation["timing"]["task_ms"] < row.baseline_observation["timing"]["task_ms"]
-        for observed in (row.baseline_observation, row.best_observation):
-            assert observed["cost"]["usd"] == pytest.approx(0.0004)
-            assert observed["conditions"] == rows[0].baseline_observation["conditions"]
-    assert set(best.named) == {"accuracy", "speed", "cost"}
-    assert best.named["accuracy"].score == pytest.approx(1.0)
-    assert best.named["speed"].score > baseline.named["speed"].score
-    assert best.score > baseline.score
-
-
 _DEEP_NEGATIVE_CODE = """
 def score(candidate, case=None):
     if candidate == "broken":
@@ -2196,3 +2088,19 @@ def test_result_details_never_show_an_unscored_value(
     response = run_blackbox_optimization(_payload(), artifact_id="job-frontier", gepa_log_dir_path=str(tmp_path))
 
     assert response.details["frontier"] == [{"id": "c001", "score": None}, {"id": "c002", "score": 0.6}]
+
+
+def test_stored_result_with_removed_keys_still_loads() -> None:
+    """Load a result stored with keys the response model no longer declares."""
+    stored = {
+        "optimizer_name": "auto",
+        "strategy_mode": "auto",
+        "engine_used": "gepa",
+        "best_candidate": "Be brief.",
+        "runtime_seconds": 1.0,
+        "optimizer_resolved": "gepa",
+        "program_artifact": {"program_state_json": {}},
+    }
+    response = BlackboxRunResponse.model_validate(stored)
+    assert response.best_candidate == "Be brief."
+    assert "program_artifact" not in response.model_dump()

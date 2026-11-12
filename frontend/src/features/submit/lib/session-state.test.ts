@@ -60,7 +60,7 @@ test("a DSPy program draft from before that target was retired moves onto a repo
     ...good,
     task: { ...good.task, objective: "Answer refund questions", background: "Support desk", repo: null },
     inputs: { ...good.inputs, mode: "pairs" },
-    optimizer: { ...good.optimizer, choice: "dspy_miprov2" },
+    optimizer: { ...good.optimizer, choice: "unknown_engine" },
     workspace: { ...good.workspace, metricCode: "def metric(x):\n    return 1.0\n" },
     meta: { ...good.meta, name: "Refund bot" },
   };

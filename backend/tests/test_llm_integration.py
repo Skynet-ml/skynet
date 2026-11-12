@@ -111,6 +111,6 @@ def test_optimize_golden_path() -> None:
         assert result["best_candidate"], "run produced no best version"
         assert isinstance(result["baseline_score"], (int, float))
         assert isinstance(result["best_score"], (int, float))
-        assert result["num_lm_calls"] > 0, "optimizer should have called the LM"
+        assert result["usage_by_model"], "optimizer should have called the LM"
     finally:
         _cleanup(job_id, username)

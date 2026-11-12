@@ -12,8 +12,6 @@ import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import {
   extractCandidates,
   extractMinibatch,
-  extractValset,
-  extractValsetOutputs,
 } from "../lib/extract-events";
 import { layoutTrajectory } from "../lib/layout";
 import {
@@ -36,11 +34,6 @@ import { TimelineScrubber } from "./TimelineScrubber";
 import { TrajectoryDrawer, type DrawerSelection } from "./TrajectoryDrawer";
 
 const NEWEST_HIGHLIGHT_MS = 2200;
-
-const BLACKBOX_FALLBACK: BlackboxTrajectoryContext = {
-  hasCases: false,
-  rendersByText: new Map(),
-};
 
 function versionText(index: number): string {
   return formatMsg("meta_harness.version", { id: displayCandidateId(String(index)) });
@@ -68,7 +61,7 @@ export interface MetaHarnessPanelProps {
   engine: string;
   // Run configuration of the black-box run, forwarded to the drawer so it
   // names versions by kind and shows per-case scores only when cases exist.
-  blackbox?: BlackboxTrajectoryContext | null;
+  blackbox: BlackboxTrajectoryContext;
   // Where the run lives; the agent-run drawer reads from the same backend.
   source?: ApiSource;
 }
@@ -85,17 +78,14 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
   const live = isLive(job);
   const optimizationId = job.optimization_id;
 
-  const blackboxCtx = blackbox ?? BLACKBOX_FALLBACK;
-  const { candidates, caseScores, valsetRows, minibatch, valsetOutputs, agentRuns } =
+  const { candidates, caseScores, minibatch, agentRuns } =
     useMemo(() => {
       const events = job.progress_events ?? [];
       const scoped = scopeToVersionLane(events);
       return {
         candidates: extractCandidates(scoped),
         caseScores: extractCaseScores(scoped),
-        valsetRows: extractValset(events),
         minibatch: extractMinibatch(scoped),
-        valsetOutputs: extractValsetOutputs(scoped),
         agentRuns: extractAgentRuns(scoped),
       };
     }, [job.progress_events]);
@@ -296,10 +286,8 @@ export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessP
             selection={drawerSelection}
             open={drawerOpen}
             onOpenChange={setDrawerOpen}
-            valsetRows={valsetRows}
             minibatch={minibatch}
-            blackbox={blackboxCtx}
-            valsetOutputs={valsetOutputs}
+            blackbox={blackbox}
             caseRuns={caseRuns}
             onOpenRun={handleOpenRun}
           />

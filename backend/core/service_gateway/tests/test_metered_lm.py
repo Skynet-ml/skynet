@@ -22,7 +22,6 @@ from core.service_gateway.language_models import (
     activate_job_lm_budget,
     activate_job_usage_registry,
     job_usage_snapshot,
-    lm_call_count,
     model_usages_from_history,
     total_tokens_from_history,
     usage_by_model_from_history,
@@ -76,22 +75,20 @@ def test_update_history_aggregates_and_retains_nothing():
 
 
 def test_no_usage_reads_as_untracked():
-    """Calls without usage count as calls but leave token readers at None."""
+    """Calls without usage leave token readers at None."""
     lm = _metered()
     lm.update_history({"prompt": "q", "response": "r", "usage": {}})
 
-    assert lm_call_count(lm) == 1
     assert total_tokens_from_history(lm) is None
     assert usage_by_model_from_history(lm) is None
 
 
 def test_readers_prefer_metered_totals():
-    """The aggregate feeds both token readers and the call counter."""
+    """The aggregate feeds both token readers."""
     lm = _metered()
     lm.update_history(_entry(prompt=10, completion=5))
     lm.update_history(_entry(prompt=20, completion=15))
 
-    assert lm_call_count(lm) == 2
     assert total_tokens_from_history(lm) == 50
     assert usage_by_model_from_history(lm) == {lm.model: (30, 20)}
 
@@ -100,10 +97,8 @@ def test_history_fallback_matches_old_semantics():
     """Plain/mocked LMs with a history list still total the old way."""
     stub = SimpleNamespace(model="mock/model", history=[_entry(prompt=7, completion=3), _entry(total=10)])
 
-    assert lm_call_count(stub) == 2
     assert total_tokens_from_history(stub) == 20
     assert usage_by_model_from_history(stub) == {"mock/model": (17, 3)}
-    assert lm_call_count(SimpleNamespace()) is None
 
 
 def test_mixed_metered_and_history_lms_sum():
@@ -261,6 +256,14 @@ def test_job_usage_snapshot_never_raises(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(language_models, "_job_lm_registry", [object()])
 
     def boom(*_lms):
+        """Fail like a broken model history read.
+
+        Args:
+            *_lms: The tracked models, ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
         raise RuntimeError("bad history")
 
     monkeypatch.setattr(language_models, "model_usages_from_history", boom)

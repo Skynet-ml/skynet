@@ -694,7 +694,6 @@ def live_route_paths() -> set[str]:
     with (
         patch("core.api.app.get_job_store", return_value=MagicMock()),
         patch("core.api.app.get_worker", return_value=MagicMock()),
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=ServiceRegistry())
     return {route.path for route in application.routes if isinstance(route, APIRoute)}

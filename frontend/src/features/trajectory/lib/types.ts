@@ -43,23 +43,10 @@ export interface RejectedMetrics {
   per_example_proposal: PerExampleScore[];
 }
 
-export interface ValsetRow {
-  id: string;
-  inputs: Record<string, string>;
-  outputs: Record<string, string>;
-}
-
-// A candidate prediction is either a flat field→value map (current runs, where
-// nested fields like the agent's history arrive as JSON strings — the same
-// shape as ValsetRow.outputs, so each value renders structurally) or a plain
-// string (legacy runs / non-Prediction metric returns).
-export type PredictionValue = string | Record<string, string>;
-
 export interface MinibatchEntry {
   example_id: string;
   score: number;
   feedback: string;
-  prediction: PredictionValue;
   sequence: number;
   // GEPA iteration the reflective propose() was on when this feedback fired.
   // null when the event predates iteration plumbing or fires outside a
@@ -72,17 +59,6 @@ export interface MinibatchEntry {
   images: SideImage[];
   // Renders left out of the event by its byte budget.
   images_dropped: number;
-}
-
-export interface ValsetPrediction {
-  example_id: string;
-  prediction: PredictionValue;
-  score: number;
-}
-
-export interface ValsetOutputsEvent {
-  candidate_index: number;
-  predictions: ValsetPrediction[];
 }
 
 export interface TrajectoryNode extends CandidateMetrics {

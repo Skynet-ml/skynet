@@ -1,4 +1,4 @@
-"""Unit tests for the workflow graph spec models and submission wiring."""
+"""Unit tests for the workflow graph spec models and dry-run wiring."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from core.models import WorkflowSpec, workflow_topological_order
-from core.models.submissions import RunRequest
+from core.models.submissions import WorkflowDryRunRequest
 
 _SIG = (
     "import dspy\n"
@@ -185,55 +185,26 @@ def test_tool_filter_only_valid_on_tool_capable_nodes():
         _spec(nodes)
 
 
-def _run_request_payload(**overrides) -> dict:
-    """Build a valid workflow RunRequest payload dict, applying overrides.
+def _dry_run_payload(**overrides) -> dict:
+    """Build a valid workflow dry-run payload dict, applying overrides.
 
     Args:
         **overrides: Top-level keys to replace in the payload.
 
     Returns:
-        The payload dict ready for ``RunRequest.model_validate``.
+        The payload dict ready for ``WorkflowDryRunRequest.model_validate``.
     """
     payload = {
-        "module_name": "workflow",
         "workflow": {"nodes": _linear_nodes(), "edges": _linear_edges()},
-        "metric_code": "def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):\n    return 1.0\n",
-        "optimizer_name": "gepa",
-        "dataset": [{"t": "hello", "s": "hi"}],
-        "column_mapping": {"inputs": {"text": "t"}, "outputs": {"summary": "s"}},
+        "inputs": {"text": "hello"},
         "model_config": _MODEL_CFG,
     }
     payload.update(overrides)
     return payload
 
 
-def test_run_request_accepts_workflow_module():
-    """A workflow run parses without a top-level signature_code."""
-    request = RunRequest.model_validate(_run_request_payload())
-    assert request.workflow is not None
-    assert request.signature_code is None
-
-
-def test_run_request_requires_workflow_for_workflow_module():
-    """module_name='workflow' without a workflow spec is rejected."""
-    with pytest.raises(ValidationError, match="workflow is required"):
-        RunRequest.model_validate(_run_request_payload(workflow=None))
-
-
-def test_run_request_rejects_workflow_on_other_modules():
-    """A workflow spec on a predict run is rejected."""
-    with pytest.raises(ValidationError, match="only valid when module_name"):
-        RunRequest.model_validate(_run_request_payload(module_name="predict", signature_code=_SIG))
-
-
-def test_run_request_still_requires_signature_code_for_scalar_modules():
-    """A predict run without signature_code is rejected."""
-    with pytest.raises(ValidationError, match="signature_code is required"):
-        RunRequest.model_validate(_run_request_payload(module_name="predict", workflow=None))
-
-
-def test_run_request_requires_tool_source_for_tool_nodes():
-    """A workflow containing an mcp node requires a run-level tool_source."""
+def test_dry_run_requires_tool_source_for_tool_nodes():
+    """A workflow containing an mcp node requires a tool_source."""
     nodes = _linear_nodes()
     nodes.insert(
         2,
@@ -249,21 +220,21 @@ def test_run_request_requires_tool_source_for_tool_nodes():
     # Keep the mcp node on a path to the output.
     nodes[-1]["fields"].append({"name": "extra"})
     edges.append({"source": "lookup", "source_port": "result", "target": "out", "target_port": "extra"})
-    payload = _run_request_payload(workflow={"nodes": nodes, "edges": edges})
+    payload = _dry_run_payload(workflow={"nodes": nodes, "edges": edges})
     with pytest.raises(ValidationError, match="tool_source is required"):
-        RunRequest.model_validate(payload)
+        WorkflowDryRunRequest.model_validate(payload)
     payload["tool_source"] = {"kind": "live_mcp", "mcp_url": "http://localhost:9"}
-    assert RunRequest.model_validate(payload).tool_source is not None
+    assert WorkflowDryRunRequest.model_validate(payload).tool_source is not None
 
 
-def test_run_request_tool_source_follows_the_flex_node_opt_in():
+def test_dry_run_tool_source_follows_the_flex_node_opt_in():
     """A flex node needs a tool_source only once it names the tools it wants."""
     nodes = _linear_nodes()
     nodes[1]["module_name"] = "flex"
-    payload = _run_request_payload(workflow={"nodes": nodes, "edges": _linear_edges()})
-    assert RunRequest.model_validate(payload).tool_source is None
+    payload = _dry_run_payload(workflow={"nodes": nodes, "edges": _linear_edges()})
+    assert WorkflowDryRunRequest.model_validate(payload).tool_source is None
 
     nodes[1]["tool_filter"] = ["search"]
-    payload = _run_request_payload(workflow={"nodes": nodes, "edges": _linear_edges()})
+    payload = _dry_run_payload(workflow={"nodes": nodes, "edges": _linear_edges()})
     with pytest.raises(ValidationError, match="tool_source is required"):
-        RunRequest.model_validate(payload)
+        WorkflowDryRunRequest.model_validate(payload)

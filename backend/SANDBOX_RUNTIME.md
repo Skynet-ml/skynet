@@ -4,7 +4,7 @@ Build `backend/Dockerfile` from the same source and dependency lock as the API/w
 
 ## Vercel images
 
-Push a **linux/amd64** image to the selected project's Vercel Container Registry (VCR), wait for its repository state to become **Ready**, and resolve the immutable digest. Set both `DSPY_SANDBOX_IMAGE` and `VERCEL_SANDBOX_IMAGE` to that verified image when using the shared backend profile. Each must contain `@sha256:` followed by the complete 64-character digest. Configure `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID` only on the parent. A GHCR reference or a mutable `:latest` tag is not a protected runtime profile.
+Push a **linux/amd64** image to the selected project's Vercel Container Registry (VCR), wait for its repository state to become **Ready**, and resolve the immutable digest. Set `VERCEL_SANDBOX_IMAGE` to that verified image. It must contain `@sha256:` followed by the complete 64-character digest. Configure `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID` only on the parent. A GHCR reference or a mutable `:latest` tag is not a protected runtime profile.
 
 When extending a VCR image with zstd layers, publish through the Vercel CLI’s OCI Buildx exporter. Preserve the original compression media types when reusing layers; legacy Docker pushes can relabel zstd blobs as gzip. Verify a real sandbox command after publication even when the image is Ready.
 
@@ -20,7 +20,7 @@ Each paid Continue check and each submitted run creates exactly one outer Vercel
 
 With `APP_LOCAL_MODE=1` (the Mac app), the protected parent opens its boxes as containers on the local Docker daemon instead of Vercel microVMs. The async Docker provider in `core/sandbox/providers/docker.py` implements the same `SandboxEnvironment` contract as the Vercel provider, and the sync bridge in `blackbox/sandbox_runtime.py` opens both, so the model mailbox, the sandbox broker and the guest protocol do not change. Hosted deployments (local mode off) still accept only Vercel.
 
-- **Image.** `APP_LOCAL_SANDBOX_IMAGE` holds a local image id (`sha256:<64 hex>`), built from `backend/Dockerfile` and read with `docker image inspect --format '{{.Id}}'`. In local mode only this bare id is accepted, for every workflow. The current Dockerfile installs x64-only harness packages, so on Apple silicon build it with `--platform linux/amd64`.
+- **Image.** `APP_LOCAL_SANDBOX_IMAGE` holds a local image id (`sha256:<64 hex>`), built from `backend/Dockerfile` and read with `docker image inspect --format '{{.Id}}'`. In local mode only this bare id is accepted. The current Dockerfile installs x64-only harness packages, so on Apple silicon build it with `--platform linux/amd64`.
 - **CLI.** `APP_DOCKER_BIN` selects the Docker CLI (default `docker`). OrbStack works through the same CLI.
 - **Isolation.** Each box runs `docker run -d --rm --init --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 1024 --cpus <vcpus> --memory <vcpus × 2048>m`, with no published ports. Only the tmpfs mounts `/workspace` (the working directory and `HOME`) and `/tmp` are writable. The box's only process is `sleep <lifetime>`, so the container and every command in it end at the wall-time limit. Commands run through `docker exec` in their own process group, and a timeout kills that whole group.
 - **Streaming.** Command output is read line by line while the command runs, so the model mailbox answers guest model requests mid-command. File writes use a separate `docker exec` with a tar stream and can run beside an in-flight command.
@@ -110,7 +110,6 @@ An interrupted run is never restarted automatically: a worker shutdown, a lost l
 
 | Path | Manual Resume |
 | --- | --- |
-| DSPy GEPA, including independent GEPA grid pairs | Exact compatible persisted GEPA state |
 | Anything, single GEPA engine | Exact compatible persisted GEPA state |
 | Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve, Auto/omni, other optimizers | Not supported; Retry or Clone instead |
 

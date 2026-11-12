@@ -1,5 +1,5 @@
 import type { WorkflowSpec } from "@/shared/types/api";
-import type { DataMode, OptimizerChoice, OptimizerTarget } from "@/shared/types/unified-run";
+import type { DataMode, OptimizerChoice } from "@/shared/types/unified-run";
 
 /** Trust mode — how much the agent must ask before acting. */
 export type TrustMode = "ask" | "auto_safe" | "yolo";
@@ -26,8 +26,6 @@ export interface WizardState {
   is_private?: boolean;
   task_objective?: string;
   task_background?: string;
-  /** `"repo"` when the run optimizes a repository. */
-  artifact_kind?: OptimizerTarget;
   /** The repository a repository run optimizes, as `owner/name`. */
   repository?: string;
   /** The host of `repository`; the user picks it, the agent only reads it. */

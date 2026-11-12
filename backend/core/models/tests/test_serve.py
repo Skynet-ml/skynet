@@ -49,8 +49,8 @@ def test_serve_response_stores_all_fields() -> None:
     assert resp.model_used == "gpt-4o-mini"
 
 
-def test_serve_info_response_demo_count_defaults_zero() -> None:
-    """Verify ServeInfoResponse defaults demo_count to 0 and instructions to None."""
+def test_serve_info_response_instructions_default_none() -> None:
+    """Verify ServeInfoResponse defaults instructions to None."""
     info = ServeInfoResponse(
         optimization_id="abc123",
         module_name="predict",
@@ -60,5 +60,4 @@ def test_serve_info_response_demo_count_defaults_zero() -> None:
         output_fields=["answer"],
     )
 
-    assert info.demo_count == 0
     assert info.instructions is None

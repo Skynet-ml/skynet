@@ -68,11 +68,10 @@ def test_blank_workspace_code_rejected(wizard_client: TestClient, field: str) ->
 
 
 def test_task_fields_round_trip(wizard_client: TestClient) -> None:
-    """Objective, background and artifact kind land under their v2 keys."""
+    """Objective and background land under their v2 keys."""
     body = {
         "task_objective": "  Make it shorter  ",
         "task_background": "Support replies.",
-        "artifact_kind": "repo",
     }
     resp = wizard_client.post("/wizard/update", json=body)
 
@@ -80,16 +79,15 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     patch = resp.json()["wizard_state"]
     assert patch["task_objective"] == "Make it shorter"
     assert patch["task_background"] == "Support replies."
-    assert patch["artifact_kind"] == "repo"
 
 
 def test_repo_target_round_trips_without_a_starting_version(wizard_client: TestClient) -> None:
-    """A repository run takes the repo kind and an owner/name, with no starting version."""
-    resp = wizard_client.post("/wizard/update", json={"artifact_kind": "repo", "repository": "acme/support-bot"})
+    """A repository run takes an owner/name, with no starting version."""
+    resp = wizard_client.post("/wizard/update", json={"repository": "acme/support-bot"})
 
     assert resp.status_code == 200
     patch = resp.json()["wizard_state"]
-    assert patch == {"artifact_kind": "repo", "repository": "acme/support-bot"}
+    assert patch == {"repository": "acme/support-bot"}
 
 
 @pytest.mark.parametrize("name", ["acme", "acme/bot/extra", "https://github.com/acme/bot", "acme/ bot"])
@@ -100,12 +98,18 @@ def test_malformed_repository_rejected(wizard_client: TestClient, name: str) -> 
     assert resp.status_code == 422
 
 
-@pytest.mark.parametrize("kind", ["prompt", "code", "text"])
-def test_other_artifact_kinds_are_refused_for_new_runs(wizard_client: TestClient, kind: str) -> None:
-    """New runs take a DSPy program or a repository, nothing else."""
-    resp = wizard_client.post("/wizard/update", json={"artifact_kind": kind})
+@pytest.mark.parametrize("kind", ["repo", "dspy_program"])
+def test_a_stale_artifact_kind_is_ignored(wizard_client: TestClient, kind: str) -> None:
+    """An old tab or draft may still send ``artifact_kind``; the update drops it and keeps the rest.
 
-    assert resp.status_code == 422
+    Args:
+        wizard_client: The wizard router client.
+        kind: An artifact kind an old client sent.
+    """
+    resp = wizard_client.post("/wizard/update", json={"artifact_kind": kind, "repository": "acme/support-bot"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["wizard_state"] == {"repository": "acme/support-bot"}
 
 
 def test_multi_part_starting_version_round_trips(wizard_client: TestClient) -> None:
@@ -165,7 +169,7 @@ def test_optimizer_choice_fitting_setup_accepted(wizard_client: TestClient, choi
     """Auto and the repository engines fit a repository run with pairs."""
     resp = wizard_client.post(
         "/wizard/update",
-        json={"artifact_kind": "repo", "data_mode": "pairs", "optimizer_choice": choice},
+        json={"data_mode": "pairs", "optimizer_choice": choice},
     )
 
     assert resp.status_code == 200
@@ -175,14 +179,13 @@ def test_optimizer_choice_fitting_setup_accepted(wizard_client: TestClient, choi
 @pytest.mark.parametrize(
     "body",
     [
-        {"artifact_kind": "repo", "data_mode": "pairs", "optimizer_choice": "dspy_miprov2"},
+        {"data_mode": "pairs", "optimizer_choice": "grid_search"},
+        {"optimizer_choice": "unknown_engine"},
         {"optimizer_choice": "dspy_gepa"},
-        {"data_mode": "single", "optimizer_choice": "dspy_bootstrap_fewshot"},
-        {"artifact_kind": "dspy_program", "optimizer_choice": "gepa"},
     ],
 )
 def test_optimizer_choice_outside_setup_rejected(wizard_client: TestClient, body: dict) -> None:
-    """Skynet is repo-only, so the DSPy optimizers and DSPy targets are refused."""
+    """Skynet is repo-only, so unknown and DSPy optimizers are refused."""
     resp = wizard_client.post("/wizard/update", json=body)
 
     assert resp.status_code == 422

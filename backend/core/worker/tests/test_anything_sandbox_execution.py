@@ -43,7 +43,7 @@ def test_anything_guest_binds_contained_runtime_around_optimizer(
     )
     observed: list[Any] = []
 
-    def run(payload: dict[str, Any], artifact_id: str, events: Any, start_method: str) -> None:
+    def run(payload: dict[str, Any], artifact_id: str, events: Any) -> None:
         """Capture the runtime visible at the optimizer entry point."""
         observed.append(current_sandbox_runtime())
 
@@ -195,7 +195,6 @@ def test_protected_parent_does_not_load_scorer_code_before_sandbox() -> None:
     with (
         patch("core.worker.engine.notify_job_completed"),
         patch("core.worker.engine.validate_blackbox_payload") as validate,
-        patch.object(worker, "_get_service"),
     ):
         worker._process_job("protected-anything", 0)
 

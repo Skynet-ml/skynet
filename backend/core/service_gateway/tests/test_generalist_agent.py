@@ -76,7 +76,6 @@ _SUBMIT = "submit_unified_run_optimize_post"
 _READY: dict[str, Any] = {
     "job_name": "My run",
     "task_objective": "Answer support questions",
-    "artifact_kind": "repo",
     "repository": "acme/bot",
     "data_mode": "pairs",
     "dataset_ready": True,
@@ -88,9 +87,9 @@ _READY: dict[str, Any] = {
 
 
 def test_empty_state_hides_dataset_and_submit_tools() -> None:
-    """An empty wizard state hides dataset/code/submit tools, exposing only discovery."""
+    """An empty wizard state hides dataset and submit tools; the static code check needs no rows."""
     allowed = tools_for(WizardState())
-    assert "validate_code_validate_code_post" not in allowed
+    assert "validate_code_validate_code_post" in allowed
     assert _SUBMIT not in allowed
     assert "list_models_for_agent" in allowed
 
@@ -142,7 +141,7 @@ def test_order_rejects_task_before_name() -> None:
 
 def test_order_allows_name_and_task_in_one_patch() -> None:
     """A single patch may set the name AND the task — each satisfies its own step."""
-    patch = {"job_name": "My run", "task_objective": "x", "artifact_kind": "repo", "repository": "acme/bot"}
+    patch = {"job_name": "My run", "task_objective": "x", "repository": "acme/bot"}
     assert validate_wizard_patch_order(patch, WizardState()) is None
 
 
@@ -155,7 +154,7 @@ def test_order_rejects_inputs_before_task() -> None:
 
 def test_order_rejects_optimizer_before_inputs() -> None:
     """The Optimizer step is gated on the Inputs step."""
-    state = {k: _READY[k] for k in ("job_name", "task_objective", "artifact_kind", "repository")}
+    state = {k: _READY[k] for k in ("job_name", "task_objective", "repository")}
     err = validate_wizard_patch_order({"optimizer_choice": "gepa"}, cast(WizardState, state))
     assert err is not None
     assert "Inputs" in err
@@ -180,10 +179,10 @@ def test_screen_allows_visible_and_screenless_fields() -> None:
 
 def test_screen_rejects_fields_off_the_visible_screen() -> None:
     """A field from another screen is refused and named in the error."""
-    patch = {"task_objective": "x", "artifact_kind": "repo", "data_mode": "pairs"}
+    patch = {"task_objective": "x", "repository": "acme/bot", "data_mode": "pairs"}
     err = validate_wizard_screen("update_wizard_state", patch, WizardState(wizard_screen="brief"))
     assert err is not None
-    assert "artifact_kind" in err
+    assert "repository" in err
     assert "data_mode" in err
     assert "task_objective" in err.split("may set only", 1)[1]
 
@@ -321,7 +320,6 @@ _FULL_SNAPSHOT: dict[str, Any] = {
     "is_private": False,
     "task_objective": "Classify tickets",
     "task_background": "b",
-    "artifact_kind": "repo",
     "repository": "acme/bot",
     "data_mode": "pairs",
     "dataset_ready": True,
@@ -340,10 +338,10 @@ _FULL_SNAPSHOT: dict[str, Any] = {
     ("screen", "expected"),
     [
         ("brief", {"task_objective", "task_background"}),
-        ("artifact", {"artifact_kind", "repository", "task_objective"}),
+        ("artifact", {"repository", "task_objective"}),
         (
             "source",
-            {"data_mode", "dataset_ready", "dataset_columns", "input_fields", "task_objective", "artifact_kind"},
+            {"data_mode", "dataset_ready", "dataset_columns", "input_fields", "task_objective"},
         ),
         (
             "plan",
@@ -353,14 +351,13 @@ _FULL_SNAPSHOT: dict[str, Any] = {
                 "model_configured",
                 "max_cost_cents",
                 "task_objective",
-                "artifact_kind",
                 "data_mode",
             },
         ),
-        ("optimizer", {"optimizer_choice", "artifact_kind", "data_mode"}),
+        ("optimizer", {"optimizer_choice", "data_mode"}),
         ("models", {"model_config", "model_configured", "optimizer_choice"}),
         ("budget", {"max_cost_cents", "optimizer_choice", "model_config"}),
-        ("metric", {"run_code", "metric_code", "task_objective", "artifact_kind", "repository", "input_fields"}),
+        ("metric", {"run_code", "metric_code", "task_objective", "repository", "input_fields"}),
         ("check", {"run_code", "metric_code", "input_fields"}),
     ],
 )
@@ -442,13 +439,11 @@ def test_artifact_snapshot_carries_the_repository_and_github_link() -> None:
         {
             **_READY,
             "wizard_screen": "artifact",
-            "artifact_kind": "repo",
             "repository": "acme/support-bot",
             "github_connected": False,
         },
     )
     snapshot = screen_snapshot(state)
-    assert snapshot["artifact_kind"] == "repo"
     assert snapshot["repository"] == "acme/support-bot"
     assert snapshot["github_connected"] is False
     assert "repository" in snapshot["editable_fields"]
@@ -458,11 +453,9 @@ def test_repo_target_needs_a_repository_not_a_starting_version() -> None:
     """A repository run completes the Task step with its repository alone."""
     repo = cast(
         WizardState,
-        {"job_name": "Bot", "task_objective": "Fix flaky tests", "artifact_kind": "repo", "wizard_screen": "artifact"},
+        {"job_name": "Bot", "task_objective": "Fix flaky tests", "wizard_screen": "artifact"},
     )
-    assert (
-        validate_wizard_screen("update_wizard_state", {"artifact_kind": "repo", "repository": "acme/bot"}, repo) is None
-    )
+    assert validate_wizard_screen("update_wizard_state", {"repository": "acme/bot"}, repo) is None
     assert _screen_problems("artifact", repo) == ["repository must be set as owner/name"]
     chosen = cast(WizardState, {**repo, "repository": "acme/bot"})
     assert _screen_problems("artifact", chosen) == []
@@ -785,7 +778,7 @@ def _wizard_tool() -> dspy.Tool:
         job_description: str = "",
         is_private: bool = False,
         task_objective: str = "",
-        artifact_kind: str = "",
+        repository: str = "",
         optimizer_choice: str = "",
         spending_limit_usd: float = 0.0,
     ) -> str:
@@ -807,7 +800,7 @@ def test_scope_wizard_tool_unchanged_without_a_screen() -> None:
     """Outside the wizard the tool keeps every argument."""
     tool = scope_wizard_tool(_wizard_tool(), WizardState())
     assert "optimizer_choice" in tool.args
-    assert "artifact_kind" in tool.args
+    assert "repository" in tool.args
 
 
 def test_scope_wizard_tool_ignores_other_tools() -> None:
@@ -863,13 +856,6 @@ def test_dataset_library_tools_always_available() -> None:
     allowed = tools_for(WizardState())
     assert "list_datasets_for_agent" in allowed
     assert "request_user_dataset_from_library" in allowed
-
-
-def test_retired_pair_serve_tools_are_hidden() -> None:
-    """The grid-pair serve tools refuse every call with 410, so the agent never sees them."""
-    allowed = tools_for(WizardState())
-    assert "request_user_pair_inference" not in allowed
-    assert "serve_pair_info_serve" not in allowed
 
 
 def test_yolo_never_gates() -> None:
@@ -1096,7 +1082,7 @@ async def test_created_repository_is_selected_and_marked() -> None:
         authoring_flag=flag,
     )
     await tool.func._async_body(name="new-bot")
-    created = {"artifact_kind": "repo", "repository": "acme/new-bot", "repo_created_by_skynet": True}
+    created = {"repository": "acme/new-bot", "repo_created_by_skynet": True}
     end = next(e for e in events if e["event"] == "tool_end")
     assert end["data"]["result"]["wizard_state"] == created
     assert flag.wizard_patch == created
@@ -1178,8 +1164,8 @@ async def test_submit_runs_through_the_wrapper() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continue_after_a_repository_only_write_counts_a_repository_run() -> None:
-    """A repository write without ``artifact_kind`` lets Continue pass the artifact screen."""
+async def test_continue_after_a_repository_write_ignores_a_stale_artifact_kind() -> None:
+    """An old draft may still carry ``artifact_kind``; a repository write still passes the artifact screen."""
     flag = _TurnAuthoringFlag()
     state = {
         "wizard_screen": "artifact",
@@ -1407,7 +1393,7 @@ async def test_sample_staging_keeps_an_existing_job_name() -> None:
 def test_system_prompt_covers_new_capabilities() -> None:
     """The prompt names the unified setup fields and tools the agent now supports."""
     prompt = GENERALIST_SYSTEM_PROMPT or ""
-    for needle in ("optimizer_catalog", "artifact_kind", "data_mode", "run_code", "validate_datasets", "restart"):
+    for needle in ("optimizer_catalog", "repository", "data_mode", "run_code", "validate_datasets", "restart"):
         assert needle in prompt
 
 
@@ -2257,7 +2243,7 @@ async def test_hand_off_puts_the_coding_agents_optimize_toml_into_the_draft(monk
         return {"wizard_state": {"optimize_toml": "[run]\nentry = 'a.py:run'\n"}, "summary": "", "open_questions": []}
 
     monkeypatch.setattr(generalist_module, "run_coding_agent", fake_coder)
-    state = cast(WizardState, {"wizard_screen": "metric", "artifact_kind": "repo", "optimize_toml": "version = 1\n"})
+    state = cast(WizardState, {"wizard_screen": "metric", "optimize_toml": "version = 1\n"})
     turn = _TurnAuthoringFlag()
     (tool,) = generalist_module.coding_agent_tools(state, turn, lm=None, emit=lambda _e: None, github_token=None)
 
@@ -2269,7 +2255,7 @@ async def test_hand_off_puts_the_coding_agents_optimize_toml_into_the_draft(monk
 
 def test_hand_off_desc_tells_the_setup_agent_to_show_the_optimize_toml() -> None:
     """The setup agent shows the returned optimize.toml in full, so the user sees the file (SKY-184)."""
-    state = cast(WizardState, {"wizard_screen": "metric", "artifact_kind": "repo"})
+    state = cast(WizardState, {"wizard_screen": "metric"})
     (tool,) = generalist_module.coding_agent_tools(
         state, _TurnAuthoringFlag(), lm=None, emit=lambda _e: None, github_token=None
     )

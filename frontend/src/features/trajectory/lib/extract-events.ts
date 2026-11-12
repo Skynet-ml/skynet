@@ -4,17 +4,11 @@ import type {
   CandidateMetrics,
   MinibatchEntry,
   PerExampleScore,
-  PredictionValue,
   RejectedMetrics,
-  ValsetOutputsEvent,
-  ValsetPrediction,
-  ValsetRow,
 } from "./types";
 
 const CANDIDATE_EVENT = "candidate";
 const REJECTED_EVENT = "candidate_rejected";
-const VALSET_EVENT = "valset_rows";
-const VALSET_OUTPUTS_EVENT = "valset_outputs";
 const MINIBATCH_EVENT = "minibatch_feedback";
 
 /**
@@ -22,8 +16,8 @@ const MINIBATCH_EVENT = "minibatch_feedback";
  *
  * Black-box strategies run engines in sequential lanes and candidate ids
  * restart at "0" in each one, so mixing lanes would corrupt the tree. Events
- * without a ``lane_index`` (every DSPy run) are lane 0, making this a no-op
- * for them.
+ * without a ``lane_index`` (single-engine runs) are lane 0, making this a
+ * no-op for them.
  */
 export function scopeToLatestLane(events: ProgressEvent[]): ProgressEvent[] {
   const laneOf = (event: ProgressEvent): number => {
@@ -154,61 +148,6 @@ export function extractRejected(events: ProgressEvent[]): RejectedMetrics[] {
   return out.sort((a, b) => a.iteration - b.iteration);
 }
 
-function coerceStringMap(value: unknown): Record<string, string> {
-  if (value === null || typeof value !== "object") return {};
-  const out: Record<string, string> = {};
-  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof raw === "string") out[key] = raw;
-  }
-  return out;
-}
-
-function coerceValsetRow(raw: unknown): ValsetRow | null {
-  if (raw === null || typeof raw !== "object") return null;
-  const entry = raw as Record<string, unknown>;
-  if (typeof entry.id !== "string") return null;
-  return {
-    id: entry.id,
-    inputs: coerceStringMap(entry.inputs),
-    outputs: coerceStringMap(entry.outputs),
-  };
-}
-
-// Valset rows are universal across grid pairs (one split for the whole run),
-// so this extractor ignores pair_index and returns the last-seen snapshot.
-export function extractValset(events: ProgressEvent[]): ValsetRow[] {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i];
-    if (event === undefined) continue;
-    if (event.event !== VALSET_EVENT) continue;
-    const rows = event.metrics?.rows;
-    if (!Array.isArray(rows)) continue;
-    const parsed: ValsetRow[] = [];
-    for (const row of rows) {
-      const r = coerceValsetRow(row);
-      if (r !== null) parsed.push(r);
-    }
-    return parsed;
-  }
-  return [];
-}
-
-// A prediction arrives as a flat field→value map (the backend serializes a dspy
-// Prediction this way, nested fields as JSON strings) or a plain string (legacy
-// runs). Map values are coerced to strings so each renders via the structured
-// FieldValue cell. Anything else (null, array, number) degrades to "".
-function coercePrediction(value: unknown): PredictionValue {
-  if (typeof value === "string") return value;
-  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    const out: Record<string, string> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = typeof item === "string" ? item : JSON.stringify(item);
-    }
-    return out;
-  }
-  return "";
-}
-
 function coerceMinibatch(
   metrics: Record<string, unknown>,
   sequence: number,
@@ -216,7 +155,6 @@ function coerceMinibatch(
   const example_id = metrics.example_id;
   const score = metrics.score;
   const feedback = metrics.feedback;
-  const prediction = metrics.prediction;
   const iteration = metrics.iteration;
   const images_dropped = metrics.images_dropped;
   if (typeof example_id !== "string") return null;
@@ -226,7 +164,6 @@ function coerceMinibatch(
     example_id,
     score,
     feedback,
-    prediction: coercePrediction(prediction),
     sequence,
     iteration: typeof iteration === "number" ? iteration : null,
     candidate_id: typeof metrics.candidate_id === "string" ? metrics.candidate_id : null,
@@ -257,47 +194,6 @@ export function extractMinibatch(events: ProgressEvent[]): MinibatchEntry[] {
     if (parsed === null) continue;
     out.push(parsed);
     seq += 1;
-  }
-  return out;
-}
-
-function coerceValsetOutputs(metrics: Record<string, unknown>): ValsetOutputsEvent | null {
-  const candidate_index = metrics.candidate_index;
-  const raw_predictions = metrics.predictions;
-  if (typeof candidate_index !== "number") return null;
-  if (!Array.isArray(raw_predictions)) return null;
-  const predictions: ValsetPrediction[] = [];
-  for (const row of raw_predictions) {
-    if (!row || typeof row !== "object") continue;
-    const r = row as Record<string, unknown>;
-    if (typeof r.example_id !== "string") continue;
-    const score = typeof r.score === "number" ? r.score : 0;
-    predictions.push({
-      example_id: r.example_id,
-      prediction: coercePrediction(r.prediction),
-      score,
-    });
-  }
-  return { candidate_index, predictions };
-}
-
-// Builds a (candidate_id -> example_id -> prediction text) lookup.
-// candidate_id is the string form of candidate_index, matching CandidateMetrics.candidate_id.
-// If the same candidate fires twice (shouldn't, but defensive), later events win.
-export function extractValsetOutputs(
-  events: ProgressEvent[],
-): Map<string, Map<string, PredictionValue>> {
-  const out = new Map<string, Map<string, PredictionValue>>();
-  for (const event of events) {
-    if (event.event !== VALSET_OUTPUTS_EVENT) continue;
-    const parsed = coerceValsetOutputs(event.metrics ?? {});
-    if (parsed === null) continue;
-    const key = String(parsed.candidate_index);
-    const inner = new Map<string, PredictionValue>();
-    for (const p of parsed.predictions) {
-      inner.set(p.example_id, p.prediction);
-    }
-    out.set(key, inner);
   }
   return out;
 }

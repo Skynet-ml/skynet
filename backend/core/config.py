@@ -171,10 +171,6 @@ class Settings(BaseSettings):
     remote_db_url: SecretStr | None = Field(default=None, description="PostgreSQL connection string for remote storage")
 
     openai_api_key: SecretStr | None = Field(default=None, description="OpenAI API key for model access")
-    openai_api_base: str | None = Field(
-        default=None,
-        description=("Base URL of the OpenAI-compatible LLM gateway (LiteLLM reads the same env var for serving)."),
-    )
     transcription_api_key: SecretStr | None = Field(
         default=None,
         description=(
@@ -183,7 +179,6 @@ class Settings(BaseSettings):
             "dictation with a typed 503."
         ),
     )
-    anthropic_api_key: SecretStr | None = Field(default=None, description="Anthropic API key for Claude models")
 
     stripe_secret_key: SecretStr | None = Field(
         default=None,
@@ -542,11 +537,6 @@ class Settings(BaseSettings):
         alias="VERCEL_SANDBOX_IMAGE",
         description="Immutable container image the protected optimization sandbox boots from. The SDK's universal default does not contain Skynet's pinned optimizer, harness, and offline dependency set.",
     )
-    dspy_sandbox_image: str | None = Field(
-        default=None,
-        alias="DSPY_SANDBOX_IMAGE",
-        description="Immutable prebuilt backend image, addressed by @sha256, containing the exact deployed Python and optimizer dependencies for protected DSPy execution.",
-    )
     vercel_sandbox_max_lifetime_seconds: float = Field(
         default=2_700.0,
         alias="VERCEL_SANDBOX_MAX_LIFETIME_SECONDS",
@@ -812,47 +802,6 @@ class Settings(BaseSettings):
         ),
         alias="JOB_STALL_TIMEOUT",
     )
-    gepa_eval_num_threads: int = Field(
-        default=8,
-        ge=1,
-        le=64,
-        description=(
-            "Eval/rollout thread count injected into GEPA when the submission "
-            "doesn't set num_threads. GEPA's own default is sequential "
-            "candidate evaluation, and runs are LM-latency-bound, so parallel "
-            "eval cuts wall-clock roughly linearly. An explicit user-supplied "
-            "num_threads always wins; job_lm_max_concurrency bounds the "
-            "multiplied total either way."
-        ),
-        alias="GEPA_EVAL_NUM_THREADS",
-    )
-    gepa_pxn_parents: int = Field(
-        default=1,
-        ge=1,
-        le=16,
-        description=(
-            "GEPA PxN batched sampling — parent count (p). Each reflective "
-            "iteration mutates p distinct parent candidates, drawing "
-            "gepa_pxn_proposals (n) proposals from each, and evaluates all p*n "
-            "as one batch. The default of 1 reproduces GEPA's classic "
-            "single-mutation sampling; raising p (or n) above 1 switches GEPA to "
-            "PxNSampling(p, n) — better wall-clock and generalization at higher "
-            "LM cost, bounded per job by job_lm_max_concurrency. A submission "
-            "that supplies its own gepa_kwargs.sampling_strategy always wins."
-        ),
-        alias="GEPA_PXN_PARENTS",
-    )
-    gepa_pxn_proposals: int = Field(
-        default=1,
-        ge=1,
-        le=16,
-        description=(
-            "GEPA PxN batched sampling — proposals per parent (n); see "
-            "gepa_pxn_parents. Raising n (or p) above 1 activates "
-            "PxNSampling(p, n). Defaults to 1 (classic single-mutation GEPA)."
-        ),
-        alias="GEPA_PXN_PROPOSALS",
-    )
     react_native_tool_calling: bool = Field(
         default=False,
         description=(
@@ -875,38 +824,12 @@ class Settings(BaseSettings):
         ge=0,
         le=256,
         description=(
-            "Per-job-child ceiling on concurrent LM calls. Grid pair threads "
-            "times GEPA eval threads multiply, and a user can pass any "
+            "Per-job-child ceiling on concurrent LM calls. A user can pass any "
             "num_threads in optimizer kwargs; this gate keeps one job from "
             "spraying the provider with enough parallel calls to trip rate "
             "limits and fail the run. 0 disables the gate."
         ),
         alias="JOB_LM_MAX_CONCURRENCY",
-    )
-    grid_pair_max_workers: int = Field(
-        default=4,
-        ge=1,
-        le=16,
-        description=(
-            "Concurrent (generation, reflection) pairs per grid-search job "
-            "child. Total LM concurrency in the child is still capped by "
-            "job_lm_max_concurrency regardless of this value."
-        ),
-        alias="GRID_PAIR_MAX_WORKERS",
-    )
-    grid_distributed_pairs: bool = Field(
-        default=True,
-        description=(
-            "Fan a multi-pair grid search out as one claimable job row per "
-            "pair so pairs spread across the whole worker fleet instead of "
-            "sharing one child process. Off = classic all-pairs-in-one-child "
-            "execution; flipping the flag never re-shapes a grid already in "
-            "flight."
-        ),
-        alias="GRID_DISTRIBUTED_PAIRS",
-    )
-    job_run_start_method: Literal["fork", "spawn", "forkserver"] = Field(
-        default="fork", description="Multiprocessing start method for job execution"
     )
     # Ceiling (pool_size + max_overflow = 20 + 20 = 40) is aligned with
     # Starlette's anyio threadpool width (40) so a burst of concurrent sync DB
@@ -974,7 +897,6 @@ class Settings(BaseSettings):
         description="Server port",
         validation_alias=AliasChoices("API_PORT", "PORT"),
     )
-    reload: bool = Field(default=False, description="Enable auto-reload on code changes (dev only)")
 
     cors_origins: str = Field(
         default="http://localhost:3000,http://localhost:3001",
@@ -997,18 +919,6 @@ class Settings(BaseSettings):
             "fd00:ec2::254) are blocked unconditionally regardless."
         ),
     )
-    program_cache_max_entries: int = Field(
-        # 32 (was 128): each entry is a full deserialized program (MBs), the
-        # cache lives in the fork-parent API process, and beta traffic serves
-        # far fewer distinct programs than 32 at a time.
-        default=32,
-        ge=1,
-        description=(
-            "Maximum number of compiled DSPy programs held in the in-process "
-            "LRU cache. Each entry is roughly the size of one optimized "
-            "program; set to bound the API process resident set."
-        ),
-    )
     model_catalog_ttl_seconds: float = Field(
         default=1800.0,
         ge=0.0,
@@ -1017,8 +927,6 @@ class Settings(BaseSettings):
             "re-evaluating provider key availability. 0 disables caching."
         ),
     )
-
-    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
 
     alert_webhook_url: str = Field(
         default="",
@@ -1375,7 +1283,7 @@ class Settings(BaseSettings):
     submissions_paused: bool = Field(
         default=False,
         description=(
-            "Operator kill-switch: when true, all new run/grid-search submissions are refused "
+            "Operator kill-switch: when true, all new run submissions are refused "
             "(in-flight runs continue). An instant emergency brake independent of spend."
         ),
     )
@@ -1391,7 +1299,7 @@ class Settings(BaseSettings):
         default=30,
         ge=0,
         description=(
-            "Per-account cap on run/grid-search submissions per rolling minute, enforced across "
+            "Per-account cap on run submissions per rolling minute, enforced across "
             "replicas via Redis. Bounds a runaway script or abusive key. 0 disables the cap."
         ),
     )

@@ -823,7 +823,6 @@ def submit_draft(
     idempotency_key: str | None,
     user: AuthenticatedUser,
     *,
-    service: Any,
     job_store: Any,
     http_client: Callable[[], httpx.Client],
     hardening_job_id: str | None = None,
@@ -840,7 +839,6 @@ def submit_draft(
         max_cost_cents: Spending limit the user agreed to.
         idempotency_key: Optional key; a repeat returns the original run.
         user: Account that runs it.
-        service: Optimization service handed to the worker.
         job_store: Store that persists the run.
         http_client: Factory for the model catalog client.
         hardening_job_id: Optional metric-hardening job whose exploit suite the run ships.
@@ -864,9 +862,7 @@ def submit_draft(
         http_client=http_client,
     )
     try:
-        result = submit_repo_payload(
-            request, service=service, job_store=job_store, current_user=user, idempotency_key=key
-        )
+        result = submit_repo_payload(request, job_store=job_store, current_user=user, idempotency_key=key)
     except DomainError as error:
         if error.code != "budget.pending":
             raise
@@ -878,13 +874,12 @@ def submit_draft(
     return {**result.model_dump(mode="json"), "next_tool": "get_run"}
 
 
-def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *, service: Any, job_store: Any) -> None:
+def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *, job_store: Any) -> None:
     """Add the repository draft tools to the remote MCP server.
 
     Args:
         mcp: The remote MCP server.
         http_client: Factory for the model catalog client.
-        service: Optimization service handed to the worker.
         job_store: Store that holds drafts, runs, budgets and connectors.
     """
     writes = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -1279,7 +1274,6 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 max_cost_cents,
                 idempotency_key,
                 user,
-                service=service,
                 job_store=job_store,
                 http_client=http_client,
                 hardening_job_id=hardening_job_id,

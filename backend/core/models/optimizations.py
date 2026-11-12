@@ -7,10 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .artifacts import ProgramArtifact
 from .blackbox import BlackboxRunResponse
-from .common import ColumnMapping, Composition, OptimizationStatus, OptimizationType, SplitFractions
-from .results import GridSearchResponse, RunResponse
+from .common import ColumnMapping, Composition, OptimizationStatus, OptimizationType
 from .telemetry import JobLogEntry, ProgressEvent
 
 
@@ -35,12 +33,11 @@ class _JobResponseBase(BaseModel):
     completed_at: datetime | None = None
     elapsed: str | None = None
     elapsed_seconds: float | None = None
-    estimated_remaining: str | None = None
 
     username: str | None = None
     module_name: str | None = None
-    # "single" (one atomic module) vs "workflow" (a DAG of module nodes). Derived
-    # at submit from module_name; null on rows submitted before this field existed.
+    # Always "single" since SKY-656 deleted the DSPy workflow runs. Set at
+    # submit; null on rows submitted before this field existed.
     composition: Composition | None = None
     module_kwargs: dict[str, Any] = Field(default_factory=dict)
     optimizer_name: str | None = None
@@ -70,26 +67,10 @@ class _JobResponseBase(BaseModel):
 
     latest_metrics: dict[str, Any] = Field(default_factory=dict)
 
-    model_name: str | None = Field(default=None, description="Single-run model name; null for grid searches.")
-    model_settings: dict[str, Any] | None = Field(
-        default=None, description="Single-run model settings; null for grid searches."
-    )
-    reflection_model_name: str | None = Field(
-        default=None, description="Single-run reflection model name; null for grid searches."
-    )
-    task_model_name: str | None = Field(default=None, description="Single-run task model name; null for grid searches.")
-
-    total_pairs: int | None = Field(default=None, description="Grid-search pair count; null for single runs.")
-    completed_pairs: int | None = Field(
-        default=None, description="Grid-search pairs that finished; null for single runs."
-    )
-    failed_pairs: int | None = Field(default=None, description="Grid-search pairs that errored; null for single runs.")
-    generation_models: list[Any] | None = Field(
-        default=None, description="Grid-search generation model list; null for single runs."
-    )
-    reflection_models: list[Any] | None = Field(
-        default=None, description="Grid-search reflection model list; null for single runs."
-    )
+    model_name: str | None = Field(default=None, description="Model name of the run.")
+    model_settings: dict[str, Any] | None = Field(default=None, description="Model settings of the run.")
+    reflection_model_name: str | None = Field(default=None, description="Reflection model name of the run.")
+    task_model_name: str | None = Field(default=None, description="Task model name of the run.")
 
     @field_validator("column_mapping", mode="before")
     @classmethod
@@ -162,11 +143,6 @@ class OptimizationStatusResponse(_JobResponseBase):
     # since_progress / since_log query params on GET /optimizations/{id}.
     progress_offset: int = 0
     logs_offset: int = 0
-    result: RunResponse | None = None
-    grid_result: GridSearchResponse | None = None
-    # Black-box runs persist a ``BlackboxRunResponse`` (no module/metric
-    # names, plus lanes and the best version), which ``RunResponse`` rejects;
-    # they surface here, mirroring ``grid_result`` for grids.
     blackbox_result: BlackboxRunResponse | None = None
     effective_role: str | None = Field(
         default=None,
@@ -181,28 +157,13 @@ class OptimizationStatusResponse(_JobResponseBase):
 class OptimizationSummaryResponse(_JobResponseBase):
     """Lightweight dashboard view of an optimization."""
 
-    split_fractions: SplitFractions | None = None
-    shuffle: bool | None = None
     seed: int | None = None
-    optimizer_kwargs: dict[str, Any] = Field(default_factory=dict)
-    compile_kwargs: dict[str, Any] = Field(default_factory=dict)
     progress_count: int = 0
     log_count: int = 0
 
-    baseline_test_metric: float | None = Field(
-        default=None,
-        description="Baseline test metric; for grid searches this is the best pair's value.",
-    )
-    optimized_test_metric: float | None = Field(
-        default=None,
-        description="Optimized test metric; for grid searches this is the best pair's value.",
-    )
-    metric_improvement: float | None = Field(
-        default=None,
-        description="Metric improvement; for grid searches this is the best pair's value.",
-    )
-
-    best_pair_label: str | None = None
+    baseline_test_metric: float | None = Field(default=None, description="Baseline test metric.")
+    optimized_test_metric: float | None = Field(default=None, description="Optimized test metric.")
+    metric_improvement: float | None = Field(default=None, description="Metric improvement.")
 
     # AI-authored task summary from job_embeddings.summary_text. Populated
     # at read-time via a side lookup so the dashboard "mine" corpus can
@@ -301,9 +262,3 @@ class OptimizationPayloadResponse(BaseModel):
     optimization_id: str
     optimization_type: OptimizationType
     payload: dict[str, Any]
-
-
-class ProgramArtifactResponse(BaseModel):
-    """Response payload for the artifact retrieval endpoint."""
-
-    program_artifact: ProgramArtifact | None

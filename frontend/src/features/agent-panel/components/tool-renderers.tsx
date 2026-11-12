@@ -25,7 +25,6 @@ import {
 } from "./SetupToolCards";
 import { SubmitSummaryCard } from "./SubmitSummaryCard";
 import { TaggingSessionsCard } from "./TaggingSessionsCard";
-import { TestResultsCard } from "./TestResultsCard";
 import { WalletCard } from "./WalletCard";
 import { TurnCheckCard } from "./TurnCheckCard";
 import { WizardBackCard, WizardContinueCard } from "./WizardNavCard";
@@ -79,7 +78,6 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   fetch_url: "read",
   profile_datasets_profile_post: "read",
   serve_info_serve: "read",
-  serve_pair_info_serve: "read",
   blackbox_engines_blackbox_engines_get: "read",
   shared_chat_item: "read",
   read_shared_chat_item: "read",
@@ -453,10 +451,6 @@ const RENDERERS: Record<string, ToolRenderer> = {
 
   get_analytics_summary_analytics_summary_get: {
     card: (call) => <AnalyticsSummaryCard call={call} />,
-  },
-
-  get_test_results_optimizations: {
-    card: (call) => <TestResultsCard call={call} />,
   },
 
   get_wallet_for_agent: {

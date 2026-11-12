@@ -23,11 +23,6 @@ class JobLogEntry(BaseModel):
     level: str
     logger: str
     message: str
-    # Storage layer at backend/core/storage/remote.py writes pair_index for
-    # grid-search rows so the frontend can filter logs to the active pair;
-    # without this field Pydantic strips it on serialization and the
-    # per-pair log filter never matches.
-    pair_index: int | None = None
     # Structured run-log fields (core.run_log). ``id`` is the live stream's
     # resume cursor; rows from before these existed are the host's.
     id: int | None = None

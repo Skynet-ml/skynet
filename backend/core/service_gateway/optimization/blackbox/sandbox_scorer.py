@@ -37,7 +37,7 @@ from ....config import Settings, app_env, settings
 from ....exceptions import ServiceError
 from ....models.common import ModelConfig
 from ...language_models import usage_by_model_from_history
-from . import check_terminal, package_setup, runner, sandbox_log
+from . import package_setup, runner, sandbox_log
 from .agent_eval import gateway_from_settings
 from .harness import ENV_API_KEY
 from .heartbeat import heartbeat
@@ -47,7 +47,6 @@ from .sandbox import (
     SandboxRuntime,
     SandboxSession,
     SandboxSpec,
-    scorer_runtime_from_settings,
     unique_sandbox_name,
 )
 
@@ -56,9 +55,6 @@ logger = logging.getLogger(__name__)
 RUNNER_FILE = "app_runner.py"
 RUNNER_SOURCE = Path(runner.__file__).read_text(encoding="utf-8")
 CALLS_DIR = "calls"
-_DEFAULT_PROBE_TIMEOUT_SECONDS = 45.0
-# A probe's box only has to outlive one call plus interpreter start-up.
-_PROBE_LIFETIME_ALLOWANCE_SECONDS = 120.0
 # apt plus a few wheels finish in about a minute; a stalled mirror must not eat the box's lifetime.
 _INSTALL_TIMEOUT_SECONDS = 600.0
 DEPENDENCIES_DIR = ".app-dependencies"
@@ -195,8 +191,8 @@ def scorer_gateway(config: ModelConfig, settings: Settings) -> ScorerGateway:
 class ScorerUsage:
     """Token ledger for one scorer's ``llm()`` calls, shaped like a ``dspy.LM`` for the usage helpers.
 
-    ``model`` and ``history`` are all that ``usage_by_model_from_history``,
-    ``lm_call_count`` and the cost ceiling read off a language model.
+    ``model`` and ``history`` are all that ``usage_by_model_from_history``
+    and the cost ceiling read off a language model.
     """
 
     def __init__(self, model: str) -> None:
@@ -559,10 +555,8 @@ class SandboxPythonScorer:
             name = _sandbox_name(self._job_id)
             logger.info("scorer sandbox: opening %s (lifetime %.0fs)", name or "a box", self._spec.lifetime_seconds)
             opened = time.perf_counter()
-            check_terminal.note("box_opening")
             session = self._runtime.open(replace(self._spec, name=name))
             logger.info("scorer sandbox: ready in %.1fs", time.perf_counter() - opened)
-            check_terminal.note("box_ready", seconds=round(time.perf_counter() - opened, 1))
             try:
                 session.write_files({RUNNER_FILE: RUNNER_SOURCE, runner.CODE_FILE: self._code})
                 self._install(session)
@@ -680,56 +674,3 @@ class SandboxPythonScorer:
             self._session = None
             session.close()
             logger.info("scorer sandbox: closed after %d call(s)", self._calls)
-
-
-def probe_scorer(
-    *,
-    scorer_code: str,
-    candidate: Any,
-    case: Any = None,
-    scorer_model: dict[str, Any] | None = None,
-    timeout_seconds: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,
-    runtime: SandboxRuntime | None = None,
-    install_command: str | None = None,
-) -> ScorerProbeResult:
-    """Score one candidate with python scorer code in a throwaway sandbox.
-
-    A scorer that raised on the candidate is reported via
-    ``ScorerProbeResult.error`` — not as an exception from this function.
-    Infrastructure, budget, and pending-usage signals propagate to setup.
-
-    Args:
-        scorer_code: User-authored scorer source.
-        candidate: The version to score.
-        case: The case to score it on, if any.
-        scorer_model: Serialized ``ModelConfig`` for the scorer's ``llm()``
-            helper, if a model was chosen.
-        timeout_seconds: Longest the call may run.
-        runtime: Where the box is opened; the configured runtime when unset.
-        install_command: Shell command run once in the box before the call.
-
-    Returns:
-        The score and side information, or the scorer's error, plus what
-        its ``llm()`` calls consumed.
-
-    Raises:
-        ServiceError: When the gateway cannot be resolved or the box fails.
-        BudgetError: When covered funding does not permit the probe.
-        UsagePendingError: When execution or final runtime billing remains uncertain.
-    """
-    gateway = scorer_gateway(ModelConfig.model_validate(scorer_model), settings) if scorer_model else None
-    scorer = SandboxPythonScorer(
-        scorer_code,
-        runtime=runtime or scorer_runtime_from_settings(settings),
-        gateway=gateway,
-        timeout_seconds=timeout_seconds,
-        lifetime_seconds=timeout_seconds
-        + _PROBE_LIFETIME_ALLOWANCE_SECONDS
-        + (_INSTALL_TIMEOUT_SECONDS if (install_command or "").strip() else 0.0),
-        job_id="probe",
-        install_command=install_command,
-    )
-    try:
-        return scorer.run(candidate, case)
-    finally:
-        scorer.close()

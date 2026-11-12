@@ -37,9 +37,8 @@ _MOVED_NAMES = (
     "load_provider",
 )
 
-# ``core.service_gateway/__init__`` imports ``DspyService``, which loads the legacy
-# module for any import under the package. The check stubs the two parent packages,
-# so it measures only what ``sandbox_runtime`` itself pulls in.
+# The check stubs the two parent packages, so it measures only what
+# ``sandbox_runtime`` itself pulls in, not what a package ``__init__`` loads.
 _LEAF_CHECK = """
 import pathlib
 import sys

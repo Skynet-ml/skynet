@@ -1,37 +1,19 @@
-import type { ExecutionRuntimeCatalog } from "@/shared/types/wizard-preflight";
 import type {
   BlackboxAgentRunResponse,
-  BlackboxCandidate,
   BlackboxRunRequest,
-  ScorerDependencyLock,
-  BlackboxEngineCatalogResponse,
-  ColumnMapping,
-  EvalExampleResult,
-  GridSearchResult,
   ModelCatalogResponse,
   ModelPrivacySettings,
-  OptimizationDatasetResponse,
   OptimizationPayloadResponse,
   OptimizationSubmissionResponse,
   OptimizationStatusResponse,
   PaginatedJobsResponse,
-  ProfileDatasetRequest,
-  ProfileDatasetResponse,
   QueueStatusResponse,
   RepositoryFileResponse,
   RepositoryTreeResponse,
   ServeInfoResponse,
   ServeResponse,
-  ValidateCodeResponse,
-  ValidateDatasetRequest,
-  ValidateDatasetResponse,
-  WorkflowDryRunResponse,
 } from "@/shared/types/api";
-import type {
-  DataMode,
-  OptimizerCatalogResponse,
-  OptimizerTarget,
-} from "@/shared/types/unified-run";
+import type { DataMode, OptimizerCatalogResponse } from "@/shared/types/unified-run";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { forgetOAuthReturn } from "@/shared/lib/oauth-return";
 import { I18N_KEY, tI18n } from "@/shared/lib/i18n";
@@ -520,11 +502,6 @@ function parseError(text: string): {
   return {};
 }
 
-/** Rendered message from an error body, or ``undefined`` for non-JSON bodies. */
-export function parseErrorMessage(text: string): string | undefined {
-  return parseError(text).message;
-}
-
 /**
  * Fire-and-forget sender for the telemetry SDK. Best-effort by contract: it
  * never throws, never blocks, and never surfaces an error — telemetry must not
@@ -559,13 +536,6 @@ export function postTelemetry(body: unknown): void {
   }
 }
 
-export interface WorkflowDryRunStreamHandlers {
-  onToken: (field: string, chunk: string) => void;
-  onFinal: (result: WorkflowDryRunResponse) => void;
-  onError: (message: string) => void;
-  signal?: AbortSignal;
-}
-
 /** Queue a repository run on `/optimize`. */
 export function submitRepoRun(
   req: BlackboxRunRequest,
@@ -587,20 +557,11 @@ export function submitRepoRun(
   );
 }
 
-export function getOptimizerCatalog(
-  target: OptimizerTarget,
-  mode: DataMode,
-  signal?: AbortSignal,
-  source?: ApiSource,
-) {
-  const query = `artifact_kind=${encodeURIComponent(target)}&data_mode=${encodeURIComponent(mode)}`;
-  return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal }, source);
-}
-
-export function getExecutionRuntimes(hasImageInputs: boolean, signal?: AbortSignal) {
-  return request<ExecutionRuntimeCatalog>(
-    `/execution-runtimes?has_image_inputs=${hasImageInputs}`,
+export function getOptimizerCatalog(mode: DataMode, signal?: AbortSignal, source?: ApiSource) {
+  return request<OptimizerCatalogResponse>(
+    `/optimizers?data_mode=${encodeURIComponent(mode)}`,
     { signal },
+    source,
   );
 }
 
@@ -671,12 +632,6 @@ export function updateExecutionBudget(
       signal,
     },
     source,
-  );
-}
-
-export function getBlackboxEngines(target: "text" | "agent" | "repo") {
-  return request<BlackboxEngineCatalogResponse>(
-    `/blackbox/engines?target=${encodeURIComponent(target)}`,
   );
 }
 
@@ -768,7 +723,7 @@ export function deleteStorageQuotaOverride(username: string) {
   });
 }
 
-export interface NorthStarFirstLiftsWeek {
+interface NorthStarFirstLiftsWeek {
   /** Monday (UTC, `YYYY-MM-DD`) that starts the signup week. */
   signup_week: string;
   signups: number;
@@ -776,13 +731,13 @@ export interface NorthStarFirstLiftsWeek {
   first_lifts: number;
 }
 
-export interface NorthStarLiftedUsersWeek {
+interface NorthStarLiftedUsersWeek {
   week: string;
   new_lifted: number;
   returning_lifted: number;
 }
 
-export interface NorthStarInUseWeek {
+interface NorthStarInUseWeek {
   week: string;
   users_in_use: number;
 }
@@ -838,7 +793,7 @@ export interface AdminTopProgram {
   errors: number;
 }
 
-export interface AdminEventCount {
+interface AdminEventCount {
   name: string;
   count: number;
   users: number;
@@ -1071,22 +1026,6 @@ export interface AccountDeletionResult {
   anonymized_rows: number;
 }
 
-export function resolveScorerDependencies(input: {
-  code: string;
-  requirements: string[];
-  seed_candidate?: BlackboxCandidate | null;
-  execution_budget_id: string;
-  execution_budget_revision: number;
-}) {
-  return request<{
-    ok: boolean;
-    dependency_lock?: ScorerDependencyLock;
-    error?: string;
-    budget: ExecutionBudget;
-    preview_status: "succeeded" | "failed" | "pending";
-  }>("/wizard/scorer-dependencies", { method: "POST", body: JSON.stringify(input) });
-}
-
 /** Check an optimize.toml text with the repository parser; it stops at the first error. */
 export function checkOptimizeToml(text: string, signal?: AbortSignal) {
   return request<{
@@ -1138,7 +1077,7 @@ export type NotificationEventType =
 export type NotificationChannel = "inbox" | "email" | "chrome" | "slack";
 /** The channels a non-urgent event may wait on before it goes out. */
 export type NotificationHeldChannel = Exclude<NotificationChannel, "inbox">;
-export type NotificationGrid = Record<NotificationEventType, Record<NotificationChannel, boolean>>;
+type NotificationGrid = Record<NotificationEventType, Record<NotificationChannel, boolean>>;
 
 export interface NotificationPreferences {
   /** Event type -> channel -> on. */
@@ -1283,7 +1222,7 @@ export function confirmNativeNotifications(ids: string[]) {
 
 export type NotificationTab = "focused" | "everything";
 
-export interface NotificationFacts {
+interface NotificationFacts {
   score?: number | null;
   /** Score change versus the run's baseline. */
   delta?: number | null;
@@ -1446,7 +1385,7 @@ export function disconnectSlack() {
   return accountRequest<SlackConnection>("/notifications/slack", { method: "DELETE" });
 }
 
-export type ExperienceLevelValue = "guided" | "standard" | "expert";
+type ExperienceLevelValue = "guided" | "standard" | "expert";
 
 export interface AccountExperience {
   level: ExperienceLevelValue | null;
@@ -1545,7 +1484,7 @@ export interface BillingUsageEntry {
 }
 
 /** The backend's live pricing terms (markup, BYOK fee, top-up fee). */
-export interface BillingPricingTerms {
+interface BillingPricingTerms {
   usage_markup: number;
   byok_fee_fraction: number;
   purchase_fee_rate: number;
@@ -2147,7 +2086,7 @@ export function listRepoCommits(repo: string, branch: string, host: RepoHost = "
 }
 
 /** One file or folder of a GitHub repository tree. */
-export interface GithubTreeEntry {
+interface GithubTreeEntry {
   path: string;
   type: "file" | "dir";
 }
@@ -2228,11 +2167,10 @@ export interface DashboardAnalyticsJob {
   elapsed_seconds?: number | null;
   dataset_rows?: number | null;
   optimization_type?: string | null;
-  best_pair_label?: string | null;
   created_at?: string | null;
 }
 
-export interface DashboardAnalyticsNameValue {
+interface DashboardAnalyticsNameValue {
   name: string;
   value: number;
 }
@@ -2248,7 +2186,7 @@ export interface DashboardAnalyticsRangeBucket {
   avg_improvement: number | null;
 }
 
-export interface DashboardAnalyticsOptimizerStat {
+interface DashboardAnalyticsOptimizerStat {
   name: string;
   count: number;
   success_count: number;
@@ -2257,7 +2195,7 @@ export interface DashboardAnalyticsOptimizerStat {
   avg_runtime_minutes: number | null;
 }
 
-export interface DashboardAnalyticsModelStat {
+interface DashboardAnalyticsModelStat {
   name: string;
   count: number;
   success_count: number;
@@ -2265,7 +2203,7 @@ export interface DashboardAnalyticsModelStat {
   avg_improvement: number | null;
 }
 
-export interface DashboardAnalyticsTimelineBucket {
+interface DashboardAnalyticsTimelineBucket {
   date: string;
   count: number;
   success_count: number;
@@ -2293,8 +2231,6 @@ export interface DashboardAnalytics {
   best_improvement: number | null;
   avg_runtime_seconds: number | null;
   total_dataset_rows: number;
-  total_pairs_run: number;
-  grid_search_count: number;
   single_run_count: number;
   improvement_histogram: DashboardAnalyticsRangeBucket[];
   runtime_histogram: DashboardAnalyticsRangeBucket[];
@@ -2391,10 +2327,9 @@ export function getJob(
   );
 }
 
-/** A run's charges and model activity, pre-aggregated per role, model, stage, pair and candidate. */
-export function getRunUsage(optimizationId: string, pairIndex?: number | null) {
-  const qs = pairIndex == null ? "" : `?pair_index=${pairIndex}`;
-  return request<RunUsage>(`/optimizations/${encodeURIComponent(optimizationId)}/usage${qs}`);
+/** A run's charges and model activity, pre-aggregated per role, model, stage and candidate. */
+export function getRunUsage(optimizationId: string) {
+  return request<RunUsage>(`/optimizations/${encodeURIComponent(optimizationId)}/usage`);
 }
 
 /** Continuous optimization of one run: its plan (or null) and whether one can start. */
@@ -2475,14 +2410,6 @@ export function getOptimizationPayload(optimizationId: string, source?: ApiSourc
   );
 }
 
-export function getOptimizationDataset(optimizationId: string, source?: ApiSource) {
-  return request<OptimizationDatasetResponse>(
-    `/optimizations/${optimizationId}/dataset`,
-    undefined,
-    source,
-  );
-}
-
 // A repository run's pinned commit never changes, so its tree and files are
 // cached for the page's lifetime.
 const REPOSITORY_CACHE_MS = Number.POSITIVE_INFINITY;
@@ -2504,13 +2431,6 @@ export function getRepositoryFile(optimizationId: string, path: string, source?:
     REPOSITORY_CACHE_MS,
     source,
   );
-}
-
-export function getTestResults(optimizationId: string, source?: ApiSource) {
-  return request<{
-    baseline: EvalExampleResult[];
-    optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/test-results`, undefined, source);
 }
 
 /**
@@ -2630,8 +2550,6 @@ export interface SharedOptimizationData {
   owner: string | null;
   status: OptimizationStatusResponse;
   payload: Record<string, unknown>;
-  dataset: OptimizationDatasetResponse | null;
-  test_results: { baseline: EvalExampleResult[]; optimized: EvalExampleResult[] } | null;
   serve_info: ServeInfoResponse | null;
 }
 
@@ -3198,11 +3116,6 @@ export function claimSharedDataset(token: string) {
   });
 }
 
-/** Public read — no auth token required; the token in the path is the capability. */
-export function getSharedOptimization(token: string) {
-  return request<SharedOptimizationData>(`/share/${encodeURIComponent(token)}`);
-}
-
 /**
  * Scrubbed read-only composite for a PUBLIC (Explore-corpus) optimization, by id.
  * Returns the same shape as a shared read, so the detail view can render it
@@ -3293,15 +3206,6 @@ export async function resumeJob(optimizationId: string, source?: ApiSource) {
 export async function deleteJob(optimizationId: string) {
   const res = await request<{ optimization_id: string; deleted: boolean }>(
     `/optimizations/${optimizationId}`,
-    { method: "DELETE" },
-  );
-  invalidateCache("/optimizations");
-  return res;
-}
-
-export async function deleteGridPair(optimizationId: string, pairIndex: number) {
-  const res = await request<GridSearchResult>(
-    `/optimizations/${optimizationId}/pair/${pairIndex}`,
     { method: "DELETE" },
   );
   invalidateCache("/optimizations");
@@ -3531,13 +3435,6 @@ export async function bulkPinOptimizations(optimizationIds: string[], value: boo
   return res;
 }
 
-export function profileDataset(payload: ProfileDatasetRequest) {
-  return request<ProfileDatasetResponse>("/datasets/profile", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
 export function stageDatasetForAgent(payload: {
   dataset: Array<Record<string, unknown>>;
   dataset_filename: string;
@@ -3620,39 +3517,6 @@ export const setupDraftApi = {
     }),
 };
 
-export function validateCode(payload: {
-  signature_code?: string;
-  metric_code?: string;
-  column_mapping: ColumnMapping;
-  sample_row?: Record<string, unknown>;
-  optimizer_name?: string;
-  module_name?: string;
-}) {
-  return request<ValidateCodeResponse>("/validate-code", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function validateDataset(payload: ValidateDatasetRequest) {
-  return request<ValidateDatasetResponse>("/datasets/validate", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export interface McpProbeTool {
-  name: string;
-  description: string | null;
-}
-
-export interface McpProbeResponse {
-  ok: boolean;
-  tool_count: number;
-  tools: McpProbeTool[];
-  error: string | null;
-}
-
 /**
  * Finish an OAuth sign-in at ``path`` (from ``oauthFinishPath``) with the state
  * and code that the callback passed in the URL fragment. The backend links the
@@ -3663,14 +3527,6 @@ export function finishOAuth(path: string, { state, code }: { state: string; code
   return request<{ name?: string; connectors?: ConnectorStatus[] } | undefined>(path, {
     method: "POST",
     body: JSON.stringify({ state, code }),
-  });
-}
-
-/** Check that a live MCP server answers and list its tools (wizard preflight). */
-export function probeMcp(payload: { mcp_url: string; auth_header?: string }) {
-  return request<McpProbeResponse>("/mcp/probe", {
-    method: "POST",
-    body: JSON.stringify(payload),
   });
 }
 
@@ -3689,9 +3545,6 @@ export interface SidebarJobItem {
   created_at?: string | null;
   pinned?: boolean;
   optimization_type?: string | null;
-  total_pairs?: number | null;
-  completed_pairs?: number | null;
-  failed_pairs?: number | null;
   /** True when this run stopped mid-optimization and can be resumed in place; drives Resume vs Restart. */
   resumable?: boolean;
   /** True when this running job has a checkpoint and can pause without losing progress. */
@@ -3757,7 +3610,7 @@ export interface RunFolder {
 }
 
 /** Access a member holds through a parent folder, shown read-only. */
-export interface InheritedFolderMember {
+interface InheritedFolderMember {
   username: string;
   role: MemberRole;
   folder_id: string;
@@ -3966,17 +3819,6 @@ export function setServingEnabled(optimizationId: string, enabled: boolean, sour
   );
 }
 
-export function getPairServeInfo(optimizationId: string, pairIndex: number) {
-  return request<ServeInfoResponse>(`/serve/${optimizationId}/pair/${pairIndex}/info`);
-}
-
-export function getPairTestResults(optimizationId: string, pairIndex: number, source?: ApiSource) {
-  return request<{
-    baseline: EvalExampleResult[];
-    optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/pair/${pairIndex}/test-results`, undefined, source);
-}
-
 export function serveProgram(
   optimizationId: string,
   inputs: Record<string, unknown>,
@@ -3992,20 +3834,6 @@ export function serveProgram(
     },
     source,
   );
-}
-
-/** Run inference through one grid-search pair (non-streaming). */
-export function servePairProgram(
-  optimizationId: string,
-  pairIndex: number,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-) {
-  return request<ServeResponse>(`/serve/${optimizationId}/pair/${pairIndex}`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
 }
 
 /** Deliver a message into the running turn opened with `steerKey`; resolves

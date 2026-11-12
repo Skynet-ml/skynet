@@ -57,7 +57,6 @@ from ..storage.models import (
     DesktopLinkModel,
     DesktopTokenModel,
     GepaCheckpointModel,
-    GridPairResultModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -516,20 +515,11 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
         result = session.execute(statement, execution_options={"synchronize_session": False})
         anonymized += result.rowcount or 0
 
-    owned_job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
-    child_job_ids = (
-        list(
-            session.scalars(select(JobModel.optimization_id).where(JobModel.parent_optimization_id.in_(owned_job_ids)))
-        )
-        if owned_job_ids
-        else []
-    )
-    job_ids = list({*owned_job_ids, *child_job_ids})
+    job_ids = list(session.scalars(select(JobModel.optimization_id).where(JobModel.username == username)))
     if job_ids:
         _run_delete(delete(ProgressEventModel).where(ProgressEventModel.optimization_id.in_(job_ids)))
         _run_delete(delete(LogEntryModel).where(LogEntryModel.optimization_id.in_(job_ids)))
         _run_delete(delete(GepaCheckpointModel).where(GepaCheckpointModel.optimization_id.in_(job_ids)))
-        _run_delete(delete(GridPairResultModel).where(GridPairResultModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareGrantModel).where(OptimizationShareGrantModel.optimization_id.in_(job_ids)))
         _run_delete(delete(OptimizationShareLinkModel).where(OptimizationShareLinkModel.optimization_id.in_(job_ids)))
         _run_delete(delete(JobModel).where(JobModel.optimization_id.in_(job_ids)))

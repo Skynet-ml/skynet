@@ -8,9 +8,8 @@ from ..billing.byok_bridge import payload_uses_token_source
 from ..config import settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED, TOKEN_SOURCE_SUBSCRIPTION
 from ..local.cli_catalog import parse_subscription_model_id
-from ..models import BlackboxRunRequest, RunRequest, UnifiedRunRequest
+from ..models import BlackboxRunRequest
 from ..models.common import ModelConfig
-from ..models.submissions import _OptimizationRequestBase
 from ..models.unified import UnifiedModels
 from ..sandbox.bridge import provider_offered
 from ..service_gateway.optimization.unified.metric_model import resolve_metric_model
@@ -21,72 +20,43 @@ LOCAL_EXECUTION_RUNTIME = "docker"
 
 
 def request_model_configs(
-    payload: _OptimizationRequestBase | BlackboxRunRequest | UnifiedRunRequest,
+    payload: BlackboxRunRequest,
 ) -> list[ModelConfig]:
     """Return every executable model config carried by a submission.
 
     Args:
-        payload: Run, Anything, or unified request.
+        payload: Repository run request.
 
     Returns:
         Model configs in execution order.
     """
-    if isinstance(payload, BlackboxRunRequest):
-        if payload.scorer.kind == "python":
-            models = UnifiedModels(
-                reflection_model=payload.reflection_model_settings,
-                metric_model=payload.scorer.model,
-                task_model=payload.task_model_settings,
-                extra_reflection_models=payload.extra_reflection_model_settings,
-            )
-            if models.reflection_model.token_source is None:
-                models.reflection_model.token_source = payload.token_source
-            error = resolve_metric_model(models, str(payload.scorer.metric_code or ""))
-            if error:
-                raise DomainError(error, status=422)
-            payload.scorer.model = models.metric_model
-        return [
-            config
-            for config in (
-                payload.task_model_settings,
-                payload.reflection_model_settings,
-                *payload.extra_reflection_model_settings,
-                payload.scorer.model,
-            )
-            if config is not None
-        ]
-    if isinstance(payload, RunRequest):
-        return [
-            config
-            for config in (
-                payload.model_settings,
-                payload.reflection_model_settings,
-                payload.task_model_settings,
-            )
-            if config is not None
-        ]
-    if isinstance(payload, UnifiedRunRequest):
-        models = payload.models
+    if payload.scorer.kind == "python":
+        models = UnifiedModels(
+            reflection_model=payload.reflection_model_settings,
+            metric_model=payload.scorer.model,
+            task_model=payload.task_model_settings,
+            extra_reflection_models=payload.extra_reflection_model_settings,
+        )
         if models.reflection_model.token_source is None:
             models.reflection_model.token_source = payload.token_source
-        error = resolve_metric_model(models, payload.workspace.metric_code)
+        error = resolve_metric_model(models, str(payload.scorer.metric_code or ""))
         if error:
             raise DomainError(error, status=422)
-        return [
-            config
-            for config in (
-                models.task_model,
-                models.reflection_model,
-                *models.extra_reflection_models,
-                models.metric_model,
-            )
-            if config is not None
-        ]
-    return []
+        payload.scorer.model = models.metric_model
+    return [
+        config
+        for config in (
+            payload.task_model_settings,
+            payload.reflection_model_settings,
+            *payload.extra_reflection_model_settings,
+            payload.scorer.model,
+        )
+        if config is not None
+    ]
 
 
 def normalize_model_token_sources(
-    payload: _OptimizationRequestBase | BlackboxRunRequest | UnifiedRunRequest,
+    payload: BlackboxRunRequest,
 ) -> tuple[list[ModelConfig], dict[str, str]]:
     """Resolve legacy job-level sources into explicit per-model sources.
 
@@ -96,7 +66,7 @@ def normalize_model_token_sources(
     whatever source the request names.
 
     Args:
-        payload: Run, Anything, or unified request to normalize in place.
+        payload: Repository run request to normalize in place.
 
     Returns:
         The model configs and their normalized model-to-source billing map.
@@ -132,7 +102,7 @@ def normalize_model_token_sources(
 
 
 def enforce_local_mode_sources(
-    payload: _OptimizationRequestBase | BlackboxRunRequest | UnifiedRunRequest,
+    payload: BlackboxRunRequest,
     requested_source: str,
     model_configs: list[ModelConfig],
 ) -> None:

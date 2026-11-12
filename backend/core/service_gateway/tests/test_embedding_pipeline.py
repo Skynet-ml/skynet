@@ -89,32 +89,6 @@ def test_extract_metadata_run_returns_overview_model() -> None:
     assert job_type == "run"
 
 
-def test_extract_metadata_grid_search_uses_best_pair() -> None:
-    """A grid-search job's winner is ``result.best_pair.generation_model``."""
-    job = _success_job(
-        payload_overview={
-            "username": "alice",
-            "optimization_type": "grid_search",
-            "name": "Grid task",
-        },
-        result={"best_pair": {"generation_model": "openai/gpt-4o"}},
-    )
-    model, job_type = pipeline._extract_metadata(job)
-    assert model == "openai/gpt-4o"
-    assert job_type == "grid_search"
-
-
-def test_extract_metadata_grid_search_without_best_pair_returns_none() -> None:
-    """Missing ``best_pair`` falls back to ``None`` model, preserving the type."""
-    job = _success_job(
-        payload_overview={"username": "alice", "optimization_type": "grid_search"},
-        result={},
-    )
-    model, job_type = pipeline._extract_metadata(job)
-    assert model is None
-    assert job_type == "grid_search"
-
-
 def test_extract_scores_run_uses_latest_metrics() -> None:
     """A run job reads ``latest_metrics.baseline/optimized``."""
     job = _success_job()
@@ -137,24 +111,6 @@ def test_extract_scores_run_falls_back_to_result_baseline() -> None:
     baseline, optimized = pipeline._extract_scores(job)
     assert baseline == 85.0
     assert optimized == 90.0
-
-
-def test_extract_scores_grid_search_uses_best_pair() -> None:
-    """A grid-search job prefers the winning pair's scores over latest_metrics."""
-    job = _success_job(
-        payload_overview={"username": "alice", "optimization_type": "grid_search"},
-        latest_metrics={"baseline_test_metric": 10.0, "optimized_test_metric": 12.0},
-        result={
-            "best_pair": {
-                "generation_model": "openai/gpt-4o",
-                "baseline_test_metric": 60.0,
-                "optimized_test_metric": 88.0,
-            }
-        },
-    )
-    baseline, optimized = pipeline._extract_scores(job)
-    assert baseline == 60.0
-    assert optimized == 88.0
 
 
 def test_extract_scores_handles_non_numeric_metrics() -> None:

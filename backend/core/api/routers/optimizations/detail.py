@@ -1,16 +1,10 @@
-"""Single-optimization read routes and evaluate-examples. [MIXED]
+"""Single-optimization read routes. [MIXED]
 
 Public dev surface (in ``_SCALAR_PUBLIC_PATHS``):
 - ``GET /optimizations/{id}`` — full job state.
 - ``GET /optimizations/{id}/summary`` — compact metrics summary.
-- ``GET /optimizations/{id}/artifact`` — download the trained program.
-- ``GET /optimizations/{id}/grid-result`` — per-pair grid-search results.
 
 Internal (frontend-only, hidden from public docs):
-- ``GET /optimizations/{id}/dataset`` — dataset reshuffle for the UI.
-- ``POST /optimizations/{id}/evaluate-examples`` — per-user playground.
-- ``GET /optimizations/{id}/test-results``
-- ``GET /optimizations/{id}/pair/{idx}/test-results``
 - ``GET /optimizations/{id}/agent-runs/{run_id}`` — one sandboxed agent run's answer and transcript.
 - ``GET /optimizations/{id}/candidates`` — the run's candidates with state, call count and cost (owner only).
 - ``GET /optimizations/{id}/candidates/{candidate_id}/calls`` — one candidate's relay calls after a cursor (owner only).
@@ -20,79 +14,42 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import random
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
-import dspy
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
-from fastapi.responses import StreamingResponse
-from pydantic import AliasChoices, BaseModel, Field, ValidationError
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
+from pydantic import ValidationError
 
-from ....billing import ProviderKeyVault, resolve_byok_model_config
-from ....billing.budget_amounts import MAX_CENTS
 from ....config import settings
-from ....constants import (
-    OPTIMIZATION_TYPE_BLACKBOX,
-    OPTIMIZATION_TYPE_GRID_SEARCH,
-    OPTIMIZATION_TYPE_RUN,
-    PAYLOAD_OVERVIEW_MODEL_NAME,
-    PAYLOAD_OVERVIEW_MODEL_SETTINGS,
-    PAYLOAD_OVERVIEW_MODULE_KWARGS,
-    PAYLOAD_OVERVIEW_MODULE_NAME,
-    PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
-    PAYLOAD_OVERVIEW_SIGNATURE_CODE,
-    PAYLOAD_OVERVIEW_WORKFLOW,
-    TOKEN_SOURCE_BYOK,
-    TOKEN_SOURCE_MANAGED,
-)
+from ....constants import OPTIMIZATION_TYPE_BLACKBOX, PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE
 from ....models import (
     BlackboxAgentRunResponse,
     BlackboxRunResponse,
-    ColumnMapping,
-    GridSearchResponse,
     JobLogEntry,
-    ModelConfig,
     OptimizationStatus,
     OptimizationStatusResponse,
     OptimizationSummaryResponse,
-    ProgramArtifactResponse,
-    RunResponse,
-    SplitFractions,
 )
 from ....models.run_calls import RunCallPage, RunCandidateList
-from ....registry import ResolverError, resolve_module_factory
-from ....service_gateway.language_models import build_language_model
-from ....service_gateway.optimization.data import load_metric_from_code, load_signature_from_code
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import (
     compute_elapsed,
-    extract_estimated_remaining,
-    job_owner,
     overview_to_base_fields,
     parse_overview,
     parse_timestamp,
     status_to_job_status,
 )
 from ...errors import DomainError
-from ...protected_interaction import run_protected_interaction
 from ...sharing_access import ShareRole
 from .._helpers import (
-    _artifact_has_payload,
-    _materialize_program,
-    _program_cache,
-    _protected_api_runtime,
     build_summary,
     is_pausable,
     is_resumable,
     load_job_for_user,
     load_job_with_role,
-    require_unprotected_api_execution,
-    stable_seed,
 )
 from ..constants import TERMINAL_STATUSES
-from ._local import execution_budget_view, remap_test_indices
-from ._program_export import build_program_export_zip
+from ._local import execution_budget_view
 
 logger = logging.getLogger(__name__)
 
@@ -182,31 +139,6 @@ def _delta_offset(raw: str | None, count: int, cap: int | None) -> int:
     return since
 
 
-_EVALUATE_EXAMPLES_MAX_INDICES = 100
-
-
-class EvaluateExamplesRequest(BaseModel):
-    """Request body for ``POST /optimizations/{id}/evaluate-examples``."""
-
-    indices: list[int] = Field(
-        default_factory=list,
-        max_length=_EVALUATE_EXAMPLES_MAX_INDICES,
-        description="Dataset row indices to evaluate; out-of-range indices are skipped.",
-    )
-    program_type: Literal["optimized", "baseline"] = Field(
-        default="optimized",
-        description="Which program to run: the optimized result or the baseline.",
-    )
-    max_cost_cents: int | None = Field(
-        validation_alias=AliasChoices("max_cost_cents", "max_cost_credits"),
-        default=None,
-        ge=1,
-        le=MAX_CENTS,
-        strict=True,
-        description="Optional cap in cents for this one evaluation request; omitted, it draws on the account balance.",
-    )
-
-
 def register_detail_routes(router: APIRouter, *, job_store) -> None:
     """Register single-optimization read routes on ``router``.
 
@@ -233,8 +165,7 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         unchanged) and delta fetches via the optional ``since_progress`` /
         ``since_log`` query params, which return only the stream rows past the
         given offsets (the response echoes the honored start index in
-        ``progress_offset`` / ``logs_offset``). Grid searches include partial
-        ``grid_result`` while still running. Corrupted result data is omitted
+        ``progress_offset`` / ``logs_offset``). Corrupted result data is omitted
         with a warning rather than raising 500. 404 if the optimization id is
         unknown or the caller doesn't own it (non-admins).
 
@@ -307,45 +238,24 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         progress_events = job_store.get_progress_events(optimization_id, since=progress_offset)
         logs = job_store.get_logs(optimization_id, offset=logs_offset)
 
-        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
+        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE)
 
-        result = None
-        grid_result = None
         blackbox_result = None
         result_data = job_data.get("result")
-        if result_data and isinstance(result_data, dict):
+        if (
+            result_data
+            and isinstance(result_data, dict)
+            and status in {OptimizationStatus.success, OptimizationStatus.stopped}
+            and optimization_type == OPTIMIZATION_TYPE_BLACKBOX
+        ):
             try:
-                if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-                    grid_result = GridSearchResponse.model_validate(result_data)
-                elif (
-                    status in {OptimizationStatus.success, OptimizationStatus.stopped}
-                    and optimization_type == OPTIMIZATION_TYPE_BLACKBOX
-                ):
-                    blackbox_result = BlackboxRunResponse.model_validate(result_data)
-                elif status in {OptimizationStatus.success, OptimizationStatus.stopped}:
-                    result = RunResponse.model_validate(result_data)
+                blackbox_result = BlackboxRunResponse.model_validate(result_data)
             except ValidationError:
                 logger.warning("Optimization %s has corrupted result data", optimization_id)
 
         created_at = parse_timestamp(job_data.get("created_at")) or datetime.now(UTC)
         started_at = parse_timestamp(job_data.get("started_at"))
         completed_at = parse_timestamp(job_data.get("completed_at"))
-
-        est_remaining = None
-        if status not in TERMINAL_STATUSES:
-            est_remaining = extract_estimated_remaining(job_data)
-
-        completed_pairs = None
-        failed_pairs = None
-        if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-            if grid_result:
-                completed_pairs = grid_result.completed_pairs
-                failed_pairs = grid_result.failed_pairs
-            else:
-                live_completed = latest_metrics.get("completed_so_far")
-                completed_pairs = live_completed if isinstance(live_completed, int) else 0
-                live_failed = latest_metrics.get("failed_so_far")
-                failed_pairs = live_failed if isinstance(live_failed, int) else 0
 
         elapsed_str, elapsed_secs = compute_elapsed(
             created_at, started_at, completed_at, job_data.get("accumulated_runtime_seconds") or 0.0
@@ -361,7 +271,6 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
             completed_at=completed_at,
             elapsed=elapsed_str,
             elapsed_seconds=elapsed_secs,
-            estimated_remaining=est_remaining,
             **overview_to_base_fields(overview),
             message=job_data.get("message"),
             stop_reason=job_data.get("stop_reason"),
@@ -371,14 +280,10 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
             recovery=job_data.get("recovery"),
             stored_bytes=job_data.get("stored_bytes", 0),
             latest_metrics=latest_metrics,
-            completed_pairs=completed_pairs,
-            failed_pairs=failed_pairs,
             progress_events=progress_events,
             progress_offset=progress_offset,
             logs=[JobLogEntry(**log) for log in logs],
             logs_offset=logs_offset,
-            result=result,
-            grid_result=grid_result,
             blackbox_result=blackbox_result,
             effective_role=effective_role,
             resumable=is_resumable(job_store, job_data),
@@ -432,315 +337,6 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         summary = build_summary(job_data)
         summary.resumable = is_resumable(job_store, job_data)
         return summary
-
-    @router.get(
-        "/optimizations/{optimization_id}/dataset",
-        summary="Reconstruct the train/val/test split used by this optimization",
-    )
-    def get_job_dataset(optimization_id: str, current_user: AuthenticatedUserDep) -> dict:
-        """Reconstruct the train/val/test split deterministically from the stored seed.
-
-        Each row includes its global dataset index for UI highlighting.
-
-        Args:
-            optimization_id: Optimization id whose dataset should be returned.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Returns:
-            A dict with ``total_rows``, ``splits``, ``column_mapping``, and
-            ``split_counts``.
-
-        Raises:
-            DomainError: 404 (optimization unknown / payload/dataset
-                missing / inaccessible), 500 (corrupt mapping).
-        """
-        job_data = load_job_for_user(job_store, optimization_id, current_user)
-
-        payload = job_data.get("payload")
-        if not payload or not isinstance(payload, dict):
-            raise DomainError("optimization.payload_unavailable", status=404)
-
-        dataset = payload.get("dataset")
-        if not dataset or not isinstance(dataset, list):
-            raise DomainError("optimization.dataset_unavailable", status=404)
-
-        raw_mapping = payload.get("column_mapping", {})
-        try:
-            column_mapping = ColumnMapping.model_validate(raw_mapping)
-        except ValidationError:
-            raise DomainError("optimization.corrupt_column_mapping", status=500) from None
-
-        raw_fractions = payload.get("split_fractions", {})
-        try:
-            fractions = SplitFractions.model_validate(raw_fractions)
-        except ValidationError:
-            fractions = SplitFractions()
-
-        shuffle = payload.get("shuffle", True)
-        seed = payload.get("seed")
-
-        # Replicates the service_gateway/data.py split algorithm. When seed
-        # is None, derive a stable seed from optimization_id so repeated
-        # calls produce the same shuffle (needed for index remapping).
-        effective_seed = seed if seed is not None else stable_seed(optimization_id)
-        total = len(dataset)
-        indices = list(range(total))
-        if shuffle:
-            rng = random.Random(effective_seed)
-            rng.shuffle(indices)
-
-        train_end = int(total * fractions.train)
-        val_end = train_end + int(total * fractions.val)
-        train_indices = indices[:train_end]
-        val_indices = indices[train_end:val_end]
-        test_indices = indices[val_end:]
-
-        splits = {
-            "train": [{"index": i, "row": dataset[i]} for i in train_indices],
-            "val": [{"index": i, "row": dataset[i]} for i in val_indices],
-            "test": [{"index": i, "row": dataset[i]} for i in test_indices],
-        }
-
-        return {
-            "total_rows": total,
-            "splits": splits,
-            "column_mapping": {
-                "inputs": column_mapping.inputs,
-                "outputs": column_mapping.outputs,
-            },
-            "split_counts": {
-                "train": len(train_indices),
-                "val": len(val_indices),
-                "test": len(test_indices),
-            },
-        }
-
-    @router.post(
-        "/optimizations/{optimization_id}/evaluate-examples",
-        summary="Run the optimized or baseline program on specific dataset rows",
-    )
-    def evaluate_examples(
-        optimization_id: str,
-        req: EvaluateExamplesRequest,
-        current_user: AuthenticatedUserDep,
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    ) -> dict:
-        """Run the optimized or baseline program on specific dataset rows.
-
-        Out-of-range indices are silently skipped.
-
-        Args:
-            optimization_id: Optimization id whose program should run.
-            req: Validated body with bounded ``indices`` and ``program_type``.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Returns:
-            ``{"results": [...], "program_type": ...}`` with one entry per
-            evaluated row.
-
-        Raises:
-            DomainError: 404 (missing/inaccessible optimization or payload),
-                400 (no metric/model/module), 409 (no result available for
-                the optimized program or no protected interactive sandbox).
-        """
-        indices = req.indices
-        program_type = req.program_type
-
-        job_data = load_job_for_user(job_store, optimization_id, current_user)
-        if _protected_api_runtime(job_data) is not None:
-            key = (idempotency_key or "").strip()
-            if not key:
-                raise DomainError("budget.idempotency_required", status=400)
-            payload = job_data.get("payload")
-            if not isinstance(payload, dict):
-                raise DomainError("optimization.no_payload", status=404)
-            overview = parse_overview(job_data)
-            model_settings = payload.get("model_config") or overview.get(PAYLOAD_OVERVIEW_MODEL_SETTINGS, {})
-            model_name = str(overview.get(PAYLOAD_OVERVIEW_MODEL_NAME) or "")
-            if model_settings:
-                model_config = ModelConfig.model_validate(model_settings)
-            elif model_name:
-                model_config = ModelConfig(name=model_name)
-            else:
-                raise DomainError("optimization.no_model_config", status=400)
-            artifact = None
-            if req.program_type == "optimized":
-                result_data = job_data.get("result")
-                if not isinstance(result_data, dict):
-                    raise DomainError("optimization.no_result_for_artifact", status=409)
-                artifact = result_data.get("program_artifact")
-                if artifact is None and isinstance(result_data.get("best_pair"), dict):
-                    artifact = result_data["best_pair"].get("program_artifact")
-                if not isinstance(artifact, dict):
-                    raise DomainError("optimization.no_program_artifact", status=409)
-            interaction_payload = {
-                "dataset": payload.get("dataset") or [],
-                "column_mapping": payload.get("column_mapping") or {},
-                "metric_code": payload.get("metric_code") or "",
-                "signature_code": payload.get("signature_code") or overview.get(PAYLOAD_OVERVIEW_SIGNATURE_CODE) or "",
-                "module_name": payload.get("module_name") or overview.get(PAYLOAD_OVERVIEW_MODULE_NAME) or "predict",
-                "module_kwargs": payload.get("module_kwargs") or overview.get(PAYLOAD_OVERVIEW_MODULE_KWARGS) or {},
-                "model_config": model_config.model_dump(mode="json"),
-                "token_source": model_config.token_source or TOKEN_SOURCE_MANAGED,
-                "payload_overview": overview,
-                "program_artifact": artifact,
-                "_interaction": {
-                    "kind": "evaluate",
-                    "indices": req.indices,
-                    "program_type": req.program_type,
-                },
-            }
-            if payload.get("tool_source") is not None:
-                interaction_payload["tool_source"] = payload["tool_source"]
-            stored_budget_id = job_data.get("execution_budget_id") or payload.get("execution_budget_id")
-            result = run_protected_interaction(
-                interaction_payload,
-                kind="evaluate",
-                max_cost_cents=req.max_cost_cents,
-                idempotency_key=key,
-                user=current_user,
-                job_store=job_store,
-                credential_owner=job_owner(job_data),
-                credential_binding_id=stored_budget_id,
-            )
-            if result.get("error"):
-                raise DomainError("serve.protected_interaction_failed", status=502, error=result["error"])
-            return result
-        require_unprotected_api_execution(job_data)
-
-        overview = parse_overview(job_data)
-        payload = job_data.get("payload")
-        if not payload or not isinstance(payload, dict):
-            raise DomainError("optimization.no_payload", status=404)
-
-        dataset = payload.get("dataset", [])
-        total = len(dataset)
-        column_mapping_raw = payload.get("column_mapping", {})
-        try:
-            column_mapping = ColumnMapping.model_validate(column_mapping_raw)
-        except ValidationError:
-            raise DomainError("optimization.corrupt_column_mapping", status=500) from None
-
-        metric_code = payload.get("metric_code", "")
-        if not metric_code:
-            raise DomainError("optimization.no_metric_code", status=400)
-        metric = load_metric_from_code(metric_code)
-
-        model_settings = payload.get("model_config") or overview.get(PAYLOAD_OVERVIEW_MODEL_SETTINGS, {})
-        model_name_str = overview.get(PAYLOAD_OVERVIEW_MODEL_NAME, "")
-        model_config = None
-        if model_settings:
-            try:
-                model_config = ModelConfig.model_validate(model_settings)
-            except ValidationError:
-                logger.warning("Optimization %s has a corrupt model_config; trying the model name", optimization_id)
-        if model_config is None:
-            if model_name_str:
-                model_config = ModelConfig(name=model_name_str)
-            else:
-                raise DomainError("optimization.no_model_config", status=400)
-
-        if model_config.token_source == TOKEN_SOURCE_BYOK:
-            engine = getattr(job_store, "engine", None)
-            if engine is None:
-                raise DomainError("billing.byok_missing_connection", status=400, provider="")
-            try:
-                model_config = resolve_byok_model_config(
-                    model_config,
-                    username=current_user.username,
-                    vault=ProviderKeyVault(engine=engine),
-                )
-            except ValueError as exc:
-                raise DomainError("billing.byok_missing_connection", status=400, provider=str(exc)) from exc
-        lm = build_language_model(model_config)
-
-        if program_type == "baseline":
-            signature_code = payload.get("signature_code", "")
-            signature_cls = load_signature_from_code(signature_code)
-            module_name = payload.get("module_name", "predict")
-            module_kwargs = dict(payload.get("module_kwargs", {}))
-
-            try:
-                module_factory, auto_signature = resolve_module_factory(module_name)
-            except ResolverError as exc:
-                raise DomainError("submission.module_resolve_failed", status=400, error=str(exc)) from exc
-            if auto_signature or "signature" not in module_kwargs:
-                module_kwargs["signature"] = signature_cls
-            program = module_factory(**module_kwargs)
-        else:
-            result_data = job_data.get("result")
-            if not result_data:
-                raise DomainError("optimization.no_result_for_artifact", status=409)
-            result = RunResponse.model_validate(result_data)
-            artifact = result.program_artifact
-            if not _artifact_has_payload(artifact):
-                raise DomainError("optimization.no_program_artifact", status=409)
-            if optimization_id not in _program_cache:
-                # Pre-migration jobs may not have signature_code in their
-                # ``payload_overview``, but the original ``payload`` row
-                # always carries it — fall back to that so legacy runs can
-                # still be reconstructed.
-                effective_overview = {
-                    **overview,
-                    PAYLOAD_OVERVIEW_SIGNATURE_CODE: (
-                        overview.get(PAYLOAD_OVERVIEW_SIGNATURE_CODE) or payload.get("signature_code")
-                    ),
-                    PAYLOAD_OVERVIEW_MODULE_NAME: (
-                        overview.get(PAYLOAD_OVERVIEW_MODULE_NAME) or payload.get("module_name")
-                    ),
-                    PAYLOAD_OVERVIEW_MODULE_KWARGS: (
-                        overview.get(PAYLOAD_OVERVIEW_MODULE_KWARGS) or payload.get("module_kwargs", {})
-                    ),
-                }
-                _program_cache[optimization_id] = _materialize_program(artifact, effective_overview)
-            program = _program_cache[optimization_id]
-
-        results = []
-        with dspy.context(lm=lm):
-            for idx in indices:
-                if idx < 0 or idx >= total:
-                    continue
-                row = dataset[idx]
-                example_dict = {}
-                for sig_field, col_name in column_mapping.inputs.items():
-                    example_dict[sig_field] = row.get(col_name, "")
-                for sig_field, col_name in column_mapping.outputs.items():
-                    example_dict[sig_field] = row.get(col_name, "")
-
-                example = dspy.Example(**example_dict).with_inputs(*list(column_mapping.inputs.keys()))
-
-                try:
-                    prediction = program(**{k: example_dict[k] for k in column_mapping.inputs})
-                    outputs = {}
-                    for sig_field in column_mapping.outputs:
-                        outputs[sig_field] = getattr(prediction, sig_field, None)
-
-                    try:
-                        score = metric(example, prediction)
-                        score = float(score) if isinstance(score, int | float | bool) else 0.0
-                    except Exception:
-                        score = 0.0
-
-                    results.append(
-                        {
-                            "index": idx,
-                            "outputs": outputs,
-                            "score": score,
-                            "pass": score > 0,
-                        }
-                    )
-                except Exception as exc:
-                    results.append(
-                        {
-                            "index": idx,
-                            "outputs": {},
-                            "score": 0.0,
-                            "pass": False,
-                            "error": str(exc),
-                        }
-                    )
-
-        return {"results": results, "program_type": program_type}
 
     @router.get(
         "/optimizations/{optimization_id}/agent-runs/{run_id}",
@@ -889,359 +485,3 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
                 "has_more": len(calls) > limit,
             }
         )
-
-    @router.get(
-        "/optimizations/{optimization_id}/test-results",
-        summary="Per-example baseline and optimized test scores",
-        tags=["agent"],
-    )
-    def get_test_results(optimization_id: str, current_user: AuthenticatedUserDep) -> dict:
-        """Return stored per-example baseline and optimized test scores.
-
-        Sequential test-split indices are remapped to global dataset indices for
-        UI use. No inference is executed.
-
-        Args:
-            optimization_id: Optimization id whose test results should be returned.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Returns:
-            ``{"baseline": [...], "optimized": [...]}`` with global indices.
-
-        Raises:
-            DomainError: 404 if unknown or inaccessible, 409 if no result yet.
-        """
-        job_data = load_job_for_user(job_store, optimization_id, current_user)
-
-        result_data = job_data.get("result")
-        if not result_data:
-            raise DomainError("optimization.no_result_pending", status=409)
-
-        try:
-            result = RunResponse.model_validate(result_data)
-        except ValidationError:
-            raise DomainError("optimization.corrupt_result", status=500) from None
-
-        payload = job_data.get("payload")
-        if not isinstance(payload, dict):
-            raise DomainError("optimization.payload_unavailable", status=404)
-        dataset = payload.get("dataset", [])
-        total = len(dataset)
-        fractions_raw = payload.get("split_fractions", {})
-        try:
-            fractions = SplitFractions.model_validate(fractions_raw)
-        except ValidationError:
-            fractions = SplitFractions()
-        shuffle = payload.get("shuffle", True)
-        seed = payload.get("seed")
-        effective_seed = seed if seed is not None else stable_seed(optimization_id)
-
-        ordered = list(range(total))
-        if shuffle:
-            rng = random.Random(effective_seed)
-            rng.shuffle(ordered)
-        train_end = int(total * fractions.train)
-        val_end = train_end + int(total * fractions.val)
-        test_indices = ordered[val_end:]
-
-        return {
-            "baseline": remap_test_indices(result.baseline_test_results, test_indices),
-            "optimized": remap_test_indices(result.optimized_test_results, test_indices),
-        }
-
-    @router.get(
-        "/optimizations/{optimization_id}/artifact",
-        response_model=ProgramArtifactResponse,
-        summary="Download the compiled DSPy program artifact",
-    )
-    def get_job_artifact(optimization_id: str, current_user: AuthenticatedUserDep) -> ProgramArtifactResponse:
-        """Return the pickled program artifact for a successful single-run optimization.
-
-        Grid searches 404 here — use ``/grid-result`` instead (one artifact per pair).
-
-        Args:
-            optimization_id: Optimization id whose artifact should be returned.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Returns:
-            A ``ProgramArtifactResponse`` carrying the pickled program.
-
-        Raises:
-            DomainError: 404 (unknown / inaccessible / grid), 409 (not
-                success), 500 (corrupt result).
-        """
-
-        job_data = load_job_for_user(job_store, optimization_id, current_user)
-
-        overview = parse_overview(job_data)
-        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-
-        if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-            raise DomainError("grid_search.artifact_per_pair_redirect", status=404)
-
-        status = status_to_job_status(job_data.get("status", "pending"))
-
-        if status in {OptimizationStatus.pending, OptimizationStatus.validating, OptimizationStatus.running}:
-            raise DomainError("optimization.not_finished", status=409)
-
-        if status == OptimizationStatus.failed:
-            error_msg = job_data.get("message") or "unknown error"
-            raise DomainError("optimization.failed_no_artifact", status=409, error=error_msg)
-
-        if status == OptimizationStatus.cancelled:
-            raise DomainError("optimization.cancelled_no_artifact", status=409)
-
-        if status == OptimizationStatus.success:
-            result_data = job_data.get("result")
-            if result_data and isinstance(result_data, dict):
-                try:
-                    result = RunResponse.model_validate(result_data)
-                except ValidationError:
-                    logger.warning("Optimization %s has corrupted result data", optimization_id)
-                    raise DomainError("optimization.corrupt_result", status=500) from None
-                return ProgramArtifactResponse(
-                    program_artifact=result.program_artifact,
-                )
-
-        raise DomainError("optimization.no_artifact_generic", status=409)
-
-    @router.get(
-        "/optimizations/{optimization_id}/program-export",
-        summary="Download a self-contained, runnable export of the compiled DSPy program",
-    )
-    def export_job_program(
-        optimization_id: str,
-        current_user: AuthenticatedUserDep,
-        pair_index: Annotated[int | None, Query(ge=0)] = None,
-    ) -> StreamingResponse:
-        """Stream a zip that reconstructs and runs the program with plain ``dspy``.
-
-        Unlike ``/serve`` (which runs the program on the platform's key), this
-        packages the persisted state JSON, the signature source, the module
-        recipe, and a standalone loader so the caller owns and runs the program
-        themselves — no platform endpoint required. Grid searches export the
-        requested pair, or their winning pair when ``pair_index`` is omitted.
-
-        Args:
-            optimization_id: Optimization id whose program should be exported.
-            current_user: Authenticated caller resolved from the bearer token.
-            pair_index: Optional grid-search pair to export instead of the winner.
-
-        Returns:
-            A ``StreamingResponse`` carrying the zip as a file attachment.
-
-        Raises:
-            DomainError: 404 (unknown / inaccessible / pair), 409 (not success,
-                or no reconstructable program), 500 (corrupt result).
-        """
-
-        job_data = load_job_for_user(job_store, optimization_id, current_user)
-
-        overview = parse_overview(job_data)
-        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-
-        status = status_to_job_status(job_data.get("status", "pending"))
-
-        if status in {OptimizationStatus.pending, OptimizationStatus.validating, OptimizationStatus.running}:
-            raise DomainError("optimization.not_finished", status=409)
-        if status == OptimizationStatus.failed:
-            error_msg = job_data.get("message") or "unknown error"
-            raise DomainError("optimization.failed_no_artifact", status=409, error=error_msg)
-        if status == OptimizationStatus.cancelled:
-            raise DomainError("optimization.cancelled_no_artifact", status=409)
-        if status != OptimizationStatus.success:
-            raise DomainError("optimization.no_artifact_generic", status=409)
-
-        result_data = job_data.get("result")
-        if not (result_data and isinstance(result_data, dict)):
-            raise DomainError("optimization.no_artifact_generic", status=409)
-        export_overview = overview
-        export_pair_index: int | None = None
-        if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-            try:
-                grid_result = GridSearchResponse.model_validate(result_data)
-            except ValidationError:
-                logger.warning("Grid search %s has corrupted result data", optimization_id)
-                raise DomainError("grid_search.corrupt_result", status=500) from None
-            pair = grid_result.best_pair
-            if pair_index is not None:
-                pair = next((item for item in grid_result.pair_results if item.pair_index == pair_index), None)
-                if pair is None:
-                    raise DomainError(
-                        "grid_search.pair_position_missing",
-                        status=404,
-                        pair_index=pair_index,
-                    )
-            if pair is None:
-                raise DomainError("grid_search.no_best_pair", status=409)
-            artifact = pair.program_artifact
-            export_pair_index = pair.pair_index
-            export_overview = {**overview, PAYLOAD_OVERVIEW_MODEL_NAME: pair.generation_model}
-            if artifact is None or artifact.program_state_json is None:
-                raise DomainError(
-                    "grid_search.pair_no_artifact",
-                    status=409,
-                    pair_index=pair.pair_index,
-                )
-        else:
-            try:
-                result = RunResponse.model_validate(result_data)
-            except ValidationError:
-                logger.warning("Optimization %s has corrupted result data", optimization_id)
-                raise DomainError("optimization.corrupt_result", status=500) from None
-            artifact = result.program_artifact
-
-        # The export reconstructs from state JSON; a legacy pickle-only artifact
-        # carries no signature_code and isn't portably rebuildable, so it's 409.
-        if artifact is None or artifact.program_state_json is None:
-            raise DomainError("optimization.no_artifact_generic", status=409)
-        # A workflow run carries no top-level signature: its program definition
-        # is the persisted graph, and each node's signature travels inside it.
-        if not (overview.get(PAYLOAD_OVERVIEW_SIGNATURE_CODE) or overview.get(PAYLOAD_OVERVIEW_WORKFLOW)):
-            raise DomainError("optimization.no_signature_code_for_reload", status=409)
-
-        zip_bytes = build_program_export_zip(
-            optimization_id=optimization_id,
-            artifact=artifact,
-            overview=export_overview,
-        )
-        pair_suffix = f"_pair_{export_pair_index}" if export_pair_index is not None else ""
-        filename = f"dspy_program_{optimization_id[:8]}{pair_suffix}.zip"
-        return StreamingResponse(
-            iter([zip_bytes]),
-            media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
-    @router.get(
-        "/optimizations/{optimization_id}/grid-result",
-        response_model=GridSearchResponse,
-        summary="Retrieve the full grid-search result with per-pair details",
-        tags=["agent"],
-    )
-    def get_grid_search_result(optimization_id: str, current_user: AuthenticatedUserDep) -> GridSearchResponse:
-        """Return all pair results for a finished grid search, including ``best_pair``.
-
-        Only valid after the sweep reaches a terminal status. For live progress
-        use ``GET /optimizations/{id}`` whose ``grid_result`` field updates
-        in-flight.
-
-        Args:
-            optimization_id: Grid-search optimization id.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Returns:
-            The full ``GridSearchResponse`` including every pair.
-
-        Raises:
-            DomainError: 404 (unknown / inaccessible / not grid / no
-                result), 409 (still running / failed without result), 500
-                (corrupt result).
-        """
-        job_data = load_job_for_user(job_store, optimization_id, current_user)
-
-        overview = parse_overview(job_data)
-        if overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE) != OPTIMIZATION_TYPE_GRID_SEARCH:
-            raise DomainError("grid_search.not_a_grid_search", status=404)
-
-        status = status_to_job_status(job_data.get("status", "pending"))
-        if status not in TERMINAL_STATUSES:
-            raise DomainError("optimization.not_finished", status=409)
-
-        result_data = job_data.get("result")
-        if not result_data or not isinstance(result_data, dict):
-            if status == OptimizationStatus.failed:
-                error_msg = job_data.get("message") or "unknown error"
-                raise DomainError("grid_search.failed_no_result", status=409, error=error_msg)
-            if status == OptimizationStatus.cancelled:
-                raise DomainError("grid_search.cancelled_no_result", status=409)
-            raise DomainError("grid_search.no_result_available", status=404)
-
-        try:
-            return GridSearchResponse.model_validate(result_data)
-        except ValidationError:
-            raise DomainError("grid_search.corrupt_result", status=500) from None
-
-    @router.get(
-        "/optimizations/{optimization_id}/pair/{pair_index}/test-results",
-        summary="Per-example test scores for one grid-search pair",
-        tags=["agent"],
-    )
-    def get_pair_test_results(optimization_id: str, pair_index: int, current_user: AuthenticatedUserDep) -> dict:
-        """Per-pair analogue of ``GET /test-results`` with global-index remapping.
-
-        Args:
-            optimization_id: Grid-search optimization id.
-            pair_index: Index of the pair to score.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Returns:
-            ``{"baseline": [...], "optimized": [...]}`` with global indices.
-
-        Raises:
-            DomainError: 404 (unknown / inaccessible / pair missing), 409
-                (not a grid search, not success, or no stored result).
-        """
-        job_data = load_job_for_user(job_store, optimization_id, current_user)
-
-        overview = parse_overview(job_data)
-        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-
-        if optimization_type != OPTIMIZATION_TYPE_GRID_SEARCH:
-            raise DomainError("grid_search.pair_test_results_grid_only", status=409)
-
-        status = status_to_job_status(job_data.get("status", "pending"))
-        if status != OptimizationStatus.success:
-            raise DomainError(
-                "optimization.not_success_status_for_test_results",
-                status=409,
-                params={"status": status.value},
-            )
-
-        result_data = job_data.get("result")
-        if not result_data or not isinstance(result_data, dict):
-            raise DomainError("optimization.no_result", status=409)
-
-        try:
-            grid_result = GridSearchResponse.model_validate(result_data)
-        except ValidationError:
-            raise DomainError("grid_search.corrupt_result", status=500) from None
-
-        pair = None
-        for pr in grid_result.pair_results:
-            if pr.pair_index == pair_index:
-                pair = pr
-                break
-        if pair is None:
-            raise DomainError(
-                "grid_search.pair_position_missing",
-                status=404,
-                pair_index=pair_index,
-            )
-
-        payload = job_data.get("payload")
-        if not isinstance(payload, dict):
-            raise DomainError("optimization.payload_unavailable", status=404)
-        dataset = payload.get("dataset", [])
-        total = len(dataset)
-        fractions_raw = payload.get("split_fractions", {})
-        try:
-            fractions = SplitFractions.model_validate(fractions_raw)
-        except ValidationError:
-            fractions = SplitFractions()
-        shuffle = payload.get("shuffle", True)
-        seed = payload.get("seed")
-        effective_seed = seed if seed is not None else stable_seed(optimization_id)
-
-        ordered = list(range(total))
-        if shuffle:
-            rng = random.Random(effective_seed)
-            rng.shuffle(ordered)
-        train_end = int(total * fractions.train)
-        val_end = train_end + int(total * fractions.val)
-        test_indices = ordered[val_end:]
-
-        return {
-            "baseline": remap_test_indices(pair.baseline_test_results, test_indices),
-            "optimized": remap_test_indices(pair.optimized_test_results, test_indices),
-        }

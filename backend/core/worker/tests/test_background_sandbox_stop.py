@@ -9,9 +9,8 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from pydantic import SecretStr
@@ -19,7 +18,7 @@ from sqlalchemy import create_engine, insert
 from sqlalchemy.pool import StaticPool
 
 from core.billing.runtime import UsagePendingError
-from core.constants import OPTIMIZATION_TYPE_RUN
+from core.constants import OPTIMIZATION_TYPE_BLACKBOX
 from core.sandbox import factory
 from core.sandbox.factory import PROVIDERS, ProviderEntry
 from core.storage.base import JobStore
@@ -169,8 +168,12 @@ def store() -> FakeJobStore:
     store.engine = object()  # type: ignore[attr-defined]
     store.seed_job(
         JOB,
-        payload=_payload(Path("/nonexistent/marker"), "vercel"),
-        payload_overview={"optimization_type": OPTIMIZATION_TYPE_RUN, "username": "alice", "token_source": "managed"},
+        payload=_payload(),
+        payload_overview={
+            "optimization_type": OPTIMIZATION_TYPE_BLACKBOX,
+            "username": "alice",
+            "token_source": "managed",
+        },
         execution_budget_id="budget",
         execution_budget_generation=0,
     )
@@ -216,7 +219,7 @@ def _run_job(store: FakeJobStore, monkeypatch: pytest.MonkeyPatch, *, exitcode: 
         patch("core.worker.engine.payload_uses_token_source", return_value=False),
         patch("core.worker.engine.ModelGateway", _Gateway),
         patch("core.worker.engine.mp.get_context", return_value=context),
-        patch.object(worker, "_get_service", return_value=MagicMock()),
+        patch("core.worker.engine.validate_blackbox_payload"),
         patch.object(worker, "_schedule_embedding_indexing"),
     ):
         worker._process_job(JOB, 0)

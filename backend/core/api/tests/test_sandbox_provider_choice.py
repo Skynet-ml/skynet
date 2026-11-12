@@ -161,6 +161,4 @@ def test_bind_refuses_a_provider_dropped_after_submission(monkeypatch: pytest.Mo
         monkeypatch: Pytest fixture.
     """
     with pytest.raises(UnpricedOperationError, match="not offered"):
-        bind_protected_sandbox(
-            _Gateway(), _hosted_settings(monkeypatch), workflow="anything", owner_id="job-1", provider="daytona"
-        )
+        bind_protected_sandbox(_Gateway(), _hosted_settings(monkeypatch), owner_id="job-1", provider="daytona")

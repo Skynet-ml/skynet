@@ -4,7 +4,6 @@ import type { IconProps } from "@phosphor-icons/react";
 import { msg } from "@/shared/lib/messages";
 import type { SandboxProviderCatalog } from "@/shared/lib/api";
 import type { MessageKey } from "@/shared/lib/generated/ui-catalog";
-import type { OptimizerTarget } from "@/shared/types/unified-run";
 import { Cube, Desktop, Globe } from "@/shared/ui/icons";
 
 // The run view's runtime names and the Mac/Web icons of the run place choice;
@@ -75,11 +74,9 @@ export function shownSandboxProvider(
 }
 
 /**
- * Whether run setup shows the sandbox picker. Only a repository run request
- * (`/blackbox/run`) accepts a sandbox choice. A failed read shows the field
+ * Whether run setup shows the sandbox picker. A failed read shows the field
  * with its failure note; a list still loading, or empty, shows nothing.
  */
-export function showsSandboxPicker(kind: OptimizerTarget, sandboxes: SandboxProviders): boolean {
-  if (kind !== "repo") return false;
+export function showsSandboxPicker(sandboxes: SandboxProviders): boolean {
   return sandboxes.status === "failed" || (sandboxes.catalog?.providers.length ?? 0) > 0;
 }

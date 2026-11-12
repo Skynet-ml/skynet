@@ -186,15 +186,8 @@ function legacyEngineChoice(strategy: unknown): Partial<OptimizerSlice> {
  * The wizard slices a stored run fills. A cloned setup is still walked step
  * by step and its contract checked again before Run.
  */
-export function cloneToSlices(
-  optimizationType: string,
-  payload: ClonePayload,
-  jobName?: string | null,
-): CloneSlices {
-  const body =
-    optimizationType === "blackbox" && payload.payload_kind !== "unified_v1"
-      ? cloneLegacyBlackbox(payload)
-      : { task: {}, inputs: {}, optimizer: {}, workspace: {} };
+export function cloneToSlices(payload: ClonePayload, jobName?: string | null): CloneSlices {
+  const body = cloneLegacyBlackbox(payload);
   if (typeof payload.max_cost_cents === "number")
     body.optimizer = { ...body.optimizer, maxCostCents: payload.max_cost_cents };
   if (payload.economy_mode === true) runEconomyToModels(body);

@@ -16,22 +16,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
 from fastapi import APIRouter, Depends
 
 from ....billing.budgets import BudgetService
 from ....config import settings
-from ....constants import (
-    OPTIMIZATION_TYPE_GRID_SEARCH,
-    OPTIMIZATION_TYPE_RUN,
-    PAYLOAD_OVERVIEW_NAME,
-    PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
-    PAYLOAD_OVERVIEW_PAYLOAD_KIND,
-)
-from ....i18n import CANCELLATION_REASON, CLONE_NAME_PREFIX, PAUSE_REASON, RETRY_NAME_PREFIX
+from ....i18n import CANCELLATION_REASON, PAUSE_REASON
 from ....models import (
-    UNIFIED_PAYLOAD_KIND,
     BulkCancelRequest,
     BulkCancelResponse,
     BulkCancelSkipped,
@@ -39,16 +31,13 @@ from ....models import (
     OptimizationStatus,
     OptimizationSubmissionResponse,
 )
-from ....storage.usage import json_byte_size
 from ....worker.budget_probe import STOP_REASON_BUDGET_PROJECTED
 from ....worker.checkpoint_compat import CheckpointCompatibilityError
 from ...auth import AuthenticatedUser, get_authenticated_user
-from ...converters import parse_overview, status_to_job_status
+from ...converters import status_to_job_status
 from ...errors import DomainError
 from ...sharing_access import ShareRole
 from .._helpers import (
-    enforce_job_quota,
-    enforce_storage_quota,
     filter_ids_at_least,
     is_budget_stop,
     is_interrupted_stop,
@@ -58,11 +47,10 @@ from .._helpers import (
     require_role_at_least,
 )
 from ..constants import TERMINAL_STATUSES
-from ._local import bulk_set_flag, clone_payload, persist_and_enqueue
+from ._local import bulk_set_flag
 from .schemas import (
     BulkMetadataRequest,
     BulkMetadataResponse,
-    CloneJobRequest,
     CloneJobResponse,
 )
 
@@ -124,29 +112,20 @@ def _require_new_budget_configuration(job: dict[str, Any]) -> None:
         )
 
 
-def _require_executable_type(overview: dict[str, Any]) -> None:
-    """Refuse to queue new work for a stored grid search or DSPy program run.
+def _refuse_resubmission() -> NoReturn:
+    """Refuse to copy a stored repository run into a new run.
 
-    Stored grid and DSPy runs stay readable, but Skynet now optimizes only
-    repositories (SKY-316), so a clone, retry, resume or restart of one must
-    not start.
-
-    Args:
-        overview: The stored run's payload overview.
+    A repository run needs fresh setup evidence and a new budget, so only the
+    submission wizard can start a copy.
 
     Raises:
-        DomainError: 409 ``optimization.grid_search_retired`` for a grid
-            search; 410 ``optimization.dspy_run_retired`` for a legacy DSPy
-            run or a unified DSPy program run.
+        DomainError: Always, as 409 ``optimization.cannot_resubmit_payload``.
     """
-    optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-    if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-        raise DomainError("optimization.grid_search_retired", status=409)
-    if (
-        optimization_type == OPTIMIZATION_TYPE_RUN
-        or overview.get(PAYLOAD_OVERVIEW_PAYLOAD_KIND) == UNIFIED_PAYLOAD_KIND
-    ):
-        raise DomainError("optimization.dspy_run_retired", status=410)
+    raise DomainError(
+        "optimization.cannot_resubmit_payload",
+        status=409,
+        detail="Open this configuration in the submission wizard and authorize a new budget before starting a new run.",
+    )
 
 
 def cancel_optimization(
@@ -225,8 +204,8 @@ def register_lifecycle_routes(
     def cancel_job(optimization_id: str, current_user: AuthenticatedUserDep) -> JobCancelResponse:
         """Cooperatively cancel an active optimization.
 
-        Flips status to ``cancelled`` immediately; the worker stops between
-        DSPy calls. One-way — no uncancel.
+        Flips status to ``cancelled`` immediately; the worker stops at its
+        next cancellation check. One-way — no uncancel.
 
         Args:
             optimization_id: Optimization id to cancel.
@@ -253,7 +232,7 @@ def register_lifecycle_routes(
 
         A manual pause is intentional, not a failure: it flips status to
         ``paused`` (distinct from ``cancelled``) and signals the worker, which
-        stops between DSPy calls and persists the GEPA checkpoint on its way out —
+        stops at its next cancellation check and persists the GEPA checkpoint —
         the same cooperative path cancel uses. Valid only while the run is
         actively ``running`` and already has a saved checkpoint, so a pause is
         always resumable; pausing before the first checkpoint is rejected. Resume
@@ -310,7 +289,7 @@ def register_lifecycle_routes(
         """Cancel a batch of non-terminal optimizations and report per-id outcomes.
 
         Same semantics as single-ID ``POST /optimizations/{id}/cancel``: flips
-        status to ``cancelled`` immediately, worker stops between DSPy calls,
+        status to ``cancelled`` immediately, worker stops at its next check,
         one-way. Duplicate ids in the request are deduplicated. IDs that don't
         exist, are already terminal, or are not owned by the caller (when
         non-admin) are reported in ``skipped`` with the reason ``not_found``.
@@ -401,26 +380,22 @@ def register_lifecycle_routes(
         summary="Duplicate an optimization and queue N copies",
         tags=["agent"],
     )
-    def clone_job(optimization_id: str, req: CloneJobRequest, current_user: AuthenticatedUserDep) -> CloneJobResponse:
-        """Clone a finished or active optimization into ``count`` fresh runs.
+    def clone_job(optimization_id: str, current_user: AuthenticatedUserDep) -> CloneJobResponse:
+        """Refuse to clone a stored optimization; the submission wizard starts copies.
 
-        Reads the stored payload, assigns new ids and seeds, and enqueues each
-        copy. Each clone's display name is prefixed with ``req.name_prefix`` or
-        ``CLONE_NAME_PREFIX``. The clone is owned by the authenticated caller
-        regardless of who owned the source; quota is checked against the
-        caller. Respects the per-user quota.
+        A repository run needs new setup evidence and a new budget, so this
+        route always ends in a 409 after the access and payload checks.
 
         Args:
             optimization_id: Source optimization id.
-            req: Clone request with ``count`` and optional ``name_prefix``.
             current_user: Authenticated caller resolved from the bearer token.
 
         Returns:
-            A ``CloneJobResponse`` listing every newly enqueued copy.
+            Never returns.
 
         Raises:
             DomainError: 404 (unknown / inaccessible source), 409 (no
-                payload / quota / saved payload no longer resubmittable).
+                payload / saved payload not resubmittable).
         """
         job_data = load_job_for_user(job_store, optimization_id, current_user)
         _require_new_budget_configuration(job_data)
@@ -429,33 +404,7 @@ def register_lifecycle_routes(
         if not source_payload or not isinstance(source_payload, dict):
             raise DomainError("optimization.clone_no_payload", status=409)
 
-        overview = parse_overview(job_data)
-        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-        _require_executable_type(overview)
-        prefix = (req.name_prefix or CLONE_NAME_PREFIX).strip()
-        source_name = overview.get(PAYLOAD_OVERVIEW_NAME) or optimization_id[:8]
-        cloned_payload_seed: dict[str, Any] = {**source_payload, "username": current_user.username}
-
-        enforce_job_quota(job_store, current_user.username, incoming_jobs=req.count)
-        enforce_storage_quota(
-            job_store,
-            current_user.username,
-            incoming_bytes=json_byte_size(cloned_payload_seed) * req.count,
-        )
-
-        created: list[OptimizationSubmissionResponse] = []
-        for i in range(req.count):
-            suffix = f" ({i + 1})" if req.count > 1 else ""
-            cloned_name = f"{prefix} {source_name}{suffix}".strip()
-            new_id, payload = clone_payload(
-                cloned_payload_seed,
-                optimization_type=optimization_type,
-                new_name=cloned_name,
-            )
-            created.append(persist_and_enqueue(job_store, new_id, payload, optimization_type=optimization_type))
-
-        logger.info("Cloned optimization %s into %d copies", optimization_id, len(created))
-        return CloneJobResponse(source_optimization_id=optimization_id, created=created)
+        _refuse_resubmission()
 
     @router.post(
         "/optimizations/{optimization_id}/retry",
@@ -465,24 +414,22 @@ def register_lifecycle_routes(
         tags=["agent"],
     )
     def retry_job(optimization_id: str, current_user: AuthenticatedUserDep) -> OptimizationSubmissionResponse:
-        """Re-run a failed or cancelled optimization using the original payload.
+        """Refuse to retry a stored optimization under a new id; use restart instead.
 
-        Only valid when the source optimization is in a terminal non-success
-        state. The new run's name is prefixed with ``RETRY_NAME_PREFIX``.
-        The retry is owned by the authenticated caller regardless of who
-        owned the source; quota is checked against the caller.
+        A repository run needs new setup evidence and a new budget, so this
+        route always ends in a 409 after the access, status and payload checks.
 
         Args:
             optimization_id: Source optimization id to retry.
             current_user: Authenticated caller resolved from the bearer token.
 
         Returns:
-            An ``OptimizationSubmissionResponse`` for the new run.
+            Never returns.
 
         Raises:
             DomainError: 404 (unknown / inaccessible source), 403 (caller's
-                share role below ``editor``), 409 (wrong status / no payload —
-                use clone instead / saved payload no longer resubmittable).
+                share role below ``editor``), 409 (wrong status / no payload /
+                saved payload not resubmittable).
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
         _require_new_budget_configuration(job_data)
@@ -499,22 +446,7 @@ def register_lifecycle_routes(
         if not source_payload or not isinstance(source_payload, dict):
             raise DomainError("optimization.retry_no_payload", status=409)
 
-        overview = parse_overview(job_data)
-        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-        _require_executable_type(overview)
-        source_name = overview.get(PAYLOAD_OVERVIEW_NAME) or optimization_id[:8]
-        retry_name = f"{RETRY_NAME_PREFIX} {source_name}".strip()
-        retry_payload_seed: dict[str, Any] = {**source_payload, "username": current_user.username}
-        enforce_job_quota(job_store, current_user.username)
-        enforce_storage_quota(
-            job_store,
-            current_user.username,
-            incoming_bytes=json_byte_size(retry_payload_seed),
-        )
-        new_id, payload = clone_payload(retry_payload_seed, optimization_type=optimization_type, new_name=retry_name)
-        response = persist_and_enqueue(job_store, new_id, payload, optimization_type=optimization_type)
-        logger.info("Retried optimization %s as %s", optimization_id, new_id)
-        return response
+        _refuse_resubmission()
 
     @router.post(
         "/optimizations/{optimization_id}/resume",
@@ -565,14 +497,11 @@ def register_lifecycle_routes(
                 params={"status": status.value},
             )
 
-        _require_executable_type(parse_overview(job_data))
         has_checkpoint = getattr(job_store, "has_gepa_checkpoint", None)
         interrupted = is_interrupted_stop(job_data)
-        # An interrupted top-level run with no checkpoint starts again from the
-        # beginning in its own budget; the store refuses every other run without one.
-        if not (callable(has_checkpoint) and has_checkpoint(optimization_id)) and not (
-            interrupted and not job_data.get("parent_optimization_id")
-        ):
+        # An interrupted run with no checkpoint starts again from the beginning in
+        # its own budget; the store refuses every other run without one.
+        if not (callable(has_checkpoint) and has_checkpoint(optimization_id)) and not interrupted:
             raise DomainError("optimization.resume_not_resumable", status=409)
 
         # Continuing a projection pause under a limit the measured burn already
@@ -660,7 +589,6 @@ def register_lifecycle_routes(
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
         _require_new_budget_configuration(job_data)
-        _require_executable_type(parse_overview(job_data))
 
         status = status_to_job_status(job_data.get("status", "pending"))
         if status not in {OptimizationStatus.failed, OptimizationStatus.cancelled}:

@@ -31,7 +31,6 @@ test("an error result gives its plain text or its body's detail", () => {
 test("the optimizer catalog keeps each option and the shared contract", () => {
   const view = optimizerCatalog(
     JSON.stringify({
-      artifact_kind: "repo",
       data_mode: "single",
       run_entry: "def run(artifact, input)",
       metric_signature: "def score(input, output, expected=None)",
@@ -65,7 +64,7 @@ test("the optimizer catalog keeps each option and the shared contract", () => {
     metricSignature: "def score(input, output, expected=None)",
     sandboxReason: "Sandbox off",
   });
-  assert.equal(optimizerCatalog({ artifact_kind: "repo" }), null);
+  assert.equal(optimizerCatalog({ data_mode: "single" }), null);
 });
 
 test("the engine catalog falls back to the id when a label is missing", () => {

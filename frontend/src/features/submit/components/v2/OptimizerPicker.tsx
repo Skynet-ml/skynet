@@ -5,7 +5,7 @@ import { useRef, type KeyboardEvent } from "react";
 import { Warning } from "@/shared/ui/icons";
 import { Label } from "@/shared/ui/primitives/label";
 import { msg } from "@/shared/lib/messages";
-import type { OptimizerTarget, DataMode } from "@/shared/types/unified-run";
+import type { DataMode } from "@/shared/types/unified-run";
 import { OPTIMIZER_NAMES } from "@/shared/lib/optimizer-names";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -43,24 +43,19 @@ function optimizerDescription(view: OptimizerOptionView, guided: boolean): strin
  * `plain` (Standard) words each card the plain way.
  */
 export function OptimizerPicker({
-  kind,
   mode,
   plain = false,
 }: {
-  kind: OptimizerTarget;
   mode: DataMode;
   plain?: boolean;
 }) {
   const { state, patchOptimizer, optimizerCatalog, optimizerCatalogLoading, guided } = useWizardV2();
   const t = (key: string, params?: Record<string, string>) => v2Msg(key, guided, params);
   const choice = state.optimizer.choice;
-  const options = optimizerOptions({ kind, mode, catalog: optimizerCatalog, guided, choice });
-  const issue = optimizerChoiceIssue({ kind, mode, catalog: optimizerCatalog, choice });
+  const options = optimizerOptions({ mode, catalog: optimizerCatalog, guided, choice });
+  const issue = optimizerChoiceIssue({ mode, catalog: optimizerCatalog, choice });
   const selectedIndex = options.findIndex((option) => option.id === choice);
-  const catalog =
-    optimizerCatalog?.artifact_kind === kind && optimizerCatalog.data_mode === mode
-      ? optimizerCatalog
-      : null;
+  const catalog = optimizerCatalog?.data_mode === mode ? optimizerCatalog : null;
   // Roving tabindex: the checked card takes the Tab stop, else the first.
   const focusIndex = selectedIndex >= 0 ? selectedIndex : 0;
   const groupRef = useRef<HTMLDivElement>(null);

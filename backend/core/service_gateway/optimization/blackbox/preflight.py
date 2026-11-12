@@ -1,10 +1,8 @@
-"""Verify Anything and unified inputs from inside the selected outer execution sandbox."""
+"""Verify Anything inputs from inside the selected outer execution sandbox."""
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
-from contextlib import nullcontext
 from typing import Any
 
 from ....billing.model_gateway import ROUTE_KEY
@@ -14,18 +12,8 @@ from ....exceptions import ServiceError
 from ....i18n_en import t_en
 from ....models import BlackboxRunRequest
 from ....models.blackbox import BLACKBOX_TARGET_REPO, BlackboxScorer, BlackboxTarget
-from ....models.unified import (
-    CONTRACT_SAMPLE_COUNT_KEY,
-    CONTRACT_SAMPLE_DEFAULT,
-    CONTRACT_SAMPLE_MAX,
-    UNIFIED_PAYLOAD_KIND,
-    UnifiedRunRequest,
-)
 from ....provider_registry import LITELLM_TO_BYOK_PROVIDER
-from ..unified.contract import run_contract_check
 from ..unified.metric_model import resolve_blackbox_metric_model_dict, scan_metric_llm
-from ..unified.service import unified_job_spec
-from ..unified.split import split_seed
 from .agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
 from .harness import GatewayConfig
 from .native_runtime import NativeOptions, check_native_runtime
@@ -34,7 +22,7 @@ from .sandbox_contract import SandboxRuntime
 from .sandbox_runtime import sandbox_runtime_context
 from .sandbox_scorer import SandboxPythonScorer, scorer_gateway
 from .scorer import RemoteScorer, build_scorer
-from .service import JobSpec, _agent_scorer, uses_native_runtime, validate_blackbox_payload, validate_job
+from .service import _agent_scorer, uses_native_runtime, validate_blackbox_payload
 
 
 def _reflection_bases(config: Any) -> dict[str, str | None]:
@@ -59,21 +47,6 @@ _SCORER_BOX_OVERHEAD_SECONDS = 60.0
 _PREFLIGHT_OVERHEAD_SECONDS = 600.0
 
 
-def unified_sample_count(payload: dict[str, Any]) -> int:
-    """Return how many train/validation cases a unified setup check scores.
-
-    Args:
-        payload: Canonical unified request, possibly carrying the contract check's count.
-
-    Returns:
-        The requested count clamped to ``1..CONTRACT_SAMPLE_MAX``, or the default when none was sent.
-    """
-    value = payload.get(CONTRACT_SAMPLE_COUNT_KEY)
-    if not isinstance(value, int) or isinstance(value, bool):
-        return CONTRACT_SAMPLE_DEFAULT
-    return min(max(value, 1), CONTRACT_SAMPLE_MAX)
-
-
 def preflight_lifetime_seconds(payload: dict[str, Any]) -> float:
     """Return the outer box lifetime one setup check can need.
 
@@ -88,10 +61,6 @@ def preflight_lifetime_seconds(payload: dict[str, Any]) -> float:
     Returns:
         The lifetime, in seconds, before the configured ceiling applies.
     """
-    if payload.get("payload_kind") == UNIFIED_PAYLOAD_KIND:
-        timeout = float((payload.get("workspace") or {}).get("metric_timeout_seconds") or 60.0)
-        # One workspace box scores every sample in turn.
-        return _PREFLIGHT_OVERHEAD_SECONDS + unified_sample_count(payload) * timeout + _SCORER_BOX_OVERHEAD_SECONDS
     scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
     target = BlackboxTarget.model_validate(payload.get("target") or {})
     # The readiness probe and the sample score each open a scorer box.
@@ -320,109 +289,4 @@ def verify_anything_in_sandbox(
                 scorer_instance.close()
             except UsagePendingError:
                 checks.append(_check("usage", "pending", "Sandbox usage is awaiting confirmation."))
-    return result
-
-
-def _check_native_readiness(job: JobSpec, runtime: SandboxRuntime | None) -> None:
-    """Probe the native proposer runtime a job's engines need, when they need it.
-
-    Args:
-        job: The run's job spec.
-        runtime: Contained command runtime bound to the outer sandbox, if any.
-
-    Raises:
-        ServiceError: When a single native engine's package is missing from the image.
-    """
-    if not uses_native_runtime(job):
-        return
-    route = job.reflection_model_settings.extra[ROUTE_KEY]
-    readiness = check_native_runtime(
-        NativeOptions(
-            runtime=job.proposer_runtime,
-            model=route["model"],
-            gateway=GatewayConfig(url=route["url"], api_key=route["token"]),
-            max_token_cost=0,
-            budget_route=route,
-            sandbox_runtime=runtime,
-        )
-    )
-    # Auto merely loses its AutoSaddler or ShinkaEvolve lane on such an image.
-    if (
-        job.strategy.mode == "single"
-        and job.strategy.engine == "autosaddler"
-        and not readiness.get("autosaddler_ready")
-    ):
-        raise ServiceError(
-            "This runtime does not ship the pinned AutoSaddler package on Python 3.12; choose another engine or Auto."
-        )
-    if job.strategy.mode == "single" and job.strategy.engine == "shinka_evolve" and not readiness.get("shinka_ready"):
-        raise ServiceError(
-            "This runtime does not ship the pinned ShinkaEvolve package on Python 3.12; choose another engine or Auto."
-        )
-
-
-def verify_unified_in_sandbox(
-    payload: dict[str, Any],
-    scope: str,
-    *,
-    identity: str | None = None,
-    runtime: SandboxRuntime | None = None,
-    on_ready: Callable[[], None] | None = None,
-) -> dict[str, Any]:
-    """Run a unified run's contract check, and in execution scope its engine readiness, in one outer sandbox.
-
-    The contract check scores the starting version on train and validation
-    samples only; the held-out test cases never run here.
-
-    Args:
-        payload: Protected unified request containing opaque parent capabilities.
-        scope: ``evaluation`` or ``execution`` readiness.
-        identity: Stable preflight evidence identity, naming the workspace box.
-        runtime: Contained command runtime bound to the outer sandbox, or the
-            trusted parent's own box runtime; the configured scorer runtime when unset.
-        on_ready: Called once the workspace box is warm and scoring starts.
-
-    Returns:
-        ``{"checks": [...], "workflow_result": {"contract": ContractCheckResponse}}`` with the
-        ``metric.contract`` check carrying the contract outcome, and an
-        ``optimizer`` check in execution scope.
-
-    Raises:
-        ServiceError: When the sandbox cannot run the workspace, or an engine is unavailable.
-    """
-    public = {key: value for key, value in payload.items() if not key.startswith("_")}
-    typed = UnifiedRunRequest.model_validate(public)
-    checks: list[dict[str, Any]] = []
-    result: dict[str, Any] = {"checks": checks}
-    route = typed.models.reflection_model.extra.get(ROUTE_KEY)
-    gateway = GatewayConfig(url=route["url"], api_key=route["token"]) if isinstance(route, dict) else None
-    samples = unified_sample_count(payload)
-    scope_runtime = sandbox_runtime_context(runtime) if runtime is not None else nullcontext()
-    with scope_runtime:
-        try:
-            contract = run_contract_check(
-                typed,
-                samples,
-                gateway=gateway,
-                protected=gateway is not None,
-                runtime=runtime,
-                job_id=identity,
-                lifetime_seconds=samples * typed.workspace.metric_timeout_seconds + _SCORER_BOX_OVERHEAD_SECONDS,
-                dependency_route=payload.get("_skynet_packages_route"),
-                on_ready=on_ready,
-            )
-        except UsagePendingError:
-            checks.append(_check("usage", "pending", "Sandbox usage is awaiting confirmation."))
-            return result
-        result["workflow_result"] = {"contract": contract.model_dump(mode="json")}
-        failure = next((item for item in contract.checks if item.status == "failed"), None)
-        message = None
-        if failure is not None:
-            message = f"{failure.message}\n{failure.detail}" if failure.detail else failure.message
-        checks.append(_check("metric.contract", "succeeded" if contract.ok else "failed", message, "workspace"))
-        if scope == "execution" and contract.ok:
-            job = unified_job_spec(typed, seed=split_seed(typed), task_lm=None)
-            validate_job(job, api_bases=_reflection_bases(typed.models.reflection_model))
-            _check_native_readiness(job, runtime)
-            checks.append(_check("optimizer", "succeeded"))
     return result

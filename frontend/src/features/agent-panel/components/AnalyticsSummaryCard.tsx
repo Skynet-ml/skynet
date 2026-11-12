@@ -28,7 +28,6 @@ interface AnalyticsResult {
   avg_improvement?: number | null;
   avg_runtime?: number | null;
   total_dataset_rows?: number;
-  total_pairs?: number;
   truncated?: boolean;
 }
 

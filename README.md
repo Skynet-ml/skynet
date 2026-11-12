@@ -71,4 +71,4 @@ If you use these methods through Skynet in research, cite the original work.
 
 Skynet is licensed under [AGPL-3.0](LICENSE). If you run a modified Skynet as a service, you must publish your changes.
 
-Two folders are exceptions and use [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0): the MCP plugin ([`plugins/skynet/`](plugins/skynet/LICENSE)) and the SDK client ([`backend/usage_guide/`](backend/usage_guide/LICENSE)).
+One folder is an exception and uses [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0): the MCP plugin ([`plugins/skynet/`](plugins/skynet/LICENSE)).

@@ -97,22 +97,6 @@ export function formatScore(n: number | undefined | null): string {
 }
 
 /**
- * Format a millisecond duration compactly and in the active locale's units.
- * @example 412 → "412 ms", 4893.7 → "4.9 sec", 75_000 → "1:15"
- */
-export function formatElapsedMs(ms: number | undefined | null): string {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
-  if (ms >= 60_000) return formatDuration(ms / 1000);
-  const inSeconds = ms >= 1000;
-  return new Intl.NumberFormat(getActiveIntlLocale(), {
-    style: "unit",
-    unit: inSeconds ? "second" : "millisecond",
-    unitDisplay: "short",
-    maximumFractionDigits: inSeconds ? 1 : 0,
-  }).format(inSeconds ? ms / 1000 : ms);
-}
-
-/**
  * Format an aggregate metric on the canonical 0–100 percentage scale.
  * @example 85.6 → "85.6%", 60.3 → "60.3%"
  */
@@ -160,23 +144,6 @@ export function formatOutput(v: unknown): string {
 
 export function formatId(id: string): string {
   return id;
-}
-
-/**
- * Friendly label for a DSPy module name. The backend may store either the
- * short alias ("cot") or the resolved dotted path ("dspy.ChainOfThought"), so
- * match on keywords rather than exact strings.
- * @example "dspy.ChainOfThought" → "CoT", "react" → "ReAct"
- */
-export function moduleLabel(raw: string | null | undefined): string {
-  if (!raw) return "—";
-  const v = raw.toLowerCase();
-  if (v === "workflow") return "Workflow";
-  if (v.includes("react")) return "ReAct";
-  if (v.includes("chain") || v === "cot") return "CoT";
-  if (v.includes("predict")) return "Predict";
-  if (v.includes("flex")) return "Flex";
-  return raw;
 }
 
 // Catalog-aware: pass the catalog to show its human `display_name`.

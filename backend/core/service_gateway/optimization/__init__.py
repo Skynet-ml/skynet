@@ -1,15 +1,8 @@
-"""DSPy optimization pipeline: compile, evaluate, persist, and stream progress.
+"""Optimization pipeline: black-box engines and the helpers they share.
 
-This subpackage groups every module that participates in running an
-optimization job end-to-end: :mod:`core` (the :class:`DspyService` facade),
-:mod:`data` (dataset loading and splitting), :mod:`optimizers`
-(per-strategy compile helpers), :mod:`progress` (tqdm / callback capture),
-:mod:`artifacts` (program persistence), :mod:`timing` (LM call timing
-callback), and :mod:`validators` (payload-level checks).
+The engines live in :mod:`blackbox`. The other modules hold shared helpers,
+for example :mod:`data` (dataset loading), :mod:`timing` (LM call timing)
+and :mod:`trajectory` (GEPA proposal capture).
 """
 
 from __future__ import annotations
-
-from .core import DspyService
-
-__all__ = ["DspyService"]

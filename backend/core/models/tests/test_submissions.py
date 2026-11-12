@@ -1,186 +1,22 @@
-"""Tests for RunRequest and OptimizationSubmissionResponse models."""
+"""Tests for the OptimizationSubmissionResponse model."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
-
-import pytest
-from pydantic import ValidationError
 
 from core.models.common import OptimizationStatus
-from core.models.submissions import OptimizationSubmissionResponse, RunRequest
-
-
-def _base_payload(**overrides: Any) -> dict[str, Any]:
-    """Build a minimal valid RunRequest payload with optional overrides.
-
-    Args:
-        **overrides: Keys that replace defaults in the returned dict.
-
-    Returns:
-        Dict suitable for ``RunRequest.model_validate``.
-    """
-    base: dict[str, Any] = {
-        "username": "alice",
-        "module_name": "predict",
-        "signature_code": "class S: pass",
-        "metric_code": "def m(e, p): return 1.0",
-        "optimizer_name": "gepa",
-        "dataset": [{"q": "1+1", "a": "2"}],
-        "column_mapping": {"inputs": {"q": "q"}, "outputs": {"a": "a"}},
-        "model_config": {"name": "gpt-4o-mini"},
-    }
-    base.update(overrides)
-    return base
-
-
-def test_run_request_accepts_minimal_payload() -> None:
-    """Verify RunRequest validates the minimal payload and exposes nested fields."""
-    req = RunRequest.model_validate(_base_payload())
-
-    assert req.model_settings.name == "gpt-4o-mini"
-    assert req.dataset == [{"q": "1+1", "a": "2"}]
-
-
-def test_run_request_model_settings_via_alias() -> None:
-    """Verify the ``model_config`` alias maps to ``model_settings`` on the model."""
-    req = RunRequest.model_validate(_base_payload())
-
-    assert req.model_settings.name == "gpt-4o-mini"
-
-
-def test_run_request_rejects_empty_dataset() -> None:
-    """Verify RunRequest rejects an empty dataset list."""
-    with pytest.raises(ValidationError, match="at least one row"):
-        RunRequest.model_validate(_base_payload(dataset=[]))
-
-
-@pytest.mark.parametrize(
-    ("length", "valid"),
-    [
-        (0, True),
-        (280, True),
-        (281, False),
-    ],
-    ids=["empty_description", "max", "over_max"],
-)
-def test_run_request_description_length_boundary(length: int, valid: bool) -> None:
-    """Verify description length boundaries: empty/<=280 accepted, >280 rejected."""
-    kwargs = _base_payload()
-    if length == 0:
-        kwargs.pop("description", None)
-    else:
-        kwargs["description"] = "x" * length
-
-    if valid:
-        req = RunRequest.model_validate(kwargs)
-        if length > 0:
-            assert req.description is not None
-            assert len(req.description) == length
-    else:
-        with pytest.raises(ValidationError):
-            RunRequest.model_validate(kwargs)
-
-
-def test_run_request_split_fractions_default() -> None:
-    """Verify default split fractions sum to 1.0."""
-    req = RunRequest.model_validate(_base_payload())
-
-    assert abs(req.split_fractions.train + req.split_fractions.val + req.split_fractions.test - 1.0) < 1e-6
-
-
-def test_run_request_shuffle_default_true() -> None:
-    """Verify shuffle defaults to True when not specified."""
-    req = RunRequest.model_validate(_base_payload())
-
-    assert req.shuffle is True
-
-
-def test_run_request_optional_reflection_model_absent() -> None:
-    """Verify reflection and task model settings default to None."""
-    req = RunRequest.model_validate(_base_payload())
-
-    assert req.reflection_model_settings is None
-    assert req.task_model_settings is None
-
-
-def test_run_request_optional_reflection_model_present() -> None:
-    """Verify ``reflection_model_config`` alias populates ``reflection_model_settings``."""
-    payload = _base_payload(reflection_model_config={"name": "ref-model"})
-    req = RunRequest.model_validate(payload)
-
-    assert req.reflection_model_settings is not None
-    assert req.reflection_model_settings.name == "ref-model"
-
-
-def test_run_request_module_kwargs_default_empty() -> None:
-    """Verify module_kwargs defaults to an empty dict."""
-    req = RunRequest.model_validate(_base_payload())
-
-    assert req.module_kwargs == {}
-
-
-def test_run_request_non_react_without_metric_code_errors() -> None:
-    """Verify a non-react run without metric_code is still rejected."""
-    payload = _base_payload()
-    payload.pop("metric_code")
-    with pytest.raises(ValidationError, match="metric_code is required"):
-        RunRequest.model_validate(payload)
-
-
-def test_run_request_react_without_metric_code_errors() -> None:
-    """Verify a react run without metric_code is rejected like any other run."""
-    payload = _base_payload(module_name="react")
-    payload.pop("metric_code")
-    with pytest.raises(ValidationError, match="metric_code is required"):
-        RunRequest.model_validate(payload)
-
-
-def test_run_request_react_with_metric_code_ok() -> None:
-    """Verify a react run that supplies metric_code validates."""
-    payload = _base_payload(module_name="react")
-    req = RunRequest.model_validate(payload)
-
-    assert req.metric_code == "def m(e, p): return 1.0"
-
-
-def test_run_request_parses_tool_source() -> None:
-    """Verify tool_source parses into a ToolSource with its optional fields."""
-    payload = _base_payload(
-        module_name="react",
-        tool_source={
-            "kind": "live_mcp",
-            "mcp_url": "http://mcp.local",
-            "mcp_auth_header": "Bearer x",
-            "tool_filter": ["search", "fetch"],
-        },
-    )
-    req = RunRequest.model_validate(payload)
-
-    assert req.tool_source is not None
-    assert req.tool_source.kind == "live_mcp"
-    assert req.tool_source.mcp_url == "http://mcp.local"
-    assert req.tool_source.mcp_auth_header == "Bearer x"
-    assert req.tool_source.tool_filter == ["search", "fetch"]
-
-
-def test_run_request_tool_source_defaults_none() -> None:
-    """Verify tool_source defaults to None on a standard (non-react) payload."""
-    req = RunRequest.model_validate(_base_payload())
-
-    assert req.tool_source is None
+from core.models.submissions import OptimizationSubmissionResponse
 
 
 def test_optimization_submission_response_defaults() -> None:
     """Verify OptimizationSubmissionResponse defaults name and description to None."""
     resp = OptimizationSubmissionResponse(
         optimization_id="abc123",
-        optimization_type="run",
+        optimization_type="blackbox",
         status=OptimizationStatus.pending,
         created_at=datetime.now(tz=UTC),
         username="alice",
-        module_name="predict",
+        module_name="blackbox",
         optimizer_name="gepa",
     )
 

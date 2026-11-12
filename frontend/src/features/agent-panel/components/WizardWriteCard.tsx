@@ -38,7 +38,6 @@ const FIELD_LABELS: Readonly<Record<string, MessageKey>> = {
   is_private: "submit.basics.privacy.label",
   task_objective: "submit.v2.task.objective_label",
   task_background: "submit.v2.task.background_label",
-  artifact_kind: "submit.v2.task.artifact.kind_label",
   repository: "submit.v2.repo.repository_label",
   data_mode: "submit.v2.inputs.source.title",
   staged_dataset_id: "storage.type.dataset",
@@ -116,9 +115,6 @@ function shownValue(field: string, value: unknown): Shown | null {
           ? msg("submit.v2.optimizer.option.auto.label")
           : OPTIMIZER_NAMES[value as Exclude<OptimizerChoice, "auto">];
       return { kind: "inline", text: name ?? value };
-    }
-    if (field === "artifact_kind" && value === "repo") {
-      return { kind: "inline", text: msg("submit.blackbox.repo.kind_repo") };
     }
     if (ID_FIELDS.has(field)) return { kind: "inline", text: value.slice(0, 8), code: true };
     if (isLongText(value)) return { kind: "text", text: value };

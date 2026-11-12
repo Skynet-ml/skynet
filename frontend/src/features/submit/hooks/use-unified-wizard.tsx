@@ -56,11 +56,7 @@ import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error
 import { getActiveMessages } from "@/shared/lib/runtime-messages";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import type { BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
-import {
-  resolveOptimizer,
-  type OptimizerCatalogResponse,
-  type OptimizerTarget,
-} from "@/shared/types/unified-run";
+import { resolveOptimizer, type OptimizerCatalogResponse } from "@/shared/types/unified-run";
 import type { ColumnRole } from "@/shared/ui/column-role-row";
 import { SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 
@@ -162,7 +158,7 @@ export interface WizardV2Shell extends WizardV2Context {
   sandboxProviders: SandboxProviders;
 }
 
-export type HostedCatalogState = "ready" | "loading" | "failed";
+type HostedCatalogState = "ready" | "loading" | "failed";
 
 /**
  * Why a setup cannot start on the web from the Mac app, or null when it can.
@@ -398,7 +394,6 @@ export function WizardV2Provider({
 
   // The catalog follows the setup it was asked for; a choice it no longer
   // offers is kept and reported as a step issue, never swapped silently.
-  const kind: OptimizerTarget = "repo";
   const mode = state.inputs.mode;
   // A linked Mac picks where the run starts; every server read below follows
   // that choice, so a web run is never judged on the Mac's catalog or prices.
@@ -440,7 +435,7 @@ export function WizardV2Provider({
     const controller = new AbortController();
     setOptimizerCatalogLoading(true);
     setCatalogFailedOn(null);
-    getOptimizerCatalog(kind, mode, controller.signal, runSource)
+    getOptimizerCatalog(mode, controller.signal, runSource)
       .then((catalog) => {
         if (!controller.signal.aborted) setCatalogEntry({ source: runSource, catalog });
       })
@@ -452,7 +447,7 @@ export function WizardV2Provider({
         if (!controller.signal.aborted) setOptimizerCatalogLoading(false);
       });
     return () => controller.abort();
-  }, [kind, mode, runSource, catalogLoads]);
+  }, [mode, runSource, catalogLoads]);
 
   const stepIssue = useCallback(
     (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog),
@@ -605,12 +600,7 @@ export function WizardV2Provider({
       },
     );
   }, [state, username, tokenSource, budgetUncapped, maxCostCents, sandboxProviders, runSource, savedSecrets]);
-  const exposedCatalog =
-    optimizerCatalog &&
-    optimizerCatalog.artifact_kind === kind &&
-    optimizerCatalog.data_mode === mode
-      ? optimizerCatalog
-      : null;
+  const exposedCatalog = optimizerCatalog && optimizerCatalog.data_mode === mode ? optimizerCatalog : null;
   const hostedBlock =
     runOn === "hosted"
       ? hostedRunBlock({
@@ -777,7 +767,7 @@ export function WizardV2Provider({
     const engine = presetEngine(state.optimizer.choice, readPref("optimizerEngine"));
     if (engine) patchOptimizer({ choice: engine });
     // Runs once, when the setup first exists; the choice is read from that render.
-  }, [kind, mode]);
+  }, [mode]);
 
   // `?clone=` hydrates every slice it can from the source run's stored,
   // server-scrubbed payload; the user still walks it forward one step at a time.
@@ -788,13 +778,9 @@ export function WizardV2Provider({
     if (!cloneId || cloneRan.current) return;
     cloneRan.current = true;
     Promise.all([getOptimizationPayload(cloneId), getJob(cloneId).catch(() => null)])
-      .then(([{ optimization_type, payload: stored }, job]) => {
+      .then(([{ payload: stored }, job]) => {
         if (!mountedRef.current) return;
-        const slices = cloneToSlices(
-          optimization_type,
-          stored as Record<string, unknown>,
-          job?.name,
-        );
+        const slices = cloneToSlices(stored as Record<string, unknown>, job?.name);
         patchTask(slices.task);
         patchInputs(slices.inputs);
         patchOptimizer(slices.optimizer);
@@ -955,10 +941,6 @@ export function WizardV2Provider({
           if (typeof shared.task_background === "string")
             patchTask({ background: shared.task_background });
           break;
-        case "artifact_kind":
-          // A repository run scores one case at a time.
-          if (shared.artifact_kind === "repo") patchInputs({ mode: "single" });
-          break;
         case "repository": {
           if (typeof shared.repository !== "string" || !shared.repository) break;
           repo = withRepository(repo, shared.repository);
@@ -1069,7 +1051,6 @@ export function WizardV2Provider({
       is_private: meta.isPrivate,
       task_objective: task.objective || undefined,
       task_background: task.background || undefined,
-      artifact_kind: "repo" as const,
       repository: task.repo.repository.trim() || undefined,
       repo_provider: task.repo.provider ?? "github",
       github_connected: githubConnected,

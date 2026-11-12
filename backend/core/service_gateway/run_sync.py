@@ -10,9 +10,6 @@ ledger or budget rows.
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 import math
 import sys
 from collections.abc import Callable, Iterator
@@ -26,7 +23,6 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..constants import (
     OPTIMIZATION_TYPE_BLACKBOX,
-    OPTIMIZATION_TYPE_RUN,
     PAYLOAD_OVERVIEW_COMPOSITION,
     PAYLOAD_OVERVIEW_DESCRIPTION,
     PAYLOAD_OVERVIEW_ESTIMATED_HIGH,
@@ -39,22 +35,20 @@ from ..constants import (
     PAYLOAD_OVERVIEW_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
-    PAYLOAD_OVERVIEW_SIGNATURE_CODE,
+    PAYLOAD_OVERVIEW_PAYLOAD_KIND,
     PAYLOAD_OVERVIEW_SOURCE_DATASET_ID,
     PAYLOAD_OVERVIEW_USERNAME,
-    PAYLOAD_OVERVIEW_WORKFLOW,
 )
-from ..models import BlackboxRunResponse, ModelConfig, RunResponse
+from ..models import BlackboxRunResponse, ModelConfig
 from ..storage.models import JobModel, ProgressEventModel
 from ..storage.usage import IMPORTED_FROM_DESKTOP, IMPORTED_FROM_KEY, json_byte_size
 
 SCHEMA_VERSION = "skynet.run-export/v1"
 MAX_BUNDLE_BYTES = 50 * 1024 * 1024
 IMPORT_LABEL = "imported from desktop"
-PROGRAM_ARTIFACT_NAME = "program_artifact.json"
 
 _SYNCABLE_STATUSES = frozenset({"success", "failed", "cancelled", "stopped"})
-_SYNCABLE_TYPES = frozenset({OPTIMIZATION_TYPE_RUN, OPTIMIZATION_TYPE_BLACKBOX})
+_SYNCABLE_TYPES = frozenset({OPTIMIZATION_TYPE_BLACKBOX})
 _RESULT_STATUSES = frozenset({"success", "stopped"})
 # Keys that point at rows or money on the exporting machine. Kept off the hosted
 # copy so an import can never claim another user's dataset, a stale spending
@@ -70,9 +64,9 @@ _DROPPED_OVERVIEW_KEYS = frozenset(
         IMPORTED_FROM_KEY,
     }
 )
-# A pickle in an uploaded bundle is attacker-chosen bytes, and ``path`` names a
-# file on the exporting machine; neither belongs in a hosted artifact.
-_DROPPED_ARTIFACT_KEYS = frozenset({"program_pickle_base64", "path"})
+# A DSPy program artifact is never read on hosted, and its pickle is
+# attacker-chosen bytes, so neither side of the sync carries one.
+_DROPPED_RESULT_KEYS = ("program_artifact", "program_artifact_path")
 _MAX_MESSAGE_CHARS = 10_000
 # Deep nesting passes json.loads but later breaks Python-side reads and
 # serialization of the caller's run list and detail, so it is refused up front.
@@ -222,7 +216,7 @@ class _BundleJob(BaseModel):
 class _BundleOptimization(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    optimization_type: Literal["run", "blackbox"]
+    optimization_type: Literal["blackbox"]
     payload_overview: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -233,7 +227,6 @@ class _Bundle(BaseModel):
     optimization: _BundleOptimization
     job: _BundleJob
     events: list[_BundleEvent] = Field(default_factory=list)
-    artifacts: dict[str, str] = Field(default_factory=dict)
 
 
 def _iso(value: Any) -> str | None:
@@ -271,22 +264,20 @@ def export_run(job_store, username: str, optimization_id: str) -> dict[str, Any]
         raise RunSyncError("optimization.not_found", 404, optimization_id=optimization_id) from None
     overview = dict(job.get("payload_overview") or {})
     owner = str(overview.get(PAYLOAD_OVERVIEW_USERNAME) or job.get("username") or "").strip().lower()
-    if job.get("parent_optimization_id") or owner != username.strip().lower():
+    if owner != username.strip().lower():
         raise RunSyncError("optimization.not_found", 404, optimization_id=optimization_id)
 
     status = str(job.get("status") or "")
     if status not in _SYNCABLE_STATUSES:
         raise RunSyncError("sync.export_not_finished", 409, status=status)
     optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE) or job.get("optimization_type")
-    optimization_type = optimization_type or OPTIMIZATION_TYPE_RUN
     if optimization_type not in _SYNCABLE_TYPES:
         raise RunSyncError("sync.unsupported_run_type", 409, optimization_type=str(optimization_type))
 
     result = dict(job["result"]) if isinstance(job.get("result"), dict) else None
-    artifacts: dict[str, str] = {}
-    if result is not None and result.get("program_artifact") is not None:
-        encoded = json.dumps(result.pop("program_artifact"), separators=(",", ":"), default=str).encode("utf-8")
-        artifacts[PROGRAM_ARTIFACT_NAME] = base64.b64encode(encoded).decode("ascii")
+    if result is not None:
+        for key in _DROPPED_RESULT_KEYS:
+            result.pop(key, None)
     overview.pop(PAYLOAD_OVERVIEW_USERNAME, None)
 
     return {
@@ -312,7 +303,6 @@ def export_run(job_store, username: str, optimization_id: str) -> dict[str, Any]
             "accumulated_runtime_seconds": float(job.get("accumulated_runtime_seconds") or 0.0),
         },
         "events": [dict(event) for event in job_store.get_progress_events(optimization_id)],
-        "artifacts": artifacts,
     }
 
 
@@ -342,30 +332,6 @@ def _parse_time(value: str | None, *, default: datetime | None) -> datetime | No
     return parsed
 
 
-def _decode_program_artifact(artifacts: dict[str, str]) -> dict[str, Any] | None:
-    """Decode the program artifact and drop the fields a hosted copy must not keep.
-
-    Args:
-        artifacts: The bundle's ``{name: base64}`` map.
-
-    Returns:
-        The cleaned artifact mapping, or ``None`` when the bundle has none.
-
-    Raises:
-        RunSyncError: 422 ``sync.invalid_bundle`` for bad base64 or JSON.
-    """
-    encoded = artifacts.get(PROGRAM_ARTIFACT_NAME)
-    if encoded is None:
-        return None
-    try:
-        artifact = json.loads(base64.b64decode(encoded, validate=True))
-    except (binascii.Error, ValueError, RecursionError):
-        raise RunSyncError("sync.invalid_bundle", 422) from None
-    if not isinstance(artifact, dict) or not _is_storable(artifact, MAX_BUNDLE_DEPTH):
-        raise RunSyncError("sync.invalid_bundle", 422)
-    return {key: value for key, value in artifact.items() if key not in _DROPPED_ARTIFACT_KEYS}
-
-
 def _imported_overview(overview: dict[str, Any], optimization_type: str, username: str) -> dict[str, Any]:
     """Rebuild the payload overview for the caller's read-only copy.
 
@@ -378,12 +344,15 @@ def _imported_overview(overview: dict[str, Any], optimization_type: str, usernam
         The overview to store, labelled as imported and owned by ``username``.
 
     Raises:
-        RunSyncError: 422 ``sync.invalid_bundle`` when ``is_private`` is not a
+        RunSyncError: 409 ``sync.unsupported_run_type`` for a retired unified
+            DSPy run. 422 ``sync.invalid_bundle`` when ``is_private`` is not a
             boolean, or when ``model_settings`` is not a valid model config. The
             public dashboard casts ``is_private`` to boolean in SQL, so one bad
             row would fail that page for every user; serve and chat rebuild the
             model from ``model_settings`` and would answer 500.
     """
+    if overview.get(PAYLOAD_OVERVIEW_PAYLOAD_KIND) == "unified_v1":
+        raise RunSyncError("sync.unsupported_run_type", 409, optimization_type="unified_v1")
     if not isinstance(overview.get(PAYLOAD_OVERVIEW_IS_PRIVATE, False), bool):
         raise RunSyncError("sync.invalid_bundle", 422)
     model_settings = overview.get(PAYLOAD_OVERVIEW_MODEL_SETTINGS)
@@ -425,20 +394,18 @@ def _fits_embedding_columns(overview: dict[str, Any], result: dict[str, Any] | N
     return engine_used is None or len(str(engine_used)) <= _ENGINE_USED_WIDTH
 
 
-def _validated_result(bundle: _Bundle, overview: dict[str, Any]) -> dict[str, Any] | None:
+def _validated_result(bundle: _Bundle) -> dict[str, Any] | None:
     """Return the result to store, checked against the response model the detail page reads.
 
     A failed or cancelled run keeps no result: nothing on hosted reads one, and
-    an unchecked shape would break the summary route. A program artifact is
-    cleaned wherever the bundle put it, and is accepted only with the signature
-    code the server needs to rebuild the program from its state JSON.
+    an unchecked shape would break the summary route. Any program artifact in
+    the bundle is dropped.
 
     Args:
         bundle: The validated bundle.
-        overview: The overview the copy will store.
 
     Returns:
-        The result mapping with its cleaned program artifact, or ``None``.
+        The result mapping without a program artifact, or ``None``.
 
     Raises:
         RunSyncError: 422 ``sync.invalid_bundle`` when the result does not parse.
@@ -446,22 +413,10 @@ def _validated_result(bundle: _Bundle, overview: dict[str, Any]) -> dict[str, An
     if bundle.job.status not in _RESULT_STATUSES or bundle.job.result is None:
         return None
     result = dict(bundle.job.result)
-    result.pop("program_artifact_path", None)
-    artifact = _decode_program_artifact(bundle.artifacts)
-    if artifact is None and result.get("program_artifact") is not None:
-        inline = result["program_artifact"]
-        if not isinstance(inline, dict):
-            raise RunSyncError("sync.invalid_bundle", 422)
-        artifact = {key: value for key, value in inline.items() if key not in _DROPPED_ARTIFACT_KEYS}
-    if artifact is not None:
-        signature_code = overview.get(PAYLOAD_OVERVIEW_SIGNATURE_CODE)
-        has_signature = isinstance(signature_code, str) and bool(signature_code.strip())
-        if not has_signature and not overview.get(PAYLOAD_OVERVIEW_WORKFLOW):
-            raise RunSyncError("sync.invalid_bundle", 422)
-        result["program_artifact"] = artifact
-    model = BlackboxRunResponse if bundle.optimization.optimization_type == OPTIMIZATION_TYPE_BLACKBOX else RunResponse
+    for key in _DROPPED_RESULT_KEYS:
+        result.pop(key, None)
     try:
-        validated = model.model_validate(result)
+        validated = BlackboxRunResponse.model_validate(result)
     except ValidationError:
         raise RunSyncError("sync.invalid_bundle", 422) from None
     # Lax validation turns text such as "Infinity" into a float the raw check never saw.
@@ -519,7 +474,7 @@ def import_run(
     now = datetime.now(UTC)
     optimization_type = parsed.optimization.optimization_type
     overview = _imported_overview(parsed.optimization.payload_overview, optimization_type, username)
-    result = _validated_result(parsed, overview)
+    result = _validated_result(parsed)
     if not _fits_embedding_columns(overview, result):
         raise RunSyncError("sync.invalid_bundle", 422)
     created_at = _parse_time(parsed.job.created_at, default=now) or now

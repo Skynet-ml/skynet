@@ -19,7 +19,7 @@ import { userErrorMessage } from "@/shared/lib/user-error";
 import { TERMS } from "@/shared/lib/terms";
 import { OptimizationDetailView } from "./OptimizationDetailView";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
-import { rememberProbedRun, useRunKindHint } from "../lib/run-kind-hint";
+import { rememberProbedRun } from "../lib/run-kind-hint";
 import { planPipelineStages } from "../lib/pipeline-plan";
 
 type GateState =
@@ -42,9 +42,7 @@ type GateState =
 export function OptimizationDetailGate() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  // A grid pair deep link renders the pair strip above the tabs.
   const searchParams = useSearchParams();
-  const isPairLink = searchParams.get("pair") != null;
   // `?source=hosted` counts only where hosted can be read (a linked Mac); the
   // web app and an unlinked Mac keep the local probe and its public fallback.
   const source = hostedRunsAvailable() ? sourceFromParam(searchParams.get("source")) : "local";
@@ -59,7 +57,6 @@ export function OptimizationDetailGate() {
   // and tab state mid-use. "notfound" is deliberately not latched so a later
   // sign-in can still upgrade it.
   const resolvedIdRef = useRef<string | null>(null);
-  const kindHint = useRunKindHint(id);
 
   useEffect(() => {
     if (status === "loading") return;
@@ -131,7 +128,7 @@ export function OptimizationDetailGate() {
   }, [id, source, runRef, status, session?.backendAccessToken, router]);
 
   if (state.mode === "loading") {
-    return <OptimizationDetailSkeleton pair={isPairLink} grid={kindHint === "grid_search"} />;
+    return <OptimizationDetailSkeleton />;
   }
   if (state.mode === "public") return <OptimizationDetailView shareData={state.data} />;
   if (state.mode === "notfound") {

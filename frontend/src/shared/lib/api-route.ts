@@ -4,7 +4,7 @@
 export type ApiSource = "local" | "hosted";
 
 /** Local API route that forwards a call to the linked hosted account. */
-export const HOSTED_PROXY_PREFIX = "/local/hosted";
+const HOSTED_PROXY_PREFIX = "/local/hosted";
 
 /** The path to send to the local API base for `source`. */
 export function apiPath(path: string, source: ApiSource = "local"): string {
@@ -46,17 +46,6 @@ export function runHref(optimizationId: string, source: ApiSource = "local"): st
     : `/optimizations/${optimizationId}`;
 }
 
-/** The run page of one grid pair (or the run itself when `pairIndex` is null), keeping the source. */
-export function pairHref(
-  optimizationId: string,
-  pairIndex: number | null,
-  source: ApiSource = "local",
-): string {
-  const base = runHref(optimizationId, source);
-  if (pairIndex == null) return base;
-  return `${base}${base.includes("?") ? "&" : "?"}pair=${pairIndex}`;
-}
-
 /** The prefix of a hosted item's key; a local item keeps its bare id. */
 const HOSTED_KEY_PREFIX = "hosted:";
 
@@ -81,7 +70,7 @@ export function parseSourceKey(key: string): { source: ApiSource; id: string } {
  * agent settings and whole-account actions. The Mac never sends these through
  * the hosted proxy, even when a caller asks for the hosted source.
  */
-export const HOSTED_CLOSED_PATHS: readonly string[] = [
+const HOSTED_CLOSED_PATHS: readonly string[] = [
   "/billing/byok/keys",
   "/billing/payment-methods",
   "/billing/checkout",

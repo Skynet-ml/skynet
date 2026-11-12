@@ -33,7 +33,6 @@ from core.config import settings
 from core.error_reporting import configure_error_reporting
 from core.notifications import configure_notification_preferences
 from core.service_gateway.embedding_pipeline import start_embedding_index_sweeper
-from core.service_gateway.service_builder import build_default_service
 from core.storage import get_job_store
 from core.worker.engine import get_worker
 
@@ -52,11 +51,7 @@ def run_worker() -> None:
     configure_mcp_connections(job_store.engine)
     job_store.recover_orphaned_jobs()
     pending_ids = job_store.recover_pending_jobs()
-    worker = get_worker(
-        job_store,
-        service=build_default_service(),
-        pending_optimization_ids=pending_ids,
-    )
+    worker = get_worker(job_store, pending_optimization_ids=pending_ids)
     sweepers = [
         start_queue_metrics_refresher(job_store),
         start_orphan_recovery_sweeper(job_store),

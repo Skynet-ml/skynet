@@ -138,31 +138,29 @@ def local_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Set
     return settings, log
 
 
-def test_local_mode_pins_the_bare_local_image_for_every_workflow(local_settings: tuple[Settings, Path]) -> None:
-    """Accept a bare ``sha256:`` id in local mode, for DSPy and Anything alike."""
+def test_local_mode_pins_the_bare_local_image(local_settings: tuple[Settings, Path]) -> None:
+    """Accept a bare ``sha256:`` id in local mode."""
     settings, _ = local_settings
-    assert protected_image(settings, "dspy") == _IMAGE
-    assert protected_image(settings, "anything") == _IMAGE
-    assert protected_vercel_unavailable_reason(settings, "dspy") is None
+    assert protected_image(settings) == _IMAGE
+    assert protected_vercel_unavailable_reason(settings) is None
 
 
 def test_hosted_mode_refuses_a_bare_image_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hosted deployment still requires a registry digest reference."""
-    settings = _settings(monkeypatch, vercel_sandbox_image=_IMAGE, dspy_sandbox_image=_IMAGE)
-    assert protected_image(settings, "dspy") is None
-    assert protected_image(settings, "anything") is None
+    settings = _settings(monkeypatch, vercel_sandbox_image=_IMAGE)
+    assert protected_image(settings) is None
 
 
 def test_local_mode_reports_a_missing_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explain the Docker problem instead of a Vercel one."""
     settings = _settings(monkeypatch, local_mode=True, docker_bin=str(tmp_path / "missing"), local_sandbox_image=_IMAGE)
-    assert protected_vercel_unavailable_reason(settings, "dspy") == t("sandbox.docker_unavailable")
+    assert protected_vercel_unavailable_reason(settings) == t("sandbox.docker_unavailable")
 
 
 def test_docker_cost_profile_is_zero(local_settings: tuple[Settings, Path]) -> None:
     """A local box adds no sandbox cost to the run."""
     settings, _ = local_settings
-    profile = runtime_cost_profile(settings, "dspy", "docker")
+    profile = runtime_cost_profile(settings, "docker")
     assert profile["minimum_session_cents"] == "0"
     assert profile["maximum_session_cents"] == "0"
 
@@ -173,7 +171,7 @@ def test_bind_uses_docker_without_a_vercel_token_and_never_charges(local_setting
     assert settings.vercel_token is None
     gateway = _Gateway()
 
-    identity = bind_protected_sandbox(gateway, settings, workflow="dspy", owner_id="job-9", parent_hosts=("pypi.org",))
+    identity = bind_protected_sandbox(gateway, settings, owner_id="job-9", parent_hosts=("pypi.org",))
 
     assert identity["image"] == _IMAGE
     assert gateway.bound == {"image": _IMAGE, "lifetime_seconds": identity["lifetime_seconds"]}
@@ -201,7 +199,7 @@ def test_hosted_bind_refuses_a_bare_pinned_image(monkeypatch: pytest.MonkeyPatch
     """Hosted mode never boots a local image id, even when one is pinned on the run."""
     settings = _settings(monkeypatch)
     with pytest.raises(UnpricedOperationError):
-        bind_protected_sandbox(_Gateway(), settings, workflow="dspy", owner_id="job-9", image=_IMAGE)
+        bind_protected_sandbox(_Gateway(), settings, owner_id="job-9", image=_IMAGE)
 
 
 def test_runtime_catalog_reports_docker_in_local_mode(

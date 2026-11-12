@@ -518,10 +518,10 @@ export function BlackboxConfigCard({
                   <SlideHeroCard
                     index={1}
                     label={
-                      <HelpTip text={tip("submit.optimization_type")}>
+                      <>
                         {msg("auto.features.submit.components.steps.summarystep.4")}
                         {TERMS.optimization}
-                      </HelpTip>
+                      </>
                     }
                     value={msg("submit.recipe.anything.title")}
                     icon={<Stack />}

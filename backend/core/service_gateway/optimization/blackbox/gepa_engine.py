@@ -242,10 +242,9 @@ class GepaEngine:
             kwargs["background"] = task.background
 
         # The watcher tails run_dir/gepa_state.bin and forwards each accepted
-        # candidate as a live progress event — the same channel DSPy runs
-        # stream their trajectory tree through. The proposal capture pins
-        # scorer feedback to the iteration that asked for it and snapshots
-        # rejected proposals' text, again exactly as the DSPy path does.
+        # candidate as a live progress event, the channel the trajectory tree
+        # streams through. The proposal capture pins scorer feedback to the
+        # iteration that asked for it and snapshots rejected proposals' text.
         with (
             capture_proposal_prompts(OPTIMIZER_NAME_GEPA),
             trajectory_watch(run_dir, _scored_progress(ctx.progress_callback, server, task.str_mode)),
@@ -301,7 +300,7 @@ class _LaneReflection:
 
         Args:
             reflection_lm: Metered model callable.
-            check_budget: Direct run-wide guard outside DSPy's callback wrapper.
+            check_budget: Run-wide budget guard, checked before and after each model call.
         """
         self.reflection_lm = reflection_lm
         self.check_budget = check_budget

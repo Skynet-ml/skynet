@@ -64,7 +64,7 @@ def test_guest_ignores_worker_dependency_versions(tmp_path: Path, monkeypatch: p
     )
     observed: list[str] = []
 
-    def run(payload: dict[str, Any], artifact_id: str, events: Any, start_method: str) -> None:
+    def run(payload: dict[str, Any], artifact_id: str, events: Any) -> None:
         """Record that the optimizer entry point was reached."""
         observed.append(artifact_id)
 

@@ -4,8 +4,7 @@ Public dev surface (in ``_SCALAR_PUBLIC_PATHS``):
 - ``POST /serve/{id}`` — run one input through the repository's ``serve.py``.
 - ``GET /serve/{id}/info`` — describe the served repository run.
 
-Skynet optimizes repositories only. The DSPy program routes that the in-app
-agents still list as tools return 410 for every call.
+Skynet optimizes repositories only. A DSPy program run gets 410 on every route.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, Field
 
-from ...constants import PAYLOAD_OVERVIEW_COLUMN_MAPPING
 from ...i18n_keys import I18nKey
 from ...models import OptimizationStatus, ServeInfoResponse, ServeRequest, ServeResponse
 from ...models.serve import ServingEnabledRequest, ServingEnabledResponse
@@ -42,7 +40,7 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 SERVE_INFERENCE_EVENT = "serve_inference"
 
 ServeChannel = Literal["api_token", "share_link", "ui"]
-ServeRoute = Literal["serve", "serve_stream", "pair", "pair_stream", "chat"]
+ServeRoute = Literal["serve", "serve_stream", "chat"]
 
 
 def serve_channel(request: Request) -> ServeChannel:
@@ -79,7 +77,6 @@ class ServeInferenceEvent:
         optimization_id: str,
         channel: ServeChannel,
         route: ServeRoute,
-        pair_index: int | None = None,
     ) -> None:
         """Capture the structural, PII-free facts of one serve call.
 
@@ -89,7 +86,6 @@ class ServeInferenceEvent:
             optimization_id: Served job id; the metric joins it to the owner.
             channel: How the caller authenticated.
             route: Which serve endpoint handled the call.
-            pair_index: Grid pair index for pair routes.
         """
         self._engine = getattr(job_store, "engine", None)
         self._username = username
@@ -98,8 +94,6 @@ class ServeInferenceEvent:
             "channel": channel,
             "route": route,
         }
-        if pair_index is not None:
-            self._properties["pair_index"] = pair_index
         self._deferred = False
         self._recorded = False
 
@@ -225,15 +219,6 @@ class RequestUserInferenceResponse(BaseModel):
     prompt: str
 
 
-class RequestUserPairInferenceResponse(BaseModel):
-    """Envelope for ``POST /serve/{id}/pair/{index}/request-form`` — UI-trigger marker."""
-
-    optimization_id: str
-    pair_index: int
-    awaiting_inputs: bool
-    prompt: str
-
-
 def _interaction_authority(max_cost_cents: int | None, idempotency_key: str | None) -> tuple[int | None, str]:
     """Require a replay key; a one-request maximum stays optional.
 
@@ -289,6 +274,7 @@ def _repo_serve_call(
     req: ServeRequest,
     current_user: AuthenticatedUser,
     idempotency_key: str | None,
+    kind: str = REPO_SERVE_KIND,
 ) -> dict[str, Any]:
     """Serve one input through the best version of a repository run.
 
@@ -303,6 +289,7 @@ def _repo_serve_call(
         req: Caller inputs and optional cost maximum.
         current_user: Authenticated caller who funds this call.
         idempotency_key: Transport replay identity.
+        kind: Interaction identity that scopes the replay key.
 
     Returns:
         ``ServeResponse``-shaped result with the settled charge.
@@ -321,7 +308,7 @@ def _repo_serve_call(
             inputs=req.inputs,
             optimization_id=optimization_id,
         ),
-        kind=REPO_SERVE_KIND,
+        kind=kind,
         max_cost_cents=max_cost_cents,
         idempotency_key=key,
         user=current_user,
@@ -335,70 +322,30 @@ def _repo_serve_call(
     return result
 
 
-def _artifact_prompt_fields(artifact: Any) -> tuple[list[str], list[str], str | None, int]:
-    """Read prompt metadata from a ``ProgramArtifact`` with ``None``-safe fallbacks.
-
-    ``artifact.optimized_prompt`` may be unset for legacy results, so this
-    helper centralises the empty-default behaviour the routes rely on.
+def repo_serve_info(job_data: dict[str, Any], optimization_id: str, endpoint_url: str | None) -> ServeInfoResponse:
+    """Describe a finished repository run without running it.
 
     Args:
-        artifact: A ``ProgramArtifact`` (or grid-pair equivalent).
+        job_data: Stored repository run that ``_repo_run`` accepted.
+        optimization_id: The run being described.
+        endpoint_url: Public serve URL, or ``None`` when the caller cannot call it.
 
     Returns:
-        ``(input_fields, output_fields, instructions, demo_count)``.
+        A ``ServeInfoResponse`` that names the served file, engine and scorer model.
     """
-    prompt = artifact.get("optimized_prompt") if isinstance(artifact, dict) else artifact.optimized_prompt
-    if prompt is None:
-        return [], [], None, 0
-    if isinstance(prompt, dict):
-        raw_inputs = prompt.get("input_fields")
-        raw_outputs = prompt.get("output_fields")
-        raw_instructions = prompt.get("instructions")
-        raw_demos = prompt.get("demos")
-        return (
-            [value for value in raw_inputs if isinstance(value, str)] if isinstance(raw_inputs, list) else [],
-            [value for value in raw_outputs if isinstance(value, str)] if isinstance(raw_outputs, list) else [],
-            raw_instructions if isinstance(raw_instructions, str) else None,
-            len(raw_demos) if isinstance(raw_demos, list) else 0,
-        )
-    return (
-        list(prompt.input_fields),
-        list(prompt.output_fields),
-        prompt.instructions,
-        len(prompt.demos),
+    stored = job_data["payload"]
+    scorer = stored.get("scorer")
+    model = scorer.get("model") if isinstance(scorer, dict) else None
+    return ServeInfoResponse(
+        optimization_id=optimization_id,
+        module_name=SERVE_FILE,
+        optimizer_name=str((stored.get("strategy") or {}).get("engine") or ""),
+        model_name=str(model.get("name") or "") if isinstance(model, dict) else "",
+        input_fields=[],
+        output_fields=[],
+        serving_enabled=serving_enabled(job_data),
+        endpoint_url=endpoint_url,
     )
-
-
-def _column_mapping_fields(overview: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Read signature field names from the submission's persisted column mapping.
-
-    Flex programs run optimizer-authored code in an interpreter and expose no
-    named predictor, so their artifact carries no ``optimized_prompt``. The
-    column mapping still names every signature input and output field.
-
-    Args:
-        overview: Persisted payload overview.
-
-    Returns:
-        ``(input_fields, output_fields)``, both empty when no mapping exists.
-    """
-    mapping = overview.get(PAYLOAD_OVERVIEW_COLUMN_MAPPING)
-    if not isinstance(mapping, dict):
-        return [], []
-
-    def _names(kind: str) -> list[str]:
-        """Return the signature field names mapped under ``kind``.
-
-        Args:
-            kind: Mapping side, either ``inputs`` or ``outputs``.
-
-        Returns:
-            Field names in their persisted order.
-        """
-        raw = mapping.get(kind)
-        return [name for name in raw if isinstance(name, str)] if isinstance(raw, dict) else []
-
-    return _names("inputs"), _names("outputs")
 
 
 def serving_enabled(job_data: dict[str, Any]) -> bool:
@@ -446,9 +393,6 @@ def create_serve_router(*, job_store) -> APIRouter:
     """
     router = APIRouter()
 
-    # The DSPy-only routes below stay registered because the in-app agents list
-    # them as tools (``test_generalist_tool_coverage``); they refuse with 410.
-
     @router.get(
         "/serve/{optimization_id}/info",
         response_model=ServeInfoResponse,
@@ -475,18 +419,8 @@ def create_serve_router(*, job_store) -> APIRouter:
         job_data = load_job_for_user(job_store, optimization_id, current_user)
         if _repo_run(job_data) is None:
             raise _dspy_serve_retired()
-        stored = job_data["payload"]
-        scorer = stored.get("scorer")
-        model = scorer.get("model") if isinstance(scorer, dict) else None
-        return ServeInfoResponse(
-            optimization_id=optimization_id,
-            module_name=SERVE_FILE,
-            optimizer_name=str((stored.get("strategy") or {}).get("engine") or ""),
-            model_name=str(model.get("name") or "") if isinstance(model, dict) else "",
-            input_fields=[],
-            output_fields=[],
-            serving_enabled=serving_enabled(job_data),
-            endpoint_url=f"{str(request.base_url).rstrip('/')}/serve/{optimization_id}",
+        return repo_serve_info(
+            job_data, optimization_id, f"{str(request.base_url).rstrip('/')}/serve/{optimization_id}"
         )
 
     @router.put(
@@ -567,33 +501,6 @@ def create_serve_router(*, job_store) -> APIRouter:
         )
 
     @router.post(
-        "/serve/{optimization_id}/pair/{pair_index}/request-form",
-        response_model=RequestUserPairInferenceResponse,
-        operation_id="request_user_pair_inference",
-        summary="Ask the user to run inference through one grid-search pair; the chat renders an input card",
-        tags=["agent"],
-    )
-    def request_user_pair_inference(
-        optimization_id: str,
-        pair_index: int,
-        req: RequestUserInferenceRequest,
-        current_user: AuthenticatedUserDep,
-    ) -> RequestUserPairInferenceResponse:
-        """Refuse a grid-search pair inference card; grid pairs are DSPy programs.
-
-        Args:
-            optimization_id: Grid-search optimization id.
-            pair_index: Index of the pair to serve.
-            req: Optional prompt describing why inference is being offered.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Raises:
-            DomainError: 404 if unknown or inaccessible, else 410.
-        """
-        load_job_for_user(job_store, optimization_id, current_user)
-        raise _dspy_serve_retired()
-
-    @router.post(
         "/serve/{optimization_id}",
         response_model=ServeResponse,
         summary="Run a single inference through an optimized program",
@@ -644,25 +551,5 @@ def create_serve_router(*, job_store) -> APIRouter:
                     idempotency_key=idempotency_key,
                 )
             )
-
-    @router.get(
-        "/serve/{optimization_id}/pair/{pair_index}/info",
-        response_model=ServeInfoResponse,
-        summary="Describe the program for one grid-search pair",
-        tags=["agent"],
-    )
-    def serve_pair_info(optimization_id: str, pair_index: int, current_user: AuthenticatedUserDep) -> ServeInfoResponse:
-        """Refuse to describe a grid-search pair; grid pairs are DSPy programs.
-
-        Args:
-            optimization_id: Grid-search optimization id.
-            pair_index: Index of the pair in the grid-search result.
-            current_user: Authenticated caller resolved from the bearer token.
-
-        Raises:
-            DomainError: 404 if unknown or inaccessible, else 410.
-        """
-        load_job_for_user(job_store, optimization_id, current_user)
-        raise _dspy_serve_retired()
 
     return router

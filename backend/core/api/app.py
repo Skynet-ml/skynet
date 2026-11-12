@@ -2,7 +2,7 @@
 
 This module now contains *only* the app-lifecycle concerns:
 
-* DI wiring (``ServiceRegistry`` + ``DspyService`` + ``job_store``)
+* DI wiring (``ServiceRegistry`` + ``job_store``)
 * Background worker lifespan + SIGTERM handling
 * CORS middleware + cache headers
 * Consistent JSON error response shape
@@ -63,7 +63,6 @@ from ..exceptions import AppError
 from ..models import HEALTH_STATUS_OK, HealthResponse, QueueStatusResponse
 from ..notifications import configure_notification_preferences, start_notification_hold_sweeper
 from ..registry import ServiceRegistry
-from ..service_gateway import DspyService
 from ..service_gateway.embedding_pipeline import (
     backfill_missing_conversation_embeddings,
     purge_orphan_conversation_embeddings,
@@ -189,8 +188,6 @@ _SCALAR_PUBLIC_PATHS = frozenset(
         "/optimizations/{optimization_id}/summary",
         "/optimizations/{optimization_id}/logs",
         "/optimizations/{optimization_id}/payload",
-        "/optimizations/{optimization_id}/artifact",
-        "/optimizations/{optimization_id}/grid-result",
         # Live progress
         "/optimizations/{optimization_id}/stream",
         # Lifecycle
@@ -712,19 +709,12 @@ class SSEFriendlyGZipMiddleware(GZipMiddleware):
 
 def create_app(
     registry: ServiceRegistry | None = None,
-    *,
-    service: DspyService | None = None,
-    service_kwargs: dict | None = None,
 ) -> FastAPI:
     """Assemble and return the fully-configured FastAPI application.
 
     Args:
         registry: Optional pre-built :class:`ServiceRegistry`; a fresh one is
             created when omitted.
-        service: Optional pre-built :class:`DspyService`; constructed from
-            ``registry`` and ``service_kwargs`` when omitted.
-        service_kwargs: Optional kwargs forwarded to :class:`DspyService`
-            when building the default instance.
 
     Returns:
         The fully wired :class:`FastAPI` application.
@@ -736,10 +726,6 @@ def create_app(
     # rather than empty lists (shared with the standalone worker entrypoint,
     # which needs identical wiring).
     wire_registry_aliases(registry)
-    service = service or DspyService(
-        registry,
-        **(service_kwargs or {}),
-    )
 
     job_store = get_job_store()
     configure_notification_preferences(job_store.engine)
@@ -795,7 +781,7 @@ def create_app(
         pending_ids = []
         if settings.worker_enabled:
             pending_ids = job_store.recover_pending_jobs()
-            worker = get_worker(job_store, service=service, pending_optimization_ids=pending_ids)
+            worker = get_worker(job_store, pending_optimization_ids=pending_ids)
         else:
             # Split deployment: this pod serves the API only; job execution
             # runs in dedicated worker replicas (worker_main.py) so request
@@ -821,7 +807,7 @@ def create_app(
         # email/push/Slack wait so reading the inbox first can cancel them).
         notification_hold_sweeper = start_notification_hold_sweeper(getattr(job_store, "engine", None))
         # Runs due continuous-optimization checks; one replica per tick holds its lock.
-        continuous_sweeper = start_continuous_sweeper(job_store, service)
+        continuous_sweeper = start_continuous_sweeper(job_store)
         warn_if_local_key_uncapped()
         if settings.event_loop_lag_monitor_enabled:
             loop_lag_monitor = start_event_loop_lag_monitor()
@@ -1409,7 +1395,7 @@ def create_app(
     app.include_router(create_hardening_router(job_store=job_store), tags=["Hardening"])
     app.include_router(create_workflows_router(job_store=job_store), tags=["Workflows"])
     app.include_router(
-        create_submissions_router(service=service, job_store=job_store),
+        create_submissions_router(job_store=job_store),
         tags=["Optimizations"],
     )
     app.include_router(create_analytics_router(job_store=job_store), tags=["Analytics"])
@@ -1439,11 +1425,10 @@ def create_app(
         logger.warning("FastMCP not available, skipping /mcp mount: %s", exc)
     mount_remote_mcp(
         app,
-        service=service,
         job_store=job_store,
         get_worker=lambda: worker,
         extensions=[
-            partial(register_repo_tools, service=service, job_store=job_store),
+            partial(register_repo_tools, job_store=job_store),
             register_route_tools(app),
         ],
     )

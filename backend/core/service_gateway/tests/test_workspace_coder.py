@@ -49,7 +49,6 @@ _REPO_METRIC: dict[str, Any] = {
     "wizard_screen": "metric",
     "job_name": "Faster tests",
     "task_objective": "Make the test suite pass faster",
-    "artifact_kind": "repo",
     "repository": "acme/shop",
     "github_connected": True,
 }
@@ -129,8 +128,6 @@ def _fake_github(monkeypatch: pytest.MonkeyPatch, reads: list[str], token_seen: 
 def test_repo_metric_screen_offers_validate_code_without_a_dataset() -> None:
     """A repository run has no dataset, yet its Metric screen keeps the code check."""
     assert VALIDATE_CODE_TOOL in screen_tools(tools_for(WizardState(**_REPO_METRIC)), WizardState(**_REPO_METRIC))
-    dspy_metric = WizardState(wizard_screen="metric", artifact_kind="dspy_program")
-    assert VALIDATE_CODE_TOOL not in screen_tools(tools_for(dspy_metric), dspy_metric)
 
 
 @pytest.mark.asyncio
@@ -160,8 +157,6 @@ def test_repo_metric_screen_needs_only_the_scorer() -> None:
     """A repository run has no run.py, so the scorer alone completes the Metric screen."""
     assert _screen_problems("metric", WizardState(**_REPO_METRIC)) == ["metric_code must be written"]
     assert _screen_problems("metric", WizardState(**_REPO_METRIC, metric_code=_SCORER)) == []
-    dspy_metric = WizardState(wizard_screen="metric", artifact_kind="dspy_program", metric_code=_SCORER)
-    assert _screen_problems("metric", dspy_metric) == ["run_code and metric_code must both be written"]
 
 
 def test_metric_focus_hands_repository_code_to_the_coding_agent() -> None:
@@ -180,8 +175,8 @@ def test_coding_agent_is_offered_on_the_metric_screen_only() -> None:
     assert coding_agent_tools(other, turn, lm=None, emit=lambda _e: None, github_token=None) == []
 
 
-def test_coding_agent_reads_the_repository_only_for_a_repository_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The repository tools come with a repository run; a linked caller reads with its token."""
+def test_coding_agent_reads_a_github_repository_but_not_a_gitlab_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GitHub repository opens with the caller's token; a GitLab repository does not open."""
     _fake_github(monkeypatch, [])
 
     def token() -> str:
@@ -190,7 +185,6 @@ def test_coding_agent_reads_the_repository_only_for_a_repository_run(monkeypatch
 
     gitlab_run = {**_REPO_METRIC, "repo_provider": "gitlab"}
     cases: list[tuple[dict[str, Any], Any]] = [
-        ({**_REPO_METRIC, "artifact_kind": "dspy_program"}, token),
         (gitlab_run, None),
         (gitlab_run, lambda: None),
     ]
@@ -553,7 +547,7 @@ def test_coding_agent_returns_optimize_toml_as_a_file() -> None:
     """The agent's optimize.toml goes into the wizard_state patch, beside metric.py (SKY-184)."""
     toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
 
-    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+    result = _run_coder(toml_text, {})
 
     assert result["wizard_state"] == {"metric_code": _SCORER, "optimize_toml": toml_text}
     assert "optimize_toml_error" not in result
@@ -563,7 +557,7 @@ def test_coding_agent_reports_the_parser_error_of_its_optimize_toml() -> None:
     """A file the parser refuses still reaches the draft, with the error and its place for the setup agent."""
     toml_text = "[run]\ntimeout = 30\n"
 
-    result = _run_coder(toml_text, {"artifact_kind": "repo"})
+    result = _run_coder(toml_text, {})
 
     assert result["wizard_state"]["optimize_toml"] == toml_text
     error = result["optimize_toml_error"]
@@ -575,18 +569,10 @@ def test_coding_agent_leaves_an_unchanged_optimize_toml_out_of_the_patch() -> No
     """The agent gets the current optimize.toml and an unchanged file is no write."""
     toml_text = workspace_coder.OPTIMIZE_TOML_EXAMPLE
 
-    result = _run_coder(toml_text, {"artifact_kind": "repo", "optimize_toml": toml_text})
+    result = _run_coder(toml_text, {"optimize_toml": toml_text})
 
     assert "optimize_toml" in workspace_coder.CONTEXT_FIELDS
     assert result["wizard_state"] == {"metric_code": _SCORER}
-
-
-def test_coding_agent_writes_no_optimize_toml_for_a_dspy_program() -> None:
-    """Only a repository run has an optimize.toml, so another run's file stays out of the patch."""
-    result = _run_coder(workspace_coder.OPTIMIZE_TOML_EXAMPLE, {"artifact_kind": "dspy_program"})
-
-    assert result["wizard_state"] == {"metric_code": _SCORER}
-    assert "optimize_toml_error" not in result
 
 
 def test_coder_prompt_marks_the_example_paths_as_placeholders() -> None:

@@ -49,16 +49,15 @@ Reference facts for coding agents. The always-on rules are in `AGENTS.md`.
 │   │   │   ├── agents/          Code/generalist agent services
 │   │   │   ├── datasets/        Dataset planning and profiling
 │   │   │   ├── embedding_pipeline/ Conversation embedding and summarization
-│   │   │   └── optimization/    DSPy workflow, metrics, artifacts, and limits
+│   │   │   └── optimization/    Workflow, metrics, training data, and limits
 │   │   │       ├── blackbox/    Pinned Optimize Anything engines, harnesses,
 │   │   │       │                scorers, sandbox broker, and remote evaluator
 │   │   │       └── training_ground/ Benchmark/training adapters
 │   │   ├── storage/             ORM, migrations, job/checkpoint/dataset stores
 │   │   ├── telemetry/           Server-side telemetry events
 │   │   └── worker/              Job orchestration, preflight, recovery,
-│   │                            scoped relay, and Vercel DSPy dispatch
-│   ├── tests/                   Integration, load, and release-gate tests
-│   └── usage_guide/             Notebooks and API-client examples
+│   │                            scoped relay, and Vercel sandbox dispatch
+│   └── tests/                   Integration, load, and release-gate tests
 │
 ├── frontend/
 │   ├── package.json             Dev/build/typecheck/lint/unit commands

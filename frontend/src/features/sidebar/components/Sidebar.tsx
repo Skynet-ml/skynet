@@ -15,8 +15,6 @@ import {
   PushPin,
   Repeat,
   Pause,
-  GridFour,
-  CaretLeft,
   Copy,
   ArrowCounterClockwise,
   Play,
@@ -47,7 +45,7 @@ import {
   listFolders,
   unhideSharedItem,
 } from "@/shared/lib/api";
-import { pairHref, runHref, sourceFromParam } from "@/shared/lib/api-route";
+import { runHref, sourceFromParam } from "@/shared/lib/api-route";
 import type { RunFolder, SidebarJobItem } from "@/shared/lib/api";
 import {
   STATUS_DOT_COLOR,
@@ -144,9 +142,6 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const activePairParam = searchParams.get("pair");
-  const parsedPair = activePairParam != null ? parseInt(activePairParam, 10) : NaN;
-  const activePairIndex = Number.isFinite(parsedPair) ? parsedPair : null;
   const activeSource = sourceFromParam(searchParams.get("source"));
   const { data: session } = useSession();
   const sessionUser = sessionIdentity(session);
@@ -594,7 +589,6 @@ export function Sidebar() {
       isShared={isShared}
       inheritedFrom={inheritedFrom}
       isActive={isOpenRun(job)}
-      activePair={isOpenRun(job) ? activePairIndex : null}
       onDelete={handleDelete}
       onRefresh={fetchData}
       onMove={() =>
@@ -1053,7 +1047,6 @@ function JobRow({
   isShared,
   inheritedFrom,
   isActive,
-  activePair,
   onDelete,
   onRefresh,
   onMove,
@@ -1063,7 +1056,6 @@ function JobRow({
   /** Folder whose share gives this run's access; the row then offers no grant controls. */
   inheritedFrom?: string | null;
   isActive: boolean;
-  activePair: number | null;
   onDelete: (e: React.MouseEvent, id: string) => void;
   onRefresh: () => void;
   onMove: () => void;
@@ -1073,11 +1065,7 @@ function JobRow({
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [renaming, setRenaming] = React.useState(false);
   const [renameValue, setRenameValue] = React.useState("");
-  const [expanded, setExpanded] = React.useState(isActive && activePair !== null);
   const renameRef = React.useRef<HTMLInputElement>(null);
-  const isGridSearch = job.optimization_type === "grid_search" && (job.total_pairs ?? 0) > 0;
-  // Grid searches are retired: the backend refuses to clone, retry or resume one.
-  const canRerun = job.optimization_type !== "grid_search";
   const displayName =
     job.name ||
     [job.module_name, job.optimizer_name].filter(Boolean).join(" · ") ||
@@ -1264,22 +1252,6 @@ function JobRow({
           >
             {displayName}
           </span>
-          {isGridSearch && (
-            <span
-              className={cn(
-                "inline-flex items-center gap-0.5 text-[9px] font-semibold px-1 py-0.5 rounded shrink-0",
-                isActive
-                  ? "bg-muted text-muted-foreground"
-                  : "bg-muted/40 text-muted-foreground/60",
-              )}
-              title={formatMsg("auto.features.sidebar.components.sidebar.template.2", {
-                p1: job.total_pairs ?? "?",
-              })}
-            >
-              <GridFour className="size-2.5" />
-              {job.total_pairs ?? "?"}
-            </span>
-          )}
           {job.automated && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1299,33 +1271,6 @@ function JobRow({
           )}
           <StatusDot status={job.status} />
         </Link>
-        {isGridSearch && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setExpanded((o) => !o);
-            }}
-            className={cn(
-              "shrink-0",
-              isActive
-                ? "text-muted-foreground hover:text-foreground"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            aria-label={
-              expanded
-                ? msg("auto.features.sidebar.components.sidebar.literal.11")
-                : msg("auto.features.sidebar.components.sidebar.literal.12")
-            }
-          >
-            <CaretLeft
-              className={cn("size-3.5 transition-transform duration-200", expanded && "-rotate-90")}
-            />
-          </Button>
-        )}
         {/* Row actions call local routes, so hosted runs offer none. */}
         {job.source !== "hosted" && (
           <PopoverPrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>
@@ -1400,20 +1345,18 @@ function JobRow({
                   </PopoverPrimitive.Close>
                 )}
 
-                {canRerun && (
-                  <PopoverPrimitive.Close asChild>
-                    <button
-                      type="button"
-                      onClick={handleClone}
-                      className={COMPACT_POPOVER_ITEM_CLASS}
-                    >
-                      <Copy className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
-                      <span className="flex-1 text-start">
-                        {msg("auto.features.sidebar.components.sidebar.9")}
-                      </span>
-                    </button>
-                  </PopoverPrimitive.Close>
-                )}
+                <PopoverPrimitive.Close asChild>
+                  <button
+                    type="button"
+                    onClick={handleClone}
+                    className={COMPACT_POPOVER_ITEM_CLASS}
+                  >
+                    <Copy className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+                    <span className="flex-1 text-start">
+                      {msg("auto.features.sidebar.components.sidebar.9")}
+                    </span>
+                  </button>
+                </PopoverPrimitive.Close>
 
                 {canEdit && (
                   <PopoverPrimitive.Close asChild>
@@ -1425,7 +1368,6 @@ function JobRow({
                 )}
 
                 {canEdit &&
-                  canRerun &&
                   (job.status === "failed" ||
                     job.status === "cancelled" ||
                     job.status === "paused") &&
@@ -1556,48 +1498,6 @@ function JobRow({
         )}
       </div>
 
-      <AnimatePresence>
-        {expanded && isGridSearch && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
-          >
-            <div className="ps-6 pe-2 pb-1">
-              {Array.from({ length: job.total_pairs ?? 0 }, (_, i) => {
-                const isPairActive = isActive && activePair === i;
-                const pairStatus = derivePairStatus(
-                  i,
-                  job.status,
-                  job.completed_pairs ?? 0,
-                  job.failed_pairs ?? 0,
-                );
-                return (
-                  <Link
-                    key={i}
-                    href={pairHref(job.optimization_id, i, job.source)}
-                    className={cn(
-                      "flex items-center gap-2 rounded-md px-2 py-1.5 text-[0.625rem] transition-all duration-150",
-                      isPairActive
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold"
-                        : "text-muted-foreground/70 hover:bg-sidebar-accent/30 hover:text-foreground",
-                    )}
-                  >
-                    <StatusDot status={pairStatus} />
-                    <span>
-                      {msg("auto.features.sidebar.components.sidebar.6")}
-                      {i + 1}
-                    </span>
-                  </Link>
-                );
-              })}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {isShared && shared.dialog}
 
       {!isShared && (
@@ -1610,17 +1510,6 @@ function JobRow({
       )}
     </div>
   );
-}
-
-function derivePairStatus(
-  index: number,
-  parentStatus: string,
-  completedPairs: number,
-  failedPairs: number,
-): string {
-  if (index < completedPairs) return "success";
-  if (index < completedPairs + failedPairs) return "failed";
-  return parentStatus;
 }
 
 function StatusDot({ status }: { status: string }) {

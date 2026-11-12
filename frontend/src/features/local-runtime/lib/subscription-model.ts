@@ -14,7 +14,7 @@ import type { RunUsageRow } from "@/shared/types/run-usage";
 
 export { CLI_PROVIDERS, isCliProvider } from "@/shared/lib/cli-providers";
 
-export const SUBSCRIPTION_MODEL_PREFIX = "subscription/";
+const SUBSCRIPTION_MODEL_PREFIX = "subscription/";
 
 /** One coding-agent CLI as `GET /local/status` reports it. */
 export interface CliStatus {
@@ -125,7 +125,7 @@ export function parseSubscriptionModelId(
  * model through a gateway prefix (`openrouter/anthropic/...`), which still
  * names the same model as the CLI's bare `anthropic/...` slug.
  */
-export function catalogValueMatchesSlug(value: string, slug: string): boolean {
+function catalogValueMatchesSlug(value: string, slug: string): boolean {
   return value === slug || value.endsWith(`/${slug}`);
 }
 
@@ -386,7 +386,7 @@ type UsageNoteRow = Pick<
 export function usageCostNoteKey(
   localMode: boolean,
   rows: readonly UsageNoteRow[],
-  view: { final: boolean; pairIndex: number | null },
+  view: { final: boolean },
 ):
   | "usage_tab.api_rates_note_local"
   | "usage_tab.subscription_note_local"
@@ -394,7 +394,7 @@ export function usageCostNoteKey(
   | null {
   if (!localMode) return null;
   if (rows.some((r) => r.provider_cents != null)) return "usage_tab.api_rates_note_local";
-  if (!view.final || view.pairIndex != null) return null;
+  if (!view.final) return null;
   // Local mode refuses managed models (models.managed_unavailable_local), so a
   // local row with no charge and no own-key billing is a subscription call.
   const billed = rows.some(

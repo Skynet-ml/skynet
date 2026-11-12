@@ -573,7 +573,6 @@ def legacy_job_committed_cents(session: Session, username: str, *, exclude_job_i
     ).where(
         JobModel.username == username,
         JobModel.status.in_(("pending", "validating", "running", "paused")),
-        JobModel.parent_optimization_id.is_(None),
         ~attached,
     )
     if exclude_job_id is not None:

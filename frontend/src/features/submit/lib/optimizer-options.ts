@@ -8,7 +8,6 @@ import {
   optimizersFor,
   resolveOptimizer,
   usesFeedback,
-  type OptimizerTarget,
   type DataMode,
   type OptimizerCatalogResponse,
   type OptimizerChoice,
@@ -31,30 +30,25 @@ export interface OptimizerOptionView {
 }
 
 /** The catalog, when it was fetched for this exact setup; a stale one says nothing about it. */
-function catalogFor(
-  catalog: OptimizerCatalogResponse | null,
-  kind: OptimizerTarget,
-  mode: DataMode,
-): OptimizerCatalogResponse | null {
-  return catalog && catalog.artifact_kind === kind && catalog.data_mode === mode ? catalog : null;
+function catalogFor(catalog: OptimizerCatalogResponse | null, mode: DataMode): OptimizerCatalogResponse | null {
+  return catalog && catalog.data_mode === mode ? catalog : null;
 }
 
 /**
- * Every optimizer that fits `kind` and `mode`, Auto first, in the order
+ * Every optimizer that fits `mode`, Auto first, in the order
  * `optimizersFor` gives. Catalog entries for ids outside that list are
  * dropped: the server rejects them anyway. Guided users do not see
  * unavailable options, except the current choice, which stays so its issue
  * has somewhere to show.
  */
 export function optimizerOptions(input: {
-  kind: OptimizerTarget;
   mode: DataMode;
   catalog: OptimizerCatalogResponse | null;
   guided: boolean;
   choice: OptimizerChoice;
 }): OptimizerOptionView[] {
-  const { kind, mode, guided, choice } = input;
-  const catalog = catalogFor(input.catalog, kind, mode);
+  const { mode, guided, choice } = input;
+  const catalog = catalogFor(input.catalog, mode);
   const views = optimizersFor().map((id): OptimizerOptionView => {
     const entry = catalog?.options.find((option) => option.id === id);
     const resolved = resolveOptimizer(id);
@@ -83,14 +77,13 @@ export type OptimizerChoiceIssue =
  * back and undoing the upstream edit restores a valid setup untouched.
  */
 export function optimizerChoiceIssue(input: {
-  kind: OptimizerTarget;
   mode: DataMode;
   catalog: OptimizerCatalogResponse | null;
   choice: OptimizerChoice;
 }): OptimizerChoiceIssue | null {
-  const { kind, mode, choice } = input;
+  const { mode, choice } = input;
   if (!optimizersFor().includes(choice)) return { kind: "not_allowed" };
-  const catalog = catalogFor(input.catalog, kind, mode);
+  const catalog = catalogFor(input.catalog, mode);
   const entry = catalog?.options.find((option) => option.id === choice);
   if (entry && !entry.available)
     return { kind: "unavailable", reason: entry.unavailable_reason?.trim() || null };

@@ -1,6 +1,6 @@
 /** Shape of `GET /optimizations/{id}/usage`, the run page's Usage and cost tab. */
 
-export type UsageRole =
+type UsageRole =
   | "task"
   | "reflection"
   | "proposer"
@@ -14,14 +14,13 @@ export type UsageRole =
  * How a row was paid: through Skynet, through the owner's key with a fee, straight to the provider,
  * or by the owner's CLI subscription (local build).
  */
-export type UsageBilling = "skynet" | "byok" | "direct" | "subscription";
+type UsageBilling = "skynet" | "byok" | "direct" | "subscription";
 
 /** One row of `GET /optimizations/{id}/usage`. */
 export interface RunUsageRow {
   role: UsageRole | string;
   model: string | null;
   stage: string | null;
-  pair: string | null;
   candidate: string | null;
   // What an engine that makes several sorts of model calls used this one for (ShinkaEvolve).
   kind?: string | null;

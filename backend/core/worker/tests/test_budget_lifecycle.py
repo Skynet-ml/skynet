@@ -14,12 +14,10 @@ from gepa.core.state import GEPAState, ValsetEvaluation
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached, BudgetStopLatch
 from core.constants import PROGRESS_CANDIDATE
-from core.service_gateway.optimization.incumbent import completed_gepa_result
 from core.storage.remote import ORPHANED_RUN_MESSAGE
 from core.storage.tests.test_remote_jobstore import SQLiteJobStore, _fund_checkpoint
 from core.worker.checkpoint_compat import (
     CheckpointCompatibilityError,
-    checkpoint_incumbent,
     checkpoint_manifest,
     evaluated_incumbent_from_progress,
     validate_checkpoint,
@@ -28,7 +26,7 @@ from core.worker.constants import EVENT_ERROR, EVENT_TERMINAL
 from core.worker.engine import BackgroundWorker
 from core.worker.subprocess_runner import run_service_in_subprocess
 
-from .mocks import REAL_RUN_PAYLOAD, fake_dspy_service, fake_service_registry
+from .mocks import REAL_RUN_PAYLOAD
 
 
 def _checkpoint(path: Path) -> bytes:
@@ -73,16 +71,11 @@ def test_subprocess_emits_budget_terminal_without_error(evaluated: bool) -> None
         evaluated: Whether a completed optimizer result exists.
     """
     events: queue.Queue = queue.Queue()
-    service = fake_dspy_service()
     stopped = BudgetReached()
     stopped.result = {"best_candidate": "tested", "optimized_test_metric": None} if evaluated else None
     stopped.evidence = {"final_evaluation_completed": False, "final_evaluation_reason": "budget_reached"}
-    service.run.side_effect = stopped
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=service),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "job", events, "spawn")
+    with patch("core.worker.subprocess_runner.run_blackbox_optimization", side_effect=stopped):
+        run_service_in_subprocess(dict(REAL_RUN_PAYLOAD), "job", events)
     messages = list(events.queue)
     assert not any(event["type"] == EVENT_ERROR for event in messages)
     terminal = next(event["outcome"] for event in messages if event["type"] == EVENT_TERMINAL)
@@ -97,16 +90,12 @@ def test_manifest_retains_upstream_counters_and_requires_exact_evidence(tmp_path
     Args:
         tmp_path: Private checkpoint directory.
     """
-    payload = {"optimizer_name": "GEPA", "dataset": [{"input": "a"}], "seed": 11}
+    payload = {"strategy": {"mode": "single", "engine": "gepa"}, "dataset": [{"input": "a"}], "seed": 11}
     data = _checkpoint(tmp_path)
     manifest = checkpoint_manifest(data, payload, "fixture-v1")
     assert manifest["iteration"] == 4
     assert manifest["metric_calls"] == 23
     validate_checkpoint(data, manifest, payload, "fixture-v1")
-    recovered = completed_gepa_result(str(tmp_path), seed=11)
-    assert recovered.total_metric_calls == 23
-    assert recovered.best_candidate == {"predict": "seed instructions"}
-    assert recovered.val_aggregate_scores[recovered.best_idx] == 0.5
     for changed_data, changed_manifest, changed_payload in [
         (data + b"corruption", manifest, payload),
         (data, manifest, {**payload, "dataset": [{"input": "changed"}]}),
@@ -122,7 +111,7 @@ def test_manifest_retains_upstream_counters_and_requires_exact_evidence(tmp_path
         checkpoint_manifest(pickle.dumps(old), payload, "fixture-v1")
 
 
-def test_checkpoint_incumbent_accepts_only_finite_completed_candidate_events() -> None:
+def test_evaluated_incumbent_accepts_only_finite_completed_candidate_events() -> None:
     """Reject malformed, unevaluated, and non-finite progress as recovery results."""
     payload = {"optimizer_name": "GEPA", "split_fractions": {"train": 0.8, "val": 0.0, "test": 0.2}}
     metrics = {
@@ -134,10 +123,8 @@ def test_checkpoint_incumbent_accepts_only_finite_completed_candidate_events() -
     incumbent = evaluated_incumbent_from_progress(PROGRESS_CANDIDATE, metrics, payload)
     assert incumbent is not None
     assert incumbent["selection_scope"] == "training"
-    assert checkpoint_incumbent({"evaluated_incumbent": incumbent}) == incumbent
     assert evaluated_incumbent_from_progress(PROGRESS_CANDIDATE, {**metrics, "score": float("nan")}, payload) is None
     assert evaluated_incumbent_from_progress(PROGRESS_CANDIDATE, {**metrics, "per_example": []}, payload) is None
-    assert checkpoint_incumbent({"evaluated_incumbent": {**incumbent, "candidate": {"predict": 3}}}) is None
 
 
 def test_orphaned_run_stays_failed() -> None:
@@ -173,7 +160,7 @@ def test_late_generation_cannot_publish_or_override_cancelled_job() -> None:
     assert store.get_job("fenced")["latest_metrics"] == {"score": 0.5}
 
 
-def test_checkpoint_and_pair_publication_reject_obsolete_generation() -> None:
+def test_checkpoint_publication_rejects_obsolete_generation() -> None:
     """Prevent an interrupted worker from replacing the active recovery snapshot."""
     store = SQLiteJobStore()
     store.create_job("checkpoint-fence")
@@ -181,9 +168,6 @@ def test_checkpoint_and_pair_publication_reject_obsolete_generation() -> None:
     assert store.save_gepa_checkpoint("checkpoint-fence", b"current", 2, expected_generation=2)
     assert not store.save_gepa_checkpoint("checkpoint-fence", b"obsolete", 3, expected_generation=1)
     assert store.get_gepa_checkpoint("checkpoint-fence").data == b"current"
-    assert store.save_grid_pair_result("checkpoint-fence", 0, {"score": 0.5}, expected_generation=2)
-    assert not store.save_grid_pair_result("checkpoint-fence", 0, {"score": 1}, expected_generation=1)
-    assert store.get_grid_pair_results("checkpoint-fence")[0] == {"score": 0.5}
 
 
 def test_resume_waits_for_dispatched_usage_then_retains_cumulative_budget(
@@ -306,7 +290,7 @@ def test_checkpoint_metadata_inspection_never_executes_pickle_payload(tmp_path: 
             return Path.write_text, (marker, "executed")
 
     state = {"validation_schema_version": 7, "i": 2, "total_num_evals": 5, "adapter_state": GuestObject()}
-    manifest = checkpoint_manifest(pickle.dumps(state), {"optimizer_name": "GEPA"}, "fixture")
+    manifest = checkpoint_manifest(pickle.dumps(state), {"strategy": {"mode": "single", "engine": "gepa"}}, "fixture")
     assert manifest["iteration"] == 2
     assert not marker.exists()
 

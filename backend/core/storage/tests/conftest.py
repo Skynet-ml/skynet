@@ -156,7 +156,6 @@ class FakeJobStore:
         logger_name: str,
         message: str,
         timestamp: datetime | None = None,
-        pair_index: int | None = None,
         **run_log_fields: Any,
     ) -> None:
         """Append a log entry to the in-memory log list."""
@@ -166,7 +165,6 @@ class FakeJobStore:
                 "logger_name": logger_name,
                 "message": message,
                 "timestamp": (timestamp or datetime.now(UTC)).isoformat(),
-                "pair_index": pair_index,
                 **run_log_fields,
             }
         )

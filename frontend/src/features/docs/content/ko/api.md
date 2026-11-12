@@ -48,7 +48,6 @@ Authorization: Bearer skyd_...
 | `POST /blackbox/run`                            | GitHub 리포지토리에서 실행을 시작합니다.                     |
 | `GET /optimizations`                            | 내 실행을 나열합니다.                                        |
 | `GET /optimizations/{optimization_id}`          | 실행 하나의 상태, 진행 상황, 로그, 결과를 반환합니다.        |
-| `GET /optimizations/{optimization_id}/artifact` | 실행이 찾은 최고 버전을 반환합니다.                          |
 | `POST /optimizations/{optimization_id}/cancel`  | 실행을 중지합니다.                                           |
 | `POST /serve/{optimization_id}`                 | 새 입력에서 최고 버전을 실행합니다.                          |
 | `GET /health`                                   | 서비스가 작동 중인지 보여 줍니다.                            |
@@ -155,7 +154,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID \
 상태가 `success`이면 최고 버전을 가져옵니다.
 
 ```bash
-curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
+curl https://api.skynetml.com/optimizations/$RUN_ID \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 

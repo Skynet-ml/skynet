@@ -80,10 +80,8 @@ test("a saved DSPy default engine reads as Auto; a repository engine stays", () 
     },
   };
   try {
-    for (const legacy of ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]) {
-      store.set(PREF_KEYS.optimizerEngine, JSON.stringify(legacy));
-      assert.equal(readPref("optimizerEngine"), "auto");
-    }
+    store.set(PREF_KEYS.optimizerEngine, JSON.stringify("dspy_gepa"));
+    assert.equal(readPref("optimizerEngine"), "auto");
     store.set(PREF_KEYS.optimizerEngine, JSON.stringify("shinka_evolve"));
     assert.equal(readPref("optimizerEngine"), "shinka_evolve");
     store.set(PREF_KEYS.optimizerEngine, JSON.stringify("unknown_engine"));

@@ -33,7 +33,6 @@ from .models import (
     ConversationEmbeddingModel,
     DatasetModel,
     GepaCheckpointModel,
-    GridPairResultModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -257,11 +256,6 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                 GepaCheckpointModel.optimization_id.in_(user_job_ids)
             )
         )
-        grid_pairs = scalar(
-            select(func.coalesce(func.sum(GridPairResultModel.stored_bytes), 0)).where(
-                GridPairResultModel.optimization_id.in_(user_job_ids)
-            )
-        )
         agent_runs = scalar(
             select(func.coalesce(func.sum(BlackboxAgentRunModel.stored_bytes), 0)).where(
                 BlackboxAgentRunModel.optimization_id.in_(user_job_ids)
@@ -341,7 +335,6 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
         + logs
         + progress_events
         + checkpoints
-        + grid_pairs
         + agent_runs
         + run_calls
         + optimization_embeddings,
@@ -546,11 +539,6 @@ def compute_user_storage_category_items(
                 .where(GepaCheckpointModel.optimization_id == JobModel.optimization_id)
                 .scalar_subquery()
             )
-            grid_pair_bytes = (
-                select(func.coalesce(func.sum(GridPairResultModel.stored_bytes), 0))
-                .where(GridPairResultModel.optimization_id == JobModel.optimization_id)
-                .scalar_subquery()
-            )
             agent_run_bytes = (
                 select(func.coalesce(func.sum(BlackboxAgentRunModel.stored_bytes), 0))
                 .where(BlackboxAgentRunModel.optimization_id == JobModel.optimization_id)
@@ -566,7 +554,6 @@ def compute_user_storage_category_items(
                 + logs_bytes
                 + progress_bytes
                 + checkpoint_bytes
-                + grid_pair_bytes
                 + agent_run_bytes
                 + run_call_bytes
                 + embedding_bytes

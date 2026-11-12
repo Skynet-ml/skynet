@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { cn } from "@/shared/lib/utils";
 
-export type ColumnRoleTone = "input" | "output" | "ignore";
+type ColumnRoleTone = "input" | "output" | "ignore";
 
 const ROLE_STYLES: Record<ColumnRoleTone, string> = {
   input: "bg-primary-fill text-primary-foreground",

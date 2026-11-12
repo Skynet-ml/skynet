@@ -229,7 +229,8 @@ def test_saved_state_feeds_the_iteration_size() -> None:
     tracker: dict = {"payload": _PAYLOAD}
     base = worker._prepare_gepa_dir("fed")
     try:
-        (base / GEPA_STATE_FILENAME).write_bytes(_state(2))
+        (base / "gepa").mkdir(exist_ok=True)
+        (base / "gepa" / GEPA_STATE_FILENAME).write_bytes(_state(2))
         worker._persist_gepa_checkpoint("fed", base, tracker)
     finally:
         shutil.rmtree(base, ignore_errors=True)

@@ -18,7 +18,6 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .artifacts import ProgramArtifact
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
 from .scorer_dependencies import ScorerDependencyLock
@@ -108,8 +107,7 @@ BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
 CLAUDE_CODE_RETIRED = "Claude Code is no longer available as an agent harness. Choose another one, such as codex."
 # Extra optimization models a single run may add beyond the reflection model.
 BLACKBOX_MAX_EXTRA_REFLECTION_MODELS = 4
-# Stands in for ``module_name`` in the job overview and notifications, where
-# DSPy jobs record the program they optimized.
+# Stands in for ``module_name`` in the job overview and notifications.
 BLACKBOX_MODULE_NAME = "blackbox"
 
 # A text artifact under optimization. ``dict`` form names several parts that
@@ -472,8 +470,7 @@ class BlackboxStrategy(BaseModel):
         return self
 
 
-# Submission payload for ``POST /blackbox/run``. Not a subclass of the DSPy
-# request base: there is no module, signature or column mapping here.
+# Submission payload for ``POST /blackbox/run``.
 class BlackboxRunRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -648,30 +645,6 @@ class BlackboxRunRequest(BaseModel):
             raise ValueError("A repository target runs Auto or one repository engine.")
 
 
-# ``POST /blackbox/scorer/dry-run``: score one version on one case before
-# submitting, so a broken scorer fails in the wizard rather than in the job.
-class ScorerDryRunRequest(BaseModel):
-    scorer: BlackboxScorer
-    candidate: BlackboxCandidate
-    case: dict[str, Any] | None = None
-    execution_budget_id: str | None = Field(default=None, min_length=1, max_length=64)
-    execution_budget_revision: int | None = Field(default=None, ge=1)
-
-
-class ScorerDryRunResponse(BaseModel):
-    ok: bool
-    score: float | None = None
-    side_info: dict[str, Any] = Field(default_factory=dict)
-    error: str | None = None
-    elapsed_ms: float
-    usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    # What this one check debited, so the wizard can show setup spend against the total budget.
-    cents_charged: int = 0
-    budget: dict[str, Any] | None = None
-    preview_status: Literal["succeeded", "failed", "pending"] | None = None
-    preflight_id: str | None = None
-
-
 # One engine lane of a run. ``explore`` lanes share the budget; the
 # ``continue`` lane resumes from the best explore result.
 class BlackboxLaneResult(BaseModel):
@@ -717,8 +690,8 @@ class BlackboxNamedScore(BaseModel):
 
 # The final run's fresh scores of the starting point and the winner on one case.
 # ``*_observation`` is the trusted measurement of that version's run on the
-# case (time in ms, each model attempt, metered service cost); see
-# ``workspace_harness.build_observation``. ``None`` where nothing measured it.
+# case (time in ms, each model attempt, metered service cost). ``None`` where
+# nothing measured it.
 class BlackboxCaseResult(BaseModel):
     index: int
     baseline_score: float | None = None
@@ -769,24 +742,19 @@ class BlackboxRunResponse(BaseModel):
     candidate_tree: list[BlackboxCandidateNode] = Field(default_factory=list)
     total_scorer_runs: int = 0
     runtime_seconds: float
-    num_lm_calls: int = 0
     total_tokens: int | None = None
     usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    # Reflection-LM timing on the shared LMActivity shape, so the run view
-    # renders the same stage matrix as DSPy runs. Only ``reflection`` is
-    # populated — black-box engines drive no generation LM.
+    # Reflection-LM timing on the shared LMActivity shape. Only
+    # ``reflection`` is populated — black-box engines drive no generation LM.
     lm_activity: LMActivity | None = None
     optimization_metadata: dict[str, Any] = Field(default_factory=dict)
     details: dict[str, Any] = Field(default_factory=dict)
-    # Unified runs only: how cases were split, the selection scores measured
-    # on ``split_counts.selection_split`` (``baseline_score``/``best_score``
-    # stay the reported scores, on ``split_counts.report_split``), the
-    # optimizer Auto resolved to, and a DSPy optimizer's compiled program.
+    # How cases were split, and the selection scores measured on
+    # ``split_counts.selection_split`` (``baseline_score``/``best_score``
+    # stay the reported scores, on ``split_counts.report_split``).
     split_counts: UnifiedSplitCounts | None = None
     baseline_val_score: float | None = None
     best_val_score: float | None = None
-    optimizer_resolved: str | None = None
-    program_artifact: ProgramArtifact | None = None
 
     # Results stored before the final run existed carry the DSPy names for
     # their held-out scores; read them as the baseline and best scores.

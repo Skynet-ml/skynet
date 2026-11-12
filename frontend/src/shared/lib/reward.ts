@@ -2,18 +2,17 @@
  * The accuracy, speed and cost reward (SKY-69), read from the metric's code.
  *
  * The metric declares `REWARD_SPEC` as plain Python data and returns
- * `reward(REWARD_SPEC, accuracy, feedback)`; the run's harness applies it with
- * the trusted time and cost of each response. This module reads the same spec
- * and applies the same formula (`blend_reward` in
- * `backend/.../workspace_harness.py`), so the setup preview and the results
- * show exactly what the run scores. No imports: `node --test` loads it as is.
+ * `reward(REWARD_SPEC, accuracy, feedback)`. This module reads that spec from
+ * the metric code, validates it and applies the formula, so the setup preview
+ * and the run's Reward tab show the reward. No imports: `node --test` loads it
+ * as is.
  */
 
 export type RewardComponent = "accuracy" | "speed" | "cost";
 
 export const REWARD_COMPONENTS: readonly RewardComponent[] = ["accuracy", "speed", "cost"];
 
-export interface RewardComponentSpec {
+interface RewardComponentSpec {
   /** The metric's own name for this part; empty when the spec gives none. */
   name: string;
   meaning: string;
@@ -119,8 +118,8 @@ function positive(value: unknown): number | null {
   return typeof value === "number" && value > 0 && Number.isFinite(value) ? value : null;
 }
 
-/** Validate a raw spec the way the harness's `reward_spec` does; `null` when it would refuse it. */
-export function rewardSpecFrom(raw: unknown): RewardSpec | null {
+/** Validate a raw spec; `null` when it is not a usable reward spec. */
+function rewardSpecFrom(raw: unknown): RewardSpec | null {
   if (!isRecord(raw) || !isRecord(raw.weights)) return null;
   const weights = {} as Record<RewardComponent, number>;
   for (const name of REWARD_COMPONENTS) {
@@ -163,7 +162,7 @@ export function rewardSpecFrom(raw: unknown): RewardSpec | null {
  * Read the metric's module-level `REWARD_SPEC = {...}`.
  *
  * Returns `none` when the metric declares no spec, and `invalid` when it does
- * but the value is not plain literal data the harness would accept.
+ * but the value is not plain literal data that `rewardSpecFrom` accepts.
  */
 export function readRewardSpec(metricCode: string | null | undefined): RewardSpecRead {
   const match = /^REWARD_SPEC\s*(?::[^=\n]*)?=\s*/m.exec(metricCode ?? "");

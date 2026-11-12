@@ -1,4 +1,4 @@
-"""Attribute each billed model call to the run stage, pair, candidate and case it served.
+"""Attribute each billed model call to the run stage, candidate and case it served.
 
 Tags travel with the request as one header, so they cross every boundary a
 call can take: a worker child's HTTP call to the gateway, a sandbox command's
@@ -24,15 +24,12 @@ USAGE_TAGS_HEADER = "x-app-usage-tags"
 # Still sent by the pinned sandbox image and older clients; read, never written.
 LEGACY_USAGE_TAGS_HEADER = "x-skynet-usage-tags"
 USAGE_TAGS_HEADERS = frozenset({USAGE_TAGS_HEADER, LEGACY_USAGE_TAGS_HEADER})
-TAG_KEYS = ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
+TAG_KEYS = ("stage", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
 # ``caller`` values: which optimizer drove an optimization-route call.
 CALLER_PROPOSER = "proposer"
 CALLER_REFLECTION = "reflection"
 # ``kind`` values: what an engine that makes several sorts of model calls used one for.
 KIND_MUTATION = "mutation"
-KIND_META_NOTES = "meta_notes"
-KIND_NOVELTY_JUDGE = "novelty_judge"
-KIND_EMBEDDING = "embedding"
 # ``lane`` names the Auto lane (``<phase>-<engine>``) a call ran in. Unlike the
 # other keys it follows the call into threads started inside the lane, because
 # engines score and reflect on their own pools where the lane's context is gone.
@@ -150,7 +147,7 @@ def usage_scope(**tags: Any) -> Iterator[None]:
     Scopes nest: an inner one keeps the outer's tags and overrides those it sets.
 
     Args:
-        **tags: ``stage``, ``pair``, ``candidate``, ``case``, ``caller``, ``kind``, ``lane``, ``box`` or
+        **tags: ``stage``, ``candidate``, ``case``, ``caller``, ``kind``, ``lane``, ``box`` or
             ``for_box``; ``None`` keeps the outer value.
 
     Yields:
@@ -161,35 +158,6 @@ def usage_scope(**tags: Any) -> Iterator[None]:
         yield
     finally:
         _scope.reset(token)
-
-
-class TagsToken:
-    """Undo one :func:`usage_tags_token` from the context that opened it."""
-
-    def __init__(self, token: contextvars.Token[dict[str, str] | None]) -> None:
-        """Hold the context variable token to restore.
-
-        Args:
-            token: Token returned when the tags were set.
-        """
-        self._token = token
-
-    def reset(self) -> None:
-        """Restore the outer tags; a no-op when called from another context."""
-        with contextlib.suppress(ValueError):
-            _scope.reset(self._token)
-
-
-def usage_tags_token(**tags: Any) -> TagsToken:
-    """Open a tag scope that a callback closes later, unlike :func:`usage_scope`.
-
-    Args:
-        **tags: Tags to add; ``None`` keeps the outer value.
-
-    Returns:
-        A token whose ``reset`` restores the outer tags.
-    """
-    return TagsToken(_scope.set({**current_tags(), **clean_tags(tags)}))
 
 
 def with_tags_header(headers: Mapping[str, str] | None, tags: Mapping[str, Any]) -> dict[str, str]:
@@ -206,7 +174,7 @@ def with_tags_header(headers: Mapping[str, str] | None, tags: Mapping[str, Any])
     result = {name: value for name, value in (headers or {}).items() if name.lower() not in USAGE_TAGS_HEADERS}
     encoded = encode_tags({**header_tags(headers), **clean_tags(tags)})
     if encoded:
-        # The DSPy guest runs the pinned image's backend copy while the parent
+        # The sandbox guest runs the pinned image's backend copy while the parent
         # ships the model proxy, so either side may be the older one; an older
         # proxy forwards and an older gateway reads only the legacy name.
         result[USAGE_TAGS_HEADER] = encoded

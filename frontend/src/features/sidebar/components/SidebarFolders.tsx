@@ -132,16 +132,6 @@ function viewRows(): ViewRow[] {
       ],
     },
     {
-      key: "type",
-      label: msg("sidebar.filter.type"),
-      options: [
-        { value: "all", label: msg("sidebar.filter.all") },
-        { value: "run", label: msg("sidebar.filter.type.run") },
-        { value: "grid_search", label: msg("sidebar.filter.type.grid") },
-        { value: "blackbox", label: msg("sidebar.filter.type.blackbox") },
-      ],
-    },
-    {
       key: "automation",
       label: msg("sidebar.filter.automation"),
       options: [

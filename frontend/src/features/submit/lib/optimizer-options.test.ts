@@ -35,11 +35,9 @@ function option(id: OptimizerOption["id"], available = true, reason?: string): O
 
 function catalog(
   options: OptimizerOption[],
-  artifact_kind: OptimizerCatalogResponse["artifact_kind"] = "repo",
   data_mode: OptimizerCatalogResponse["data_mode"] = "pairs",
 ): OptimizerCatalogResponse {
   return {
-    artifact_kind,
     data_mode,
     default: "auto",
     options,
@@ -50,7 +48,6 @@ function catalog(
 
 test("Auto leads and the list follows the setup's allowed optimizers", () => {
   const blackbox = optimizerOptions({
-    kind: "repo",
     mode: "pairs",
     catalog: null,
     guided: false,
@@ -62,9 +59,8 @@ test("Auto leads and the list follows the setup's allowed optimizers", () => {
 });
 
 test("without a matching catalog every option is pending, not unavailable", () => {
-  const stale = catalog([option("gepa", false, "no key")], "repo", "single");
+  const stale = catalog([option("gepa", false, "no key")], "single");
   const views = optimizerOptions({
-    kind: "repo",
     mode: "pairs",
     catalog: stale,
     guided: false,
@@ -75,7 +71,6 @@ test("without a matching catalog every option is pending, not unavailable", () =
 
 test("unavailable options show disabled with their reason", () => {
   const views = optimizerOptions({
-    kind: "repo",
     mode: "pairs",
     catalog: catalog([option("gepa", false, "  sandbox down ")]),
     guided: false,
@@ -91,7 +86,6 @@ test("unavailable options show disabled with their reason", () => {
 test("guided hides unavailable options but keeps the current choice", () => {
   const cat = catalog([option("gepa", false), option("best_of_n", false), option("autoresearch")]);
   const views = optimizerOptions({
-    kind: "repo",
     mode: "pairs",
     catalog: cat,
     guided: true,
@@ -103,19 +97,17 @@ test("guided hides unavailable options but keeps the current choice", () => {
 test("catalog entries outside the allowed list are dropped", () => {
   const retired = option("gepa");
   const views = optimizerOptions({
-    kind: "repo",
     mode: "pairs",
-    catalog: catalog([option("auto"), { ...retired, id: "dspy_gepa" as OptimizerOption["id"] }, option("gepa")]),
+    catalog: catalog([option("auto"), { ...retired, id: "unknown_engine" as OptimizerOption["id"] }, option("gepa")]),
     guided: false,
     choice: "auto",
   }).map((view) => view.id);
-  assert.equal(views.includes("dspy_gepa" as OptimizerOption["id"]), false);
+  assert.equal(views.includes("unknown_engine" as OptimizerOption["id"]), false);
   assert.deepEqual(views.slice(0, 2), ["auto", "gepa"]);
 });
 
 test("fallback flags come from the shared rules while the catalog loads", () => {
   const repo = optimizerOptions({
-    kind: "repo",
     mode: "pairs",
     catalog: null,
     guided: false,
@@ -130,9 +122,9 @@ test("fallback flags come from the shared rules while the catalog loads", () => 
 });
 
 test("a choice the setup no longer allows is reported, never reset", () => {
-  for (const choice of ["dspy_miprov2", "dspy_gepa"]) {
+  for (const choice of ["unknown_engine", "grid_search"]) {
     assert.deepEqual(
-      optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: null, choice: choice as OptimizerChoice }),
+      optimizerChoiceIssue({ mode: "pairs", catalog: null, choice: choice as OptimizerChoice }),
       { kind: "not_allowed" },
     );
   }
@@ -141,17 +133,17 @@ test("a choice the setup no longer allows is reported, never reset", () => {
 test("an unavailable choice reports the catalog's reason", () => {
   const cat = catalog([option("gepa"), option("shinka_evolve", false, "no GPU")]);
   assert.deepEqual(
-    optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: cat, choice: "shinka_evolve" }),
+    optimizerChoiceIssue({ mode: "pairs", catalog: cat, choice: "shinka_evolve" }),
     { kind: "unavailable", reason: "no GPU" },
   );
   assert.equal(
-    optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: cat, choice: "gepa" }),
+    optimizerChoiceIssue({ mode: "pairs", catalog: cat, choice: "gepa" }),
     null,
   );
 });
 
 test("a repository run offers Auto first, then the six repository engines", () => {
-  const input = { kind: "repo", mode: "single", catalog: null, choice: "auto" } as const;
+  const input = { mode: "single", catalog: null, choice: "auto" } as const;
   const ids = optimizerOptions({ ...input, guided: false }).map((view) => view.id);
   assert.deepEqual(ids, [
     "auto",
@@ -164,7 +156,7 @@ test("a repository run offers Auto first, then the six repository engines", () =
   ]);
   assert.equal(optimizerChoiceIssue(input), null);
   assert.equal(optimizerChoiceIssue({ ...input, choice: "gepa" }), null);
-  assert.deepEqual(optimizerChoiceIssue({ ...input, choice: "dspy_gepa" as OptimizerChoice }), {
+  assert.deepEqual(optimizerChoiceIssue({ ...input, choice: "unknown_engine" as OptimizerChoice }), {
     kind: "not_allowed",
   });
 });

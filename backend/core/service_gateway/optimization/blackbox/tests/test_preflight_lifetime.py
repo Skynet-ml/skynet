@@ -1,7 +1,7 @@
 """Bound the setup check's outer box by the request's own timeouts."""
 
 from core.service_gateway.optimization.blackbox.agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
-from core.service_gateway.optimization.blackbox.preflight import preflight_lifetime_seconds, unified_sample_count
+from core.service_gateway.optimization.blackbox.preflight import preflight_lifetime_seconds
 from core.service_gateway.optimization.blackbox.sandbox import KILL_GRACE_SECONDS
 
 SCORER = {"kind": "python", "metric_code": "def metric(candidate, case):\n    return 1.0\n"}
@@ -29,14 +29,3 @@ def test_preflight_lifetime_adds_the_agent_case_and_its_readiness_probe() -> Non
     lifetime = preflight_lifetime_seconds(payload)
 
     assert lifetime == 600 + 2 * (60 + 60) + READINESS_LIFETIME_SECONDS + case_lifetime_seconds(300.0, setup_steps=3)
-
-
-def test_unified_lifetime_follows_the_contract_sample_count() -> None:
-    """One workspace box scores every requested sample; the count is clamped and defaults to three."""
-    base = {"payload_kind": "unified_v1", "workspace": {"metric_timeout_seconds": 10}}
-
-    assert unified_sample_count(base) == 3
-    assert unified_sample_count({**base, "contract_sample_count": 5}) == 5
-    assert unified_sample_count({**base, "contract_sample_count": 99}) == 5
-    assert unified_sample_count({**base, "contract_sample_count": True}) == 3
-    assert preflight_lifetime_seconds({**base, "contract_sample_count": 5}) == 600 + 5 * 10 + 60

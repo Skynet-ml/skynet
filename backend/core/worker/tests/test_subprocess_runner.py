@@ -2,9 +2,8 @@
 
 Covers (all in-process, no real subprocesses):
   safe_queue_put              — normal put and error suppression
-  set_fork_service            — stores / clears module global
   SubprocessLogHandler        — emit field capture, fallback on format error, UTC timestamp
-  run_service_in_subprocess   — happy path, exception path, dispatch, progress callback
+  run_service_in_subprocess   — happy path, exception path, dispatch, progress
 """
 
 from __future__ import annotations
@@ -28,10 +27,7 @@ from core.worker.subprocess_runner import (
     SubprocessLogHandler,
     run_service_in_subprocess,
     safe_queue_put,
-    set_fork_service,
 )
-
-from .mocks import REAL_RUN_PAYLOAD, REAL_UNIFIED_PAYLOAD, fake_dspy_service, fake_service_registry
 
 
 def _make_queue() -> queue.Queue:
@@ -92,23 +88,6 @@ def test_safe_queue_put_does_not_raise_on_none_event() -> None:
     safe_queue_put(q, None)  # type: ignore[arg-type]
 
     assert q.get_nowait() is None
-
-
-def test_set_fork_service_stores_provided_instance() -> None:
-    """``set_fork_service`` stores the provided service on the module global."""
-    fake_service = MagicMock()
-
-    set_fork_service(fake_service)
-
-    assert sr._FORK_SERVICE is fake_service
-
-
-def test_set_fork_service_clears_when_passed_none() -> None:
-    """``set_fork_service(None)`` clears the module global."""
-    set_fork_service(MagicMock())
-    set_fork_service(None)
-
-    assert sr._FORK_SERVICE is None
 
 
 def test_subprocess_log_handler_emits_log_event_type() -> None:
@@ -233,186 +212,6 @@ def _drain_queue(q: queue.Queue) -> list[dict]:
     return events
 
 
-def test_run_service_in_subprocess_happy_path_emits_result_event() -> None:
-    """A successful run emits a single ``EVENT_RESULT`` carrying the payload."""
-    q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service(result={"baseline_test_metric": 0.5, "optimized_test_metric": 0.8})
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-1", q, "spawn")
-
-    events = _drain_queue(q)
-    result_events = [e for e in events if e.get("type") == EVENT_RESULT]
-    assert len(result_events) == 1
-    assert result_events[0]["result"] == {"baseline_test_metric": 0.5, "optimized_test_metric": 0.8}
-
-
-def test_run_service_in_subprocess_happy_path_zero_exit() -> None:
-    """A successful run does not raise."""
-    q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service()
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        # Must not raise.
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-2", q, "spawn")
-
-
-def test_run_service_in_subprocess_exception_emits_error_event() -> None:
-    """A failing run emits a single ``EVENT_ERROR`` with error text and traceback."""
-    q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service()
-    svc.run.side_effect = RuntimeError("model exploded")
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-3", q, "spawn")
-
-    events = _drain_queue(q)
-    error_events = [e for e in events if e.get("type") == EVENT_ERROR]
-    assert len(error_events) == 1
-    assert "model exploded" in error_events[0]["error"]
-    assert "traceback" in error_events[0]
-    assert error_events[0]["failure_kind"] == DETERMINISTIC_FAILURE
-
-
-def test_run_service_in_subprocess_classifies_trusted_transport_interruption() -> None:
-    """Mark a typed model/sandbox interruption recoverable at the child boundary."""
-    q: queue.Queue[dict] = queue.Queue()
-    service = fake_dspy_service()
-    service.run.side_effect = InfrastructureInterruptionError("provider stream ended")
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=service),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-transient", q, "spawn")
-
-    [event] = [value for value in _drain_queue(q) if value.get("type") == EVENT_ERROR]
-    assert event["failure_kind"] == INFRASTRUCTURE_INTERRUPTION
-    assert event["error_type"] == "InfrastructureInterruptionError"
-
-
-def test_run_service_in_subprocess_exception_no_result_event() -> None:
-    """A failing run does not emit an ``EVENT_RESULT``."""
-    q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service()
-    svc.run.side_effect = ValueError("bad payload")
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-4", q, "spawn")
-
-    events = _drain_queue(q)
-    result_events = [e for e in events if e.get("type") == EVENT_RESULT]
-    assert result_events == []
-
-
-def test_run_service_in_subprocess_run_type_calls_service_run() -> None:
-    """A ``run`` payload is dispatched to ``service.run``."""
-    q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service()
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-5", q, "spawn")
-
-    svc.run.assert_called_once()
-
-
-def test_run_service_in_subprocess_unified_payload_calls_run_unified_optimization() -> None:
-    """A black-box payload marked ``unified_v1`` runs the unified service, never the legacy entry point."""
-    q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service()
-    fake_result = MagicMock()
-    fake_result.model_dump.return_value = {"best_score": 0.9}
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-        patch("core.worker.subprocess_runner.run_blackbox_optimization") as run_bb,
-        patch(
-            "core.worker.subprocess_runner.run_unified_optimization", autospec=True, return_value=fake_result
-        ) as run_unified,
-    ):
-        run_service_in_subprocess({**REAL_UNIFIED_PAYLOAD, "_gepa_log_dir": "/tmp/u-run"}, "art-6", q, "spawn")
-
-    run_unified.assert_called_once()
-    payload_arg = run_unified.call_args.args[0]
-    assert isinstance(payload_arg, sr.UnifiedRunRequest)
-    assert payload_arg.optimizer.choice == "dspy_gepa"
-    assert run_unified.call_args.kwargs["artifact_id"] == "art-6"
-    assert run_unified.call_args.kwargs["gepa_log_dir_path"] == "/tmp/u-run"
-    run_bb.assert_not_called()
-    svc.run.assert_not_called()
-    result_events = [e for e in _drain_queue(q) if e.get("type") == EVENT_RESULT]
-    assert result_events == [{"type": EVENT_RESULT, "result": {"best_score": 0.9}}]
-
-
-def test_run_service_in_subprocess_progress_callback_emits_progress_events() -> None:
-    """Progress-callback invocations are forwarded to the parent as ``EVENT_PROGRESS``."""
-    q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service()
-
-    captured_callback = {}
-
-    def _fake_run(payload, *, artifact_id, progress_callback, gepa_log_dir_path=None):
-        """Stand-in for ``service.run`` that emits two progress events."""
-        captured_callback["cb"] = progress_callback
-        progress_callback("step_a", {"score": 0.3})
-        progress_callback("step_b", {"score": 0.6})
-        fake_result = MagicMock()
-        fake_result.model_dump.return_value = {}
-        return fake_result
-
-    svc.run.side_effect = _fake_run
-
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-    ):
-        run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-7", q, "spawn")
-
-    events = _drain_queue(q)
-    progress_events = [e for e in events if e.get("type") == EVENT_PROGRESS]
-    assert len(progress_events) == 2
-    assert progress_events[0]["event"] == "step_a"
-    assert progress_events[0]["metrics"] == {"score": 0.3}
-    assert progress_events[1]["event"] == "step_b"
-    assert progress_events[1]["metrics"] == {"score": 0.6}
-
-
-def test_run_service_in_subprocess_uses_fork_service_when_start_method_is_fork() -> None:
-    """Under ``fork`` start method the prepared ``_FORK_SERVICE`` is reused."""
-    q: queue.Queue[dict] = queue.Queue()
-    fork_svc = fake_dspy_service()
-
-    set_fork_service(fork_svc)
-    try:
-        with (
-            patch("core.worker.subprocess_runner.DspyService") as mock_dspy_svc,
-            patch("core.worker.subprocess_runner.ServiceRegistry"),
-        ):
-            run_service_in_subprocess(REAL_RUN_PAYLOAD, "art-8", q, "fork")
-
-        # DspyService constructor must NOT have been called — fork service reused
-        mock_dspy_svc.assert_not_called()
-        fork_svc.run.assert_called_once()
-    finally:
-        set_fork_service(None)
-
-
 _BLACKBOX_PAYLOAD: dict = {
     "name": "bb",
     "username": "alice",
@@ -425,19 +224,98 @@ _BLACKBOX_PAYLOAD: dict = {
 }
 
 
-def test_run_service_in_subprocess_blackbox_type_calls_run_blackbox_optimization() -> None:
-    """A ``blackbox`` payload bypasses the DSPy service and runs the black-box entry point."""
+def _blackbox_result(result: dict | None = None) -> MagicMock:
+    """Build a fake black-box result whose ``model_dump`` returns ``result``.
+
+    Args:
+        result: The serialized result; defaults to an empty dict.
+
+    Returns:
+        A MagicMock standing in for ``BlackboxRunResponse``.
+    """
+    fake_result = MagicMock()
+    fake_result.model_dump.return_value = result if result is not None else {}
+    return fake_result
+
+
+def _patch_run(**kwargs: object):
+    """Patch ``run_blackbox_optimization`` in the subprocess runner.
+
+    Args:
+        **kwargs: Options for ``unittest.mock.patch``.
+
+    Returns:
+        The patch context manager.
+    """
+    return patch("core.worker.subprocess_runner.run_blackbox_optimization", **kwargs)
+
+
+def test_run_service_in_subprocess_happy_path_emits_result_event() -> None:
+    """A successful run emits a single ``EVENT_RESULT`` carrying the payload."""
     q: queue.Queue[dict] = queue.Queue()
-    svc = fake_dspy_service()
+
+    with _patch_run(return_value=_blackbox_result({"best_score": 0.8})):
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-1", q)
+
+    events = _drain_queue(q)
+    result_events = [e for e in events if e.get("type") == EVENT_RESULT]
+    assert len(result_events) == 1
+    assert result_events[0]["result"] == {"best_score": 0.8}
+
+
+def test_run_service_in_subprocess_exception_emits_error_event() -> None:
+    """A failing run emits a single ``EVENT_ERROR`` with error text and traceback, and no result."""
+    q: queue.Queue[dict] = queue.Queue()
+
+    with _patch_run(side_effect=RuntimeError("model exploded")):
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-3", q)
+
+    events = _drain_queue(q)
+    error_events = [e for e in events if e.get("type") == EVENT_ERROR]
+    assert len(error_events) == 1
+    assert "model exploded" in error_events[0]["error"]
+    assert "traceback" in error_events[0]
+    assert error_events[0]["failure_kind"] == DETERMINISTIC_FAILURE
+    assert [e for e in events if e.get("type") == EVENT_RESULT] == []
+
+
+def test_run_service_in_subprocess_classifies_trusted_transport_interruption() -> None:
+    """Mark a typed model/sandbox interruption recoverable at the child boundary."""
+    q: queue.Queue[dict] = queue.Queue()
+
+    with _patch_run(side_effect=InfrastructureInterruptionError("provider stream ended")):
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-transient", q)
+
+    [event] = [value for value in _drain_queue(q) if value.get("type") == EVENT_ERROR]
+    assert event["failure_kind"] == INFRASTRUCTURE_INTERRUPTION
+    assert event["error_type"] == "InfrastructureInterruptionError"
+
+
+@pytest.mark.parametrize("optimization_type", ["run", "grid_search"])
+def test_run_service_in_subprocess_rejects_a_retired_job_kind(optimization_type: str) -> None:
+    """A stored DSPy job kind fails with an error event and never starts the black-box run.
+
+    Args:
+        optimization_type: A retired DSPy job kind.
+    """
+    q: queue.Queue[dict] = queue.Queue()
+
+    with _patch_run() as run_bb:
+        run_service_in_subprocess({**_BLACKBOX_PAYLOAD, "_optimization_type": optimization_type}, "art-5", q)
+
+    run_bb.assert_not_called()
+    [event] = [value for value in _drain_queue(q) if value.get("type") == EVENT_ERROR]
+    assert "Unsupported optimization type" in event["error"]
+
+
+def test_run_service_in_subprocess_blackbox_type_calls_run_blackbox_optimization() -> None:
+    """A ``blackbox`` payload runs the black-box entry point with the worker-owned fields."""
+    q: queue.Queue[dict] = queue.Queue()
     fake_result = MagicMock()
     fake_result.model_dump.return_value = {"best_candidate": "aeiou", "optimized_test_metric": 1.0}
 
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=svc),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-        patch("core.worker.subprocess_runner.run_blackbox_optimization", return_value=fake_result) as run_bb,
-    ):
-        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-9", q, "spawn")
+    with patch("core.worker.subprocess_runner.run_blackbox_optimization", return_value=fake_result) as run_bb:
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-9", q)
 
     run_bb.assert_called_once()
     payload_arg = run_bb.call_args.args[0]
@@ -446,7 +324,6 @@ def test_run_service_in_subprocess_blackbox_type_calls_run_blackbox_optimization
     assert run_bb.call_args.kwargs["artifact_id"] == "art-9"
     assert run_bb.call_args.kwargs["gepa_log_dir_path"] == "/tmp/bb-run"
     assert callable(run_bb.call_args.kwargs["progress_callback"])
-    svc.run.assert_not_called()
 
     result_events = [e for e in _drain_queue(q) if e.get("type") == EVENT_RESULT]
     assert result_events == [
@@ -478,12 +355,8 @@ def test_run_service_in_subprocess_blackbox_progress_is_forwarded() -> None:
         fake_result.model_dump.return_value = {}
         return fake_result
 
-    with (
-        patch("core.worker.subprocess_runner.DspyService", return_value=fake_dspy_service()),
-        patch("core.worker.subprocess_runner.ServiceRegistry", return_value=fake_service_registry()),
-        patch("core.worker.subprocess_runner.run_blackbox_optimization", side_effect=_fake_run),
-    ):
-        run_service_in_subprocess({**_BLACKBOX_PAYLOAD, "_skynet_evaluator_route": relay}, "art-10", q, "spawn")
+    with patch("core.worker.subprocess_runner.run_blackbox_optimization", side_effect=_fake_run):
+        run_service_in_subprocess({**_BLACKBOX_PAYLOAD, "_skynet_evaluator_route": relay}, "art-10", q)
 
     events = _drain_queue(q)
     progress_events = [e for e in events if e.get("type") == EVENT_PROGRESS]

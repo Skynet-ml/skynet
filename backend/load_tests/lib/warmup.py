@@ -1,7 +1,6 @@
 """Validation-cache pre-warming for the load-test harness.
 
-The submit-time validators (``validate_signature_code`` /
-``validate_metric_code``) spawn a fresh Python interpreter and import
+The submit-time validators (such as ``validate_signature_code``) spawn a fresh Python interpreter and import
 dspy in a subprocess. A clean cold start is ~5 s; under 32-concurrent
 burst load it balloons past the 30 s parse timeout and the first
 request from each uvicorn worker fails — taking the dogpile-protected

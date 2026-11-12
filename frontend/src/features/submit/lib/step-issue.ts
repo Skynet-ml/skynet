@@ -13,17 +13,12 @@ import {
   type WizardV2State,
 } from "./wizard-v2";
 
-export const hasModel = (config: ModelConfig | null | undefined): config is ModelConfig =>
+const hasModel = (config: ModelConfig | null | undefined): config is ModelConfig =>
   Boolean(config?.name.trim());
 
 /** The catalog entry for the current choice, when the catalog matches the setup. */
 function catalogOption(state: WizardV2State, catalog: OptimizerCatalogResponse | null) {
-  if (
-    !catalog ||
-    catalog.artifact_kind !== "repo" ||
-    catalog.data_mode !== state.inputs.mode
-  )
-    return undefined;
+  if (!catalog || catalog.data_mode !== state.inputs.mode) return undefined;
   return catalog.options.find((option) => option.id === state.optimizer.choice) ?? null;
 }
 
