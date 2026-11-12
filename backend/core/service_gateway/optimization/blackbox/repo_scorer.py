@@ -600,11 +600,28 @@ class RepoScorer:
             if unstamped:
                 raise RepoScoreError(unstamped)
             calls = shlex.quote(CALLS_DIR)
-            done = f"{root}/{supervisor}/{runner.OUTPUT_FILE}"
+            frames: list[str] = []
+            forward = relay.output if relay is not None else sandbox_log.ignore_output
+            pending = [""]
+
+            def output(stream: str, data: str) -> None:
+                """Keep each result frame of the supervisor's stdout, and pass all output on.
+
+                Args:
+                    stream: ``stdout`` or ``stderr``.
+                    data: The next piece of output.
+                """
+                if stream == "stdout":
+                    lines = (pending[0] + data).split("\n")
+                    pending[0] = lines.pop()
+                    prefix = runner.RESULT_PREFIX
+                    frames.extend(line[len(prefix) :] for line in lines if line.startswith(prefix))
+                forward(stream, data)
+
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
                     f"/usr/bin/find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec /bin/rm -rf {{}} +; /bin/rm -rf {shlex.quote(done)} {shlex.quote(done + '.part')}"
+                    f" -exec /bin/rm -rf {{}} +"
                     f'; p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
                     # exec leaves no shell parent that the entry could trace
                     # to fake the supervisor's exit code.
@@ -612,16 +629,18 @@ class RepoScorer:
                     f" {shlex.quote(f'{root}/{RUNNER_PATH}')} {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
-                    on_output=relay.output if relay is not None else sandbox_log.ignore_output,
+                    on_output=output,
                 )
         self._check_changes(relay, secrets, candidate)
-        text = session.read_file(f"{supervisor}/{runner.OUTPUT_FILE}")
         try:
-            ran = json.loads(text) if text is not None else None
+            ran = json.loads(frames[0]) if len(frames) == 1 else None
         except ValueError:
             ran = None
-        # The entry can write this file and then kill the supervisor, so the
-        # file counts only when the supervisor itself exited cleanly (SKY-642).
+        # The result comes only from the supervisor's stdout, which the entry
+        # never holds: a process the entry left can rewrite any file in the box
+        # (SKY-398). A second frame means that some other process reached that
+        # stdout (for example through a same-user wrapper's /proc/<pid>/fd), so
+        # no frame counts. It counts only when the supervisor exited cleanly (SKY-642).
         if not result.ok or not isinstance(ran, dict):
             logger.warning(
                 "The [run] supervisor did not exit cleanly (exit %s): %s",

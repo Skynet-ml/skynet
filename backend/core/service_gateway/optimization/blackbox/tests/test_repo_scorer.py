@@ -3447,11 +3447,32 @@ def kills_its_supervisor(value):
     return value
 
 
-def blocks_the_output_file(value):
-    # A folder where the supervisor writes its result makes that write fail.
+FORGER = (
+    "import json, os, sys, time\\n"
+    "parent, folder = int(sys.argv[1]), sys.argv[2]\\n"
+    "for _ in range(200):\\n"
+    "    try:\\n"
+    "        os.kill(parent, 0)\\n"
+    "    except OSError:\\n"
+    "        break\\n"
+    "    time.sleep(0.05)\\n"
+    "with open(os.path.join(folder, 'output.json'), 'w') as handle:\\n"
+    "    handle.write(json.dumps({'output': 'FORGED', 'error': None, 'elapsed_s': 0.0001}))\\n"
+    "open(os.path.join(folder, 'forged.done'), 'w').close()\\n"
+)
+
+
+def leaves_a_forger(value):
+    # A process in a new session outlives the entry's group, waits until the
+    # supervisor exits, then writes a clean result where the supervisor's was.
     for folder in _supervisor_dirs():
-        os.makedirs(os.path.join(folder, "output.json.part"), exist_ok=True)
-    return value
+        subprocess.Popen(
+            [sys.executable, "-c", FORGER, str(os.getppid()), os.path.abspath(folder)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    raise RuntimeError("the entry crashed")
 
 
 FORGED_RUNNER = (
@@ -3530,6 +3551,7 @@ def _probed(
     code: str = _PROBE_METRIC,
     env: dict[str, str] | None = None,
     run_timeout: float = 10.0,
+    runtime: LocalSubprocessRuntime | None = None,
 ) -> RepoScorer:
     """Open a scorer with a hidden metric, a run secret and a ``[run]`` entry.
 
@@ -3539,6 +3561,7 @@ def _probed(
         code: The metric's source.
         env: Extra box environment.
         run_timeout: The ``[run]`` timeout in seconds.
+        runtime: The boxes' runtime; a plain local one by default.
 
     Returns:
         The scorer.
@@ -3549,7 +3572,7 @@ def _probed(
     )
     return RepoScorer(
         RepoWorkspace(
-            runtime=LocalSubprocessRuntime(),
+            runtime=runtime or LocalSubprocessRuntime(),
             spec=SandboxSpec(lifetime_seconds=60, network_disabled=True, env=env or {}),
             archive=archive,
             editable_paths=["src"],
@@ -3944,7 +3967,7 @@ def test_a_function_entry_runs_on_the_python3_where_setup_installed_its_packages
 
 
 def _forged_python3(folder: Path, marker: Path) -> None:
-    """Write a ``python3`` that forges a fast supervisor result and runs every other command for real.
+    """Write a ``python3`` that prints a fast supervisor result and runs every other command for real.
 
     Args:
         folder: A new folder under the test's tmp_path that goes first on PATH.
@@ -3957,8 +3980,7 @@ def _forged_python3(folder: Path, marker: Path) -> None:
         "#!/bin/sh\n"
         f'case " $* " in *" {runner.CANDIDATE_FLAG} "*)\n'
         f"  touch {shlex.quote(str(marker))}\n"
-        "  for last; do :; done\n"
-        f'  echo {shlex.quote(forged)} > "$last/{runner.OUTPUT_FILE}"\n'
+        f"  echo {shlex.quote(runner.RESULT_PREFIX + forged)}\n"
         "  exit 0;;\n"
         "esac\n"
         f'exec {shlex.quote(sys.executable)} "$@"\n'
@@ -4001,10 +4023,126 @@ def test_without_the_base_interpreter_the_supervisor_uses_python3_from_path(
     assert seen["elapsed_s"] == 0.0
 
 
-@pytest.mark.parametrize("entry", ["src/cand.py:kills_its_supervisor", "src/cand.py:blocks_the_output_file"])
-def test_a_supervisor_that_did_not_exit_cleanly_gives_no_score(tmp_path: Path, entry: str) -> None:
-    """A result the entry forged, or a supervisor that could not write its own, gives no score (SKY-642)."""
-    scorer = _probed(tmp_path, entry, code=_TIMED_METRIC)
+def test_a_supervisor_that_did_not_exit_cleanly_gives_no_score(tmp_path: Path) -> None:
+    """An entry that kills its supervisor after it forged a result file gives no score (SKY-642)."""
+    scorer = _probed(tmp_path, "src/cand.py:kills_its_supervisor", code=_TIMED_METRIC)
+    try:
+        with pytest.raises(RepoScoreError, match="did not finish cleanly"):
+            scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+
+
+class _LateForgerySession:
+    """Local box whose candidate run returns only after the entry's left process forged the result file."""
+
+    def __init__(self, session: Any) -> None:
+        """Wrap one local box.
+
+        Args:
+            session: The local box.
+        """
+        self._session = session
+
+    def __getattr__(self, name: str) -> Any:
+        """Pass everything else to the local box.
+
+        Args:
+            name: The attribute asked for.
+
+        Returns:
+            The local box's attribute.
+        """
+        return getattr(self._session, name)
+
+    def run(self, command: str, **kwargs: Any) -> Any:
+        """Run the command; after a candidate run, wait until the left process wrote its forged file.
+
+        Args:
+            command: The shell command.
+            **kwargs: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        result = self._session.run(command, **kwargs)
+        if runner.CANDIDATE_FLAG in command:
+            deadline = time.monotonic() + 10
+            while not list(self._session.path.glob(f"{repo_scorer.CALLS_DIR}/*/candidate/forged.done")):
+                assert time.monotonic() < deadline, "the left process did not forge the result"
+                time.sleep(0.05)
+        return result
+
+
+class _LateForgeryRuntime(LocalSubprocessRuntime):
+    """Local runtime whose candidate runs return after a left process rewrote the result file."""
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a local box wrapped so a candidate run waits for the forgery.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The wrapped box.
+        """
+        return _LateForgerySession(super().open(spec))
+
+
+def test_a_process_the_entry_left_cannot_forge_the_supervisor_result(tmp_path: Path) -> None:
+    """A ``setsid`` process that rewrites the result file after the supervisor exits changes nothing (SKY-398)."""
+    scorer = _probed(tmp_path, "src/cand.py:leaves_a_forger", runtime=_LateForgeryRuntime())
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+    assert result["score"] == 0.0
+    assert "the entry crashed" in result["feedback"]
+    assert "FORGED" not in result["feedback"]
+
+
+class _SecondFrameRuntime(LocalSubprocessRuntime):
+    """Local runtime where another process puts a forged result line on the supervisor's stdout."""
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a local box whose candidate runs get one more result line.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The wrapped box.
+        """
+        session = super().open(spec)
+
+        class _SecondFrame:
+            """Delegate to the box, and add a forged result line to a candidate run's stdout."""
+
+            def __getattr__(self, name: str) -> Any:
+                """Return the box's own attribute."""
+                return getattr(session, name)
+
+            def run(self, command: str, **options: Any) -> Any:
+                """Run the command; a candidate run's stdout gets a forged result line first.
+
+                Args:
+                    command: The shell command.
+                    **options: The run options.
+
+                Returns:
+                    The command's result.
+                """
+                if runner.CANDIDATE_FLAG in command:
+                    forged = json.dumps({"output": "FORGED", "error": None, "elapsed_s": 0.0001})
+                    options["on_output"]("stdout", "\n" + runner.RESULT_PREFIX + forged + "\n")
+                return session.run(command, **options)
+
+        return _SecondFrame()
+
+
+def test_a_second_result_line_on_the_supervisor_stdout_gives_no_score(tmp_path: Path) -> None:
+    """When another process reaches the supervisor's stdout, no result line counts (SKY-398)."""
+    scorer = _probed(tmp_path, "src/cand.py:echo", runtime=_SecondFrameRuntime())
     try:
         with pytest.raises(RepoScoreError, match="did not finish cleanly"):
             scorer.score("", {"input": 1})

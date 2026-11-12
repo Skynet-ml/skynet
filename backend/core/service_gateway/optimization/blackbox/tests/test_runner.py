@@ -1212,13 +1212,17 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
     call_dir.mkdir(exist_ok=True)
     payload = {"entry": entry, "input": value, "timeout": timeout, "stages": None}
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
-    subprocess.run(
+    stdout = subprocess.run(
         [sys.executable, runner.__file__, runner.CANDIDATE_FLAG, str(call_dir)],
         cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        text=True,
         check=True,
         timeout=timeout + 60,
-    )
-    return json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
+    ).stdout
+    [frame] = [line for line in stdout.splitlines() if line.startswith(runner.RESULT_PREFIX)]
+    assert not (call_dir / runner.OUTPUT_FILE).exists()
+    return json.loads(frame[len(runner.RESULT_PREFIX) :])
 
 
 def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Path) -> None:

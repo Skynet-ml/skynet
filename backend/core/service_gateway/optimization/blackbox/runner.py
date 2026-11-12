@@ -151,6 +151,9 @@ _PROCESS_EVENTS = frozenset(
 _STAGE_POLL_SECONDS = 0.05
 # Frames one ``log()`` event on stderr; the host turns each into a run-log line.
 EVENT_PREFIX = "APP_SCORER_EVENT "
+# Frames the candidate supervisor's result on its own stdout. The entry never
+# holds that stdout, so it cannot forge the result, unlike a file it can write (SKY-398).
+RESULT_PREFIX = "APP_RUN_RESULT "
 _EVENT_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 # The module scorer code imports those helpers from: ``from skynet import llm, Image``.
 # Saved user scorers import it by this name, so it stays as it is.
@@ -1332,7 +1335,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) == 2 and args[0] == CANDIDATE_FLAG:
         call_dir = Path(args[1])
         payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
-        _write_output(call_dir, json.dumps(run_candidate(payload, call_dir)))
+        _print_result(json.dumps(run_candidate(payload, call_dir)))
         return 0
     if len(args) != 1:
         sys.stderr.write("usage: app_runner.py <call_dir>\n")
@@ -1365,6 +1368,19 @@ def _write_output(call_dir: Path, text: str) -> None:
     partial.unlink(missing_ok=True)
     partial.write_text(text, encoding="utf-8")
     partial.replace(call_dir / OUTPUT_FILE)
+
+
+def _print_result(text: str) -> None:
+    """Print the candidate supervisor's result as one framed line on its own stdout.
+
+    Args:
+        text: The result document.
+    """
+    stream = sys.__stdout__ or sys.stdout
+    # One write: a relay thread's frame cannot split the line. The leading
+    # newline ends any partial line before it.
+    stream.write("\n" + RESULT_PREFIX + text + "\n")
+    stream.flush()
 
 
 def refuse_processes() -> list[bool]:

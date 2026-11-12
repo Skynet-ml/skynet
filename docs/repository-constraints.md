@@ -213,7 +213,11 @@ The `[run]` supervisor measures the time in its own process, with a
 monotonic clock. The time starts just before the entry starts. It stops when
 the entry exits and the supervisor kills the entry's process group. A
 process that the entry starts in a new session is not part of that time,
-and it ends when Skynet closes the candidate box. It includes the Python start
+and it ends when Skynet closes the candidate box. Until then, that process
+can write any file that the entry can write. Thus the supervisor sends its
+result as one line on its own stdout, not in a file. The entry never gets
+that stdout: a function entry's prints go to stderr, and a command entry's
+stdout is a pipe that the supervisor reads. The time includes the Python start
 for a function entry. It does not include setup or the metric. The
 entry's code runs in other processes, so it cannot patch this clock. A time
 that the candidate puts in its `output` is not trusted. Use `elapsed_s`.
@@ -235,10 +239,11 @@ supervisor replaces itself with it (`exec`), so no shell of Skynet's waits
 for its exit code. These steps make the supervisor harder to change. They
 do not replace the separate boxes; see the residual risk below. Skynet
 trusts the supervisor's result only when the supervisor exits cleanly, so an
-entry that writes a false result and then kills the supervisor gets no
-score. On Linux the supervisor
+entry that kills the supervisor gets no score. On Linux the supervisor
 sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
-`ptrace` and `/proc/<pid>/mem` access to it, also when Yama is off.
+`ptrace` and `/proc/<pid>/mem` access to it, also when Yama is off. It also
+blocks access to its open files through `/proc/<pid>/fd`, so the entry cannot
+open the supervisor's stdout there.
 
 Residual risk:
 
@@ -251,7 +256,9 @@ Residual risk:
   exit code) runs as the same user as the version's code. Where the box
   allows same-user `ptrace` of that wrapper, version code could change the
   exit code that Skynet reads for that case. The next case gets a new
-  candidate box (SKY-398).
+  candidate box (SKY-398). If such code writes a second result line to the
+  supervisor's stdout through that wrapper, no result line counts, and the
+  case gets no score.
 - Each case starts from the state that `[setup]` left. A cache that
   `[setup]` fills (for example a download or a model file) makes every case
   faster, but a case leaves nothing for the next case.
