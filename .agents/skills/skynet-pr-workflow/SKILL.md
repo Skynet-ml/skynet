@@ -202,9 +202,9 @@ for review until the evidence is there.
   staging test-credit grant command in the `skynet-test-accounts` skill
   ("Grant test credit"). Use it only for a check account you created for
   this check, only after Gilad approves that grant in chat, and within the
-  one $50 UTC-day cap on the staging database. Amounts depend on the
-  check. Before each grant, ask Gilad in chat for a specific dollar amount:
-  the smallest amount the check needs, with a short cost estimate. Gilad
+  one $50 UTC-day cap on the staging database. Amounts depend on the check.
+  Before each grant, ask Gilad in chat for a specific dollar amount: the
+  smallest amount the check needs, with a short cost estimate. Gilad
   approves that amount, or a larger one if he thinks the check needs more.
   Record his approval text. Spend as little as possible. Never grant on
   production, to real customers or to manual accounts. Never use a raw
@@ -214,8 +214,9 @@ for review until the evidence is there.
 - Costly or rare workflows (for example expensive scheduled runs): backend
   algorithmic tests and source review may verify the backend. The frontend
   may use clearly labeled simulated state on the real running UI. Label the
-  simulated state in the PR. State the cost, the simulated boundary, the real
-  coverage and the remaining gap. Never claim the expensive run happened.
+  simulated state on the Linear issue. State the cost, the simulated
+  boundary, the real coverage and the remaining gap. Never claim the
+  expensive run happened.
 - This exception does not cover cheap authentication, data or navigation
   flows. Test those on real staging.
 
