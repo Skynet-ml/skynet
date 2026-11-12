@@ -2003,7 +2003,7 @@ def _names(archive: Path) -> set[str]:
 
 
 _METRIC_TREE = {
-    "optimize.toml": '[paths]\neditable = ["src"]\n\n[metric]\nfiles = ["eval/scorer.py"]\n',
+    "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
     "src/app.py": "x = 1\n",
     "eval/scorer.py": "def score(): ...\n",
     "eval/data.csv": "1\n",
@@ -2132,7 +2132,7 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
         **_FILES,
         "optimize.toml": _CONSTRAINTS
         + '\n[services.judge]\nurl = "https://judge.example.com/v1"\nheaders = { X-Key = "${JUDGE_KEY}" }\n'
-        + '\n[metric]\nservices = ["judge"]\n',
+        + '\n[run]\nentry = "a.py:f"\n[metric]\nservices = ["judge"]\n',
     }
     _, staged = _stage_with(files, monkeypatch)
     try:
@@ -2661,7 +2661,7 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
             tmp_path,
             {
                 "optimize.toml": '[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
-                '\n\n[metric]\nmcp = ".mcp.json"\n',
+                '\n\n[run]\nentry = "a.py:f"\n[metric]\nmcp = ".mcp.json"\n',
                 ".mcp.json": '{"mcpServers": {}}\n',
                 "src/app.py": "def main(case):\n    return case\n",
             },
@@ -2675,7 +2675,7 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
     ("toml", "inside"),
     [
         (
-            '[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[metric]\nfiles = ["eval"]\n',
+            '[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             "eval/labels.json",
         ),
         ('[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n', ".optimize/exploits/cheat.py"),
@@ -2703,11 +2703,11 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
     ("toml", "message"),
     [
         (
-            '[paths]\neditable = ["src", "eval"]\n\n[metric]\nfiles = ["eval"]\n',
+            '[paths]\neditable = ["src", "eval"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             r"'eval' is editable, but only the scorer reads it",
         ),
         (
-            '[proposer]\nillegal = "eval/rules.md"\n\n[metric]\nfiles = ["eval"]\n',
+            '[proposer]\nillegal = "eval/rules.md"\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             r"\[proposer\] illegal 'eval/rules\.md' is inside the hidden",
         ),
         ('[run]\nentry = "eval/run.py:main"\n\n[metric]\nfiles = ["eval"]\n', r"\[run\] entry names 'eval/run\.py'"),
@@ -2734,27 +2734,38 @@ def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
 @pytest.mark.parametrize(
     ("toml", "links", "linked"),
     [
-        pytest.param('[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "real")}, "scoring", id="inside"),
         pytest.param(
-            '[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "/etc")}, "scoring", id="outside-absolute"
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+            {"scoring": (tarfile.SYMTYPE, "real")},
+            "scoring",
+            id="inside",
         ),
         pytest.param(
-            '[metric]\nfiles = ["scoring"]\n',
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+            {"scoring": (tarfile.SYMTYPE, "/etc")},
+            "scoring",
+            id="outside-absolute",
+        ),
+        pytest.param(
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
             {"scoring": (tarfile.SYMTYPE, "../../x")},
             "scoring",
             id="outside-relative",
         ),
         pytest.param(
-            '[metric]\nfiles = ["scoring/score.py"]\n',
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/score.py"]\n',
             {"scoring": (tarfile.SYMTYPE, "real")},
             "scoring/score.py",
             id="below-a-linked-folder",
         ),
         pytest.param(
-            '[metric]\nfiles = ["eval"]\n', {"eval/data": (tarfile.SYMTYPE, "../real")}, "eval", id="link-inside-folder"
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            {"eval/data": (tarfile.SYMTYPE, "../real")},
+            "eval",
+            id="link-inside-folder",
         ),
         pytest.param(
-            '[metric]\nfiles = ["eval"]\n',
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             {"eval/copy.py": (tarfile.LNKTYPE, "real/score.py")},
             "eval",
             id="hard-link-out",
@@ -2778,7 +2789,7 @@ def test_staging_refuses_a_hidden_path_with_a_link(
 def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it."""
     files = {
-        "optimize.toml": '[metric]\nfiles = ["eval"]\n',
+        "optimize.toml": '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
         "eval/score.py": "def metric(case, output):\n    return 1.0\n",
         "src/app.py": "x = 1\n",
     }

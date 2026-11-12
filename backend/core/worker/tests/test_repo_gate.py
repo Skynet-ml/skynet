@@ -76,7 +76,9 @@ def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
 
 def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
     """The message says which sandbox cannot enforce the key."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[metric]\nreference = "eval/reference.json"\n'})
+    archive = _archive(
+        tmp_path, {CONSTRAINTS_FILE: b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n'}
+    )
 
     [failure] = check_repository(archive, (), place="cloud")
 
@@ -122,9 +124,9 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
             b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n',
             "[target.planner] network",
         ),
-        (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
+        (b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
         (b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
-        (b'[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
+        (b'[run]\nentry = "a.py:f"\n[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -147,10 +149,13 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
             "[run] services",
         ),
         (b'[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
-        (b'[services.grader]\nurl = "https://api.example.com"\n[metric]\nservices = ["grader"]\n', "[metric] services"),
-        (b"[metric]\nservices = []\n", "[metric] services"),
+        (
+            b'[services.grader]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\n[metric]\nservices = ["grader"]\n',
+            "[metric] services",
+        ),
+        (b"[run]\nentry = 'a.py:f'\n[metric]\nservices = []\n", "[metric] services"),
         (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
-        (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
+        (b'[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
         (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
         (b"[proposer]\nservices = []\n", "[proposer] services"),
     ],
@@ -223,7 +228,7 @@ def test_a_target_mcp_file_passes_in_every_place(tmp_path: Path, place: str) -> 
 
 def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
     """Each failure renders in Hebrew with its own parameters, so the setup check shows it in the user's language."""
-    raw = b'[metric]\nreference = "eval/reference.json"\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
+    raw = b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     assert {failure.code for failure in failures} == {
@@ -279,7 +284,7 @@ def _mcp_archive(tmp_path: Path, server: str) -> Path:
     Returns:
         The archive.
     """
-    raw = b'[metric]\nmcp = "eval/.mcp.json"\n'
+    raw = b'[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n'
     mcp = b'{"mcpServers": {"grader": ' + server.encode() + b"}}"
     return _archive(tmp_path, {CONSTRAINTS_FILE: raw, "eval/.mcp.json": mcp})
 
@@ -417,10 +422,10 @@ def test_local_mode_is_the_local_place() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        b'[metric]\nfiles = ["eval/scorer.py"]\n',
-        b"[metric]\nfiles = []\n",
-        b'[metric]\nexploits = "eval/exploits"\n',
-        b'[metric]\nexploits = ".optimize/exploits"\n',
+        b'[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+        b"[run]\nentry = 'a.py:f'\n[metric]\nfiles = []\n",
+        b'[run]\nentry = "a.py:f"\n[metric]\nexploits = "eval/exploits"\n',
+        b'[run]\nentry = "a.py:f"\n[metric]\nexploits = ".optimize/exploits"\n',
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -577,6 +582,9 @@ def test_a_missing_hidden_path_names_its_setting(tmp_path: Path) -> None:
 
 
 _LABELLED_TOML = b"""
+[run]
+entry = "src/app.py:main"
+
 [metric]
 files = ["eval"]
 illegal = "rules/metric.md"
@@ -824,8 +832,8 @@ def test_a_proposer_mcp_file_gets_the_allowed_host_check(tmp_path: Path) -> None
     [
         b'[run]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\n',
         b'[run]\nentry = "a.py:f"\nvcpus = 4\n',
-        b'[metric]\nnetwork = ["judge.example.com"]\n',
-        b"[metric]\nvcpus = 2\n",
+        b'[run]\nentry = "a.py:f"\n[metric]\nnetwork = ["judge.example.com"]\n',
+        b"[run]\nentry = 'a.py:f'\n[metric]\nvcpus = 2\n",
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])

@@ -48,9 +48,12 @@ mailbox, so the entry keeps its model route. On Vercel the exec wrapper sends
 the supervisor's stdout to a root-owned `/tmp/.app-output-<token>.out` file.
 The supervisor checks that file, then starts the entry as the owner of the
 candidate tree, so the entry cannot write the wrapper's files. In a local
-Docker box the supervisor's stdout is a pipe, so the entry runs as the
-supervisor's user. That box drops all capabilities, so its root cannot
-switch users. `test_metric_isolation.py` proves the user switch on Docker with a
+Docker box the supervisor's stdout is a pipe and its root has no
+capabilities, so it cannot switch users and the entry runs as the
+supervisor's user. A root with capabilities switches users also with a pipe.
+Only the supervisor command gets a root model proxy. That proxy starts from
+`/usr/local/bin/python3` and runs only the proxy and config bytes whose
+digests the parent sent. `test_metric_isolation.py` proves the user switch on Docker with a
 privileged `docker exec` that stands in for Vercel's root.
 
 ## Offline dependencies

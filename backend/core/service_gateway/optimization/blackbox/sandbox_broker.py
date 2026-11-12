@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import shlex
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -16,6 +17,7 @@ from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
 from ....sandbox.snapshots import SnapshotCache
 from ....sandbox.sync_bridge import run as bridge_run
+from . import runner
 from .sandbox_contract import (
     CommandResult,
     OutputSink,
@@ -184,8 +186,10 @@ class ParentSandboxSession:
             The command's outcome.
         """
         options = {"env": env, "timeout_seconds": timeout_seconds, "on_output": on_output}
-        # The scorer's root supervisor starts a candidate that calls models (SKY-398),
-        # so a root command also goes through the mailbox.
+        if sudo and runner.CANDIDATE_FLAG not in shlex.split(command):
+            # A root setup command needs no model route, so no root proxy runs for it.
+            return self._session.run(command, **options, sudo=True)
+        # The scorer's root supervisor starts a candidate that calls models (SKY-398).
         root = {"sudo": True} if sudo else {}
         if self._command_runner is not None:
             return self._command_runner(self._session, command, **options, **root)

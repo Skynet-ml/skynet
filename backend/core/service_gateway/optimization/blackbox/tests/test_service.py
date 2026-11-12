@@ -62,7 +62,7 @@ from ..protocol import (
     Task,
     candidate_key,
 )
-from ..sandbox import LocalSubprocessRuntime
+from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from ..sandbox_scorer import ScorerGateway, ScorerUsage
 from ..service import run_blackbox_optimization, validate_blackbox_payload
 from ..workspace_scorer import build_workspace_scorer
@@ -2076,12 +2076,23 @@ class _PendingNote:
         return ["Rule warning: do not edit the tests."]
 
 
-def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(tmp_path: Path) -> None:
+def test_a_run_fails_when_every_repository_run_fails_behind_a_rule_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A rule-judge note before "Run failed" feedback does not hide the failure (SKY-221 review F3).
 
     The repository scorer answers through ``RepoScorer.dispatch``, and the job
-    reads that answer through the relay and ``normalize_score``.
+    reads that answer through the relay and ``normalize_score``. A local box
+    refuses root, so the [run] supervisor runs as the test's user here; the
+    Docker tests prove the root supervisor (SKY-398).
     """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user; ``sudo`` is ignored."""
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
     scorer = _probed(tmp_path, "src/cand.py:boom")
     scorer._rule_judge = _PendingNote()
 

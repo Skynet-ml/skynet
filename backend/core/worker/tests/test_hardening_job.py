@@ -26,6 +26,9 @@ from core.worker.repo_gate import GateFailure, RepoGateError
 from core.worker.repo_staging import StagedRepository
 
 _TOML = b"""
+[run]
+entry = "a.py:f"
+
 [metric]
 files = ["eval/metric.py"]
 exploits = "eval/exploits"

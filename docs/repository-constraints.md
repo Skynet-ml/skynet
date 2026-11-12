@@ -254,10 +254,18 @@ case fails. The
 supervisor then starts the entry as the owner of the candidate tree, not as
 root. So the entry cannot signal, trace or read the supervisor, and it
 cannot replace or write the wrapper's output and exit code files (SKY-398).
-When the supervisor's stdout is a pipe, or the supervisor is not root (for
-example in a local Docker box, which drops the root capabilities), the entry
-runs as the supervisor's user. A pipe has no file that the entry could
+A root supervisor that holds Linux capabilities always switches to the tree
+owner, also when its stdout is a pipe. The entry runs as the supervisor's
+user only when the supervisor is not root, or when it is a root with no
+capabilities and a pipe stdout (a local Docker box drops all capabilities).
+Such a root cannot switch users, and a pipe has no file that the entry could
 replace.
+
+The model mailbox wraps only the supervisor command in a root proxy. Other
+root commands run without a proxy. The root proxy starts from
+`/usr/local/bin/python3`, never from `PATH`. It runs only the proxy and
+config bytes whose sha256 digests the parent sent, so a box user who
+rewrites those files gets no code run as root.
 
 Residual risk:
 

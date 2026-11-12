@@ -7,7 +7,10 @@ mailbox, so the box needs no network and never holds a provider key.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from decimal import Decimal
@@ -19,6 +22,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from core.billing import model_mailbox
 from core.billing.budgets import BudgetService
 from core.billing.model_gateway import ROUTE_KEY, ModelGateway
 from core.billing.model_mailbox import ModelMailbox
@@ -32,7 +36,7 @@ from ..preflight import verify_anything_in_sandbox
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
-from ..sandbox_broker import SandboxBroker
+from ..sandbox_broker import ParentSandboxSession, SandboxBroker
 from .test_repo_workspace import _archive
 
 IMAGE = "fixture@sha256:" + "a" * 64
@@ -103,6 +107,7 @@ def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     The supervisor then runs as the test's user and starts the entry as that
     user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+    The root proxy uses the test's interpreter, because a host may have no image path.
 
     Args:
         monkeypatch: Restores the local box's run after the test.
@@ -130,6 +135,7 @@ def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return run(self, command, **options)
 
     monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+    monkeypatch.setattr(model_mailbox, "ROOT_PYTHON", sys.executable)
     return root_commands
 
 
@@ -265,7 +271,7 @@ def test_a_managed_call_from_the_box_is_metered(
     # The [run] supervisor runs as root, and the mailbox still wraps it, so the entry keeps its model route.
     supervisors = [command for command in root_commands_in_local_boxes if "--candidate" in command]
     assert supervisors
-    assert all(command.startswith("python3 -I .app-model-") for command in supervisors)
+    assert all(command.startswith(f"{sys.executable} -I -S -c ") for command in supervisors)
 
     document = result["document"]
     assert document["score"] == 1.0
@@ -486,3 +492,120 @@ def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
     assert check["status"] == "failed"
     assert "The scorer raised an error" in check["message"]
     assert "evaluator_readiness" not in result
+
+
+def _boot(tmp_path: Path, source: str, config: str, digests: tuple[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the root proxy boot on two files the box user could have rewritten.
+
+    Args:
+        tmp_path: Folder for the proxy and config files.
+        source: Text of the proxy file on disk.
+        config: Text of the config file on disk.
+        digests: The sha256 digests the parent sent for the source and the config.
+
+    Returns:
+        The finished boot process.
+    """
+    (tmp_path / "proxy.py").write_text(source, encoding="utf-8")
+    (tmp_path / "config.json").write_text(config, encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            *("-I", "-S", "-c", model_mailbox.ROOT_PROXY_BOOT, *digests),
+            *(str(tmp_path / "proxy.py"), str(tmp_path / "config.json"), "echo", "hi"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _sha(text: str) -> str:
+    """Return the hex sha256 of a text.
+
+    Args:
+        text: The text.
+
+    Returns:
+        Its digest.
+    """
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_the_root_proxy_refuses_a_proxy_file_the_box_user_changed(tmp_path: Path) -> None:
+    """A root proxy runs nothing when the proxy file differs from what the parent wrote (SKY-398)."""
+    sent = "print('parent proxy')\n"
+
+    result = _boot(tmp_path, "print('candidate code as root')\n", "{}", (_sha(sent), _sha("{}")))
+
+    assert result.returncode != 0
+    assert "The model proxy files changed before they ran." in result.stderr
+    assert "candidate code as root" not in result.stdout
+
+
+def test_the_root_proxy_runs_the_sent_bytes_with_a_private_config_copy(tmp_path: Path) -> None:
+    """With matching digests the boot runs the proxy on a config copy, not the box user's file."""
+    source = "import sys\nprint(open(sys.argv[1]).read(), sys.argv[1], *sys.argv[2:], sep='|')\n"
+
+    result = _boot(tmp_path, source, '{"k": 1}', (_sha(source), _sha('{"k": 1}')))
+
+    assert result.returncode == 0, result.stderr
+    config, copy, *command = result.stdout.strip().split("|")
+    assert config == '{"k": 1}'
+    assert copy != str(tmp_path / "config.json")
+    assert command == ["echo", "hi"]
+
+
+class _RecordingSession:
+    """Record each command a parent box runs, and whether it asked for root."""
+
+    def __init__(self) -> None:
+        """Start with no commands."""
+        self.commands: list[tuple[str, str, bool]] = []
+
+    def run(self, command: str, *, sudo: bool = False, **_options: Any) -> str:
+        """Record a direct run.
+
+        Args:
+            command: The shell command.
+            sudo: Whether the command asked for root.
+            **_options: Ignored run options.
+
+        Returns:
+            A marker for the direct path.
+        """
+        self.commands.append(("direct", command, sudo))
+        return "direct"
+
+
+def test_only_the_root_supervisor_goes_through_the_model_mailbox(tmp_path: Path) -> None:
+    """A root setup command skips the mailbox, so no root proxy runs for it; the supervisor keeps its route."""
+    session = _RecordingSession()
+
+    def mailbox(box: Any, command: str, *, sudo: bool = False, **_options: Any) -> str:
+        """Record a run through the mailbox.
+
+        Args:
+            box: The wrapped box.
+            command: The shell command.
+            sudo: Whether the command asked for root.
+            **_options: Ignored run options.
+
+        Returns:
+            A marker for the mailbox path.
+        """
+        session.commands.append(("mailbox", command, sudo))
+        return "mailbox"
+
+    box = ParentSandboxSession(session, mailbox)  # type: ignore[arg-type]
+    supervisor = f"/usr/local/bin/python3 -I -S -c boot runner.py abc --candidate {tmp_path}/candidate"
+
+    box.run("chmod 0700 /vercel/sandbox/.app-repo", sudo=True)
+    box.run(supervisor, sudo=True)
+    box.run("python3 setup.py")
+
+    assert session.commands == [
+        ("direct", "chmod 0700 /vercel/sandbox/.app-repo", True),
+        ("mailbox", supervisor, True),
+        ("mailbox", "python3 setup.py", False),
+    ]

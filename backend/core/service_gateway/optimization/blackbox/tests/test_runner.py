@@ -1454,3 +1454,29 @@ def test_a_file_stdout_that_is_not_the_wrappers_root_file_is_refused(tmp_path: P
         )
 
     assert done.stderr.startswith("'The supervisor")
+
+
+_ENTRY_USER = (
+    "import importlib.util,json,sys;"
+    "spec=importlib.util.spec_from_file_location('r',sys.argv[1]);m=importlib.util.module_from_spec(spec);"
+    "sys.modules['r']=m;spec.loader.exec_module(m);m.os.geteuid=lambda:0;"
+    "m._has_capabilities=lambda:sys.argv[2]=='caps';sys.stderr.write(json.dumps(m._entry_user({})))"
+)
+
+
+@pytest.mark.parametrize(("capabilities", "switched"), [("caps", True), ("none", False)])
+def test_a_root_with_capabilities_drops_the_entry_to_the_tree_owner_also_with_a_pipe(
+    tmp_path: Path, capabilities: str, switched: bool
+) -> None:
+    """Only a root with no capability, as in a local Docker box, keeps the entry as itself (SKY-398)."""
+    done = subprocess.run(
+        [sys.executable, "-c", _ENTRY_USER, runner.__file__, capabilities],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    chosen = json.loads(done.stderr)
+    assert chosen == ({"user": os.getuid(), "group": os.getgid(), "extra_groups": []} if switched else {})

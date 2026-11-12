@@ -1490,16 +1490,33 @@ def unsafe_output() -> str | None:
     return None
 
 
+def _has_capabilities() -> bool:
+    """Tell whether this process holds any effective Linux capability.
+
+    Returns:
+        ``False`` only when ``/proc/self/status`` shows no effective capability.
+        A host without that file counts as holding them.
+    """
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    for line in status.splitlines():
+        if line.startswith("CapEff:"):
+            return int(line.split()[1], 16) != 0
+    return True
+
+
 def _entry_user(env: dict[str, str]) -> dict[str, Any]:
     """Choose the user the entry runs as, and set its environment to match.
 
-    A root supervisor whose stdout is the exec wrapper's root file (Vercel)
-    starts the entry as the owner of the candidate tree, its working
-    directory. The entry then cannot signal, trace or read the supervisor,
-    or change the wrapper's root files (SKY-398). A stdout pipe has no file
-    that the entry could replace, and a local Docker box drops the root
-    capabilities that a user switch needs. So with a pipe, or without root,
-    the entry runs as the supervisor's user.
+    A root supervisor starts the entry as the owner of the candidate tree,
+    its working directory. The entry then cannot signal, trace or read the
+    supervisor, or change the exec wrapper's root files (SKY-398). A local
+    Docker box drops every root capability, so its root cannot switch users.
+    That root holds no capability, and a stdout pipe has no file that the
+    entry could replace. So only a root with no capabilities and a pipe
+    stdout runs the entry as itself.
 
     Args:
         env: The entry's environment; gets ``HOME``, ``USER`` and ``LOGNAME``.
@@ -1510,7 +1527,7 @@ def _entry_user(env: dict[str, str]) -> dict[str, Any]:
     Raises:
         EntryUserError: When root owns the candidate tree.
     """
-    if os.geteuid() != 0 or not stat.S_ISREG(os.fstat(1).st_mode):
+    if os.geteuid() != 0 or (not stat.S_ISREG(os.fstat(1).st_mode) and not _has_capabilities()):
         return {}
     owner = Path().stat()
     if owner.st_uid == 0:
