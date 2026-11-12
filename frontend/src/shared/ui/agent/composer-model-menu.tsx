@@ -367,8 +367,8 @@ export function ComposerModelMenu({
             if (!header) return <React.Fragment key={key}>{items}</React.Fragment>;
             return (
               <div key={key} role="group" aria-label={header.label} className="model-section">
-                <DropdownMenuLabel className="sticky top-0 z-10 flex items-center gap-2 bg-card px-2 pb-1 pt-2.5 text-xs font-semibold text-foreground">
-                  <ProviderLogo slug={header.slug} size={14} />
+                <DropdownMenuLabel className="sticky top-0 z-10 flex items-center gap-2 bg-card px-2 pb-1.5 pt-3 text-sm font-semibold text-foreground">
+                  <ProviderLogo slug={header.slug} size={16} />
                   <span dir="ltr">{header.label}</span>
                 </DropdownMenuLabel>
                 {items}
