@@ -901,3 +901,200 @@ def test_predict_stream_does_not_block_the_event_loop_on_a_cold_catalog(monkeypa
 
     assert resp.status_code == 200, resp.text
     assert builds == [True]
+
+
+def test_tagging_guide_reads_the_session_guide() -> None:
+    """The chat reads the task, rubric and a dataset sample of a session."""
+    client, _ = _client(_ALICE)
+    session_id = _create(client)
+    resp = client.get(f"/tagging-sessions/{session_id}/assist/guide")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["mode"] == "binary"
+    assert body["question"] == "Positive?"
+    assert body["rubric"] == ["Sarcasm counts as negative."]
+    assert body["needs_dataset_spec"] is False
+    assert body["autotag_running"] is False
+    assert "great" in body["dataset"]
+
+
+def test_tagging_guide_save_writes_the_shapes_predictions_read() -> None:
+    """A saved guide lands in assist.rubric and assist.taskOverride, so the effective config follows it."""
+    client, store = _client(_ALICE)
+    session_id = _create(client)
+    resp = client.put(
+        f"/tagging-sessions/{session_id}/assist/guide",
+        json={
+            "rubric": ["  Emoji alone is neutral. ", " "],
+            "task": {"mode": "binary", "question": "Is the review positive overall?"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rubric"] == ["Emoji alone is neutral."]
+    assert body["mode"] == "binary"
+    assert body["question"] == "Is the review positive overall?"
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["rubric"] == ["Emoji alone is neutral."]
+        assert row.assist["taskOverride"] == {"question": "Is the review positive overall?"}
+        assert row.assist["calibrationIds"] == ["1", "2"]
+        config = _effective_config(row)
+    assert config["mode"] == "binary"
+    assert config["question"] == "Is the review positive overall?"
+    # Without a task the save keeps the stored task.
+    resp = client.put(f"/tagging-sessions/{session_id}/assist/guide", json={"rubric": ["Only the rule changes."]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["question"] == "Is the review positive overall?"
+
+
+def test_tagging_guide_save_refuses_unusable_guides() -> None:
+    """An empty rubric, a long rule or an unusable task is refused and nothing is written."""
+    client, store = _client(_ALICE)
+    session_id = _create(client)
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    assert client.put(url, json={"rubric": []}).status_code == 422
+    resp = client.put(url, json={"rubric": ["  "]})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "tagger.assist.invalid_guide"
+    resp = client.put(url, json={"rubric": ["x" * (tagger_assist.MAX_GUIDE_RULE_CHARS + 1)]})
+    assert resp.status_code == 422
+    resp = client.put(url, json={"rubric": ["Rule."], "task": {"question": " "}})
+    assert resp.status_code == 422
+    # A session whose answer style is chosen keeps it, as in the interview.
+    task = {"mode": "multiclass", "categories": ["Positive", "Negative"]}
+    resp = client.put(url, json={"rubric": ["Rule."], "task": task})
+    assert resp.status_code == 422
+    with Session(store.engine) as db:
+        assert db.get(TaggingSessionModel, session_id).assist["rubric"] == ["Sarcasm counts as negative."]
+
+
+def test_tagging_guide_save_on_a_provisional_synthetic_session() -> None:
+    """A session with no answer style needs a task, and a session with no rows needs a dataset spec."""
+    client, store = _client(_ALICE)
+    session_id = client.post("/tagging-sessions", json=_SYNTHETIC_BODY).json()["id"]
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    guide = client.get(url).json()
+    assert guide["mode"] is None
+    assert guide["needs_dataset_spec"] is True
+    spec = {"brief": "Bank support chats", "columns": ["text"], "rows": 20}
+    task = {"mode": "binary", "question": "Is the customer angry?"}
+    resp = client.put(url, json={"rubric": ["Caps lock counts as angry."], "dataset_spec": spec})
+    assert resp.status_code == 422
+    resp = client.put(url, json={"rubric": ["Caps lock counts as angry."], "task": task})
+    assert resp.status_code == 422
+    resp = client.put(url, json={"rubric": ["Rule."], "task": task, "dataset_spec": {"brief": ""}})
+    assert resp.status_code == 422
+    resp = client.put(url, json={"rubric": ["Caps lock counts as angry."], "task": task, "dataset_spec": spec})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["mode"] == "binary"
+    assert body["question"] == "Is the customer angry?"
+    assert body["dataset_spec"]["brief"] == "Bank support chats"
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["datasetSpec"]["brief"] == "Bank support chats"
+        assert _effective_config(row)["mode"] == "binary"
+    # A session with rows takes no dataset spec.
+    uploaded = _create(client)
+    resp = client.put(f"/tagging-sessions/{uploaded}/assist/guide", json={"rubric": ["Rule."], "dataset_spec": spec})
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "tagger.assist.not_synthetic"
+
+
+def test_tagging_guide_save_refuses_while_autotag_runs_or_without_assist() -> None:
+    """The save follows the autosave rule while the bulk job runs, and needs an assist session."""
+    client, store = _client(_ALICE)
+    session_id = _create(client)
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        row.assist = {**row.assist, "autotag": {"status": "running"}}
+        db.commit()
+    assert client.get(f"/tagging-sessions/{session_id}/assist/guide").json()["autotag_running"] is True
+    resp = client.put(f"/tagging-sessions/{session_id}/assist/guide", json={"rubric": ["Rule."]})
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "tagger.assist.autotag_running"
+    plain = client.post("/tagging-sessions", json={**_SESSION_BODY, "assist": None}).json()["id"]
+    resp = client.put(f"/tagging-sessions/{plain}/assist/guide", json={"rubric": ["Rule."]})
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "tagger.assist.not_enabled"
+
+
+def test_tagging_guide_routes_enforce_ownership() -> None:
+    """Another user gets 404 on the guide read and save, and the guide stays the same."""
+    alice_client, store = _client(_ALICE)
+    session_id = _create(alice_client)
+    bob_client, _ = _client(_BOB, store=store)
+    assert bob_client.get(f"/tagging-sessions/{session_id}/assist/guide").status_code == 404
+    resp = bob_client.put(f"/tagging-sessions/{session_id}/assist/guide", json={"rubric": ["Bob's rule."]})
+    assert resp.status_code == 404
+    with Session(store.engine) as db:
+        assert db.get(TaggingSessionModel, session_id).assist["rubric"] == ["Sarcasm counts as negative."]
+
+
+def test_tagging_guide_save_keeps_the_mode_a_provisional_session_chose() -> None:
+    """After a provisional session picks its answer style, later saves keep it."""
+    client, store = _client(_ALICE)
+    session_id = client.post("/tagging-sessions", json=_SYNTHETIC_BODY).json()["id"]
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    spec = {"brief": "Bank support chats", "columns": ["text"], "rows": 20}
+    first = {"rubric": ["Caps lock counts as angry."], "task": {"mode": "binary", "question": "Angry?"}}
+    assert client.put(url, json={**first, "dataset_spec": spec}).status_code == 200
+    resp = client.put(url, json={"rubric": ["Rule."], "task": {"mode": "multiclass", "categories": ["a", "b"]}})
+    assert resp.status_code == 422
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["taskOverride"] == {"mode": "binary", "question": "Angry?"}
+        assert row.assist["rubric"] == ["Caps lock counts as angry."]
+    resp = client.put(url, json={"rubric": ["Rule."], "task": {"question": "Is the customer angry?"}})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == "binary"
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["taskOverride"] == {"mode": "binary", "question": "Is the customer angry?"}
+    resp = client.put(url, json={"rubric": ["Only the rule changes."]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == "binary"
+    assert resp.json()["question"] == "Is the customer angry?"
+
+
+def test_tagging_guide_save_keeps_an_autosaved_override_mode() -> None:
+    """A stored-binary session whose autosave set a multiclass override stays multiclass."""
+    client, store = _client(_ALICE)
+    session_id = _create(client)
+    assist = {
+        **_SESSION_BODY["assist"],
+        "taskOverride": {
+            "mode": "multiclass",
+            "categories": [{"id": "cat1", "label": "a"}, {"id": "cat2", "label": "b"}],
+        },
+    }
+    resp = client.put(f"/tagging-sessions/{session_id}", json={"annotations": {}, "assist": assist, "current_index": 0})
+    assert resp.status_code == 200, resp.text
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    for task in ({"mode": "multiclass", "categories": ["x", "y"]}, {"categories": ["x", "y"]}):
+        resp = client.put(url, json={"rubric": ["Rule."], "task": task})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["mode"] == "multiclass"
+        assert resp.json()["categories"] == ["x", "y"]
+        with Session(store.engine) as db:
+            override = db.get(TaggingSessionModel, session_id).assist["taskOverride"]
+        assert override["mode"] == "multiclass"
+
+
+def test_tagging_guide_save_keeps_a_chosen_freetext_mode() -> None:
+    """A provisional session that picks freetext stays freetext on a save with no mode."""
+    client, store = _client(_ALICE)
+    session_id = client.post("/tagging-sessions", json=_SYNTHETIC_BODY).json()["id"]
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    spec = {"brief": "Bank support chats", "columns": ["text"], "rows": 20}
+    task = {"mode": "freetext", "prompt": "Summarize the complaint."}
+    assert client.put(url, json={"rubric": ["Rule."], "task": task, "dataset_spec": spec}).status_code == 200
+    resp = client.put(url, json={"rubric": ["Rule."], "task": {"prompt": "Name the product."}})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == "freetext"
+    assert resp.json()["prompt"] == "Name the product."
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["taskOverride"]["mode"] == "freetext"
+        assert "modeProvisional" not in _effective_config(row)
