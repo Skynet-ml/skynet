@@ -537,9 +537,10 @@ export function OptimizationDetailView({
         // backend ETag is keyed on those counts, the 304 fast-path can never
         // fire. Re-fetch only when progress advances (the run's progress events
         // drive the trajectory and score views) or the status changes; for
-        // logs-only bumps, patch the lightweight live fields in place. The Logs tab catches up on the next progress tick and
-        // a terminal status always triggers a final full fetch. Black-box jobs
-        // also coalesce a fetch on log growth: see scheduleLogFetch.
+        // logs-only bumps, patch the lightweight live fields in place. The Logs
+        // tab catches up on the next progress tick and a terminal status always
+        // triggers a final full fetch. Black-box jobs also coalesce a fetch on
+        // log growth: see scheduleLogFetch.
         if (progressed || statusChanged) {
           void fetchJob();
         } else {

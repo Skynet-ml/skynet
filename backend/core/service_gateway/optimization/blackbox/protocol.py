@@ -193,8 +193,6 @@ class Result:
     best_score: float | None
     total_evals: int
     metadata: dict[str, Any] = field(default_factory=dict)
-    # A DSPy engine's compiled program (``ProgramArtifact.model_dump()``).
-    artifact: dict[str, Any] | None = None
 
 
 @dataclass

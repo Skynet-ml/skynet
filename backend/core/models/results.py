@@ -55,8 +55,9 @@ class ModelTokenUsage(BaseModel):
 def result_scores(result: dict[str, Any]) -> tuple[Any, Any]:
     """Read a stored result's baseline and optimized scores, whatever job wrote it.
 
-    DSPy runs store held-out test metrics; black-box runs store the scores of
-    their final run under ``baseline_score`` / ``best_score``.
+    Runs store the scores of their final run under ``baseline_score`` /
+    ``best_score``. The held-out ``*_test_metric`` keys serve only older
+    stored results.
 
     Args:
         result: A stored ``result`` mapping.

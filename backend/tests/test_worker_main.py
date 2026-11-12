@@ -21,7 +21,6 @@ def test_run_worker_boots_against_the_real_store_signatures(monkeypatch):
         "configure_error_reporting",
         "configure_notification_preferences",
         "configure_data_policy",
-        "build_default_service",
         "get_worker",
         "start_queue_metrics_refresher",
         "start_orphan_recovery_sweeper",

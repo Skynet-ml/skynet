@@ -402,33 +402,6 @@ def test_legacy_auto_byok_reflection_with_cost_limit(
     assert all(ctx.native_options.max_token_cost is not None for _, ctx in fake_native_proposers)
 
 
-def test_legacy_byok_task_usage_does_not_consume_budget(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Keep a BYOK task model out of the legacy budget checks."""
-    task_lm = FakeReflectionLM()
-    original = service_mod.job_spec_from_payload
-
-    def job_from_payload(payload: BlackboxRunRequest) -> service_mod.JobSpec:
-        """Add a BYOK task model to the job."""
-        job = original(payload)
-        job.extra_lms = [task_lm]
-        job.extra_lm_sources = ["byok"]
-        return job
-
-    def strategy(_strategy: Any, _task: Task, _server: EvalServer, ctx: EngineContext, *_args: Any, **_kwargs: Any):
-        """Exercise both budget checks after task model usage."""
-        task_lm.history.append({"usage": {"prompt_tokens": 1000000, "completion_tokens": 1000000}})
-        service_mod.dspy.settings.callbacks[0]._check()
-        ctx.check_budget()
-        assert ctx.remaining_cost_usd() > 0
-        return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
-
-    monkeypatch.setattr(service_mod, "job_spec_from_payload", job_from_payload)
-    monkeypatch.setattr(service_mod, "run_strategy", strategy)
-    run_blackbox_optimization(_payload(max_cost_cents=1), artifact_id="byok-task", gepa_log_dir_path=str(tmp_path))
-
-
 @pytest.mark.parametrize("source", ["byok", "managed"])
 def test_legacy_judge_source_controls_budget(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
@@ -2115,3 +2088,19 @@ def test_result_details_never_show_an_unscored_value(
     response = run_blackbox_optimization(_payload(), artifact_id="job-frontier", gepa_log_dir_path=str(tmp_path))
 
     assert response.details["frontier"] == [{"id": "c001", "score": None}, {"id": "c002", "score": 0.6}]
+
+
+def test_stored_result_with_removed_keys_still_loads() -> None:
+    """Load a result stored with keys the response model no longer declares."""
+    stored = {
+        "optimizer_name": "auto",
+        "strategy_mode": "auto",
+        "engine_used": "gepa",
+        "best_candidate": "Be brief.",
+        "runtime_seconds": 1.0,
+        "optimizer_resolved": "gepa",
+        "program_artifact": {"program_state_json": {}},
+    }
+    response = BlackboxRunResponse.model_validate(stored)
+    assert response.best_candidate == "Be brief."
+    assert "program_artifact" not in response.model_dump()

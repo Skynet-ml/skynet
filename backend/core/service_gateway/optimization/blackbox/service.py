@@ -56,7 +56,6 @@ from ....constants import (
     TQDM_TOTAL_KEY,
 )
 from ....exceptions import ServiceError
-from ....models.artifacts import ProgramArtifact
 from ....models.blackbox import (
     BLACKBOX_REPO_ENGINES,
     BLACKBOX_STRATEGY_AUTO,
@@ -256,12 +255,8 @@ class JobSpec:
     max_cost_cents: int | None = None
     execution_budget_id: str | None = None
     optimizer_name: str = ""
-    optimizer_resolved: str | None = None
     # Private run context for in-process adapters; never serialized to a proposer.
     context: dict[str, Any] = field(default_factory=dict)
-    # Further metered models (the DSPy task model) whose usage the run bills.
-    extra_lms: list[Any] = field(default_factory=list)
-    extra_lm_sources: list[str | None] = field(default_factory=list)
     scorer_token_source: str | None = None
 
 
@@ -926,8 +921,7 @@ def _reflection_activity(durations_ms: list[float]) -> LMActivity | None:
 
     Black-box engines only drive the reflection model inside the
     optimization loop, so every call lands in the ``training`` stage and the
-    ``generation`` matrix stays empty; the run view renders the same stage
-    table as DSPy runs.
+    ``generation`` matrix stays empty.
 
     Args:
         durations_ms: Wall-clock duration of each reflection call.
@@ -1239,16 +1233,10 @@ def _run_job(
     # The scorer's own model calls are part of the run: they count toward
     # the cost ceiling and the usage the worker bills.
     scorer_usage = getattr(base_scorer, "usage", None)
-    lms = [lm, *job.extra_lms] + ([] if scorer_usage is None else [scorer_usage])
+    lms = [lm] + ([] if scorer_usage is None else [scorer_usage])
     byok_reflection = job.reflection_model_settings.token_source == "byok"
-    billable_lms = (
-        ([] if byok_reflection else [lm])
-        + [
-            extra_lm
-            for index, extra_lm in enumerate(job.extra_lms)
-            if index >= len(job.extra_lm_sources) or job.extra_lm_sources[index] != "byok"
-        ]
-        + ([] if scorer_usage is None or job.scorer_token_source == "byok" else [scorer_usage])
+    billable_lms = ([] if byok_reflection else [lm]) + (
+        [] if scorer_usage is None or job.scorer_token_source == "byok" else [scorer_usage]
     )
     native_sources: dict[str, set[str]] = {}
     for config in (job.reflection_model_settings, *job.extra_reflection_model_settings):
@@ -1431,11 +1419,6 @@ def _run_job(
         for node in result.metadata.pop("candidate_tree", [])
     ]
     optimizer_best_score = None if engine_pick_error is not None else result.best_score
-    program_artifact = (
-        ProgramArtifact.model_validate(result.artifact)
-        if result.artifact is not None and best_candidate == result.best_candidate and not regression_guard_applied
-        else None
-    )
     response = BlackboxRunResponse(
         optimizer_name=job.optimizer_name,
         strategy_mode=job.strategy.mode,
@@ -1490,8 +1473,6 @@ def _run_job(
         split_counts=counts,
         baseline_val_score=baseline_val.score if baseline_val else None,
         best_val_score=best_val.score if best_val else None,
-        optimizer_resolved=job.optimizer_resolved,
-        program_artifact=program_artifact,
     )
     if stop is not None:
         stop.result = response

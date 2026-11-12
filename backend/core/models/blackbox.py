@@ -18,7 +18,6 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .artifacts import ProgramArtifact
 from .common import ModelConfig, refuse_removed_cli
 from .results import LMActivity, ModelTokenUsage
 from .scorer_dependencies import ScorerDependencyLock
@@ -747,21 +746,17 @@ class BlackboxRunResponse(BaseModel):
     runtime_seconds: float
     total_tokens: int | None = None
     usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    # Reflection-LM timing on the shared LMActivity shape, so the run view
-    # renders the same stage matrix as DSPy runs. Only ``reflection`` is
-    # populated — black-box engines drive no generation LM.
+    # Reflection-LM timing on the shared LMActivity shape. Only
+    # ``reflection`` is populated — black-box engines drive no generation LM.
     lm_activity: LMActivity | None = None
     optimization_metadata: dict[str, Any] = Field(default_factory=dict)
     details: dict[str, Any] = Field(default_factory=dict)
-    # Unified runs only: how cases were split, the selection scores measured
-    # on ``split_counts.selection_split`` (``baseline_score``/``best_score``
-    # stay the reported scores, on ``split_counts.report_split``), the
-    # optimizer Auto resolved to, and a DSPy optimizer's compiled program.
+    # How cases were split, and the selection scores measured on
+    # ``split_counts.selection_split`` (``baseline_score``/``best_score``
+    # stay the reported scores, on ``split_counts.report_split``).
     split_counts: UnifiedSplitCounts | None = None
     baseline_val_score: float | None = None
     best_val_score: float | None = None
-    optimizer_resolved: str | None = None
-    program_artifact: ProgramArtifact | None = None
 
     # Results stored before the final run existed carry the DSPy names for
     # their held-out scores; read them as the baseline and best scores.

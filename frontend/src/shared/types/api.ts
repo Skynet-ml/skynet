@@ -604,14 +604,12 @@ export interface BlackboxRunResult {
   case_count?: number;
   /** Fresh scorer runs spent on the final run, outside `max_scorer_runs`. */
   final_scorer_runs?: number;
-  /** Runs recorded before the final run existed. Unified runs store a
+  /** Runs recorded before the final run existed. Newer runs store a
    *  `UnifiedSplitCounts` object here instead. */
   split_counts?: Record<string, number>;
-  /** Unified runs: selection scores on `split_counts.selection_split`. */
+  /** Selection scores on `split_counts.selection_split`. */
   baseline_val_score?: number | null;
   best_val_score?: number | null;
-  /** Unified runs: the optimizer Auto resolved to. */
-  optimizer_resolved?: string | null;
   baseline_test_metric?: number | null;
   optimized_test_metric?: number | null;
   seed_candidate?: BlackboxCandidate | null;
