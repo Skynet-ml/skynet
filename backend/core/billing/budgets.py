@@ -1537,7 +1537,7 @@ class BudgetService:
         held; dispatched work keeps its coverage until its usage reconciles.
 
         Args:
-            job_ids: Root and grid-child job ids being deleted in ``session``.
+            job_ids: Job ids being deleted in ``session``.
             session: The caller's delete transaction, so budget and job go together.
 
         Returns:
