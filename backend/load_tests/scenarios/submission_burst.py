@@ -23,7 +23,7 @@ import httpx
 
 from ..lib import db as db_inspector
 from ..lib.metrics import ScenarioResult
-from ..lib.payloads import grid_payload, run_payload
+from ..lib.payloads import run_payload
 from ..lib.reporter import print_result
 from ..lib.runner import RequestSpec, run_load
 
@@ -36,7 +36,6 @@ class BurstConfig:
     mock_lm_url: str
     usernames: list[str]
     run_requests: int
-    grid_requests: int
     idempotent_retries: int
     concurrency: int
 
@@ -47,7 +46,6 @@ def _round_robin_specs(
     mock_lm_url: str,
     usernames: list[str],
     n_runs: int,
-    n_grids: int,
 ) -> list[RequestSpec]:
     """Build a flat list of POST specs distributed across load-test users.
 
@@ -56,7 +54,6 @@ def _round_robin_specs(
         mock_lm_url: Mock LM base URL passed into every payload.
         usernames: Load-test usernames to rotate through.
         n_runs: Number of ``POST /run`` requests to generate.
-        n_grids: Number of ``POST /grid-search`` requests to generate.
 
     Returns:
         A list of :class:`RequestSpec` with users rotated round-robin so
@@ -71,16 +68,6 @@ def _round_robin_specs(
                 url=f"{api_base_url}/run",
                 username=user,
                 json_body=run_payload(username=user, mock_lm_url=mock_lm_url, name=f"burst-run-{i}"),
-            )
-        )
-    for i in range(n_grids):
-        user = usernames[i % len(usernames)]
-        specs.append(
-            RequestSpec(
-                method="POST",
-                url=f"{api_base_url}/grid-search",
-                username=user,
-                json_body=grid_payload(username=user, mock_lm_url=mock_lm_url, name=f"burst-grid-{i}"),
             )
         )
     return specs
@@ -160,7 +147,6 @@ async def run(config: BurstConfig) -> ScenarioResult:
         mock_lm_url=config.mock_lm_url,
         usernames=config.usernames,
         n_runs=config.run_requests,
-        n_grids=config.grid_requests,
     )
 
     captured: list[httpx.Response] = []
@@ -234,14 +220,13 @@ def default_config(api_base_url: str, mock_lm_url: str) -> BurstConfig:
 
     Returns:
         A :class:`BurstConfig` calibrated for a single-host local stack:
-        200 mixed submissions, 50 idempotent retries, 32 in flight.
+        200 run submissions, 50 idempotent retries, 32 in flight.
     """
     return BurstConfig(
         api_base_url=api_base_url,
         mock_lm_url=mock_lm_url,
         usernames=list(_iter_default_usernames()),
-        run_requests=160,
-        grid_requests=40,
+        run_requests=200,
         idempotent_retries=50,
         concurrency=32,
     )

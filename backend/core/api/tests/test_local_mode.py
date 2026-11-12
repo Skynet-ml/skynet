@@ -207,7 +207,6 @@ def test_app_hides_local_routes_from_openapi() -> None:
     with (
         patch("core.api.app.get_job_store"),
         patch("core.api.app.get_worker"),
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=ServiceRegistry())
 
@@ -232,7 +231,6 @@ def _full_app(monkeypatch: pytest.MonkeyPatch, *, local_mode: bool) -> FastAPI:
     with (
         patch("core.api.app.get_job_store"),
         patch("core.api.app.get_worker"),
-        patch("core.api.app.DspyService"),
     ):
         return create_app(registry=ServiceRegistry())
 

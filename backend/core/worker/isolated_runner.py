@@ -1,4 +1,4 @@
-"""Run the unchanged optimizer service inside a credential-free managed sandbox."""
+"""Run the optimizer, setup checks and interactions inside a credential-free managed sandbox."""
 
 from __future__ import annotations
 
@@ -16,8 +16,6 @@ from typing import Any
 from core.billing.signals import BudgetReached
 from core.config import app_env
 from core.constants import OPTIMIZATION_TYPE_BLACKBOX
-from core.models.unified import UNIFIED_PAYLOAD_KIND
-from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
 from core.service_gateway.optimization.blackbox.preflight import verify_anything_in_sandbox
 from core.service_gateway.optimization.blackbox.sandbox_runtime import (
     ContainedSubprocessRuntime,
@@ -32,7 +30,7 @@ from core.worker.subprocess_runner import run_service_in_subprocess
 # Shared with the pinned sandbox image's own backend copy; renaming breaks older images.
 EVENT_PREFIX = "SKYNET_JOB_EVENT "
 INCOMPATIBLE_IMAGE_MESSAGE = "The sandbox image speaks an older protocol than this worker; rebuild the sandbox image."
-_CHECKPOINT_PATH = re.compile(r"(?:(?:pair_\d+|gepa)/)?gepa_state\.bin\Z")
+_CHECKPOINT_PATH = re.compile(r"(?:gepa/)?gepa_state\.bin\Z")
 
 
 class EventQueue:
@@ -83,8 +81,7 @@ def _export_checkpoints(directory: Path, events: EventQueue, seen: dict[str, str
 def _forget_request(path: Path) -> None:
     """Remove the request file once it is in memory, so no proposer can read the metric from disk.
 
-    The document carries ``workspace.metric_code`` (unified runs) or
-    ``scorer.metric_code`` (legacy black-box runs). Proposers run as
+    The document carries ``scorer.metric_code``. Proposers run as
     contained commands in this same box and could otherwise find it.
 
     Args:
@@ -101,12 +98,9 @@ def _is_blackbox_family(payload: dict[str, Any]) -> bool:
         payload: The guest request payload.
 
     Returns:
-        True for legacy black-box runs and for unified runs.
+        True for black-box runs.
     """
-    return (
-        payload.get("_optimization_type") == OPTIMIZATION_TYPE_BLACKBOX
-        or payload.get("payload_kind") == UNIFIED_PAYLOAD_KIND
-    )
+    return payload.get("_optimization_type") == OPTIMIZATION_TYPE_BLACKBOX
 
 
 def _run_preflight(payload: dict[str, Any], preflight: dict[str, Any], events: EventQueue) -> dict[str, Any]:
@@ -123,8 +117,6 @@ def _run_preflight(payload: dict[str, Any], preflight: dict[str, Any], events: E
     Raises:
         RuntimeError: When a black-box check did not enter its sandbox.
     """
-    if payload.get("payload_kind") == UNIFIED_PAYLOAD_KIND:
-        return blackbox_preflight.verify_unified_in_sandbox(payload, preflight["scope"])
     if payload.get("_optimization_type") == OPTIMIZATION_TYPE_BLACKBOX:
         runtime = current_sandbox_runtime()
         if runtime is None:

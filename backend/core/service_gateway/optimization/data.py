@@ -1,40 +1,22 @@
-"""Dataset loading, signature introspection, and split utilities.
+"""Loaders and introspection for user-authored workflow code.
 
-Pure helpers used by :class:`DspyService` to: load a user-authored
-:class:`dspy.Signature` and metric callable from source, convert raw
-rows into :class:`dspy.Example` instances, and partition the example
-list into train/val/test slices.
-
-Splits are size-based only: see ``datasets/planner.py`` for the
-research-grounded tier policy. Per-class stratification was removed —
-GEPA's reflection LM consumes free-form trajectories and the Pareto
-frontier scores against an aggregate metric, so balanced sampling
-buys nothing here.
+Helpers that load a user-authored :class:`dspy.Signature`, metric or
+transform callable from source and read the signature's fields. Two
+callers use them: the ``safe_exec`` validators, which run them in a
+spawned child process, and the workflow preview
+(``optimization/workflow.py``), which runs inside the preview sandbox.
 """
 
 from __future__ import annotations
 
-import random
 import typing
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 import dspy
 
 from ...exceptions import ServiceError
-from ...models import ColumnMapping, SplitFractions
-from ..datasets.split_counts import split_counts
 from .logged_scores import log_metrics
-
-
-@dataclass
-class DatasetSplits:
-    """Container for train/validation/test partitions."""
-
-    train: list[Any]
-    val: list[Any]
-    test: list[Any]
 
 
 def extract_signature_fields(signature_cls: type[dspy.Signature]) -> tuple[list[str], list[str]]:
@@ -71,80 +53,6 @@ def extract_signature_fields(signature_cls: type[dspy.Signature]) -> tuple[list[
     return inputs, outputs
 
 
-def rows_to_examples(
-    dataset: list[dict[str, Any]],
-    mapping: ColumnMapping,
-    *,
-    image_input_fields: set[str] | None = None,
-    extra_columns: set[str] | None = None,
-) -> list[Any]:
-    """Convert dataset rows into DSPy Example instances using the column mapping.
-
-    ``image_input_fields`` lists signature input field names whose cell
-    values must be wrapped in ``dspy.Image(url=...)`` before the example is
-    built — pass the result of :func:`image_input_field_names` on the loaded
-    signature class.
-
-    ``extra_columns`` lists raw source columns to carry onto the example as
-    plain attributes *after* construction — without ``with_inputs``/output
-    marking — so a reward function can read ``gold.<col>`` while the value
-    never feeds the program. Each named column present in a row is set on the
-    example; columns absent from a row are silently skipped (extras are
-    advisory, not required like mapped inputs/outputs).
-
-    Args:
-        dataset: Raw dataset rows.
-        mapping: Column mapping describing inputs and outputs.
-        image_input_fields: Optional set of signature field names whose
-            values are coerced into ``dspy.Image`` instances.
-        extra_columns: Optional set of raw source-column names to attach to
-            each example as unmarked attributes for reward-side reads.
-
-    Returns:
-        A list of populated :class:`dspy.Example` instances.
-
-    Raises:
-        ServiceError: If a row is not a dict or a mapped column is missing.
-    """
-
-    image_fields = image_input_fields or set()
-    extras = extra_columns or set()
-    examples: list[Any] = []
-    for row_idx, row in enumerate(dataset):
-        if not isinstance(row, dict):
-            raise ServiceError(f"Row {row_idx} is not a mapping: {row!r}")
-        payload: dict[str, Any] = {}
-        for signature_field, column_name in mapping.inputs.items():
-            try:
-                value = row[column_name]
-            except KeyError as exc:
-                raise ServiceError(f"Missing input column '{column_name}' for row {row_idx}") from exc
-            payload[signature_field] = _coerce_image(value) if signature_field in image_fields else value
-        for signature_field, column_name in mapping.outputs.items():
-            try:
-                payload[signature_field] = row[column_name]
-            except KeyError as exc:
-                raise ServiceError(f"Missing output column '{column_name}' for row {row_idx}") from exc
-
-        example = dspy.Example(**payload)
-        if hasattr(example, "with_inputs"):
-            example = example.with_inputs(*mapping.inputs.keys())
-        if mapping.outputs:
-            if hasattr(example, "with_outputs"):
-                example = example.with_outputs(*mapping.outputs.keys())
-            elif hasattr(example, "with_targets"):
-                example = example.with_targets(*mapping.outputs.keys())
-        # Attach extras after input/output marking so they stay out of
-        # ``example.inputs()`` — reward code reads ``gold.<col>`` but the
-        # program never receives the value.
-        for column_name in extras:
-            if column_name in row:
-                setattr(example, column_name, row[column_name])
-        examples.append(example)
-
-    return examples
-
-
 def image_input_field_names(signature_cls: type[dspy.Signature]) -> set[str]:
     """Return the names of input fields annotated as ``dspy.Image``.
 
@@ -162,9 +70,7 @@ def image_input_field_names(signature_cls: type[dspy.Signature]) -> set[str]:
     image_type = getattr(dspy, "Image", None)
     if image_type is None:
         return set()
-    fields_mapping = getattr(signature_cls, "model_fields", None) or getattr(
-        signature_cls, "__pydantic_fields__", None
-    )
+    fields_mapping = getattr(signature_cls, "model_fields", None) or getattr(signature_cls, "__pydantic_fields__", None)
     if not fields_mapping:
         return set()
     out: set[str] = set()
@@ -202,38 +108,13 @@ def _annotation_is_image(annotation: Any, image_type: type) -> bool:
     return False
 
 
-def _coerce_image(value: Any) -> Any:
-    """Wrap a raw cell value into a ``dspy.Image`` instance.
-
-    Already-wrapped ``dspy.Image`` instances pass through unchanged so
-    callers that pre-coerce don't double-wrap.
-
-    Args:
-        value: The raw cell value (URL string, data URI, or pre-wrapped image).
-
-    Returns:
-        A ``dspy.Image`` instance (or ``value`` unchanged when ``dspy.Image``
-        is unavailable).
-    """
-    image_type = getattr(dspy, "Image", None)
-    if image_type is None:
-        return value
-    if isinstance(value, image_type):
-        return value
-    return image_type(url=value)
-
-
 def load_signature_from_code(code: str) -> type[dspy.Signature]:
     """Execute user-provided code and return the single DSPy signature class it defines.
 
-    Trust boundary: the body of ``code`` runs in-process via ``exec``. Optimization
-    runs (``DspyService.run``) reach this through
-    ``backend/core/worker/subprocess_runner.py``, which sandboxes per-job execution
-    in a separate process. Validation paths (the ``code_validation`` router,
-    ``validate_payload``, the code agent) intentionally exec in the API process
-    so the user gets fast feedback — anyone who can call those endpoints already
-    has authenticated arbitrary-code-execution rights against the gateway. Do not
-    expose those endpoints beyond the optimization team without sandboxing first.
+    Trust boundary: the body of ``code`` runs in the calling process via
+    ``exec``. Callers must isolate it: the ``safe_exec`` validators call this in
+    a spawned child process, and the workflow preview calls it inside the
+    preview sandbox. Never call it directly in the API process.
 
     Args:
         code: User-authored signature source code.
@@ -248,14 +129,6 @@ def load_signature_from_code(code: str) -> type[dspy.Signature]:
 
     namespace: dict[str, Any] = {"dspy": dspy}
     try:
-        # exec: user-supplied signature code. Isolation is context-dependent:
-        # the DspyService.run path executes inside
-        # worker/subprocess_runner.py (separate process boundary), but the
-        # validation paths (code_validation router, validate_payload,
-        # code_agent) run in the API process. Treat this as class-body
-        # evaluation only — the signature class itself is invoked later under
-        # the subprocess boundary. See backend/core/worker/subprocess_runner.py.
-        #
         # dont_inherit=True: this module's ``from __future__ import annotations``
         # (PEP 563) would otherwise leak into the exec'd code and stringize the
         # signature's field annotations. DSPy resolves bare builtins (``str``,
@@ -308,9 +181,7 @@ def _resolve_signature_annotations(
         hints = typing.get_type_hints(signature_cls, globalns=namespace)
     except Exception:
         return
-    fields_mapping = getattr(signature_cls, "model_fields", None) or getattr(
-        signature_cls, "__pydantic_fields__", None
-    )
+    fields_mapping = getattr(signature_cls, "model_fields", None) or getattr(signature_cls, "__pydantic_fields__", None)
     if not fields_mapping:
         return
     for field_name, field_info in fields_mapping.items():
@@ -323,10 +194,7 @@ def load_metric_from_code(code: str) -> Callable[..., Any]:
     """Execute user-provided code and return the metric callable it defines.
 
     Same trust boundary as :func:`load_signature_from_code`: the metric body
-    runs in-process via ``exec``. Optimization runs route through the per-job
-    subprocess sandbox (``worker/subprocess_runner.py``); validation calls
-    intentionally exec in the API process. Treat callers as having full code
-    execution against the gateway.
+    runs in the calling process via ``exec``, so callers must isolate it.
 
     Args:
         code: User-authored metric source code.
@@ -343,13 +211,6 @@ def load_metric_from_code(code: str) -> Callable[..., Any]:
     # alongside the single scalar the optimizer consumes.
     namespace: dict[str, Any] = {"dspy": dspy, "log_metrics": log_metrics}
     try:
-        # exec: user-supplied metric code. Same security boundary as
-        # load_signature_from_code — isolated when called from
-        # DspyService.run (via worker/subprocess_runner.py),
-        # but runs in-process during validation (code_validation router,
-        # validate_payload, code_agent). Module-level def evaluation only;
-        # the metric callable itself is invoked later inside the subprocess.
-        #
         # dont_inherit=True: keep this module's PEP 563 ``from __future__ import
         # annotations`` from stringizing the metric's annotations, matching
         # load_signature_from_code so user code always sees eager annotations.
@@ -375,8 +236,7 @@ def load_transform_from_code(code: str) -> Callable[..., Any]:
     Transforms are the non-LLM steps of a workflow graph: plain functions
     taking the node's input ports as keyword arguments and returning a dict
     keyed by the node's declared output ports. Same trust boundary as
-    :func:`load_metric_from_code` — isolated behind the per-job subprocess
-    for optimization runs, exec'd in-process on validation paths.
+    :func:`load_signature_from_code`: callers must isolate it.
 
     Args:
         code: User-authored transform source code.
@@ -406,59 +266,6 @@ def load_transform_from_code(code: str) -> Callable[..., Any]:
     if not callable(transform):
         raise ServiceError("transform_code must define a callable named 'transform'.")
     return transform
-
-
-def split_examples(
-    examples: list[Any],
-    fractions: SplitFractions,
-    *,
-    shuffle: bool,
-    seed: int | None,
-) -> DatasetSplits:
-    """Split examples into train/val/test partitions.
-
-    The counts come from :func:`split_counts`, so every example lands in a
-    split, a non-zero fraction always gets at least one example and a zero
-    fraction gets none.
-
-    Args:
-        examples: Examples to partition.
-        fractions: Train/val/test fractions summing to 1.0.
-        shuffle: Whether to shuffle before slicing.
-        seed: Optional RNG seed for deterministic splits.
-
-    Returns:
-        A populated :class:`DatasetSplits` with train/val/test lists.
-
-    Raises:
-        ServiceError: If the dataset has too few examples to give the
-            requested val split a single one.
-    """
-
-    total = len(examples)
-    if total == 0:
-        return DatasetSplits(train=[], val=[], test=[])
-
-    ordered = list(examples)
-    if shuffle:
-        rng = random.Random(seed)
-        rng.shuffle(ordered)
-
-    counts = split_counts(total, fractions)
-    val_end = counts.train + counts.val
-    splits = DatasetSplits(
-        train=ordered[: counts.train],
-        val=ordered[counts.train : val_end],
-        test=ordered[val_end:],
-    )
-
-    if fractions.val > 0 and len(splits.val) == 0:
-        raise ServiceError(
-            f"Dataset has {total} examples — too small for a val split of "
-            f"{fractions.val:.0%}. Add more data or set val fraction to 0."
-        )
-
-    return splits
 
 
 def _is_signature_field(value: Any, *, field_type: str) -> bool:

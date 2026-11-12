@@ -105,9 +105,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Any:
         """Stand in for a billing change that the projection leaves out."""
         return {}
 
-    mount_remote_mcp(
-        app, service="svc", job_store=_Store(engine), get_worker=object, extensions=[register_route_tools(app)]
-    )
+    mount_remote_mcp(app, job_store=_Store(engine), get_worker=object, extensions=[register_route_tools(app)])
     with TestClient(app) as test_client:
         yield test_client
 

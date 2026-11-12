@@ -542,11 +542,6 @@ class Settings(BaseSettings):
         alias="VERCEL_SANDBOX_IMAGE",
         description="Immutable container image the protected optimization sandbox boots from. The SDK's universal default does not contain Skynet's pinned optimizer, harness, and offline dependency set.",
     )
-    dspy_sandbox_image: str | None = Field(
-        default=None,
-        alias="DSPY_SANDBOX_IMAGE",
-        description="Immutable prebuilt backend image, addressed by @sha256, containing the exact deployed Python and optimizer dependencies for protected DSPy execution.",
-    )
     vercel_sandbox_max_lifetime_seconds: float = Field(
         default=2_700.0,
         alias="VERCEL_SANDBOX_MAX_LIFETIME_SECONDS",
@@ -875,38 +870,12 @@ class Settings(BaseSettings):
         ge=0,
         le=256,
         description=(
-            "Per-job-child ceiling on concurrent LM calls. Grid pair threads "
-            "times GEPA eval threads multiply, and a user can pass any "
+            "Per-job-child ceiling on concurrent LM calls. A user can pass any "
             "num_threads in optimizer kwargs; this gate keeps one job from "
             "spraying the provider with enough parallel calls to trip rate "
             "limits and fail the run. 0 disables the gate."
         ),
         alias="JOB_LM_MAX_CONCURRENCY",
-    )
-    grid_pair_max_workers: int = Field(
-        default=4,
-        ge=1,
-        le=16,
-        description=(
-            "Concurrent (generation, reflection) pairs per grid-search job "
-            "child. Total LM concurrency in the child is still capped by "
-            "job_lm_max_concurrency regardless of this value."
-        ),
-        alias="GRID_PAIR_MAX_WORKERS",
-    )
-    grid_distributed_pairs: bool = Field(
-        default=True,
-        description=(
-            "Fan a multi-pair grid search out as one claimable job row per "
-            "pair so pairs spread across the whole worker fleet instead of "
-            "sharing one child process. Off = classic all-pairs-in-one-child "
-            "execution; flipping the flag never re-shapes a grid already in "
-            "flight."
-        ),
-        alias="GRID_DISTRIBUTED_PAIRS",
-    )
-    job_run_start_method: Literal["fork", "spawn", "forkserver"] = Field(
-        default="fork", description="Multiprocessing start method for job execution"
     )
     # Ceiling (pool_size + max_overflow = 20 + 20 = 40) is aligned with
     # Starlette's anyio threadpool width (40) so a burst of concurrent sync DB
@@ -995,18 +964,6 @@ class Settings(BaseSettings):
             "::1) is always allowed so Ollama-on-localhost works without a "
             "flag. Cloud metadata service IPs (169.254.169.254 / "
             "fd00:ec2::254) are blocked unconditionally regardless."
-        ),
-    )
-    program_cache_max_entries: int = Field(
-        # 32 (was 128): each entry is a full deserialized program (MBs), the
-        # cache lives in the fork-parent API process, and beta traffic serves
-        # far fewer distinct programs than 32 at a time.
-        default=32,
-        ge=1,
-        description=(
-            "Maximum number of compiled DSPy programs held in the in-process "
-            "LRU cache. Each entry is roughly the size of one optimized "
-            "program; set to bound the API process resident set."
         ),
     )
     model_catalog_ttl_seconds: float = Field(
@@ -1375,7 +1332,7 @@ class Settings(BaseSettings):
     submissions_paused: bool = Field(
         default=False,
         description=(
-            "Operator kill-switch: when true, all new run/grid-search submissions are refused "
+            "Operator kill-switch: when true, all new run submissions are refused "
             "(in-flight runs continue). An instant emergency brake independent of spend."
         ),
     )
@@ -1391,7 +1348,7 @@ class Settings(BaseSettings):
         default=30,
         ge=0,
         description=(
-            "Per-account cap on run/grid-search submissions per rolling minute, enforced across "
+            "Per-account cap on run submissions per rolling minute, enforced across "
             "replicas via Redis. Bounds a runaway script or abusive key. 0 disables the cap."
         ),
     )

@@ -45,7 +45,7 @@ def _seed_job(store: _MemStore, optimization_id: str, username: str = "alice") -
         optimization_id: Optimization id for the seeded job.
         username: Owner username recorded on the job.
     """
-    overview = {"optimization_type": "run", "name": optimization_id, "username": username}
+    overview = {"optimization_type": "blackbox", "name": optimization_id, "username": username}
     with Session(store.engine) as session:
         session.add(
             JobModel(

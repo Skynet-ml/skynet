@@ -17,7 +17,6 @@ Methods intentionally skipped:
   start() / _worker_loop()    — spawns real threads that fork subprocesses
   stop()                       — requires started threads
   _process_job()               — forks a real mp.Process
-  _get_service()               — instantiates DspyService (requires registry setup)
   submit_job()                 — calls update_job on a real job store w/ Pydantic model
   _terminate_run_process()     — requires a live process handle
   _drain_subprocess_events()   — requires a live mp.Queue from a subprocess

@@ -8,21 +8,12 @@ the test is asserting against) stay inline in the test — only the generic
 Example:
     >>> from core.api.tests.mocks import (
     ...     fake_background_worker,
-    ...     real_grid_response_dict,
-    ...     make_artifact,
-    ...     make_run_result,
-    ...     make_grid_job,
-    ...     REAL_OPTIMIZATION_ID,
-    ...     REAL_USERNAME,
     ... )
 """
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
-from functools import cache
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -33,172 +24,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ...models import (
-    GridSearchResponse,
-    OptimizedPredictor,
-    PairResult,
-    ProgramArtifact,
-    RunResponse,
-    SplitCounts,
-)
 from ...storage.models import Base, RunCallModel, RunCandidateModel
 from ...storage.run_call_store import PostgresRunCallStore
-
-_FIXTURES_ROOT = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
-
-
-@cache
-def _read_fixture_text(name: str) -> str:
-    """Read and cache the raw text of a fixture file.
-
-    Args:
-        name: Path to the fixture relative to the fixtures root.
-
-    Returns:
-        The file contents as a string.
-    """
-    return (_FIXTURES_ROOT / name).read_text()
-
-
-def load_fixture(name: str) -> Any:
-    """Return a freshly-parsed JSON payload from a fixture file.
-
-    The result is decoded from the cached fixture text on every call so it
-    remains safe to mutate between calls.
-
-    Args:
-        name: Path to the fixture file relative to the fixtures root.
-
-    Returns:
-        The parsed JSON content (typically a ``dict`` or ``list``).
-    """
-    return json.loads(_read_fixture_text(name))
-
-
-# These come from jobs/success_single_gepa.detail.json
-REAL_OPTIMIZATION_ID: str = load_fixture("jobs/success_single_gepa.detail.json")["optimization_id"]
-REAL_USERNAME: str = load_fixture("jobs/success_single_gepa.detail.json")["username"]
-
-
-def real_grid_response_dict() -> dict:
-    """Return the ``grid_result`` block from the recorded grid-search fixture.
-
-    Returns:
-        A fresh dict that can be mutated by the caller.
-    """
-    return load_fixture("jobs/success_grid.detail.json")["grid_result"]
-
-
-def make_artifact(
-    input_fields: list[str] | None = None,
-    output_fields: list[str] | None = None,
-) -> ProgramArtifact:
-    """Build a ``ProgramArtifact`` for serve-route tests.
-
-    Pass an empty list for ``input_fields`` to drive the 400 "missing inputs"
-    response; an empty ``output_fields`` triggers the 409 "missing outputs"
-    path. Passing ``None`` for both returns the fixture-backed artifact.
-
-    Args:
-        input_fields: Optional override for the optimized prompt's input fields.
-        output_fields: Optional override for the optimized prompt's output fields.
-
-    Returns:
-        A ``ProgramArtifact`` ready to be embedded in a fake job result.
-    """
-    if input_fields is None and output_fields is None:
-        raw = load_fixture("jobs/success_grid.detail.json")
-        return ProgramArtifact.model_validate(raw["grid_result"]["pair_results"][0]["program_artifact"])
-    prompt = OptimizedPredictor(
-        predictor_name="predict",
-        instructions="Be helpful.",
-        input_fields=input_fields or [],
-        output_fields=output_fields or [],
-    )
-    return ProgramArtifact(program_pickle_base64="AAAA", optimized_prompt=prompt)
-
-
-def make_run_result(artifact: ProgramArtifact) -> RunResponse:
-    """Build a fully-populated ``RunResponse`` wrapping the given artifact.
-
-    Args:
-        artifact: The program artifact to embed in the result.
-
-    Returns:
-        A ``RunResponse`` parsed from the recorded single-run fixture, with
-        its ``program_artifact`` swapped for the supplied one.
-    """
-    raw = dict(load_fixture("jobs/success_single_gepa.detail.json")["result"])
-    raw["program_artifact"] = artifact.model_dump()
-    return RunResponse.model_validate(raw)
-
-
-def make_grid_job(
-    opt_id: str,
-    pair_index: int = 0,
-    pair_error: str | None = None,
-    artifact: ProgramArtifact | None = None,
-    status: str = "success",
-) -> dict:
-    """Build a fake grid-search job document.
-
-    Returns the recorded fixture when both ``artifact`` and ``pair_error`` are
-    ``None``; otherwise hand-builds a minimal one-pair grid result.
-
-    Args:
-        opt_id: Optimization identifier to embed in the document.
-        pair_index: Pair index to assign to the synthesised pair result.
-        pair_error: Optional error message for the synthesised pair.
-        artifact: Optional artifact for the synthesised pair; defaults to the
-            fixture artifact when omitted.
-        status: Job-level status string.
-
-    Returns:
-        A dict shaped like a ``JobStore`` row for grid-search jobs.
-    """
-    if artifact is None and pair_error is None:
-        raw = load_fixture("jobs/success_grid.detail.json")
-        return {
-            "optimization_id": opt_id,
-            "status": status,
-            "payload_overview": {
-                "optimization_type": "grid_search",
-                "model_name": "openai/gpt-4o-mini",
-                "module_name": raw["module_name"],
-                "optimizer_name": raw["optimizer_name"],
-            },
-            "result": raw["grid_result"],
-        }
-    if artifact is None:
-        artifact = make_artifact()
-    pair = PairResult(
-        pair_index=pair_index,
-        generation_model="openai/gpt-4o-mini",
-        reflection_model="openai/gpt-4o",
-        program_artifact=artifact,
-        error=pair_error,
-    )
-    grid = GridSearchResponse(
-        module_name="MyModule",
-        optimizer_name="GEPA",
-        metric_name="accuracy",
-        split_counts=SplitCounts(train=10, val=3, test=3),
-        total_pairs=1,
-        completed_pairs=1,
-        pair_results=[pair],
-        best_pair=pair,
-    )
-    return {
-        "optimization_id": opt_id,
-        "status": status,
-        "payload_overview": {
-            "optimization_type": "grid_search",
-            "model_name": "openai/gpt-4o-mini",
-            "module_name": "MyModule",
-            "optimizer_name": "gepa",
-        },
-        "result": grid.model_dump(),
-    }
 
 
 class _BaseFakeJobStore:
@@ -215,7 +42,6 @@ class _BaseFakeJobStore:
         self._progress: dict[str, list] = {}
         self._staged: dict[str, dict] = {}
         self._checkpoints: dict[str, dict[int, dict]] = {}
-        self._grid_pair_results: dict[str, dict[int, dict]] = {}
         self._agent_runs: dict[str, dict[int, dict]] = {}
         self._run_call_engine: Engine | None = None
 
@@ -323,7 +149,6 @@ class _BaseFakeJobStore:
         self._logs.pop(optimization_id, None)
         self._progress.pop(optimization_id, None)
         self._checkpoints.pop(optimization_id, None)
-        self._grid_pair_results.pop(optimization_id, None)
         self._agent_runs.pop(optimization_id, None)
         if self._run_call_engine is not None:
             with Session(self._run_call_engine) as session:
@@ -419,22 +244,6 @@ class _BaseFakeJobStore:
         """Return whether any checkpoint exists for the job (single run or any pair)."""
         return bool(self._checkpoints.get(optimization_id))
 
-    def save_grid_pair_result(self, optimization_id: str, pair_index: int, result: dict) -> None:
-        """Store one completed grid pair's result in memory."""
-        self._grid_pair_results.setdefault(optimization_id, {})[pair_index] = result
-
-    def get_grid_pair_results(self, optimization_id: str) -> dict:
-        """Return ``{pair_index: result}`` for the grid's completed pairs."""
-        return dict(self._grid_pair_results.get(optimization_id, {}))
-
-    def delete_grid_pair_results(self, optimization_id: str) -> None:
-        """Drop every stored pair result for a grid."""
-        self._grid_pair_results.pop(optimization_id, None)
-
-    def has_grid_pair_results(self, optimization_id: str) -> bool:
-        """Return whether the grid has any completed-pair result stored."""
-        return bool(self._grid_pair_results.get(optimization_id))
-
     def requeue_for_resume(self, optimization_id: str, *, bump_attempts: bool = True):
         """Flip a job back to ``pending`` in place, optionally bumping its attempt count."""
         job = self._jobs.get(optimization_id)
@@ -455,7 +264,7 @@ class _BaseFakeJobStore:
             )
         job["completed_at"] = None
         job["started_at"] = None
-        job["message"] = "Resuming" if bump_attempts else "Re-running grid pair"
+        job["message"] = "Resuming"
         return next_attempt
 
     def requeue_for_rerun(self, optimization_id: str) -> bool:
@@ -466,7 +275,6 @@ class _BaseFakeJobStore:
         self._logs.pop(optimization_id, None)
         self._progress.pop(optimization_id, None)
         self._checkpoints.pop(optimization_id, None)
-        self._grid_pair_results.pop(optimization_id, None)
         job["status"] = "pending"
         job["started_at"] = None
         job["completed_at"] = None

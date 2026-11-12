@@ -1,11 +1,9 @@
-"""Request/response models for the unified (wizard v2) optimization run.
+"""Request models for the retired unified (wizard v2) DSPy program run.
 
-One payload optimizes a DSPy program with a DSPy optimizer. New runs can no
-longer pick one (SKY-316); the models stay so stored payloads parse. Every optimizer
-runs through the black-box engine layer against the same workspace contract
-(a ``run(artifact, input)`` function plus a ``score(input, output,
-expected=None)`` metric). Stored runs keep the ``blackbox`` optimization type
-and are told apart from repository runs by ``payload_kind``.
+Skynet no longer runs these payloads (SKY-316, SKY-656). ``POST /optimize``
+still documents :class:`UnifiedRunRequest` as its body and answers 410, so
+the models stay in the OpenAPI contract. :class:`UnifiedModels` also carries
+the model roles that repository billing resolves.
 
 Pydantic class docstrings are part of the OpenAPI contract — see AGENTS.md
 "Pydantic class docstrings" — so per-model annotations live in comments
@@ -31,8 +29,6 @@ from .blackbox import (
 from .common import ModelConfig, SplitFractions
 from .scorer_dependencies import ScorerDependencyLock
 
-UNIFIED_PAYLOAD_KIND = "unified_v1"
-
 ArtifactKind = Literal["dspy_program"]
 # What the optimizer catalog is asked about: a unified run's artifact, or a
 # repository run, which has no artifact and runs only the black-box engines.
@@ -40,9 +36,6 @@ OptimizerTarget = Literal["dspy_program", "repo"]
 DataMode = Literal["single", "pairs"]
 OptimizerChoice = Literal[
     "auto",
-    "dspy_gepa",
-    "dspy_miprov2",
-    "dspy_bootstrap_fewshot",
     "gepa",
     "best_of_n",
     "autoresearch",
@@ -50,8 +43,7 @@ OptimizerChoice = Literal[
     "autosaddler",
     "shinka_evolve",
 ]
-OptimizerFamily = Literal["auto", "dspy", "blackbox"]
-DSPY_OPTIMIZERS: tuple[str, ...] = ("dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot")
+OptimizerFamily = Literal["auto", "blackbox"]
 BLACKBOX_OPTIMIZERS: tuple[str, ...] = (
     "gepa",
     "best_of_n",
@@ -60,23 +52,10 @@ BLACKBOX_OPTIMIZERS: tuple[str, ...] = (
     "autosaddler",
     "shinka_evolve",
 )
-# instantiate_optimizer() resolves names through resolve_optimizer_factory():
-# only GEPA has a short alias, the others resolve by their dotted dspy path.
-DSPY_OPTIMIZER_NAMES: dict[str, str] = {
-    "dspy_gepa": "gepa",
-    "dspy_miprov2": "dspy.teleprompt.MIPROv2",
-    "dspy_bootstrap_fewshot": "dspy.teleprompt.BootstrapFewShot",
-}
-# "auto" is listed because both of its resolutions (DSPy GEPA, the black-box
-# Auto strategy that continues with GEPA) consume feedback text.
-FEEDBACK_OPTIMIZERS = frozenset({"dspy_gepa", "gepa", "auto"})
+# "auto" is listed because the black-box Auto strategy continues with GEPA,
+# which consumes feedback text.
+FEEDBACK_OPTIMIZERS = frozenset({"gepa", "auto"})
 MIN_PAIRS_FOR_HELD_OUT = 5
-CONTRACT_SAMPLE_MAX = 5
-# How many samples a sandboxed contract check scores when the caller names none.
-CONTRACT_SAMPLE_DEFAULT = 3
-# Canonical-payload key carrying a contract check's sample count from the API
-# into the setup sandbox; public so it is part of the evidence fingerprint.
-CONTRACT_SAMPLE_COUNT_KEY = "contract_sample_count"
 ARTIFACT_KIND_DSPY_PROGRAM = "dspy_program"
 OPTIMIZER_AUTO = "auto"
 
@@ -101,48 +80,15 @@ def optimizers_for(target: OptimizerTarget, data_mode: DataMode) -> list[Optimiz
     return [OPTIMIZER_AUTO, *BLACKBOX_OPTIMIZERS]
 
 
-def _stored_optimizers_for(data_mode: DataMode) -> list[OptimizerChoice]:
-    """List the optimizer choices a stored DSPy-program payload may carry.
-
-    Args:
-        data_mode: Whether the run has one input or input/output pairs.
-
-    Returns:
-        The choices the old unified flow offered for this data mode.
-    """
-    if data_mode == "pairs":
-        return ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
-    return ["auto", "dspy_gepa"]
-
-
-def resolve_optimizer(choice: OptimizerChoice, target: OptimizerTarget) -> str:
-    """Resolve the user's choice to the optimizer that actually runs.
-
-    Args:
-        choice: The optimizer the user picked.
-        target: A DSPy program, or ``"repo"`` for a repository run.
-
-    Returns:
-        ``"dspy_gepa"`` for Auto on a DSPy program, ``"auto"`` (the black-box
-        Auto strategy) for Auto on a repository, otherwise ``choice``.
-    """
-    if choice == OPTIMIZER_AUTO:
-        return "dspy_gepa" if target == ARTIFACT_KIND_DSPY_PROGRAM else OPTIMIZER_AUTO
-    return choice
-
-
 def optimizer_family(resolved: str) -> OptimizerFamily:
-    """Name the family a resolved optimizer belongs to.
+    """Name the family an optimizer belongs to.
 
     Args:
-        resolved: An optimizer id as returned by :func:`resolve_optimizer`.
+        resolved: An optimizer id.
 
     Returns:
-        ``"dspy"`` for the DSPy optimizers, ``"auto"`` for the black-box Auto
-        strategy, otherwise ``"blackbox"``.
+        ``"auto"`` for the black-box Auto strategy, otherwise ``"blackbox"``.
     """
-    if resolved in DSPY_OPTIMIZERS:
-        return "dspy"
     if resolved == OPTIMIZER_AUTO:
         return "auto"
     return "blackbox"
@@ -367,32 +313,6 @@ class UnifiedRunRequest(BaseModel):
         validation_alias=AliasChoices("estimated_cents_high", "estimated_credits_high"), default=None, ge=0
     )
 
-    @model_validator(mode="after")
-    def _ensure_optimizer_allowed(self) -> UnifiedRunRequest:
-        """Reject an optimizer that does not fit the artifact kind and data mode.
-
-        The rule is the old unified flow's, not :func:`optimizers_for`: the
-        worker and the read paths re-parse stored payloads. New DSPy runs
-        cannot start, because ``POST /optimize`` refuses them with a 410.
-
-        Returns:
-            The validated request instance.
-
-        Raises:
-            ValueError: When ``optimizer.choice`` is not among the stored
-                choices for this data mode.
-        """
-        allowed = _stored_optimizers_for(self.data.mode)
-        if self.optimizer.choice not in allowed:
-            raise ValueError(
-                t_en(
-                    I18nKey.SUBMIT_UNIFIED_OPTIMIZER_NOT_ALLOWED,
-                    optimizer=self.optimizer.choice,
-                    allowed=", ".join(allowed),
-                )
-            )
-        return self
-
 
 class OptimizerOption(BaseModel):
     id: OptimizerChoice
@@ -420,93 +340,16 @@ class OptimizerCatalogResponse(BaseModel):
     sandbox_reason: str | None = None
 
 
-ContractCheckKey = Literal[
-    "workspace.run_signature",
-    "workspace.files",
-    "metric.signature",
-    "metric.model",
-    "workspace.run",
-    "metric.shape",
-]
-
-
-# ``message`` is rendered in the request's ``locale`` (the Hebrew base when it
-# names none); ``message_code`` and ``message_params`` are the i18n code and
-# placeholders the client renders in its own locale.
-# ``detail`` is the exact error text, trimmed to frames from the user's own code.
-class ContractCheckItem(BaseModel):
-    key: ContractCheckKey
-    status: Literal["passed", "failed", "pending", "skipped"]
-    message: str
-    message_code: str | None = None
-    message_params: dict[str, str | int] = Field(default_factory=dict)
-    sample_index: int | None = None
-    detail: str | None = Field(default=None, max_length=4000)
-
-
-class ContractSample(BaseModel):
-    index: int
-    input_preview: str
-    output_preview: str | None = None
-    score: float | None = None
-    feedback_preview: str | None = None
-    duration_ms: int | None = None
-    # The trusted measurement of this run (see ``workspace_harness.build_observation``).
-    observation: dict[str, Any] | None = None
-
-
-class ContractCheckRequest(BaseModel):
-    spec: UnifiedRunRequest
-    sample_count: int = Field(default=CONTRACT_SAMPLE_DEFAULT, ge=1, le=CONTRACT_SAMPLE_MAX)
-    locale: str | None = Field(default=None, max_length=35)
-
-
-# One workspace file's lint from the static check: ruff's error rules
-# (undefined names, broken imports) as ``errors``, its other findings as
-# ``warnings``, each as ``"<path>:<line>:<col> <rule> <message>"``.
-class WorkspaceFileLint(BaseModel):
-    path: str
-    errors: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-# ``fingerprint`` is the sha256 hex of the canonical JSON of the inputs the
-# check depends on, so the wizard can tell when a passing check went stale.
-# ``files`` is the static check's lint of each Python file that parses, so
-# each editor shows its own findings; lint never decides ``ok``.
-# ``uses_llm`` indicates whether the metric uses the helper; its model is derived from the code.
-class ContractCheckResponse(BaseModel):
-    ok: bool
-    optimizer_resolved: str
-    uses_llm: bool = False
-    checks: list[ContractCheckItem]
-    samples: list[ContractSample] = Field(default_factory=list)
-    fingerprint: str
-    files: list[WorkspaceFileLint] = Field(default_factory=list)
-    terminal: dict[str, Any] | None = None
-
-
 __all__ = [
     "BLACKBOX_OPTIMIZERS",
-    "CONTRACT_SAMPLE_COUNT_KEY",
-    "CONTRACT_SAMPLE_DEFAULT",
-    "CONTRACT_SAMPLE_MAX",
-    "DSPY_OPTIMIZERS",
-    "DSPY_OPTIMIZER_NAMES",
     "FEEDBACK_OPTIMIZERS",
     "METRIC_FILE",
     "METRIC_SIGNATURE",
     "MIN_PAIRS_FOR_HELD_OUT",
     "RUN_ENTRY",
     "RUN_FILE",
-    "UNIFIED_PAYLOAD_KIND",
     "WORKSPACE_FILE_MAX_COUNT",
     "ArtifactKind",
-    "ContractCheckItem",
-    "ContractCheckKey",
-    "ContractCheckRequest",
-    "ContractCheckResponse",
-    "ContractSample",
     "DataMode",
     "OptimizerCatalogResponse",
     "OptimizerChoice",
@@ -522,10 +365,8 @@ __all__ = [
     "UnifiedSplitCounts",
     "UnifiedTask",
     "UnifiedWorkspace",
-    "WorkspaceFileLint",
     "optimizer_family",
     "optimizers_for",
-    "resolve_optimizer",
     "workspace_files_error",
     "workspace_path_error",
 ]

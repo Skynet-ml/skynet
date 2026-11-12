@@ -35,9 +35,6 @@ def test_analytics_summary_defaults_zeroed() -> None:
     assert s.min_improvement is None
     assert s.avg_runtime is None
     assert s.total_dataset_rows == 0
-    assert s.total_pairs == 0
-    assert s.completed_pairs == 0
-    assert s.failed_pairs == 0
     assert s.truncated is False
 
 
@@ -131,12 +128,11 @@ def test_dashboard_analytics_job_full_population() -> None:
         metric_improvement=0.3,
         elapsed_seconds=120.0,
         dataset_rows=100,
-        optimization_type="run",
-        best_pair_label="g1/r1",
+        optimization_type="blackbox",
         created_at="2026-04-28T10:00:00Z",
     )
 
-    assert j.optimization_type == "run"
+    assert j.optimization_type == "blackbox"
     assert j.metric_improvement == pytest.approx(0.3)
 
 

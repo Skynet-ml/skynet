@@ -24,7 +24,7 @@ from ..routers import serve as serve_module
 from ..routers.serve import create_serve_router
 from ..sharing_access import ShareRole
 from .conftest import TEST_USER, bypass_auth
-from .mocks import _BaseFakeJobStore, make_artifact, make_grid_job, make_run_result
+from .mocks import _BaseFakeJobStore
 from .test_protected_interactions import interactions as _interactions_fixture
 from .test_protected_submissions import _Harness
 from .test_protected_submissions import harness as _harness_fixture
@@ -116,7 +116,7 @@ def _seed_dspy_run(store: _FakeJobStore, opt_id: str = "dspy-run") -> None:
         opt_id,
         status="success",
         payload_overview={"model_name": "openai/gpt-4o-mini"},
-        result=make_run_result(make_artifact()).model_dump(),
+        result={"baseline_test_metric": 0.5, "optimized_test_metric": 0.75},
     )
 
 
@@ -140,26 +140,7 @@ def test_dspy_serve_routes_return_410(
     assert response.json()["code"] == _RETIRED
 
 
-@pytest.mark.parametrize(
-    ("method", "path", "body"),
-    [
-        ("get", "/serve/grid/pair/0/info", None),
-        ("post", "/serve/grid/pair/0/request-form", {}),
-    ],
-)
-def test_grid_pair_serve_routes_return_410(
-    serve_client: TestClient, serve_store: _FakeJobStore, method: str, path: str, body: dict[str, Any] | None
-) -> None:
-    """Grid-search pairs are DSPy programs, so their serve routes refuse with the retired code."""
-    serve_store.seed_raw("grid", job=make_grid_job("grid"))
-
-    response = serve_client.request(method, path, json=body)
-
-    assert response.status_code == 410
-    assert response.json()["code"] == _RETIRED
-
-
-@pytest.mark.parametrize("path", ["/serve/missing/info", "/serve/missing/pair/0/info", "/serve/missing/request-form"])
+@pytest.mark.parametrize("path", ["/serve/missing/info", "/serve/missing/request-form"])
 def test_serve_routes_return_404_for_unknown_id(serve_client: TestClient, path: str) -> None:
     """An unknown run is a 404 before the DSPy refusal, so ids do not leak."""
     response = serve_client.get(path) if path.endswith("info") else serve_client.post(path, json={})
@@ -175,6 +156,8 @@ def test_serve_routes_return_404_for_unknown_id(serve_client: TestClient, path: 
         "/serve/dspy-run/chat/confirm",
         "/serve/dspy-run/pair/0",
         "/serve/dspy-run/pair/0/stream",
+        "/serve/dspy-run/pair/0/request-form",
+        "/serve/dspy-run/pair/0/info",
     ],
 )
 def test_removed_dspy_serve_routes_are_gone(serve_client: TestClient, serve_store: _FakeJobStore, path: str) -> None:
@@ -234,7 +217,7 @@ def _repo_job(
     """
     return {
         "status": status,
-        "payload_overview": {"username": "alice", "optimization_type": "run", "serving_enabled": serving_enabled},
+        "payload_overview": {"username": "alice", "optimization_type": "blackbox", "serving_enabled": serving_enabled},
         "payload": {
             "username": "alice",
             "strategy": {"engine": "gepa"},
@@ -494,7 +477,7 @@ def test_setting_the_same_serving_state_twice_is_idempotent(serve_store: _FakeJo
 def test_serve_info_defaults_serving_to_off(serve_client: TestClient, serve_store: _FakeJobStore) -> None:
     """A run that never stored the switch reports serving as off."""
     job = _repo_job()
-    job["payload_overview"] = {"username": "alice", "optimization_type": "run"}
+    job["payload_overview"] = {"username": "alice", "optimization_type": "blackbox"}
     serve_store.seed_job("repo-run", **job)
 
     assert serve_client.get("/serve/repo-run/info").json()["serving_enabled"] is False

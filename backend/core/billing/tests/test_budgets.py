@@ -246,13 +246,6 @@ def test_legacy_commitments_count_active_roots_and_byok_budget(engine: Engine) -
                     payload_overview={"max_cost_cents": 100, "token_source": "byok"},
                 ),
                 JobModel(
-                    optimization_id="child",
-                    username="alice",
-                    parent_optimization_id="running",
-                    status="running",
-                    payload_overview={"max_cost_cents": 500},
-                ),
-                JobModel(
                     optimization_id="foreign",
                     username="bob",
                     status="running",

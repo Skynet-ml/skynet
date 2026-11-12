@@ -36,12 +36,6 @@ const extractWizardPatch = declaration("extractWizardPatch", {
   storedOptimizerChoice,
 });
 
-test("a DSPy optimizer from the agent is dropped", () => {
-  for (const id of ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]) {
-    assert.equal(extractWizardPatch({ wizard_state: { optimizer_choice: id } }).optimizer_choice, undefined);
-  }
-});
-
 test("repository engines pass through and unknown ids are dropped", () => {
   assert.equal(extractWizardPatch({ optimizer_choice: "shinka_evolve" }).optimizer_choice, "shinka_evolve");
   assert.equal(extractWizardPatch({ optimizer_choice: "grid_search" }).optimizer_choice, undefined);

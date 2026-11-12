@@ -15,7 +15,7 @@ import dspy
 import requests
 
 # All HTTP calls to the service share the same generous timeout: long enough
-# to absorb a slow grid-search detail fetch, short enough to fail fast if the
+# to absorb a slow detail fetch, short enough to fail fast if the
 # server is unreachable rather than letting a notebook hang forever.
 _REQUEST_TIMEOUT = 30
 
@@ -61,19 +61,6 @@ class DSPyServiceClient:
             The newly created ``optimization_id``.
         """
         resp = requests.post(f"{self.base_url}/run", json=payload)
-        resp.raise_for_status()
-        return resp.json()["optimization_id"]
-
-    def submit_grid_search(self, payload: dict) -> str:
-        """Submit a grid-search optimization job.
-
-        Args:
-            payload: Full ``POST /grid-search`` request body.
-
-        Returns:
-            The newly created ``optimization_id``.
-        """
-        resp = requests.post(f"{self.base_url}/grid-search", json=payload)
         resp.raise_for_status()
         return resp.json()["optimization_id"]
 
@@ -133,19 +120,6 @@ class DSPyServiceClient:
             The ``GET /optimizations/{id}/artifact`` response payload.
         """
         resp = requests.get(f"{self.base_url}/optimizations/{optimization_id}/artifact")
-        resp.raise_for_status()
-        return resp.json()
-
-    def grid_result(self, optimization_id: str) -> dict:
-        """Fetch the per-cell grid-search results.
-
-        Args:
-            optimization_id: The grid-search job identifier.
-
-        Returns:
-            The ``GET /optimizations/{id}/grid-result`` response payload.
-        """
-        resp = requests.get(f"{self.base_url}/optimizations/{optimization_id}/grid-result")
         resp.raise_for_status()
         return resp.json()
 

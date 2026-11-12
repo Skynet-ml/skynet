@@ -173,9 +173,7 @@ def test_a_failed_codex_requirements_write_stops_the_run_before_the_optimizer(
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
     events: queue.Queue = queue.Queue()
 
-    vercel_dspy.run_vercel_dspy(
-        _descriptor_payload(tmp_path, optimizer={"choice": "gepa", "proposer": {}}), "job-req-fail", events, "spawn"
-    )
+    vercel_dspy.run_vercel_dspy(_descriptor_payload(tmp_path, proposer={}), "job-req-fail", events, "spawn")
 
     assert "optimizer" not in session.steps
     assert not session.files
@@ -191,10 +189,8 @@ def test_a_failed_codex_requirements_write_stops_the_run_before_the_optimizer(
         {},
         {"proposer": {"harness": "pi"}},
         {"proposer": {"harness": "codex", "host_cli": "codex"}},
-        {"optimizer": {"choice": "dspy_gepa", "proposer": {"harness": "codex"}}},
-        {"optimizer": {"choice": "gepa", "proposer": {"harness": "opencode"}}},
     ],
-    ids=["no-proposer", "pi", "host-cli", "dspy", "unified-opencode"],
+    ids=["no-proposer", "pi", "host-cli"],
 )
 def test_a_run_without_a_sandbox_codex_proposer_skips_the_root_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any]

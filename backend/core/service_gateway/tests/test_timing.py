@@ -62,7 +62,6 @@ def test_end_without_start_is_ignored() -> None:
     assert cb.durations_ms == []
 
 
-
 def test_exception_path_still_records_duration() -> None:
     """A call that ends with an exception still has its duration recorded."""
     target = _FakeLM()
@@ -207,7 +206,7 @@ def test_stage_visible_from_worker_thread() -> None:
     assert summary[STAGE_TRAINING][0] == 8
 
 
-def test_timed_calls_carry_stage_and_pair_usage_tags() -> None:
+def test_timed_calls_carry_stage_usage_tags() -> None:
     """Tag the headers DSPy builds for a timed call, and only while that call runs."""
     contextvars.Context().run(_assert_timed_call_tagged)
 
@@ -215,13 +214,13 @@ def test_timed_calls_carry_stage_and_pair_usage_tags() -> None:
 def _assert_timed_call_tagged() -> None:
     """Check tagging from a context no earlier test has left tags open in."""
     lm = object()
-    callback = GenLMTimingCallback(lm, pair_index=2)
+    callback = GenLMTimingCallback(lm)
     with track_stage("training", callback):
         callback.on_lm_start("call-1", lm, {})
         headers = dspy_lm._add_dspy_identifier_to_headers({"X-Other": "1"})
         callback.on_lm_end("call-1", None)
     assert headers["X-Other"] == "1"
-    assert header_tags(headers) == {"stage": "training", "pair": "2"}
+    assert header_tags(headers) == {"stage": "training"}
     assert USAGE_TAGS_HEADER not in dspy_lm._add_dspy_identifier_to_headers(None)
 
 
@@ -233,7 +232,7 @@ def test_untimed_lms_are_not_tagged() -> None:
 def _assert_untimed_call_untagged() -> None:
     """Check that another LM's call opens no tags, from a clean context."""
     timed_lm, other_lm = object(), object()
-    callback = GenLMTimingCallback(timed_lm, pair_index=0)
+    callback = GenLMTimingCallback(timed_lm)
     with track_stage("baseline", callback):
         callback.on_lm_start("call-2", other_lm, {})
         headers = dspy_lm._add_dspy_identifier_to_headers(None)

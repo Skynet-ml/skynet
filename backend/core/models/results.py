@@ -1,14 +1,10 @@
-"""Outbound result payloads for single optimization runs and grid searches."""
+"""Outbound result payloads: terminal outcome, model usage and LM activity."""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-
-from .artifacts import ProgramArtifact
-from .common import SplitCounts
-from .telemetry import JobLogEntry
 
 
 class TerminalOutcome(BaseModel):
@@ -56,92 +52,6 @@ class ModelTokenUsage(BaseModel):
     reasoning_tokens: int = 0
 
 
-class RunResponse(BaseModel):
-    """Result of a single optimization run."""
-
-    module_name: str
-    optimizer_name: str
-    metric_name: str | None
-    split_counts: SplitCounts
-    baseline_test_metric: float | None = None
-    optimized_test_metric: float | None = None
-    metric_improvement: float | None = None
-    optimization_metadata: dict[str, Any] = Field(default_factory=dict)
-    details: dict[str, Any] = Field(default_factory=dict)
-    program_artifact_path: str | None = None
-    program_artifact: ProgramArtifact | None = None
-    runtime_seconds: float | None = None
-    num_lm_calls: int | None = None
-    total_tokens: int | None = None
-    # Per-model input/output split behind ``total_tokens`` — the basis the billing
-    # worker charges from and the UI reconciles the estimate against.
-    usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    avg_response_time_ms: float | None = None
-    lm_activity: LMActivity | None = None
-    run_log: list[JobLogEntry] = Field(default_factory=list)
-    baseline_test_results: list[dict[str, Any]] = Field(default_factory=list)
-    optimized_test_results: list[dict[str, Any]] = Field(default_factory=list)
-    # Named scores the metric logged via log_metrics (precision/recall-style
-    # components), macro-averaged over the test rows that logged each name.
-    # Empty when the metric never logs.
-    baseline_logged_metrics: dict[str, float] = Field(default_factory=dict)
-    optimized_logged_metrics: dict[str, float] = Field(default_factory=dict)
-
-
-class PairResult(BaseModel):
-    """Result of a single (generation, reflection) model pair run."""
-
-    pair_index: int
-    generation_model: str
-    reflection_model: str
-    generation_reasoning_effort: str | None = None
-    reflection_reasoning_effort: str | None = None
-    baseline_test_metric: float | None = None
-    optimized_test_metric: float | None = None
-    metric_improvement: float | None = None
-    target_score: float | None = None
-    target_score_reached: bool | None = None
-    stop_reason: str | None = None
-    result_availability: Literal["evaluated", "none"] | None = None
-    terminal_evidence: dict[str, Any] | None = None
-    runtime_seconds: float | None = None
-    num_lm_calls: int | None = None
-    total_tokens: int | None = None
-    usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    avg_response_time_ms: float | None = None
-    lm_activity: LMActivity | None = None
-    program_artifact: ProgramArtifact | None = None
-    error: str | None = None
-    baseline_test_results: list[dict[str, Any]] = Field(default_factory=list)
-    optimized_test_results: list[dict[str, Any]] = Field(default_factory=list)
-    # Same macro-averaged log_metrics aggregates as on RunResponse, per pair.
-    baseline_logged_metrics: dict[str, float] = Field(default_factory=dict)
-    optimized_logged_metrics: dict[str, float] = Field(default_factory=dict)
-
-
-class GridSearchResponse(BaseModel):
-    """Result of a grid search over model pairs.
-
-    Contains a leaderboard of per-pair scores and highlights the best config.
-    """
-
-    module_name: str
-    optimizer_name: str
-    metric_name: str | None = None
-    split_counts: SplitCounts
-    total_pairs: int
-    completed_pairs: int = 0
-    failed_pairs: int = 0
-    stopped_pairs: int = 0
-    pair_results: list[PairResult] = Field(default_factory=list)
-    best_pair: PairResult | None = None
-    runtime_seconds: float | None = None
-    total_tokens: int | None = None
-    # Per-model usage summed across all pairs — the basis the worker charges the
-    # whole grid from (each pair priced on its own gen/refl models).
-    usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-
-
 def result_scores(result: dict[str, Any]) -> tuple[Any, Any]:
     """Read a stored result's baseline and optimized scores, whatever job wrote it.
 
@@ -149,7 +59,7 @@ def result_scores(result: dict[str, Any]) -> tuple[Any, Any]:
     their final run under ``baseline_score`` / ``best_score``.
 
     Args:
-        result: A stored ``result`` mapping (or a grid search's ``best_pair``).
+        result: A stored ``result`` mapping.
 
     Returns:
         The raw ``(baseline, optimized)`` values, each ``None`` when absent.

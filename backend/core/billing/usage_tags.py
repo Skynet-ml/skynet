@@ -1,4 +1,4 @@
-"""Attribute each billed model call to the run stage, pair, candidate and case it served.
+"""Attribute each billed model call to the run stage, candidate and case it served.
 
 Tags travel with the request as one header, so they cross every boundary a
 call can take: a worker child's HTTP call to the gateway, a sandbox command's
@@ -24,7 +24,7 @@ USAGE_TAGS_HEADER = "x-app-usage-tags"
 # Still sent by the pinned sandbox image and older clients; read, never written.
 LEGACY_USAGE_TAGS_HEADER = "x-skynet-usage-tags"
 USAGE_TAGS_HEADERS = frozenset({USAGE_TAGS_HEADER, LEGACY_USAGE_TAGS_HEADER})
-TAG_KEYS = ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
+TAG_KEYS = ("stage", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
 # ``caller`` values: which optimizer drove an optimization-route call.
 CALLER_PROPOSER = "proposer"
 CALLER_REFLECTION = "reflection"
@@ -150,7 +150,7 @@ def usage_scope(**tags: Any) -> Iterator[None]:
     Scopes nest: an inner one keeps the outer's tags and overrides those it sets.
 
     Args:
-        **tags: ``stage``, ``pair``, ``candidate``, ``case``, ``caller``, ``kind``, ``lane``, ``box`` or
+        **tags: ``stage``, ``candidate``, ``case``, ``caller``, ``kind``, ``lane``, ``box`` or
             ``for_box``; ``None`` keeps the outer value.
 
     Yields:

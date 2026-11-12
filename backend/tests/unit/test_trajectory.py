@@ -27,14 +27,12 @@ from gepa.proposer.reflective_mutation.reflective_mutation import (
 from core.constants import (
     PROGRESS_CANDIDATE,
     PROGRESS_MINIBATCH,
-    PROGRESS_VALSET,
     PROGRESS_VALSET_OUTPUTS,
 )
 from core.service_gateway.optimization.trajectory import (
     GEPA_STATE_FILENAME,
     MINIBATCH_FEEDBACK_CHAR_CAP,
     MINIBATCH_PREDICTION_CHAR_CAP,
-    VALSET_FIELD_CHAR_CAP,
     CandidateEvent,
     MinibatchRecorder,
     RejectedEvent,
@@ -44,12 +42,8 @@ from core.service_gateway.optimization.trajectory import (
     _normalize_prediction,
     capture_proposal_prompts,
     current_proposal_iteration,
-    emit_valset_event,
     extract_candidates_from_state,
     extract_rejected_from_trace,
-    gepa_log_dir,
-    maybe_wrap_minibatch_recorder,
-    serialize_valset_rows,
     trajectory_watch,
 )
 from core.storage.run_call_store import PROGRAM_EVENT_KEY
@@ -326,28 +320,6 @@ class TestLoadState:
         assert _load_state("/tmp/__definitely_missing_gepa_state__.bin") is None
 
 
-class TestGepaLogDir:
-    """The optimizer-gated tempdir context yields ``None`` for non-GEPA optimizers."""
-
-    def test_returns_path_for_gepa(self) -> None:
-        """GEPA gets a real temporary directory that exists during the block."""
-        with gepa_log_dir("gepa") as log_dir:
-            assert log_dir is not None
-            assert Path(log_dir).is_dir()
-
-    def test_returns_none_for_other_optimizers(self) -> None:
-        """No tempdir is allocated for optimizers that don't use ``log_dir``."""
-        with gepa_log_dir("bootstrap_fewshot") as log_dir:
-            assert log_dir is None
-
-    def test_directory_is_cleaned_up_on_exit(self) -> None:
-        """The tempdir is removed when the context exits."""
-        with gepa_log_dir("gepa") as log_dir:
-            assert log_dir is not None
-            captured = log_dir
-        assert not Path(captured).exists()
-
-
 class TestTrajectoryWatchNoop:
     """When either input is missing, ``trajectory_watch`` is a pure no-op."""
 
@@ -367,101 +339,6 @@ class TestTrajectoryWatchNoop:
         """Runs without a progress callback have nothing to forward to."""
         with tempfile.TemporaryDirectory() as tmp, trajectory_watch(tmp, None):
             pass
-
-
-class TestSerializeValsetRows:
-    """Lock the JSON shape the Pareto-cell drawer reads from the SSE stream."""
-
-    def test_dspy_examples_round_trip_to_string_maps(self) -> None:
-        """Each Example becomes ``{"id": str(idx), "inputs": {...}, "outputs": {...}}``."""
-        valset = [
-            dspy.Example(question="2+2", answer="4").with_inputs("question"),
-            dspy.Example(question="3+3", answer="6").with_inputs("question"),
-        ]
-        rows = serialize_valset_rows(valset)
-        assert rows == [
-            {"id": "0", "inputs": {"question": "2+2"}, "outputs": {"answer": "4"}},
-            {"id": "1", "inputs": {"question": "3+3"}, "outputs": {"answer": "6"}},
-        ]
-
-    def test_ids_match_gepa_subscore_keys(self) -> None:
-        """Ids are sequential integer strings starting at ``"0"`` so the frontend
-        can join them against per-example score keys."""
-        rows = serialize_valset_rows([dspy.Example(q="a", a="x").with_inputs("q") for _ in range(3)])
-        assert [r["id"] for r in rows] == ["0", "1", "2"]
-
-    def test_plain_dict_fallback_uses_dict_as_inputs(self) -> None:
-        """Non-DSPy rows (test fixtures) treat the dict as inputs with empty outputs."""
-        rows = serialize_valset_rows([{"question": "2+2", "context": "math"}])
-        assert rows == [
-            {
-                "id": "0",
-                "inputs": {"question": "2+2", "context": "math"},
-                "outputs": {},
-            }
-        ]
-
-    def test_oversized_field_is_truncated_with_marker(self) -> None:
-        """Field values longer than the cap end with ``"…"`` so the UI can flag them."""
-        big = "x" * (VALSET_FIELD_CHAR_CAP + 50)
-        ex = dspy.Example(blob=big, label="y").with_inputs("blob")
-        rows = serialize_valset_rows([ex])
-        rendered = rows[0]["inputs"]["blob"]
-        assert len(rendered) == VALSET_FIELD_CHAR_CAP + 1
-        assert rendered.endswith("…")
-
-    def test_empty_valset_returns_empty_list(self) -> None:
-        """Runs without a validation split yield ``[]``, not ``None``."""
-        assert serialize_valset_rows([]) == []
-
-    def test_tool_schema_hashes_is_excluded_from_display(self) -> None:
-        """``tool_schema_hashes`` is internal drift-detection provenance, not a
-        human-facing expected output, so it's dropped from the rendered rows while
-        the genuine label fields still render."""
-        ex = dspy.Example(
-            question="q",
-            answer="a",
-            tool_schema_hashes={"submit": "deadbeef"},
-        ).with_inputs("question")
-        rows = serialize_valset_rows([ex])
-        assert rows[0]["outputs"] == {"answer": "a"}
-
-
-class TestEmitValsetEvent:
-    """The fire-and-forget emitter must respect the SSE contract."""
-
-    def test_emits_progress_valset_with_rows_payload(self) -> None:
-        """Single ``PROGRESS_VALSET`` event carries a ``rows`` list."""
-        events: list[tuple[str, dict]] = []
-        emit_valset_event(
-            [dspy.Example(q="a", a="x").with_inputs("q")],
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        assert len(events) == 1
-        assert events[0][0] == PROGRESS_VALSET
-        assert events[0][1] == {"rows": [{"id": "0", "inputs": {"q": "a"}, "outputs": {"a": "x"}}]}
-
-    def test_noop_when_callback_missing(self) -> None:
-        """Non-streaming code paths pass ``None`` and must get no exception."""
-        emit_valset_event([dspy.Example(q="a").with_inputs("q")], None)
-
-    def test_noop_when_valset_empty(self) -> None:
-        """Empty splits don't emit an event (frontend treats absence as 'no rows')."""
-        events: list[tuple[str, dict]] = []
-        emit_valset_event([], lambda event, metrics: events.append((event, metrics)))
-        assert events == []
-
-    def test_callback_exception_is_swallowed(self) -> None:
-        """A raising callback must not abort the optimization."""
-
-        def raising(event: str, metrics: dict) -> None:
-            """Progress callback that always raises to exercise the swallow path."""
-            raise RuntimeError("downstream broke")
-
-        emit_valset_event(
-            [dspy.Example(q="a").with_inputs("q")],
-            raising,
-        )
 
 
 class TestMinibatchRecorder:
@@ -651,52 +528,6 @@ class TestMinibatchRecorder:
 
         assert not any(e == PROGRESS_VALSET_OUTPUTS for e, _ in events)
         assert sum(1 for e, _ in events if e == PROGRESS_MINIBATCH) == 2
-
-
-class TestMaybeWrapMinibatchRecorder:
-    """Wraps whenever a callback is present; candidate-output events stay GEPA-only."""
-
-    def test_returns_recorder_for_gepa_with_callback(self) -> None:
-        """GEPA + callback yields a recorder that also emits candidate-output events."""
-        wrapped = maybe_wrap_minibatch_recorder(
-            lambda *_, **__: 0.0,
-            [dspy.Example(q="a").with_inputs("q")],
-            "gepa",
-            lambda *_: None,
-        )
-        assert isinstance(wrapped, MinibatchRecorder)
-        assert wrapped._emit_candidate_events is True
-
-    def test_returns_raw_metric_when_callback_missing(self) -> None:
-        """Without a progress callback there's nowhere to send events, so skip wrapping."""
-
-        def metric(*_, **__):
-            """Constant stub metric; its value is irrelevant to this test."""
-            return 0.0
-
-        wrapped = maybe_wrap_minibatch_recorder(
-            metric,
-            [dspy.Example(q="a").with_inputs("q")],
-            "gepa",
-            None,
-        )
-        assert wrapped is metric
-
-    def test_wraps_non_gepa_for_heartbeat_with_candidate_events_off(self) -> None:
-        """Non-GEPA + callback still wraps (for the per-example heartbeat), but the
-        candidate-index attribution is GEPA-specific so candidate-output events stay off."""
-        example = dspy.Example(q="a").with_inputs("q")
-        events: list[tuple[str, dict]] = []
-        wrapped = maybe_wrap_minibatch_recorder(
-            lambda *_, **__: 0.0,
-            [example],
-            "bootstrap_fewshot",
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        assert isinstance(wrapped, MinibatchRecorder)
-        assert wrapped._emit_candidate_events is False
-        wrapped(example, dspy.Prediction(answer="a"))
-        assert not any(e == PROGRESS_VALSET_OUTPUTS for e, _ in events)
 
 
 class TestCaptureProposalPrompts:

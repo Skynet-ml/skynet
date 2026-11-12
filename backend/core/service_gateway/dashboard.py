@@ -37,8 +37,6 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..constants import (
     OPTIMIZATION_TYPE_BLACKBOX,
-    OPTIMIZATION_TYPE_GRID_SEARCH,
-    OPTIMIZATION_TYPE_RUN,
     PAYLOAD_OVERVIEW_DESCRIPTION,
     PAYLOAD_OVERVIEW_MODEL_NAME,
     PAYLOAD_OVERVIEW_MODULE_NAME,
@@ -63,17 +61,13 @@ _CACHE: dict[str, Any] = {"fingerprint": None, "at": 0.0, "payload": None}
 # Explore is a catalog of user-facing optimization jobs, not the worker's
 # shared jobs table. Keep this allowlist strict so new internal job types do
 # not become publicly discoverable by default. A row with no recorded type
-# anywhere predates the column and is a plain run: default to 'run' so it
-# stays discoverable, matching the open paths (share.py / _helpers.py) that
-# serve it. Distributed grid-pair child rows are scheduling internals of
-# their parent grid — excluded here the same way RemoteDBJobStore's
-# _top_level_jobs() keeps them out of listings.
+# defaults to a repository run, matching the open paths (share.py /
+# _helpers.py) that serve it.
 _USER_FACING_CORPUS_SQL = (
     "(COALESCE(je.optimization_type, j.optimization_type, "
     f"j.payload_overview->>'{PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE}', "
-    f"'{OPTIMIZATION_TYPE_RUN}') "
-    f"IN ('{OPTIMIZATION_TYPE_RUN}', '{OPTIMIZATION_TYPE_GRID_SEARCH}', '{OPTIMIZATION_TYPE_BLACKBOX}') "
-    "AND j.parent_optimization_id IS NULL)"
+    f"'{OPTIMIZATION_TYPE_BLACKBOX}') "
+    f"= '{OPTIMIZATION_TYPE_BLACKBOX}')"
 )
 
 # "Shared with me" scope: restrict to optimizations the caller holds a member
@@ -125,12 +119,11 @@ def _jobs_metric_sql(key: str) -> str:
 
     Mirrors the embedding pipeline's ``_extract_scores`` lookup order so the
     lexical/BM25 paths rank and render unembedded rows from the same numbers
-    the pipeline would have embedded: grid jobs read ``result.best_pair``
-    first, everything else reads ``latest_metrics`` then ``result``. The
-    ``jsonb_typeof`` guard skips non-numeric values instead of failing the
-    whole search on one malformed row, matching the pipeline's ``float()``
-    try/except. ``CAST`` spelling (not ``::``) keeps the fragment executable
-    on the sqlite test harness.
+    the pipeline would have embedded: ``latest_metrics`` first, then
+    ``result``. The ``jsonb_typeof`` guard skips non-numeric values instead
+    of failing the whole search on one malformed row, matching the
+    pipeline's ``float()`` try/except. ``CAST`` spelling (not ``::``) keeps
+    the fragment executable on the sqlite test harness.
 
     Args:
         key: Metric key (``baseline_test_metric`` or ``optimized_test_metric``).
@@ -139,24 +132,14 @@ def _jobs_metric_sql(key: str) -> str:
         A SQL expression yielding the metric as a double precision value, or
         NULL when no numeric source exists.
     """
-    best_pair = (
-        f"CASE WHEN jsonb_typeof(j.result->'best_pair'->'{key}') = 'number' "
-        f"THEN CAST(j.result->'best_pair'->>'{key}' AS double precision) END"
-    )
     latest = (
         f"CASE WHEN jsonb_typeof(j.latest_metrics->'{key}') = 'number' "
         f"THEN CAST(j.latest_metrics->>'{key}' AS double precision) END"
     )
     result = (
-        f"CASE WHEN jsonb_typeof(j.result->'{key}') = 'number' "
-        f"THEN CAST(j.result->>'{key}' AS double precision) END"
+        f"CASE WHEN jsonb_typeof(j.result->'{key}') = 'number' THEN CAST(j.result->>'{key}' AS double precision) END"
     )
-    return (
-        f"CASE WHEN j.payload_overview->>'{PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE}' "
-        f"= '{OPTIMIZATION_TYPE_GRID_SEARCH}' "
-        f"THEN COALESCE({best_pair}, {latest}) "
-        f"ELSE COALESCE({latest}, {result}) END"
-    )
+    return f"COALESCE({latest}, {result})"
 
 
 # The embedded metric when present, else the job's own scores. Keeps the gain
@@ -164,12 +147,8 @@ def _jobs_metric_sql(key: str) -> str:
 # where unembedded rows (embeddings disabled, table absent, or backfill still
 # running) would otherwise all carry NULL metrics and the gain ranking would
 # silently degrade to recency.
-_CORPUS_BASELINE_METRIC_SQL = (
-    f"COALESCE(je.baseline_metric, {_jobs_metric_sql('baseline_test_metric')})"
-)
-_CORPUS_OPTIMIZED_METRIC_SQL = (
-    f"COALESCE(je.optimized_metric, {_jobs_metric_sql('optimized_test_metric')})"
-)
+_CORPUS_BASELINE_METRIC_SQL = f"COALESCE(je.baseline_metric, {_jobs_metric_sql('baseline_test_metric')})"
+_CORPUS_OPTIMIZED_METRIC_SQL = f"COALESCE(je.optimized_metric, {_jobs_metric_sql('optimized_test_metric')})"
 
 
 def _job_embeddings_table_present(job_store: Any) -> bool:
@@ -192,9 +171,7 @@ def _job_embeddings_table_present(job_store: Any) -> bool:
         return cached
     try:
         with Session(engine) as session:
-            present = bool(
-                session.execute(text("SELECT to_regclass('job_embeddings')")).scalar()
-            )
+            present = bool(session.execute(text("SELECT to_regclass('job_embeddings')")).scalar())
     except Exception as exc:
         logger.warning("job_embeddings presence probe failed, assuming absent: %s", exc)
         present = False
@@ -330,7 +307,7 @@ def _fetch_corpus_points(session: Session, je_rel: str) -> list[dict[str, Any]]:
                 f"COALESCE(je.winning_model, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODEL_NAME}') "
                 "AS winning_model, "
                 f"{_CORPUS_BASELINE_METRIC_SQL} AS baseline_metric, "
-        f"{_CORPUS_OPTIMIZED_METRIC_SQL} AS optimized_metric, "
+                f"{_CORPUS_OPTIMIZED_METRIC_SQL} AS optimized_metric, "
                 "je.summary_text, "
                 f"COALESCE(j.payload_overview->>'{PAYLOAD_OVERVIEW_NAME}', je.task_name) AS task_name, "
                 f"COALESCE(je.module_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODULE_NAME}') "
@@ -524,10 +501,7 @@ def fetch_corpus_facets(
         scope_sql = _SHARED_GRANT_SCOPE_SQL
         params["shared_with_username"] = shared_with_username
     else:
-        scope_sql = (
-            "NOT COALESCE(je.is_private, "
-            "(j.payload_overview->>'is_private')::boolean, FALSE)"
-        )
+        scope_sql = "NOT COALESCE(je.is_private, (j.payload_overview->>'is_private')::boolean, FALSE)"
     date_parts: list[str] = []
     if date_from is not None:
         date_parts.append("AND j.created_at >= :date_from")
@@ -561,13 +535,11 @@ def fetch_corpus_facets(
         "AS module, "
         "COALESCE(je.optimization_type, j.optimization_type, "
         f"j.payload_overview->>'{PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE}', "
-        f"'{OPTIMIZATION_TYPE_RUN}') AS run_type "
+        f"'{OPTIMIZATION_TYPE_BLACKBOX}') AS run_type "
         "FROM jobs j "
         f"LEFT JOIN {_job_embeddings_relation(job_store)} je "
         "ON je.optimization_id = j.optimization_id "
-        f"WHERE j.status = 'success' AND {_USER_FACING_CORPUS_SQL} AND {scope_sql} "
-        + " ".join(date_parts)
-        + ")"
+        f"WHERE j.status = 'success' AND {_USER_FACING_CORPUS_SQL} AND {scope_sql} " + " ".join(date_parts) + ")"
     )
     params["facet_limit"] = max(1, min(int(limit), FACET_LIMIT_MAX))
     match_sql = ""
@@ -677,10 +649,9 @@ def record_public_search_query(job_store: Any, query: str) -> None:
     try:
         with Session(job_store.engine) as session:
             session.execute(
-                text(
-                    "INSERT INTO search_query_log (query_text, created_at) "
-                    "VALUES (:q, :ts)"
-                ).bindparams(bindparam("ts", type_=DateTime(timezone=True))),
+                text("INSERT INTO search_query_log (query_text, created_at) VALUES (:q, :ts)").bindparams(
+                    bindparam("ts", type_=DateTime(timezone=True))
+                ),
                 {"q": normalized, "ts": datetime.now(UTC)},
             )
             session.commit()
@@ -872,9 +843,7 @@ def search_optimizations(
                     shared_with_username=shared_with_username,
                 )
             except SQLAlchemyError as exc:
-                logger.warning(
-                    "BM25 search failed (%s); falling back to ILIKE lexical search.", exc
-                )
+                logger.warning("BM25 search failed (%s); falling back to ILIKE lexical search.", exc)
         return _search_lexical(
             job_store=job_store,
             je_rel=je_rel,
@@ -1012,10 +981,7 @@ def _search_semantic(
     # INNER JOIN with jobs so deleted/orphan embedding rows can't leak through,
     # and so the status filter is enforced regardless of how the embedding row
     # was written.
-    from_sql = (
-        "FROM job_embeddings je "
-        "INNER JOIN jobs j ON j.optimization_id = je.optimization_id"
-    )
+    from_sql = "FROM job_embeddings je INNER JOIN jobs j ON j.optimization_id = je.optimization_id"
     where_parts: list[str] = [
         "j.status = 'success'",
         _USER_FACING_CORPUS_SQL,
@@ -1043,15 +1009,11 @@ def _search_semantic(
     # derive from (``_fetch_corpus_points``) so a filter value always lines up
     # with the chip the user picked, even for jobs renamed after embedding.
     if tasks:
-        where_parts.append(
-            f"COALESCE(j.payload_overview->>'{PAYLOAD_OVERVIEW_NAME}', je.task_name) "
-            "= ANY(:tasks)"
-        )
+        where_parts.append(f"COALESCE(j.payload_overview->>'{PAYLOAD_OVERVIEW_NAME}', je.task_name) = ANY(:tasks)")
         params["tasks"] = list(tasks)
     if modules:
         where_parts.append(
-            f"COALESCE(je.module_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODULE_NAME}') "
-            "= ANY(:modules)"
+            f"COALESCE(je.module_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODULE_NAME}') = ANY(:modules)"
         )
         params["modules"] = list(modules)
     if date_from is not None:
@@ -1095,9 +1057,7 @@ def _search_semantic(
         )
 
         leaders = [row["optimization_id"] for row in ranked_rows]
-        relevance_by_id = {
-            row["optimization_id"]: _as_float(row.get("relevance")) for row in ranked_rows
-        }
+        relevance_by_id = {row["optimization_id"]: _as_float(row.get("relevance")) for row in ranked_rows}
         total = len(leaders)
         offset = (page - 1) * size
         page_ids = leaders[offset : offset + size]
@@ -1262,40 +1222,29 @@ def _search_lexical(
     else:
         # Private flag may live in the embedding row OR the payload overview
         # (for jobs that haven't been embedded yet). Treat either as private.
-        where_parts.append(
-            "NOT COALESCE(je.is_private, "
-            "(j.payload_overview->>'is_private')::boolean, FALSE)"
-        )
+        where_parts.append("NOT COALESCE(je.is_private, (j.payload_overview->>'is_private')::boolean, FALSE)")
 
     if models:
         where_parts.append(
-            f"COALESCE(je.winning_model, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODEL_NAME}') "
-            "= ANY(:models)"
+            f"COALESCE(je.winning_model, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODEL_NAME}') = ANY(:models)"
         )
         params["models"] = list(models)
     if optimizers:
         where_parts.append(
-            f"COALESCE(je.optimizer_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_OPTIMIZER_NAME}') "
-            "= ANY(:optimizers)"
+            f"COALESCE(je.optimizer_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_OPTIMIZER_NAME}') = ANY(:optimizers)"
         )
         params["optimizers"] = list(optimizers)
     if optimization_types:
-        where_parts.append(
-            "COALESCE(je.optimization_type, j.optimization_type) = ANY(:optimization_types)"
-        )
+        where_parts.append("COALESCE(je.optimization_type, j.optimization_type) = ANY(:optimization_types)")
         params["optimization_types"] = list(optimization_types)
     # Same COALESCE expressions as the corpus options (``_fetch_corpus_points``)
     # so a picked chip's value always matches, including for unembedded jobs.
     if tasks:
-        where_parts.append(
-            f"COALESCE(j.payload_overview->>'{PAYLOAD_OVERVIEW_NAME}', je.task_name) "
-            "= ANY(:tasks)"
-        )
+        where_parts.append(f"COALESCE(j.payload_overview->>'{PAYLOAD_OVERVIEW_NAME}', je.task_name) = ANY(:tasks)")
         params["tasks"] = list(tasks)
     if modules:
         where_parts.append(
-            f"COALESCE(je.module_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODULE_NAME}') "
-            "= ANY(:modules)"
+            f"COALESCE(je.module_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODULE_NAME}') = ANY(:modules)"
         )
         params["modules"] = list(modules)
     if date_from is not None:
@@ -1467,38 +1416,27 @@ def _search_bm25(
         where_parts.append(_SHARED_GRANT_SCOPE_SQL)
         params["shared_with_username"] = shared_with_username
     else:
-        where_parts.append(
-            "NOT COALESCE(je.is_private, "
-            "(j.payload_overview->>'is_private')::boolean, FALSE)"
-        )
+        where_parts.append("NOT COALESCE(je.is_private, (j.payload_overview->>'is_private')::boolean, FALSE)")
 
     if models:
         where_parts.append(
-            f"COALESCE(je.winning_model, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODEL_NAME}') "
-            "= ANY(:models)"
+            f"COALESCE(je.winning_model, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODEL_NAME}') = ANY(:models)"
         )
         params["models"] = list(models)
     if optimizers:
         where_parts.append(
-            f"COALESCE(je.optimizer_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_OPTIMIZER_NAME}') "
-            "= ANY(:optimizers)"
+            f"COALESCE(je.optimizer_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_OPTIMIZER_NAME}') = ANY(:optimizers)"
         )
         params["optimizers"] = list(optimizers)
     if optimization_types:
-        where_parts.append(
-            "COALESCE(je.optimization_type, j.optimization_type) = ANY(:optimization_types)"
-        )
+        where_parts.append("COALESCE(je.optimization_type, j.optimization_type) = ANY(:optimization_types)")
         params["optimization_types"] = list(optimization_types)
     if tasks:
-        where_parts.append(
-            f"COALESCE(j.payload_overview->>'{PAYLOAD_OVERVIEW_NAME}', je.task_name) "
-            "= ANY(:tasks)"
-        )
+        where_parts.append(f"COALESCE(j.payload_overview->>'{PAYLOAD_OVERVIEW_NAME}', je.task_name) = ANY(:tasks)")
         params["tasks"] = list(tasks)
     if modules:
         where_parts.append(
-            f"COALESCE(je.module_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODULE_NAME}') "
-            "= ANY(:modules)"
+            f"COALESCE(je.module_name, j.payload_overview->>'{PAYLOAD_OVERVIEW_MODULE_NAME}') = ANY(:modules)"
         )
         params["modules"] = list(modules)
     if date_from is not None:
@@ -1552,9 +1490,7 @@ def _search_bm25(
         )
 
         leaders = [row["optimization_id"] for row in ranked_rows]
-        relevance_by_id = {
-            row["optimization_id"]: _as_float(row.get("relevance")) for row in ranked_rows
-        }
+        relevance_by_id = {row["optimization_id"]: _as_float(row.get("relevance")) for row in ranked_rows}
         total = len(leaders)
         offset = (page - 1) * size
         page_ids = leaders[offset : offset + size]

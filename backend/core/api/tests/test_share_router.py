@@ -7,15 +7,14 @@ member CRUD, role gating), the access-gated public composite read
 
 The store mirrors the in-memory SQLite pattern of the sibling routers: a
 ``RemoteDBJobStore`` subclass that skips the pgvector bootstrap and seeds
-``JobModel`` rows directly. The serve test monkeypatches the program loader and
-language-model builder on the ``share`` module so it never touches a real model.
+``JobModel`` rows directly. The serve tests monkeypatch the protected
+interaction on the ``serve`` module so they never start a sandbox.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -25,7 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from ...i18n_en import t_en
-from ...models import ProgramArtifact, RunResponse, ServeInfoResponse
+from ...models import ServeInfoResponse
 from ...storage.models import Base, JobModel
 from ...storage.remote import RemoteDBJobStore
 from ..auth import AuthenticatedUser, get_authenticated_user
@@ -33,7 +32,6 @@ from ..routers import serve as serve_module
 from ..routers import share as share_module
 from ..routers.share import create_share_router
 from ..sharing_access import get_grant
-from .mocks import make_artifact, make_run_result
 
 
 class _MemStore(RemoteDBJobStore):
@@ -68,7 +66,7 @@ def _seed_job(store: _MemStore, optimization_id: str = "opt-share-1", username: 
                 latest_metrics={},
                 result=None,
                 payload_overview={
-                    "optimization_type": "run",
+                    "optimization_type": "blackbox",
                     "name": "My run",
                     "username": username,
                     "optimizer_name": "gepa",
@@ -325,59 +323,6 @@ def test_member_editor_sees_owner_and_serve_info() -> None:
     assert body["status"]["username"] == "alice"
 
 
-def test_protected_shared_metadata_does_not_execute_persisted_signature(
-    tmp_path: Path,
-) -> None:
-    """Expose protected shared form metadata while keeping signature code inert.
-
-    Args:
-        tmp_path: Parent-owned directory the persisted signature must not modify.
-    """
-    store = _MemStore()
-    _seed_job(store, username="alice")
-    marker = tmp_path / "shared-signature-ran-in-api.txt"
-    signature_code = "\n".join(
-        [
-            "import pathlib",
-            "import dspy",
-            f"pathlib.Path({str(marker)!r}).write_text('unsafe')",
-            "class UnsafeSignature(dspy.Signature):",
-            "    question: str = dspy.InputField()",
-            "    answer: str = dspy.OutputField()",
-        ]
-    )
-    prompt = make_artifact().optimized_prompt
-    artifact = ProgramArtifact(program_state_json={}, optimized_prompt=prompt)
-    result = make_run_result(artifact)
-    current = store.get_job("opt-share-1")
-    store.update_job(
-        "opt-share-1",
-        execution_budget_id="budget-1",
-        payload={**current["payload"], "execution_runtime": "vercel"},
-        payload_overview={
-            **current["payload_overview"],
-            "model_name": "openai/gpt-5.4-nano",
-            "signature_code": signature_code,
-        },
-        result=result.model_dump(mode="json"),
-    )
-    token = _enable_anyone(store, role="editor")
-    editor = _client(store, user="bob")
-
-    read = editor.get(f"/share/{token}")
-    execution = editor.post(
-        f"/share/{token}/serve",
-        json={"inputs": {"question": "hello"}},
-    )
-
-    assert read.status_code == 200
-    assert read.json()["serve_info"]["input_fields"] == ["question"]
-    assert read.json()["serve_info"]["output_fields"] == ["reasoning", "answer"]
-    assert execution.status_code == 400
-    assert "Idempotency-Key" in execution.json()["detail"]
-    assert not marker.exists()
-
-
 def test_claim_anyone_link_persists_grant_and_makes_run_visible() -> None:
     """Redeeming an anyone-link durably grants the link tier and surfaces the run.
 
@@ -608,23 +553,6 @@ def test_public_view_payload_is_scrubbed() -> None:
     assert "MODEL-AUTH-SECRET" not in json.dumps(body)
 
 
-def test_public_view_dataset_is_full_not_capped() -> None:
-    """The shared dataset returns the FULL split (all 40 rows), not a preview cap."""
-    store = _MemStore()
-    _seed_job(store, username="alice")
-    token = _enable_anyone(store)
-
-    reader = _client(store, user="bob")
-    body = reader.get(f"/share/{token}").json()
-    dataset = body["dataset"]
-
-    assert dataset["total_rows"] == 40
-    counts = dataset["split_counts"]
-    assert counts["train"] + counts["val"] + counts["test"] == 40
-    rows = sum(len(dataset["splits"][s]) for s in ("train", "val", "test"))
-    assert rows == 40
-
-
 def test_member_crud_add_patch_remove() -> None:
     """A member grant can be added, re-roled, and removed by the owner."""
     store = _MemStore()
@@ -815,30 +743,6 @@ def test_user_search_excludes_synthetic_local_accounts() -> None:
     assert caller.get("/users/search", params={"q": "probe@"}).json()["usernames"] == []
 
 
-def _seed_serveable(store: _MemStore, optimization_id: str = "opt-share-1") -> tuple[object, object, dict]:
-    """Return the ``(program, RunResponse, overview)`` triple a fake loader yields.
-
-    Builds a single-run result whose artifact declares one input and one output
-    field so the serve handler's input validation and output projection both
-    exercise the happy path without a real model.
-
-    Args:
-        store: The seeded store (unused beyond signature symmetry with loaders).
-        optimization_id: Optimization id embedded in the synthesized result.
-
-    Returns:
-        A ``(program, RunResponse, overview)`` tuple matching ``load_program``.
-    """
-    artifact = make_artifact(input_fields=["question"], output_fields=["answer"])
-    result: RunResponse = make_run_result(artifact)
-    overview = {
-        "module_name": "predict",
-        "optimizer_name": "gepa",
-        "model_name": "openai/gpt-5.4-nano",
-    }
-    return object(), result, overview
-
-
 def _make_repo(store: _MemStore, optimization_id: str = "opt-share-1") -> None:
     """Turn the seeded job into a repository run, the only kind shared serve accepts.
 
@@ -847,7 +751,7 @@ def _make_repo(store: _MemStore, optimization_id: str = "opt-share-1") -> None:
         optimization_id: Optimization id of the seeded job.
     """
     current = store.get_job(optimization_id)
-    target = {"kind": "repo", "repo": {"url": "https://github.com/example/app", "ref": "main"}}
+    target = {"kind": "repo", "repo": {"repository": "example/app", "ref": "main", "commit": "abc123"}}
     store.update_job(
         optimization_id,
         payload={**current["payload"], "target": target},
@@ -864,15 +768,9 @@ def test_serve_allowed_for_editor_member() -> None:
     owner = _client(store, user="alice")
     owner.post("/optimizations/opt-share-1/sharing/members", json={"username": "erin", "role": "editor"})
 
-    _program, result, overview = _seed_serveable(store)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
-            share_module,
-            "load_program_metadata",
-            lambda *_a, **_k: (result.program_artifact, overview, overview["model_name"]),
-        )
-        mp.setattr(
-            share_module,
+            serve_module,
             "run_protected_interaction",
             lambda *_a, **_k: {
                 "optimization_id": "opt-share-1",
@@ -913,7 +811,7 @@ def test_serve_refuses_a_shared_repo_run_while_serving_is_off() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         calls: list[object] = []
-        mp.setattr(share_module, "run_protected_interaction", lambda *a, **_k: calls.append(a))
+        mp.setattr(serve_module, "run_protected_interaction", lambda *a, **_k: calls.append(a))
         resp = editor.post(
             f"/share/{token}/serve",
             json={"inputs": {"question": "hi"}, "max_cost_cents": 10},
@@ -926,7 +824,7 @@ def test_serve_refuses_a_shared_repo_run_while_serving_is_off() -> None:
 
 
 def test_serve_refuses_a_shared_dspy_run_with_410() -> None:
-    """A shared DSPy program run stays readable but can no longer serve."""
+    """A shared DSPy program run can no longer serve."""
     store = _MemStore()
     _seed_job(store, username="alice")
     token = _enable_anyone(store, role="editor")
@@ -934,7 +832,7 @@ def test_serve_refuses_a_shared_dspy_run_with_410() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         calls: list[object] = []
-        mp.setattr(share_module, "run_protected_interaction", lambda *a, **_k: calls.append(a))
+        mp.setattr(serve_module, "run_protected_interaction", lambda *a, **_k: calls.append(a))
         resp = editor.post(
             f"/share/{token}/serve",
             json={"inputs": {"question": "hi"}, "max_cost_cents": 10},
@@ -1018,15 +916,9 @@ def test_signed_in_stranger_gets_editor_link_role_and_can_serve() -> None:
     assert read.json()["role"] == "editor"
     assert read.json()["owner"] == "alice"
 
-    _program, result, overview = _seed_serveable(store)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
-            share_module,
-            "load_program_metadata",
-            lambda *_a, **_k: (result.program_artifact, overview, overview["model_name"]),
-        )
-        mp.setattr(
-            share_module,
+            serve_module,
             "run_protected_interaction",
             lambda *_a, **_k: {
                 "optimization_id": "opt-share-1",
@@ -1118,7 +1010,7 @@ def test_public_view_of_internal_tagger_job_404() -> None:
 
 
 def test_public_view_of_unknown_internal_job_type_404() -> None:
-    """Explore accepts only run and grid-search optimization jobs."""
+    """Explore accepts only black-box optimization jobs."""
     store = _MemStore()
     _seed_job(store, username="alice")
     job_data = store.get_job("opt-share-1")
@@ -1165,14 +1057,8 @@ def _shared_serve(
     _client(store, user="alice").post(
         "/optimizations/opt-share-1/sharing/members", json={"username": "erin", "role": "editor"}
     )
-    _program, result, overview = _seed_serveable(store)
     events: list[dict] = []
-    mp.setattr(
-        share_module,
-        "load_program_metadata",
-        lambda *_a, **_k: (result.program_artifact, overview, overview["model_name"]),
-    )
-    mp.setattr(share_module, "run_protected_interaction", lambda *_a, **_k: interaction_result)
+    mp.setattr(serve_module, "run_protected_interaction", lambda *_a, **_k: interaction_result)
     mp.setattr(
         serve_module,
         "record_server_event",

@@ -92,7 +92,6 @@ def app_client(mock_worker, mock_job_store):
     with (
         patch("core.api.app.get_job_store", return_value=mock_job_store),
         patch("core.api.app.get_worker", return_value=mock_worker),
-        patch("core.api.app.DspyService"),  # prevent real DSPy init
     ):
         application = create_app(registry=registry)
         with TestClient(application, raise_server_exceptions=False) as client:
@@ -105,7 +104,6 @@ def test_lifespan_calls_recover_orphaned_jobs(mock_worker, mock_job_store):
     with (
         patch("core.api.app.get_job_store", return_value=mock_job_store),
         patch("core.api.app.get_worker", return_value=mock_worker),
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=registry)
         with TestClient(application, raise_server_exceptions=False):
@@ -118,7 +116,6 @@ def test_lifespan_calls_get_worker(mock_worker, mock_job_store):
     with (
         patch("core.api.app.get_job_store", return_value=mock_job_store),
         patch("core.api.app.get_worker", return_value=mock_worker) as gw_mock,
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=registry)
         with TestClient(application, raise_server_exceptions=False):
@@ -133,7 +130,6 @@ def test_lifespan_requeues_pending_jobs(mock_worker):
     with (
         patch("core.api.app.get_job_store", return_value=mock_js),
         patch("core.api.app.get_worker", return_value=mock_worker) as gw_mock,
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=registry)
         with TestClient(application, raise_server_exceptions=False):
@@ -229,7 +225,6 @@ def test_health_no_worker_returns_503():
     with (
         patch("core.api.app.get_job_store", return_value=mock_js),
         patch("core.api.app.get_worker", return_value=null_worker),
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=registry)
         with TestClient(application, raise_server_exceptions=False) as client:
@@ -268,7 +263,6 @@ def test_queue_without_worker_returns_zeros():
     with (
         patch("core.api.app.get_job_store", return_value=mock_js),
         patch("core.api.app.get_worker", return_value=None),
-        patch("core.api.app.DspyService"),
     ):
         application = create_app(registry=registry)
         with TestClient(application, raise_server_exceptions=False) as client:
@@ -334,7 +328,6 @@ def test_sigterm_handler_calls_worker_stop() -> None:
     with (
         patch("core.api.app.get_job_store", return_value=mock_js),
         patch("core.api.app.get_worker", return_value=mock_w),
-        patch("core.api.app.DspyService"),
         patch("core.api.app.signal.signal", side_effect=fake_signal),
         patch("core.api.app.threading.current_thread", return_value=__import__("threading").main_thread()),
     ):
@@ -444,7 +437,6 @@ def worker_disabled_client(mock_job_store, monkeypatch):
     registry = ServiceRegistry()
     with (
         patch("core.api.app.get_job_store", return_value=mock_job_store),
-        patch("core.api.app.DspyService"),  # prevent real DSPy init
     ):
         application = create_app(registry=registry)
         with TestClient(application, raise_server_exceptions=False) as client:

@@ -60,15 +60,15 @@ def test_get_job_payload_returns_when_present(client: TestClient, job_store: Fak
     """A job with a stored payload returns that payload alongside metadata."""
     job_store.seed_job(
         "job3",
-        payload={"dataset": [{"q": 1}]},
-        payload_overview={"job_type": "run"},
+        payload={"cases": [{"q": 1}]},
+        payload_overview={},
     )
     r = client.get("/optimizations/job3/payload")
     assert r.status_code == 200
     body = r.json()
     assert body["optimization_id"] == "job3"
-    assert body["optimization_type"] == "run"
-    assert body["payload"]["dataset"] == [{"q": 1}]
+    assert body["optimization_type"] == "blackbox"
+    assert body["payload"]["cases"] == [{"q": 1}]
 
 
 def test_get_job_payload_still_shows_a_stored_claude_code_run(client: TestClient, job_store: FakeJobStore) -> None:
@@ -197,28 +197,6 @@ def test_analytics_summary_running_and_validating_fold_into_running_count(
     assert body["pending_count"] == 1
 
 
-def test_analytics_summary_grid_search_aggregates_pair_counts(client: TestClient, job_store: FakeJobStore) -> None:
-    """Grid-search jobs surface pair-level totals in the analytics summary."""
-    job_store.seed_job(
-        "gs1",
-        status="success",
-        payload_overview={"optimization_type": "grid_search", "total_pairs": 4},
-        result={
-            "best_pair": {
-                "baseline_test_metric": 0.4,
-                "optimized_test_metric": 0.7,
-            },
-            "completed_pairs": 3,
-            "failed_pairs": 1,
-        },
-    )
-    r = client.get("/analytics/summary")
-    body = r.json()
-    assert body["total_pairs"] == 4
-    assert body["completed_pairs"] == 3
-    assert body["failed_pairs"] == 1
-
-
 def test_analytics_summary_success_rate_calculation(client: TestClient, job_store: FakeJobStore) -> None:
     """``success_rate`` is the ratio of successes to terminal jobs."""
     # success_rate = success_count / (success_count + failed_count)
@@ -297,12 +275,12 @@ def test_analytics_dashboard_populates_optimizer_counts(client: TestClient, job_
     job_store.seed_job(
         "d1",
         status="success",
-        payload_overview={"optimization_type": "run", "optimizer_name": "gepa"},
+        payload_overview={"optimization_type": "blackbox", "optimizer_name": "gepa"},
     )
     job_store.seed_job(
         "d2",
         status="pending",
-        payload_overview={"optimization_type": "run", "optimizer_name": "gepa"},
+        payload_overview={"optimization_type": "blackbox", "optimizer_name": "gepa"},
     )
     r = client.get("/analytics/dashboard")
     body = r.json()
@@ -317,7 +295,7 @@ def test_analytics_dashboard_date_filter_excludes_other_days(client: TestClient,
         created_at="2024-03-15T10:00:00+00:00",
         started_at="2024-03-15T10:00:00+00:00",
         completed_at="2024-03-15T10:01:00+00:00",
-        payload_overview={"optimization_type": "run"},
+        payload_overview={"optimization_type": "blackbox"},
     )
     r = client.get("/analytics/dashboard?date=2024-03-16")
     assert r.json()["filtered_total"] == 0
@@ -419,15 +397,14 @@ def test_analytics_dashboard_date_to_widens_day_filter_to_a_range(client, job_st
 
 
 def test_analytics_dashboard_job_type_filter_matches_histogram_buckets(client, job_store):
-    """Verify ``job_type`` narrows to one bucket, including the derived workflow bucket."""
-    job_store.seed_job("single", payload_overview={"optimization_type": "run"})
-    job_store.seed_job("grid", payload_overview={"optimization_type": "grid_search"})
-    job_store.seed_job("flow", payload_overview={"optimization_type": "run", "composition": "workflow"})
+    """Verify ``job_type`` narrows to one bucket, and an untyped run counts as black-box."""
+    job_store.seed_job("typed", payload_overview={"optimization_type": "blackbox"})
+    job_store.seed_job("untyped", payload_overview={})
 
-    assert client.get("/analytics/dashboard?job_type=grid_search").json()["filtered_total"] == 1
-    workflow = client.get("/analytics/dashboard?job_type=workflow").json()
-    assert workflow["filtered_total"] == 1
-    assert workflow["job_type_counts"] == {"workflow": 1}
+    blackbox = client.get("/analytics/dashboard?job_type=blackbox").json()
+    assert blackbox["filtered_total"] == 2
+    assert blackbox["job_type_counts"] == {"blackbox": 2}
+    assert client.get("/analytics/dashboard?job_type=workflow").json()["filtered_total"] == 0
 
 
 def test_analytics_dashboard_module_filter(client, job_store):

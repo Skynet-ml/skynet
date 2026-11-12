@@ -8,31 +8,14 @@ coordinated migration is intended.
 
 RESOLUTION_HINT = "Register it via ServiceRegistry or provide a dotted path beginning with 'dspy.'."
 
-DETAIL_TRAIN = "train_examples"
-DETAIL_VAL = "val_examples"
-DETAIL_TEST = "test_examples"
 DETAIL_BASELINE = "baseline_test_metric"
 DETAIL_OPTIMIZED = "optimized_test_metric"
-
-META_OPTIMIZER = "optimizer"
-META_OPTIMIZER_KWARGS = "optimizer_kwargs"
-META_COMPILE_KWARGS = "compile_kwargs"
-META_MODULE_KWARGS = "module_kwargs"
-META_MODEL_IDENTIFIER = "model_identifier"
 
 PAYLOAD_OVERVIEW_NAME = "name"
 PAYLOAD_OVERVIEW_DESCRIPTION = "description"
 PAYLOAD_OVERVIEW_USERNAME = "username"
 PAYLOAD_OVERVIEW_MODULE_NAME = "module_name"
 PAYLOAD_OVERVIEW_MODULE_KWARGS = "module_kwargs"
-# Stored so the load path can reconstruct the optimized program from a
-# state-only JSON artifact (no pickle deserialization required).
-PAYLOAD_OVERVIEW_SIGNATURE_CODE = "signature_code"
-# Workflow runs: the full graph spec (the workflow-mode analogue of
-# signature_code) and a scrubbed tool_source ({kind, mcp_url, tool_filter} —
-# never the auth header), both needed to rebuild the program shell at serve.
-PAYLOAD_OVERVIEW_WORKFLOW = "workflow"
-PAYLOAD_OVERVIEW_TOOL_SOURCE = "tool_source"
 PAYLOAD_OVERVIEW_OPTIMIZER_NAME = "optimizer_name"
 PAYLOAD_OVERVIEW_MODEL_NAME = "model_name"
 PAYLOAD_OVERVIEW_MODEL_SETTINGS = "model_settings"
@@ -70,7 +53,6 @@ PAYLOAD_OVERVIEW_IS_PRIVATE = "is_private"
 PAYLOAD_OVERVIEW_SOURCE_DATASET_ID = "source_dataset_id"
 # Unified (wizard v2) runs are stored as black-box runs; these keys tell them
 # apart and record how the wizard configured them.
-PAYLOAD_OVERVIEW_PAYLOAD_KIND = "payload_kind"
 PAYLOAD_OVERVIEW_ARTIFACT_KIND = "artifact_kind"
 PAYLOAD_OVERVIEW_OPTIMIZER_CHOICE = "optimizer_choice"
 PAYLOAD_OVERVIEW_OPTIMIZER_RESOLVED = "optimizer_resolved"
@@ -98,9 +80,6 @@ PROGRESS_CASE_SCORED = "case_scored"
 # their own table, keyed by the event's ``run_id``.
 PROGRESS_AGENT_RUN = "agent_run"
 
-PROGRESS_GRID_PAIR_STARTED = "grid_pair_started"
-PROGRESS_GRID_PAIR_COMPLETED = "grid_pair_completed"
-PROGRESS_GRID_PAIR_FAILED = "grid_pair_failed"
 # Black-box runs: one event per engine lane plus the explore → continue
 # hand-off, so the run page can render the Auto strategy's lane table.
 PROGRESS_LANE_STARTED = "lane_started"
@@ -108,7 +87,7 @@ PROGRESS_LANE_COMPLETED = "lane_completed"
 PROGRESS_LANE_HANDOFF = "lane_handoff"
 
 # Phase-marker events the UI relies on to render pipeline stages and
-# per-pair status. They fire once per phase (not per step), so they're
+# lane status. They fire once per phase (not per step), so they're
 # cheap to keep — but they also happen early, which makes them the
 # first casualties of a naive FIFO eviction. The jobstore preserves
 # these before touching optimizer_progress and other high-volume rows.
@@ -125,9 +104,6 @@ STRUCTURAL_PROGRESS_EVENTS = frozenset(
         PROGRESS_REJECTED,
         PROGRESS_VALSET,
         PROGRESS_VALSET_OUTPUTS,
-        PROGRESS_GRID_PAIR_STARTED,
-        PROGRESS_GRID_PAIR_COMPLETED,
-        PROGRESS_GRID_PAIR_FAILED,
         PROGRESS_AGENT_RUN,
         PROGRESS_LANE_STARTED,
         PROGRESS_LANE_COMPLETED,
@@ -136,20 +112,14 @@ STRUCTURAL_PROGRESS_EVENTS = frozenset(
 )
 
 PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE = "optimization_type"
-OPTIMIZATION_TYPE_RUN = "run"
-OPTIMIZATION_TYPE_GRID_SEARCH = "grid_search"
-# Black-box text optimization: any text artifact + a scorer, no DSPy program.
-# Runs through the same worker/subprocess pipeline as ``run``.
+# Black-box text optimization: any text artifact + a scorer.
 OPTIMIZATION_TYPE_BLACKBOX = "blackbox"
 
-# Composition classifier — orthogonal to optimization_type. Distinguishes a run
-# over a single atomic DSPy module from one over a workflow (a DAG of module
-# nodes). Derived at submit time from ``module_name == WORKFLOW_MODULE_NAME`` and
-# hoisted to the indexed ``jobs.composition`` column so it is queryable without
-# parsing JSON or string-matching the module name.
+# Composition classifier — orthogonal to optimization_type, hoisted to the
+# indexed ``jobs.composition`` column. Every new run stores ``single``; rows of
+# retired DSPy workflow runs may still hold ``"workflow"``.
 PAYLOAD_OVERVIEW_COMPOSITION = "composition"
 COMPOSITION_SINGLE = "single"
-COMPOSITION_WORKFLOW = "workflow"
 # Tagger bulk auto-tag jobs: claimed by the same worker fleet but run in the
 # worker thread (no subprocess) — see core.worker.tagging_job.
 OPTIMIZATION_TYPE_TAGGING = "tagging_autotag"
@@ -163,15 +133,10 @@ TOKEN_SOURCE_BYOK = "byok"
 TOKEN_SOURCE_SUBSCRIPTION = "subscription"
 CLI_PROVIDERS = ("codex", "claude")
 
-PAYLOAD_OVERVIEW_TOTAL_PAIRS = "total_pairs"
-PAYLOAD_OVERVIEW_GENERATION_MODELS = "generation_models"
-PAYLOAD_OVERVIEW_REFLECTION_MODELS = "reflection_models"
 
 TQDM_TOTAL_KEY = "tqdm_total"
 TQDM_N_KEY = "tqdm_n"
-TQDM_ELAPSED_KEY = "tqdm_elapsed"
 TQDM_PERCENT_KEY = "tqdm_percent"
-TQDM_RATE_KEY = "tqdm_rate"
 TQDM_REMAINING_KEY = "tqdm_remaining"
 TQDM_DESC_KEY = "tqdm_desc"
 
@@ -179,12 +144,6 @@ TQDM_DESC_KEY = "tqdm_desc"
 # the family forward across interleaved non-tqdm events so the live progress bar
 # does not blink out between rollout ticks.
 TQDM_KEY_PREFIX = "tqdm_"
-
-COMPILE_TRAINSET_KEY = "trainset"
-COMPILE_VALSET_KEY = "valset"
-OPTIMIZER_METRIC_KEY = "metric"
-OPTIMIZER_REFLECTION_LM_KEY = "reflection_lm"
-OPTIMIZER_LOG_DIR_KEY = "log_dir"
 
 OPTIMIZER_NAME_GEPA = "gepa"
 

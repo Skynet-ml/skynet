@@ -347,7 +347,6 @@ def run_protected_preview(
                     bind_protected_sandbox(
                         gateway,
                         settings,
-                        workflow="anything" if kind == "dependencies" else "dspy",
                         owner_id=document["id"],
                     )
                     protected = gateway.protect_payload(

@@ -188,7 +188,7 @@ def engine_catalog(target_kind: str) -> BlackboxEngineCatalogResponse:
             id=runtime,
             available=unavailable is None,
             unavailable_reason=unavailable,
-            cost=runtime_cost_profile(settings, "anything", runtime),
+            cost=runtime_cost_profile(settings, runtime),
             checkpoint_restore_supported=unavailable is None,
             checkpoint_restore_reason=unavailable,
         )
@@ -222,7 +222,6 @@ def engine_catalog(target_kind: str) -> BlackboxEngineCatalogResponse:
                 ),
             )
             for spec in ENGINES.values()
-            if not spec.hidden
         ],
         auto_engines=list(AUTO_ENGINES),
         auto_available=auto_reason is None,

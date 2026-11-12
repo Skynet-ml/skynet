@@ -747,7 +747,6 @@ def _link_accepted(job_store: Any, session: Session, username: str, cycle: Conti
 
 def process_cycle(
     job_store: Any,
-    service: Any,
     cycle_id: str,
     *,
     now: datetime | None = None,
@@ -761,7 +760,6 @@ def process_cycle(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         cycle_id: The claimed cycle.
         now: Clock override for tests.
         pick_model: Finds a better model for one role.
@@ -867,7 +865,7 @@ def process_cycle(
                 payload, username=plan_username, workflow=_workflow(payload), supplied_key=_run_key(cycle_id)
             ).budget,
         }
-    _submit_run(job_store, service, cycle_id, plan_username, payload, lease)
+    _submit_run(job_store, cycle_id, plan_username, payload, lease)
 
 
 def _workflow(payload: BlackboxRunRequest) -> str:
@@ -884,7 +882,6 @@ def _workflow(payload: BlackboxRunRequest) -> str:
 
 def _submit_run(
     job_store: Any,
-    service: Any,
     cycle_id: str,
     username: str,
     payload: BlackboxRunRequest,
@@ -899,7 +896,6 @@ def _submit_run(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         cycle_id: The check.
         username: Plan owner.
         payload: The run's request.
@@ -914,7 +910,6 @@ def _submit_run(
     try:
         response = submit_repo_payload(
             payload,
-            service=service,
             job_store=job_store,
             current_user=AuthenticatedUser(username, "user", ()),
             idempotency_key=_run_key(cycle_id),
@@ -1241,7 +1236,6 @@ def _reclaim_stale(job_store: Any, now: datetime) -> list[str]:
 
 def run_due_checks(
     job_store: Any,
-    service: Any,
     *,
     now: datetime | None = None,
     pick_model: ModelPicker = better_model,
@@ -1250,7 +1244,6 @@ def run_due_checks(
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
         now: Clock override for tests.
         pick_model: Finds a better model for one role.
 
@@ -1269,7 +1262,7 @@ def run_due_checks(
     checked = _reclaim_stale(job_store, now) + _claim_due(engine, now)
     for cycle_id in checked:
         try:
-            process_cycle(job_store, service, cycle_id, now=now, pick_model=pick_model)
+            process_cycle(job_store, cycle_id, now=now, pick_model=pick_model)
         except Exception:
             # The lease expires and a later sweep retries; the idempotency key
             # keeps that retry from starting or funding a second run.
@@ -1280,16 +1273,14 @@ def run_due_checks(
 class ContinuousSweeper:
     """Run :func:`run_due_checks` on a timer on one replica at a time."""
 
-    def __init__(self, job_store: Any, service: Any, interval_seconds: float = SWEEP_INTERVAL_SECONDS) -> None:
-        """Bind the sweeper to its store and service.
+    def __init__(self, job_store: Any, interval_seconds: float = SWEEP_INTERVAL_SECONDS) -> None:
+        """Bind the sweeper to its store.
 
         Args:
             job_store: Job store.
-            service: Optimization service handed to the in-process worker.
-            interval_seconds: Seconds between sweeps.
+                interval_seconds: Seconds between sweeps.
         """
         self._job_store = job_store
-        self._service = service
         self._interval_seconds = interval_seconds
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1310,7 +1301,7 @@ class ContinuousSweeper:
         try:
             with advisory_lock(self._job_store.engine, CONTINUOUS_SWEEP_LOCK_KEY) as leader:
                 if leader:
-                    run_due_checks(self._job_store, self._service)
+                    run_due_checks(self._job_store)
         except Exception:
             logger.warning("Continuous sweep failed", exc_info=True)
 
@@ -1320,18 +1311,17 @@ class ContinuousSweeper:
             self.sweep_once()
 
 
-def start_continuous_sweeper(job_store: Any, service: Any) -> ContinuousSweeper | None:
+def start_continuous_sweeper(job_store: Any) -> ContinuousSweeper | None:
     """Start the continuous-optimization sweeper when the store has a database.
 
     Args:
         job_store: Job store.
-        service: Optimization service handed to the in-process worker.
 
     Returns:
         The started sweeper, or ``None`` for a store without an engine.
     """
     if getattr(job_store, "engine", None) is None:
         return None
-    sweeper = ContinuousSweeper(job_store, service)
+    sweeper = ContinuousSweeper(job_store)
     sweeper.start()
     return sweeper

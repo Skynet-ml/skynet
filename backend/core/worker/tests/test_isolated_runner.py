@@ -1,4 +1,4 @@
-"""Verify the guest drops its request file and routes unified runs through the black-box sandbox."""
+"""Verify the guest drops its request file and runs black-box jobs in the contained runtime."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def test_request_file_is_gone_once_loaded(tmp_path: Path, monkeypatch: pytest.Mo
         monkeypatch: Runner and argument substitutions.
     """
     request = tmp_path / "request.json"
-    payload = {"payload_kind": "unified_v1", "workspace": {"metric_code": f"# {SENTINEL}"}}
+    payload = {"_optimization_type": "blackbox", "workspace": {"metric_code": f"# {SENTINEL}"}}
     _write_request(request, payload)
     observed: list[dict[str, Any]] = []
 
@@ -59,30 +59,10 @@ def test_request_file_is_gone_once_loaded(tmp_path: Path, monkeypatch: pytest.Mo
     assert all(SENTINEL not in path.read_text() for path in tmp_path.rglob("*") if path.is_file())
 
 
-def test_unified_payloads_run_in_the_contained_runtime() -> None:
-    """Treat unified payloads as black-box runs, so their commands stay contained."""
-    assert isolated_runner._is_blackbox_family({"payload_kind": "unified_v1"})
+def test_blackbox_payloads_run_in_the_contained_runtime() -> None:
+    """Treat only black-box payloads as contained runs."""
     assert isolated_runner._is_blackbox_family({"_optimization_type": "blackbox"})
     assert not isolated_runner._is_blackbox_family({"_optimization_type": "run"})
-
-
-def test_unified_preflight_goes_to_the_unified_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Send a unified setup check to the unified sandbox verifier.
-
-    Args:
-        monkeypatch: Verifier substitution.
-    """
-    calls: list[tuple[dict[str, Any], str]] = []
-
-    def verify(payload: dict[str, Any], scope: str) -> dict[str, Any]:
-        """Record the dispatched check."""
-        calls.append((payload, scope))
-        return {"ok": True}
-
-    monkeypatch.setattr(isolated_runner.blackbox_preflight, "verify_unified_in_sandbox", verify, raising=False)
-    payload = {"payload_kind": "unified_v1"}
-    assert isolated_runner._run_preflight(payload, {"scope": "evaluation"}, events=None) == {"ok": True}
-    assert calls == [(payload, "evaluation")]
 
 
 def test_a_failed_preflight_names_its_error_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +74,7 @@ def test_a_failed_preflight_names_its_error_type(tmp_path: Path, monkeypatch: py
     """
     request = tmp_path / "request.json"
     document = {
-        "payload": {"payload_kind": "unified_v1", "_preflight": {"scope": "evaluation", "identity": "i"}},
+        "payload": {"_optimization_type": "blackbox", "_preflight": {"scope": "evaluation", "identity": "i"}},
         "artifact_id": "g1",
         "nonce": "fixture",
         "protocol": isolated_runner.SANDBOX_PROTOCOL,

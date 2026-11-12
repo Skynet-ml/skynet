@@ -37,8 +37,6 @@ class JobRecord(TypedDict, total=False):
     log_count: int
     stored_bytes: int
     accumulated_runtime_seconds: float
-    parent_optimization_id: str | None
-    pair_index: int | None
 
 
 class ProgressEventRecord(TypedDict):
@@ -57,7 +55,6 @@ class LogEntryRecord(TypedDict):
     level: str
     logger: str
     message: str
-    pair_index: int | None
     source: str
     event: str | None
     fields: dict[str, Any] | None
@@ -229,7 +226,6 @@ class JobStore(Protocol):
         logger_name: str,
         message: str,
         timestamp: datetime | None = None,
-        pair_index: int | None = None,
         source: str | None = None,
         event: str | None = None,
         fields: dict[str, Any] | None = None,
@@ -247,7 +243,6 @@ class JobStore(Protocol):
             logger_name: Originating logger name.
             message: Log line content.
             timestamp: Optional override for the entry timestamp.
-            pair_index: Optional grid-pair index when emitted from a sweep.
             source: Where the line came from, see :data:`core.run_log.SOURCES`.
             event: Typed event name, if the line is an event.
             fields: The event's JSON payload.
@@ -331,7 +326,7 @@ class JobStore(Protocol):
         Returns:
             Matching ``JobRecord`` rows in newest-first order. Implementations
             may prune ``result`` down to the summary scalars list surfaces
-            read (test metrics, runtime, pair counters, ``best_pair`` labels);
+            read (test metrics, runtime, scores);
             use :meth:`get_job` for the full blob.
         """
         ...

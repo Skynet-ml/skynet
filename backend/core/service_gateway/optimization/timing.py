@@ -63,14 +63,13 @@ class _LMStageTimingCallback(BaseCallback):
     timing logic, stage state, and bucketing live here.
     """
 
-    def __init__(self, target_lm: Any, pair_index: int | None = None) -> None:
+    def __init__(self, target_lm: Any) -> None:
         """Capture the identity of the LM to time and initialise empty buckets.
 
         Args:
             target_lm: The DSPy LM whose calls should be timed; identity is
                 captured so unrelated LMs sharing the same context are
                 excluded from the duration list.
-            pair_index: Grid pair this LM serves, tagged on its billed calls.
         """
         # ``id()`` is safe because the optimization driver keeps ``target_lm``
         # alive for the entire timing window — the callback is registered
@@ -85,7 +84,6 @@ class _LMStageTimingCallback(BaseCallback):
         # Stage state lives on the callback (not in a ContextVar) so it is
         # visible from DSPy's worker threads — see module docstring.
         self._current_stage: str | None = None
-        self._pair_index = pair_index
         self._tag_tokens: dict[str, Any] = {}
 
     def set_stage(self, stage: str | None) -> None:
@@ -115,9 +113,7 @@ class _LMStageTimingCallback(BaseCallback):
         self._stage_starts[call_id] = stage
         # DSPy runs start and end callbacks on the calling thread's context, the
         # same one its request headers are built in, so the tags reach the call.
-        self._tag_tokens[call_id] = usage_tags_token(
-            stage=stage, pair=self._pair_index, candidate=current_proposal_iteration()
-        )
+        self._tag_tokens[call_id] = usage_tags_token(stage=stage, candidate=current_proposal_iteration())
 
     def on_lm_end(
         self,

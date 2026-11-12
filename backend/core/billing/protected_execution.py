@@ -40,30 +40,25 @@ def _immutable(settings: Settings, image: str) -> bool:
     return bool(pattern.fullmatch(image))
 
 
-def protected_image(settings: Settings, workflow: str) -> str | None:
-    """Return the deployment-owned immutable profile for a workflow.
+def protected_image(settings: Settings) -> str | None:
+    """Return the deployment-owned immutable sandbox image.
 
     Args:
         settings: Trusted backend configuration.
-        workflow: DSPy or Anything execution family.
 
     Returns:
         The pinned image reference when configured, otherwise None. Local
-        mode uses one local image for every workflow.
+        mode uses the local image.
     """
-    if settings.local_mode:
-        image = settings.local_sandbox_image
-    else:
-        image = settings.dspy_sandbox_image if workflow == "dspy" else settings.vercel_sandbox_image
+    image = settings.local_sandbox_image if settings.local_mode else settings.vercel_sandbox_image
     return image if image and _immutable(settings, image) else None
 
 
-def protected_vercel_unavailable_reason(settings: Settings, workflow: str) -> str | None:
+def protected_vercel_unavailable_reason(settings: Settings) -> str | None:
     """Check required provider access and an immutable offline workload image.
 
     Args:
         settings: Trusted deployment configuration.
-        workflow: Execution family selecting its dependency profile.
 
     Returns:
         A configuration reason, or None when real setup verification may proceed.
@@ -72,17 +67,16 @@ def protected_vercel_unavailable_reason(settings: Settings, workflow: str) -> st
     reason = protected_unavailable_reason(settings)
     if reason or settings.local_mode:
         return reason
-    if protected_image(settings, workflow) is None:
+    if protected_image(settings) is None:
         return "This deployment needs a pinned sandbox image with the optimizer dependencies installed."
     return None
 
 
-def runtime_cost_profile(settings: Settings, workflow: str, runtime: str) -> dict[str, Any]:
+def runtime_cost_profile(settings: Settings, runtime: str) -> dict[str, Any]:
     """Describe the selected sandbox's incremental user-funded cost category.
 
     Args:
         settings: Trusted deployment configuration.
-        workflow: DSPy or Anything execution family.
         runtime: Managed sandbox identity.
 
     Returns:
@@ -97,7 +91,7 @@ def runtime_cost_profile(settings: Settings, workflow: str, runtime: str) -> dic
             "maximum_lifetime_seconds": None,
             "vcpus": 2,
         }
-    image = protected_image(settings, workflow)
+    image = protected_image(settings)
     if runtime != "vercel" or image is None:
         return {
             "billing_basis": "at_cost",
@@ -147,7 +141,6 @@ def bind_protected_sandbox(
     gateway: ModelGateway,
     settings: Settings,
     *,
-    workflow: str,
     owner_id: str,
     lifetime_seconds: int | None = None,
     guest_lifetime_seconds: int | None = None,
@@ -161,7 +154,6 @@ def bind_protected_sandbox(
         gateway: Existing generation-fenced model and spend authority.
         settings: Trusted Vercel account and deployment image configuration,
             or the local Docker image in local mode.
-        workflow: Execution family selecting its immutable prebuilt image.
         owner_id: Stable job or setup identity used for cleanup after interruption.
         lifetime_seconds: Optional shorter ceiling for one bounded interaction.
         guest_lifetime_seconds: Optional shorter ceiling for the guest's boxes
@@ -181,14 +173,14 @@ def bind_protected_sandbox(
     Raises:
         UnpricedOperationError: When the protected runtime cannot be configured.
     """
-    reason = protected_vercel_unavailable_reason(settings, workflow)
+    reason = protected_vercel_unavailable_reason(settings)
     if reason:
         raise UnpricedOperationError(reason)
     # The deployment may drop a provider between the run's submission and its start.
     if not provider_offered(settings, provider):
         raise UnpricedOperationError(f"The sandbox provider {provider!r} is not offered on this deployment.")
     if image is None:
-        image = protected_image(settings, workflow)
+        image = protected_image(settings)
     elif not _immutable(settings, image):
         raise UnpricedOperationError("The run's pinned sandbox image is not an immutable reference.")
     assert image is not None

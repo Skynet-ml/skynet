@@ -195,7 +195,6 @@ def test_protected_parent_does_not_load_scorer_code_before_sandbox() -> None:
     with (
         patch("core.worker.engine.notify_job_completed"),
         patch("core.worker.engine.validate_blackbox_payload") as validate,
-        patch.object(worker, "_get_service"),
     ):
         worker._process_job("protected-anything", 0)
 

@@ -108,7 +108,7 @@ class _Env:
         Returns:
             Checked cycle ids.
         """
-        return continuous.run_due_checks(self.store, object(), now=now)
+        return continuous.run_due_checks(self.store, now=now)
 
     def count(self, model: Any) -> int:
         """Count rows of one table.
@@ -337,7 +337,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
         """Render domain errors with their stable code."""
         return JSONResponse(status_code=exc.status_code, content={"code": exc.code, "params": exc.params})
 
-    app.include_router(submissions.create_submissions_router(service=object(), job_store=store))
+    app.include_router(submissions.create_submissions_router(job_store=store))
     app.include_router(create_continuous_router(job_store=store))
     app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(fixture.username, fixture.role, ())
     environment = _Env(fixture, monkeypatch)
@@ -537,7 +537,7 @@ def _make_dspy(env: _Env, optimization_id: str) -> None:
 
 
 def test_a_dspy_run_cannot_enable_a_plan(env: _Env) -> None:
-    """A stored DSPy run stays readable but is never eligible, since Skynet no longer starts DSPy runs."""
+    """A stored DSPy run is never eligible, since Skynet no longer starts DSPy runs."""
     optimization_id = _incumbent(env)
     _make_dspy(env, optimization_id)
 
@@ -1229,7 +1229,7 @@ def test_a_crashed_check_never_takes_another_users_budget_with_its_key(env: _Env
     env.edit_cycle(claimed, snapshot={"budget_key": "shared-key"})
     BudgetService(engine=env.store.engine).create("bob", CYCLE_BUDGET, idempotency_key="shared-key")
 
-    continuous.process_cycle(env.store, object(), claimed)
+    continuous.process_cycle(env.store, claimed)
 
     [cycle] = env.cycles()
     assert (cycle.status, cycle.execution_budget_id) == ("skipped", None)
@@ -1414,7 +1414,7 @@ def test_another_users_run_with_a_checks_key_is_never_linked(env: _Env) -> None:
     assert forged.status_code == 201, forged.text
     env.harness.username = "alice"
 
-    continuous.process_cycle(env.store, object(), claimed)
+    continuous.process_cycle(env.store, claimed)
 
     [cycle] = env.cycles()
     assert cycle.status == "optimizing"
@@ -1699,7 +1699,7 @@ def test_a_worker_that_lost_its_lease_stops_before_it_submits(env: _Env) -> None
     )
     jobs = env.count(JobModel)
 
-    continuous._submit_run(env.store, object(), claimed, "alice", payload, cycle.lease_until - timedelta(minutes=1))
+    continuous._submit_run(env.store, claimed, "alice", payload, cycle.lease_until - timedelta(minutes=1))
 
     [after] = env.cycles()
     assert env.count(JobModel) == jobs
@@ -1770,7 +1770,7 @@ def test_a_waiting_check_is_reported_as_busy(env: _Env) -> None:
     continuous._claim_due(env.store.engine, now)
     env.edit_plan(next_check_at=now)
     [second] = continuous._claim_due(env.store.engine, now + timedelta(seconds=1))
-    continuous.process_cycle(env.store, object(), second, now=now)
+    continuous.process_cycle(env.store, second, now=now)
     assert {c.id: c.detail_code for c in env.cycles()}[second] == "continuous.skip_busy"
 
 

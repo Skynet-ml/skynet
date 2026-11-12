@@ -23,7 +23,6 @@ class SidebarJobItem(BaseModel):
     created_at: datetime | None = None
     pinned: bool = False
     optimization_type: str | None = None
-    total_pairs: int | None = None
     # True when this run stopped mid-optimization with a saved checkpoint and can
     # be resumed in place; drives the sidebar Resume-vs-Restart menu item.
     resumable: bool = False

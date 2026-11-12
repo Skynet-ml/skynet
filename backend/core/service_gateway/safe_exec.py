@@ -1,7 +1,7 @@
 """Subprocess isolation for validation-time exec of user-authored code.
 
-User-authored DSPy signature and metric code has to be exec'd at some point
-to validate it. Running exec() directly in the API process leaks arbitrary
+User-authored signature, transform, metric and scorer code has to be
+exec'd at some point to validate it. Running exec() directly in the API process leaks arbitrary
 user code into the web server — a simple ``while True: pass`` would hang a
 request worker, and ``import os; os.kill(1, 9)`` would be much worse.
 
@@ -15,9 +15,8 @@ re-raises a ``ServiceError``.
 Invariant: the child NEVER returns the compiled class or function back.
 Dynamically-exec'd classes can't be pickled across processes anyway, and
 letting the compiled object cross the boundary would defeat the point.
-Callers that need the actual object — the optimization worker — already
-run inside their own subprocess and exec directly (see
-``worker/subprocess_runner.py``).
+Callers that need the actual object — the workflow preview — already run
+inside the preview sandbox and exec directly.
 """
 
 from __future__ import annotations
@@ -62,7 +61,6 @@ _NO_RESULT = object()
 # avoids. Per-key locks live in ``_dogpile_locks``; ``_locks_mutex`` guards
 # only the locks dict, not the heavy validation itself.
 _signature_cache: dict[str, SignatureIntrospection] = {}
-_metric_cache: dict[str, MetricIntrospection] = {}
 _transform_cache: dict[str, TransformIntrospection] = {}
 _scorer_cache: dict[str, bool] = {}
 _workspace_cache: dict[str, WorkspaceCodeIntrospection] = {}
@@ -113,14 +111,6 @@ class SignatureIntrospection:
     input_fields: list[str]
     output_fields: list[str]
     image_input_fields: list[str]
-
-
-@dataclass(frozen=True)
-class MetricIntrospection:
-    """Metadata extracted from a user-authored metric callable."""
-
-    callable_name: str
-    param_names: list[str]
 
 
 @dataclass(frozen=True)
@@ -349,70 +339,6 @@ def validate_signature_code(
             image_input_fields=list(result.get("image_input_fields") or []),
         )
         _bounded_cache_put(_signature_cache, code, introspection)
-        return introspection
-
-
-def _metric_worker(code: str, queue: Any) -> None:
-    """Child-side entry point for ``validate_metric_code``.
-
-    Args:
-        code: User-authored metric callable source.
-        queue: Multiprocessing queue used to return a result dict.
-    """
-    try:
-        metric = load_metric_from_code(code)
-        sig = inspect.signature(metric)
-        param_names = [p.name for p in sig.parameters.values()]
-        queue.put(
-            {
-                "ok": True,
-                "callable_name": getattr(metric, "__name__", "metric"),
-                "param_names": param_names,
-            }
-        )
-    except BaseException as exc:  # user code is arbitrary — any failure is reported, not raised
-        queue.put(_error_payload(exc))
-
-
-def validate_metric_code(
-    code: str,
-    *,
-    timeout_seconds: float = _DEFAULT_PARSE_TIMEOUT_SECONDS,
-) -> MetricIntrospection:
-    """Parse user-authored metric code in a subprocess and return its shape.
-
-    Memoized per-process: concurrent submissions of the same metric share
-    one subprocess spawn instead of dogpiling N spawn+import-dspy cycles.
-
-    Args:
-        code: User-authored metric callable source.
-        timeout_seconds: Maximum time to wait for the child to finish.
-
-    Returns:
-        Callable name plus parameter names extracted via ``inspect``.
-
-    Raises:
-        ServiceError: When the user code fails to load or the child errors.
-    """
-    cached = _metric_cache.get(code)
-    if cached is not None:
-        return cached
-    with _dogpile_lock(f"met:{code}"):
-        cached = _metric_cache.get(code)
-        if cached is not None:
-            return cached
-        result = _run_in_subprocess(
-            _metric_worker,
-            (code,),
-            timeout_seconds=timeout_seconds,
-        )
-        if not result.get("ok"):
-            _raise_child_error(result)
-        introspection = MetricIntrospection(
-            callable_name=result["callable_name"],
-            param_names=list(result["param_names"]),
-        )
-        _bounded_cache_put(_metric_cache, code, introspection)
         return introspection
 
 

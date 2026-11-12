@@ -58,19 +58,6 @@ _EVALUATION_FIELDS = {
     "execution_runtime",
 }
 
-# A unified check scores the whole workspace contract, so its evaluation
-# evidence must change whenever the task, data, code, models, optimizer or
-# sample count change; the DSPy/Anything field names above miss all of them.
-_UNIFIED_EVALUATION_FIELDS = {
-    "task",
-    "data",
-    "workspace",
-    "models",
-    "optimizer",
-    "seed",
-    "contract_sample_count",
-}
-
 
 class WizardPreflightModel(Base):
     """Store the outcome of one account-owned, content-addressed setup attempt."""
@@ -122,20 +109,19 @@ def verification_fingerprint(
     Args:
         session: Database session used to resolve current account credential revisions.
         username: Authenticated owner, never a client-supplied identity.
-        workflow: DSPy or Anything.
+        workflow: Request family, such as Anything or an interaction.
         scope: Evaluation or complete execution readiness.
         payload: Canonical public request before runtime-only injection.
 
     Returns:
         Digest only; credential values and authored input are never persisted here.
     """
-    evaluation_fields = _UNIFIED_EVALUATION_FIELDS if workflow == "unified" else _EVALUATION_FIELDS
     inputs = {
         key: value
         for key, value in payload.items()
         if key not in _COSMETIC_FIELDS
         and not key.startswith("_")
-        and (scope != "evaluation" or key in evaluation_fields)
+        and (scope != "evaluation" or key in _EVALUATION_FIELDS)
     }
     connections = session.execute(
         select(BillingProviderKeyModel.id, BillingProviderKeyModel.updated_at, BillingProviderKeyModel.status)
@@ -151,7 +137,6 @@ def verification_fingerprint(
             "inputs": inputs,
             "deployment": {
                 "code": settings.code_version,
-                "dspy_image": settings.dspy_sandbox_image,
                 "scorer_image": settings.vercel_sandbox_image,
                 "managed_route": json_fingerprint(managed),
                 "sandbox_account": [settings.vercel_team_id, settings.vercel_project_id],

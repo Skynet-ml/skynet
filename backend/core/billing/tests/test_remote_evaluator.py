@@ -405,6 +405,5 @@ def test_continue_uses_nonheldout_case_and_persists_actual_remote_result(
     assert json.loads(request.content)["case"] == {"question": "training case"}
     assert result["budget"]["setup_spent_cents"] == "0"
     assert len(bindings) == 1
-    assert bindings[0]["workflow"] == "anything"
     assert isinstance(bindings[0]["owner_id"], str)
     assert bindings[0]["owner_id"]

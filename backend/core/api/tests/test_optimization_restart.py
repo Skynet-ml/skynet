@@ -16,7 +16,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ...constants import OPTIMIZATION_TYPE_BLACKBOX
-from ...i18n_en import t_en
 from ..routers.optimizations import create_optimizations_router
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
@@ -108,20 +107,18 @@ def test_restart_unknown_id_is_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-@pytest.mark.parametrize(
-    "overview",
-    [{}, {"optimization_type": "run"}, {"optimization_type": "blackbox", "payload_kind": "unified_v1"}],
-)
-def test_restart_of_a_stored_dspy_run_is_410(client: TestClient, store: _BaseFakeJobStore, overview: dict) -> None:
-    """A stored DSPy program run stays readable but cannot run again (SKY-316).
+@pytest.mark.parametrize("optimization_type", ["run", "grid_search"])
+def test_restart_of_a_stored_dspy_row_is_404(
+    client: TestClient, store: _BaseFakeJobStore, optimization_type: str
+) -> None:
+    """A leftover DSPy run or grid row is not a user-facing run, so it reads as not found.
 
     Args:
         client: Test client over the optimizations router.
         store: Fake job store.
-        overview: A legacy run overview, or a unified DSPy program overview.
+        optimization_type: A retired DSPy job kind.
     """
-    store.seed_job("d1", status="failed", username="alice", payload_overview=overview)
+    store.seed_job("d1", status="failed", username="alice", payload_overview={"optimization_type": optimization_type})
     resp = client.post("/optimizations/d1/restart")
-    assert resp.status_code == 410
-    assert resp.json()["detail"] == t_en("optimization.dspy_run_retired")
+    assert resp.status_code == 404
     assert store.get_job("d1")["status"] == "failed"

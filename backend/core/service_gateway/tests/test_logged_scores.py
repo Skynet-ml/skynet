@@ -1,16 +1,13 @@
 """Tests for the named-score logging channel (``log_metrics``).
 
 Covers the strict logging contract, per-example capture through
-:class:`LoggedScoreRecorder`, macro-averaging, the ``evaluate_on_test``
-integration, the ``load_metric_from_code`` namespace injection, and the
+:class:`LoggedScoreRecorder`, macro-averaging, the ``load_metric_from_code``
+namespace injection, and the
 validation probe's capture of logged scores (real subprocesses).
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
-import dspy
 import pytest
 
 from core.service_gateway.optimization.data import load_metric_from_code
@@ -22,10 +19,6 @@ from core.service_gateway.optimization.logged_scores import (
     drain_logged_metrics,
     log_metrics,
     reset_logged_metrics,
-)
-from core.service_gateway.optimization.optimizers import (
-    _perfect_prediction_score,
-    evaluate_on_test,
 )
 from core.service_gateway.optimization.trajectory import MinibatchRecorder
 from core.service_gateway.safe_exec import probe_metric_on_sample
@@ -166,10 +159,7 @@ def test_aggregate_logged_metrics_empty_rows() -> None:
 
 def test_aggregate_logged_metrics_caps_name_union() -> None:
     """A dynamic-name metric cannot blow the aggregate past the cap."""
-    rows = [
-        {"logged_metrics": {f"m{row}_{i}": 1.0 for i in range(MAX_LOGGED_METRICS)}}
-        for row in range(4)
-    ]
+    rows = [{"logged_metrics": {f"m{row}_{i}": 1.0 for i in range(MAX_LOGGED_METRICS)}} for row in range(4)]
     aggregated = aggregate_logged_metrics(rows)
     assert len(aggregated) == MAX_AGGREGATE_METRIC_NAMES
     assert next(iter(aggregated)) == "m0_0"
@@ -185,126 +175,9 @@ def test_minibatch_recorder_resets_slot_between_training_calls() -> None:
         log_metrics(fresh=1.0)
         return 1.0
 
-    recorder = MinibatchRecorder(
-        metric, valset=[], progress_callback=lambda *_: None, emit_candidate_events=False
-    )
+    recorder = MinibatchRecorder(metric, valset=[], progress_callback=lambda *_: None, emit_candidate_events=False)
     assert recorder(object(), None) == 1.0
     assert drain_logged_metrics() == {"fresh": 1.0}
-
-
-def test_perfect_prediction_score_survives_slot_residue() -> None:
-    """Preflight scoring resets the slot so logging metrics never zeroes it."""
-    for i in range(MAX_LOGGED_METRICS):
-        log_metrics(**{f"stale{i}": 1.0})
-
-    def metric(example: object, prediction: object, trace: object = None) -> float:
-        """Log a fresh name and report a perfect score."""
-        log_metrics(precision=1.0)
-        return 1.0
-
-    example = dspy.Example(answer="x")
-    assert _perfect_prediction_score(metric, example, ["answer"]) == 1.0
-
-
-class _FakeEvalResult:
-    """Stand-in for dspy.Evaluate's structured result with score + results."""
-
-    def __init__(self, score: float, results: list) -> None:
-        """Store the aggregate score and per-example results list."""
-        self.score = score
-        self.results = results
-
-
-class _FakeExample:
-    """Stand-in dataset example exposing a single 'answer' label."""
-
-    def labels(self) -> list[str]:
-        """Return the canonical label list for this example."""
-        return ["answer"]
-
-
-class _MetricDrivingEvaluator:
-    """Fake dspy.Evaluate that actually invokes the metric per example."""
-
-    def __init__(self, **kwargs: object) -> None:
-        """Capture the devset and metric evaluate_on_test passes in."""
-        self._devset = kwargs["devset"]
-        self._metric = kwargs["metric"]
-
-    def __call__(self, program: object) -> _FakeEvalResult:
-        """Score every example through the (wrapped) metric.
-
-        Mirrors dspy.Evaluate's failure handling: a metric crash scores the
-        row 0 instead of propagating.
-        """
-        results = []
-        for example in self._devset:
-            try:
-                score = self._metric(example, None)
-            except Exception:
-                score = 0.0
-            results.append((example, None, score))
-        return _FakeEvalResult(score=100.0, results=results)
-
-
-def test_evaluate_on_test_rows_carry_logged_metrics() -> None:
-    """Per-example rows include logged scores and aggregate cleanly."""
-    examples = [_FakeExample(), _FakeExample()]
-    values = iter([1.0, 0.0])
-
-    def metric(example: object, prediction: object) -> float:
-        """Log a varying precision per example."""
-        log_metrics(precision=next(values))
-        return 1.0
-
-    with patch(
-        "core.service_gateway.optimization.optimizers.dspy.Evaluate",
-        _MetricDrivingEvaluator,
-    ):
-        score, rows = evaluate_on_test(object(), examples, metric, collect_per_example=True)
-
-    assert score == pytest.approx(100.0)
-    assert [row["logged_metrics"] for row in rows] == [{"precision": 1.0}, {"precision": 0.0}]
-    assert aggregate_logged_metrics(rows) == {"precision": 0.5}
-
-
-def test_evaluate_on_test_row_carries_metric_crash_error() -> None:
-    """A metric crash zeroes the row score and records why in the row."""
-    examples = [_FakeExample(), _FakeExample()]
-    calls = iter([False, True])
-
-    def metric(example: object, prediction: object) -> float:
-        """Crash on the second example only."""
-        if next(calls):
-            raise RuntimeError("boom")
-        return 1.0
-
-    with patch(
-        "core.service_gateway.optimization.optimizers.dspy.Evaluate",
-        _MetricDrivingEvaluator,
-    ):
-        _, rows = evaluate_on_test(object(), examples, metric, collect_per_example=True)
-
-    assert "error" not in rows[0]
-    assert rows[1]["score"] == 0.0
-    assert rows[1]["error"] == "RuntimeError: boom"
-
-
-def test_evaluate_on_test_rows_omit_key_when_metric_never_logs() -> None:
-    """A metric that never calls log_metrics leaves rows without the key."""
-    examples = [_FakeExample()]
-
-    def metric(example: object, prediction: object) -> float:
-        """Return a score without logging."""
-        return 1.0
-
-    with patch(
-        "core.service_gateway.optimization.optimizers.dspy.Evaluate",
-        _MetricDrivingEvaluator,
-    ):
-        _, rows = evaluate_on_test(object(), examples, metric, collect_per_example=True)
-
-    assert "logged_metrics" not in rows[0]
 
 
 def test_load_metric_from_code_injects_log_metrics() -> None:
@@ -324,15 +197,11 @@ def test_load_metric_from_code_fallback_ignores_injected_helper() -> None:
 
 
 _LOGGING_METRIC = (
-    "def metric(example, prediction, trace=None):\n"
-    "    log_metrics(precision=0.75, recall=0.5)\n"
-    "    return 1.0\n"
+    "def metric(example, prediction, trace=None):\n    log_metrics(precision=0.75, recall=0.5)\n    return 1.0\n"
 )
 
 _BAD_LOGGING_METRIC = (
-    "def metric(example, prediction, trace=None):\n"
-    "    log_metrics(precision='high')\n"
-    "    return 1.0\n"
+    "def metric(example, prediction, trace=None):\n    log_metrics(precision='high')\n    return 1.0\n"
 )
 
 

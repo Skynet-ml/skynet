@@ -40,7 +40,6 @@ from typing import Any
 from .... import run_log
 from ....billing.usage_tags import usage_scope
 from ....sandbox.hooks import TERMINAL_EVENTS, BoxEvent, BoxEventInfo, BoxHooks, BoxTimings, LiveCounts
-from . import check_terminal
 from .runner import EVENT_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -414,52 +413,16 @@ def logged_command(run: Callable[..., Any]) -> Callable[..., Any]:
         session_env = getattr(self, "_env", None)
         secrets = [*(env or {}).values(), *(session_env.values() if isinstance(session_env, Mapping) else ())]
         record = SandboxOutputLog(command, secrets, getattr(self, "log_owner", None))
-        terminal = check_terminal.current_recorder()
-        command_id = None
-        if terminal is not None:
-            command_id = terminal.command_started(
-                command, scrub=record.scrub.text, sample=check_terminal.current_sample()
-            )
-            on_output = _mirrored(terminal, command_id, on_output)
         sink = record.tee(on_output)
         try:
             result = run(self, command, env=env, timeout_seconds=timeout_seconds, on_output=sink, sudo=sudo)
         except BaseException as error:
             record.failed(error)
-            if terminal is not None and command_id is not None:
-                terminal.command_finished(command_id, error=type(error).__name__)
             raise
         record.finish(result, streamed=sink is not None)
-        if terminal is not None and command_id is not None:
-            terminal.command_finished(command_id, exit_code=result.exit_code, timed_out=result.timed_out)
         return result
 
     return wrapper
-
-
-def _mirrored(
-    terminal: check_terminal.CheckTerminalRecorder,
-    command_id: int,
-    on_output: Callable[[str, str], None] | None,
-) -> Callable[[str, str], None]:
-    """Wrap a command's output sink so the Check's live transcript sees every chunk.
-
-    Args:
-        terminal: The check's recorder.
-        command_id: The command's transcript id.
-        on_output: The caller's sink, or ``None``.
-
-    Returns:
-        A sink that records each chunk and then hands it on unchanged.
-    """
-
-    def sink(stream: str, text: str) -> None:
-        """Record one chunk, then pass it to the caller's sink."""
-        terminal.command_output(command_id, stream, text)
-        if on_output is not None:
-            on_output(stream, text)
-
-    return sink
 
 
 SANDBOX_BOXES_EVENT = "sandbox_boxes"

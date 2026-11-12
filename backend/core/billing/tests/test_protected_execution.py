@@ -75,7 +75,6 @@ def _settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
         vercel_team_id="team",
         vercel_project_id="project",
         vercel_sandbox_image=_DIGEST,
-        dspy_sandbox_image=_DIGEST,
     )
 
 
@@ -164,13 +163,13 @@ def test_protected_execution_imports_no_sync_runtime() -> None:
 @pytest.mark.usefixtures("provider_credentials")
 def test_async_backend_reports_no_unavailable_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that a configured async deployment can open protected boxes."""
-    assert protected_vercel_unavailable_reason(_settings(monkeypatch), "dspy") is None
+    assert protected_vercel_unavailable_reason(_settings(monkeypatch)) is None
 
 
 def test_async_backend_reports_missing_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check that the protected check reports the provider's credential problem."""
     monkeypatch.setattr(global_settings, "vercel_token", None)
-    reason = protected_vercel_unavailable_reason(_settings(monkeypatch), "dspy")
+    reason = protected_vercel_unavailable_reason(_settings(monkeypatch))
     assert reason == "The Vercel sandbox credentials are not configured."
 
 
@@ -180,7 +179,7 @@ def test_async_bind_reserves_and_settles_each_box_once(monkeypatch: pytest.Monke
     log, usages = _fake_vercel(monkeypatch)
     gateway = _Gateway()
 
-    identity = bind_protected_sandbox(gateway, _settings(monkeypatch), workflow="dspy", owner_id="job-9")
+    identity = bind_protected_sandbox(gateway, _settings(monkeypatch), owner_id="job-9")
 
     assert identity["image"] == _DIGEST
     runtime = gateway.broker._runtime
@@ -209,7 +208,7 @@ def test_async_bind_gives_the_broker_one_snapshot_cache_for_the_run(monkeypatch:
     _fake_vercel(monkeypatch)
     gateway = _Gateway()
 
-    bind_protected_sandbox(gateway, _settings(monkeypatch), workflow="dspy", owner_id="job-9")
+    bind_protected_sandbox(gateway, _settings(monkeypatch), owner_id="job-9")
 
     cache = gateway.broker._snapshots
     assert isinstance(cache, SnapshotCache)
@@ -239,7 +238,7 @@ def test_async_bind_skips_the_cache_without_snapshot_support(monkeypatch: pytest
     monkeypatch.setattr(protected_execution, "protected_runtime", runtime)
     gateway = _Gateway()
 
-    bind_protected_sandbox(gateway, _settings(monkeypatch), workflow="dspy", owner_id="job-9")
+    bind_protected_sandbox(gateway, _settings(monkeypatch), owner_id="job-9")
 
     assert gateway.broker._runtime is plain
     assert gateway.broker._snapshots is None

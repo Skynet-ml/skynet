@@ -23,7 +23,7 @@ import httpx
 from ..lib import db as db_inspector
 from ..lib.auth import auth_headers
 from ..lib.metrics import ScenarioMetrics, ScenarioResult
-from ..lib.payloads import CANONICAL_COLUMN_MAPPING, grid_payload, run_payload
+from ..lib.payloads import CANONICAL_COLUMN_MAPPING, run_payload
 from ..lib.reporter import print_result
 from ..lib.slo import ScenarioSLO, apply_slo
 
@@ -165,7 +165,7 @@ async def _submit_job(
     headers: dict[str, str],
     sequence: int,
 ) -> str | None:
-    """Submit one run or grid-search job for a virtual user.
+    """Submit one run for a virtual user.
 
     Args:
         client: Shared HTTP client.
@@ -173,26 +173,19 @@ async def _submit_job(
         config: URLs and workload knobs.
         username: Job owner.
         headers: Cached bearer headers.
-        sequence: User index used to split run and grid-search traffic.
+        sequence: User index used to name the run.
 
     Returns:
         The optimization id from a 201 response, or ``None``.
     """
-    is_grid = sequence % 5 == 0
-    operation = "submit_grid" if is_grid else "submit_run"
-    endpoint = "/grid-search" if is_grid else "/run"
-    body = (
-        grid_payload(username=username, mock_lm_url=config.mock_lm_url, name=f"mixed-grid-{sequence}")
-        if is_grid
-        else run_payload(username=username, mock_lm_url=config.mock_lm_url, name=f"mixed-run-{sequence}")
-    )
+    body = run_payload(username=username, mock_lm_url=config.mock_lm_url, name=f"mixed-run-{sequence}")
     response = await _request(
         client,
         journey_metrics,
         method="POST",
-        url=f"{config.api_base_url}{endpoint}",
+        url=f"{config.api_base_url}/run",
         headers=headers,
-        operation=operation,
+        operation="submit_run",
         json_body=body,
     )
     if response is None or response.status_code != 201:

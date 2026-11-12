@@ -38,7 +38,7 @@ from core.worker.constants import (
 from core.worker.engine import BackgroundWorker, get_worker, reset_worker_for_tests
 
 from .conftest import FakeJobStore
-from .mocks import REAL_RUN_PAYLOAD, fake_mp_process, make_mp_context
+from .mocks import REAL_RUN_PAYLOAD, fake_mp_process, make_mp_context, protect_dispatch
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +62,6 @@ def worker(store: FakeJobStore) -> BackgroundWorker:
         job_store=cast(JobStore, store),
         num_workers=2,
         poll_interval=1.0,
-        _allow_unprotected_test_execution=True,
     )
 
 
@@ -484,7 +483,6 @@ def test_dump_thread_stacks_includes_thread_name_when_threads_are_running() -> N
         job_store=cast(JobStore, store),
         num_workers=1,
         poll_interval=0.05,
-        _allow_unprotected_test_execution=True,
     )
     w.start()
     try:
@@ -567,7 +565,6 @@ def test_init_falls_back_to_1_0_when_cancel_poll_interval_is_not_a_float(
     # ``except ValueError`` fallback in ``BackgroundWorker.__init__``.
     class _FakeSettings:
         cancel_poll_interval = "not-a-float"
-        job_run_start_method = "fork"
 
     monkeypatch.setattr(engine_module, "settings", _FakeSettings())
 
@@ -576,67 +573,8 @@ def test_init_falls_back_to_1_0_when_cancel_poll_interval_is_not_a_float(
         job_store=cast(JobStore, store),
         num_workers=1,
         poll_interval=1.0,
-        _allow_unprotected_test_execution=True,
     )
     assert w._cancel_poll_interval == 1.0
-
-
-def test_resolve_mp_context_raises_and_falls_back_on_bogus_method(
-    store: FakeJobStore,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``_resolve_mp_context`` falls back to a default context for bad methods."""
-
-    class _FakeSettings:
-        cancel_poll_interval = 1.0
-        job_run_start_method = "bogus_method"
-
-    monkeypatch.setattr(engine_module, "settings", _FakeSettings())
-
-    # mp.get_context("bogus_method") raises ValueError.
-    ctx = BackgroundWorker._resolve_mp_context()
-    # The fallback context must be valid (non-None) and support get_start_method().
-    assert ctx is not None
-    assert ctx.get_start_method() in ("fork", "spawn", "forkserver")
-
-
-def test_resolve_mp_context_emits_warning_for_bogus_method(
-    store: FakeJobStore,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """``_resolve_mp_context`` warns when an unknown start method is configured."""
-
-    class _FakeSettings:
-        cancel_poll_interval = 1.0
-        job_run_start_method = "definitely_invalid"
-
-    monkeypatch.setattr(engine_module, "settings", _FakeSettings())
-
-    with caplog.at_level("WARNING", logger="core.worker.engine"):
-        BackgroundWorker._resolve_mp_context()
-
-    assert any("definitely_invalid" in msg for msg in caplog.messages)
-
-
-def test_resolve_mp_context_emits_warning_for_non_fork_method(
-    store: FakeJobStore,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """``_resolve_mp_context`` warns when a non-fork method is configured."""
-
-    class _FakeSettings:
-        cancel_poll_interval = 1.0
-        job_run_start_method = "spawn"
-
-    monkeypatch.setattr(engine_module, "settings", _FakeSettings())
-
-    with caplog.at_level("WARNING", logger="core.worker.engine"):
-        BackgroundWorker._resolve_mp_context()
-
-    # spawn is a valid method — the second warning about registry callables fires.
-    assert any("spawn" in msg for msg in caplog.messages)
 
 
 def test_stop_sets_all_cancel_events(store: FakeJobStore) -> None:
@@ -645,7 +583,6 @@ def test_stop_sets_all_cancel_events(store: FakeJobStore) -> None:
         job_store=cast(JobStore, store),
         num_workers=1,
         poll_interval=0.05,
-        _allow_unprotected_test_execution=True,
     )
     w.start()
     try:
@@ -719,7 +656,7 @@ def test_renewing_lease_touches_activity_while_a_blocking_step_runs(
 
 
 _SAMPLE_ROWS = [{"question": "Capital of France?", "answer": "Paris"}, {"question": "2 + 2?", "answer": "4"}]
-_OUTCOME_OVERVIEW = {"optimization_type": "run", "username": "alice", "optimizer_name": "gepa"}
+_OUTCOME_OVERVIEW = {"optimization_type": "blackbox", "username": "alice", "optimizer_name": "gepa"}
 
 
 def _run_outcome_event(
@@ -736,23 +673,22 @@ def _run_outcome_event(
         worker: Worker under test.
         store: In-memory store the job is seeded into.
         events: Events the fake optimizer process emits.
-        dataset: Dataset rows for the stored payload; the default payload's otherwise.
+        dataset: Case rows for the stored payload; none otherwise.
         job_id: Id of the seeded job.
 
     Returns:
         The recorded event name and its properties.
     """
-    payload = {**REAL_RUN_PAYLOAD, "dataset": dataset or REAL_RUN_PAYLOAD["dataset"]}
+    payload = {**REAL_RUN_PAYLOAD, "cases": dataset or []}
     store.seed_job(job_id, payload=payload, payload_overview=_OUTCOME_OVERVIEW)
     worker.enqueue_job(job_id)
     ctx, _proc = make_mp_context(exitcode=0, result_events=events)
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
     with (
         patch.object(engine_module, "SAMPLE_DATASETS", {"qa": {"rows": _SAMPLE_ROWS}}),
+        patch.object(engine_module, "validate_blackbox_payload"),
         patch.object(engine_module, "notify_job_completed"),
         patch.object(engine_module, "record_server_event") as record,
-        patch.object(worker, "_get_service"),
     ):
         worker._process_job(job_id, 0)
     record.assert_called_once()
@@ -767,7 +703,7 @@ def test_run_completed_carries_lift_held_out_and_sample_flag(
     result = {
         "baseline_test_metric": 0.5,
         "optimized_test_metric": 0.8,
-        "split_counts": {"train": 10, "val": 5, "test": 24},
+        "split_counts": {"train": 10, "val": 5, "test": 24, "held_out": True},
     }
     name, props = _run_outcome_event(worker, store, [{"type": EVENT_RESULT, "result": result}], dataset=_SAMPLE_ROWS)
 
@@ -849,13 +785,12 @@ def test_outcome_helper_raising_never_changes_job_status(
     store.seed_job("opt-helper", payload=dict(REAL_RUN_PAYLOAD), payload_overview=_OUTCOME_OVERVIEW)
     worker.enqueue_job("opt-helper")
     ctx, _proc = make_mp_context(exitcode=0, result_events=[{"type": EVENT_RESULT, "result": {"best_score": 1}}])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
     with (
         patch.object(engine_module, "completed_properties", side_effect=RuntimeError("helper bug")),
+        patch.object(engine_module, "validate_blackbox_payload"),
         patch.object(engine_module, "notify_job_completed"),
         patch.object(engine_module, "record_server_event") as record,
-        patch.object(worker, "_get_service"),
     ):
         worker._process_job("opt-helper", 0)
 

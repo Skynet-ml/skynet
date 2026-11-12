@@ -105,11 +105,11 @@ test("catalog entries outside the allowed list are dropped", () => {
   const views = optimizerOptions({
     kind: "repo",
     mode: "pairs",
-    catalog: catalog([option("auto"), { ...retired, id: "dspy_gepa" as OptimizerOption["id"] }, option("gepa")]),
+    catalog: catalog([option("auto"), { ...retired, id: "unknown_engine" as OptimizerOption["id"] }, option("gepa")]),
     guided: false,
     choice: "auto",
   }).map((view) => view.id);
-  assert.equal(views.includes("dspy_gepa" as OptimizerOption["id"]), false);
+  assert.equal(views.includes("unknown_engine" as OptimizerOption["id"]), false);
   assert.deepEqual(views.slice(0, 2), ["auto", "gepa"]);
 });
 
@@ -130,7 +130,7 @@ test("fallback flags come from the shared rules while the catalog loads", () => 
 });
 
 test("a choice the setup no longer allows is reported, never reset", () => {
-  for (const choice of ["dspy_miprov2", "dspy_gepa"]) {
+  for (const choice of ["unknown_engine", "grid_search"]) {
     assert.deepEqual(
       optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: null, choice: choice as OptimizerChoice }),
       { kind: "not_allowed" },
@@ -164,7 +164,7 @@ test("a repository run offers Auto first, then the six repository engines", () =
   ]);
   assert.equal(optimizerChoiceIssue(input), null);
   assert.equal(optimizerChoiceIssue({ ...input, choice: "gepa" }), null);
-  assert.deepEqual(optimizerChoiceIssue({ ...input, choice: "dspy_gepa" as OptimizerChoice }), {
+  assert.deepEqual(optimizerChoiceIssue({ ...input, choice: "unknown_engine" as OptimizerChoice }), {
     kind: "not_allowed",
   });
 });

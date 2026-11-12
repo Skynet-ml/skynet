@@ -288,8 +288,8 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
   {
     name: "unified-dspy-program",
     job: blackboxJob("gepa", {
-      optimizer_name: "dspy_gepa",
-      optimizer_resolved: "dspy_gepa",
+      optimizer_name: "gepa",
+      optimizer_resolved: "gepa",
       baseline_val_score: 0.4,
       best_val_score: 0.8,
       split_counts: { train: 36, val: 12, test: 12 },

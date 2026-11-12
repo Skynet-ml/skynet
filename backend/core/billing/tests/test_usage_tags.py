@@ -21,8 +21,8 @@ from core.billing.usage_tags import (
 
 def test_parse_keeps_only_known_short_values() -> None:
     """Drop unknown keys, control characters and oversized values."""
-    raw = '{"stage":"training","role":"judge","candidate":"7","case":"bad\\nvalue","pair":"' + "x" * 80 + '"}'
-    assert parse_tags(raw) == {"stage": "training", "candidate": "7", "pair": "x" * 64}
+    raw = '{"stage":"training","role":"judge","candidate":"7","case":"bad\\nvalue","kind":"' + "x" * 80 + '"}'
+    assert parse_tags(raw) == {"stage": "training", "candidate": "7", "kind": "x" * 64}
 
 
 def test_parse_ignores_malformed_headers() -> None:
@@ -45,8 +45,8 @@ def test_scopes_nest_and_restore() -> None:
 def test_token_reset_restores_outer_tags() -> None:
     """A callback-opened scope closes back to the outer tags."""
     with usage_scope(stage="baseline"):
-        token = usage_tags_token(pair=2)
-        assert current_tags() == {"stage": "baseline", "pair": "2"}
+        token = usage_tags_token(kind=2)
+        assert current_tags() == {"stage": "baseline", "kind": "2"}
         token.reset()
         assert current_tags() == {"stage": "baseline"}
 
@@ -75,20 +75,20 @@ def test_header_tags_reads_current_and_legacy_names() -> None:
 def test_with_tags_header_writes_the_merged_tags_under_both_names() -> None:
     """Write one merged value under both spellings, so an older proxy or gateway still reads it."""
     headers = with_tags_header(
-        {LEGACY_USAGE_TAGS_HEADER: '{"case":"c1"}', USAGE_TAGS_HEADER: '{"pair":"1"}'}, {"stage": "training"}
+        {LEGACY_USAGE_TAGS_HEADER: '{"case":"c1"}', USAGE_TAGS_HEADER: '{"kind":"1"}'}, {"stage": "training"}
     )
     assert LEGACY_USAGE_TAGS_HEADER == "x-skynet-usage-tags"
     assert sorted(headers) == sorted([USAGE_TAGS_HEADER, LEGACY_USAGE_TAGS_HEADER])
     assert headers[USAGE_TAGS_HEADER] == headers[LEGACY_USAGE_TAGS_HEADER]
     assert header_tags({LEGACY_USAGE_TAGS_HEADER: headers[LEGACY_USAGE_TAGS_HEADER]}) == {
-        "pair": "1",
+        "kind": "1",
         "stage": "training",
     }
 
 
 def test_lane_is_a_known_key() -> None:
     """``lane`` survives cleaning and the header round trip; existing keys are unchanged."""
-    assert TAG_KEYS == ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
+    assert TAG_KEYS == ("stage", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
     assert parse_tags('{"lane":"explore-gepa","stage":"training"}') == {"lane": "explore-gepa", "stage": "training"}
     assert header_tags(with_tags_header(None, {"lane": "continue-gepa"})) == {"lane": "continue-gepa"}
 

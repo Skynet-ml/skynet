@@ -92,7 +92,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
         lambda request, *, username, workflow, supplied_key: SimpleNamespace(budget=None, job=supplied_key),
     )
 
-    def submit(request: Any, *, service: Any, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
+    def submit(request: Any, *, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
         """Record the submission instead of starting a run."""
         calls["submits"].append(
             {"username": current_user.username, "key": idempotency_key, "hardening_job_id": request.hardening_job_id}
@@ -103,10 +103,9 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
     app = FastAPI()
     mount_remote_mcp(
         app,
-        service="svc",
         job_store=_Store(engine),
         get_worker=object,
-        extensions=[partial(register_repo_tools, service="svc", job_store=_Store(engine))],
+        extensions=[partial(register_repo_tools, job_store=_Store(engine))],
     )
     with TestClient(app) as client:
         yield client, engine, calls
@@ -384,7 +383,7 @@ def test_submit_sends_an_owned_hardening_job(harness: Any, monkeypatch: pytest.M
     client, engine, calls = harness
     runs: dict[str, str] = {}
 
-    def submit(request: Any, *, service: Any, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
+    def submit(request: Any, *, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
         """Replay a known job key as ``submit_repo_payload`` does, or record a new run."""
         job_key = submission_idempotency.resolve_submission_replay_keys(
             request, username=current_user.username, workflow="anything", supplied_key=idempotency_key

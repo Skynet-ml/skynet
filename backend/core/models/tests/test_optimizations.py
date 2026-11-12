@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 
 import pytest
 
-from core.models.artifacts import ProgramArtifact
 from core.models.common import ColumnMapping, OptimizationStatus, SplitFractions
 from core.models.optimizations import (
     BulkCancelRequest,
@@ -22,7 +21,6 @@ from core.models.optimizations import (
     OptimizationStatusResponse,
     OptimizationSummaryResponse,
     PaginatedJobsResponse,
-    ProgramArtifactResponse,
 )
 
 
@@ -35,7 +33,7 @@ def _required_base_fields() -> dict:
     """
     return {
         "optimization_id": "abc123",
-        "optimization_type": "run",
+        "optimization_type": "blackbox",
         "status": OptimizationStatus.success,
         "created_at": datetime.now(tz=UTC),
     }
@@ -46,12 +44,11 @@ def test_optimization_status_response_minimal() -> None:
     resp = OptimizationStatusResponse.model_validate(_required_base_fields())
 
     assert resp.optimization_id == "abc123"
-    assert resp.optimization_type == "run"
+    assert resp.optimization_type == "blackbox"
     assert resp.status is OptimizationStatus.success
     assert resp.progress_events == []
     assert resp.logs == []
-    assert resp.result is None
-    assert resp.grid_result is None
+    assert resp.blackbox_result is None
 
 
 def test_optimization_status_response_pinned_default() -> None:
@@ -150,7 +147,6 @@ def test_optimization_summary_response_metric_fields_default_none() -> None:
     assert resp.baseline_test_metric is None
     assert resp.optimized_test_metric is None
     assert resp.metric_improvement is None
-    assert resp.best_pair_label is None
     assert resp.progress_count == 0
     assert resp.log_count == 0
 
@@ -254,25 +250,10 @@ def test_optimization_payload_response_round_trip() -> None:
     """Verify OptimizationPayloadResponse persists id/type/payload."""
     r = OptimizationPayloadResponse(
         optimization_id="abc",
-        optimization_type="run",
+        optimization_type="blackbox",
         payload={"signature_code": "..."},
     )
 
     assert r.optimization_id == "abc"
-    assert r.optimization_type == "run"
+    assert r.optimization_type == "blackbox"
     assert r.payload == {"signature_code": "..."}
-
-
-def test_program_artifact_response_accepts_none() -> None:
-    """Verify ProgramArtifactResponse accepts a null artifact."""
-    r = ProgramArtifactResponse(program_artifact=None)
-
-    assert r.program_artifact is None
-
-
-def test_program_artifact_response_with_artifact() -> None:
-    """Verify ProgramArtifactResponse stores a populated ProgramArtifact."""
-    r = ProgramArtifactResponse(program_artifact=ProgramArtifact(path="/p"))
-
-    assert r.program_artifact is not None
-    assert r.program_artifact.path == "/p"

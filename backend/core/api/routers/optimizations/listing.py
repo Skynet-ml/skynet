@@ -22,7 +22,6 @@ from ....constants import (
     PAYLOAD_OVERVIEW_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
-    PAYLOAD_OVERVIEW_TOTAL_PAIRS,
     PAYLOAD_OVERVIEW_USERNAME,
 )
 from ....models import (
@@ -104,7 +103,6 @@ def build_sidebar_item(
         created_at=parse_timestamp(row.get("created_at")),
         pinned=bool(overview.get("pinned", False)),
         optimization_type=overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE),
-        total_pairs=overview.get(PAYLOAD_OVERVIEW_TOTAL_PAIRS),
         resumable=row["optimization_id"] in resumable_ids,
         pausable=row["optimization_id"] in pausable_ids,
         role=role,
@@ -134,9 +132,7 @@ def register_listing_routes(router: APIRouter, *, job_store) -> None:
             description="Exact-match status filter: pending, validating, running, success, failed, cancelled",
         ),
         username: str | None = Query(default=None, description="Only include optimizations submitted by this user"),
-        optimization_type: str | None = Query(
-            default=None, description="'run' (single optimization) or 'grid_search' (model-pair sweep)"
-        ),
+        optimization_type: str | None = Query(default=None, description="'run' (single optimization) or 'blackbox'"),
         limit: int = Query(
             default=AGENT_DEFAULT_LIST,
             ge=1,
@@ -176,7 +172,7 @@ def register_listing_routes(router: APIRouter, *, job_store) -> None:
             current_user: Authenticated caller resolved from the bearer token.
             status: Optional exact-match status filter.
             username: Optional submitter filter (admin-only).
-            optimization_type: Optional ``"run"`` / ``"grid_search"`` filter.
+            optimization_type: Optional ``"run"`` / ``"blackbox"`` filter.
             limit: Page size (clamped to ``AGENT_MAX_LIST``).
             offset: Number of optimizations to skip.
             include_shared: Union in runs shared with the caller (non-admin).

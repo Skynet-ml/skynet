@@ -1,8 +1,7 @@
-"""Validate isolated DSPy setup without invoking an optimizer or held-out test set."""
+"""Run explicit DSPy workflow previews inside the protected guest."""
 
 from __future__ import annotations
 
-import inspect
 import math
 from collections.abc import Callable
 from typing import Any
@@ -10,23 +9,10 @@ from typing import Any
 import dspy
 from dspy.streaming import StreamListener, StreamResponse
 
-from ..config import settings
-from ..models.common import ColumnMapping, ModelConfig
+from ..models.common import ModelConfig
 from ..models.submissions import ToolSource
 from ..models.workflow import WorkflowSpec
-from ..registry import ServiceRegistry
-from ..service_gateway import DspyService
 from ..service_gateway.language_models import build_language_model, usage_by_model_from_history
-from ..service_gateway.optimization.data import (
-    extract_signature_fields,
-    image_input_field_names,
-    load_metric_from_code,
-    load_signature_from_code,
-    rows_to_examples,
-)
-from ..service_gateway.optimization.retrying_react import RetryingReActV2
-from ..service_gateway.optimization.training_ground.run_react import resolve_react_tools
-from ..service_gateway.optimization.validators import require_mapping_matches_signature
 from ..service_gateway.optimization.workflow import (
     WorkflowNodeExecutionError,
     build_workflow_program,
@@ -159,129 +145,23 @@ def run_workflow_preview(
 def run_dspy_preflight(
     payload: dict[str, Any], descriptor: dict[str, Any], on_token: Callable[[dict[str, str]], None] | None = None
 ) -> dict[str, Any]:
-    """Check code and optionally perform one actual sample prediction and metric call.
+    """Run one explicit workflow preview inside the protected guest.
 
     Args:
-        payload: Canonical setup with parent-selected non-held-out sample data.
-        descriptor: Scope selected by the parent, either evaluation or execution.
+        payload: Authored workflow, explicit input values, and scoped model route.
+        descriptor: Check selected by the parent; only ``workflow_preview`` remains.
         on_token: Optional streaming receiver for explicit workflow previews.
 
     Returns:
-        Explicit completed and deferred checks without optimizer state.
+        The workflow check and its actual preview result.
+
+    Raises:
+        ValueError: When the parent asks for any other check.
     """
-    if descriptor.get("kind") == "workflow_preview":
-        result = run_workflow_preview(payload, on_token if descriptor.get("stream") else None)
-        return {
-            "checks": [{"key": "workflow", "status": "failed" if result["error"] else "succeeded"}],
-            "workflow_result": result,
-        }
-    scope = descriptor.get("scope")
-    if scope not in {"evaluation", "execution"}:
-        raise ValueError("Unsupported DSPy setup-check scope.")
-    rows = payload.get("dataset", [])
-    if not rows:
-        raise ValueError("A non-held-out setup sample is required.")
-    mapping = ColumnMapping.model_validate(payload["column_mapping"])
-    metric = load_metric_from_code(payload["metric_code"])
-    module_name = str(payload["module_name"])
-    signature = None
-    if module_name.lower() == "workflow":
-        workflow = WorkflowSpec.model_validate(payload["workflow"])
-        inputs, outputs = workflow.input_field_names(), workflow.output_field_names()
-        program, _hashes = build_workflow_program(
-            workflow,
-            tool_source=ToolSource.model_validate(payload["tool_source"]) if payload.get("tool_source") else None,
-            dataset=rows,
-        )
-    else:
-        signature = load_signature_from_code(payload["signature_code"])
-        inputs, outputs = extract_signature_fields(signature)
-        if module_name.lower() == "react":
-            tools, _hashes = resolve_react_tools(
-                ToolSource.model_validate(payload["tool_source"]), signature, settings, dataset=rows
-            )
-            program = RetryingReActV2(
-                signature, tools, max_iters=int(payload.get("module_kwargs", {}).get("max_iters", 5))
-            )
-        else:
-            factory, automatic_signature = DspyService(ServiceRegistry())._get_module_factory(module_name)
-            kwargs = dict(payload.get("module_kwargs", {}))
-            if automatic_signature or "signature" not in kwargs:
-                kwargs["signature"] = signature
-            program = factory(**kwargs)
-    require_mapping_matches_signature(mapping, inputs, outputs)
-    examples = rows_to_examples(
-        rows, mapping, image_input_fields=image_input_field_names(signature) if signature else frozenset()
-    )
-    checks = [
-        {"key": "program", "status": "succeeded"},
-        {"key": "metric", "status": "succeeded"},
-        {"key": "sample_mapping", "status": "succeeded"},
-    ]
-    if scope == "evaluation":
-        return {"scope": scope, "checks": [*checks, {"key": "sample_prediction", "status": "pending"}]}
-    configs = [payload.get("model_config")]
-    scores = []
-    workflow_results = []
-    for index, config in enumerate(configs):
-        if not isinstance(config, dict):
-            raise TypeError("Select the task model before running the paid setup check.")
-        language_model = build_language_model(ModelConfig.model_validate(config), disable_cache=True)
-        example = examples[0]
-        prediction = None
-        with capture_node_traces() as traces:
-            try:
-                with dspy.context(lm=language_model):
-                    prediction = program(**example.inputs())
-                    parameters = inspect.signature(metric).parameters
-                    positional = [
-                        item
-                        for item in parameters.values()
-                        if item.kind in {item.POSITIONAL_ONLY, item.POSITIONAL_OR_KEYWORD}
-                    ]
-                    score = metric(example, prediction, *([None] * max(0, len(positional) - 2)))
-            except Exception as error:
-                if module_name.lower() != "workflow":
-                    raise
-                failed = _workflow_result(
-                    traces,
-                    config["name"],
-                    {name: getattr(prediction, name, None) for name in outputs} if prediction is not None else None,
-                    error,
-                )
-                return {
-                    "scope": scope,
-                    "checks": [
-                        *checks,
-                        {
-                            "key": f"sample_prediction:{index}" if prediction is None else f"sample_metric:{index}",
-                            "status": "failed",
-                            "message": str(error),
-                            "field": "workflow" if prediction is None else "metric_code",
-                        },
-                    ],
-                    "workflow_result": failed,
-                    "workflow_results": [*workflow_results, failed],
-                    "sample_scores": scores,
-                }
-        if module_name.lower() == "workflow":
-            workflow_results.append(
-                _workflow_result(traces, config["name"], {name: getattr(prediction, name, None) for name in outputs})
-            )
-        scalar = score.get("score") if isinstance(score, dict) else getattr(score, "score", score)
-        if not isinstance(scalar, int | float) or not math.isfinite(scalar):
-            raise ValueError("The metric must return a finite score for the setup sample.")
-        scores.append({"model": config["name"], "score": float(scalar)})
-        checks.extend(
-            [
-                {"key": f"sample_prediction:{index}", "status": "succeeded"},
-                {"key": f"sample_metric:{index}", "status": "succeeded"},
-            ]
-        )
-    result = {"scope": scope, "checks": checks, "sample_scores": scores}
-    if len(scores) == 1:
-        result["sample_score"] = scores[0]["score"]
-    if workflow_results:
-        result["workflow_result"] = workflow_results[0]
-        result["workflow_results"] = workflow_results
-    return result
+    if descriptor.get("kind") != "workflow_preview":
+        raise ValueError("Unsupported DSPy setup check.")
+    result = run_workflow_preview(payload, on_token if descriptor.get("stream") else None)
+    return {
+        "checks": [{"key": "workflow", "status": "failed" if result["error"] else "succeeded"}],
+        "workflow_result": result,
+    }

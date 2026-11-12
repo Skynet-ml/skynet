@@ -22,9 +22,6 @@ from core.service_gateway.agents.generalist import (
 _HIDDEN_FROM_GENERALIST = {
     # Every run optimizes a repository, and the wizard's own Run button submits it (SKY-316).
     "submit_unified_run_optimize_post",
-    # Grid-search pairs are DSPy programs, and these routes refuse every call with 410 (SKY-316).
-    "serve_pair_info_serve",
-    "request_user_pair_inference",
     # The chat's inference card runs this itself; the agent cannot know the user's inputs.
     "serve_program_serve",
     # Needs a black-box run ordinal the agent has no listing for, and returns a full transcript.
@@ -67,7 +64,6 @@ def agent_tool_names() -> set[str]:
     with (
         patch("core.api.app.get_job_store"),
         patch("core.api.app.get_worker"),
-        patch("core.api.app.DspyService"),
     ):
         app = create_app(registry=ServiceRegistry())
     names: set[str] = set()

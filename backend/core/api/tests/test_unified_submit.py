@@ -1,4 +1,4 @@
-"""Tests for ``POST /optimize`` request validation and the stored DSPy payload shape.
+"""Tests for ``POST /optimize`` request validation and the optimizer choices a new run may pick.
 
 ``/optimize`` refuses every new DSPy program run with a 410 (SKY-316); the
 retirement itself is tested in ``test_submissions_router.py``.
@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from ...models import UnifiedRunRequest, optimizers_for
+from ...models import optimizers_for
 from .test_submissions_router import _FakeJobStore, make_client, unified_payload
 
 
@@ -28,15 +28,15 @@ def _submit(client: Any, body: dict) -> tuple[int, dict]:
     return resp.status_code, resp.json()
 
 
-def test_optimizer_outside_the_setup_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A black-box engine on a DSPy program is rejected by request validation."""
+def test_a_retired_dspy_optimizer_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DSPy optimizer id is no longer a valid choice, so request validation rejects it."""
     store = _FakeJobStore()
     client = make_client(store, monkeypatch=monkeypatch)
 
-    status, body = _submit(client, unified_payload(optimizer={"choice": "gepa"}))
+    status, body = _submit(client, unified_payload(optimizer={"choice": "dspy_gepa"}))
 
     assert status == 422
-    assert "gepa" in str(body) or "optimizer" in str(body).lower()
+    assert "optimizer" in str(body).lower()
     assert store.created_ids() == []
 
 
@@ -51,14 +51,3 @@ def test_a_new_run_cannot_choose_a_dspy_optimizer(data_mode: str) -> None:
     repo = optimizers_for("repo", data_mode)
     assert repo[0] == "auto"
     assert not any(choice.startswith("dspy_") for choice in repo)
-
-
-@pytest.mark.parametrize("choice", ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot", "auto"])
-def test_a_stored_dspy_payload_still_parses(choice: str) -> None:
-    """The worker re-parses stored payloads, so the old DSPy choices stay valid there.
-
-    Args:
-        choice: The stored optimizer choice.
-    """
-    request = UnifiedRunRequest.model_validate(unified_payload(optimizer={"choice": choice}))
-    assert request.optimizer.choice == choice

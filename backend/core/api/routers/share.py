@@ -28,7 +28,6 @@ cross the public boundary.
 from __future__ import annotations
 
 import logging
-import random
 import secrets
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -42,33 +41,19 @@ from ...billing.credential_safety import scrub_model_config
 from ...billing.protected_credentials import scrub_execution_credentials
 from ...constants import (
     OPTIMIZATION_TYPE_BLACKBOX,
-    OPTIMIZATION_TYPE_GRID_SEARCH,
-    OPTIMIZATION_TYPE_RUN,
     PAYLOAD_OVERVIEW_IS_PRIVATE,
-    PAYLOAD_OVERVIEW_MODEL_NAME,
-    PAYLOAD_OVERVIEW_MODEL_SETTINGS,
-    PAYLOAD_OVERVIEW_MODULE_KWARGS,
-    PAYLOAD_OVERVIEW_MODULE_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
-    PAYLOAD_OVERVIEW_SIGNATURE_CODE,
-    PAYLOAD_OVERVIEW_TOOL_SOURCE,
     PAYLOAD_OVERVIEW_USERNAME,
-    TOKEN_SOURCE_MANAGED,
 )
 from ...i18n_keys import I18nKey
 from ...models import (
     BlackboxRunResponse,
-    ColumnMapping,
-    GridSearchResponse,
     JobLogEntry,
-    ModelConfig,
     OptimizationStatus,
     OptimizationStatusResponse,
-    RunResponse,
     ServeInfoResponse,
     ServeRequest,
     ServeResponse,
-    SplitFractions,
 )
 from ...notifications import (
     notify_ownership_transfer,
@@ -84,7 +69,6 @@ from ...storage.models import (
     OptimizationShareGrantModel,
     OptimizationShareLinkModel,
 )
-from ...worker.repo_staging import is_repo_payload
 from ..auth import AuthenticatedUser, get_authenticated_user, is_admin
 from ..converters import (
     compute_elapsed,
@@ -95,7 +79,6 @@ from ..converters import (
     status_to_job_status,
 )
 from ..errors import DomainError
-from ..protected_interaction import run_protected_interaction
 from ..sharing_access import (
     GENERAL_ACCESS_ANYONE,
     GENERAL_ACCESS_RESTRICTED,
@@ -113,19 +96,13 @@ from ..sharing_access import (
 from ._helpers import (
     get_job_no_payload,
     job_owner,
-    load_program_metadata,
-    stable_seed,
-    workflow_spec_from_overview,
 )
 from .constants import TERMINAL_STATUSES
-from .optimizations._local import remap_test_indices
-from .serve import ServeInferenceEvent, _artifact_prompt_fields, _column_mapping_fields, require_serving_enabled
+from .serve import ServeInferenceEvent, _repo_run, _repo_serve_call, repo_serve_info, require_serving_enabled
 
 logger = logging.getLogger(__name__)
 
-_USER_FACING_OPTIMIZATION_TYPES = frozenset(
-    {OPTIMIZATION_TYPE_RUN, OPTIMIZATION_TYPE_GRID_SEARCH, OPTIMIZATION_TYPE_BLACKBOX}
-)
+_USER_FACING_OPTIMIZATION_TYPES = frozenset({OPTIMIZATION_TYPE_BLACKBOX})
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
@@ -231,9 +208,8 @@ def _strip_model_secrets(cfg: Any) -> Any:
 def _scrub_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Project the stored payload onto the public, secret-free share view.
 
-    Drops the owner ``username`` and the raw ``dataset`` rows (the full split is
-    served separately) and strips API keys / base URLs from every model config,
-    including the grid-search model lists.
+    Drops the owner ``username`` and any raw ``dataset`` rows, and strips API
+    keys / base URLs from every model config.
 
     Args:
         payload: The optimization's stored request payload.
@@ -255,127 +231,6 @@ def _scrub_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _test_split_indices(payload: dict[str, Any], optimization_id: str, total: int) -> list[int]:
-    """Recompute the deterministic test-split global indices for a job.
-
-    Mirrors the seed/shuffle/fraction algorithm in ``get_job_dataset`` and
-    ``get_test_results`` so the remapped test scores line up with the rows the
-    full-dataset split returns.
-
-    Args:
-        payload: The optimization's stored request payload.
-        optimization_id: Owning optimization id (used to derive the seed fallback).
-        total: Total dataset row count.
-
-    Returns:
-        Global dataset indices belonging to the test split.
-    """
-    try:
-        fractions = SplitFractions.model_validate(payload.get("split_fractions", {}))
-    except ValidationError:
-        fractions = SplitFractions()
-    shuffle = payload.get("shuffle", True)
-    seed = payload.get("seed")
-    effective_seed = seed if seed is not None else stable_seed(optimization_id)
-    ordered = list(range(total))
-    if shuffle:
-        random.Random(effective_seed).shuffle(ordered)
-    train_end = int(total * fractions.train)
-    val_end = train_end + int(total * fractions.val)
-    return ordered[val_end:]
-
-
-def _full_dataset(job_data: dict[str, Any], optimization_id: str) -> dict[str, Any] | None:
-    """Build the FULL train/val/test split for the share view (uncapped).
-
-    Reuses the deterministic split of ``get_job_dataset`` without the per-split
-    preview cap, so an invited member sees the same rows the owner does.
-
-    Args:
-        job_data: Raw job row.
-        optimization_id: Owning optimization id (used to derive the seed fallback).
-
-    Returns:
-        A dict with ``total_rows``, full ``splits``, ``column_mapping``, and
-        ``split_counts``, or ``None`` when no dataset is stored.
-    """
-    payload = job_data.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    dataset = payload.get("dataset")
-    if not isinstance(dataset, list) or not dataset:
-        return None
-    try:
-        column_mapping = ColumnMapping.model_validate(payload.get("column_mapping", {}))
-    except ValidationError:
-        return None
-    try:
-        fractions = SplitFractions.model_validate(payload.get("split_fractions", {}))
-    except ValidationError:
-        fractions = SplitFractions()
-
-    shuffle = payload.get("shuffle", True)
-    seed = payload.get("seed")
-    effective_seed = seed if seed is not None else stable_seed(optimization_id)
-    total = len(dataset)
-    indices = list(range(total))
-    if shuffle:
-        random.Random(effective_seed).shuffle(indices)
-    train_end = int(total * fractions.train)
-    val_end = train_end + int(total * fractions.val)
-    train_idx = indices[:train_end]
-    val_idx = indices[train_end:val_end]
-    test_idx = indices[val_end:]
-
-    def _rows(idx: list[int]) -> list[dict[str, Any]]:
-        """Project split indices into ``{index, row}`` dicts for the share view."""
-        return [{"index": i, "row": dataset[i]} for i in idx]
-
-    return {
-        "total_rows": total,
-        "splits": {"train": _rows(train_idx), "val": _rows(val_idx), "test": _rows(test_idx)},
-        "column_mapping": {"inputs": column_mapping.inputs, "outputs": column_mapping.outputs},
-        "split_counts": {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx)},
-    }
-
-
-def _test_results(job_data: dict[str, Any], optimization_id: str) -> dict[str, list[dict[str, Any]]] | None:
-    """Return stored per-example test scores remapped to global indices, if any.
-
-    Reuses the ``get_test_results`` loader: validates the stored single-run
-    ``RunResponse`` and remaps the sequential test-split indices back to global
-    dataset positions. Returns ``None`` for grid searches, missing results, or
-    corrupt result envelopes (the share view simply omits the column).
-
-    Args:
-        job_data: Raw job row.
-        optimization_id: Owning optimization id (used to derive the seed fallback).
-
-    Returns:
-        ``{"baseline": [...], "optimized": [...]}`` with global indices, or
-        ``None`` when no per-example single-run results are available.
-    """
-    result_data = job_data.get("result")
-    if not isinstance(result_data, dict):
-        return None
-    overview = parse_overview(job_data)
-    if overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN) == OPTIMIZATION_TYPE_GRID_SEARCH:
-        return None
-    try:
-        result = RunResponse.model_validate(result_data)
-    except ValidationError:
-        return None
-    payload = job_data.get("payload") or {}
-    dataset = payload.get("dataset") or []
-    if not isinstance(dataset, list) or not dataset:
-        return None
-    test_indices = _test_split_indices(payload, optimization_id, len(dataset))
-    return {
-        "baseline": remap_test_indices(result.baseline_test_results, test_indices),
-        "optimized": remap_test_indices(result.optimized_test_results, test_indices),
-    }
-
-
 def _build_status_response(job_store, optimization_id: str, job_data: dict[str, Any]) -> OptimizationStatusResponse:
     """Assemble the read-only status response for a shared optimization.
 
@@ -393,20 +248,17 @@ def _build_status_response(job_store, optimization_id: str, job_data: dict[str, 
     """
     status = status_to_job_status(job_data.get("status", "pending"))
     overview = parse_overview(job_data)
-    optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
+    optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE)
 
-    result = None
-    grid_result = None
     blackbox_result = None
     result_data = job_data.get("result")
-    if isinstance(result_data, dict):
+    if (
+        isinstance(result_data, dict)
+        and status == OptimizationStatus.success
+        and optimization_type == OPTIMIZATION_TYPE_BLACKBOX
+    ):
         try:
-            if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-                grid_result = GridSearchResponse.model_validate(result_data)
-            elif status == OptimizationStatus.success and optimization_type == OPTIMIZATION_TYPE_BLACKBOX:
-                blackbox_result = BlackboxRunResponse.model_validate(result_data)
-            elif status == OptimizationStatus.success:
-                result = RunResponse.model_validate(result_data)
+            blackbox_result = BlackboxRunResponse.model_validate(result_data)
         except ValidationError:
             logger.warning("Shared optimization %s has corrupted result data", optimization_id)
 
@@ -416,14 +268,6 @@ def _build_status_response(job_store, optimization_id: str, job_data: dict[str, 
     est_remaining = None if status in TERMINAL_STATUSES else extract_estimated_remaining(job_data)
 
     latest_metrics = job_data.get("latest_metrics", {})
-    completed_pairs = failed_pairs = None
-    if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-        if grid_result:
-            completed_pairs = grid_result.completed_pairs
-            failed_pairs = grid_result.failed_pairs
-        else:
-            completed_pairs = latest_metrics.get("completed_so_far") or 0
-            failed_pairs = latest_metrics.get("failed_so_far") or 0
 
     elapsed_str, elapsed_secs = compute_elapsed(
         created_at, started_at, completed_at, job_data.get("accumulated_runtime_seconds") or 0.0
@@ -455,98 +299,29 @@ def _build_status_response(job_store, optimization_id: str, job_data: dict[str, 
         **base_fields,
         message=job_data.get("message"),
         latest_metrics=latest_metrics,
-        completed_pairs=completed_pairs,
-        failed_pairs=failed_pairs,
         progress_events=progress_events,
         logs=[JobLogEntry(**log) for log in logs],
-        result=result,
-        grid_result=grid_result,
         blackbox_result=blackbox_result,
     )
 
 
-def _serve_info(job_store, optimization_id: str, owner: str) -> ServeInfoResponse | None:
-    """Build the program ``ServeInfoResponse`` for a shared optimization.
-
-    Loads metadata under the OWNER's identity (the resolver already proved the
-    caller is a viewer+), returning ``None`` when the job is not in a serveable
-    state. Protected artifacts are never materialized in the API process.
+def _serve_info(job_data: dict[str, Any], optimization_id: str) -> ServeInfoResponse | None:
+    """Describe a shared repository run for the share page's inference panel.
 
     Args:
-        job_store: Job-store backing :func:`load_program_metadata`.
-        optimization_id: Optimization whose program is described.
-        owner: Job owner username, used to satisfy the ownership check inside
-            :func:`load_program_metadata` without exposing model secrets.
+        job_data: Raw job row.
+        optimization_id: Optimization whose served version is described.
 
     Returns:
-        A :class:`ServeInfoResponse`, or ``None`` when the program is not
-        serveable (not finished, no artifact, etc.).
+        A :class:`ServeInfoResponse`, or ``None`` when the run is not a
+        finished repository run with a pinned commit.
     """
-    owner_user = AuthenticatedUser(username=owner, role="user", groups=())
     try:
-        artifact, overview, model_name = load_program_metadata(job_store, optimization_id, owner_user)
+        if _repo_run(job_data) is None:
+            return None
     except DomainError:
         return None
-    prompt = artifact.get("optimized_prompt") if isinstance(artifact, dict) else artifact.optimized_prompt
-    if prompt is None:
-        input_fields: list[str] = []
-        output_fields: list[str] = []
-        instructions = None
-        demo_count = 0
-    elif isinstance(prompt, dict):
-        raw_inputs = prompt.get("input_fields")
-        raw_outputs = prompt.get("output_fields")
-        raw_instructions = prompt.get("instructions")
-        raw_demos = prompt.get("demos")
-        input_fields = [value for value in raw_inputs if isinstance(value, str)] if isinstance(raw_inputs, list) else []
-        output_fields = (
-            [value for value in raw_outputs if isinstance(value, str)] if isinstance(raw_outputs, list) else []
-        )
-        instructions = raw_instructions if isinstance(raw_instructions, str) else None
-        demo_count = len(raw_demos) if isinstance(raw_demos, list) else 0
-    else:
-        input_fields = list(prompt.input_fields)
-        output_fields = list(prompt.output_fields)
-        instructions = prompt.instructions
-        demo_count = len(prompt.demos)
-    return ServeInfoResponse(
-        optimization_id=optimization_id,
-        module_name=overview.get("module_name", ""),
-        optimizer_name=overview.get("optimizer_name", ""),
-        model_name=model_name,
-        input_fields=input_fields,
-        output_fields=output_fields,
-        instructions=instructions,
-        demo_count=demo_count,
-    )
-
-
-def _owner_model_config(job_data: dict[str, Any], overview: dict[str, Any]) -> ModelConfig:
-    """Resolve the stored model selection before caller credential binding.
-
-    Prefers ``payload['model_config']`` and falls back to the scrubbed overview
-    settings or bare model name. The protected interaction layer removes any
-    legacy inline credential and resolves BYOK only from the paying caller's
-    verified connection.
-
-    Args:
-        job_data: Raw job row whose ``payload`` carries the owner's model config.
-        overview: Parsed payload-overview dict (fallback model settings/name).
-
-    Returns:
-        The owner's :class:`ModelConfig`.
-
-    Raises:
-        DomainError: 400 when no model config can be resolved.
-    """
-    payload = job_data.get("payload") or {}
-    stored = payload.get("model_config") or overview.get(PAYLOAD_OVERVIEW_MODEL_SETTINGS, {})
-    model_name = overview.get(PAYLOAD_OVERVIEW_MODEL_NAME, "")
-    if stored:
-        return ModelConfig.model_validate(stored)
-    if model_name:
-        return ModelConfig(name=model_name)
-    raise DomainError("serve.no_model_config", status=400)
+    return repo_serve_info(job_data, optimization_id, None)
 
 
 def create_share_router(*, job_store) -> APIRouter:
@@ -1059,17 +834,14 @@ def create_share_router(*, job_store) -> APIRouter:
         Requires a signed-in caller; the floor is ``viewer`` (real owner shown).
         ``serve_info`` (the field schema behind the inference panel) is available
         to every viewer because each call spends a fresh caller-owned budget.
-        Secrets (API keys, base URLs) are stripped from the payload, and the full
-        train/val/test split plus per-example test results are returned uncapped
-        for the read-only detail view.
+        Secrets (API keys, base URLs) are stripped from the payload.
 
         Args:
             token: The public share token from the URL.
             current_user: Authenticated caller.
 
         Returns:
-            ``{optimization_id, role, owner, status, payload, dataset,
-            test_results, serve_info}``.
+            ``{optimization_id, role, owner, status, payload, serve_info}``.
 
         Raises:
             DomainError: 404 when the token is unknown/revoked, the caller has
@@ -1095,7 +867,7 @@ def create_share_router(*, job_store) -> APIRouter:
         payload = _scrub_payload(raw_payload) if isinstance(raw_payload, dict) else {}
         serve_info = None
         if can_serve and owner is not None:
-            info = _serve_info(job_store, optimization_id, owner)
+            info = _serve_info(job_data, optimization_id)
             serve_info = info.model_dump(mode="json") if info is not None else None
 
         return {
@@ -1104,8 +876,6 @@ def create_share_router(*, job_store) -> APIRouter:
             "owner": owner,
             "status": status.model_dump(mode="json"),
             "payload": payload,
-            "dataset": _full_dataset(job_data, optimization_id),
-            "test_results": _test_results(job_data, optimization_id),
             "serve_info": serve_info,
         }
 
@@ -1132,8 +902,8 @@ def create_share_router(*, job_store) -> APIRouter:
             optimization_id: The optimization to read.
 
         Returns:
-            ``{optimization_id, role, owner, status, payload, dataset,
-            test_results, serve_info}`` — the same shape as the share composite.
+            ``{optimization_id, role, owner, status, payload, serve_info}`` —
+            the same shape as the share composite.
 
         Raises:
             DomainError: 404 when the optimization is unknown or private.
@@ -1143,11 +913,7 @@ def create_share_router(*, job_store) -> APIRouter:
         except KeyError:
             raise DomainError("share.not_found", status=404) from None
         overview = parse_overview(job_data)
-        optimization_type = (
-            overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE)
-            or job_data.get("optimization_type")
-            or OPTIMIZATION_TYPE_RUN
-        )
+        optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE) or job_data.get("optimization_type")
         if (
             optimization_type not in _USER_FACING_OPTIMIZATION_TYPES
             or status_to_job_status(job_data.get("status", "pending")) != OptimizationStatus.success
@@ -1169,8 +935,6 @@ def create_share_router(*, job_store) -> APIRouter:
             "owner": job_owner(job_data),
             "status": status.model_dump(mode="json"),
             "payload": payload,
-            "dataset": _full_dataset(job_data, optimization_id),
-            "test_results": _test_results(job_data, optimization_id),
             "serve_info": None,
         }
 
@@ -1266,16 +1030,17 @@ def create_share_router(*, job_store) -> APIRouter:
             token: The public share token from the URL.
             req: Inference request carrying the inputs.
             current_user: Authenticated caller.
+            idempotency_key: Transport replay identity.
 
         Returns:
             A :class:`ServeResponse` with the predicted outputs and resolved
             model identifier.
 
         Raises:
-            DomainError: 404 when the token is unknown/revoked; 400 (bad inputs,
-                missing replay key, or no model);
-                409 when the optimization is not in a serveable state or its
-                owner did not turn serving on; 410 for a DSPy program run.
+            DomainError: 404 when the token is unknown/revoked; 400 without a
+                replay key; 409 when the run is not serveable or its owner did
+                not turn serving on; 410 for a DSPy program run; 502 when the
+                sandbox call fails.
         """
         with Session(job_store.engine) as session:
             role = resolve_share_access(session, token, current_user)
@@ -1305,66 +1070,19 @@ def create_share_router(*, job_store) -> APIRouter:
             owner = job_owner(job_data)
             if owner is None:
                 raise DomainError("share.not_found", status=404)
-            if not is_repo_payload(job_data.get("payload") or {}):
+            if _repo_run(job_data) is None:
                 raise DomainError(I18nKey.OPTIMIZATION_DSPY_RUN_RETIRED, status=410)
             require_serving_enabled(job_data)
-
-            owner_user = AuthenticatedUser(username=owner, role="user", groups=())
-            artifact, overview, _model_name = load_program_metadata(job_store, optimization_id, owner_user)
-            model_config = _owner_model_config(job_data, overview)
-            input_fields, output_fields, _instructions, _demo_count = _artifact_prompt_fields(artifact)
-            workflow = workflow_spec_from_overview(overview)
-            if workflow is not None:
-                input_fields = workflow.input_field_names()
-                output_fields = workflow.output_field_names()
-            if not input_fields:
-                input_fields, output_fields = _column_mapping_fields(overview)
-            if not input_fields:
-                raise DomainError("serve.no_declared_inputs", status=400)
-            missing = [f for f in input_fields if f not in req.inputs]
-            if missing:
-                raise DomainError("serve.missing_inputs", status=400, missing=missing, input_fields=input_fields)
-            filtered_inputs = {f: req.inputs[f] for f in input_fields}
-            stored = job_data.get("payload") if isinstance(job_data.get("payload"), dict) else {}
-            effective_overview = {
-                **overview,
-                PAYLOAD_OVERVIEW_SIGNATURE_CODE: (
-                    overview.get(PAYLOAD_OVERVIEW_SIGNATURE_CODE) or stored.get("signature_code")
-                ),
-                PAYLOAD_OVERVIEW_MODULE_NAME: (overview.get(PAYLOAD_OVERVIEW_MODULE_NAME) or stored.get("module_name")),
-                PAYLOAD_OVERVIEW_MODULE_KWARGS: (
-                    overview.get(PAYLOAD_OVERVIEW_MODULE_KWARGS) or stored.get("module_kwargs", {})
-                ),
-            }
-            tool_source = stored.get("tool_source") or overview.get(PAYLOAD_OVERVIEW_TOOL_SOURCE)
-            interaction_payload = {
-                "model_config": model_config.model_dump(mode="json"),
-                "token_source": model_config.token_source or TOKEN_SOURCE_MANAGED,
-                "program_artifact": (artifact.model_dump(mode="json") if hasattr(artifact, "model_dump") else artifact),
-                "payload_overview": effective_overview,
-                "inputs": filtered_inputs,
-                "_interaction": {
-                    "kind": "serve",
-                    "optimization_id": optimization_id,
-                    "input_fields": input_fields,
-                    "output_fields": output_fields,
-                    "stream": False,
-                },
-            }
-            if tool_source is not None:
-                interaction_payload["tool_source"] = tool_source
-            result = run_protected_interaction(
-                interaction_payload,
-                kind="shared_serve",
-                max_cost_cents=req.max_cost_cents,
-                idempotency_key=key,
-                user=current_user,
-                job_store=job_store,
-                credential_owner=owner,
-                credential_binding_id=job_data.get("execution_budget_id") or stored.get("execution_budget_id"),
+            return ServeResponse.model_validate(
+                _repo_serve_call(
+                    job_store=job_store,
+                    job_data=job_data,
+                    optimization_id=optimization_id,
+                    req=req,
+                    current_user=current_user,
+                    idempotency_key=key,
+                    kind="shared_serve",
+                )
             )
-            if result.get("error"):
-                raise DomainError("serve.protected_interaction_failed", status=502, error=result["error"])
-            return ServeResponse.model_validate(result)
 
     return router

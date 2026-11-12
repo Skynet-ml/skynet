@@ -1,14 +1,13 @@
 """Tests for desktop run sync: export a local run, import it into the hosted account.
 
 Both sides run on a real ``RemoteDBJobStore`` over in-memory SQLite, so the
-import writes real job and progress rows and the hosted listing, detail and
-artifact routes read them back through their normal code paths.
+import writes real job and progress rows and the hosted listing and detail
+routes read them back through their normal code paths.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import threading
 from types import SimpleNamespace
@@ -40,8 +39,6 @@ from .conftest import bypass_auth
 
 DESK_USER = AuthenticatedUser(username="desk-user", role="user", groups=())
 HOSTED_USER = AuthenticatedUser(username="bob", role="user", groups=())
-_SIGNATURE_CODE = "class QA(dspy.Signature):\n    question = dspy.InputField()\n    answer = dspy.OutputField()"
-_PROGRAM_STATE = {"predict": {"signature": {"instructions": "Answer briefly."}, "demos": []}}
 
 
 class _SQLiteJobStore(RemoteDBJobStore):
@@ -55,7 +52,6 @@ class _SQLiteJobStore(RemoteDBJobStore):
         Base.metadata.create_all(self._engine)
         self._session_factory = sessionmaker(bind=self._engine)
         self._checkpoints = remote_mod.PostgresCheckpointBlobStore(self._engine)
-        self._grid_pair_results = remote_mod.PostgresGridPairResultStore(self._engine)
         self._agent_runs = remote_mod.PostgresAgentRunStore(self._engine)
 
 
@@ -76,7 +72,7 @@ def _client(store: _SQLiteJobStore, user: AuthenticatedUser) -> TestClient:
 
 
 def _seed_finished_run(store: _SQLiteJobStore, optimization_id: str = "local-run-1", status: str = "success") -> None:
-    """Write a finished local run with a result, artifact and progress events.
+    """Write a finished local black-box run with a result and progress events.
 
     Args:
         store: The local job store.
@@ -90,11 +86,9 @@ def _seed_finished_run(store: _SQLiteJobStore, optimization_id: str = "local-run
             "name": "Desk run",
             "description": "Support triage",
             "username": DESK_USER.username,
-            "optimization_type": "run",
-            "module_name": "predict",
+            "optimization_type": "blackbox",
             "optimizer_name": "gepa",
             "model_name": "openai/gpt-4o-mini",
-            "signature_code": _SIGNATURE_CODE,
             "max_cost_cents": 500,
             "estimated_cents_low": 10,
             "estimated_cents_high": 40,
@@ -109,19 +103,16 @@ def _seed_finished_run(store: _SQLiteJobStore, optimization_id: str = "local-run
         message="Finished",
         latest_metrics={"baseline_test_metric": 0.41, "optimized_test_metric": 0.82},
         result={
-            "module_name": "predict",
             "optimizer_name": "gepa",
-            "metric_name": "accuracy",
-            "split_counts": {"train": 6, "val": 2, "test": 2},
-            "baseline_test_metric": 0.41,
-            "optimized_test_metric": 0.82,
+            "strategy_mode": "single",
+            "engine_used": "gepa",
+            "baseline_score": 0.41,
+            "best_score": 0.82,
             "metric_improvement": 0.41,
+            "best_candidate": "Answer briefly.",
+            "runtime_seconds": 12.0,
             "program_artifact_path": "/Users/desk/runs/local-run-1",
-            "program_artifact": {
-                "path": "/Users/desk/runs/local-run-1/program.json",
-                "program_state_json": _PROGRAM_STATE,
-                "program_pickle_base64": base64.b64encode(b"not-a-real-pickle").decode(),
-            },
+            "program_artifact": {"path": "/Users/desk/runs/local-run-1/program.json"},
         },
     )
 
@@ -193,13 +184,12 @@ def test_export_bundle_shape(bundle: dict[str, Any]) -> None:
     assert bundle["job"]["status"] == "success"
     assert "username" not in bundle["optimization"]["payload_overview"]
     assert "program_artifact" not in bundle["job"]["result"]
+    assert "program_artifact_path" not in bundle["job"]["result"]
     assert [event["event"] for event in bundle["events"]] == ["baseline", "done"]
-    artifact = json.loads(base64.b64decode(bundle["artifacts"][run_sync.PROGRAM_ARTIFACT_NAME]))
-    assert artifact["program_state_json"] == _PROGRAM_STATE
 
 
-def test_round_trip_shows_same_scores_and_artifact(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
-    """An imported run appears in the hosted listing and detail with the same scores and program."""
+def test_round_trip_shows_same_scores(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
+    """An imported run appears in the hosted listing and detail with the same scores."""
     resp = _import(hosted_store, bundle)
     assert resp.status_code == 201, resp.text
     new_id = resp.json()["optimization_id"]
@@ -214,17 +204,10 @@ def test_round_trip_shows_same_scores_and_artifact(hosted_store: _SQLiteJobStore
     assert detail.status_code == 200, detail.text
     body = detail.json()
     assert body["status"] == "success"
-    assert body["result"]["baseline_test_metric"] == 0.41
-    assert body["result"]["optimized_test_metric"] == 0.82
+    assert body["blackbox_result"]["baseline_score"] == 0.41
+    assert body["blackbox_result"]["best_score"] == 0.82
     assert body["description"] == f"Support triage ({run_sync.IMPORT_LABEL})"
     assert len(body["progress_events"]) == 2
-
-    artifact = client.get(f"/optimizations/{new_id}/artifact")
-    assert artifact.status_code == 200, artifact.text
-    program = artifact.json()["program_artifact"]
-    assert program["program_state_json"] == _PROGRAM_STATE
-    assert program["program_pickle_base64"] is None
-    assert program["path"] is None
 
 
 def test_import_lands_under_caller_and_ignores_bundle_identity(
@@ -261,15 +244,14 @@ def test_import_makes_no_wallet_or_budget_rows(hosted_store: _SQLiteJobStore, bu
 
 
 def test_imported_run_cannot_be_requeued(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
-    """Restart of an imported failed DSPy run is refused, and the failed copy keeps no result."""
+    """Restart of an imported failed run is refused, and the failed copy keeps no result."""
     bundle["job"]["status"] = "failed"
     resp = _import(hosted_store, bundle)
     assert resp.status_code == 201, resp.text
     new_id = resp.json()["optimization_id"]
     restart = _client(hosted_store, HOSTED_USER).post(f"/optimizations/{new_id}/restart")
-    # The bundle is a DSPy run, and Skynet no longer starts DSPy runs (SKY-316).
-    assert restart.status_code == 410
-    assert restart.json()["detail"] == t_en("optimization.dspy_run_retired")
+    assert restart.status_code == 409
+    assert restart.json()["detail"] == t_en("optimization.retry_no_payload")
     job = hosted_store.get_job(new_id)
     assert job["status"] == "failed"
     assert job["result"] is None
@@ -319,11 +301,10 @@ def test_unknown_schema_is_422(hosted_store: _SQLiteJobStore, bundle: dict[str, 
     [
         lambda b: b["job"].update(status="running"),
         lambda b: b["optimization"].update(optimization_type="grid_search"),
-        lambda b: b["artifacts"].update({run_sync.PROGRAM_ARTIFACT_NAME: "%%%not-base64"}),
-        lambda b: b["job"]["result"].pop("split_counts"),
+        lambda b: b["job"]["result"].pop("best_candidate"),
         lambda b: b["events"].append({"timestamp": "yesterday", "event": "x", "metrics": {}}),
     ],
-    ids=["active-status", "grid-type", "bad-artifact", "bad-result", "bad-timestamp"],
+    ids=["active-status", "grid-type", "bad-result", "bad-timestamp"],
 )
 def test_malformed_bundle_is_422(hosted_store: _SQLiteJobStore, bundle: dict[str, Any], mutate: Any) -> None:
     """Bundles that do not match the contract are refused with no rows written."""
@@ -355,29 +336,15 @@ def test_default_cap_is_50_mb() -> None:
     assert run_sync.MAX_BUNDLE_BYTES == 50 * 1024 * 1024
 
 
-def test_inline_result_artifact_is_cleaned(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
-    """A program artifact placed inside the result loses its pickle and path, like the artifacts entry."""
-    encoded = bundle["artifacts"].pop(run_sync.PROGRAM_ARTIFACT_NAME)
-    inline = json.loads(base64.b64decode(encoded))
-    inline.update(path="/Users/desk/secret.json", program_pickle_base64=base64.b64encode(b"evil").decode())
-    bundle["job"]["result"]["program_artifact"] = inline
+def test_inline_result_artifact_is_dropped(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
+    """A program artifact or path placed inside the result never reaches the hosted copy."""
+    bundle["job"]["result"]["program_artifact"] = {"path": "/Users/desk/secret.json"}
+    bundle["job"]["result"]["program_artifact_path"] = "/Users/desk/secret"
     resp = _import(hosted_store, bundle)
     assert resp.status_code == 201, resp.text
-    artifact = _client(hosted_store, HOSTED_USER).get(f"/optimizations/{resp.json()['optimization_id']}/artifact")
-    assert artifact.status_code == 200, artifact.text
-    program = artifact.json()["program_artifact"]
-    assert program["program_state_json"] == _PROGRAM_STATE
-    assert program["program_pickle_base64"] is None
-    assert program["path"] is None
-
-
-def test_artifact_without_signature_code_is_422(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
-    """Without a signature the hosted copy could rebuild the program only from a pickle, so it is refused."""
-    bundle["optimization"]["payload_overview"].pop("signature_code")
-    resp = _import(hosted_store, bundle)
-    assert resp.status_code == 422
-    assert resp.json()["detail"] == t_en("sync.invalid_bundle")
-    assert _count(hosted_store, JobModel) == 0
+    result = hosted_store.get_job(resp.json()["optimization_id"])["result"]
+    assert "program_artifact" not in result
+    assert "program_artifact_path" not in result
 
 
 def test_deeply_nested_body_is_422(hosted_store: _SQLiteJobStore) -> None:
@@ -616,7 +583,7 @@ def test_finite_runtime_is_accepted(hosted_store: _SQLiteJobStore, bundle: dict[
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda b: b["job"]["result"].update(baseline_test_metric="Infinity"),
+        lambda b: b["job"]["result"].update(baseline_score="Infinity"),
         lambda b: b["optimization"]["payload_overview"].update(model_name=7),
         lambda b: b["optimization"]["payload_overview"].update(dataset_rows="abc"),
         lambda b: b["optimization"]["payload_overview"].update(dataset_rows=5.5),
@@ -665,15 +632,6 @@ def test_pin_and_rename_keep_imported_storage(hosted_store: _SQLiteJobStore, bun
         optimization_id, ("success",), result=hosted_store.get_job(optimization_id)["result"]
     )
     assert hosted_store.get_job(optimization_id)["stored_bytes"] >= 2 * len(blob)
-
-
-def test_imported_run_test_results_is_404(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
-    """An imported run has no stored payload, so its test results give 404, not 500."""
-    resp = _import(hosted_store, bundle)
-    assert resp.status_code == 201, resp.text
-    r = _client(hosted_store, HOSTED_USER).get(f"/optimizations/{resp.json()['optimization_id']}/test-results")
-    assert r.status_code == 404
-    assert r.json()["detail"] == t_en("optimization.payload_unavailable")
 
 
 async def test_import_does_not_block_other_requests(

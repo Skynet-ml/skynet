@@ -72,7 +72,6 @@ def test_repo_offers_auto_first_then_the_blackbox_engines(monkeypatch: pytest.Mo
     assert by_id["gepa"]["native_proposer"] is False
     assert body["sandbox_available"] is True
     assert all(option["available"] for option in body["options"])
-    assert all(option["family"] != "dspy" for option in body["options"])
 
 
 def test_blackbox_availability_follows_the_engine_catalog(monkeypatch: pytest.MonkeyPatch) -> None:

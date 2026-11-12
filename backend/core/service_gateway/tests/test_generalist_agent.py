@@ -865,13 +865,6 @@ def test_dataset_library_tools_always_available() -> None:
     assert "request_user_dataset_from_library" in allowed
 
 
-def test_retired_pair_serve_tools_are_hidden() -> None:
-    """The grid-pair serve tools refuse every call with 410, so the agent never sees them."""
-    allowed = tools_for(WizardState())
-    assert "request_user_pair_inference" not in allowed
-    assert "serve_pair_info_serve" not in allowed
-
-
 def test_yolo_never_gates() -> None:
     """Yolo trust-mode never gates any tool."""
     for name in ("delete_job_optimizations", "submit_unified_run_optimize_post", "rename_job_optimizations"):

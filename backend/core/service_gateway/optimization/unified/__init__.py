@@ -1,7 +1,6 @@
-"""Unified (wizard v2) optimization: one payload for every optimizer.
+"""Helpers shared with the black-box engines: the held-out split and the metric model.
 
-Modules: :mod:`split` (the server-side held-out split), :mod:`dspy_engine`
-(DSPy optimizers behind the black-box engine protocol) and :mod:`service`
-(the worker entry point). Kept slim so importing one module does not pull in
-the others.
+Modules: :mod:`split` (the server-side held-out split) and :mod:`metric_model`
+(the scorer's metric model resolution). Kept slim so importing one module does
+not pull in the other.
 """

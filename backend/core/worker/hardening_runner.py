@@ -689,9 +689,7 @@ def open_hardening_runner(
         target = job.target or {}
         setup_command = (target.get("setup_command") or "").strip() or None
         hosts = PACKAGE_REGISTRY_HOSTS if setup_command else ()
-        descriptor = bind_protected_sandbox(
-            gateway, settings, workflow="anything", owner_id=operation_key(job.id), parent_hosts=hosts
-        )
+        descriptor = bind_protected_sandbox(gateway, settings, owner_id=operation_key(job.id), parent_hosts=hosts)
         protected = gateway.protect_payload({"scorer": dict(scorer_spec)}, managed_key=managed_key, allow_batch=False)
         model_gateway = _repo_model_gateway(protected["scorer"])
         editable = tuple(target.get("repo", {}).get("editable_paths") or ())

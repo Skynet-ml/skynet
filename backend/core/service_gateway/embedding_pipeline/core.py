@@ -36,7 +36,6 @@ from ...billing.service import StripeBillingService
 from ...config import settings
 from ...constants import (
     OPTIMIZATION_TYPE_BLACKBOX,
-    OPTIMIZATION_TYPE_GRID_SEARCH,
     PAYLOAD_OVERVIEW_DESCRIPTION,
     PAYLOAD_OVERVIEW_IS_PRIVATE,
     PAYLOAD_OVERVIEW_MODEL_NAME,
@@ -62,25 +61,18 @@ _EMBEDDING_IN_FLIGHT: set[str] = set()
 def _extract_metadata(job: dict[str, Any]) -> tuple[str | None, str | None]:
     """Return ``(winning_model, optimization_type)`` for a finished job.
 
-    For a ``run`` job the winner is the single configured model. For a
-    grid search the winner is ``result.best_pair.generation_model``.
+    The winner is the single configured model.
 
     Args:
-        job: The job-store record (with ``payload_overview`` and ``result``
-            sub-dicts) for a finished optimization.
+        job: The job-store record (with a ``payload_overview`` sub-dict)
+            for a finished optimization.
 
     Returns:
         A 2-tuple of ``(winning_model, optimization_type)`` where each
         entry may be ``None`` when the corresponding field is absent.
     """
     overview = job.get("payload_overview") or {}
-    result = job.get("result") or {}
     job_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE)
-    if job_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-        best = result.get("best_pair") if isinstance(result, dict) else None
-        if isinstance(best, dict):
-            return best.get("generation_model"), job_type
-        return None, job_type
     return overview.get(PAYLOAD_OVERVIEW_MODEL_NAME), job_type
 
 
@@ -90,7 +82,6 @@ def _extract_scores(job: dict[str, Any]) -> tuple[float | None, float | None]:
     Run jobs publish the score pair to ``latest_metrics`` while running, but
     only ``optimized_test_metric`` survives there at completion — the baseline
     lands in ``result`` — so fall back to ``result`` for either missing half.
-    Grid jobs keep the winning pair under ``result.best_pair``.
 
     Scores are passed through verbatim on the canonical 0-100 percentage
     scale — the scale ``dspy.Evaluate`` reports and the one every job persists
@@ -110,24 +101,16 @@ def _extract_scores(job: dict[str, Any]) -> tuple[float | None, float | None]:
         is the metric's float on the 0-100 scale, or ``None`` when the score
         is missing.
     """
-    overview = job.get("payload_overview") or {}
-    job_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE)
     metrics = job.get("latest_metrics") or {}
     result = job.get("result")
     result = result if isinstance(result, dict) else {}
     baseline = metrics.get("baseline_test_metric")
     optimized = metrics.get("optimized_test_metric")
-    if job_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-        best = result.get("best_pair")
-        if isinstance(best, dict):
-            baseline = best.get("baseline_test_metric", baseline)
-            optimized = best.get("optimized_test_metric", optimized)
-    else:
-        stored_baseline, stored_optimized = result_scores(result)
-        if baseline is None:
-            baseline = stored_baseline
-        if optimized is None:
-            optimized = stored_optimized
+    stored_baseline, stored_optimized = result_scores(result)
+    if baseline is None:
+        baseline = stored_baseline
+    if optimized is None:
+        optimized = stored_optimized
     try:
         baseline_f = float(baseline) if baseline is not None else None
     except (TypeError, ValueError):

@@ -494,7 +494,6 @@ def _fund_checkpoint(store: RemoteDBJobStore, job_id: str, monkeypatch: pytest.M
     Returns:
         The budget service for the resume.
     """
-    monkeypatch.setattr(remote_mod.settings, "dspy_sandbox_image", "fixture@sha256:" + "a" * 64)
     monkeypatch.setattr(remote_mod.settings, "vercel_sandbox_max_lifetime_seconds", 60.0)
     username = f"trials-owner-{uuid.uuid4().hex[:8]}"
     with Session(store.engine) as session:

@@ -38,12 +38,12 @@ from ..engine import BackgroundWorker, WorkerShutdownError, reset_worker_for_tes
 from .conftest import FakeJobStore
 from .mocks import (
     REAL_RUN_PAYLOAD,
-    REAL_UNIFIED_PAYLOAD,
     fake_mp_process,
     fake_mp_queue,
     make_mp_context,
     make_progress_event,
     make_result_event,
+    protect_dispatch,
     stopped_box_event,
 )
 from .test_budget_lifecycle import _checkpoint
@@ -70,7 +70,6 @@ def worker(store: FakeJobStore) -> BackgroundWorker:
         job_store=cast(JobStore, store),
         num_workers=1,
         poll_interval=1.0,
-        _allow_unprotected_test_execution=True,
     )
 
 
@@ -107,7 +106,7 @@ def test_process_job_parses_json_string_payload_overview(
     store: FakeJobStore,
 ) -> None:
     """A JSON-string ``payload_overview`` is parsed and the job runs to success."""
-    overview_str = json.dumps({"optimization_type": "run", "username": "alice"})
+    overview_str = json.dumps({"optimization_type": "blackbox", "username": "alice"})
     store.seed_job(
         "opt-2",
         payload=REAL_RUN_PAYLOAD,
@@ -119,11 +118,12 @@ def test_process_job_parses_json_string_payload_overview(
         exitcode=0,
         result_events=[{"type": EVENT_RESULT, "result": {"baseline_test_metric": 0.5, "optimized_test_metric": 0.7}}],
     )
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-2", 0)
 
     # If the JSON-string branch worked, job succeeded (not failed due to bad overview).
@@ -146,11 +146,12 @@ def test_process_job_handles_invalid_json_string_payload_overview_gracefully(
         exitcode=0,
         result_events=[{"type": EVENT_RESULT, "result": {"baseline_test_metric": 0.5, "optimized_test_metric": 0.7}}],
     )
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-3", 0)
 
     assert store._jobs["opt-3"]["status"] == "success"
@@ -172,11 +173,12 @@ def test_process_job_handles_non_dict_json_payload_overview_gracefully(
         exitcode=0,
         result_events=[{"type": EVENT_RESULT, "result": {"baseline_test_metric": 0.5, "optimized_test_metric": 0.7}}],
     )
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-3b", 0)
 
     assert store._jobs["opt-3b"]["status"] == "success"
@@ -192,11 +194,12 @@ def test_process_job_sets_status_failed_on_nonzero_exit_without_result(
 
     # Exit code 1, no result events → RuntimeError caught by BaseException handler
     ctx, _proc = make_mp_context(exitcode=1, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-4", 0)  # must not raise — error handled internally
 
     assert store._jobs["opt-4"]["status"] == "failed"
@@ -212,11 +215,12 @@ def test_process_job_sigkill_fails_without_restart(
     worker.enqueue_job("opt-oom")
 
     ctx, _proc = make_mp_context(exitcode=-9, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-oom", 0)
 
     assert store._jobs["opt-oom"]["status"] == "failed"
@@ -244,11 +248,12 @@ def test_process_job_fails_classified_infrastructure_event(
             }
         ],
     )
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-transient", 0)
 
     assert store._jobs["opt-transient"]["status"] == "failed"
@@ -273,11 +278,12 @@ def test_process_job_gives_a_guest_box_deadline_stop_the_interrupted_stop_reason
     store.engine = MagicMock()
     worker.enqueue_job("opt-deadline")
     ctx, _proc = make_mp_context(exitcode=0, result_events=[event])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-deadline", 0)
 
     job = store._jobs["opt-deadline"]
@@ -307,11 +313,12 @@ def test_process_job_does_not_recover_deterministic_failure_event(
             }
         ],
     )
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-deterministic", 0)
 
     assert store._jobs["opt-deterministic"]["status"] == "failed"
@@ -339,7 +346,14 @@ def test_process_job_releases_run_when_worker_shuts_down_during_validating(
     store: FakeJobStore,
 ) -> None:
     """A shutdown while validating hands the run to the orphan sweep instead of failing it."""
-    store.seed_job("opt-stop-validating", payload=REAL_RUN_PAYLOAD, status="validating", claimed_by="w1")
+    store.seed_job(
+        "opt-stop-validating",
+        payload=REAL_RUN_PAYLOAD,
+        status="validating",
+        claimed_by="w1",
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
     worker.enqueue_job("opt-stop-validating")
 
     def _shutdown(*_args: object, **_kwargs: object) -> None:
@@ -349,9 +363,9 @@ def test_process_job_releases_run_when_worker_shuts_down_during_validating(
 
     with (
         patch("core.worker.engine.notify_job_completed") as notify,
-        patch.object(worker, "_get_service") as mock_svc,
+        patch.object(engine_module, "validate_blackbox_payload") as validate,
     ):
-        mock_svc.return_value.validate_payload.side_effect = _shutdown
+        validate.side_effect = _shutdown
         worker._process_job("opt-stop-validating", 0)
 
     job = store._jobs["opt-stop-validating"]
@@ -405,14 +419,12 @@ def test_process_job_releases_run_when_worker_shuts_down_during_running(
             event.set()
 
     proc.start.side_effect = _shutdown
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
     with (
         patch("core.worker.engine.notify_job_completed") as notify,
-        patch.object(worker, "_get_service") as mock_svc,
+        patch.object(engine_module, "validate_blackbox_payload"),
     ):
-        mock_svc.return_value.validate_payload = MagicMock()
         worker._process_job("opt-stop-running", 0)
 
     job = store._jobs["opt-stop-running"]
@@ -433,112 +445,15 @@ def test_process_job_sets_status_failed_when_subprocess_sends_no_result(
 
     # Exit code 0 but queue is empty → no result_dict → RuntimeError caught internally
     ctx, _proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-5", 0)  # must not raise — error handled internally
 
     assert store._jobs["opt-5"]["status"] == "failed"
-
-
-def test_process_job_fails_a_queued_grid_search_without_running_it(
-    worker: BackgroundWorker,
-    store: FakeJobStore,
-) -> None:
-    """A grid search queued before grid search was retired fails instead of executing."""
-    store.seed_job(
-        "opt-6",
-        payload=REAL_RUN_PAYLOAD,
-        payload_overview={"optimization_type": "grid_search", "username": "bob"},
-    )
-    worker.enqueue_job("opt-6")
-    ctx, _proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
-
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service"):
-        worker._process_job("opt-6", 0)
-
-    assert store._jobs["opt-6"]["status"] == "failed"
-    assert store._jobs["opt-6"]["message"] == engine_module.GRID_SEARCH_RETIRED_MESSAGE
-    ctx.Process.assert_not_called()
-
-
-def test_process_job_validates_unified_payload_against_its_contract(
-    worker: BackgroundWorker,
-    store: FakeJobStore,
-) -> None:
-    """A unified run is parsed as a unified request and checked by the workspace contract."""
-    store.seed_job(
-        "opt-7",
-        payload=REAL_UNIFIED_PAYLOAD,
-        payload_overview={"optimization_type": "blackbox", "username": "bob"},
-        execution_budget_id="budget-7",
-    )
-    worker.enqueue_job("opt-7")
-    ctx, _proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
-
-    with (
-        patch("core.worker.engine.notify_job_completed"),
-        patch.object(worker, "_get_service"),
-        patch.object(engine_module, "validate_blackbox_payload") as legacy_validate,
-        patch.object(
-            engine_module, "validate_unified_payload", side_effect=ValueError("metric shape mismatch")
-        ) as validate,
-    ):
-        worker._process_job("opt-7", 0)
-
-    validate.assert_called_once()
-    assert validate.call_args.args[0].payload_kind == "unified_v1"
-    legacy_validate.assert_not_called()
-    assert store._jobs["opt-7"]["status"] == "failed"
-    assert "metric shape mismatch" in store._jobs["opt-7"]["message"]
-
-
-def test_worker_keeps_stored_metric_model_without_declaration(worker: BackgroundWorker, store: FakeJobStore) -> None:
-    """A queued legacy run keeps its selected metric model before protection."""
-    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
-    payload["models"]["metric_model"] = {
-        "name": "anthropic/old-judge",
-        "token_source": "byok",
-        "byok_provider": "anthropic",
-    }
-    payload["workspace"]["metric_code"] = (
-        "from skynet import llm\ndef score(input, output, expected=None):\n    return llm('judge')\n"
-    )
-    store.seed_job(
-        "legacy-metric",
-        payload=payload,
-        payload_overview={"optimization_type": "blackbox", "username": "bob"},
-        execution_budget_id="budget-legacy",
-    )
-    worker.enqueue_job("legacy-metric")
-    ctx, _proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
-    recorded = {}
-    real_alias = engine_module.alias_unified_model_roles
-
-    def capture(source: dict, **kwargs: object) -> None:
-        """Capture the model after the real execution alias step."""
-        real_alias(source, **kwargs)
-        recorded.update(source["models"]["metric_model"])
-        raise ValueError("stop after alias")
-
-    with (
-        patch("core.worker.engine.notify_job_completed"),
-        patch.object(worker, "_get_service"),
-        patch.object(engine_module, "validate_unified_payload"),
-        patch.object(engine_module, "alias_unified_model_roles", side_effect=capture),
-    ):
-        worker._process_job("legacy-metric", 0)
-    assert recorded["name"] == "anthropic/old-judge"
-    assert recorded["token_source"] == "byok"
-    assert recorded["byok_provider"] == "anthropic"
 
 
 def test_process_job_handles_key_error_when_job_deleted_mid_run(
@@ -554,8 +469,7 @@ def test_process_job_handles_key_error_when_job_deleted_mid_run(
         exitcode=0,
         result_events=[{"type": EVENT_RESULT, "result": good_result}],
     )
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
     original_get_job = store.get_job
     call_count = {"n": 0}
@@ -572,8 +486,10 @@ def test_process_job_handles_key_error_when_job_deleted_mid_run(
     store.get_job = _get_job_side_effect  # type: ignore[method-assign,assignment]
 
     # Must NOT raise even though get_job raises KeyError on the second call.
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-8", 0)  # must not raise
 
 
@@ -586,7 +502,7 @@ def test_process_job_cancellation_error_notifies_cancelled(
     We trigger cancel at the second _check_cancel() (after validation) by setting the event
     inside validate_payload, which is called after overview is assigned.
     """
-    store.seed_job("opt-9", payload=REAL_RUN_PAYLOAD)
+    store.seed_job("opt-9", payload=REAL_RUN_PAYLOAD, execution_budget_id="budget", execution_budget_generation=0)
     worker.enqueue_job("opt-9")
 
     notify_mock = MagicMock()
@@ -598,9 +514,9 @@ def test_process_job_cancellation_error_notifies_cancelled(
 
     with (
         patch("core.worker.engine.notify_job_completed", notify_mock),
-        patch.object(worker, "_get_service") as mock_svc,
+        patch.object(engine_module, "validate_blackbox_payload") as validate,
     ):
-        mock_svc.return_value.validate_payload.side_effect = _set_cancel_then_validate
+        validate.side_effect = _set_cancel_then_validate
         worker._process_job("opt-9", 0)
 
     # notify_job_completed must have been called with status='cancelled'.
@@ -627,12 +543,14 @@ def test_process_job_generic_exception_sets_status_failed(
     worker.enqueue_job("opt-10")
 
     ctx, _proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload") as validate,
+    ):
         # validate_payload raises a generic exception (after overview is assigned)
-        mock_svc.return_value.validate_payload.side_effect = RuntimeError("boom")
+        validate.side_effect = RuntimeError("boom")
         worker._process_job("opt-10", 0)  # must not raise — error handled internally
 
     assert store._jobs["opt-10"]["status"] == "failed"
@@ -647,11 +565,13 @@ def test_process_job_system_exit_sets_status_failed_and_reraises(
     worker.enqueue_job("opt-11")
 
     ctx, _proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload.side_effect = SystemExit(1)
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload") as validate,
+    ):
+        validate.side_effect = SystemExit(1)
         with pytest.raises(SystemExit):
             worker._process_job("opt-11", 0)
 
@@ -667,11 +587,13 @@ def test_process_job_keyboard_interrupt_sets_status_failed_and_reraises(
     worker.enqueue_job("opt-12")
 
     ctx, _proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload.side_effect = KeyboardInterrupt()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload") as validate,
+    ):
+        validate.side_effect = KeyboardInterrupt()
         with pytest.raises(KeyboardInterrupt):
             worker._process_job("opt-12", 0)
 
@@ -704,18 +626,16 @@ def test_process_job_watchdog_fails_run_that_emits_no_events(
     worker.enqueue_job("opt-stall")
 
     ctx, proc = _stall_ctx()
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
     monkeypatch.setattr(engine_module.settings, "job_stall_timeout_seconds", 1.0)
 
     # A monotonic clock that jumps far past the 1s window on every read forces
     # the watchdog to trip on the first event-less iteration, deterministically.
     with (
         patch("core.worker.engine.notify_job_completed"),
-        patch.object(worker, "_get_service") as mock_svc,
+        patch.object(engine_module, "validate_blackbox_payload"),
         patch.object(engine_module.time, "monotonic", side_effect=itertools.count(0.0, 100_000.0)),
     ):
-        mock_svc.return_value.validate_payload = MagicMock()
         worker._process_job("opt-stall", 0)  # must not raise — handled internally
 
     assert store._jobs["opt-stall"]["status"] == "failed"
@@ -740,12 +660,13 @@ def test_process_job_watchdog_disabled_when_timeout_zero(
     ctx.Queue.return_value = mq
     ctx.Process.return_value = proc
     ctx.get_start_method.return_value = "spawn"
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
     monkeypatch.setattr(engine_module.settings, "job_stall_timeout_seconds", 0.0)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-nowatch", 0)
 
     assert store._jobs["opt-nowatch"]["status"] == "success"
@@ -766,11 +687,12 @@ def test_process_job_watchdog_does_not_fire_while_events_flow(
     ctx.Queue.return_value = mq
     ctx.Process.return_value = proc
     ctx.get_start_method.return_value = "spawn"
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service") as mock_svc:
-        mock_svc.return_value.validate_payload = MagicMock()
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(engine_module, "validate_blackbox_payload"),
+    ):
         worker._process_job("opt-live", 0)
 
     assert store._jobs["opt-live"]["status"] == "success"
@@ -786,7 +708,7 @@ def test_process_job_records_run_completed_milestone(
         "opt-tel",
         payload=REAL_RUN_PAYLOAD,
         payload_overview={
-            "optimization_type": "run",
+            "optimization_type": "blackbox",
             "username": "alice",
             "optimizer_name": "gepa",
             "model_name": "openai/gpt-4o-mini",
@@ -800,15 +722,13 @@ def test_process_job_records_run_completed_milestone(
         exitcode=0,
         result_events=[{"type": EVENT_RESULT, "result": {"baseline_test_metric": 0.5, "optimized_test_metric": 0.7}}],
     )
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
     with (
         patch("core.worker.engine.notify_job_completed"),
         patch("core.worker.engine.record_server_event") as record,
-        patch.object(worker, "_get_service") as mock_svc,
+        patch.object(engine_module, "validate_blackbox_payload"),
     ):
-        mock_svc.return_value.validate_payload = MagicMock()
         worker._process_job("opt-tel", 0)
 
     assert store._jobs["opt-tel"]["status"] == "success"
@@ -818,7 +738,7 @@ def test_process_job_records_run_completed_milestone(
     assert kwargs["name"] == "run_completed"
     assert kwargs["properties"] == {
         "status": "success",
-        "optimization_type": "run",
+        "optimization_type": "blackbox",
         "optimizer": "gepa",
         "model": "openai/gpt-4o-mini",
         "token_source": "managed",
@@ -879,7 +799,7 @@ def test_protected_blackbox_novelty_failure_has_plain_detail(worker: BackgroundW
     }
     store.seed_job("novelty", payload=payload, payload_overview=_BLACKBOX_OVERVIEW, execution_budget_id="budget")
     worker.enqueue_job("novelty")
-    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service"):
+    with patch("core.worker.engine.notify_job_completed"):
         worker._process_job("novelty", 0)
     assert store._jobs["novelty"]["status"] == "failed"
     assert store._jobs["novelty"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
@@ -910,7 +830,6 @@ def test_protected_blackbox_custom_novelty_fails_in_worker(
     with (
         patch("core.worker.engine.notify_job_completed"),
         patch("core.worker.engine.record_server_event"),
-        patch.object(worker, "_get_service"),
         patch("core.worker.engine.ProviderKeyVault", return_value=vault),
     ):
         worker._process_job("custom-novelty", 0)
@@ -935,7 +854,6 @@ def test_gateway_domain_failure_has_plain_detail(worker: BackgroundWorker, store
     with (
         patch("core.worker.engine.notify_job_completed"),
         patch("core.worker.engine.record_server_event"),
-        patch.object(worker, "_get_service"),
         patch("core.worker.engine.validate_blackbox_payload"),
         patch("core.worker.engine.payload_uses_token_source", return_value=False),
         patch("core.worker.engine.ModelGateway", return_value=gateway),
@@ -983,7 +901,6 @@ def _fail_protected_run(
     with (
         patch("core.worker.engine.notify_job_completed") as notify,
         patch("core.worker.engine.record_server_event"),
-        patch.object(worker, "_get_service"),
         patch("core.worker.engine.validate_blackbox_payload"),
         patch("core.worker.engine.payload_uses_token_source", return_value=False),
         patch("core.worker.engine.ModelGateway", return_value=gateway),
@@ -1143,7 +1060,6 @@ def _run_repository_job(
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("core.worker.engine.notify_job_completed"))
         stack.enter_context(patch("core.worker.engine.record_server_event"))
-        stack.enter_context(patch.object(worker, "_get_service"))
         stack.enter_context(patch("core.worker.engine.validate_blackbox_payload"))
         stack.enter_context(patch("core.worker.engine.payload_uses_token_source", return_value=False))
         stack.enter_context(patch("core.worker.engine.ModelGateway", return_value=gateway))
@@ -1261,7 +1177,6 @@ def test_the_run_gate_reads_secret_bindings_and_allowed_hosts_before_staging(
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("core.worker.engine.notify_job_completed"))
         stack.enter_context(patch("core.worker.engine.record_server_event"))
-        stack.enter_context(patch.object(worker, "_get_service"))
         stack.enter_context(patch("core.worker.engine.validate_blackbox_payload"))
         stack.enter_context(patch("core.worker.engine.payload_uses_token_source", return_value=False))
         stack.enter_context(patch("core.worker.engine.ModelGateway", return_value=gateway))
@@ -1374,50 +1289,48 @@ def test_a_refused_host_proposer_fails_before_staging_and_paid_setup(
     assert store._jobs["repo-hardened"]["status"] == "failed"
 
 
-def test_unified_byok_injection_domain_error_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
+def test_byok_injection_domain_error_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
     """Record a plain domain error when the BYOK bridge rejects a model."""
     name = "openrouter/anthropic/claude-sonnet-4"
-    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
-    payload["models"] = {"reflection_model": {"name": name, "token_source": "byok", "byok_provider": "anthropic"}}
+    payload = copy.deepcopy(REAL_RUN_PAYLOAD)
+    payload["reflection_model_config"] = {"name": name, "token_source": "byok", "byok_provider": "anthropic"}
     payload["token_source"] = "byok"
     store.engine = MagicMock()
     store.seed_job(
-        "unified-inject",
+        "byok-inject",
         payload=payload,
         payload_overview={"optimization_type": "blackbox", "username": payload["username"], "token_source": "byok"},
         execution_budget_id="budget",
         execution_budget_generation=0,
     )
-    worker.enqueue_job("unified-inject")
+    worker.enqueue_job("byok-inject")
     vault = MagicMock()
     vault.resolve_connection.return_value = MagicMock(api_base=None, secret="fixture", params={})
     with (
         patch("core.worker.engine.notify_job_completed"),
         patch("core.worker.engine.record_server_event"),
-        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.validate_blackbox_payload"),
         patch("core.worker.engine.ProviderKeyVault", return_value=vault),
         patch("core.worker.engine.bind_protected_sandbox") as bind,
     ):
-        worker._process_job("unified-inject", 0)
+        worker._process_job("byok-inject", 0)
     vault.resolve_connection.assert_called_with(payload["username"], "anthropic")
     bind.assert_not_called()
-    assert store._jobs["unified-inject"]["status"] == "failed"
+    assert store._jobs["byok-inject"]["status"] == "failed"
     assert (
-        store._jobs["unified-inject"]["message"]
+        store._jobs["byok-inject"]["message"]
         == DomainError("billing.byok_model_not_served", status=400, model=name, provider="anthropic").detail
     )
 
 
-def test_process_job_blackbox_without_budget_requires_vercel(
-    worker: BackgroundWorker,
-    store: FakeJobStore,
-) -> None:
+def test_process_job_blackbox_without_budget_requires_vercel(store: FakeJobStore) -> None:
     """A black-box job without a protected budget fails: scoring only runs in the Vercel sandbox.
 
-    The unprotected test escape hatch that lets other run types dispatch a local
-    subprocess never applies to black-box, so the job fails at the gate before any
+    Only a worker built with the test escape hatch dispatches a local
+    subprocess, so a production worker fails the job at the gate before any
     validation or child process starts.
     """
+    worker = BackgroundWorker(job_store=cast(JobStore, store), num_workers=1, poll_interval=1.0)
     store.seed_job("opt-bb", payload=_BLACKBOX_PAYLOAD, payload_overview=_BLACKBOX_OVERVIEW)
     worker.enqueue_job("opt-bb")
 
@@ -1442,95 +1355,18 @@ def test_process_job_blackbox_validation_failure_marks_job_failed(
     worker.enqueue_job("opt-bb-bad")
 
     ctx, proc = make_mp_context(exitcode=0, result_events=[])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
+    protect_dispatch(store, ctx)
 
     with (
         patch("core.worker.engine.notify_job_completed"),
         patch(
             "core.worker.engine.validate_blackbox_payload", side_effect=ServiceError("Engine 'nope' is not available")
         ),
-        patch.object(worker, "_get_service"),
     ):
         worker._process_job("opt-bb-bad", 0)
 
     assert store._jobs["opt-bb-bad"]["status"] == "failed"
     proc.start.assert_not_called()
-
-
-_USAGE_SNAPSHOT = [{"model": "openai/gpt-4o-mini", "input_tokens": 4000, "output_tokens": 300}]
-
-
-def _run_failing_leg(worker: BackgroundWorker, store: FakeJobStore, job_id: str, error_event: dict) -> MagicMock:
-    """Run one legacy leg that reports usage and then fails, capturing its debit calls.
-
-    Args:
-        worker: The worker under test.
-        store: The in-memory store the job is seeded in.
-        job_id: Job to seed and process.
-        error_event: The child's terminal error event.
-
-    Returns:
-        The patched ``_debit_run_cents`` mock.
-    """
-    store.seed_job(job_id, payload=REAL_RUN_PAYLOAD, attempts=0, execution_generation=3)
-    store.engine = MagicMock()
-    worker.enqueue_job(job_id)
-    progress = {**make_progress_event(), "usage_by_model": _USAGE_SNAPSHOT}
-    ctx, _proc = make_mp_context(exitcode=1, result_events=[progress, error_event])
-    worker._mp_ctx = ctx
-    worker._mp_start_method = "spawn"
-    with (
-        patch("core.worker.engine.notify_job_completed"),
-        patch.object(worker, "_get_service") as mock_svc,
-        patch.object(worker, "_debit_run_cents", return_value=7) as debit,
-    ):
-        mock_svc.return_value.validate_payload = MagicMock()
-        worker._process_job(job_id, 0)
-    return debit
-
-
-def test_process_job_bills_failed_legacy_leg_for_reported_usage(
-    worker: BackgroundWorker,
-    store: FakeJobStore,
-) -> None:
-    """A legacy run that fails after spending tokens is billed once, keyed to its execution leg."""
-    debit = _run_failing_leg(
-        worker,
-        store,
-        "opt-bill-fail",
-        {
-            "type": EVENT_ERROR,
-            "error": "provider rejected the request with 400",
-            "error_type": "ValueError",
-            "failure_kind": DETERMINISTIC_FAILURE,
-            "usage_by_model": _USAGE_SNAPSHOT,
-        },
-    )
-    assert store._jobs["opt-bill-fail"]["status"] == "failed"
-    debit.assert_called_once()
-    assert debit.call_args.args[1] == {"usage_by_model": _USAGE_SNAPSHOT}
-    assert debit.call_args.kwargs["settlement_key"] == "legacy:opt-bill-fail:g3"
-
-
-def test_process_job_does_not_bill_platform_infrastructure_interruption(
-    worker: BackgroundWorker,
-    store: FakeJobStore,
-) -> None:
-    """A leg lost to a platform-side interruption fails without charging the user."""
-    debit = _run_failing_leg(
-        worker,
-        store,
-        "opt-bill-infra",
-        {
-            "type": EVENT_ERROR,
-            "error": "sandbox transport interrupted",
-            "error_type": "InfrastructureInterruptionError",
-            "failure_kind": INFRASTRUCTURE_INTERRUPTION,
-        },
-    )
-    assert store._jobs["opt-bill-infra"]["status"] == "failed"
-    debit.assert_not_called()
 
 
 def test_an_inferred_setup_command_is_stored_on_the_run(worker: BackgroundWorker, store: FakeJobStore) -> None:
@@ -1560,7 +1396,7 @@ def test_checkpoints_taken_after_the_environment_is_recorded_stay_resumable(
 ) -> None:
     """Hand back the stored payload, so checkpoints hash what resume validates against."""
     staged = {
-        "optimizer_name": "GEPA",
+        "strategy": {"mode": "single", "engine": "gepa"},
         "target": {"kind": "repo", "repo": {"repository": "acme/app", "commit": "a" * 40}},
     }
     store.seed_job("opt-repo", payload=copy.deepcopy(staged))

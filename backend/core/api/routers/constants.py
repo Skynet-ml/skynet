@@ -9,7 +9,7 @@ to import :mod:`_helpers` for unrelated symbols.
 
 from __future__ import annotations
 
-from ...constants import OPTIMIZATION_TYPE_BLACKBOX, OPTIMIZATION_TYPE_GRID_SEARCH, OPTIMIZATION_TYPE_RUN
+from ...constants import OPTIMIZATION_TYPE_BLACKBOX
 from ...models import OptimizationStatus
 
 TERMINAL_STATUSES = {
@@ -25,4 +25,4 @@ TERMINAL_STATUSES = {
 
 VALID_STATUSES = {s.value for s in OptimizationStatus}
 
-VALID_OPTIMIZATION_TYPES = {OPTIMIZATION_TYPE_RUN, OPTIMIZATION_TYPE_GRID_SEARCH, OPTIMIZATION_TYPE_BLACKBOX}
+VALID_OPTIMIZATION_TYPES = {OPTIMIZATION_TYPE_BLACKBOX}

@@ -81,7 +81,6 @@ def _bind_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
         job_store=cast(JobStore, store),
         num_workers=1,
         poll_interval=1.0,
-        _allow_unprotected_test_execution=True,
     )
     worker.enqueue_job("repo-deadline")
     gateway = MagicMock()
@@ -117,7 +116,6 @@ def _bind_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
             stack.enter_context(patch(f"core.worker.engine.{target}", **kwargs))
         stack.enter_context(patch("core.worker.engine.mp.get_context", return_value=ctx))
         bind = stack.enter_context(patch("core.worker.engine.bind_protected_sandbox"))
-        stack.enter_context(patch.object(worker, "_get_service"))
         stack.enter_context(patch.object(worker, "_record_repo_commit"))
         stack.enter_context(patch.object(worker, "_record_repo_environment", return_value=None))
         stack.enter_context(patch.object(worker, "_close_budget_gateway", return_value=(None, None)))
@@ -178,13 +176,9 @@ def test_override_only_shortens_the_configured_deadline(
     configured = settings.vercel_sandbox_max_lifetime_seconds
     gateways = [_Gateway() for _ in range(3)]
 
-    short = bind_protected_sandbox(
-        gateways[0], settings, workflow="anything", owner_id="job-1", guest_lifetime_seconds=120
-    )
-    long = bind_protected_sandbox(
-        gateways[1], settings, workflow="anything", owner_id="job-2", guest_lifetime_seconds=configured + 1000
-    )
-    default = bind_protected_sandbox(gateways[2], settings, workflow="anything", owner_id="job-3")
+    short = bind_protected_sandbox(gateways[0], settings, owner_id="job-1", guest_lifetime_seconds=120)
+    long = bind_protected_sandbox(gateways[1], settings, owner_id="job-2", guest_lifetime_seconds=configured + 1000)
+    default = bind_protected_sandbox(gateways[2], settings, owner_id="job-3")
 
     assert short["lifetime_seconds"] == gateways[0].bound["lifetime_seconds"] == 120
     assert long["lifetime_seconds"] == default["lifetime_seconds"] == configured

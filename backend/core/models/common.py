@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import REMOVED_CLI_PROVIDER, REMOVED_CLI_PROVIDER_MESSAGE
 
-OptimizationType = Literal["run", "grid_search", "blackbox"]
+OptimizationType = Literal["blackbox"]
 Composition = Literal["single", "workflow"]
 
 

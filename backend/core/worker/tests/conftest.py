@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stop_started_patches() -> Iterator[None]:
+    """Stop the patches a helper started, so one test's fakes never reach the next."""
+    yield
+    patch.stopall()
 
 
 class FakeJobStore:
@@ -150,7 +159,6 @@ class FakeJobStore:
         logger_name: str,
         message: str,
         timestamp: datetime | None = None,
-        pair_index: int | None = None,
         **run_log_fields: Any,
     ) -> None:
         """Persist a log entry and record the call for assertions.
@@ -161,7 +169,6 @@ class FakeJobStore:
             logger_name: Name of the originating logger.
             message: Formatted log message.
             timestamp: When the record was emitted, or ``None``.
-            pair_index: Grid-search pair index, or ``None``.
             **run_log_fields: ``source``, ``event``, ``fields``, ``candidate`` and ``case``.
         """
         entry = {
@@ -170,7 +177,6 @@ class FakeJobStore:
             "logger_name": logger_name,
             "message": message,
             "timestamp": timestamp,
-            "pair_index": pair_index,
             **run_log_fields,
         }
         self._logs.setdefault(optimization_id, []).append(entry)

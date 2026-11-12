@@ -175,14 +175,13 @@ def test_optimizer_choice_fitting_setup_accepted(wizard_client: TestClient, choi
 @pytest.mark.parametrize(
     "body",
     [
-        {"artifact_kind": "repo", "data_mode": "pairs", "optimizer_choice": "dspy_miprov2"},
-        {"optimizer_choice": "dspy_gepa"},
-        {"data_mode": "single", "optimizer_choice": "dspy_bootstrap_fewshot"},
+        {"artifact_kind": "repo", "data_mode": "pairs", "optimizer_choice": "grid_search"},
+        {"optimizer_choice": "unknown_engine"},
         {"artifact_kind": "dspy_program", "optimizer_choice": "gepa"},
     ],
 )
 def test_optimizer_choice_outside_setup_rejected(wizard_client: TestClient, body: dict) -> None:
-    """Skynet is repo-only, so the DSPy optimizers and DSPy targets are refused."""
+    """Skynet is repo-only, so unknown optimizers and DSPy targets are refused."""
     resp = wizard_client.post("/wizard/update", json=body)
 
     assert resp.status_code == 422

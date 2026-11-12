@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ...constants import COMPOSITION_WORKFLOW, PAYLOAD_OVERVIEW_COMPOSITION, TQDM_REMAINING_KEY
+from ...constants import PAYLOAD_OVERVIEW_COMPOSITION, TQDM_REMAINING_KEY
 from ...models import OptimizationStatus
 from ..converters import (
     compute_elapsed,
@@ -180,9 +180,7 @@ def test_compute_elapsed_reports_banked_time_before_resumed_leg_starts() -> None
     """
     created = _ts(2024, 1, 1, 10, 0, 0)
 
-    elapsed_str, elapsed_secs = compute_elapsed(
-        created, started_at=None, completed_at=None, accumulated_seconds=180.0
-    )
+    elapsed_str, elapsed_secs = compute_elapsed(created, started_at=None, completed_at=None, accumulated_seconds=180.0)
 
     assert elapsed_secs == 180.0
     assert elapsed_str == "00:03:00"
@@ -247,10 +245,10 @@ def test_extract_estimated_remaining_negative_value_returns_none() -> None:
     assert extract_estimated_remaining(job) is None
 
 
-def test_overview_to_base_fields_defaults_type_to_run() -> None:
-    """``optimization_type`` defaults to ``run`` when no key is present."""
+def test_overview_to_base_fields_defaults_type_to_blackbox() -> None:
+    """``optimization_type`` defaults to ``blackbox`` when no key is present."""
     fields = overview_to_base_fields({})
-    assert fields["optimization_type"] == "run"
+    assert fields["optimization_type"] == "blackbox"
 
 
 def test_overview_to_base_fields_picks_up_job_type() -> None:
@@ -273,8 +271,8 @@ def test_overview_to_base_fields_passes_through_model_name() -> None:
 
 def test_overview_to_base_fields_passes_through_composition() -> None:
     """``composition`` is propagated when present in the overview."""
-    fields = overview_to_base_fields({PAYLOAD_OVERVIEW_COMPOSITION: COMPOSITION_WORKFLOW})
-    assert fields["composition"] == COMPOSITION_WORKFLOW
+    fields = overview_to_base_fields({PAYLOAD_OVERVIEW_COMPOSITION: "workflow"})
+    assert fields["composition"] == "workflow"
 
 
 def test_overview_to_base_fields_composition_defaults_to_none() -> None:
@@ -299,10 +297,10 @@ def test_overview_to_base_fields_legacy_job_type_key_is_ignored() -> None:
     """Legacy 'job_type' is intentionally NOT read.
 
     The overview is normalised to 'optimization_type' before storage. Default
-    'run' is returned when only the legacy key is present.
+    'blackbox' is returned when only the legacy key is present.
     """
     fields = overview_to_base_fields({"job_type": "grid_search"})
-    assert fields["optimization_type"] == "run"
+    assert fields["optimization_type"] == "blackbox"
 
 
 def test_overview_to_base_fields_both_keys_optimization_type_wins() -> None:
@@ -311,7 +309,7 @@ def test_overview_to_base_fields_both_keys_optimization_type_wins() -> None:
     assert fields["optimization_type"] == "grid_search"
 
 
-def test_overview_to_base_fields_neither_key_defaults_to_run() -> None:
-    """An empty overview defaults to ``run``."""
+def test_overview_to_base_fields_neither_key_defaults_to_blackbox() -> None:
+    """An empty overview defaults to ``blackbox``."""
     fields = overview_to_base_fields({})
-    assert fields["optimization_type"] == "run"
+    assert fields["optimization_type"] == "blackbox"

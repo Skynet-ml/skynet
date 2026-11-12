@@ -21,14 +21,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ...constants import (
-    COMPOSITION_WORKFLOW,
-    OPTIMIZATION_TYPE_GRID_SEARCH,
-    OPTIMIZATION_TYPE_RUN,
+    OPTIMIZATION_TYPE_BLACKBOX,
     PAYLOAD_OVERVIEW_DATASET_ROWS,
     PAYLOAD_OVERVIEW_MODEL_NAME,
-    PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
-    PAYLOAD_OVERVIEW_TOTAL_PAIRS,
 )
 from ...i18n import t
 from ...models import (
@@ -110,7 +106,6 @@ def _summary_to_analytics_job(s: OptimizationSummaryResponse) -> DashboardAnalyt
         elapsed_seconds=s.elapsed_seconds,
         dataset_rows=s.dataset_rows,
         optimization_type=s.optimization_type,
-        best_pair_label=s.best_pair_label,
         created_at=created_at_str,
     )
 
@@ -125,10 +120,6 @@ _DATASET_ROW_EDGES: tuple[float, ...] = (50.0, 100.0, 250.0, 500.0, 1000.0)
 # Timeline granularity thresholds (days between first and last run).
 _TIMELINE_DAY_MAX_SPAN = 60
 _TIMELINE_WEEK_MAX_SPAN = 400
-
-# Job-type bucket for single runs whose program is a multi-node workflow;
-# they share ``optimization_type == "run"`` with plain single-module runs.
-_JOB_TYPE_WORKFLOW = "workflow"
 
 
 def _improvement_points(value: float) -> float:
@@ -153,13 +144,9 @@ def _job_type_key(summary: OptimizationSummaryResponse) -> str:
         summary: The run's dashboard summary.
 
     Returns:
-        The ``optimization_type``, except that single runs of a multi-node
-        workflow program report :data:`_JOB_TYPE_WORKFLOW`.
+        The ``optimization_type``; black-box when the run records none.
     """
-    job_type = summary.optimization_type or OPTIMIZATION_TYPE_RUN
-    if job_type == OPTIMIZATION_TYPE_RUN and summary.composition == COMPOSITION_WORKFLOW:
-        return _JOB_TYPE_WORKFLOW
-    return job_type
+    return summary.optimization_type or OPTIMIZATION_TYPE_BLACKBOX
 
 
 def _in_bucket(value: float | None, lower: float | None, upper: float | None) -> bool:
@@ -400,7 +387,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
 
         Prefers the store's skinny analytics scan, which prunes ``result``
         down to its scalar metrics inside the SELECT — the full blob (multi-MB
-        per grid run) never reaches this process, so a 10k-row scan costs KBs
+        per run) never reaches this process, so a 10k-row scan costs KBs
         instead of the cache holding hundreds of MB. Stores without the method
         (in-memory/test doubles) keep the plain list scan.
 
@@ -452,8 +439,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
 
         Caps at :data:`_ANALYTICS_JOB_HARD_CAP` jobs per request and surfaces
         ``truncated=True`` when the cap is hit. ``running_count`` folds in
-        ``validating`` status. For grid searches the ``best_pair`` is used
-        as the representative result.
+        ``validating`` status.
 
         Args:
             optimizer: Exact-match optimizer name filter.
@@ -494,9 +480,6 @@ def create_analytics_router(*, job_store) -> APIRouter:
         improvements = []
         runtimes = []
         total_dataset_rows = 0
-        total_pairs = 0
-        completed_pairs = 0
-        failed_pairs = 0
 
         for job_data, overview in filtered_jobs:
             job_status = job_data.get("status", "pending")
@@ -506,12 +489,6 @@ def create_analytics_router(*, job_store) -> APIRouter:
             if isinstance(rows, int):
                 total_dataset_rows += rows
 
-            optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-            if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-                pairs = overview.get(PAYLOAD_OVERVIEW_TOTAL_PAIRS)
-                if isinstance(pairs, int):
-                    total_pairs += pairs
-
             if job_status != "success":
                 continue
 
@@ -519,32 +496,13 @@ def create_analytics_router(*, job_store) -> APIRouter:
             if not result_data or not isinstance(result_data, dict):
                 continue
 
-            if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-                best_pair = result_data.get("best_pair")
-                if isinstance(best_pair, dict):
-                    baseline = best_pair.get("baseline_test_metric")
-                    optimized = best_pair.get("optimized_test_metric")
-                    if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                        improvements.append(optimized - baseline)
+            baseline, optimized = result_scores(result_data)
+            if isinstance(baseline, int | float) and isinstance(optimized, int | float):
+                improvements.append(optimized - baseline)
 
-                    runtime = best_pair.get("runtime_seconds")
-                    if isinstance(runtime, int | float):
-                        runtimes.append(runtime)
-
-                comp = result_data.get("completed_pairs")
-                fail = result_data.get("failed_pairs")
-                if isinstance(comp, int):
-                    completed_pairs += comp
-                if isinstance(fail, int):
-                    failed_pairs += fail
-            else:
-                baseline, optimized = result_scores(result_data)
-                if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                    improvements.append(optimized - baseline)
-
-                runtime = result_data.get("runtime_seconds")
-                if isinstance(runtime, int | float):
-                    runtimes.append(runtime)
+            runtime = result_data.get("runtime_seconds")
+            if isinstance(runtime, int | float):
+                runtimes.append(runtime)
 
         success_count = status_counts["success"]
         success_rate = (success_count / total) if total > 0 else 0.0
@@ -567,9 +525,6 @@ def create_analytics_router(*, job_store) -> APIRouter:
             min_improvement=round(min_improvement, 6) if min_improvement is not None else None,
             avg_runtime=round(avg_runtime, 2) if avg_runtime is not None else None,
             total_dataset_rows=total_dataset_rows,
-            total_pairs=total_pairs,
-            completed_pairs=completed_pairs,
-            failed_pairs=failed_pairs,
             truncated=truncated,
         )
 
@@ -635,27 +590,13 @@ def create_analytics_router(*, job_store) -> APIRouter:
 
                 result_data = job_data.get("result")
                 if result_data and isinstance(result_data, dict):
-                    optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
+                    baseline, optimized = result_scores(result_data)
+                    if isinstance(baseline, int | float) and isinstance(optimized, int | float):
+                        stats["improvements"].append(optimized - baseline)
 
-                    if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-                        best_pair = result_data.get("best_pair")
-                        if isinstance(best_pair, dict):
-                            baseline = best_pair.get("baseline_test_metric")
-                            optimized = best_pair.get("optimized_test_metric")
-                            if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                                stats["improvements"].append(optimized - baseline)
-
-                            runtime = best_pair.get("runtime_seconds")
-                            if isinstance(runtime, int | float):
-                                stats["runtimes"].append(runtime)
-                    else:
-                        baseline, optimized = result_scores(result_data)
-                        if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                            stats["improvements"].append(optimized - baseline)
-
-                        runtime = result_data.get("runtime_seconds")
-                        if isinstance(runtime, int | float):
-                            stats["runtimes"].append(runtime)
+                    runtime = result_data.get("runtime_seconds")
+                    if isinstance(runtime, int | float):
+                        stats["runtimes"].append(runtime)
 
         items: list[OptimizerStatsItem] = []
         for optimizer_name, stats in optimizer_data.items():
@@ -743,19 +684,9 @@ def create_analytics_router(*, job_store) -> APIRouter:
 
                 result_data = job_data.get("result")
                 if result_data and isinstance(result_data, dict):
-                    optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-
-                    if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-                        best_pair = result_data.get("best_pair")
-                        if isinstance(best_pair, dict):
-                            baseline = best_pair.get("baseline_test_metric")
-                            optimized = best_pair.get("optimized_test_metric")
-                            if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                                stats["improvements"].append(optimized - baseline)
-                    else:
-                        baseline, optimized = result_scores(result_data)
-                        if isinstance(baseline, int | float) and isinstance(optimized, int | float):
-                            stats["improvements"].append(optimized - baseline)
+                    baseline, optimized = result_scores(result_data)
+                    if isinstance(baseline, int | float) and isinstance(optimized, int | float):
+                        stats["improvements"].append(optimized - baseline)
 
         model_items: list[ModelStatsItem] = []
         for model_name, stats in model_data.items():
@@ -814,7 +745,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
         ),
         job_type: str | None = Query(
             default=None,
-            description="Job-type bucket filter: 'run', 'grid_search', 'blackbox' or 'workflow'.",
+            description="Job-type bucket filter: 'run', 'blackbox' or 'workflow'.",
         ),
         module: str | None = Query(default=None, description="Exact-match module name filter"),
         improvement_min: float | None = Query(
@@ -856,7 +787,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
             include_shared: Union in runs shared with ``username``.
             owner: Restrict the aggregation to runs owned by this username.
             access: Restrict to a caller access tier (mine/owner/editor/viewer).
-            job_type: Restrict to one job-type bucket (run/grid_search/blackbox/workflow).
+            job_type: Restrict to one job-type bucket (run/blackbox/workflow).
             module: Exact-match module name filter.
             improvement_min: Inclusive lower bound on improvement (points).
             improvement_max: Exclusive upper bound on improvement (points).
@@ -994,8 +925,6 @@ def create_analytics_router(*, job_store) -> APIRouter:
         job_type_counts: dict[str, int] = {}
         module_counts: dict[str, int] = {}
         total_dataset_rows = 0
-        total_pairs_run = 0
-        grid_search_count = 0
         single_run_count = 0
         for s in summaries:
             opt = s.optimizer_name or t("analytics.other_bucket")
@@ -1006,13 +935,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
                 module_counts[s.module_name] = module_counts.get(s.module_name, 0) + 1
             if s.dataset_rows:
                 total_dataset_rows += s.dataset_rows
-            if s.optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
-                grid_search_count += 1
-                if s.total_pairs:
-                    total_pairs_run += s.total_pairs
-            else:
-                single_run_count += 1
-                total_pairs_run += 1
+            single_run_count += 1
 
         owner_counter: Counter = Counter()
         for s in summaries:
@@ -1060,7 +983,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
         )
 
         def _model_key(s: OptimizationSummaryResponse) -> str | None:
-            """Return the run's primary model, falling back to the grid's best pair.
+            """Return the run's primary model.
 
             Args:
                 s: The optimization summary.
@@ -1068,9 +991,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
             Returns:
                 The model name, or None when the run recorded none.
             """
-            if s.model_name:
-                return s.model_name
-            return s.best_pair_label.split(" + ")[0] if s.best_pair_label else None
+            return s.model_name or None
 
         def _group_stats(key_of: Callable[[OptimizationSummaryResponse], str | None]) -> dict[str, dict[str, Any]]:
             """Roll the filtered runs up by ``key_of`` for the comparison tables.
@@ -1162,8 +1083,6 @@ def create_analytics_router(*, job_store) -> APIRouter:
             best_improvement=round(best_improvement, 2) if best_improvement is not None else None,
             avg_runtime_seconds=round(avg_runtime_seconds, 2) if avg_runtime_seconds is not None else None,
             total_dataset_rows=total_dataset_rows,
-            total_pairs_run=total_pairs_run,
-            grid_search_count=grid_search_count,
             single_run_count=single_run_count,
             improvement_histogram=improvement_histogram,
             runtime_histogram=runtime_histogram,

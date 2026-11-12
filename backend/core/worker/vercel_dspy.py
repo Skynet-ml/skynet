@@ -1,4 +1,4 @@
-"""Supervise the unchanged DSPy service through a parent-owned Vercel sandbox."""
+"""Supervise the protected optimizer through a parent-owned Vercel sandbox."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from ..billing.signals import BudgetReached
 from ..brand import APP_NAME
 from ..exceptions import InfrastructureInterruptionError, ServiceError
 from ..models.blackbox import BLACKBOX_HARNESS_CODEX
-from ..models.unified import DSPY_OPTIMIZERS
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, archive_chunks
 from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSpec
@@ -29,7 +28,7 @@ from .sandbox_protocol import SANDBOX_PROTOCOL
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_EVENT = "checkpoint_file"
-_CHECKPOINT_PATH = re.compile(r"(?:(?:pair_\d+|gepa)/)?gepa_state\.bin\Z")
+_CHECKPOINT_PATH = re.compile(r"(?:gepa/)?gepa_state\.bin\Z")
 BROKEN_IMAGE_MESSAGE = "The sandbox image cannot start its optimizer; rebuild the sandbox image."
 OUTDATED_IMAGE_MESSAGE = (
     f"The sandbox image is older than this version of {APP_NAME}; rebuild and re-pin the sandbox image."
@@ -65,21 +64,14 @@ def _starts_codex(payload: dict[str, Any]) -> bool:
     """Tell whether the optimizer in this box can start a contained Codex proposer.
 
     Args:
-        payload: The run payload (black-box ``proposer`` or unified
-            ``optimizer.proposer``).
+        payload: The black-box run payload.
 
     Returns:
-        True for a sandbox proposer on the Codex harness, outside a setup check
-        and a DSPy optimizer.
+        True for a sandbox proposer on the Codex harness, outside a setup check.
     """
     if "_preflight" in payload:
         return False
-    optimizer = payload.get("optimizer")
-    if isinstance(optimizer, dict) and optimizer.get("choice") in DSPY_OPTIMIZERS:
-        return False
     proposer = payload.get("proposer")
-    if proposer is None and isinstance(optimizer, dict):
-        proposer = optimizer.get("proposer")
     if not isinstance(proposer, dict) or proposer.get("host_cli") is not None:
         return False
     return proposer.get("harness", BLACKBOX_HARNESS_CODEX) == BLACKBOX_HARNESS_CODEX

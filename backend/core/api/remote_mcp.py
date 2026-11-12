@@ -324,7 +324,6 @@ def stop_run(optimization_id: str, user: AuthenticatedUser, *, job_store: Any, w
 
 def build_remote_mcp(
     *,
-    service: Any,
     job_store: Any,
     get_worker: Callable[[], Any],
     http_client: Callable[[], httpx.Client] | None = None,
@@ -333,7 +332,6 @@ def build_remote_mcp(
     """Build the remote MCP server and its tools.
 
     Args:
-        service: Optimization service handed to the worker.
         job_store: Store that holds runs, budgets and grants.
         get_worker: Returns the background worker.
         http_client: Factory for the model catalog client.
@@ -557,7 +555,6 @@ class RemoteMcpDispatch:
 def mount_remote_mcp(
     app: FastAPI,
     *,
-    service: Any,
     job_store: Any,
     get_worker: Callable[[], Any],
     extensions: Sequence[McpExtension] = (),
@@ -569,12 +566,11 @@ def mount_remote_mcp(
 
     Args:
         app: The API application.
-        service: Optimization service handed to the worker.
         job_store: Store that holds runs, budgets and grants.
         get_worker: Returns the background worker.
         extensions: Registrars that add more tools to the server.
     """
-    mcp = build_remote_mcp(service=service, job_store=job_store, get_worker=get_worker, extensions=extensions)
+    mcp = build_remote_mcp(job_store=job_store, get_worker=get_worker, extensions=extensions)
     mcp_app = mcp.http_app(path="/", stateless_http=True, json_response=True)
     app.add_middleware(RemoteMcpDispatch, mcp_app=mcp_app, job_store=job_store)
     parent_lifespan = app.router.lifespan_context

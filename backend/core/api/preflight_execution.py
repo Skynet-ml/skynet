@@ -533,7 +533,6 @@ def _perform_preflight(
         bind_protected_sandbox(
             gateway,
             settings,
-            workflow=request.workflow,
             owner_id=document["id"],
             lifetime_seconds=lifetime_seconds,
             parent_hosts=PACKAGE_REGISTRY_HOSTS if is_repo_payload(payload) else (),

@@ -65,50 +65,33 @@ def test_corpus_fetch_has_no_artificial_point_cap() -> None:
     assert "LIMIT" not in statement.text.upper()
 
 
-def test_user_facing_corpus_sql_keeps_legacy_rows_and_drops_internal_rows() -> None:
+def test_user_facing_corpus_sql_keeps_untyped_rows_and_drops_other_types() -> None:
     """The corpus predicate admits user-facing rows and rejects internal ones.
 
     Executes the real SQL against an in-memory schema shaped like the columns
-    the predicate reads. Legacy rows (no ``optimization_type`` recorded
-    anywhere) must stay discoverable — the open/detail paths serve them — and
-    tagger jobs and distributed grid-pair child rows must never surface.
+    the predicate reads. Rows with no ``optimization_type`` recorded anywhere
+    default to black-box and stay discoverable — the open/detail paths serve
+    them. Retired DSPy runs and tagger jobs must never surface.
     """
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE jobs (optimization_id TEXT, optimization_type TEXT, payload_overview TEXT)"))
+        conn.execute(text("CREATE TABLE job_embeddings (optimization_id TEXT, optimization_type TEXT)"))
         conn.execute(
-            text(
-                "CREATE TABLE jobs (optimization_id TEXT, optimization_type TEXT, "
-                "payload_overview TEXT, parent_optimization_id TEXT)"
-            )
-        )
-        conn.execute(
-            text("CREATE TABLE job_embeddings (optimization_id TEXT, optimization_type TEXT)")
-        )
-        conn.execute(
-            text("INSERT INTO jobs VALUES (:id, :otype, :payload, :parent)"),
+            text("INSERT INTO jobs VALUES (:id, :otype, :payload)"),
             [
-                {"id": "legacy", "otype": None, "payload": None, "parent": None},
-                {"id": "plain-run", "otype": "run", "payload": None, "parent": None},
-                {"id": "grid-parent", "otype": "grid_search", "payload": None, "parent": None},
+                {"id": "legacy", "otype": None, "payload": None},
+                {"id": "plain-run", "otype": "run", "payload": None},
+                {"id": "repo-run", "otype": "blackbox", "payload": None},
                 {
                     "id": "payload-only",
                     "otype": None,
                     "payload": '{"optimization_type": "run"}',
-                    "parent": None,
                 },
                 {
                     "id": "tagger",
                     "otype": OPTIMIZATION_TYPE_TAGGING,
                     "payload": None,
-                    "parent": None,
-                },
-                {
-                    "id": "grid-child",
-                    "otype": "grid_search",
-                    "payload": None,
-                    "parent": "grid-parent",
                 },
             ],
         )
@@ -125,7 +108,7 @@ def test_user_facing_corpus_sql_keeps_legacy_rows_and_drops_internal_rows() -> N
             .scalars()
             .all()
         )
-    assert kept == ["grid-parent", "legacy", "payload-only", "plain-run"]
+    assert kept == ["legacy", "repo-run"]
 
 
 def _sqlite_jsonb_typeof(value: str | None) -> str | None:
@@ -151,16 +134,13 @@ def test_corpus_metric_sql_falls_back_to_job_scores() -> None:
     Executes the real metric-fallback SQL against an in-memory schema — the
     SQL that fills each result row's ``baseline_metric``/``optimized_metric``.
     The embedded pair must win when present; otherwise runs read
-    ``latest_metrics`` then ``result`` and grid jobs read
-    ``result.best_pair``, mirroring the embedding pipeline's
+    ``latest_metrics`` then ``result``, mirroring the embedding pipeline's
     ``_extract_scores``. Rows with no numeric pair anywhere (including a
     malformed non-numeric value, which must not error) resolve to NULL. The
     ``optimized - baseline`` ordering here is only the assertion vehicle for
     the resolved values, not a production sort.
     """
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
 
     @event.listens_for(engine, "connect")
     def _register_jsonb_typeof(dbapi_conn, _record) -> None:
@@ -174,10 +154,7 @@ def test_corpus_metric_sql_falls_back_to_job_scores() -> None:
             )
         )
         conn.execute(
-            text(
-                "CREATE TABLE job_embeddings (optimization_id TEXT, "
-                "baseline_metric REAL, optimized_metric REAL)"
-            )
+            text("CREATE TABLE job_embeddings (optimization_id TEXT, baseline_metric REAL, optimized_metric REAL)")
         )
         conn.execute(
             text("INSERT INTO jobs VALUES (:id, :overview, :metrics, :result, :created)"),
@@ -204,16 +181,6 @@ def test_corpus_metric_sql_falls_back_to_job_scores() -> None:
                     "created": "2026-07-26",
                 },
                 {
-                    "id": "grid",
-                    "overview": '{"optimization_type": "grid_search"}',
-                    "metrics": None,
-                    "result": (
-                        '{"best_pair": {"baseline_test_metric": 50.0, '
-                        '"optimized_test_metric": 60.0}}'
-                    ),
-                    "created": "2026-07-22",
-                },
-                {
                     "id": "embedded",
                     "overview": None,
                     "metrics": '{"optimized_test_metric": 11.0}',
@@ -236,9 +203,7 @@ def test_corpus_metric_sql_falls_back_to_job_scores() -> None:
                 },
             ],
         )
-        conn.execute(
-            text("INSERT INTO job_embeddings VALUES ('embedded', 10.0, 30.0)")
-        )
+        conn.execute(text("INSERT INTO job_embeddings VALUES ('embedded', 10.0, 30.0)"))
         ranked = (
             conn.execute(
                 text(
@@ -256,7 +221,6 @@ def test_corpus_metric_sql_falls_back_to_job_scores() -> None:
     assert ranked == [
         "embedded",
         "papillon",
-        "grid",
         "flat",
         "regressed",
         "malformed",
@@ -273,9 +237,7 @@ def test_normalize_query_for_log_collapses_and_drops_short() -> None:
 
 def test_log_and_fetch_popular_queries_ranks_by_count() -> None:
     """Recorded public queries aggregate into a count-ranked trending list."""
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SearchQueryLogModel.__table__.create(engine)
     store = SimpleNamespace(engine=engine)
 
@@ -298,9 +260,7 @@ def test_job_embeddings_relation_degrades_when_table_absent() -> None:
     itself is Postgres-specific (``::`` casts, ``WHERE FALSE``) and is validated
     against a real table-less Postgres out-of-band, not here on SQLite.
     """
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     store = SimpleNamespace(engine=engine)
     dashboard._EMBEDDINGS_TABLE_PRESENT.pop(engine, None)
     assert dashboard._job_embeddings_table_present(store) is False
@@ -394,7 +354,10 @@ def test_fetch_corpus_facets_counts_each_dimension_against_the_other_filters(mon
     assert "run_type <> 'blackbox'" not in values_sql["models"]
     assert "HAVING COUNT(*) FILTER (WHERE run_type = ANY(:optimization_types)) > 0" in values_sql["models"]
     assert "ORDER BY n DESC, value ASC LIMIT :facet_limit" in values_sql["models"]
-    assert "COUNT(DISTINCT model) AS n FROM corpus WHERE model <> '' AND run_type = ANY(:optimization_types)" in totals_sql["models"]
+    assert (
+        "COUNT(DISTINCT model) AS n FROM corpus WHERE model <> '' AND run_type = ANY(:optimization_types)"
+        in totals_sql["models"]
+    )
     assert "ILIKE" not in sql
     assert "j.created_at >= :date_from" in sql
     assert params["optimization_types"] == ["blackbox"]
@@ -433,8 +396,17 @@ def test_fetch_corpus_facets_value_query_matches_every_dimension_and_escapes_lik
     assert params["facet_limit"] == dashboard.FACET_LIMIT_MAX
     assert sql.count("ILIKE :value_pattern") == 8
     assert "WHERE model <> '' AND model ILIKE :value_pattern GROUP BY model" in sql
-    assert "COUNT(DISTINCT optimizer) AS n FROM corpus WHERE optimizer <> '' AND optimizer ILIKE :value_pattern AND TRUE" in sql
-    assert out == {"models": [], "optimizers": [], "modules": [], "types": [], "totals": {"models": 0, "optimizers": 0, "modules": 0, "types": 0}}
+    assert (
+        "COUNT(DISTINCT optimizer) AS n FROM corpus WHERE optimizer <> '' AND optimizer ILIKE :value_pattern AND TRUE"
+        in sql
+    )
+    assert out == {
+        "models": [],
+        "optimizers": [],
+        "modules": [],
+        "types": [],
+        "totals": {"models": 0, "optimizers": 0, "modules": 0, "types": 0},
+    }
 
 
 def test_fetch_corpus_facets_dimension_restricts_the_query_to_one_dimension(monkeypatch) -> None:

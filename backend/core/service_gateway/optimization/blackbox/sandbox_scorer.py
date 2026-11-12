@@ -37,7 +37,7 @@ from ....config import Settings, app_env, settings
 from ....exceptions import ServiceError
 from ....models.common import ModelConfig
 from ...language_models import usage_by_model_from_history
-from . import check_terminal, package_setup, runner, sandbox_log
+from . import package_setup, runner, sandbox_log
 from .agent_eval import gateway_from_settings
 from .harness import ENV_API_KEY
 from .heartbeat import heartbeat
@@ -559,10 +559,8 @@ class SandboxPythonScorer:
             name = _sandbox_name(self._job_id)
             logger.info("scorer sandbox: opening %s (lifetime %.0fs)", name or "a box", self._spec.lifetime_seconds)
             opened = time.perf_counter()
-            check_terminal.note("box_opening")
             session = self._runtime.open(replace(self._spec, name=name))
             logger.info("scorer sandbox: ready in %.1fs", time.perf_counter() - opened)
-            check_terminal.note("box_ready", seconds=round(time.perf_counter() - opened, 1))
             try:
                 session.write_files({RUNNER_FILE: RUNNER_SOURCE, runner.CODE_FILE: self._code})
                 self._install(session)

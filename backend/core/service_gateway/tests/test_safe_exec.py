@@ -13,12 +13,10 @@ from core.exceptions import ServiceError
 from core.service_gateway import safe_exec
 from core.service_gateway.safe_exec import (
     FunctionShape,
-    MetricIntrospection,
     MetricProbeResult,
     SignatureIntrospection,
     introspect_workspace_code,
     probe_metric_on_sample,
-    validate_metric_code,
     validate_scorer_code,
     validate_signature_code,
 )
@@ -96,34 +94,6 @@ class TestValidateSignatureCode:
         # a `while True` in module-level scope hangs the validator forever.
         with pytest.raises(ServiceError, match="timeout"):
             validate_signature_code("while True: pass", timeout_seconds=2.0)
-
-
-class TestValidateMetricCode:
-    """Tests for ``validate_metric_code``."""
-
-    def test_returns_param_names_for_valid_metric(self) -> None:
-        """A valid metric returns ``MetricIntrospection`` with the parameter names."""
-        info = validate_metric_code(_VALID_PREDICTION_METRIC)
-
-        assert isinstance(info, MetricIntrospection)
-        assert info.callable_name == "metric"
-        assert info.param_names == [
-            "example",
-            "prediction",
-            "trace",
-            "pred_name",
-            "pred_trace",
-        ]
-
-    def test_missing_callable_surfaces_as_service_error(self) -> None:
-        """Source without any callable raises ``ServiceError``."""
-        with pytest.raises(ServiceError, match="metric"):
-            validate_metric_code("x = 1")
-
-    def test_syntax_error_surfaces_as_service_error(self) -> None:
-        """A syntactically invalid metric raises ``ServiceError``."""
-        with pytest.raises(ServiceError, match="syntax error"):
-            validate_metric_code("def !!!")
 
 
 class TestProbeMetricOnSample:

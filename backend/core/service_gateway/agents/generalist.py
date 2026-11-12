@@ -1063,12 +1063,6 @@ _ALWAYS_TOOLS = frozenset(
         # agent uses it to surface comparable runs ("find me sentiment jobs
         # that beat 0.8 with GEPA") before the user has filled the wizard.
         "public_search_dashboard_search_post",
-        # Diagnostic readouts for finished runs — per-example baseline /
-        # optimized scores and full grid-result detail. Read-only and safe
-        # to call once an optimization id is in scope.
-        "get_test_results_optimizations",
-        "get_grid_search_result_optimizations",
-        "get_pair_test_results_optimizations",
         # Tagger reach: list the caller's tagging sessions and point the user at
         # /tagger/{id}; a new tagging opens through open_page (SKY-631). The
         # chat reads and saves a session's labeling guide through the same
@@ -2315,12 +2309,6 @@ Capabilities worth knowing about:
   language, like
   "show me sentiment runs that scored above 0.8") before reaching for
   the wizard.
-* Run diagnostics: ``get_test_results`` returns per-example baseline
-  and optimized test scores for a single run; ``get_grid_search_result``
-  returns the full per-pair table for a finished grid search;
-  ``get_pair_test_results`` zooms into one pair's per-example scores.
-  Call them when the user asks why a run scored what it did or which
-  examples regressed.
 * Live inference: when the user wants to try the trained program on a
   fresh input ("how would this run classify X?"), call
   ``request_user_inference`` with the ``optimization_id``. That renders

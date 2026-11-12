@@ -18,10 +18,10 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from sqlalchemy import Engine, and_, case, create_engine, func, or_, text
+from sqlalchemy import Engine, case, create_engine, func, or_, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, aliased, defer, sessionmaker
+from sqlalchemy.orm import Session, defer, sessionmaker
 
 from .. import run_log
 from ..billing.budgets import BudgetConflictError, BudgetError, BudgetInFlightError, BudgetService
@@ -32,7 +32,6 @@ from ..constants import (
     PAYLOAD_OVERVIEW_MODEL_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
-    PAYLOAD_OVERVIEW_TOTAL_PAIRS,
     PROGRESS_CANDIDATE,
     PROGRESS_LANE_STARTED,
     PROGRESS_REJECTED,
@@ -44,7 +43,7 @@ from ..sandbox.pool import CLAIMABLE_TRIAL_STATUSES, TrialClaim, TrialFingerprin
 from ..worker.checkpoint_compat import CheckpointCompatibilityError, validate_checkpoint
 from .agent_run_store import PostgresAgentRunStore
 from .base import JobRecord, LogEntryRecord, ProgressEventRecord
-from .checkpoint_store import GepaCheckpoint, PostgresCheckpointBlobStore, PostgresGridPairResultStore
+from .checkpoint_store import GepaCheckpoint, PostgresCheckpointBlobStore
 from .log_quota import LogQuotaGate
 from .migrate import stamp_if_unadopted, upgrade_if_adopted
 from .models import (
@@ -54,7 +53,6 @@ from .models import (
     BlackboxAgentRunModel,
     ConversationEmbeddingModel,
     GepaCheckpointModel,
-    GridPairResultModel,
     JobEmbeddingModel,
     JobModel,
     LogEntryModel,
@@ -230,7 +228,6 @@ def _log_record(log: LogEntryModel) -> LogEntryRecord:
             "level": log.level,
             "logger": log.logger,
             "message": log.message,
-            "pair_index": log.pair_index,
             "source": log.source or "host",
             "event": log.event,
             "fields": log.fields,
@@ -313,15 +310,6 @@ def _json_float(value: Any) -> float | None:
         return None
 
 
-def _json_str(value: Any) -> str | None:
-    """Keep one extracted JSON scalar when it is a string, else ``None``.
-
-    Both dialects hand string members back as ``str``; anything else means the
-    key held a number or a nested value, which the summaries never label with.
-    """
-    return value if isinstance(value, str) else None
-
-
 def _result_summary_columns() -> tuple[Any, ...]:
     """SELECT expressions extracting the ``result`` scalars list rows carry.
 
@@ -338,19 +326,11 @@ def _result_summary_columns() -> tuple[Any, ...]:
         A ``result IS NULL`` flag followed by the extracted scalars.
     """
     result = JobModel.result
-    best_pair = result["best_pair"]
     return (
         result.is_(None),
         result["baseline_test_metric"].as_string(),
         result["optimized_test_metric"].as_string(),
         result["runtime_seconds"].as_string(),
-        result["completed_pairs"].as_string(),
-        result["failed_pairs"].as_string(),
-        best_pair["baseline_test_metric"].as_string(),
-        best_pair["optimized_test_metric"].as_string(),
-        best_pair["runtime_seconds"].as_string(),
-        best_pair["generation_model"].as_string(),
-        best_pair["reflection_model"].as_string(),
         result["baseline_score"].as_string(),
         result["best_score"].as_string(),
     )
@@ -360,10 +340,8 @@ def _assemble_result_summary(values: Any) -> dict[str, Any] | None:
     """Rebuild a pruned ``result`` dict from :func:`_result_summary_columns` scalars.
 
     Keeps the shapes the readers rely on: a NULL ``result`` stays ``None``
-    (the ``if not result_data`` guards), absent or non-scalar keys stay
-    absent (``.get`` → ``None``, as on the full blob), and ``best_pair``
-    appears only when at least one of its summarized keys parsed — matching
-    how a grid row looks to ``build_summary``.
+    (the ``if not result_data`` guards), and absent or non-scalar keys stay
+    absent (``.get`` → ``None``, as on the full blob).
 
     Args:
         values: The positional scalars, in :func:`_result_summary_columns` order.
@@ -376,13 +354,6 @@ def _assemble_result_summary(values: Any) -> dict[str, Any] | None:
         r_baseline,
         r_optimized,
         r_runtime,
-        r_completed,
-        r_failed,
-        bp_baseline,
-        bp_optimized,
-        bp_runtime,
-        bp_generation,
-        bp_reflection,
         r_baseline_score,
         r_best_score,
     ) = values
@@ -392,23 +363,10 @@ def _assemble_result_summary(values: Any) -> dict[str, Any] | None:
         ("baseline_test_metric", _json_float(r_baseline)),
         ("optimized_test_metric", _json_float(r_optimized)),
         ("runtime_seconds", _json_float(r_runtime)),
-        ("completed_pairs", _json_int(r_completed)),
-        ("failed_pairs", _json_int(r_failed)),
         ("baseline_score", _json_float(r_baseline_score)),
         ("best_score", _json_float(r_best_score)),
     )
-    result: dict[str, Any] = {key: value for key, value in result_pairs if value is not None}
-    best_pair_pairs = (
-        ("baseline_test_metric", _json_float(bp_baseline)),
-        ("optimized_test_metric", _json_float(bp_optimized)),
-        ("runtime_seconds", _json_float(bp_runtime)),
-        ("generation_model", _json_str(bp_generation)),
-        ("reflection_model", _json_str(bp_reflection)),
-    )
-    best_pair = {key: value for key, value in best_pair_pairs if value is not None}
-    if best_pair:
-        result["best_pair"] = best_pair
-    return result
+    return {key: value for key, value in result_pairs if value is not None}
 
 
 def _assemble_analytics_row(row: Any) -> JobRecord:
@@ -424,19 +382,18 @@ def _assemble_analytics_row(row: Any) -> JobRecord:
     Returns:
         A ``JobRecord``-shaped dict with pruned ``payload_overview``/``result``.
     """
-    optimization_id, job_status, ov_optimizer, ov_model, ov_type, ov_rows, ov_pairs = row[:7]
+    optimization_id, job_status, ov_optimizer, ov_model, ov_type, ov_rows = row[:6]
     overview_pairs = (
         (PAYLOAD_OVERVIEW_OPTIMIZER_NAME, ov_optimizer),
         (PAYLOAD_OVERVIEW_MODEL_NAME, ov_model),
         (PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, ov_type),
         (PAYLOAD_OVERVIEW_DATASET_ROWS, _json_int(ov_rows)),
-        (PAYLOAD_OVERVIEW_TOTAL_PAIRS, _json_int(ov_pairs)),
     )
     return {
         "optimization_id": optimization_id,
         "status": job_status,
         "payload_overview": {key: value for key, value in overview_pairs if value is not None},
-        "result": _assemble_result_summary(row[7:]),
+        "result": _assemble_result_summary(row[6:]),
     }
 
 
@@ -447,35 +404,15 @@ def _user_facing_jobs():
     claim them, but they are not optimization runs: every listing and count
     surface skips them unless a caller filters for the type explicitly. The
     NULL branch is kept because ``optimization_type`` is nullable (legacy
-    rows) and a bare ``!=`` would silently drop those rows too. Distributed
-    grid-pair child rows are scheduling internals of their parent grid and
-    are excluded the same way (see also :func:`_top_level_jobs`, applied
-    even when a caller filters by type).
+    rows) and a bare ``!=`` would silently drop those rows too.
 
     Returns:
         A SQLAlchemy boolean clause for ``query.filter``.
     """
-    return and_(
-        or_(
-            JobModel.optimization_type.is_(None),
-            JobModel.optimization_type != OPTIMIZATION_TYPE_TAGGING,
-        ),
-        _top_level_jobs(),
+    return or_(
+        JobModel.optimization_type.is_(None),
+        JobModel.optimization_type != OPTIMIZATION_TYPE_TAGGING,
     )
-
-
-def _top_level_jobs():
-    """SQL filter excluding distributed grid-pair child rows.
-
-    Child rows share the jobs table (so the claim/lease/orphan machinery
-    applies to them verbatim) but belong to their parent grid in every
-    user-facing sense: listings, counts, and dashboards must never show
-    them, even when the caller filters for ``grid_search`` explicitly.
-
-    Returns:
-        A SQLAlchemy boolean clause for ``query.filter``.
-    """
-    return JobModel.parent_optimization_id.is_(None)
 
 
 # Must match PG_CONTAINER in desktop/src/main/postgres.ts.
@@ -786,7 +723,6 @@ class RemoteDBJobStore:
         self.bm25_search_enabled = settings.search_bm25_enabled and self._bootstrap_bm25()
         self._session_factory = sessionmaker(bind=self._engine)
         self._checkpoints = PostgresCheckpointBlobStore(self._engine)
-        self._grid_pair_results = PostgresGridPairResultStore(self._engine)
         self._agent_runs = PostgresAgentRunStore(self._engine)
         self._run_calls = PostgresRunCallStore(self._engine)
         self.sandbox_trials = PostgresSandboxTrialStore(self._engine)
@@ -965,8 +901,6 @@ class RemoteDBJobStore:
                 "sandbox_image": job.sandbox_image,
                 "stored_bytes": job.stored_bytes or 0,
                 "accumulated_runtime_seconds": job.accumulated_runtime_seconds or 0.0,
-                "parent_optimization_id": job.parent_optimization_id,
-                "pair_index": job.pair_index,
             },
         )
 
@@ -1164,8 +1098,8 @@ class RemoteDBJobStore:
         The in-run counterpart of :meth:`claim_completion_notification`: each
         email kind (``new_best``, ``stage:baseline``, ``digest:<window>`` ...)
         is recorded on the job row under a row lock, so a resumed run, an
-        orphan-recovered run or parallel grid pairs all writing to one parent
-        send it once. ``cap_prefix``/``cap`` bound how many claims sharing a
+        orphan-recovered run writing to one job
+        sends it once. ``cap_prefix``/``cap`` bound how many claims sharing a
         prefix a run may hold (the per-run progress-email cap).
 
         Args:
@@ -1445,7 +1379,6 @@ class RemoteDBJobStore:
             if settings.embeddings_enabled:
                 session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id == optimization_id).delete()
             session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id == optimization_id).delete()
-            session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id == optimization_id).delete()
             session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id == optimization_id).delete()
             session.query(BlackboxAgentRunModel).filter(
                 BlackboxAgentRunModel.optimization_id == optimization_id
@@ -1454,7 +1387,6 @@ class RemoteDBJobStore:
             session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
             session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id == optimization_id).delete()
             self._close_deleted_job_budgets(session, [optimization_id])
-            self._delete_grid_pair_children(session, optimization_id)
             session.query(JobModel).filter(JobModel.optimization_id == optimization_id).delete()
             session.commit()
         finally:
@@ -1462,7 +1394,7 @@ class RemoteDBJobStore:
         self._evict_job_counters([optimization_id])
 
     def _close_deleted_job_budgets(self, session: Session, optimization_ids: list[str]) -> None:
-        """Close the execution budgets of jobs (and their grid pairs) about to be deleted.
+        """Close the execution budgets of jobs about to be deleted.
 
         Budgets and ledger rows are financial history with no foreign key to
         ``jobs``, so they are kept; this releases unstarted holds and drops the
@@ -1470,56 +1402,9 @@ class RemoteDBJobStore:
 
         Args:
             session: The open delete session the caller commits.
-            optimization_ids: Root job ids being deleted.
+            optimization_ids: Job ids being deleted.
         """
-        child_ids = [
-            row[0]
-            for row in session.query(JobModel.optimization_id)
-            .filter(JobModel.parent_optimization_id.in_(optimization_ids))
-            .all()
-        ]
-        BudgetService(engine=self._engine).close_for_deleted_jobs([*optimization_ids, *child_ids], session=session)
-
-    @staticmethod
-    def _delete_grid_pair_children(session: Session, parent_optimization_id: str) -> None:
-        """Delete a grid parent's pair-child rows and their per-child stores.
-
-        Explicit (rather than relying on the ``ON DELETE CASCADE`` self-FK)
-        so SQLite test runs without foreign-key enforcement clean up exactly
-        like Postgres. Child logs/progress need no handling — a pair child
-        writes those onto its PARENT's id.
-
-        Args:
-            session: The open session the caller commits.
-            parent_optimization_id: The grid parent whose children go away.
-        """
-        child_ids = [
-            row[0]
-            for row in session.query(JobModel.optimization_id)
-            .filter(JobModel.parent_optimization_id == parent_optimization_id)
-            .all()
-        ]
-        if not child_ids:
-            return
-        session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id.in_(child_ids)).delete(
-            synchronize_session=False
-        )
-        session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id.in_(child_ids)).delete(
-            synchronize_session=False
-        )
-        session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id.in_(child_ids)).delete(
-            synchronize_session=False
-        )
-        session.query(BlackboxAgentRunModel).filter(BlackboxAgentRunModel.optimization_id.in_(child_ids)).delete(
-            synchronize_session=False
-        )
-        session.query(RunCallModel).filter(RunCallModel.optimization_id.in_(child_ids)).delete(
-            synchronize_session=False
-        )
-        session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id.in_(child_ids)).delete(
-            synchronize_session=False
-        )
-        session.query(JobModel).filter(JobModel.optimization_id.in_(child_ids)).delete(synchronize_session=False)
+        BudgetService(engine=self._engine).close_for_deleted_jobs(list(optimization_ids), session=session)
 
     def _evict_job_counters(self, optimization_ids: list[str]) -> None:
         """Drop the per-job in-memory bookkeeping for deleted jobs.
@@ -1601,9 +1486,6 @@ class RemoteDBJobStore:
             session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id.in_(optimization_ids)).delete(
                 synchronize_session=False
             )
-            session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id.in_(optimization_ids)).delete(
-                synchronize_session=False
-            )
             session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id.in_(optimization_ids)).delete(
                 synchronize_session=False
             )
@@ -1620,8 +1502,6 @@ class RemoteDBJobStore:
                 synchronize_session=False
             )
             self._close_deleted_job_budgets(session, optimization_ids)
-            for parent_id in optimization_ids:
-                self._delete_grid_pair_children(session, parent_id)
             deleted = (
                 session.query(JobModel)
                 .filter(JobModel.optimization_id.in_(optimization_ids))
@@ -1728,13 +1608,13 @@ class RemoteDBJobStore:
         manifest: dict[str, Any] | None = None,
         expected_generation: int | None = None,
     ) -> bool:
-        """Persist (or replace) the latest GEPA state blob for one run or grid pair.
+        """Persist (or replace) the latest GEPA state blob for one run.
 
         Args:
             optimization_id: Owning job id.
             data: Raw ``gepa_state.bin`` bytes for the latest iteration.
             iteration: The iteration index the state was saved at.
-            pair_index: Grid pair index, or ``-1`` for a single run.
+            pair_index: Checkpoint key; ``-1`` for a run.
             manifest: Exact engine and task evidence for compatible restoration.
             expected_generation: Current worker epoch authorizing publication.
 
@@ -1755,7 +1635,7 @@ class RemoteDBJobStore:
 
         Args:
             optimization_id: Job whose checkpoint is read.
-            pair_index: Grid pair index, or ``-1`` for a single run.
+            pair_index: Checkpoint key; ``-1`` for a run.
 
         Returns:
             The :class:`GepaCheckpoint` (state bytes plus iteration), or ``None``.
@@ -1763,7 +1643,7 @@ class RemoteDBJobStore:
         return self._checkpoints.get(optimization_id, pair_index)
 
     def list_gepa_checkpoints(self, optimization_id: str) -> list[GepaCheckpoint]:
-        """Return every saved checkpoint for a job (all grid pairs, or the single run).
+        """Return every saved checkpoint for a job.
 
         Args:
             optimization_id: Job whose checkpoints are read.
@@ -1778,12 +1658,12 @@ class RemoteDBJobStore:
 
         Args:
             optimization_id: Owning job id.
-            pair_index: Grid pair index, or ``-1`` for a single run.
+            pair_index: Checkpoint key; ``-1`` for a run.
         """
         self._checkpoints.delete(optimization_id, pair_index)
 
     def delete_all_gepa_checkpoints(self, optimization_id: str) -> None:
-        """Drop every checkpoint for a job (e.g. once a grid succeeds).
+        """Drop every checkpoint for a job (e.g. once it succeeds).
 
         Args:
             optimization_id: Job whose checkpoints are freed.
@@ -1793,7 +1673,7 @@ class RemoteDBJobStore:
     def has_gepa_checkpoint(self, optimization_id: str) -> bool:
         """Return whether any resumable GEPA checkpoint exists for ``optimization_id``.
 
-        Cheap key-only existence check (single run or any grid pair) used to gate
+        Cheap key-only existence check used to gate
         the per-job ``resumable`` flag on the list/detail read paths.
 
         Args:
@@ -1803,215 +1683,6 @@ class RemoteDBJobStore:
             ``True`` when at least one checkpoint row exists.
         """
         return self._checkpoints.has_any(optimization_id)
-
-    def save_grid_pair_result(
-        self, optimization_id: str, pair_index: int, result: dict[str, Any], *, expected_generation: int | None = None
-    ) -> bool:
-        """Persist (or replace) one completed grid pair's result so resume can skip it.
-
-        Args:
-            optimization_id: Owning grid job id.
-            pair_index: The completed pair's index.
-            result: The pair's serialized ``PairResult``.
-            expected_generation: Worker epoch authorizing this pair publication.
-
-        Returns:
-            Whether the current generation stored the result.
-        """
-        return self._grid_pair_results.put(optimization_id, pair_index, result, expected_generation=expected_generation)
-
-    def get_grid_pair_results(self, optimization_id: str) -> dict[int, dict[str, Any]]:
-        """Return ``{pair_index: result}`` for every completed pair of a grid.
-
-        Args:
-            optimization_id: Grid job whose finished pairs are read.
-
-        Returns:
-            Mapping of completed pair index to its serialized result (possibly empty).
-        """
-        return self._grid_pair_results.get_all(optimization_id)
-
-    def delete_grid_pair_results(self, optimization_id: str) -> None:
-        """Drop every stored pair result for a grid (e.g. once it succeeds).
-
-        Args:
-            optimization_id: Grid job whose pair results are freed.
-        """
-        self._grid_pair_results.delete_all(optimization_id)
-
-    def delete_grid_pair_result(self, optimization_id: str, pair_index: int) -> None:
-        """Drop one pair's stored result (targeted per-pair re-run).
-
-        Args:
-            optimization_id: Grid job owning the pair.
-            pair_index: The pair whose stored result is dropped.
-        """
-        self._grid_pair_results.delete_one(optimization_id, pair_index)
-
-    def list_finalizable_grid_parents(self, limit: int = 10) -> list[str]:
-        """Return running grid parents whose pair children are ALL terminal.
-
-        The normal finalizer is the last pair child to finish; this query
-        backstops the crash window where that child wrote its terminal status
-        and died before assembling the parent result — without it the grid
-        would sit at ``running`` forever with nothing left to run.
-
-        Args:
-            limit: Maximum parents to return per sweep.
-
-        Returns:
-            Parent optimization ids ready for result assembly.
-        """
-        session = self._get_session()
-        try:
-            any_child = aliased(JobModel)
-            live_child = aliased(JobModel)
-            has_children = (
-                session.query(any_child.optimization_id)
-                .filter(any_child.parent_optimization_id == JobModel.optimization_id)
-                .exists()
-            )
-            has_live_children = (
-                session.query(live_child.optimization_id)
-                .filter(
-                    live_child.parent_optimization_id == JobModel.optimization_id,
-                    live_child.status.notin_(["success", "failed", "cancelled", "stopped"]),
-                )
-                .exists()
-            )
-            rows = (
-                session.query(JobModel.optimization_id)
-                .filter(JobModel.status == "running")
-                .filter(has_children)
-                .filter(~has_live_children)
-                .limit(limit)
-                .all()
-            )
-            return [row[0] for row in rows]
-        finally:
-            session.close()
-
-    def create_grid_pair_jobs(
-        self,
-        parent_optimization_id: str,
-        pair_count: int,
-        *,
-        username: str | None,
-        payload_overview: dict[str, Any],
-    ) -> list[str]:
-        """Fan a distributed grid search out into one claimable row per pair.
-
-        Each child row carries only a tiny reference payload — the dataset
-        stays on the parent row and is re-read at claim time — plus the
-        overview keys the worker pipeline dispatches on. Children inherit the
-        parent's username (fairness/quota accounting) and the current code
-        version, and are removed with the parent via the cascading self-FK.
-
-        The children and the parent's flip to ``running`` commit in ONE
-        transaction: a crash before the commit leaves the parent ``pending``
-        (claimable through the legacy in-child grid path — the run still
-        happens), while after it the parent is unclaimable and only the pair
-        rows carry the work. There is no window where both paths could run
-        the same grid. Calling again for a parent that already has children
-        inserts nothing but still re-parks the parent — the resume path
-        re-pends the children and relies on this call to flip the parent
-        back to ``running``.
-
-        Args:
-            parent_optimization_id: The grid parent whose pairs are fanned out.
-            pair_count: Total number of (generation, reflection) pairs.
-            username: The submitting user, copied onto every child row.
-            payload_overview: Minimal overview stamped on each child (at least
-                the optimization-type and token-source keys the worker reads).
-
-        Returns:
-            The child optimization ids, ordered by pair index.
-        """
-        now = datetime.now(UTC)
-        session = self._get_session()
-        try:
-            existing = (
-                session.query(JobModel.optimization_id)
-                .filter(JobModel.parent_optimization_id == parent_optimization_id)
-                .order_by(JobModel.pair_index.asc())
-                .all()
-            )
-            if existing:
-                child_ids = [row[0] for row in existing]
-            else:
-                child_ids = [str(uuid4()) for _ in range(pair_count)]
-                for index, child_id in enumerate(child_ids):
-                    session.add(
-                        JobModel(
-                            optimization_id=child_id,
-                            status="pending",
-                            created_at=now,
-                            latest_metrics={},
-                            payload={
-                                "parent_optimization_id": parent_optimization_id,
-                                "pair_index": index,
-                            },
-                            payload_overview=dict(payload_overview),
-                            optimization_type="grid_search",
-                            attempts=0,
-                            code_version=self._current_code_version,
-                            username=username,
-                            parent_optimization_id=parent_optimization_id,
-                            pair_index=index,
-                        )
-                    )
-            # The parent was claimed to reach this fan-out: clear its lease so
-            # it can't be orphan-swept back to pending, and park it at
-            # ``running`` — unclaimable, updated only by pair completions.
-            session.query(JobModel).filter(JobModel.optimization_id == parent_optimization_id).update(
-                {
-                    "status": "running",
-                    "message": f"Distributed across {pair_count} pair jobs",
-                    "started_at": now,
-                    "completed_at": None,
-                    "claimed_by": None,
-                    "claimed_at": None,
-                    "lease_expires_at": None,
-                }
-            )
-            session.commit()
-            return child_ids
-        finally:
-            session.close()
-
-    def get_grid_pair_children(self, parent_optimization_id: str) -> list[JobRecord]:
-        """Return the child pair rows of a distributed grid, ordered by pair index.
-
-        Args:
-            parent_optimization_id: The grid parent whose children are read.
-
-        Returns:
-            Child ``JobRecord``s (payload omitted — it is only a tiny
-            reference dict, but list callers never need it).
-        """
-        session = self._get_session()
-        try:
-            rows = (
-                session.query(JobModel)
-                .options(defer(JobModel.payload))
-                .filter(JobModel.parent_optimization_id == parent_optimization_id)
-                .order_by(JobModel.pair_index.asc())
-                .all()
-            )
-            return [self._job_to_dict(row, include_payload=False) for row in rows]
-        finally:
-            session.close()
-
-    def has_grid_pair_results(self, optimization_id: str) -> bool:
-        """Return whether the grid has any completed-pair result stored.
-
-        Args:
-            optimization_id: Grid job to test.
-
-        Returns:
-            ``True`` when at least one pair result exists.
-        """
-        return self._grid_pair_results.has_any(optimization_id)
 
     def has_compatible_gepa_checkpoint(self, optimization_id: str) -> bool:
         """Expose recovery only after source, task, runtime, and integrity checks pass.
@@ -2063,16 +1734,14 @@ class RemoteDBJobStore:
         bump_attempts: bool = True,
         expected_generation: int | None = None,
         budget_service: Any = None,
-        pair_index_to_resume: int | None = None,
         automatic: bool = False,
     ) -> int | None:
         """Re-queue a terminal job in place so a worker resumes it from its checkpoint.
 
         Flips the existing row back to ``pending`` — same id, payload, seed and
-        budget — and clears the prior claim/lease. A whole-job resume increments
-        ``attempts`` against the ``job_max_attempts`` cap; a targeted per-pair grid
-        re-run passes ``bump_attempts=False`` so retrying individual pairs is not
-        bounded by that cap. The caller owns the resumability preconditions.
+        budget — and clears the prior claim/lease. A resume increments
+        ``attempts`` against the ``job_max_attempts`` cap unless the caller
+        passes ``bump_attempts=False``. The caller owns the resumability preconditions.
 
         The finished leg's wall-clock duration is folded into
         ``accumulated_runtime_seconds`` before ``started_at``/``completed_at`` are
@@ -2089,7 +1758,6 @@ class RemoteDBJobStore:
             bump_attempts: Whether to count this re-queue against the attempt cap.
             expected_generation: Fenced publication generation observed by the caller.
             budget_service: Authoritative funding and dispatch fence for a protected job.
-            pair_index_to_resume: Explicit pair whose stored result is cleared atomically for recovery.
             automatic: Whether the orphan sweep recovers an interrupted active run.
 
         Returns:
@@ -2121,20 +1789,9 @@ class RemoteDBJobStore:
                 and isinstance(job.recovery, dict)
                 and job.recovery.get("interrupted_budget_generation") is not None
             )
-            # A grid pair or a child run needs its own checkpoint to rejoin its
-            # parent's results, so only a whole top-level run may start again.
-            fresh_restart = (
-                (automatic or resumes_interrupted)
-                and not checkpoints
-                and pair_index_to_resume is None
-                and job.parent_optimization_id is None
-            )
+            fresh_restart = (automatic or resumes_interrupted) and not checkpoints
             if not checkpoints and not fresh_restart:
                 raise CheckpointCompatibilityError("No completed compatible checkpoint is available.")
-            if pair_index_to_resume is not None and not any(
-                checkpoint.pair_index == pair_index_to_resume for checkpoint in checkpoints
-            ):
-                raise CheckpointCompatibilityError("The selected pair has no compatible checkpoint.")
             for checkpoint in checkpoints:
                 validate_checkpoint(
                     checkpoint.data,
@@ -2250,25 +1907,6 @@ class RemoteDBJobStore:
                     if automatic:
                         self._note_ended_orphan(optimization_id, ended_generation)
                     return None
-            if pair_index_to_resume is not None:
-                result = job.result if isinstance(job.result, dict) else {}
-                for pair in result.get("pair_results", []):
-                    index = pair.get("pair_index")
-                    if not isinstance(index, int) or index == pair_index_to_resume:
-                        continue
-                    row = session.get(GridPairResultModel, (optimization_id, index))
-                    if row is None:
-                        session.add(
-                            GridPairResultModel(
-                                optimization_id=optimization_id,
-                                pair_index=index,
-                                result=pair,
-                                stored_bytes=json_byte_size(pair),
-                            )
-                        )
-                selected = session.get(GridPairResultModel, (optimization_id, pair_index_to_resume))
-                if selected is not None:
-                    session.delete(selected)
             job.execution_generation = int(job.execution_generation or 0) + 1
             job.stop_reason = None
             job.recovery = None
@@ -2325,7 +1963,7 @@ class RemoteDBJobStore:
             elif automatic:
                 job.message = "Resuming after a worker restart"  # type: ignore[assignment]
             else:
-                job.message = "Resuming" if bump_attempts else "Re-running grid pair"  # type: ignore[assignment]
+                job.message = "Resuming"  # type: ignore[assignment]
             session.commit()
             return next_attempt
         finally:
@@ -2367,7 +2005,7 @@ class RemoteDBJobStore:
         Unlike :meth:`requeue_for_resume`, which keeps the checkpoint and
         continues GEPA where it stopped, this discards every artefact of the
         previous attempt — logs, progress events, the search embedding, GEPA
-        checkpoints and grid-pair results — and zeroes the row's runtime,
+        checkpoints — and zeroes the row's runtime,
         result and attempt bookkeeping. Only the immutable identity (id, name,
         owner, payload) survives, so a worker re-runs the same configuration
         from iteration zero under the same id. The child-row deletes mirror
@@ -2389,19 +2027,12 @@ class RemoteDBJobStore:
             if settings.embeddings_enabled:
                 session.query(JobEmbeddingModel).filter(JobEmbeddingModel.optimization_id == optimization_id).delete()
             session.query(GepaCheckpointModel).filter(GepaCheckpointModel.optimization_id == optimization_id).delete()
-            session.query(GridPairResultModel).filter(GridPairResultModel.optimization_id == optimization_id).delete()
             session.query(SandboxTrialModel).filter(SandboxTrialModel.optimization_id == optimization_id).delete()
             session.query(BlackboxAgentRunModel).filter(
                 BlackboxAgentRunModel.optimization_id == optimization_id
             ).delete()
             session.query(RunCallModel).filter(RunCallModel.optimization_id == optimization_id).delete()
             session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
-            # A distributed grid's pair children belong to the discarded
-            # attempt: drop them so the re-claimed parent fans out fresh rows
-            # instead of "resuming" stale terminal children. Deleted
-            # explicitly (not via the FK cascade) so SQLite test runs without
-            # foreign-key enforcement behave like Postgres.
-            self._delete_grid_pair_children(session, optimization_id)
             job.status = "pending"  # type: ignore[assignment]
             job.started_at = None  # type: ignore[assignment]
             job.completed_at = None  # type: ignore[assignment]
@@ -2832,12 +2463,6 @@ class RemoteDBJobStore:
         session = self._get_session()
         try:
             now = datetime.now(UTC)
-            child = aliased(JobModel)
-            has_children = (
-                session.query(child.optimization_id)
-                .filter(child.parent_optimization_id == JobModel.optimization_id)
-                .exists()
-            )
             candidates = [
                 (
                     job.optimization_id,
@@ -2849,7 +2474,6 @@ class RemoteDBJobStore:
                 .filter(
                     JobModel.status.in_(["running", "validating"]),
                     (JobModel.lease_expires_at.is_(None)) | (JobModel.lease_expires_at < now),
-                    ~has_children,
                 )
                 .all()
             ]
@@ -3212,7 +2836,7 @@ class RemoteDBJobStore:
         """Publish progress only while its source worker owns the active generation.
 
         Args:
-            optimization_id: Job or parent grid receiving the event.
+            optimization_id: Job receiving the event.
             message: Event name.
             metrics: Completed progress evidence from the child.
             source_optimization_id: Actual leased job that emitted the event.
@@ -3536,7 +3160,6 @@ class RemoteDBJobStore:
         logger_name: str,
         message: str,
         timestamp: datetime | None = None,
-        pair_index: int | None = None,
         source: str | None = None,
         event: str | None = None,
         fields: dict[str, Any] | None = None,
@@ -3555,7 +3178,6 @@ class RemoteDBJobStore:
             logger_name: Originating logger name.
             message: Log line content.
             timestamp: Optional override for the entry timestamp; defaults to ``now``.
-            pair_index: Optional grid-pair index when emitted from a sweep.
             source: Where the line came from, see :data:`core.run_log.SOURCES`.
             event: Typed event name, if the line is an event.
             fields: The event's JSON payload.
@@ -3570,7 +3192,6 @@ class RemoteDBJobStore:
                     "logger": logger_name,
                     "message": message,
                     "timestamp": timestamp,
-                    "pair_index": pair_index,
                     "source": source,
                     "event": event,
                     "fields": fields,
@@ -3620,7 +3241,6 @@ class RemoteDBJobStore:
                     logger=run_log.fit(str(entry.get("logger") or ""), run_log.LOGGER_CHARS),
                     # Postgres TEXT rejects NUL, which sandbox output can carry.
                     message=str(entry.get("message") or "").replace("\x00", ""),
-                    pair_index=entry.get("pair_index"),
                     source=run_log.fit(entry.get("source"), run_log.SOURCE_CHARS),
                     event=run_log.fit(entry.get("event"), run_log.EVENT_CHARS),
                     fields=entry.get("fields"),
@@ -3704,7 +3324,7 @@ class RemoteDBJobStore:
         fields the aggregations read: ``status`` plus pruned
         ``payload_overview`` and ``result`` dicts. The pruning happens in the
         SELECT itself — the full ``result`` blob (per-example outputs,
-        multi-MB for grid runs) never leaves the database, which is what
+        often multi-MB) never leaves the database, which is what
         keeps a 10k-row scan from spiking the API process. JSON paths are
         extracted with SQLAlchemy's dialect-portable operators, so the same
         query runs on PostgreSQL and the SQLite test harness.
@@ -3727,7 +3347,6 @@ class RemoteDBJobStore:
                 overview[PAYLOAD_OVERVIEW_MODEL_NAME].as_string(),
                 overview[PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE].as_string(),
                 overview[PAYLOAD_OVERVIEW_DATASET_ROWS].as_string(),
-                overview[PAYLOAD_OVERVIEW_TOTAL_PAIRS].as_string(),
                 *_result_summary_columns(),
             ).order_by(JobModel.created_at.desc())
             q = q.filter(_user_facing_jobs())
@@ -3816,7 +3435,7 @@ class RemoteDBJobStore:
             if username:
                 q = q.filter(JobModel.username == username)
             if optimization_type:
-                q = q.filter(JobModel.optimization_type == optimization_type, _top_level_jobs())
+                q = q.filter(JobModel.optimization_type == optimization_type)
             else:
                 q = q.filter(_user_facing_jobs())
             records = [self._list_row_to_dict(row) for row in q.offset(offset).limit(limit).all()]
@@ -4029,7 +3648,7 @@ class RemoteDBJobStore:
             if status:
                 q = q.filter(JobModel.status == status)
             if optimization_type:
-                q = q.filter(JobModel.optimization_type == optimization_type, _top_level_jobs())
+                q = q.filter(JobModel.optimization_type == optimization_type)
             else:
                 q = q.filter(_user_facing_jobs())
             rows = q.order_by(JobModel.created_at.desc()).offset(offset).limit(limit).all()
@@ -4069,7 +3688,7 @@ class RemoteDBJobStore:
             if status:
                 q = q.filter(JobModel.status == status)
             if optimization_type:
-                q = q.filter(JobModel.optimization_type == optimization_type, _top_level_jobs())
+                q = q.filter(JobModel.optimization_type == optimization_type)
             else:
                 q = q.filter(_user_facing_jobs())
             return q.scalar() or 0
@@ -4223,7 +3842,7 @@ class RemoteDBJobStore:
             if username:
                 q = q.filter(JobModel.username == username)
             if optimization_type:
-                q = q.filter(JobModel.optimization_type == optimization_type, _top_level_jobs())
+                q = q.filter(JobModel.optimization_type == optimization_type)
             else:
                 q = q.filter(_user_facing_jobs())
             return q.scalar() or 0

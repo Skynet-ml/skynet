@@ -354,9 +354,9 @@ _job_lm_gate: threading.BoundedSemaphore | None = None
 def activate_job_lm_budget(max_concurrency: int) -> None:
     """Install a process-wide ceiling on concurrent LM calls.
 
-    Called once per job child (``run_service_in_subprocess``) so grid pair
-    threads times GEPA eval threads — plus any user-supplied ``num_threads``
-    — can never put more than ``max_concurrency`` LM calls in flight at once.
+    Called once per job child (``run_service_in_subprocess``) so the engine's
+    eval threads can never put more than ``max_concurrency`` LM calls in
+    flight at once.
     Excess callers block in ``MeteredLM.forward`` until a permit frees; the
     per-call timeout still bounds each held permit, so the gate cannot wedge
     a run. Only the sync path is gated: optimizers evaluate on threads, and

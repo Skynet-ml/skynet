@@ -70,20 +70,6 @@ class TestTqdmKeys:
         assert isinstance(C.TQDM_N_KEY, str)
 
 
-class TestOptimizationTypeStrings:
-    """Pin the optimization-type discriminator strings used in the JSON wire format."""
-
-    def test_optimization_type_run_value_and_type(self) -> None:
-        """``OPTIMIZATION_TYPE_RUN`` is the literal ``"run"``."""
-        assert C.OPTIMIZATION_TYPE_RUN == "run"
-        assert isinstance(C.OPTIMIZATION_TYPE_RUN, str)
-
-    def test_optimization_type_grid_search_value_and_type(self) -> None:
-        """``OPTIMIZATION_TYPE_GRID_SEARCH`` is the literal ``"grid_search"``."""
-        assert C.OPTIMIZATION_TYPE_GRID_SEARCH == "grid_search"
-        assert isinstance(C.OPTIMIZATION_TYPE_GRID_SEARCH, str)
-
-
 class TestPayloadOverviewKeys:
     """Pin payload overview keys used as dict keys throughout the API layer."""
 
@@ -96,8 +82,3 @@ class TestPayloadOverviewKeys:
         """``PAYLOAD_OVERVIEW_USERNAME`` is ``"username"``."""
         assert isinstance(C.PAYLOAD_OVERVIEW_USERNAME, str)
         assert C.PAYLOAD_OVERVIEW_USERNAME == "username"
-
-    def test_payload_overview_total_pairs_is_str(self) -> None:
-        """``PAYLOAD_OVERVIEW_TOTAL_PAIRS`` is ``"total_pairs"``."""
-        assert isinstance(C.PAYLOAD_OVERVIEW_TOTAL_PAIRS, str)
-        assert C.PAYLOAD_OVERVIEW_TOTAL_PAIRS == "total_pairs"

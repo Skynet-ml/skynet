@@ -29,7 +29,6 @@ import contextvars
 import json
 import logging
 import pickle
-import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -51,7 +50,6 @@ from ...constants import (
     PROGRESS_CANDIDATE,
     PROGRESS_MINIBATCH,
     PROGRESS_REJECTED,
-    PROGRESS_VALSET,
     PROGRESS_VALSET_OUTPUTS,
 )
 from ...storage.run_call_store import PROGRAM_EVENT_KEY
@@ -61,144 +59,6 @@ logger = logging.getLogger(__name__)
 
 
 GEPA_STATE_FILENAME = "gepa_state.bin"
-# A finished grid pair's serialized PairResult, written into its worker-owned
-# pair dir so the worker can durably record it and a resumed grid skips the pair.
-GRID_PAIR_RESULT_FILENAME = "result.json"
-
-VALSET_FIELD_CHAR_CAP = 4096
-
-
-def _normalize_field_value(value: Any) -> str:
-    """Render an Example field value as a JSON-safe, length-capped string.
-
-    The trajectory drawer wants to display the example's raw inputs and
-    outputs verbatim. JSON-native scalars pass through as their string
-    form; anything else (images, custom objects) is stringified so the
-    SSE payload stays valid JSON.
-
-    Args:
-        value: Field value pulled out of a DSPy Example.
-
-    Returns:
-        A string no longer than :data:`VALSET_FIELD_CHAR_CAP` characters.
-        Over-cap values are truncated and suffixed with an ellipsis marker
-        so the UI can tell the cell is incomplete.
-    """
-    if value is None:
-        text = ""
-    elif isinstance(value, (str, int, float, bool)):
-        text = str(value)
-    else:
-        text = str(value)
-    if len(text) > VALSET_FIELD_CHAR_CAP:
-        return text[:VALSET_FIELD_CHAR_CAP] + "…"
-    return text
-
-
-# Per-example fields that are internal provenance, not human-facing expected
-# output, so they're dropped from the valset rows the trajectory drawer renders.
-# Each stays on the EvaluationExample itself (the harness still feeds/scores on
-# them) — only this display serialization hides it:
-#   * ``tool_schema_hashes`` — {tool: sha256} drift snapshot consumed by the
-#     optimizer's roster-drift filter, never reviewed by a user.
-#   * ``wizard_state`` — turn-start state dict handed to the candidate as input
-#     context; load-bearing for the rollout but noise beside the answer.
-#   * ``state_before`` / ``state_after`` — replay-role snapshots the gate metric
-#     scores against; scoring detail, not review content.
-_HIDDEN_VALSET_FIELDS: frozenset[str] = frozenset(
-    {"tool_schema_hashes", "wizard_state", "state_before", "state_after"}
-)
-
-
-def _example_field_map(example: Any, method_name: str) -> dict[str, str]:
-    """Pull inputs or labels off a DSPy Example into a string-valued dict.
-
-    Plain dicts (used in tests and as a fallback for non-DSPy rows) take
-    the same path — we treat the dict as the inputs map and emit an empty
-    outputs map. This keeps the helper resilient when the optimizer runs
-    against fixture data that bypasses :func:`rows_to_examples`.
-
-    Args:
-        example: DSPy ``Example`` or plain dict.
-        method_name: ``"inputs"`` or ``"labels"``.
-
-    Returns:
-        Field name → normalized string. Empty dict when the example
-        exposes no fields of that kind.
-    """
-    accessor = getattr(example, method_name, None)
-    if callable(accessor):
-        try:
-            extracted = accessor()
-        except Exception:
-            return {}
-        items = getattr(extracted, "items", None)
-        pairs = items() if callable(items) else extracted
-    elif isinstance(example, dict) and method_name == "inputs":
-        pairs = example.items()
-    else:
-        return {}
-    out: dict[str, str] = {}
-    for key, value in pairs:
-        if str(key) in _HIDDEN_VALSET_FIELDS:
-            continue
-        out[str(key)] = _normalize_field_value(value)
-    return out
-
-
-def serialize_valset_rows(valset: list[Any]) -> list[dict[str, Any]]:
-    """Convert a validation split into the JSON shape the frontend renders.
-
-    The id assigned to each row matches GEPA's per-example score keys
-    (sequential integers as strings starting at ``"0"``). The frontend
-    keys its Pareto-cell detail lookup off this id, so the order of
-    ``valset`` must match the order GEPA sees during evaluation.
-
-    Args:
-        valset: List of DSPy ``Example`` instances (or dicts) in evaluation
-            order — typically ``DatasetSplits.val``.
-
-    Returns:
-        List of ``{"id", "inputs", "outputs"}`` dicts, one per example.
-        Returns ``[]`` when ``valset`` is empty.
-    """
-    rows: list[dict[str, Any]] = []
-    for idx, example in enumerate(valset):
-        rows.append(
-            {
-                "id": str(idx),
-                "inputs": _example_field_map(example, "inputs"),
-                "outputs": _example_field_map(example, "labels"),
-            }
-        )
-    return rows
-
-
-def emit_valset_event(
-    valset: list[Any],
-    progress_callback: Callable[[str, dict[str, Any]], None] | None,
-) -> None:
-    """Fire a single :data:`PROGRESS_VALSET` event carrying the validation rows.
-
-    No-op when the callback is missing (non-streaming code paths) or the
-    valset is empty (test runs with only a train split). Failures inside
-    the callback are logged but never propagate — losing the event must
-    not abort the optimization.
-
-    Args:
-        valset: Validation split examples in GEPA-ordering.
-        progress_callback: Job-level progress callback, or ``None``.
-    """
-    if progress_callback is None:
-        return
-    rows = serialize_valset_rows(valset)
-    if not rows:
-        return
-    try:
-        progress_callback(PROGRESS_VALSET, {"rows": rows})
-    except Exception:
-        logger.exception("progress_callback raised for valset (%d rows)", len(rows))
-
 
 MINIBATCH_FEEDBACK_CHAR_CAP = 4096
 MINIBATCH_PREDICTION_CHAR_CAP = 1024
@@ -378,7 +238,7 @@ class MinibatchRecorder:
 
     The example-id lookup uses object identity (``id(example)``) against
     the validation split, so the recorder must be constructed from the
-    same ``DatasetSplits.val`` list the optimizer will see during compile.
+    validation list the optimizer will see during compile.
     """
 
     def __init__(
@@ -410,9 +270,7 @@ class MinibatchRecorder:
         """
         self._metric = metric
         self._index_by_id = {id(ex): str(idx) for idx, ex in enumerate(valset)}
-        self._all_valset_ids: frozenset[str] = frozenset(
-            str(idx) for idx in range(len(valset))
-        )
+        self._all_valset_ids: frozenset[str] = frozenset(str(idx) for idx in range(len(valset)))
         self._progress_callback = progress_callback
         self._module_name = module_name
         self._emit_candidate_events = emit_candidate_events
@@ -473,18 +331,14 @@ class MinibatchRecorder:
                     },
                 )
             except Exception:
-                logger.exception(
-                    "progress_callback raised for minibatch (example=%s)", ex_id
-                )
+                logger.exception("progress_callback raised for minibatch (example=%s)", ex_id)
 
         if self._emit_candidate_events and ex_id != "?" and self._all_valset_ids:
             self._record_valset_call(ex_id, prediction_text, score)
 
         return result
 
-    def _record_valset_call(
-        self, ex_id: str, prediction_text: dict[str, str] | str, score: float
-    ) -> None:
+    def _record_valset_call(self, ex_id: str, prediction_text: dict[str, str] | str, score: float) -> None:
         """Add a call to the sweep buffer; flush when the full valset is covered.
 
         The buffer is shared between minibatch and full-eval calls — minibatch
@@ -524,41 +378,6 @@ class MinibatchRecorder:
                 "progress_callback raised for valset_outputs (candidate=%d)",
                 index_for_event,
             )
-
-
-def maybe_wrap_minibatch_recorder(
-    metric: Callable[..., Any],
-    valset: list[Any],
-    optimizer_name: str,
-    progress_callback: Callable[[str, dict[str, Any]], None] | None,
-    module_name: str = "module",
-) -> Callable[..., Any]:
-    """Wrap the metric in a :class:`MinibatchRecorder`, or return it unchanged.
-
-    Centralises the gating logic so callers don't need to repeat the
-    callback null-check. Any streaming optimizer (callback present) gets the
-    wrapper so its per-example evaluation heartbeat reaches job_logs; the
-    GEPA-only ``PROGRESS_VALSET_OUTPUTS`` candidate-output events stay gated to
-    GEPA, where the candidate-index attribution is valid.
-
-    Args:
-        metric: The original metric callable.
-        valset: Validation split for example-id lookup.
-        optimizer_name: Name of the optimizer about to be instantiated.
-        progress_callback: Job-level progress callback, or ``None``.
-        module_name: The run's module type, forwarded to the recorder so the
-            per-example heartbeat in job_logs is tagged by module.
-
-    Returns:
-        The wrapped metric when a callback is present, otherwise the metric
-        unchanged.
-    """
-    if progress_callback is None:
-        return metric
-    emit_candidate_events = optimizer_name.lower() == OPTIMIZER_NAME_GEPA
-    return MinibatchRecorder(
-        metric, valset, progress_callback, module_name, emit_candidate_events
-    )
 
 
 class ReactValsetOutputsRecorder:
@@ -601,15 +420,11 @@ class ReactValsetOutputsRecorder:
         """
         self._evaluate = evaluate
         self._index_by_id = {id(ex): str(idx) for idx, ex in enumerate(valset)}
-        self._all_ids: frozenset[str] = frozenset(
-            str(idx) for idx in range(len(valset))
-        )
+        self._all_ids: frozenset[str] = frozenset(str(idx) for idx in range(len(valset)))
         self._progress_callback = progress_callback
         self._candidate_index = 0
 
-    def __call__(
-        self, batch: list[Any], candidate: Any, *args: Any, **kwargs: Any
-    ) -> Any:
+    def __call__(self, batch: list[Any], candidate: Any, *args: Any, **kwargs: Any) -> Any:
         """Forward to the wrapped evaluate, then emit outputs on a full sweep.
 
         Args:
@@ -760,18 +575,14 @@ class ReactReflectiveFeedbackRecorder:
         Returns:
             The wrapped builder's return value, unmodified.
         """
-        result = self._make_reflective_dataset(
-            candidate, eval_batch, components_to_update, *args, **kwargs
-        )
+        result = self._make_reflective_dataset(candidate, eval_batch, components_to_update, *args, **kwargs)
         try:
             self._maybe_emit(eval_batch, result, components_to_update)
         except Exception:
             logger.exception("progress_callback raised for react minibatch feedback")
         return result
 
-    def _maybe_emit(
-        self, eval_batch: Any, result: Any, components_to_update: list[str]
-    ) -> None:
+    def _maybe_emit(self, eval_batch: Any, result: Any, components_to_update: list[str]) -> None:
         """Emit a :data:`PROGRESS_MINIBATCH` event per feedback-bearing example.
 
         Trajectories, scores, and outputs share the adapter's per-example order,
@@ -808,9 +619,7 @@ class ReactReflectiveFeedbackRecorder:
                     "example_id": self._example_id(example),
                     "score": _extract_score(scores[idx]) if idx < len(scores) else 0.0,
                     "feedback": feedback[:MINIBATCH_FEEDBACK_CHAR_CAP],
-                    "prediction": _normalize_prediction(outputs[idx])
-                    if idx < len(outputs)
-                    else "",
+                    "prediction": _normalize_prediction(outputs[idx]) if idx < len(outputs) else "",
                     "iteration": iteration if isinstance(iteration, int) else None,
                 },
             )
@@ -860,9 +669,7 @@ def react_minibatch_feedback(
         yield
         return
     original = adapter.make_reflective_dataset
-    adapter.make_reflective_dataset = ReactReflectiveFeedbackRecorder(
-        original, valset, progress_callback
-    )
+    adapter.make_reflective_dataset = ReactReflectiveFeedbackRecorder(original, valset, progress_callback)
     try:
         yield
     finally:
@@ -906,8 +713,7 @@ def capture_proposal_prompts(optimizer_name: str) -> Iterator[None]:
         # a GEPA package reshuffle would leave the rejected-proposal drawer
         # silently empty with no clue why.
         logger.warning(
-            "GEPA reflective proposer not importable; rejected proposals will "
-            "have no prompt snapshot for this run"
+            "GEPA reflective proposer not importable; rejected proposals will have no prompt snapshot for this run"
         )
         yield
         return
@@ -938,9 +744,7 @@ def capture_proposal_prompts(optimizer_name: str) -> Iterator[None]:
                     and isinstance(candidates[parent_idx], dict)
                 ):
                     entry["parent_prompt_snapshot"] = dict(candidates[parent_idx])
-                proposed = (
-                    getattr(proposal, "candidate", None) if proposal is not None else None
-                )
+                proposed = getattr(proposal, "candidate", None) if proposal is not None else None
                 if isinstance(proposed, dict):
                     entry["proposed_prompt_snapshot"] = dict(proposed)
             except Exception:
@@ -1072,12 +876,8 @@ class RejectedEvent:
             "proposal_prompt": dict(self.proposal_prompt),
             "parent_prompt": dict(self.parent_prompt),
             "subsample_ids": list(self.subsample_ids),
-            "per_example_parent": [
-                {"id": eid, "score": s} for eid, s in self.per_example_parent
-            ],
-            "per_example_proposal": [
-                {"id": eid, "score": s} for eid, s in self.per_example_proposal
-            ],
+            "per_example_parent": [{"id": eid, "score": s} for eid, s in self.per_example_parent],
+            "per_example_proposal": [{"id": eid, "score": s} for eid, s in self.per_example_proposal],
         }
 
 
@@ -1275,26 +1075,14 @@ def extract_candidates_from_state(
             parents_extra: tuple[str, ...] = ()
         else:
             parent_id = str(parent_list[0])
-            parents_extra = tuple(
-                str(p) for p in parent_list[1:] if isinstance(p, int)
-            )
+            parents_extra = tuple(str(p) for p in parent_list[1:] if isinstance(p, int))
 
         per_example_dict = subscores[idx] if idx < len(subscores) else {}
-        per_example = tuple(
-            (str(k), float(v)) for k, v in per_example_dict.items()
-        )
-        score = (
-            sum(v for _, v in per_example) / len(per_example)
-            if per_example
-            else 0.0
-        )
+        per_example = tuple((str(k), float(v)) for k, v in per_example_dict.items())
+        score = sum(v for _, v in per_example) / len(per_example) if per_example else 0.0
 
         prompt_raw = candidates[idx]
-        prompt = (
-            {str(k): str(v) for k, v in prompt_raw.items()}
-            if isinstance(prompt_raw, dict)
-            else {}
-        )
+        prompt = {str(k): str(v) for k, v in prompt_raw.items()} if isinstance(prompt_raw, dict) else {}
 
         out.append(
             CandidateEvent(
@@ -1305,9 +1093,7 @@ def extract_candidates_from_state(
                 score=score,
                 per_example=per_example,
                 prompt=prompt,
-                discovered_at_evals=(
-                    int(discovery[idx]) if idx < len(discovery) else 0
-                ),
+                discovered_at_evals=(int(discovery[idx]) if idx < len(discovery) else 0),
                 iteration=iteration_by_idx.get(idx),
             )
         )
@@ -1550,41 +1336,6 @@ class TrajectoryWatcher:
                     )
             if new_rejected:
                 self._last_rejected_iteration = new_rejected[-1].iteration
-
-
-@contextlib.contextmanager
-def gepa_log_dir(optimizer_name: str, provided_dir: str | None = None) -> Iterator[str | None]:
-    """Allocate a directory for GEPA's state file, or yield ``None``.
-
-    GEPA writes ``gepa_state.bin`` here on every iteration; the path is
-    handed to ``instantiate_optimizer(log_dir=...)``. Non-GEPA optimizers
-    don't use it, so no directory is created and ``None`` is yielded —
-    ``instantiate_optimizer`` ignores ``log_dir`` for those.
-
-    When ``provided_dir`` is given (the worker owns a per-job directory so it
-    can persist/restore the checkpoint that backs resume), that directory is
-    used and left in place on exit — its lifecycle belongs to the caller. With
-    no ``provided_dir`` a fresh tempdir is created and removed on exit, the
-    original ephemeral behaviour kept for callers that don't resume.
-
-    Args:
-        optimizer_name: The optimizer's registered name.
-        provided_dir: A caller-owned directory to write the state into, or
-            ``None`` to allocate (and clean up) an ephemeral tempdir.
-
-    Yields:
-        Absolute path to the directory GEPA writes into, or ``None`` for
-        non-GEPA optimizers.
-    """
-    if optimizer_name.lower() != OPTIMIZER_NAME_GEPA:
-        yield None
-        return
-    if provided_dir is not None:
-        Path(provided_dir).mkdir(parents=True, exist_ok=True)
-        yield provided_dir
-        return
-    with tempfile.TemporaryDirectory(prefix="gepa_trajectory_") as tmpdir:
-        yield tmpdir
 
 
 @contextlib.contextmanager

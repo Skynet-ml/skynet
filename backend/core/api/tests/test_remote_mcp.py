@@ -26,7 +26,6 @@ from ...config import Settings, settings
 from ...connectors.saved_secrets import SavedSecretStore
 from ...models import BlackboxRunRequest
 from ...models.optimizations import JobCancelResponse
-from ...models.unified import UnifiedRunRequest
 from ...storage.models import Base, McpGrantModel, McpTokenModel, UserModel
 from .. import remote_mcp
 from ..auth import hash_api_token
@@ -133,7 +132,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
         """Stand in for the internal API ``/mcp`` route."""
         return {"served_by": "api"}
 
-    mount_remote_mcp(app, service="svc", job_store=store, get_worker=lambda: worker)
+    mount_remote_mcp(app, job_store=store, get_worker=lambda: worker)
     calls["worker"] = worker
     with TestClient(app) as client:
         yield client, store, calls
@@ -304,54 +303,36 @@ def test_run_tools_refuse_dspy_program_runs(harness: Any, tool: str, arguments: 
 
 
 def test_declared_task_model_normalizes_with_task_source() -> None:
-    """A metric naming the task model must not conflict with the task's billing source."""
-    spec = UnifiedRunRequest.model_validate(
-        unified_payload(
-            models={
-                "task_model": {"name": "openai/task", "token_source": "byok", "byok_provider": "openai"},
-                "reflection_model": {"name": "openai/reflection", "token_source": "managed"},
-            },
-            workspace={"run_code": "pass", "metric_code": "from skynet import llm\nllm(model='openai/task')"},
-        )
+    """A scorer naming the task model must not conflict with the task's billing source."""
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "task_model_config": {"name": "openai/task", "token_source": "byok", "byok_provider": "openai"},
+            "reflection_model_config": {"name": "openai/reflection", "token_source": "managed"},
+            "target": {"kind": "agent", "harness": "custom", "model": "openai/task", "run_command": "run-agent"},
+            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='openai/task')"},
+        }
     )
     _, sources = normalize_model_token_sources(spec)
     assert sources["openai/task"] == "byok"
-    assert spec.models.metric_model == spec.models.task_model
+    assert spec.scorer.model == spec.task_model_settings
 
 
 def test_declared_extra_reflection_model_normalizes_with_its_source() -> None:
-    """A metric naming an extra reflection model uses that role's source."""
-    spec = UnifiedRunRequest.model_validate(
-        unified_payload(
-            optimizer={"choice": "dspy_gepa"},
-            models={
-                "reflection_model": {"name": "openai/gpt-4o-mini", "token_source": "managed"},
-                "extra_reflection_models": [
-                    {"name": "anthropic/claude-x", "token_source": "byok", "byok_provider": "anthropic"}
-                ],
-            },
-            workspace={"run_code": "pass", "metric_code": "from skynet import llm\nllm(model='anthropic/claude-x')"},
-        )
+    """A scorer naming an extra reflection model uses that role's source."""
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "reflection_model_config": {"name": "openai/gpt-4o-mini", "token_source": "managed"},
+            "extra_reflection_model_configs": [
+                {"name": "anthropic/claude-x", "token_source": "byok", "byok_provider": "anthropic"}
+            ],
+            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='anthropic/claude-x')"},
+        }
     )
     _, sources = normalize_model_token_sources(spec)
     assert sources["anthropic/claude-x"] == "byok"
-    assert spec.models.metric_model == spec.models.extra_reflection_models[0]
-
-
-def test_submission_keeps_client_metric_model_without_declaration() -> None:
-    """Submissions preserve an old picker value when no model is declared."""
-    spec = UnifiedRunRequest.model_validate(
-        unified_payload(
-            models={
-                "reflection_model": {"name": "openai/reflection", "token_source": "managed"},
-                "metric_model": {"name": "anthropic/old", "token_source": "byok"},
-            },
-            workspace={"run_code": "pass", "metric_code": "from skynet import llm\nllm('x')"},
-        )
-    )
-    normalize_model_token_sources(spec)
-    assert spec.models.metric_model.name == "anthropic/old"
-    assert spec.models.metric_model.token_source == "byok"
+    assert spec.scorer.model == spec.extra_reflection_model_settings[0]
 
 
 def test_repo_submission_rejects_conflicting_stored_scorer_model() -> None:
@@ -442,38 +423,24 @@ def test_blackbox_submission_rejects_mixed_model_declarations() -> None:
     assert exc.value.code == "contract.metric_model_declaration"
 
 
-def test_submission_rejects_conflicting_stored_metric_model() -> None:
-    """Reject a conflicting metric model before billing."""
-    spec = UnifiedRunRequest.model_validate(
-        unified_payload(
-            models={"reflection_model": {"name": "openai/reflection"}, "metric_model": {"name": "anthropic/old"}},
-            workspace={"run_code": "pass", "metric_code": "llm(model='anthropic/new')"},
-        )
-    )
-    with pytest.raises(DomainError) as exc:
-        request_model_configs(spec)
-    assert exc.value.code == "contract.metric_model_conflict"
-
-
 def test_unmatched_metric_model_is_managed_in_subscription_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject a managed metric in local mode rather than assigning it a CLI plan."""
+    """Reject a managed scorer model in local mode rather than assigning it a CLI plan."""
     monkeypatch.setattr(settings, "local_mode", True)
-    spec = UnifiedRunRequest.model_validate(
-        unified_payload(
-            token_source="subscription",
-            models={
-                "reflection_model": {
-                    "name": "subscription/codex/model",
-                    "token_source": "subscription",
-                    "cli_provider": "codex",
-                }
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "token_source": "subscription",
+            "reflection_model_config": {
+                "name": "subscription/codex/model",
+                "token_source": "subscription",
+                "cli_provider": "codex",
             },
-            workspace={"run_code": "pass", "metric_code": "from skynet import llm\nllm(model='openai/judge')"},
-        )
+            "scorer": {"kind": "python", "metric_code": "from skynet import llm\nllm(model='openai/judge')"},
+        }
     )
     configs, _ = normalize_model_token_sources(spec)
-    assert spec.models.metric_model.token_source == "managed"
-    assert spec.models.metric_model.cli_provider is None
+    assert spec.scorer.model.token_source == "managed"
+    assert spec.scorer.model.cli_provider is None
     with pytest.raises(DomainError) as exc:
         enforce_local_mode_sources(spec, "subscription", configs)
     assert exc.value.code == "models.managed_unavailable_local"

@@ -42,7 +42,6 @@ from ..billing import (
 )
 from ..billing.budgets import BudgetService
 from ..billing.byok_bridge import provider_slug_for_model
-from ..billing.byok_upstreams import validate_byok_novelty
 from ..billing.byok_vault import byok_provider_for_litellm
 from ..billing.host_agent import (
     attach_host_agent_token,
@@ -53,9 +52,7 @@ from ..billing.host_agent import (
     host_proposer,
     host_reasoning_effort,
 )
-from ..billing.metering import debit_at_fallback_price
 from ..billing.model_gateway import ModelGateway, SandboxControl
-from ..billing.pricing import ModelUsage
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
     has_exposed_execution_credentials,
@@ -68,17 +65,11 @@ from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import settings
 from ..constants import (
     OPTIMIZATION_TYPE_BLACKBOX,
-    OPTIMIZATION_TYPE_GRID_SEARCH,
-    OPTIMIZATION_TYPE_RUN,
     OPTIMIZATION_TYPE_TAGGING,
-    PAYLOAD_OVERVIEW_ESTIMATED_HIGH,
-    PAYLOAD_OVERVIEW_ESTIMATED_LOW,
     PAYLOAD_OVERVIEW_MODEL_NAME,
-    PAYLOAD_OVERVIEW_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
     PAYLOAD_OVERVIEW_TOKEN_SOURCE,
-    PAYLOAD_OVERVIEW_TOKEN_SOURCES_BY_MODEL,
     PAYLOAD_OVERVIEW_USERNAME,
     TOKEN_SOURCE_BYOK,
     TOKEN_SOURCE_MANAGED,
@@ -86,18 +77,15 @@ from ..constants import (
 )
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
-from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus, RunRequest, UnifiedRunRequest
+from ..models import BlackboxRunRequest, ModelConfig, OptimizationStatus
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
-from ..registry import ServiceRegistry
 from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
-from ..service_gateway import DspyService
 from ..service_gateway.embedding_pipeline import embed_finished_job
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from ..service_gateway.optimization.blackbox.service import validate_blackbox_payload
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
-from ..service_gateway.optimization.unified.contract import validate_unified_payload
 from ..storage import JobStore
 from ..storage.models import JobModel
 from ..telemetry import record_server_event
@@ -113,7 +101,6 @@ from .budget_probe import (
 from .checkpoint_compat import (
     checkpoint_manifest,
     evaluated_incumbent_from_progress,
-    is_unified_payload,
     supports_checkpoint,
     validate_checkpoint,
 )
@@ -139,9 +126,8 @@ from .repo_staging import (
     publish_improvement,
     stage_repository,
 )
-from .subprocess_runner import run_service_in_subprocess, set_fork_service
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
-from .unified_aliases import alias_blackbox_metric_model, alias_unified_model_roles, strip_unified_model_aliases
+from .unified_aliases import alias_blackbox_metric_model
 from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
@@ -161,113 +147,17 @@ _SANDBOX_SWEEP_STATUSES = frozenset(
     }
 )
 
-GRID_SEARCH_RETIRED_MESSAGE = "Grid search is no longer supported. Submit this optimization again as a single run."
 
-
-def _gepa_state_base(base: Path, payload: dict[str, Any]) -> Path:
+def _gepa_state_base(base: Path) -> Path:
     """Return where the run keeps ``gepa_state.bin`` under its worker-owned dir.
-
-    Black-box engines (legacy and unified) nest GEPA state in a ``gepa``
-    subdir of the run dir; a DSPy run writes it at the base.
 
     Args:
         base: The worker-owned base directory.
-        payload: The stored job payload.
 
     Returns:
-        The directory holding the state file.
+        The ``gepa`` subdir the black-box engine writes its state to.
     """
-    return base / "gepa" if "strategy" in payload or is_unified_payload(payload) else base
-
-
-# Optional per-row pricing evidence written by newer workers; older results lack it.
-_USAGE_DETAIL_FIELDS = (
-    "reported_cost_usd",
-    "reported_input_tokens",
-    "reported_output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-)
-
-
-def _is_amount(value: Any) -> bool:
-    """Return whether a result field is a usable non-negative number.
-
-    Args:
-        value: A raw field from a serialized usage row.
-
-    Returns:
-        ``True`` for a non-negative int or float that is not a bool.
-    """
-    return isinstance(value, int | float) and not isinstance(value, bool) and value >= 0
-
-
-def _usages_from_result(result_dict: dict[str, Any] | None, fallback_model: str | None) -> list[ModelUsage]:
-    """Build per-model :class:`ModelUsage` from a serialized run/grid result.
-
-    Reads the result's ``usage_by_model`` rows (stamped by the optimizer from the
-    LM histories). A result that predates the per-model split — or an in-flight
-    job spanning the deploy — has no rows; it falls back to pricing the whole
-    ``total_tokens`` on ``fallback_model``, attributing it to input (the cheaper
-    side) so the legacy path under-charges rather than over-charges.
-
-    Args:
-        result_dict: The serialized run/grid result, or ``None``.
-        fallback_model: Model id to price a rows-less legacy result against.
-
-    Returns:
-        Per-model usage rows with positive token counts, or ``[]`` when the run
-        reported no usage at all.
-    """
-    if not isinstance(result_dict, dict):
-        return []
-    usages: list[ModelUsage] = []
-    rows = result_dict.get("usage_by_model")
-    if isinstance(rows, list):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            model = row.get("model")
-            in_tokens = row.get("input_tokens", 0)
-            out_tokens = row.get("output_tokens", 0)
-            if not isinstance(model, str) or not isinstance(in_tokens, int) or not isinstance(out_tokens, int):
-                continue
-            if in_tokens > 0 or out_tokens > 0:
-                usages.append(
-                    ModelUsage(
-                        model=model,
-                        input_tokens=in_tokens,
-                        output_tokens=out_tokens,
-                        **{key: row[key] for key in _USAGE_DETAIL_FIELDS if _is_amount(row.get(key))},
-                    )
-                )
-    if usages:
-        return usages
-    total_tokens = result_dict.get("total_tokens")
-    if isinstance(total_tokens, int) and total_tokens > 0:
-        return [ModelUsage(model=fallback_model or "unknown", input_tokens=total_tokens, output_tokens=0)]
-    return []
-
-
-def _legacy_settlement_key(optimization_id: str, generation: int | None) -> str | None:
-    """Return the idempotency key for one legacy execution leg's debit.
-
-    Every claim bumps the job's execution generation, so the key is unique per
-    leg: a resumed or re-run leg bills its own usage, while a redelivered
-    settlement of the same leg collides and charges nothing.
-
-    Args:
-        optimization_id: The job being billed.
-        generation: The leg's execution generation, or ``None`` on a store
-            without generations.
-
-    Returns:
-        The ledger ``settlement_key``, or ``None`` when there is no generation.
-    """
-    if generation is None:
-        return None
-    return f"legacy:{optimization_id}:g{generation}"
+    return base / "gepa"
 
 
 class CancellationError(Exception):
@@ -344,8 +234,8 @@ class BackgroundWorker:
     """Multi-threaded worker that polls a job store and runs optimization jobs.
 
     Each worker thread calls ``_worker_loop``, which polls ``_pending_jobs`` and
-    dispatches work to ``_process_job``.  Jobs run inside a child process created
-    with the configured multiprocessing start method (fork or spawn); events
+    dispatches work to ``_process_job``.  Jobs run inside a spawned child process
+    that drives the managed sandbox; events
     (progress, logs, result, error) are streamed back through a ``mp.Queue``
     and persisted by ``_drain_subprocess_events``.  Cancellation is cooperative:
     each job has a ``threading.Event``; ``_raise_if_cancelled`` polls it between
@@ -357,10 +247,8 @@ class BackgroundWorker:
         job_store: JobStore,
         num_workers: int = 2,
         poll_interval: float = 2.0,
-        service: DspyService | None = None,
         pod_name: str | None = None,
         lease_seconds: float = 60.0,
-        _allow_unprotected_test_execution: bool = False,
     ) -> None:
         """Initialize the worker with a job store and concurrency settings.
 
@@ -368,7 +256,6 @@ class BackgroundWorker:
             job_store: Backend used to load and persist job state.
             num_workers: Number of worker threads to spawn on ``start``.
             poll_interval: Seconds the loop sleeps between empty-queue checks.
-            service: Optional pre-built ``DspyService``; one is built lazily otherwise.
             pod_name: Identifier written to ``jobs.claimed_by`` so claim
                 ownership survives a process restart and is observable across
                 the fleet. Defaults to ``$POD_NAME`` (set via the Kubernetes
@@ -378,19 +265,14 @@ class BackgroundWorker:
                 The worker loop renews it via ``_touch_activity`` on every
                 cancel-poll tick; should comfortably exceed
                 ``cancel_poll_interval × 3``.
-            _allow_unprotected_test_execution: Permit direct child-process
-                execution only for isolated worker unit tests. Production
-                callers must keep the default managed-sandbox requirement.
         """
         self._job_store = job_store
         self._num_workers = num_workers
         self._poll_interval = poll_interval
         self._running = False
         self._threads: list[threading.Thread] = []
-        self._service: DspyService | None = service
         self._pod_name = pod_name or os.environ.get("POD_NAME") or socket.gethostname()
         self._lease_seconds = max(float(lease_seconds), 5.0)
-        self._allow_unprotected_test_execution = _allow_unprotected_test_execution
 
         # In-memory queue is retained as a backwards-compat seam: tests and
         # any legacy single-pod callers can still call ``enqueue_job`` directly
@@ -407,8 +289,6 @@ class BackgroundWorker:
         except ValueError:
             logger.warning("Invalid CANCEL_POLL_INTERVAL=%r; using 1.0", poll_raw)
             self._cancel_poll_interval = 1.0
-        self._mp_ctx = self._resolve_mp_context()
-        self._mp_start_method = self._mp_ctx.get_start_method()
 
         self._last_activity: dict[int, float] = {}
         self._activity_lock = threading.Lock()
@@ -419,40 +299,6 @@ class BackgroundWorker:
         self._thread_current_job: dict[int, str] = {}
         # Rate-limits the memory-pressure deferral warning across all threads.
         self._admission_last_log = 0.0
-
-    @staticmethod
-    def _resolve_mp_context() -> mp.context.BaseContext:
-        """Resolve multiprocessing start method from JOB_RUN_START_METHOD, falling back to system default.
-
-        Returns:
-            A multiprocessing context honoring the configured start method.
-        """
-        requested = settings.job_run_start_method
-        try:
-            ctx = mp.get_context(requested)
-        except ValueError:
-            logger.warning(
-                "Invalid JOB_RUN_START_METHOD=%r; using default start method.",
-                requested,
-            )
-            ctx = mp.get_context()
-        if ctx.get_start_method() != "fork":
-            logger.warning(
-                "Multiprocessing start method is '%s'. "
-                "Custom registry callables may not be available in subprocess jobs.",
-                ctx.get_start_method(),
-            )
-        return ctx
-
-    def _get_service(self) -> DspyService:
-        """Get or lazily build the shared DspyService instance.
-
-        Returns:
-            The shared ``DspyService`` used by all worker threads.
-        """
-        if self._service is None:
-            self._service = DspyService(ServiceRegistry())
-        return self._service
 
     def enqueue_job(self, optimization_id: str) -> None:
         """Register a cancel event for ``optimization_id`` and pre-stage it locally.
@@ -475,7 +321,7 @@ class BackgroundWorker:
     def submit_job(
         self,
         optimization_id: str,
-        payload: RunRequest | BlackboxRunRequest | UnifiedRunRequest | TaggingAutotagPayload,
+        payload: BlackboxRunRequest | TaggingAutotagPayload,
         payload_dump: dict[str, Any] | None = None,
     ) -> None:
         """Persist payload to the job store; rely on DB claim for pickup.
@@ -774,12 +620,7 @@ class BackgroundWorker:
         execution_generation: int | None = None
         execution_budget_snapshot: dict[str, Any] | None = None
         run_gateway: ModelGateway | None = None
-        # Legacy (unprotected) runs are billed from the worker, not a budget
-        # gateway; the exception handler reads these to bill a leg that ended
-        # without a successful completion.
-        bill_legacy_usage = False
         result_dict: dict[str, Any] | None = None
-        usage_tracker: dict[str, Any] = {}
         # Where the run was when it failed, read by run_failed telemetry.
         run_phase = "preflight"
 
@@ -804,25 +645,15 @@ class BackgroundWorker:
                     overview = {}
             if not isinstance(overview, dict):
                 overview = {}
-            optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
+            optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_BLACKBOX)
 
             if optimization_type == OPTIMIZATION_TYPE_TAGGING:
                 self._process_tagging_job(optimization_id, worker_id, cancel_event, payload_dict)
                 return
 
-            # Stored grid runs stay readable, but grid search is no longer an
-            # executable job type; a grid row still queued from before the
-            # removal fails here instead of spending anything.
-            if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH or job_data.get("parent_optimization_id"):
-                raise ValueError(GRID_SEARCH_RETIRED_MESSAGE)
-            is_unified = optimization_type == OPTIMIZATION_TYPE_BLACKBOX and is_unified_payload(payload_dict)
-            execution_payload: RunRequest | BlackboxRunRequest | UnifiedRunRequest
-            if is_unified:
-                execution_payload = UnifiedRunRequest.model_validate(payload_dict)
-            elif optimization_type == OPTIMIZATION_TYPE_BLACKBOX:
-                execution_payload = BlackboxRunRequest.model_validate(payload_dict)
-            else:
-                execution_payload = RunRequest.model_validate(payload_dict)
+            if optimization_type != OPTIMIZATION_TYPE_BLACKBOX:
+                raise ValueError(f"Optimization type {optimization_type!r} is no longer supported.")
+            execution_payload = BlackboxRunRequest.model_validate(payload_dict)
 
             self._update_owned_job(
                 optimization_id,
@@ -838,57 +669,29 @@ class BackgroundWorker:
 
             protected_execution = job_data.get("execution_budget_id") is not None
             # Black-box scoring only runs in the managed Vercel sandbox, so a
-            # black-box job always requires a funded protected run: the
-            # unprotected test escape hatch other run types use to dispatch a
-            # local subprocess never applies to it.
-            allow_unprotected = (
-                self._allow_unprotected_test_execution and optimization_type != OPTIMIZATION_TYPE_BLACKBOX
-            )
-            if not protected_execution and not allow_unprotected:
+            # job always requires a funded protected run.
+            if not protected_execution:
                 raise ValueError(
                     "This stored job predates protected execution. Submit it again to start a funded run in the cloud sandbox."
                 )
-            bill_legacy_usage = not protected_execution
-            service = self._get_service()
-            # Current preflight evidence already proves semantic validity inside
-            # this job's selected sandbox. The legacy validators exec authored
-            # modules in a broader subprocess, before that boundary exists.
-            if isinstance(execution_payload, UnifiedRunRequest):
-                try:
-                    validate_unified_payload(execution_payload)
-                    model = execution_payload.models.reflection_model
-                    novelty = bool(execution_payload.optimizer.shinka and execution_payload.optimizer.shinka.novelty)
-                    api_bases = _reflection_api_bases(
-                        getattr(self._job_store, "engine", None),
-                        execution_payload.username,
-                        model,
-                        execution_payload.token_source,
-                        novelty,
-                    )
-                    reflection = model.model_dump()
-                    reflection["token_source"] = model.token_source or execution_payload.token_source
-                    validate_byok_novelty(reflection, novelty, api_bases=api_bases)
-                except DomainError as error:
-                    raise domain_service_error(error) from error
-            elif isinstance(execution_payload, BlackboxRunRequest):
-                try:
-                    model = execution_payload.reflection_model_settings
-                    api_bases = _reflection_api_bases(
-                        getattr(self._job_store, "engine", None),
-                        execution_payload.username,
-                        model,
-                        execution_payload.token_source,
-                        bool(execution_payload.shinka and execution_payload.shinka.novelty),
-                    )
-                    validate_blackbox_payload(
-                        execution_payload,
-                        verify_scorer=not protected_execution,
-                        api_bases=api_bases,
-                    )
-                except DomainError as error:
-                    raise domain_service_error(error) from error
-            elif optimization_type == OPTIMIZATION_TYPE_RUN and not protected_execution:
-                service.validate_payload(execution_payload)
+            # A protected job's preflight already ran the scorer inside its
+            # selected sandbox, so the host never executes authored scorer code.
+            try:
+                model = execution_payload.reflection_model_settings
+                api_bases = _reflection_api_bases(
+                    getattr(self._job_store, "engine", None),
+                    execution_payload.username,
+                    model,
+                    execution_payload.token_source,
+                    bool(execution_payload.shinka and execution_payload.shinka.novelty),
+                )
+                validate_blackbox_payload(
+                    execution_payload,
+                    verify_scorer=False,
+                    api_bases=api_bases,
+                )
+            except DomainError as error:
+                raise domain_service_error(error) from error
 
             self._touch_activity(worker_id)
             self._raise_if_interrupted(cancel_event, optimization_id)
@@ -929,10 +732,6 @@ class BackgroundWorker:
                 # lease so the upcoming subprocess spawn starts with a full window.
                 self._touch_activity(worker_id)
 
-            # Preserve registry-backed service in child when using fork.
-            if self._mp_start_method == "fork":
-                set_fork_service(service)
-
             try:
                 # Inject job type so subprocess can dispatch without duck-typing.
                 # Pydantic ignores this unknown key during model_validate.
@@ -952,10 +751,7 @@ class BackgroundWorker:
                 # client-supplied key.
                 token_source = overview.get(PAYLOAD_OVERVIEW_TOKEN_SOURCE) or TOKEN_SOURCE_MANAGED
                 byok_engine = getattr(self._job_store, "engine", None)
-                if is_unified:
-                    alias_unified_model_roles(payload_dict)
-                elif optimization_type == OPTIMIZATION_TYPE_BLACKBOX:
-                    alias_blackbox_metric_model(payload_dict)
+                alias_blackbox_metric_model(payload_dict)
                 if byok_engine is not None and payload_uses_token_source(
                     payload_dict,
                     TOKEN_SOURCE_BYOK,
@@ -992,161 +788,150 @@ class BackgroundWorker:
                                 default_token_source=token_source,
                             )
 
-                if job_data.get("execution_budget_id") is not None:
-                    if byok_engine is None:
-                        raise ValueError("Protected execution requires the authoritative ledger.")
-                    uses_managed_models = payload_uses_token_source(
-                        payload_dict,
-                        TOKEN_SOURCE_MANAGED,
-                        default_token_source=token_source,
-                    )
-                    if uses_managed_models and settings.openrouter_api_key is None:
-                        raise ValueError("Managed model roles require the configured provider route.")
-                    budget_gateway = ModelGateway(
-                        BudgetRuntime(
-                            BudgetService(engine=byok_engine),
-                            username=execution_payload.username,
-                            budget_id=job_data["execution_budget_id"],
-                            generation=job_data["execution_budget_generation"],
-                            phase="run",
-                        )
-                    )
-                    run_gateway = budget_gateway
-                    sandbox_workflow = "anything" if optimization_type == OPTIMIZATION_TYPE_BLACKBOX else "dspy"
-                    current_image = protected_image(settings, sandbox_workflow)
-                    sandbox_image = (
-                        self._job_store.pin_sandbox_image(optimization_id, current_image)
-                        if current_image is not None
-                        else None
-                    )
-                    bind_protected_sandbox(
-                        budget_gateway,
-                        settings,
-                        workflow=sandbox_workflow,
-                        owner_id=optimization_id,
-                        image=sandbox_image,
-                        guest_lifetime_seconds=payload_dict.get("deadline_seconds"),
-                        provider=payload_dict.get("sandbox_provider"),
-                        parent_hosts=(
-                            PACKAGE_REGISTRY_HOSTS
-                            if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and is_repo_payload(payload_dict)
-                            else ()
-                        ),
-                    )
-                    checkpoint_tracker.update(sandbox_image=sandbox_image)
-                    parent_payload = resolve_execution_credentials(
-                        payload_dict,
+                if byok_engine is None:
+                    raise ValueError("Protected execution requires the authoritative ledger.")
+                uses_managed_models = payload_uses_token_source(
+                    payload_dict,
+                    TOKEN_SOURCE_MANAGED,
+                    default_token_source=token_source,
+                )
+                if uses_managed_models and settings.openrouter_api_key is None:
+                    raise ValueError("Managed model roles require the configured provider route.")
+                budget_gateway = ModelGateway(
+                    BudgetRuntime(
+                        BudgetService(engine=byok_engine),
                         username=execution_payload.username,
-                        binding_id=job_data["execution_budget_id"],
-                        vault=ProtectedCredentialVault(engine=byok_engine),
+                        budget_id=job_data["execution_budget_id"],
+                        generation=job_data["execution_budget_generation"],
+                        phase="run",
                     )
-                    try:
-                        payload_dict = budget_gateway.protect_payload(
-                            parent_payload,
+                )
+                run_gateway = budget_gateway
+                current_image = protected_image(settings)
+                sandbox_image = (
+                    self._job_store.pin_sandbox_image(optimization_id, current_image)
+                    if current_image is not None
+                    else None
+                )
+                bind_protected_sandbox(
+                    budget_gateway,
+                    settings,
+                    owner_id=optimization_id,
+                    image=sandbox_image,
+                    guest_lifetime_seconds=payload_dict.get("deadline_seconds"),
+                    provider=payload_dict.get("sandbox_provider"),
+                    parent_hosts=(PACKAGE_REGISTRY_HOSTS if is_repo_payload(payload_dict) else ()),
+                )
+                checkpoint_tracker.update(sandbox_image=sandbox_image)
+                parent_payload = resolve_execution_credentials(
+                    payload_dict,
+                    username=execution_payload.username,
+                    binding_id=job_data["execution_budget_id"],
+                    vault=ProtectedCredentialVault(engine=byok_engine),
+                )
+                try:
+                    payload_dict = budget_gateway.protect_payload(
+                        parent_payload,
+                        managed_key=(
+                            settings.openrouter_api_key.get_secret_value()
+                            if settings.openrouter_api_key is not None
+                            else ""
+                        ),
+                        allow_private_tools=settings.discover_allow_private,
+                    )
+                except DomainError as error:
+                    raise domain_service_error(error) from error
+                # The wizard leaves the ceiling unset for a budget without a
+                # limit, while the guest's proposer still plans its spend
+                # against one, so the parent hands it the ledger's allowance.
+                if payload_dict.get("max_cost_cents") is None:
+                    payload_dict["max_cost_cents"] = budget_gateway.cost_ceiling_cents()
+                host = host_proposer(payload_dict)
+                # The bind waits for the staged hidden paths, but a host proposer
+                # it would refuse must fail before setup and the scorer cost money.
+                if host is not None:
+                    check_host_agent(settings, cli=host[0], permission=host[1])
+                if is_repo_payload(payload_dict):
+                    with self._renewing_lease(worker_id):
+                        # Staging empties the secret list, so read the gate's inputs first.
+                        secret_bindings = dict(payload_dict["target"]["repo"].get("secret_bindings") or {})
+                        secret_allowed_hosts = repo_secret_allowed_hosts(payload_dict)
+                        payload_dict, staged_repository = stage_repository(
+                            payload_dict,
+                            username=execution_payload.username,
+                            binding_id=job_data["execution_budget_id"],
+                            engine=byok_engine,
+                        )
+                        self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
+                        # Before the setup model and the scorer box, so a refused run costs nothing.
+                        gate_failures = check_repository(
+                            staged_repository.snapshot.archive,
+                            staged_repository.secrets,
+                            place=sandbox_place(settings.local_mode),
+                            bindings=secret_bindings,
+                            allowed_hosts=secret_allowed_hosts,
+                        )
+                        if gate_failures:
+                            raise RepoGateError(gate_failures)
+                        # The broker was bound before staging read optimize.toml, so the
+                        # proposer's hosts are granted only now; with none it stays offline.
+                        budget_gateway.allow_guest_hosts(
+                            tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
+                        )
+                        inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
+                        if inferred_setup is not None:
+                            self._record_setup_command(optimization_id, inferred_setup)
+                        bind_repo_scorer(
+                            payload_dict,
+                            staged_repository,
+                            budget_gateway,
+                            owner_id=optimization_id,
                             managed_key=(
                                 settings.openrouter_api_key.get_secret_value()
                                 if settings.openrouter_api_key is not None
                                 else ""
                             ),
-                            allow_private_tools=settings.discover_allow_private,
                         )
-                    except DomainError as error:
-                        raise domain_service_error(error) from error
-                    # The wizard leaves the ceiling unset for a budget without a
-                    # limit, while the guest's proposer still plans its spend
-                    # against one, so the parent hands it the ledger's allowance.
-                    if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and payload_dict.get("max_cost_cents") is None:
-                        payload_dict["max_cost_cents"] = budget_gateway.cost_ceiling_cents()
-                    host = host_proposer(payload_dict)
-                    # The bind waits for the staged hidden paths, but a host proposer
-                    # it would refuse must fail before setup and the scorer cost money.
-                    if host is not None:
-                        check_host_agent(settings, cli=host[0], permission=host[1])
-                    if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and is_repo_payload(payload_dict):
-                        with self._renewing_lease(worker_id):
-                            # Staging empties the secret list, so read the gate's inputs first.
-                            secret_bindings = dict(payload_dict["target"]["repo"].get("secret_bindings") or {})
-                            secret_allowed_hosts = repo_secret_allowed_hosts(payload_dict)
-                            payload_dict, staged_repository = stage_repository(
-                                payload_dict,
-                                username=execution_payload.username,
-                                binding_id=job_data["execution_budget_id"],
-                                engine=byok_engine,
-                            )
-                            self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
-                            # Before the setup model and the scorer box, so a refused run costs nothing.
-                            gate_failures = check_repository(
-                                staged_repository.snapshot.archive,
-                                staged_repository.secrets,
-                                place=sandbox_place(settings.local_mode),
-                                bindings=secret_bindings,
-                                allowed_hosts=secret_allowed_hosts,
-                            )
-                            if gate_failures:
-                                raise RepoGateError(gate_failures)
-                            # The broker was bound before staging read optimize.toml, so the
-                            # proposer's hosts are granted only now; with none it stays offline.
-                            budget_gateway.allow_guest_hosts(
-                                tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
-                            )
-                            inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
-                            if inferred_setup is not None:
-                                self._record_setup_command(optimization_id, inferred_setup)
-                            bind_repo_scorer(
-                                payload_dict,
-                                staged_repository,
-                                budget_gateway,
-                                owner_id=optimization_id,
-                                managed_key=(
-                                    settings.openrouter_api_key.get_secret_value()
-                                    if settings.openrouter_api_key is not None
-                                    else ""
-                                ),
-                            )
-                            recorded = self._record_repo_environment(
-                                optimization_id, payload_dict["target"]["repo"][ENVIRONMENT_KEY]
-                            )
-                            # Resume checks checkpoints against the stored payload,
-                            # which now holds what staging recorded.
-                            if recorded is not None:
-                                checkpoint_tracker["payload"] = dict(recorded)
-                    if host is not None:
-                        # The CLI and permission come from the stored run settings,
-                        # never from the guest, and only this run's proposer gets the token.
-                        # After staging, which works out the hidden paths the CLI must refuse.
-                        host_token = bind_host_agent(
-                            budget_gateway,
-                            settings,
-                            cli=host[0],
-                            permission=host[1],
-                            reasoning_effort=host_reasoning_effort(payload_dict),
-                            hidden_paths=staged_repository.hidden_paths if staged_repository is not None else (),
+                        recorded = self._record_repo_environment(
+                            optimization_id, payload_dict["target"]["repo"][ENVIRONMENT_KEY]
                         )
-                        attach_host_agent_token(payload_dict, host_token)
-                if is_unified:
-                    strip_unified_model_aliases(payload_dict)
+                        # Resume checks checkpoints against the stored payload,
+                        # which now holds what staging recorded.
+                        if recorded is not None:
+                            checkpoint_tracker["payload"] = dict(recorded)
+                if host is not None:
+                    # The CLI and permission come from the stored run settings,
+                    # never from the guest, and only this run's proposer gets the token.
+                    # After staging, which works out the hidden paths the CLI must refuse.
+                    host_token = bind_host_agent(
+                        budget_gateway,
+                        settings,
+                        cli=host[0],
+                        permission=host[1],
+                        reasoning_effort=host_reasoning_effort(payload_dict),
+                        hidden_paths=staged_repository.hidden_paths if staged_repository is not None else (),
+                    )
+                    attach_host_agent_token(payload_dict, host_token)
                 if has_exposed_execution_credentials(
                     payload_dict,
-                    allow_parent_model_routes=budget_gateway is not None,
+                    allow_parent_model_routes=True,
                 ):
                     raise ValueError(
                         "The stored job contains credentials outside the trusted relay; clone and test setup again."
                     )
 
-                execution_start_method = "spawn" if budget_gateway is not None else self._mp_start_method
-                execution_context = mp.get_context("spawn") if budget_gateway is not None else self._mp_ctx
+                execution_context = mp.get_context("spawn")
                 event_queue = execution_context.Queue()
-                if budget_gateway is not None:
-                    budget_gateway.heartbeat = lambda: event_queue.put_nowait({"type": EVENT_HEARTBEAT})
+                budget_gateway.heartbeat = lambda: event_queue.put_nowait({"type": EVENT_HEARTBEAT})
                 run_process = execution_context.Process(  # type: ignore[attr-defined]
-                    target=run_vercel_dspy if budget_gateway is not None else run_service_in_subprocess,
+                    target=run_vercel_dspy,
                     args=(
                         payload_dict,
                         f"{optimization_id}-g{execution_generation}"
                         if execution_generation is not None
                         else optimization_id,
                         event_queue,
-                        execution_start_method,
+                        "spawn",
                     ),
                     name=f"dspy-run-{optimization_id[:8]}",
                     daemon=True,
@@ -1158,8 +943,7 @@ class BackgroundWorker:
                 # From here the child owns its copy of the payload. The
                 # validated request model is a second full copy of the
                 # dataset that would otherwise sit in this process for the
-                # whole multi-hour run — and be duplicated into every
-                # sibling job's fork image. ``payload_dict`` itself stays
+                # whole multi-hour run. ``payload_dict`` itself stays
                 # pinned by ``run_process``'s args tuple; only ``attempts``
                 # is read from ``job_data`` after this point.
                 job_data = {
@@ -1193,7 +977,6 @@ class BackgroundWorker:
                         event_queue,
                         generation=execution_generation,
                         checkpoint_tracker=checkpoint_tracker,
-                        usage_tracker=usage_tracker,
                         run_watcher=run_watcher,
                         budget_gateway=budget_gateway,
                     )
@@ -1211,7 +994,7 @@ class BackgroundWorker:
                         )
                     if gepa_dir is not None:
                         self._persist_gepa_checkpoint(optimization_id, gepa_dir, checkpoint_tracker)
-                    if run_watcher is not None and budget_gateway is not None and run_watcher.spend_check_due():
+                    if run_watcher is not None and run_watcher.spend_check_due():
                         self._observe_run_spend(optimization_id, run_watcher, budget_gateway)
 
                 drained_result, drained_error, _ = self._drain_subprocess_events(
@@ -1219,7 +1002,6 @@ class BackgroundWorker:
                     event_queue,
                     generation=execution_generation,
                     checkpoint_tracker=checkpoint_tracker,
-                    usage_tracker=usage_tracker,
                     run_watcher=run_watcher,
                 )
                 if drained_result is not None:
@@ -1361,31 +1143,6 @@ class BackgroundWorker:
                             payload=payload_dict,
                             phase=run_phase,
                         )
-                    # Every terminal status is billed for the tokens it spent — a
-                    # failed or budget-stopped run still consumed them. The
-                    # per-generation settlement key keeps a redelivered leg from
-                    # double-billing; a store without generations falls back to
-                    # the once-only completion claim.
-                    if bill_legacy_usage and (claimed or execution_generation is not None):
-                        billed = self._bill_legacy_leg(
-                            optimization_id,
-                            overview,
-                            result_dict,
-                            usage_tracker,
-                            generation=execution_generation,
-                        )
-                        # Stamp the billing outcome onto the persisted result so
-                        # the result screen can show what the run cost.
-                        # Re-persisted because the debit runs after the first
-                        # completion write.
-                        if isinstance(result_dict, dict):
-                            self._stamp_billing_outcome(
-                                optimization_id,
-                                result_dict,
-                                billed=billed,
-                                estimated_low=overview.get(PAYLOAD_OVERVIEW_ESTIMATED_LOW),
-                                estimated_high=overview.get(PAYLOAD_OVERVIEW_ESTIMATED_HIGH),
-                            )
                     if final_status == "success":
                         self._schedule_embedding_indexing(optimization_id)
                 except KeyError:
@@ -1403,8 +1160,7 @@ class BackgroundWorker:
                         self._persist_gepa_checkpoint(optimization_id, gepa_dir, checkpoint_tracker)
                 if run_process is not None and run_process.is_alive():
                     self._terminate_run_process(run_process, optimization_id)
-                    if optimization_type == OPTIMIZATION_TYPE_BLACKBOX:
-                        self._stop_blackbox_sandboxes(optimization_id)
+                    self._stop_blackbox_sandboxes(optimization_id)
                 raise
             finally:
                 if budget_gateway is not None:
@@ -1456,22 +1212,6 @@ class BackgroundWorker:
             is_shutdown = isinstance(exc, SystemExit | KeyboardInterrupt)
             is_cancelled = isinstance(exc, CancellationError)
             is_temporary = isinstance(exc, InfrastructureInterruptionError) or is_shutdown
-            # A legacy leg that failed, was cancelled/paused, or stalled is billed
-            # for the tokens it already spent. Interruptions the platform caused
-            # (host pressure, provider transport drop, shutdown) are not billed.
-            if (
-                bill_legacy_usage
-                and execution_generation is not None
-                and (not is_temporary or isinstance(exc, JobStalledError))
-            ):
-                with contextlib.suppress(Exception):
-                    self._bill_legacy_leg(
-                        optimization_id,
-                        overview if isinstance(overview, dict) else {},
-                        result_dict,
-                        usage_tracker,
-                        generation=execution_generation,
-                    )
             if isinstance(exc, WorkerShutdownError):
                 self._release_for_restart(optimization_id, execution_generation)
                 return
@@ -2173,172 +1913,6 @@ class BackgroundWorker:
         except Exception:  # isolation boundary: telemetry must never affect a run outcome
             logger.debug("Optimization %s: run outcome telemetry failed", optimization_id, exc_info=True)
 
-    def _debit_run_cents(
-        self,
-        username: str,
-        result_dict: dict[str, Any] | None,
-        *,
-        run_name: str,
-        model: str | None,
-        optimization_id: str | None = None,
-        token_source: str = TOKEN_SOURCE_MANAGED,
-        token_sources_by_model: dict[str, str] | None = None,
-        settlement_key: str | None = None,
-    ) -> int:
-        """Debit a finished run's cost from the account's local ledger.
-
-        Writes a signed ``run`` row and decrements the account's grant/balance via
-        :meth:`StripeBillingService.debit_run`. Runs inline (not on a daemon
-        thread) so the wallet visibly reflects the spend the moment the run lands,
-        but wrapped so a billing-DB hiccup can never flip job status — the local
-        ledger is the balance source of truth, independent of whether Stripe is
-        configured. A managed run is charged its full per-token cost; a BYOK run is
-        charged no model fee because the provider bills the user's key. A no-op
-        when the store exposes no SQL engine (legacy/in-memory),
-        the caller is anonymous, or the run reported no token usage. A failed debit
-        is logged at ``ERROR`` (forwarded as an alert) and retried at the fallback
-        frontier price, so a metering fault never gives the tokens away.
-
-        Args:
-            username: Account the run is billed to.
-            result_dict: The serialized run/grid result; its ``usage_by_model`` is
-                priced per-model into the charge (falling back to ``total_tokens``).
-            run_name: Run name for the ledger row's human label.
-            model: Model id stamped on the ledger row, or ``None``.
-            optimization_id: Finished legacy job whose own wallet commitment is consumed.
-            token_source: ``"managed"`` (full cost) or ``"byok"`` (no model charge);
-                defaults to managed.
-            token_sources_by_model: Optional model-to-source map for mixed jobs.
-            settlement_key: Idempotency key for this leg's debit, so a retried
-                or re-claimed leg is never charged twice.
-
-        Returns:
-            The cents charged (``0`` when nothing was billed or the debit was
-            skipped/failed).
-        """
-        engine = getattr(self._job_store, "engine", None)
-        if engine is None or not username:
-            return 0
-        usages = _usages_from_result(result_dict, model)
-        if not usages:
-            return 0
-        service = StripeBillingService(engine=engine)
-        billing_kwargs: dict[str, Any] = {
-            "model": model,
-            "description": run_name or "Run",
-            "token_source": token_source,
-        }
-        if token_sources_by_model is not None:
-            billing_kwargs["token_sources_by_model"] = token_sources_by_model
-        if optimization_id is not None:
-            billing_kwargs["optimization_id"] = optimization_id
-        if settlement_key is not None:
-            billing_kwargs["settlement_key"] = settlement_key
-        try:
-            return service.debit_run(username, usages, **billing_kwargs)
-        except Exception:  # isolation boundary: a debit failure must never impact job status
-            logger.exception(
-                "Balance debit failed for %s (job %s, %s); charging at fallback price: %s",
-                username,
-                optimization_id,
-                run_name or "Run",
-                ", ".join(f"{u.model}={u.input_tokens}/{u.output_tokens}" for u in usages),
-            )
-            return debit_at_fallback_price(service, username, usages, **billing_kwargs)
-
-    def _bill_legacy_leg(
-        self,
-        optimization_id: str,
-        overview: dict[str, Any],
-        result_dict: dict[str, Any] | None,
-        usage_tracker: dict[str, Any],
-        *,
-        generation: int | None,
-        commitment_job_id: str | None = None,
-    ) -> int:
-        """Bill one execution leg of a legacy (unprotected) job, whatever its outcome.
-
-        Prices the result's usage when the leg delivered one, otherwise the last
-        cumulative usage snapshot the child reported before it failed or was
-        stopped. Usage the child spent after its last event is not visible here.
-
-        Args:
-            optimization_id: The job whose leg is billed.
-            overview: The job's payload overview (username, model, token source).
-            result_dict: The leg's result payload, when one arrived.
-            usage_tracker: Latest ``usage_by_model`` snapshot from the child's events.
-            generation: The leg's execution generation; keys the idempotent debit.
-            commitment_job_id: Job holding the wallet commitment this debit may
-                consume; defaults to ``optimization_id``.
-
-        Returns:
-            The cents charged.
-        """
-        source: dict[str, Any] | None = result_dict if _usages_from_result(result_dict, None) else None
-        if source is None and usage_tracker.get("usage_by_model"):
-            source = {"usage_by_model": usage_tracker["usage_by_model"]}
-        if source is None:
-            return 0
-        return self._debit_run_cents(
-            overview.get(PAYLOAD_OVERVIEW_USERNAME, ""),
-            source,
-            optimization_id=commitment_job_id or optimization_id,
-            run_name=overview.get(PAYLOAD_OVERVIEW_NAME) or "",
-            model=overview.get(PAYLOAD_OVERVIEW_MODEL_NAME),
-            token_source=overview.get(PAYLOAD_OVERVIEW_TOKEN_SOURCE) or TOKEN_SOURCE_MANAGED,
-            token_sources_by_model=overview.get(PAYLOAD_OVERVIEW_TOKEN_SOURCES_BY_MODEL),
-            settlement_key=_legacy_settlement_key(optimization_id, generation),
-        )
-
-    def _stamp_billing_outcome(
-        self,
-        optimization_id: str,
-        result_dict: dict[str, Any] | None,
-        *,
-        billed: int,
-        estimated_low: int | None = None,
-        estimated_high: int | None = None,
-    ) -> None:
-        """Record the run's billed cost on its result for the result screen.
-
-        Writes ``result['details']['billing']`` — ``{outcome: "billed", cents}``
-        where ``cents`` is the amount charged. When the run was submitted with a
-        projected bracket, ``estimated_low``/``estimated_high`` are echoed
-        alongside so the estimate can be reconciled against the actual charge.
-        Only stamps single-run results (a grid envelope has no per-run
-        ``details``) and only when a charged amount exists, so a free-grant run
-        that cost nothing adds no row. Re-persists the result via the job store
-        because the debit runs after the first completion write; wrapped so a
-        store hiccup can never flip job status.
-
-        Args:
-            optimization_id: The finished run whose result is updated.
-            result_dict: The serialized run result; mutated in place and re-saved.
-            billed: Cents charged by :meth:`_debit_run_cents`.
-            estimated_low: Low end of the projected cost bracket, or None when
-                the run carried no estimate.
-            estimated_high: High end of the projected cost bracket, or None.
-        """
-        if not isinstance(result_dict, dict) or "pair_results" in result_dict:
-            return
-        outcome = "billed"
-        cents = billed
-        if cents <= 0:
-            return
-        try:
-            details = result_dict.get("details")
-            if not isinstance(details, dict):
-                details = {}
-                result_dict["details"] = details
-            billing: dict[str, Any] = {"outcome": outcome, "cents": cents}
-            if estimated_low is not None and estimated_high is not None:
-                billing["estimated_low"] = estimated_low
-                billing["estimated_high"] = estimated_high
-            details["billing"] = billing
-            self._job_store.update_job(optimization_id, result=result_dict)
-        except Exception as exc:  # isolation boundary: stamping must never impact job status
-            logger.debug("Billing-outcome stamp for %s failed: %s", optimization_id, exc)
-
     def _terminate_run_process(self, run_process: mp.process.BaseProcess, optimization_id: str) -> None:
         """Terminate a still-running job subprocess, escalating to SIGKILL after a 3-second grace period.
 
@@ -2452,13 +2026,12 @@ class BackgroundWorker:
         *,
         generation: int | None = None,
         checkpoint_tracker: dict[str, Any] | None = None,
-        usage_tracker: dict[str, Any] | None = None,
         run_watcher: RunNotificationWatcher | None = None,
         budget_gateway: ModelGateway | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
         """Drain all pending events from the subprocess queue, routing each by type.
 
-        Handles the event types emitted by ``run_service_in_subprocess``:
+        Handles the event types emitted by ``run_vercel_dspy``:
         ``EVENT_PROGRESS`` → ``job_store.record_progress``; ``EVENT_LOG`` →
         ``job_store.append_log``; ``EVENT_AGENT_RUN`` → ``job_store.save_agent_run``
         or ``append_agent_run_transcript`` (on stores that keep agent runs);
@@ -2472,9 +2045,6 @@ class BackgroundWorker:
             generation: Source worker publication epoch.
             checkpoint_tracker: Mutable checkpoint cursor that receives the best
                 completed candidate for each GEPA pair.
-            usage_tracker: Mutable dict that receives the latest cumulative
-                ``usage_by_model`` snapshot a progress or error event carried,
-                so a run that ends without a result can still be billed.
             run_watcher: The run's in-run email watcher, fed each persisted
                 progress event.
             budget_gateway: The run's trusted transport; when set, each
@@ -2504,9 +2074,6 @@ class BackgroundWorker:
 
             drained_count += 1
             event_type = event.get("type")
-            usage_rows = event.get("usage_by_model")
-            if usage_tracker is not None and isinstance(usage_rows, list) and usage_rows:
-                usage_tracker["usage_by_model"] = usage_rows
             if event_type == EVENT_PROGRESS:
                 try:
                     metrics = event.get("metrics") or {}
@@ -2531,14 +2098,10 @@ class BackgroundWorker:
                             checkpoint_tracker.get("payload", {}),
                         )
                         if incumbent is not None:
-                            pair_index = metrics.get("pair_index")
-                            pair_key = (
-                                pair_index if isinstance(pair_index, int) and not isinstance(pair_index, bool) else -1
-                            )
                             incumbents = checkpoint_tracker.setdefault("_incumbents", {})
-                            previous = incumbents.get(pair_key)
+                            previous = incumbents.get(-1)
                             if previous is None or incumbent["selection_score"] > previous["selection_score"]:
-                                incumbents[pair_key] = incumbent
+                                incumbents[-1] = incumbent
                     fenced_progress = getattr(self._job_store, "record_progress_for_generation", None)
                     if generation is not None and callable(fenced_progress):
                         fenced_progress(
@@ -2562,15 +2125,12 @@ class BackgroundWorker:
                         timestamp = datetime.fromisoformat(timestamp_raw)
                     except ValueError:
                         timestamp = None
-                pair_index_raw = event.get("pair_index")
-                pair_index = int(pair_index_raw) if isinstance(pair_index_raw, int) else None
                 log_batch.append(
                     {
                         "level": str(event.get("level", "INFO")),
                         "logger": str(event.get("logger", "dspy")),
                         "message": str(event.get("message", "")),
                         "timestamp": timestamp,
-                        "pair_index": pair_index,
                         **run_log.normalize(event),
                     }
                 )
@@ -2628,8 +2188,7 @@ class BackgroundWorker:
         """Return whether this job is a GEPA run on a checkpoint-capable store.
 
         A store without checkpoint support falls through to the existing
-        restart path. Stored grid searches are not executable any more, so
-        they never reach this check.
+        restart path.
 
         Args:
             optimization_type: The job's optimization type.
@@ -2637,9 +2196,7 @@ class BackgroundWorker:
         Returns:
             ``True`` when the run should persist and restore GEPA checkpoints.
         """
-        return optimization_type in (OPTIMIZATION_TYPE_RUN, OPTIMIZATION_TYPE_BLACKBOX) and hasattr(
-            self._job_store, "save_gepa_checkpoint"
-        )
+        return optimization_type == OPTIMIZATION_TYPE_BLACKBOX and hasattr(self._job_store, "save_gepa_checkpoint")
 
     def _prepare_gepa_dir(self, optimization_id: str) -> Path:
         """Allocate a clean worker-owned GEPA base dir, seeding a saved checkpoint for resume.
@@ -2672,7 +2229,7 @@ class BackgroundWorker:
                 job.get("code_version"),
                 sandbox_image=job.get("sandbox_image"),
             )
-            state_base = _gepa_state_base(base, payload)
+            state_base = _gepa_state_base(base)
             state_base.mkdir(parents=True, exist_ok=True)
             (state_base / GEPA_STATE_FILENAME).write_bytes(checkpoint.data)
             logger.info(
@@ -2695,7 +2252,7 @@ class BackgroundWorker:
             tracker: Per-key cursor (``pair_index -> {"mtime","n"}``), carried
                 across calls.
         """
-        state_base = _gepa_state_base(gepa_dir, tracker.get("payload", {}))
+        state_base = _gepa_state_base(gepa_dir)
         self._persist_one_checkpoint(optimization_id, state_base / GEPA_STATE_FILENAME, -1, tracker)
 
     def _persist_one_checkpoint(
@@ -2841,7 +2398,6 @@ _worker_lock = threading.Lock()
 
 def get_worker(
     job_store: JobStore,
-    service: DspyService | None = None,
     pending_optimization_ids: list | None = None,
 ) -> BackgroundWorker:
     """Return the module-level singleton ``BackgroundWorker``, creating it if needed.
@@ -2855,7 +2411,6 @@ def get_worker(
 
     Args:
         job_store: Backend used by the worker to persist job state.
-        service: Optional pre-built ``DspyService`` shared with the worker.
         pending_optimization_ids: Optional local hint for jobs already known
             to be pending (eg. recovered on the same pod's restart).
 
@@ -2876,7 +2431,6 @@ def get_worker(
                 job_store=job_store,
                 num_workers=num_workers,
                 poll_interval=poll_interval,
-                service=service,
             )
             _worker.start()
             for optimization_id in pending_optimization_ids or []:

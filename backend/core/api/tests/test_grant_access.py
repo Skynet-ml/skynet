@@ -68,7 +68,7 @@ def _seed_job(store: _MemStore, optimization_id: str, owner: str, status: str = 
                 status=status,
                 created_at=datetime.now(UTC),
                 latest_metrics={},
-                payload_overview={"optimization_type": "run", "username": owner},
+                payload_overview={"optimization_type": "blackbox", "username": owner},
                 payload={"username": owner},
                 username=owner,
             )

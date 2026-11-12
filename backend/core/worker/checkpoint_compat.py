@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from ..constants import PROGRESS_CANDIDATE
-from ..models.unified import UNIFIED_PAYLOAD_KIND, resolve_optimizer
 
 GEPA_REVISION = "0632cdb5dcc052e690eab439e1b4a7e3e9cfe407"
 GEPA_SCHEMA = 7
@@ -38,37 +37,6 @@ class CheckpointCompatibilityError(ValueError):
     """Reject restoration when exact checkpoint compatibility is unproven."""
 
 
-def is_unified_payload(payload: dict[str, Any]) -> bool:
-    """Return whether a stored payload is a unified wizard run.
-
-    Args:
-        payload: Stored optimizer request.
-
-    Returns:
-        Whether the payload carries the unified ``payload_kind`` marker.
-    """
-    return payload.get("payload_kind") == UNIFIED_PAYLOAD_KIND
-
-
-def _unified_resolved_optimizer(payload: dict[str, Any]) -> str | None:
-    """Resolve the optimizer a stored unified payload runs, without full validation.
-
-    Args:
-        payload: Stored unified request.
-
-    Returns:
-        The resolved optimizer id, or ``None`` when the payload is malformed.
-    """
-    optimizer = payload.get("optimizer")
-    task = payload.get("task")
-    choice = optimizer.get("choice", "auto") if isinstance(optimizer, dict) else "auto"
-    artifact = task.get("artifact") if isinstance(task, dict) else None
-    kind = artifact.get("kind") if isinstance(artifact, dict) else None
-    if not isinstance(choice, str) or not isinstance(kind, str):
-        return None
-    return resolve_optimizer(choice, kind)  # type: ignore[arg-type]
-
-
 def supports_checkpoint(payload: dict[str, Any]) -> bool:
     """Identify the pinned engine paths with a genuine external restore contract.
 
@@ -76,16 +44,13 @@ def supports_checkpoint(payload: dict[str, Any]) -> bool:
         payload: Stored optimizer request, before private worker fields are injected.
 
     Returns:
-        Whether this request runs GEPA directly. A unified run qualifies only
-        when its optimizer resolves to the black-box ``gepa`` engine; the DSPy
-        adapter and other engines have no restore contract yet.
+        Whether this request runs GEPA directly. The other engines have no
+        restore contract yet.
     """
-    if is_unified_payload(payload):
-        return _unified_resolved_optimizer(payload) == "gepa"
     strategy = payload.get("strategy")
-    if isinstance(strategy, dict):
-        return strategy.get("mode", "single") == "single" and strategy.get("engine") == "gepa"
-    return str(payload.get("optimizer_name", "")).lower() == "gepa"
+    return (
+        isinstance(strategy, dict) and strategy.get("mode", "single") == "single" and strategy.get("engine") == "gepa"
+    )
 
 
 def _configuration_hash(payload: dict[str, Any]) -> str:

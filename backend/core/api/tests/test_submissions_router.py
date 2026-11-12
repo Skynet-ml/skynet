@@ -390,7 +390,7 @@ def unified_payload(**overrides: Any) -> dict:
             "cases": [{"input": {"question": f"Q{i}?"}, "expected": f"A{i}"} for i in range(6)],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "dspy_gepa"},
+        "optimizer": {"choice": "auto"},
         "models": {"reflection_model": {"name": "openai/gpt-4o-mini"}},
         "workspace": {"run_code": _RUN_CODE, "metric_code": _METRIC_CODE},
     }
@@ -429,7 +429,7 @@ def make_client(store: _FakeJobStore, *, monkeypatch: pytest.MonkeyPatch, balanc
     monkeypatch.setattr(_sub_mod, "_protected_submission", lambda *args, **kwargs: None)
 
     app = FastAPI()
-    app.include_router(create_submissions_router(service=object(), job_store=store))
+    app.include_router(create_submissions_router(job_store=store))
     bypass_auth(app)
 
     @app.exception_handler(HTTPException)

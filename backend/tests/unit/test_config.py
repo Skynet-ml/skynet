@@ -25,7 +25,6 @@ _SETTINGS_ENV_VARS = (
     "EMBEDDING_INDEX_SWEEP_BATCH_SIZE",
     "PROGRESS_EVENTS_PER_JOB_CAP",
     "CANCEL_POLL_INTERVAL",
-    "JOB_RUN_START_METHOD",
     "DB_POOL_SIZE",
     "DB_POOL_MAX_OVERFLOW",
     "DB_POOL_RECYCLE",
@@ -120,13 +119,6 @@ def test_settings_defaults_cancel_poll_interval() -> None:
     s = Settings(_env_file=None)
 
     assert s.cancel_poll_interval == 1.0
-
-
-def test_settings_defaults_job_run_start_method() -> None:
-    """Default ``job_run_start_method`` is ``"fork"``."""
-    s = Settings(_env_file=None)
-
-    assert s.job_run_start_method == "fork"
 
 
 def test_settings_defaults_db_pool_config() -> None:
