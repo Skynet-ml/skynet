@@ -14,7 +14,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -1171,7 +1170,7 @@ def echo(value):
 
 
 def leaves_a_sleeper(value):
-    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"], start_new_session=True)
     return value
 
 
@@ -1196,9 +1195,7 @@ def fakes_its_time(value):
 """
 
 
-def _candidate(
-    tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30, token: str | None = None
-) -> dict[str, Any]:
+def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
     """Run the ``[run]`` supervisor once in a fresh folder, as the candidate box does.
 
     Args:
@@ -1206,9 +1203,6 @@ def _candidate(
         entry: The ``[run]`` entry.
         value: The case input.
         timeout: The run timeout.
-        token: The run's marker. Each call gets its own by default, because
-            ``stop_candidates`` kills every process with the marker, and
-            parallel tests that shared one killed each other's candidates.
 
     Returns:
         The supervisor's output document.
@@ -1216,13 +1210,7 @@ def _candidate(
     (tmp_path / "cand.py").write_text(_CANDIDATE_CODE, encoding="utf-8")
     call_dir = tmp_path / "call"
     call_dir.mkdir(exist_ok=True)
-    payload = {
-        "entry": entry,
-        "input": value,
-        "timeout": timeout,
-        "token": token or f"tok-{uuid.uuid4().hex}",
-        "stages": None,
-    }
+    payload = {"entry": entry, "input": value, "timeout": timeout, "stages": None}
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
     subprocess.run(
         [sys.executable, runner.__file__, runner.CANDIDATE_FLAG, str(call_dir)],
@@ -1237,18 +1225,14 @@ def test_a_function_entry_gets_the_input_and_returns_its_json_value(tmp_path: Pa
     """A ``path.py:function`` entry gets the case input; its JSON return value is the output."""
     ran = _candidate(tmp_path, "cand.py:echo", {"a": 1})
     assert ran.pop(runner.ELAPSED_PARAM) >= 0
-    assert ran == {
-        "output": {"got": {"a": 1}},
-        "error": None,
-        "stopped": True,
-    }
+    assert ran == {"output": {"got": {"a": 1}}, "error": None}
 
 
 def test_a_command_entry_reads_stdin_and_a_nonzero_exit_is_an_output(tmp_path: Path) -> None:
     """A command gets the input as JSON on stdin; its exit code and stdout are the output, not a failure."""
     ran = _candidate(tmp_path, ["sh", "-c", "cat; echo; exit 3"], {"a": 1})
     assert ran.pop(runner.ELAPSED_PARAM) >= 0
-    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None, "stopped": True}
+    assert ran == {"output": {"exit_code": 3, "stdout": '{"a": 1}\n'}, "error": None}
 
 
 def test_a_command_stdout_is_capped(tmp_path: Path) -> None:
@@ -1275,43 +1259,17 @@ def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> 
     ran = _candidate(tmp_path, entry, timeout=1 if "timeout" in error else 30)
     assert ran["output"] is None
     assert error in ran["error"]
-    assert ran["stopped"] is True
 
 
-def test_the_supervisor_stops_every_process_the_candidate_left(tmp_path: Path) -> None:
-    """A background process in its own session still stops before the metric files go in."""
-    token = f"tok-{uuid.uuid4().hex}"
-    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7, token=token)
-    ran.pop(runner.ELAPSED_PARAM)
-    assert ran == {"output": 7, "error": None, "stopped": True}
-    assert _marked(runner.candidate_processes(token), token) == set()
+def test_the_supervisor_does_not_wait_for_a_process_the_candidate_left(tmp_path: Path) -> None:
+    """A process in its own session neither holds the result nor counts in the run time (SKY-398).
 
-
-def _marked(pids: set[int], token: str) -> set[int]:
-    """Keep the processes that carry the run's marker.
-
-    On Linux ``candidate_processes`` also returns every child of the calling
-    process, which under xdist includes the shared worker's own children.
-
-    Args:
-        pids: Process ids to filter.
-        token: The run's marker.
-
-    Returns:
-        The ids whose environment holds the marker; on macOS, all of them,
-        because there the function finds processes by the marker only.
+    Closing the candidate box ends that process; the supervisor only kills
+    the entry's own process group.
     """
-    if not sys.platform.startswith("linux"):
-        return pids
-    marker = f"{runner.CANDIDATE_TOKEN_ENV}={token}".encode()
-    found: set[int] = set()
-    for pid in pids:
-        try:
-            if marker in Path(f"/proc/{pid}/environ").read_bytes():
-                found.add(pid)
-        except OSError:
-            continue
-    return found
+    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
+    assert ran.pop(runner.ELAPSED_PARAM) < 5
+    assert ran == {"output": 7, "error": None}
 
 
 def test_a_stage_client_names_its_role_in_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1439,3 +1397,17 @@ def test_the_metric_gets_the_output_as_its_third_argument(tmp_path: Path) -> Non
     result = json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))
     assert result["score"] == pytest.approx(0.4)
     assert result["side_info"]["feedback"] == "e"
+
+
+def test_the_metric_site_goes_before_the_image_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The metric's installed packages win over the image's, and a missing or repeated folder changes nothing."""
+    site = tmp_path / "site"
+    site.mkdir()
+    monkeypatch.setattr(sys, "path", ["/usr/lib/python313.zip", "/app/.venv/lib/python3.13/site-packages"])
+
+    runner._add_metric_site(str(site))
+    runner._add_metric_site(str(site))
+    runner._add_metric_site(str(tmp_path / "missing"))
+    runner._add_metric_site(None)
+
+    assert sys.path == ["/usr/lib/python313.zip", str(site), "/app/.venv/lib/python3.13/site-packages"]

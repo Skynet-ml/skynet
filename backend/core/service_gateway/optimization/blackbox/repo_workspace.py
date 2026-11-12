@@ -42,6 +42,7 @@ from ....billing.budgets import BudgetError
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
 from ....billing.signals import BudgetReached
+from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ....sandbox.snapshots import snapshot_cache_key
 from .repo_tree import (
     MAX_PATCH_BYTES,
@@ -75,6 +76,11 @@ METRIC_REPO_DIR = f"{METRIC_DIR}/repo"
 # The repository file that lists the metric's packages, one requirement per
 # line. The metric setup step installs only these into the metric box.
 METRIC_REQUIREMENTS = ".optimize/metric-requirements.txt"
+# The metric setup step installs the metric packages here, not into user
+# site-packages: the image's python3 is a venv without a user site, and the
+# metric runs under ``-I``, which reads no user site. The runner puts this
+# folder on ``sys.path`` (SKY-398).
+METRIC_SITE_DIR = f"{METRIC_DIR}/site"
 _METRIC_READY = f"{METRIC_DIR}/ready"
 # The saved state's parts while the parent reads them out of a box.
 _STATE_DIR = ".app-state"
@@ -464,6 +470,7 @@ class MetricBox:
         self.session = session
         self.root = root
         self.repo_path = f"{root}/{METRIC_REPO_DIR}"
+        self.site_path = f"{root}/{METRIC_SITE_DIR}"
         self._closed = False
 
     def install_metric_files(self) -> None:
@@ -751,7 +758,8 @@ class RepoWorkspace:
         Raises:
             RepoSetupError: When the install fails or the state cannot be saved.
         """
-        hosts = tuple(self._spec.allowed_hosts)
+        # The registries, also when the repository has no [setup] command: the
+        # spec's own hosts are then empty, and the install would run offline.
         spec = replace(
             self._spec,
             operation_key=self._next_key("metric-setup"),
@@ -759,14 +767,15 @@ class RepoWorkspace:
             snapshot_id=None,
             private=True,
             vcpus=self._metric_vcpus or self._spec.vcpus,
-            network_disabled=not hosts,
-            allowed_hosts=hosts,
+            network_disabled=False,
+            allowed_hosts=PACKAGE_REGISTRY_HOSTS,
         )
         session = self._runtime.open(spec)
         try:
             session.write_files({f"{METRIC_DIR}/requirements.txt": "\n".join(self._requirements) + "\n"})
             result = session.run(
-                f"python3 -m pip install --user --no-input --disable-pip-version-check -r {METRIC_DIR}/requirements.txt"
+                f"python3 -m pip install --target {METRIC_SITE_DIR} --no-input --disable-pip-version-check"
+                f" -r {METRIC_DIR}/requirements.txt"
                 f" && rm -f {METRIC_DIR}/requirements.txt && touch {_METRIC_READY}",
                 env={"PIP_BREAK_SYSTEM_PACKAGES": "1"},
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,

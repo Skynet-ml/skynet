@@ -47,11 +47,11 @@ runs as ``--stage-command <call_dir> <command> [<arg> ...]`` behind it.
 
 A repository with a ``[run]`` entry runs the candidate first, in its own
 candidate box (SKY-398). ``python3 app_runner.py --candidate <call_dir>``
-reads ``{"entry", "input", "timeout", "token", "stages"}``, starts the
-entry in its own session with only the case's input (E42), stops every
-process it left, and writes ``{"output", "error", "stopped", "elapsed_s"}``.
-The parent then ends the box; the metric runs in another box that never
-holds the candidate's code.
+reads ``{"entry", "input", "timeout", "stages"}``, starts the entry in
+its own session with only the case's input (E42), and writes
+``{"output", "error", "elapsed_s"}``. The parent then ends the box, and
+every process the entry left ends with it; the metric runs in another box
+that never holds the candidate's code.
 A function entry (``path/file.py:function``) runs as ``--run <dir>
 <entry>`` and its output is its JSON return value; a command entry
 (``["pytest", "-q"]``) gets the input as JSON on stdin and its output is
@@ -62,8 +62,8 @@ parent refuses a frame whose role is not the box's own.
 A metric that also names an ``elapsed_s`` parameter after ``output`` gets
 the entry's run time in seconds as ``elapsed_s=...`` (SKY-642). The
 supervisor measures it in its own process, from just before the entry
-starts until every process it started is gone, so the candidate's code
-cannot patch the clock it reads.
+starts until the entry exits and its process group is killed, so the
+candidate's code cannot patch the clock it reads.
 """
 
 from __future__ import annotations
@@ -131,16 +131,14 @@ RELAY_PORT = 47_311
 CANDIDATE_FLAG = "--candidate"
 # ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
 RUN_FLAG = "--run"
-# Every candidate process inherits this marker, so the supervisor finds the ones
-# that left its process group; a process that clears its environment is still
-# found on Linux, where the supervisor adopts every orphan.
-CANDIDATE_TOKEN_ENV = "APP_CANDIDATE_TOKEN"
 RUN_DIR = "run"
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
 # The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
 ELAPSED_PARAM = "elapsed_s"
-_STOP_ROUNDS = 100
-_PR_SET_CHILD_SUBREAPER = 36
+# The metric input key that names the folder the metric setup step installed
+# the metric's packages into. ``-I`` reads no user or PYTHONPATH folder, and
+# the image's venv has no system site, so the runner adds this one (SKY-398).
+METRIC_SITE_PARAM = "metric_site"
 _PR_SET_DUMPABLE = 4
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
@@ -1296,6 +1294,22 @@ def _keep_user_site() -> None:
         sys.path.append(folder)
 
 
+def _add_metric_site(folder: Any) -> None:
+    """Put the metric packages' folder on ``sys.path`` before the image's site-packages.
+
+    A plain ``sys.path`` entry runs no ``.pth`` file. The metric box holds no
+    candidate code, so the folder holds only the declared packages (SKY-398).
+
+    Args:
+        folder: The folder from the metric input, or ``None`` when the
+            metric declares no packages.
+    """
+    if not isinstance(folder, str) or not Path(folder).is_dir() or folder in sys.path:
+        return
+    sites = [index for index, entry in enumerate(sys.path) if entry.endswith(("site-packages", "dist-packages"))]
+    sys.path.insert(sites[0] if sites else len(sys.path), folder)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one scorer call from ``<call_dir>/input.json`` into ``<call_dir>/output.json``.
 
@@ -1325,6 +1339,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     call_dir = Path(args[0])
     payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
+    _add_metric_site(payload.get(METRIC_SITE_PARAM))
     if "code" not in payload:
         code_path = Path(__file__).resolve().with_name(CODE_FILE)
         payload["code"] = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
@@ -1385,30 +1400,27 @@ def refuse_processes() -> list[bool]:
 def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
     """Run the ``[run]`` entry on one case's input in the candidate box.
 
-    The supervisor kills the candidate's process group, then every process
-    that carries the run's marker or, on Linux, that it adopted, so none can
-    change the output or the run time after it stops the clock (SKY-642).
-    The parent then ends the box; the metric never shares a box with the
-    candidate (SKY-398).
+    The supervisor kills the entry's process group when the entry exits, so
+    a process left in that group cannot hold the output pipe open and
+    stretch the run time (SKY-642). The parent then ends the box, which is
+    the only cleanup of every other process (SKY-398).
 
     Args:
-        payload: ``{"entry", "input", "timeout", "token", "stages"}``.
+        payload: ``{"entry", "input", "timeout", "stages"}``.
         call_dir: The candidate call's folder.
 
     Returns:
-        ``{"output", "error", "stopped", "elapsed_s"}``: the entry's output,
-        why the run failed, whether every candidate process is gone, and the
-        entry's run time in seconds, measured here, outside its processes.
+        ``{"output", "error", "elapsed_s"}``: the entry's output, why the run
+        failed, and the entry's run time in seconds, measured here, outside
+        its processes.
     """
-    entry, token = payload["entry"], str(payload["token"])
+    entry = payload["entry"]
     timeout = float(payload["timeout"])
-    _become_subreaper()
     _block_tracing()
     env = dict(os.environ)
     stages = payload.get("stages")
     if isinstance(stages, dict):
         env.update(_relay_env(StageClient(stages), stages))
-    env[CANDIDATE_TOKEN_ENV] = token
     run_dir = call_dir / RUN_DIR
     run_dir.mkdir(parents=True, exist_ok=True)
     body = json.dumps(payload.get("input"))
@@ -1442,21 +1454,19 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
             for reader in readers:
                 reader.start()
     except OSError as exc:
-        return {"output": None, "error": f"The command could not start: {exc}", "stopped": stop_candidates(token)}
+        return {"output": None, "error": f"The command could not start: {exc}"}
     try:
         code: int | None = child.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         code = None
-        with _quiet():
-            os.killpg(child.pid, signal.SIGKILL)
+    with _quiet():
+        os.killpg(child.pid, signal.SIGKILL)
+    if code is None:
         child.wait()
-    stopped = stop_candidates(token, child.pid)
     for reader in readers:
         reader.join(timeout=5)
-    # The time ends once every candidate process is gone, so a process the
-    # entry left cannot finish its work after the clock stops (SKY-642).
     elapsed = time.monotonic() - started
-    result: dict[str, Any] = {"output": None, "error": None, "stopped": stopped, ELAPSED_PARAM: round(elapsed, 6)}
+    result: dict[str, Any] = {"output": None, "error": None, ELAPSED_PARAM: round(elapsed, 6)}
     if code is None:
         result["error"] = f"timeout after {timeout:g} s"
     elif code < 0:
@@ -1538,14 +1548,6 @@ def _signal_name(number: int) -> str:
         return str(number)
 
 
-def _become_subreaper() -> None:
-    """Adopt every orphan of the candidate on Linux, so a double fork cannot hide a process."""
-    if not sys.platform.startswith("linux"):
-        return
-    with _quiet():
-        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
-
-
 def _block_tracing() -> None:
     """Stop same-user ptrace and ``/proc/<pid>/mem`` access to this process on Linux (SKY-642).
 
@@ -1556,93 +1558,6 @@ def _block_tracing() -> None:
         return
     with _quiet():
         ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)
-
-
-def stop_candidates(token: str, leader: int | None = None) -> bool:
-    """Kill every candidate process, then check that none is left.
-
-    Args:
-        token: The run's marker in each candidate process's environment.
-        leader: The candidate's first process, whose group goes first.
-
-    Returns:
-        Whether no candidate process is left.
-    """
-    if leader is not None:
-        with _quiet():
-            os.killpg(leader, signal.SIGKILL)
-    for _ in range(_STOP_ROUNDS):
-        _reap()
-        left = candidate_processes(token)
-        if not left:
-            return True
-        for pid in left:
-            with _quiet():
-                os.kill(pid, signal.SIGKILL)
-        time.sleep(0.02)
-    _reap()
-    return not candidate_processes(token)
-
-
-def _reap() -> None:
-    """Collect every child that has exited, the adopted ones included."""
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return
-        if pid == 0:
-            return
-
-
-def candidate_processes(token: str) -> set[int]:
-    """Find the live processes that carry the run's marker or descend from this one.
-
-    Args:
-        token: The run's marker.
-
-    Returns:
-        Their process ids; exited processes that wait to be collected are left out.
-    """
-    marker = f"{CANDIDATE_TOKEN_ENV}={token}".encode()
-    me = os.getpid()
-    parents: dict[int, int] = {}
-    found: set[int] = set()
-    proc = Path("/proc")
-    if sys.platform.startswith("linux") and proc.is_dir():
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            try:
-                fields = (entry / "stat").read_text().rpartition(")")[2].split()
-                if fields[0] == "Z":
-                    continue
-                parents[pid] = int(fields[1])
-                if marker in (entry / "environ").read_bytes():
-                    found.add(pid)
-            except (OSError, IndexError, ValueError):
-                continue
-    else:
-        # macOS: no /proc, and orphans go to launchd, so only the marker finds them.
-        env = {key: value for key, value in os.environ.items() if key != CANDIDATE_TOKEN_ENV}
-        listing = subprocess.run(
-            ["ps", "-axwwE", "-o", "pid=,state=,command="], capture_output=True, check=False, env=env
-        ).stdout
-        for line in listing.splitlines():
-            parts = line.split(None, 2)
-            if len(parts) == 3 and not parts[1].startswith(b"Z") and marker in parts[2]:
-                found.add(int(parts[0]))
-    children: dict[int, list[int]] = {}
-    for pid, parent in parents.items():
-        children.setdefault(parent, []).append(pid)
-    queue = list(children.get(me, ()))
-    while queue:
-        pid = queue.pop()
-        found.add(pid)
-        queue.extend(children.get(pid, ()))
-    found.discard(me)
-    return found
 
 
 def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:

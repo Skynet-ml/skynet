@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.exceptions import ServiceError
 
 from .. import native_engines, native_runtime, runner
@@ -562,7 +563,7 @@ def test_the_metric_setup_installs_only_the_declared_packages_and_keeps_no_repos
     [setup] = runtime.of("metric-setup")
 
     assert setup.spec.private
-    assert setup.spec.allowed_hosts == ("pypi.org",)
+    assert setup.spec.allowed_hosts == PACKAGE_REGISTRY_HOSTS
     assert set(setup.writes) == {f"{METRIC_DIR}/requirements.txt"}
     [(command, requirements)] = runtime.installs
     assert requirements == _REQUIREMENTS
@@ -586,7 +587,14 @@ _docker = pytest.mark.skipif(not _DOCKER_UP, reason=f"Docker or the local {_IMAG
 
 
 def _docker_scorer(
-    tmp_path: Path, runtime: Any, tag: str, entry: str, code: str, *, setup: str | None = None
+    tmp_path: Path,
+    runtime: Any,
+    tag: str,
+    entry: str,
+    code: str,
+    *,
+    setup: str | None = None,
+    files: dict[str, str] | None = None,
 ) -> RepoScorer:
     """Build a repository scorer whose boxes are local Docker containers labelled with ``tag``.
 
@@ -597,11 +605,12 @@ def _docker_scorer(
         entry: The source of ``src/app.py``, whose ``run`` is the ``[run]`` entry.
         code: The metric source.
         setup: The setup command.
+        files: More files for the tree.
 
     Returns:
         The scorer.
     """
-    archive = _archive(tmp_path, {"src/app.py": entry, "eval/metric.py": _METRIC_FILE})
+    archive = _archive(tmp_path, {"src/app.py": entry, "eval/metric.py": _METRIC_FILE, **(files or {})})
     return RepoScorer(
         RepoWorkspace(
             runtime=runtime,
@@ -867,4 +876,44 @@ def test_root_in_the_candidate_box_cannot_change_the_metric_box_or_the_score(tmp
     assert attack.stdout.splitlines()[0] == "0", attack
     assert json.loads(result["feedback"]) == {"digest": digest, "forged": []}
     assert result["score"] == 0.25
+    assert _containers(tag) == []
+
+
+_PACKAGE_METRIC = """
+import json
+
+import inflection
+
+
+def score(repo_path, case, output):
+    return 1.0, json.dumps({'file': inflection.__file__, 'word': inflection.camelize('metric_box')})
+"""
+
+
+@pytest.mark.docker
+@_docker
+def test_a_declared_metric_package_imports_in_the_metric_box(tmp_path: Path) -> None:
+    """The metric setup box installs a real package from the registry, and M imports it from the metric state.
+
+    The repository has no ``[setup]`` command. The image's python3 is a venv without a user site, so the
+    install goes into the metric state's own folder, which the runner puts on ``sys.path``.
+    """
+    tag = uuid.uuid4().hex
+    scorer = _docker_scorer(
+        tmp_path,
+        AsyncBridgeRuntime("docker", image=_IMAGE),
+        tag,
+        _TREE["src/app.py"],
+        _PACKAGE_METRIC,
+        files={".optimize/metric-requirements.txt": "inflection==0.5.1\n"},
+    )
+    try:
+        result = scorer.score("", {"input": 1})
+    finally:
+        scorer.close()
+
+    seen = json.loads(result["feedback"])
+    assert seen["word"] == "MetricBox", seen
+    assert f"/{METRIC_DIR}/site/inflection" in seen["file"], seen
+    assert result["score"] == 1.0
     assert _containers(tag) == []

@@ -49,16 +49,15 @@ from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..config import Settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
 from ..models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningView
-from ..sandbox.services import ComposeService
 from ..service_gateway.optimization.blackbox.classification import JUDGE_LABELS, answer_format
 from ..service_gateway.optimization.blackbox.hardening import Candidate, HardeningRunner
-from ..service_gateway.optimization.blackbox.repo_constraints import read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import RepoConstraints, read_constraints
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from .hardening_job import HardeningWorkspace, run_hardening_job
-from .repo_staging import _judge_limits, _reply_text, _repo_model_gateway
+from .repo_staging import _judge_limits, _reply_text, _repo_model_gateway, _role_hosts, hidden_repo_paths
 
 T = TypeVar("T")
 
@@ -592,20 +591,19 @@ def _pack_tree(tree: Path, archive: Path) -> None:
             packed.add(entry, arcname=entry.name)
 
 
-def _trusted_compose_services(trusted_root: Path) -> tuple[ComposeService, ...]:
-    """Read the ``[sandbox]`` compose services of the unfixed trusted tree.
+def _trusted_constraints(trusted_root: Path) -> RepoConstraints | None:
+    """Read the constraints file of the unfixed trusted tree.
 
     Args:
         trusted_root: The base-commit tree.
 
     Returns:
-        The compose services, or none when the tree names no compose file.
+        The validated constraints, or None when the tree has no constraints file.
     """
     with tempfile.TemporaryDirectory(prefix="hardening-constraints-") as folder:
         archive = Path(folder) / "tree.tgz"
         _pack_tree(trusted_root, archive)
-        constraints = read_constraints(archive)
-    return constraints.compose_services if constraints is not None else ()
+        return read_constraints(archive)
 
 
 @contextmanager
@@ -685,10 +683,14 @@ def open_hardening_runner(
         protected = gateway.protect_payload({"scorer": dict(scorer_spec)}, managed_key=managed_key, allow_batch=False)
         model_gateway = _repo_model_gateway(protected["scorer"])
         editable = tuple(target.get("repo", {}).get("editable_paths") or ())
-        # Staging reads the compose services from the base commit. A drafted
-        # fix may touch any path, so it must not change what runs next to the
-        # scorer: every scorer box of the pass gets the unfixed tree's services.
-        compose_services = _trusted_compose_services(workspace.trusted_root)
+        # Staging reads the constraints from the base commit. A drafted fix may
+        # touch any path, so it must not change what runs next to the scorer:
+        # every scorer box of the pass gets the unfixed tree's services, metric
+        # file list and [run] and [metric] settings. Each box still packs the
+        # metric files from its own fixed tree into the metric box (SKY-398).
+        constraints = _trusted_constraints(workspace.trusted_root)
+        compose_services = constraints.compose_services if constraints is not None else ()
+        hidden = hidden_repo_paths(constraints)
 
         def open_scorer(archive: Path, fixes: tuple[str, ...]) -> RepoScorer:
             """Open and prepare one scorer box on a packed tree.
@@ -720,10 +722,18 @@ def open_hardening_runner(
                     readonly_paths=(),
                     setup_command=setup_command,
                     secrets=workspace.secrets,
+                    hidden_paths=hidden,
+                    run_hosts=_role_hosts(constraints.run_role if constraints is not None else None),
+                    run_vcpus=constraints.run_vcpus if constraints is not None else None,
+                    metric_hosts=_role_hosts(constraints.metric_role if constraints is not None else None),
+                    metric_vcpus=constraints.metric_vcpus if constraints is not None else None,
                 ),
                 str(scorer_spec["metric_code"]),
                 timeout_seconds=float(scorer_spec.get("timeout_seconds") or SCORE_TIMEOUT_SECONDS),
                 gateway=model_gateway,
+                hidden_paths=hidden,
+                run_entry=constraints.run_entry if constraints is not None else None,
+                run_timeout=constraints.run_timeout if constraints is not None else 60.0,
             )
             scorer.prepare()
             return scorer

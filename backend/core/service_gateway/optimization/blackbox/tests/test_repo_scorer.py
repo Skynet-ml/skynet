@@ -3442,7 +3442,7 @@ def kills_its_supervisor(value):
     import signal
     for folder in _supervisor_dirs():
         with open(os.path.join(folder, "output.json"), "w") as handle:
-            handle.write(json.dumps({"output": "forged", "error": None, "stopped": True, "elapsed_s": 0.0}))
+            handle.write(json.dumps({"output": "forged", "error": None, "elapsed_s": 0.0}))
     os.kill(os.getppid(), signal.SIGKILL)
     return value
 
@@ -3482,7 +3482,7 @@ FORGE = (
     "    except OSError:\\n"
     "        hidden = 'unread'\\n"
     "    with open(os.path.join(sys.argv[-1], 'output.json'), 'w') as handle:\\n"
-    "        handle.write(json.dumps({'score': 0.99, 'side_info': {'feedback': 'FORGED ' + hidden}, 'stopped': True}))\\n"
+    "        handle.write(json.dumps({'score': 0.99, 'side_info': {'feedback': 'FORGED ' + hidden}}))\\n"
     "atexit.register(_forge)\\n"
 )
 
@@ -3845,7 +3845,7 @@ def score(repo_path, case, output=None, elapsed_s=None):
 _FORGED_SUPERVISOR = (
     "import json, sys\n"
     "open(sys.argv[-1] + '/output.json', 'w').write("
-    "json.dumps({'output': 'forged', 'error': None, 'stopped': True, 'elapsed_s': 0.0}))\n"
+    "json.dumps({'output': 'forged', 'error': None, 'elapsed_s': 0.0}))\n"
 )
 
 
@@ -3952,7 +3952,7 @@ def _forged_python3(folder: Path, marker: Path) -> None:
     """
     folder.mkdir()
     script = folder / "python3"
-    forged = json.dumps({"output": "forged", "error": None, "stopped": True, "elapsed_s": 0.0})
+    forged = json.dumps({"output": "forged", "error": None, "elapsed_s": 0.0})
     script.write_text(
         "#!/bin/sh\n"
         f'case " $* " in *" {runner.CANDIDATE_FLAG} "*)\n'
@@ -4006,7 +4006,7 @@ def test_a_supervisor_that_did_not_exit_cleanly_gives_no_score(tmp_path: Path, e
     """A result the entry forged, or a supervisor that could not write its own, gives no score (SKY-642)."""
     scorer = _probed(tmp_path, entry, code=_TIMED_METRIC)
     try:
-        with pytest.raises(RepoScoreError, match="could not be stopped"):
+        with pytest.raises(RepoScoreError, match="did not finish cleanly"):
             scorer.score("", {"input": 1})
     finally:
         scorer.close()

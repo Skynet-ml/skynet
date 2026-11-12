@@ -15,11 +15,14 @@ from typing import Any
 
 import pytest
 
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+
 from .. import repo_workspace
 from ..repo_constraints import parse_constraints, scorer_only_paths
 from ..repo_tree import unpack_tree, version_patch
 from ..repo_workspace import (
     METRIC_REPO_DIR,
+    METRIC_SITE_DIR,
     PREPARED_DIR,
     WORK_DIR,
     CandidateBox,
@@ -615,7 +618,11 @@ def test_each_role_sizes_and_walls_off_its_own_box(tmp_path: Path) -> None:
 def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_repository_code(
     tmp_path: Path,
 ) -> None:
-    """The metric setup box gets the package list only, and its state holds no repository file (SKY-398)."""
+    """The metric setup box gets the package list only, and its state holds no repository file (SKY-398).
+
+    The repository has no ``[setup]`` command, so its own spec is offline; the metric setup box still
+    reaches the package registries, and pip installs into the metric state's own folder.
+    """
     runtime = _Runtime()
     archive = _archive(
         tmp_path,
@@ -625,7 +632,16 @@ def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_r
             ".optimize/metric-requirements.txt": "# the metric's packages\nnumpy==2.1.0\n\nscipy>=1.13\n",
         },
     )
-    space = _space(archive, runtime, setup=None, hidden_paths=["eval/metric.py"])
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=SandboxSpec(lifetime_seconds=60, network_disabled=True, operation_key="op"),
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        hidden_paths=["eval/metric.py"],
+    )
     try:
         space.prepare()
         metric = space.open_metric()
@@ -639,10 +655,14 @@ def test_the_metric_setup_installs_only_the_declared_packages_in_a_box_without_r
     assert not [name for name in names if "src" in name or "app.py" in name or "metric.py" in name]
     setup, metric_setup, metric_box = runtime.boxes
     assert metric_setup.spec.operation_key == "op:metric-setup-1"
+    assert not setup.online
     assert metric_setup.online
-    assert metric_setup.spec.allowed_hosts == ("pypi.org",)
+    assert metric_setup.spec.allowed_hosts == PACKAGE_REGISTRY_HOSTS
     assert metric_setup.writes == {".app-metric/requirements.txt": "numpy==2.1.0\nscipy>=1.13\n"}
-    assert [command for command, _ in metric_setup.commands if "pip install" in command]
+    [install] = [command for command, _ in metric_setup.commands if "pip install" in command]
+    assert f"pip install --target {METRIC_SITE_DIR} " in install
+    assert "--user" not in install
+    assert metric.site_path.endswith(f"/{METRIC_SITE_DIR}")
     assert setup.closed
     assert metric_setup.closed
     assert not metric_box.online

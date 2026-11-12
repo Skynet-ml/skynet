@@ -498,6 +498,7 @@ class RepoScorer:
             "candidate": metric.repo_path,
             "case": case,
             "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
+            runner.METRIC_SITE_PARAM: metric.site_path,
         }
         if ran is not None:
             document["output"] = ran.get("output")
@@ -572,12 +573,11 @@ class RepoScorer:
             secrets: Values to keep out of anything that leaves the box.
 
         Returns:
-            ``{"output", "error", "stopped", "elapsed_s"}`` from the supervisor.
+            ``{"output", "error", "elapsed_s"}`` from the supervisor.
 
         Raises:
-            RepoScoreError: When the version changed a protected file, the
-                supervisor did not exit cleanly, or not every process the
-                version started could be shown to have stopped.
+            RepoScoreError: When the version changed a protected file, or the
+                supervisor did not exit cleanly.
             BudgetReached: When the run's budget stopped a service or MCP call.
             BudgetError: When a service or MCP call had insufficient budget coverage.
             UsagePendingError: When a service or MCP call needs reconciliation.
@@ -589,7 +589,6 @@ class RepoScorer:
             "entry": self._run_entry if isinstance(self._run_entry, str) else list(self._run_entry or ()),
             "input": case.get("input") if isinstance(case, Mapping) else case,
             "timeout": self._run_timeout,
-            "token": uuid.uuid4().hex,
             "stages": None,
         }
         session.write_files({RUNNER_PATH: RUNNER_SOURCE})
@@ -623,14 +622,13 @@ class RepoScorer:
             ran = None
         # The entry can write this file and then kill the supervisor, so the
         # file counts only when the supervisor itself exited cleanly (SKY-642).
-        if not result.ok or not isinstance(ran, dict) or ran.get("stopped") is not True:
+        if not result.ok or not isinstance(ran, dict):
             logger.warning(
-                "The [run] supervisor did not stop every process (exit %s): %s",
+                "The [run] supervisor did not exit cleanly (exit %s): %s",
                 result.exit_code,
                 redact((result.stderr or result.stdout)[-2_000:], secrets),
             )
-            # A process left running could still rewrite the output or the run time (SKY-642).
-            raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
+            raise RepoScoreError("The [run] supervisor did not finish cleanly, so the version has no score.")
         _raise_control({"control": relay.control if relay is not None else None})
         return ran
 

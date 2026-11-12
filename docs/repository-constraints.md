@@ -173,8 +173,10 @@ version code.
 `.optimize/metric-requirements.txt` lists the metric's packages, one
 requirement on each line, in the pip format (for example `numpy==2.1.0`).
 Comments and blank lines are allowed. Options such as `-r`, `-e` or
-`--index-url`, and paths or URLs, fail setup. Without the file, the metric
-box has only the image's packages.
+`--index-url`, and paths or URLs, fail setup. The packages go into a folder
+in the metric box, and the metric's runner puts that folder on `sys.path`
+before the image's packages. Without the file, the metric box has only the
+image's packages.
 
 The metric cannot run version code. A check that needs the version's code
 belongs in a `[run]` entry: the entry runs the code in the candidate box, and
@@ -209,8 +211,9 @@ default. A metric with
 
 The `[run]` supervisor measures the time in its own process, with a
 monotonic clock. The time starts just before the entry starts. It stops when
-the entry exits and the supervisor stopped every process that the entry
-left, so work in a left process also counts. It includes the Python start
+the entry exits and the supervisor kills the entry's process group. A
+process that the entry starts in a new session is not part of that time,
+and it ends when Skynet closes the candidate box. It includes the Python start
 for a function entry. It does not include setup or the metric. The
 entry's code runs in other processes, so it cannot patch this clock. A time
 that the candidate puts in its `output` is not trusted. Use `elapsed_s`.
@@ -230,10 +233,10 @@ installed. The entry is candidate code, so its interpreter does not need
 trust; the clock stays in the supervisor. The shell that starts the
 supervisor replaces itself with it (`exec`), so no shell of Skynet's waits
 for its exit code. These steps make the supervisor harder to change. They
-do not replace the separate boxes; see the residual risk below. Skynet trusts the
-supervisor's result
-only when the supervisor exits cleanly, so an entry that writes a false
-result and then kills the supervisor gets no score. On Linux the supervisor
+do not replace the separate boxes; see the residual risk below. Skynet
+trusts the supervisor's result only when the supervisor exits cleanly, so an
+entry that writes a false result and then kills the supervisor gets no
+score. On Linux the supervisor
 sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
 `ptrace` and `/proc/<pid>/mem` access to it, also when Yama is off.
 
