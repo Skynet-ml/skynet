@@ -1056,3 +1056,45 @@ def test_tagging_guide_save_keeps_the_mode_a_provisional_session_chose() -> None
     assert resp.status_code == 200, resp.text
     assert resp.json()["mode"] == "binary"
     assert resp.json()["question"] == "Is the customer angry?"
+
+
+def test_tagging_guide_save_keeps_an_autosaved_override_mode() -> None:
+    """A stored-binary session whose autosave set a multiclass override stays multiclass."""
+    client, store = _client(_ALICE)
+    session_id = _create(client)
+    assist = {
+        **_SESSION_BODY["assist"],
+        "taskOverride": {
+            "mode": "multiclass",
+            "categories": [{"id": "cat1", "label": "a"}, {"id": "cat2", "label": "b"}],
+        },
+    }
+    resp = client.put(f"/tagging-sessions/{session_id}", json={"annotations": {}, "assist": assist, "current_index": 0})
+    assert resp.status_code == 200, resp.text
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    for task in ({"mode": "multiclass", "categories": ["x", "y"]}, {"categories": ["x", "y"]}):
+        resp = client.put(url, json={"rubric": ["Rule."], "task": task})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["mode"] == "multiclass"
+        assert resp.json()["categories"] == ["x", "y"]
+        with Session(store.engine) as db:
+            override = db.get(TaggingSessionModel, session_id).assist["taskOverride"]
+        assert override["mode"] == "multiclass"
+
+
+def test_tagging_guide_save_keeps_a_chosen_freetext_mode() -> None:
+    """A provisional session that picks freetext stays freetext on a save with no mode."""
+    client, store = _client(_ALICE)
+    session_id = client.post("/tagging-sessions", json=_SYNTHETIC_BODY).json()["id"]
+    url = f"/tagging-sessions/{session_id}/assist/guide"
+    spec = {"brief": "Bank support chats", "columns": ["text"], "rows": 20}
+    task = {"mode": "freetext", "prompt": "Summarize the complaint."}
+    assert client.put(url, json={"rubric": ["Rule."], "task": task, "dataset_spec": spec}).status_code == 200
+    resp = client.put(url, json={"rubric": ["Rule."], "task": {"prompt": "Name the product."}})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == "freetext"
+    assert resp.json()["prompt"] == "Name the product."
+    with Session(store.engine) as db:
+        row = db.get(TaggingSessionModel, session_id)
+        assert row.assist["taskOverride"]["mode"] == "freetext"
+        assert "modeProvisional" not in _effective_config(row)

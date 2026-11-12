@@ -1038,8 +1038,10 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
             mode_change = not config.get("modeProvisional") and asked_mode not in ("", config.get("mode"))
             if not rubric or mode_change or (req.task is not None and not override):
                 raise DomainError("tagger.assist.invalid_guide", status=422)
-            if override and row.config.get("modeProvisional") and "mode" not in override:
-                # The override replaces the old one, so it must carry the chosen mode.
+            stored_mode = str((assist.get("taskOverride") or {}).get("mode") or "")
+            if override and (row.config.get("modeProvisional") or stored_mode) and "mode" not in override:
+                # The override replaces the old one, so it must carry the mode the
+                # merge used: the provisional choice, or an autosaved override mode.
                 override = {"mode": config["mode"], **override}
             # A provisional session has no answer style until a task gives it one.
             task_override = override if req.task is not None else assist.get("taskOverride") or {}
