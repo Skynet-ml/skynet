@@ -19,6 +19,7 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import Connection, create_engine, inspect, text
+from sqlalchemy.engine.interfaces import ReflectedForeignKeyConstraint
 
 from ...config import app_env
 from ..models import Base
@@ -52,11 +53,13 @@ migration = _load_migration()
 @pytest.fixture
 def conn() -> Iterator[Connection]:
     """Yield a connection to a fresh schema with the pre-migration grid shape, dropped after."""
+    url = TEST_DB_URL
+    assert url
     schema = f"sky676_test_{uuid4().hex}"
-    admin = create_engine(TEST_DB_URL)
+    admin = create_engine(url)
     with admin.begin() as setup:
         setup.execute(text(f'CREATE SCHEMA "{schema}"'))
-    engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema},public"})
+    engine = create_engine(url, connect_args={"options": f"-csearch_path={schema},public"})
     try:
         Base.metadata.create_all(engine)
         with engine.begin() as connection:
@@ -132,6 +135,22 @@ def _columns(connection: Connection, table: str) -> set[str]:
     return {column["name"] for column in inspect(connection).get_columns(table)}
 
 
+def _parent_fks(connection: Connection) -> list[ReflectedForeignKeyConstraint]:
+    """Return the ``jobs`` FKs on ``parent_optimization_id``.
+
+    Args:
+        connection: The test schema connection.
+
+    Returns:
+        The matching foreign keys.
+    """
+    return [
+        fk
+        for fk in inspect(connection).get_foreign_keys("jobs")
+        if fk["constrained_columns"] == ["parent_optimization_id"]
+    ]
+
+
 def _assert_dropped(connection: Connection) -> None:
     """Assert that the grid schema is gone and the live rows and checkpoint key stay.
 
@@ -142,7 +161,7 @@ def _assert_dropped(connection: Connection) -> None:
     assert not inspector.has_table("grid_pair_results")
     assert not {"parent_optimization_id", "pair_index"} & _columns(connection, "jobs")
     assert "pair_index" not in _columns(connection, "job_logs")
-    assert inspector.get_foreign_keys("jobs") == []
+    assert _parent_fks(connection) == []
     assert "ix_jobs_parent_optimization_id" not in {index["name"] for index in inspector.get_indexes("jobs")}
     assert "pair_index" in _columns(connection, "gepa_checkpoints")
     for table in ("jobs", "job_logs", "gepa_checkpoints"):
@@ -176,6 +195,8 @@ def test_downgrade_recreates_the_empty_schema(conn: Connection) -> None:
     assert conn.execute(text("SELECT count(*) FROM grid_pair_results")).scalar_one() == 0
     assert {"parent_optimization_id", "pair_index"} <= _columns(conn, "jobs")
     assert "pair_index" in _columns(conn, "job_logs")
-    assert [fk["referred_table"] for fk in inspector.get_foreign_keys("jobs")] == ["jobs"]
+    [parent_fk] = _parent_fks(conn)
+    assert parent_fk["referred_table"] == "jobs"
+    assert parent_fk.get("options", {}).get("ondelete") == "CASCADE"
     assert "ix_jobs_parent_optimization_id" in {index["name"] for index in inspector.get_indexes("jobs")}
     assert conn.execute(text("SELECT parent_optimization_id, pair_index FROM jobs")).one() == (None, None)

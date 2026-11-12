@@ -16,8 +16,11 @@ maps or reads it now, so this revision drops:
 ``gepa_checkpoints.pair_index`` stays: it is part of that table's primary
 key and a repository run uses it.
 
-Merge this revision only after production runs SKY-656: an old pod deletes
-from ``grid_pair_results`` on every job delete.
+Merge this revision only after production runs SKY-656. Old pods map
+``jobs.parent_optimization_id``, ``jobs.pair_index`` and
+``job_logs.pair_index`` in the ORM, and delete from ``grid_pair_results`` on
+every job delete. After the drop, every job and job-log read or write on an
+old pod fails until a new pod replaces it.
 
 Every step uses ``IF EXISTS``, so the revision is idempotent. Postgres only,
 like the revisions that added this schema: the SQLite test schema comes from
