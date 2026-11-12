@@ -299,22 +299,18 @@ def test_chat_outside_the_wizard_opens_the_setup_in_the_same_chat() -> None:
     assert "or from the chat in which the user asked for this setup" in screen_prompt
 
 
-def test_tagging_request_opens_the_tagger_and_names_the_chat_by_wizard_screen() -> None:
-    """A tagging request opens the tagger setup, with this chat only outside a setup (SKY-631)."""
+def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
+    """A tagging request outside a setup opens the tagger setup beside this chat (SKY-631)."""
     prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
     assert "call ``open_page`` with ``path`` ``/tagger?dataset=<id>``" in prompt
     assert "``/tagger?new=1``" in prompt
-    # Only outside a setup does the chat stay; the setup ends its own chat
-    # when the wizard closes, so the prompt must not promise the same chat there.
-    # On the PR preview the model told a dashboard user that a new chat starts,
-    # so each case names the ``wizard_screen`` signal that selects it.
-    assert "When ``wizard_screen`` is absent, the tagger opens with this same chat beside it" in prompt
-    assert "never say that a new chat starts" in prompt
-    assert "When ``wizard_screen`` is present, the tagger opens with a new chat" in prompt
-    assert "this setup chat stays in the history as a draft" in prompt
-    assert "The tagger opens with this same chat" not in prompt
-    # The rule holds whether or not a wizard screen is on view, so it sits
-    # before that section of the prompt, not inside it.
+    # A wizard screen turn runs the screen agent, which has no open_page, so
+    # this rule covers only turns outside a setup. On the PR preview the model
+    # told a dashboard user that a new chat starts, so the rule forbids that.
+    assert "The tagger opens with this same chat beside it, so never say that a new chat starts" in prompt
+    assert "the tagger opens with a new chat" not in prompt
+    # The rule is not about a wizard screen, so it sits before that section
+    # of the prompt, not inside it.
     assert prompt.index("Starting tagging:") < prompt.index("The wizard screen on view:")
     assert {"open_page", "list_datasets_for_agent"} <= set(tools_for({}))
 
