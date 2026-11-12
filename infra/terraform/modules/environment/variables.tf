@@ -81,20 +81,18 @@ variable "api_domain" {
 variable "mcp_domain" {
   description = <<-EOT
     Host name of the hosted remote MCP server (SKY-229). The backend serves it
-    at https://<mcp_domain>/mcp. A host directly under var.preview_domain uses
-    the preview wildcard certificate; any other host gets its own certificate.
+    at https://<mcp_domain>/mcp. A host directly under var.wildcard_domain uses
+    the wildcard certificate; any other host gets its own certificate.
     Empty: no remote MCP server.
   EOT
   type        = string
   default     = ""
 }
 
-variable "preview_domain" {
+variable "wildcard_domain" {
   description = <<-EOT
-    Parent domain of the PR preview hosts (pr-<n>.<domain> and
-    api-pr-<n>.<domain>). Set it to add a wildcard certificate to the HTTPS
-    listener, a log group and the SSM parameter /skynet/<env>/preview that
-    scripts/preview.sh reads. Empty: no previews in this environment.
+    Parent domain of a wildcard certificate (*.<domain>) on the HTTPS
+    listener. Empty: no wildcard certificate.
   EOT
   type        = string
   default     = ""

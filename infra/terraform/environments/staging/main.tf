@@ -20,9 +20,9 @@ module "env" {
   mcp_domain       = "mcp.staging.skynetml.com"
   enable_https     = var.enable_https
 
-  # PR previews (SKY-164): pr-<n>.staging.skynetml.com and
-  # api-pr-<n>.staging.skynetml.com. Cloudflare: *.staging CNAME to the ALB.
-  preview_domain = "staging.skynetml.com"
+  # mcp.staging.skynetml.com uses the *.staging.skynetml.com certificate.
+  # Cloudflare: *.staging CNAME to the ALB.
+  wildcard_domain = "staging.skynetml.com"
 
   db_instance_class        = var.db_instance_class
   db_multi_az              = var.db_multi_az

@@ -446,9 +446,6 @@ serves the MCP endpoint at `https://<mcp_domain>/mcp` (`MCP_RESOURCE_URL`).
   `terraform apply -target=module.env.aws_acm_certificate.mcp` first. Create
   its record from `acm_validation_records`, then run the full apply. Point
   `mcp.skynetml.com` at the ALB with a CNAME.
-- PR previews: `scripts/preview.sh` sets the URL to
-  `https://api-pr-<n>.staging.skynetml.com/remote-mcp`, under the preview API
-  host. The wildcard certificate has no second preview host.
 
 ## Monthly cost estimate (us-east-2, October 2026 list prices)
 
@@ -491,8 +488,6 @@ Plan cuts on-demand Fargate by about 20% to 50%.
 
 ## Not in this stack
 
-- PR previews (SKY-164): out of scope. The module can serve a third
-  environment later.
 - The app code changes for `APP_GIT_SHA`, `APP_ENVIRONMENT`, `APP_SERVICE_NAME`
   and `FORWARDED_ALLOW_IPS` are in PR #788 (SKY-161). The task definitions set
   these variables already.

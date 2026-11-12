@@ -9,8 +9,7 @@ the matching file below when the task needs it:
 | When you | Read |
 | --- | --- |
 | Open, update, describe, review, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
-| Sign in to staging or a PR preview, or run acceptance checks there | `.agents/skills/skynet-test-accounts/SKILL.md` |
-| Work on or debug a PR preview environment | `docs/agents/pr-previews.md` |
+| Sign in to staging, or run acceptance checks there | `.agents/skills/skynet-test-accounts/SKILL.md` |
 | Need the stack, layout, local URLs, persistence, auth or i18n facts | `docs/agents/architecture.md` |
 | Install a worktree or run maintenance | `docs/agents/install-and-maintain.md` |
 | Move code between files or add a router or feature slice | `docs/agents/refactoring.md` |
@@ -104,20 +103,23 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 
 ## Merge policy (MANDATORY)
 
-- Each PR gets a preview (staging copy, empty database) at
-  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks there. UI PRs
-  need no Before and After images or videos.
-- **Fix bugs locally, deploy once.** Each push rebuilds the preview and
-  starts a new review. Test and review the full diff locally, then push once.
+- Shared staging replaces PR previews (Gilad, 2026-11-11). UI PRs need no
+  Before and After images or videos.
+- **Fix bugs locally, push once.** Each push starts a new review. Test and
+  review the full diff locally, then push once.
 - **Among agents, only the orchestrator merges**, in the daily window (03:00
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
-- Every PR merges into `staging` when the Opus review approves its current
-  commit and all gates pass (Gilad, 2026-11-11). This includes CI
+- A PR merges into `staging` when one Opus 5.5 review at medium effort
+  approves its current head commit with 0 findings, and CI passes (Gilad,
+  2026-11-11). This includes CI
   (`.github/**`), deploy and infra config, and the agent rule files. A PR
   that Gilad marks "do not merge" stays unmerged. The automatic merge never
   covers `main` or production.
-  A change in `staging` is approved for production. The orchestrator promotes
+- After the merge reaches staging, the orchestrator runs the acceptance
+  checks on `https://staging.skynetml.com` with a test account. A failed
+  check becomes a new bug issue.
+- A change in `staging` is approved for production. The orchestrator promotes
   `staging` → `main` when the staging checks pass. A manual hold stops it.
   Steps, gates and Linear flow: the `skynet-pr-workflow` skill.
 - **CI runs only per batch and on the promotion PR** (`staging` → `main`).
@@ -127,8 +129,8 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 ## Test accounts and environments (MANDATORY)
 
 - Run acceptance checks on AWS staging (`https://staging.skynetml.com`, API
-  `https://api-staging.skynetml.com`) or the PR's preview. Never test against
-  production. Railway is deleted; never use it.
+  `https://api-staging.skynetml.com`). Never test against production.
+  Railway is deleted; never use it.
 - **Test accounts are ephemeral.** Each signed-in check creates its own
   fresh account and deletes it when the check ends, also after a failure.
   No check uses a fixed, shared or long-lived account.
@@ -143,15 +145,14 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 - If you cannot create an account, report the exact failure and record the
   coverage gap. Do not ask Gilad to create one. Never borrow a personal
   session. Never print or commit passwords, tokens, cookies or email codes.
-- New staging accounts get no credit. Run paid checks on the PR preview,
-  which gives new accounts a test grant, or record the gap. Or, with
-  Gilad's approval in chat, fund the check account with the staging
-  test-credit grant (see `skynet-test-accounts`).
+- New staging accounts get no credit. For a paid check, get Gilad's
+  approval in chat and fund the check account with the staging test-credit
+  grant (see `skynet-test-accounts`). Or record the gap.
 - Never add funds, grant credits or change balances, with one exception: the
   staging test-credit grant command (`skynet-test-accounts`, "Grant test
   credit"). Use it only for a check account you created for this check,
   only after Gilad approves that grant in chat, and within the one $50
-  UTC-day cap on the staging database. The command refuses PR previews.
+  UTC-day cap on the staging database.
   Amounts depend on the check. Before each grant, ask Gilad in chat for
   a specific dollar amount: the smallest amount the check needs, with a short
   cost estimate. Gilad approves that amount, or a larger one if he thinks the

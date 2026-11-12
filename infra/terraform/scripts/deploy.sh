@@ -15,9 +15,6 @@
 # the family whose execution and task roles are this environment's own roles
 # (skynet-<env>-<family>-exec/-task). The other environment's deploy role
 # cannot pass these roles, so it cannot plant a revision this script uses.
-# The revision must also carry the tag Environment=<env>: the PR preview role
-# can pass the staging roles, but it can only register revisions of the
-# skynet-pr-* families, tagged Environment=preview.
 # New revisions carry the tag Environment=<env>; the deploy role must send it.
 
 source "$(dirname "$0")/lib.sh"

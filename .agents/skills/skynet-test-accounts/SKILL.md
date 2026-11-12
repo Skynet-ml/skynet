@@ -1,24 +1,20 @@
 ---
 name: skynet-test-accounts
-description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks or API calls with a user token. It holds the target choice, the served-commit check, the DNS fallback, the create, sign-in and delete steps for each check's test account, and the rules for secrets and test data.
+description: Use this skill before any signed-in check on Skynet shared staging (staging.skynetml.com), for acceptance checks or API calls with a user token. It holds the target, the served-commit check, the DNS fallback, the create, sign-in and delete steps for each check's test account, and the rules for secrets and test data.
 ---
 
 # Skynet test accounts and targets
 
-Read this before you run any acceptance check on Skynet staging or on a PR
-preview. The PR rules that use these checks are in the `skynet-pr-workflow`
-skill.
+Read this before you run any acceptance check on Skynet staging. The PR rules
+that use these checks are in the `skynet-pr-workflow` skill.
 
-## 1. Pick the right target
+## 1. The target
 
-| Your check needs | Use |
-| --- | --- |
-| The PR's own code (new behavior) | The PR preview: `https://pr-<n>.staging.skynetml.com`, API `https://api-pr-<n>.staging.skynetml.com` |
-| The current product (baseline checks, unrelated flows) | Shared staging: `https://staging.skynetml.com`, API `https://api-staging.skynetml.com` |
+Run every check on shared staging: `https://staging.skynetml.com`, API
+`https://api-staging.skynetml.com`.
 
-- Shared staging runs merged code only. It does not hold your PR's change.
-- A preview has its own empty database. Staging accounts do not exist there.
-  Create the account on the target you test.
+- Shared staging runs merged code only. The orchestrator runs the acceptance
+  checks after the merge reaches staging.
 - Never test against production. Railway is deleted; never use it.
 
 ## 2. Confirm the served commit
@@ -32,10 +28,10 @@ curl -s "${DOH[@]}" "$APP/api/version"   # frontend: {"commit": "<sha>"}
 curl -s "${DOH[@]}" "$API/health"        # backend:  {"commit": "<sha>", "status": ...}
 ```
 
-- Compare `commit` with the full SHA of the PR head (preview) or of
-  `origin/staging` (staging).
-- If the preview serves an older SHA, the deploy is not done. Wait for the
-  `preview` workflow, or report it. Never record evidence on a stale
+- Compare `commit` with the full SHA of the merged commit or a later
+  `origin/staging` commit.
+- If staging serves an older SHA, the deploy is not done. Wait for the
+  staging deploy, or report it. Never record evidence on a stale
   deployment.
 - An unchanged service may run an older SHA only with proof that it misses
   no relevant change.
@@ -56,11 +52,11 @@ many agents, and its access can get lost.
 
 - Check your AWS login first: `aws sts get-caller-identity --profile skynet`.
   If it fails, report it and record the signed-in check as a coverage gap.
-- Create the account on the target that you test. `--target` is `staging`
-  or `pr-<n>`. `--label` is your issue or PR, for example `SKY-123`:
+- Create the account on staging with `--target staging`. `--label` is your
+  issue or PR, for example `SKY-123`:
 
 ```bash
-python3 .agents/skills/skynet-test-accounts/account.py create --target pr-<n> --label SKY-123
+python3 .agents/skills/skynet-test-accounts/account.py create --target staging --label SKY-123
 ```
 
 `account.py` first writes the secret `skynet/staging/check-account/<id>`
@@ -122,21 +118,18 @@ to the orchestrator.
 
 "No new email code arrived" does not prove that the account is gone. A
 verified account gets no new code. Use `forget` only when `create` printed
-no `register: HTTP 2xx` line, the preview database is gone, or an earlier
-`delete` printed `account delete: HTTP 200` but kept the secret. A `delete`
-of an id with no secret changes nothing and exits 0.
+no `register: HTTP 2xx` line, or when an earlier `delete` printed
+`account delete: HTTP 200` but kept the secret. A `delete` of an id with no
+secret changes nothing and exits 0.
 
 - `account.py list` prints the id, target, status and creation date of every
   check account that still has a secret. The orchestrator runs it after each
   batch and deletes the leftovers. A deleted secret can still show for about
   a minute.
 - `account.py forget <id>` removes only the secret. Use it only when the
-  account does not exist in the app: `register` never succeeded, the
-  preview database is gone (PR closed or 48 hours idle), or an earlier
-  `delete` printed `account delete: HTTP 200`. The `delete` error
+  account does not exist in the app: `register` never succeeded, or an
+  earlier `delete` printed `account delete: HTTP 200`. The `delete` error
   says when to use it. Never use `forget` while the account still exists.
-- On a preview, the whole database is also dropped when the PR closes, or
-  after 48 hours with no push. This is a backstop, not the delete step.
 - **Do not ask Gilad to create an account.** Never borrow a personal
   session or another agent's account.
 
@@ -151,12 +144,11 @@ of an id with no secret changes nothing and exits 0.
 
 ### Credit on new accounts
 
-- A new staging account gets no credit. A new preview account gets
-  `PREVIEW_GRANT_CENTS` (see `docs/agents/pr-previews.md`). Run checks
-  that need a paid run on the preview, or record the gap. Or, with Gilad's
-  approval in chat, fund the check account with "Grant test credit" below.
+- A new staging account gets no credit. For a check that needs a paid
+  run, get Gilad's approval in chat and fund the check account with "Grant
+  test credit" below. Or record the gap.
 - Never add funds except through "Grant test credit" below.
-- Staging keeps the setup intake for new accounts. Previews skip it.
+- Staging keeps the setup intake for new accounts.
 
 ### Grant test credit (staging only)
 
@@ -176,8 +168,6 @@ rules apply:
   sees the ledger row, so the row holds only `Test grant: <reason>`.
 - All grants on all accounts share one $50 cap for each UTC day, kept in the
   staging database. The command refuses a grant that passes it.
-- The command refuses every grant on a PR preview. Each preview has its own
-  database, so a preview grant would get its own $50 cap.
 - Never use a raw wallet INSERT, Stripe or any other path.
 
 The command refuses unless `APP_ENVIRONMENT` is `staging`, the database
@@ -228,9 +218,6 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
 - Exit code `2` with usage text and no `Grant refused:` means a missing or
   bad argument. Fix the command line; nothing was written.
 - Record the grant (account id, dollars, key) in the PR test scope.
-- A preview already gives new accounts `PREVIEW_GRANT_CENTS`. The grant
-  command refuses previews. If a preview check needs more, ask the
-  orchestrator.
 
 ### Authentication changes
 
@@ -245,7 +232,7 @@ Record in the PR that you used fresh accounts and real codes.
 - Never put passwords, tokens, cookies or email codes in prompts, logs,
   screenshots, videos, commits, PR text or Linear.
 - In evidence, name the account by its target and label (for example
-  `pr-827 SKY-123 check account`) and by email domain only.
+  `staging SKY-123 check account`) and by email domain only.
 - In a browser, sign in through the normal login page. Keep the password out
   of recordings.
 - A test-account login is access setup, not proof of email verification.
@@ -267,14 +254,13 @@ Record in the PR that you used fresh accounts and real codes.
 - Never borrow another agent's account, Gilad's session or a personal
   account.
 
-## 7. What to write in the PR
+## 7. What to record
 
-In the test-scope section, add:
+Record the acceptance results on the Linear issue (see the
+`skynet-pr-workflow` skill). Add:
 
-- The target (staging or the `pr-<n>` preview), its URL, and the commit you
-  confirmed.
+- The target (staging), its URL, and the commit you confirmed.
 - That you used a fresh check account, and that its delete returned
   HTTP 200. Never the email address or any secret.
 - Each check you ran and its result.
-- Gaps, for example "checked on staging, not on the preview" or "simulated
-  state for the expensive run".
+- Gaps, for example "simulated state for the expensive run".
