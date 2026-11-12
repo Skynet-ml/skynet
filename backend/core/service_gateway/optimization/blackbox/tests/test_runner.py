@@ -1453,7 +1453,8 @@ def test_a_file_stdout_that_is_not_the_wrappers_root_file_is_refused(tmp_path: P
             check=False,
         )
 
-    assert done.stderr.startswith("'The supervisor")
+    # repr() quotes the refusal with double quotes when it holds an apostrophe.
+    assert done.stderr.strip("'\"").startswith("The supervisor")
 
 
 _ENTRY_USER = (
