@@ -6,7 +6,7 @@ mailbox document, and the guest proxy. They are display attribution only,
 except ``box`` and ``for_box``. The money a call costs and the role it is
 billed under come from the trusted route, never from a tag, so a forged tag
 can only mislabel its own run's rows. A forged ``box`` or ``for_box`` tag can
-at most stop its own run early (see ``BudgetRuntime.pin``).
+at most stop its own run early (see ``BudgetRuntime._begin_wait``).
 """
 
 from __future__ import annotations
