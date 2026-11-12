@@ -892,8 +892,9 @@ def normalize_guide(config: dict[str, Any], rubric: Any, task: Any) -> tuple[lis
     shapes from ``assist.rubric`` and ``assist.taskOverride``.
 
     Args:
-        config: The session's stored ``TaggerConfig`` payload. A provisional
-            session takes the answer style from ``task``.
+        config: The session's effective config (``effective_task_config``);
+            a session that is still provisional takes the answer style from
+            ``task``.
         rubric: The rules, as a list of strings.
         task: The task definition (``mode``, ``question``, ``categories``,
             ``prompt``), or None to keep the session's task.
