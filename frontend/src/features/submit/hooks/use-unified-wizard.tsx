@@ -18,7 +18,7 @@ import { toast } from "react-toastify";
 
 import { flushSetupChat, useWizardStateOptional } from "@/features/agent-panel";
 import { useConnectors } from "@/features/connectors";
-import { formatBudgetUsd, usePricingTerms } from "@/features/billing";
+import { usePricingTerms } from "@/features/billing";
 import {
   useExperienceLevel,
   useExperienceOptional,
@@ -39,8 +39,6 @@ import {
   isStorageQuotaError,
   setupDraftApi,
   submitRepoRun,
-  submitUnifiedRun,
-  enableContinuous,
   listSavedSecrets,
   SAVED_SECRETS_CHANGED_EVENT,
   type SavedSecret,
@@ -48,27 +46,21 @@ import {
 import { runHref, type ApiSource } from "@/shared/lib/api-route";
 import { requestSandboxProvider, type SandboxProviders } from "@/shared/lib/sandbox-provider";
 import { onLinkChange } from "@/shared/hooks/use-linked-account";
-import { contractCheckMessage } from "@/shared/lib/i18n";
 import {
   SETUP_CHAT_KEPT_EVENT,
   SETUP_SUBMITTED_EVENT,
   clearSetupDraft,
 } from "@/shared/lib/setup-draft";
-import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
+import { msg, type MessageKey } from "@/shared/lib/messages";
 import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
-import type { ContinuousEnableRequest } from "@/shared/types/continuous";
-import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { getActiveMessages } from "@/shared/lib/runtime-messages";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import type { BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
 import {
-  optimizersFor,
   resolveOptimizer,
   type OptimizerCatalogResponse,
-  type OptimizerChoice,
-  type UnifiedRunRequest,
+  type OptimizerTarget,
 } from "@/shared/types/unified-run";
-import type { WizardPreflightResponse } from "@/shared/types/wizard-preflight";
 import type { ColumnRole } from "@/shared/ui/column-role-row";
 import { SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 
@@ -93,50 +85,32 @@ import {
   singleInputCase,
   type Row,
 } from "../lib/inputs-mode";
-import { prepareModelConfig } from "../lib/model-config";
-import {
-  checkedRunRequest,
-  preflightMayAdvance,
-  preflightPendingMessageKey,
-} from "../lib/preflight-outcome";
 import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate-reasons";
 import { finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
 import {
-  currentRunFailure,
-  runFailureFromCheck,
-  runFailureFromError,
-  type RunFailure,
-} from "../lib/run-failure";
-import {
   WIZARD_HARDENING_KEY,
-  WIZARD_SCHEDULE_KEY,
   WIZARD_SESSION_KEY,
   WIZARD_VIEW_KEYS,
-  decodeScheduledRun,
   decodeWizardSession,
   encodeWizardSession,
-  keepSessionValue,
   readSessionValue,
 } from "../lib/session-state";
-import { metricUsesModel } from "../lib/scorer-dependencies";
+import { scorerCallsModel } from "../lib/scorer-dependencies";
 import {
   SETUP_DRAFT_SAVE_DELAY_MS,
   deleteSetupDraft,
   saveSetupDraft,
   setupDraftOf,
 } from "../lib/setup-draft-sync";
-import { computeStepIssue, hasModel, runBlockedReason as blockedReason } from "../lib/step-issue";
+import { computeStepIssue, runBlockedReason as blockedReason } from "../lib/step-issue";
 import { canEnterStep, canMoveForward } from "../lib/wizard-steps";
 import { createStepViewTracker } from "../lib/wizard-telemetry";
 import {
   WIZARD_V2_STEPS,
-  contractSnapshot,
   defaultModels,
   deleteWorkspaceFile,
   initialWizardV2State,
-  optimizerTarget,
   presetEngine,
-  targetPatch,
   withRepository,
   type InputsSlice,
   type MetaSlice,
@@ -160,7 +134,6 @@ import {
   useModelCatalog,
   useSandboxProviders,
 } from "./use-submit-wizard-data";
-import { useWizardPreflight } from "./use-wizard-preflight";
 
 // A repository run's optimize.toml; the coding agent writes it into the draft (SKY-184).
 const OPTIMIZE_TOML = "optimize.toml";
@@ -170,14 +143,10 @@ export type SubmitPhase = "idle" | "sending" | "splash" | "done";
 /** The shell's view of the wizard: the shared context plus what only the frame draws. */
 export interface WizardV2Shell extends WizardV2Context {
   submitPhase: SubmitPhase;
-  /** The pre-submit check is running; Run and Back hold still meanwhile. */
-  advancing: boolean;
   /** The setup came back from a reload of this tab. */
   restored: boolean;
   /** A `?clone=` source run is still loading into the setup. */
   cloneLoading: boolean;
-  /** Why the last Run click on this exact setup did not start a run. */
-  runFailure: RunFailure | null;
   /** A linked Mac may start the run on the web instead of on the Mac. */
   hostedChoice: boolean;
   /** The user's choice; it stays Web when the link drops, so a Web run never starts on the Mac. */
@@ -197,23 +166,20 @@ export type HostedCatalogState = "ready" | "loading" | "failed";
 
 /**
  * Why a setup cannot start on the web from the Mac app, or null when it can.
- * Only a repository run goes to hosted, judged on hosted's own catalog, and
- * nothing that lives only on this Mac may go with it. The models, proposer
+ * The run is judged on hosted's own catalog, and nothing that lives only on
+ * this Mac may go with it. The models, proposer
  * and dataset come from the request itself, so the check matches what is sent.
  */
 export function hostedRunBlock({
-  repo,
   request,
   linked,
   catalog,
 }: {
-  repo: boolean;
   request: BlackboxRunRequest | null;
   linked: boolean;
   catalog: HostedCatalogState;
 }): MessageKey | null {
   if (!linked) return "submit.v2.run_on.blocked.unlinked";
-  if (!repo) return "submit.v2.run_on.blocked.repo_only";
   if (catalog === "failed") return "submit.v2.run_on.blocked.catalog_failed";
   if (catalog === "loading") return "submit.v2.run_on.blocked.catalog_loading";
   if (!request) return null;
@@ -245,7 +211,7 @@ type Action =
 const stepIndex = (step: WizardStepId) => WIZARD_V2_STEPS.indexOf(step);
 
 // Every patch merges into exactly one slice: editing an earlier step never
-// clears a later one, a broken downstream contract only turns stale.
+// clears a later one.
 function reducer(state: WizardV2State, action: Action): WizardV2State {
   if (action.type === "go") {
     const furthest =
@@ -432,7 +398,7 @@ export function WizardV2Provider({
 
   // The catalog follows the setup it was asked for; a choice it no longer
   // offers is kept and reported as a step issue, never swapped silently.
-  const kind = optimizerTarget(state.task);
+  const kind: OptimizerTarget = "repo";
   const mode = state.inputs.mode;
   // A linked Mac picks where the run starts; every server read below follows
   // that choice, so a web run is never judged on the Mac's catalog or prices.
@@ -470,7 +436,7 @@ export function WizardV2Provider({
   const [catalogLoads, setCatalogLoads] = useState(0);
   const retryHostedCatalog = useCallback(() => setCatalogLoads((count) => count + 1), []);
   useEffect(() => {
-    if (!kind || !mode) return;
+    if (!mode) return;
     const controller = new AbortController();
     setOptimizerCatalogLoading(true);
     setCatalogFailedOn(null);
@@ -496,7 +462,7 @@ export function WizardV2Provider({
   // The Optimizer step is blocked only once it has a setup to judge; before
   // that, Guided's flow must not flash the step in and out.
   const optimizerBlocked =
-    Boolean(kind && mode) && computeStepIssue(state, "optimizer", optimizerCatalog) !== null;
+    Boolean(mode) && computeStepIssue(state, "optimizer", optimizerCatalog) !== null;
   const steps = useMemo(() => wizardSteps(state, optimizerBlocked), [state, optimizerBlocked]);
   // Until the account's level loads it reads as the Guided placeholder, and
   // applying that would move a reopened Standard setup off the Optimizer step
@@ -526,13 +492,7 @@ export function WizardV2Provider({
   );
 
   const [submitPhase, setSubmitPhase] = useState<SubmitPhase>("idle");
-  // Kept with the tab's setup, so a reload does not silently submit a one-off run.
-  const [scheduledRun, setScheduledRun] = useState<ContinuousEnableRequest | null>(() =>
-    restored ? decodeScheduledRun(readSessionValue(WIZARD_SCHEDULE_KEY)) : null,
-  );
-  const [advancing, setAdvancing] = useState(false);
-  const [runFailure, setRunFailure] = useState<RunFailure | null>(null);
-  const busy = advancing || submitPhase !== "idle";
+  const busy = submitPhase !== "idle";
 
   const goTo = useCallback(
     (step: WizardStepId) => {
@@ -557,18 +517,16 @@ export function WizardV2Provider({
     if (prev) goTo(prev);
   }, [steps, state.step, goTo]);
 
-  const resolvedOptimizer = kind ? resolveOptimizer(state.optimizer.choice, kind) : null;
-  const snapshot = contractSnapshot(state);
-  const contractStale = state.workspace.lastCheckSnapshot !== snapshot;
+  const resolvedOptimizer = resolveOptimizer(state.optimizer.choice);
 
   // While the wizard's agent works, missing code reads as being written.
   const agentWriting = useWizardStateOptional()?.agentBusy ?? false;
   const runBlockedReason = useMemo(
-    () => blockedReason(state, optimizerCatalog, { message: contractCheckMessage, agentWriting }),
+    () => blockedReason(state, optimizerCatalog, { agentWriting }),
     [state, optimizerCatalog, agentWriting],
   );
 
-  const metricCallsModel = metricUsesModel(state);
+  const metricCallsModel = scorerCallsModel(state.workspace.metricCode);
   const submittedModels = runModels(
     state.optimizer,
     metricCallsModel,
@@ -618,71 +576,13 @@ export function WizardV2Provider({
     [budget, patchOptimizer],
   );
   // The server budget is per page load, so a restored limit is set on it again.
-  // A layout effect, so the limit is in place before any screen's own effect
-  // runs: a reload that reopens the check screen starts the check at once, and
-  // a check started before this would find no limit and fail as invalid.
+  // A layout effect, so the limit is in place before any screen's own effect runs.
   useLayoutEffect(() => {
     if (restored) restoreSavedLimit(restored.optimizer, { budget, patchSaved: patchOptimizer });
     // Runs once, for the setup read at mount.
   }, []);
 
   const username = session?.user?.name ?? "";
-  const buildPayload = useCallback((): UnifiedRunRequest | null => {
-    const { task, inputs, optimizer, workspace, meta } = state;
-    if (!task.artifactKind || task.startingVersion === null || !inputs.mode) return null;
-    if (inputs.cases.length === 0 && !inputs.stagedDatasetId) return null;
-    if (!hasModel(optimizer.reflectionModel)) return null;
-    if (!workspace.runCode.trim() || !workspace.metricCode.trim()) return null;
-    const metricModel = metricUsesModel(state)
-      ? storedMetricModel(workspace.metricModel, workspace.metricCode)
-      : null;
-    return {
-      payload_kind: "unified_v1",
-      name: meta.name.trim() || undefined,
-      description: meta.description.trim() || undefined,
-      username: username || undefined,
-      task: {
-        objective: task.objective.trim(),
-        background: task.background.trim(),
-        artifact: { kind: task.artifactKind, starting_version: task.startingVersion },
-      },
-      data: {
-        mode: inputs.mode,
-        ...(inputs.cases.length > 0
-          ? { cases: inputs.cases }
-          : { staged_dataset_id: inputs.stagedDatasetId }),
-        input_fields: inputs.inputFields,
-        expected_field: inputs.expectedField,
-        split: inputs.split,
-        shuffle: inputs.shuffle,
-      },
-      optimizer: {
-        choice: optimizer.choice,
-        budget: optimizer.budget,
-        proposer: withSupportedHostCli(optimizer.proposer),
-        shinka: optimizer.choice === "shinka_evolve" ? optimizer.shinka : null,
-      },
-      models: {
-        task_model: hasModel(optimizer.taskModel) ? prepareModelConfig(optimizer.taskModel) : null,
-        reflection_model: prepareModelConfig(optimizer.reflectionModel),
-        metric_model: hasModel(metricModel) ? prepareModelConfig(metricModel) : null,
-        extra_reflection_models:
-          optimizer.choice === "shinka_evolve"
-            ? optimizer.extraReflectionModels.filter(hasModel).map(prepareModelConfig)
-            : [],
-      },
-      workspace: {
-        run_code: workspace.runCode,
-        metric_code: workspace.metricCode,
-        ...(Object.keys(workspace.files).length > 0 && { files: workspace.files }),
-        metric_timeout_seconds: workspace.metricTimeoutSeconds,
-      },
-      token_source: tokenSource,
-      is_private: meta.isPrivate,
-      max_cost_cents: budgetUncapped ? undefined : (maxCostCents ?? undefined),
-    };
-  }, [state, username, tokenSource, budgetUncapped, maxCostCents]);
-
   // Submit sends this exact request, and the Web check judges it.
   const repoRequest = useMemo(() => {
     const proposer = withSupportedHostCli(state.optimizer.proposer);
@@ -714,22 +614,12 @@ export function WizardV2Provider({
   const hostedBlock =
     runOn === "hosted"
       ? hostedRunBlock({
-          repo: Boolean(state.task.repo),
           request: repoRequest,
           linked: hostedChoice,
           catalog:
             catalogFailedOn === "hosted" ? "failed" : exposedCatalog ? "ready" : "loading",
         })
       : null;
-
-  // The preflight hook keys its evidence on the payload; an incomplete setup
-  // has none yet and is never run, so an empty stand-in only names the slot.
-  const payload = buildPayload();
-  const preflight = useWizardPreflight(
-    "unified",
-    payload ?? ({} as UnifiedRunRequest),
-    budgetSession,
-  );
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -845,71 +735,7 @@ export function WizardV2Provider({
       toast.error(v2Text(computeStepIssue(state, blocked, optimizerCatalog) ?? "", guided));
       return;
     }
-    if (state.task.repo) return submitRepo();
-    if (runBlockedReason || !payload) {
-      toast.error(v2Text(runBlockedReason ?? "submit.v2.metric.check.needed", guided));
-      return;
-    }
-    submittingRef.current = true;
-    setAdvancing(true);
-    setRunFailure(null);
-    const identity = preflight.identity;
-    let checked: WizardPreflightResponse | null = null;
-    try {
-      checked =
-        preflight.reusable("execution", payload) ?? (await preflight.run("execution", payload));
-      if (!mountedRef.current) return;
-      if (checked.status === "pending") {
-        toast.info(msg(preflightPendingMessageKey(checked)));
-        checked = null;
-      } else if (checked.status !== "succeeded" || !preflightMayAdvance(checked, "execution")) {
-        // The box under Run states the failure and keeps it; a toast would repeat it.
-        setRunFailure(runFailureFromCheck(identity, checked));
-        checked = null;
-      } else {
-        const locale = getActiveIntlLocale();
-        toast.success(
-          `${msg("submit.preflight.succeeded")} · ${msg("submit.budget.setup_spent")}: ${formatBudgetUsd(checked.budget.setup_spent_cents, locale)}`,
-        );
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : msg("submit.preflight.failed");
-      if (mountedRef.current && !(error instanceof Error && error.name === "AbortError")) {
-        const shown = message.startsWith("budget.") ? msg(message as MessageKey) : message;
-        setRunFailure(runFailureFromError(identity, shown));
-      }
-      checked = null;
-    } finally {
-      if (mountedRef.current) setAdvancing(false);
-      if (!checked) submittingRef.current = false;
-    }
-    if (!checked || !mountedRef.current) return;
-
-    setSubmitPhase("sending");
-    try {
-      const request = checkedRunRequest(payload, checked);
-      const key = await budgetSession.submissionKey(checked.fingerprint);
-      const result = await submitUnifiedRun(request, { idempotencyKey: key });
-      track(TelemetryEvent.RunSubmitted, {
-        artifact_kind: request.task.artifact.kind,
-        data_mode: request.data.mode,
-        optimizer: request.optimizer.choice,
-        optimizer_resolved: resolvedOptimizer,
-      });
-      if (scheduledRun) {
-        // The plan waits for the run to succeed. A refused plan never holds back the run itself.
-        await enableContinuous(result.optimization_id, scheduledRun).catch((err: unknown) => {
-          toast.error(
-            formatMsg("submit.v2.schedule.failed", {
-              error: userErrorMessage(err),
-            }),
-          );
-        });
-      }
-      await openSubmitted(result.optimization_id);
-    } catch (err) {
-      submitFailed(err);
-    }
+    return submitRepo();
   };
 
   // A submit leaves on purpose: the shared agent state starts the next run clean.
@@ -946,9 +772,9 @@ export function WizardV2Provider({
   // engines fit; a cloned run or an engine set earlier keeps its choice.
   const enginePresetDone = useRef(searchParams.has("clone") || restored !== null);
   useEffect(() => {
-    if (enginePresetDone.current || !kind || !mode) return;
+    if (enginePresetDone.current || !mode) return;
     enginePresetDone.current = true;
-    const engine = presetEngine(state.optimizer.choice, readPref("optimizerEngine"), kind, mode);
+    const engine = presetEngine(state.optimizer.choice, readPref("optimizerEngine"));
     if (engine) patchOptimizer({ choice: engine });
     // Runs once, when the setup first exists; the choice is read from that render.
   }, [kind, mode]);
@@ -988,15 +814,6 @@ export function WizardV2Provider({
       window.sessionStorage.setItem(WIZARD_SESSION_KEY, encodeWizardSession(accountId, state));
     } catch {}
   }, [accountId, state]);
-  useEffect(() => {
-    if (submittedRef.current) return;
-    if (scheduledRun) keepSessionValue(WIZARD_SCHEDULE_KEY, JSON.stringify(scheduledRun));
-    else {
-      try {
-        window.sessionStorage.removeItem(WIZARD_SCHEDULE_KEY);
-      } catch {}
-    }
-  }, [scheduledRun]);
   // Leaving the page keeps the setup as the account's draft on the server,
   // and in this browser until the server takes it. /submit offers the draft
   // back on any device until a submit or Start new. A reload or a tab close
@@ -1115,7 +932,7 @@ export function WizardV2Provider({
     const keys = wizardCtx?.agentPulseKeys ?? [];
     if (!shared || keys.length === 0) return;
     let rolesWritten = false;
-    // Both target keys can land in one pulse while `state` is still the
+    // Two repository writes can land in one pulse while `state` is still the
     // render's; the draft written first is the base for the second.
     let repo = state.task.repo;
     for (const key of keys) {
@@ -1138,31 +955,16 @@ export function WizardV2Provider({
           if (typeof shared.task_background === "string")
             patchTask({ background: shared.task_background });
           break;
-        case "artifact_kind": {
-          const target = shared.artifact_kind;
-          if (target !== "repo" && target !== "dspy_program") break;
-          const patch = targetPatch(target, repo, state.optimizer.choice);
-          patchTask(patch.task);
-          if (patch.inputs) patchInputs(patch.inputs);
-          if (patch.optimizer) patchOptimizer(patch.optimizer);
-          repo = patch.task.repo ?? null;
+        case "artifact_kind":
+          // A repository run scores one case at a time.
+          if (shared.artifact_kind === "repo") patchInputs({ mode: "single" });
           break;
-        }
         case "repository": {
           if (typeof shared.repository !== "string" || !shared.repository) break;
-          if (!repo) {
-            const patch = targetPatch("repo", null, state.optimizer.choice);
-            if (patch.inputs) patchInputs(patch.inputs);
-            if (patch.optimizer) patchOptimizer(patch.optimizer);
-          }
           repo = withRepository(repo, shared.repository);
           patchTask({ repo });
           break;
         }
-        case "starting_version":
-          if (shared.starting_version !== undefined)
-            patchTask({ startingVersion: shared.starting_version });
-          break;
         case "data_mode":
           if (shared.data_mode) patchInputs({ mode: shared.data_mode });
           break;
@@ -1267,17 +1069,16 @@ export function WizardV2Provider({
       is_private: meta.isPrivate,
       task_objective: task.objective || undefined,
       task_background: task.background || undefined,
-      artifact_kind: task.repo ? ("repo" as const) : (task.artifactKind ?? undefined),
-      starting_version: task.repo ? undefined : (task.startingVersion ?? undefined),
-      repository: task.repo?.repository.trim() || undefined,
-      repo_provider: task.repo ? (task.repo.provider ?? "github") : undefined,
+      artifact_kind: "repo" as const,
+      repository: task.repo.repository.trim() || undefined,
+      repo_provider: task.repo.provider ?? "github",
       github_connected: githubConnected,
       data_mode: inputs.mode ?? undefined,
       staged_dataset_id: inputs.stagedDatasetId ?? undefined,
       optimizer_choice: optimizer.choice,
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
-      optimize_toml: task.repo ? workspace.files[OPTIMIZE_TOML] || undefined : undefined,
+      optimize_toml: workspace.files[OPTIMIZE_TOML] || undefined,
       dataset_columns: inputs.columns.length > 0 ? inputs.columns : undefined,
       input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
       expected_field: inputs.expectedField ?? undefined,
@@ -1328,14 +1129,10 @@ export function WizardV2Provider({
     resolvedOptimizer,
     optimizerCatalog: exposedCatalog,
     optimizerCatalogLoading,
-    contractStale,
     runBlockedReason,
-    buildPayload,
     ensureBudget,
     submit,
     submitting: submitPhase !== "idle",
-    scheduledRun,
-    setScheduledRun,
     runFloor,
     costSettled,
     tokenSource,
@@ -1345,8 +1142,6 @@ export function WizardV2Provider({
     setBudgetUncapped,
     guided,
     submitPhase,
-    advancing,
-    runFailure: currentRunFailure(runFailure, preflight.identity),
     hostedChoice,
     runOn,
     setRunOn,

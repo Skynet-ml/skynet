@@ -2,8 +2,7 @@
  * Wizard v2 state: types, constants and pure helpers only.
  *
  * Four fixed steps (task, inputs, optimizer, metric) each own a slice. Editing
- * an earlier step never clears a later slice; a downstream break only makes
- * the contract check stale, which `contractSnapshot` detects.
+ * an earlier step never clears a later slice.
  */
 import type {
   BlackboxBudget,
@@ -14,19 +13,12 @@ import type {
 } from "@/shared/types/api";
 import type { ExperienceLevel } from "@/features/experience";
 import type { ExecutionBudget } from "@/shared/types/execution-budget";
-import type { ContinuousEnableRequest } from "@/shared/types/continuous";
 import {
   optimizersFor,
-  resolveOptimizer,
-  type ArtifactKind,
-  type ContractCheckResponse,
   type DataMode,
   type OptimizerCatalogResponse,
   type OptimizerChoice,
-  type OptimizerTarget,
   type UnifiedCase,
-  type UnifiedChatTurn,
-  type UnifiedRunRequest,
 } from "@/shared/types/unified-run";
 import type { TokenSourceMode } from "@/features/billing";
 import type { RepoHost } from "@/shared/lib/api";
@@ -43,7 +35,7 @@ export const DEFAULT_UNIFIED_SPLIT: Readonly<SplitFractions> = {
 export const DEFAULT_METRIC_TIMEOUT_SECONDS = 60;
 
 /**
- * A GitHub, GitLab or Bitbucket repository the run optimizes in place of an artifact. Empty
+ * A GitHub, GitLab or Bitbucket repository the run optimizes. Empty
  * branch and commit mean the default branch's head; an empty setup command
  * is inferred by the server's setup check.
  */
@@ -89,12 +81,8 @@ export const emptyRepoDraft = (): RepoDraft => ({
 export interface TaskSlice {
   objective: string;
   background: string;
-  artifactKind: ArtifactKind | null;
-  startingVersion: string | Record<string, string> | null;
-  artifactRationale: string;
-  transcript: UnifiedChatTurn[];
-  /** Set for a repository run, which has no artifact or inputs of its own. */
-  repo: RepoDraft | null;
+  /** The repository the run optimizes. */
+  repo: RepoDraft;
   /** The repository the user named in the interview, searched until one is chosen. */
   repoQuery?: string;
   /** The interview's call on whether the run needs example data; unset means unknown. */
@@ -145,8 +133,6 @@ export interface WorkspaceSlice {
   /** Every other workspace file, relative path to text (helpers `run.py` imports). */
   files: Record<string, string>;
   metricTimeoutSeconds: number;
-  lastCheck: ContractCheckResponse | null;
-  lastCheckSnapshot: string | null;
 }
 
 export interface MetaSlice {
@@ -182,14 +168,10 @@ export function initialWizardV2State(
     task: {
       objective: "",
       background: "",
-      artifactKind: "dspy_program",
-      startingVersion: null,
-      artifactRationale: "",
-      transcript: [],
-      repo: null,
+      repo: emptyRepoDraft(),
     },
     inputs: {
-      mode: null,
+      mode: "single",
       cases: [],
       stagedDatasetId: null,
       datasetLabel: null,
@@ -229,8 +211,6 @@ export function initialWizardV2State(
       metricModel: null,
       files: {},
       metricTimeoutSeconds: DEFAULT_METRIC_TIMEOUT_SECONDS,
-      lastCheck: null,
-      lastCheckSnapshot: null,
     },
     meta: {
       name: "",
@@ -249,13 +229,7 @@ const hasModel = (config: ModelConfig | null): boolean => Boolean(config?.name.t
  * move on. There is no separate confirm: Continue is the confirmation.
  */
 export function taskIssue(task: TaskSlice): string | null {
-  if (task.repo) return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
-  if (!task.artifactKind) return "submit.v2.task.issue.kind";
-  const v = task.startingVersion;
-  const empty =
-    v === null ||
-    (typeof v === "string" ? !v.trim() : Object.values(v).every((part) => !part.trim()));
-  return empty ? "submit.v2.task.issue.starting" : null;
+  return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
 }
 
 export const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
@@ -324,63 +298,15 @@ function secretsIssue(secrets: RepoSecretDraft[]): string | null {
   return null;
 }
 
-/**
- * The inputs and optimizer patches that go with switching to a repository
- * target: one case at a time, and Auto in place of a DSPy optimizer.
- */
-export function repoTargetSlices(choice: OptimizerChoice): {
-  inputs: Partial<InputsSlice>;
-  optimizer: Partial<OptimizerSlice> | null;
-} {
-  const fits = optimizersFor("repo", "single").includes(choice);
-  return { inputs: { mode: "single" }, optimizer: fits ? null : { choice: "auto" } };
-}
-
-/** The optimizer patch for leaving a repository target: a black-box engine goes back to Auto. */
-export function programTargetOptimizer(choice: OptimizerChoice): Partial<OptimizerSlice> | null {
-  return optimizersFor("dspy_program", "pairs").includes(choice) ? null : { choice: "auto" };
-}
-
-/**
- * The slice patches for switching what the run optimizes. A repository keeps
- * its draft when it is already the target; a DSPy program clears it.
- */
-export function targetPatch(
-  target: OptimizerTarget,
-  repo: RepoDraft | null,
-  choice: OptimizerChoice,
-): {
-  task: Partial<TaskSlice>;
-  inputs: Partial<InputsSlice> | null;
-  optimizer: Partial<OptimizerSlice> | null;
-} {
-  if (target === "repo") {
-    const { inputs, optimizer } = repoTargetSlices(choice);
-    return { task: { repo: repo ?? emptyRepoDraft() }, inputs, optimizer };
-  }
-  return {
-    task: { repo: null, artifactKind: "dspy_program" },
-    inputs: null,
-    optimizer: programTargetOptimizer(choice),
-  };
-}
-
 /** The draft with another repository picked; a new repository starts from its default branch. */
-export function withRepository(repo: RepoDraft | null, repository: string): RepoDraft {
-  const base = repo ?? emptyRepoDraft();
-  if (base.repository === repository) return base;
+export function withRepository(repo: RepoDraft, repository: string): RepoDraft {
+  if (repo.repository === repository) return repo;
   // Another repository is not the one Skynet created, so the flag must not carry over.
-  return { ...base, repository, branch: "", commit: "", ...(base.createdBySkynet ? { createdBySkynet: false } : {}) };
+  return { ...repo, repository, branch: "", commit: "", ...(repo.createdBySkynet ? { createdBySkynet: false } : {}) };
 }
 
-/** What the optimizer catalog is keyed on: `"repo"` for a repository run, else the artifact kind. */
-export function optimizerTarget(task: Pick<TaskSlice, "repo" | "artifactKind">): OptimizerTarget | null {
-  return task.repo ? "repo" : task.artifactKind;
-}
-
-/** Whether the models the chosen artifact needs to run are set. */
+/** Whether the models a repository run needs are set. */
 export function optimizerModelsReady(s: WizardV2State): boolean {
-  if (!s.task.repo && !hasModel(s.optimizer.taskModel)) return false;
   return hasModel(s.optimizer.reflectionModel);
 }
 
@@ -393,10 +319,9 @@ export function optimizerModelsReady(s: WizardV2State): boolean {
 export function wizardSteps(s: WizardV2State, optimizerBlocked: boolean): readonly WizardStepId[] {
   // A repository run is scored on the checkout itself, so it has an Inputs
   // step only when the interview found it scores one case at a time.
-  const all =
-    s.task.repo && !s.task.needsData
-      ? WIZARD_V2_STEPS.filter((step) => step !== "inputs")
-      : WIZARD_V2_STEPS;
+  const all = !s.task.needsData
+    ? WIZARD_V2_STEPS.filter((step) => step !== "inputs")
+    : WIZARD_V2_STEPS;
   if (s.level !== "guided" || optimizerBlocked || s.step === "optimizer") return all;
   return all.filter((step) => step !== "optimizer");
 }
@@ -491,11 +416,9 @@ export function withOptimizerPatch(
 export function presetEngine(
   choice: OptimizerChoice,
   engine: OptimizerChoice,
-  target: OptimizerTarget,
-  mode: DataMode,
 ): OptimizerChoice | null {
   if (choice !== "auto" || engine === "auto") return null;
-  return optimizersFor(target, mode).includes(engine) ? engine : null;
+  return optimizersFor().includes(engine) ? engine : null;
 }
 
 /* ── Workspace files ─────────────────────────────────────────────────── */
@@ -589,73 +512,6 @@ export function deleteWorkspaceFile(
   return { files };
 }
 
-/** Recursively sorts object keys so equal values always serialize the same. */
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const entries = Object.keys(value as Record<string, unknown>)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value ?? null);
-}
-
-/** 32-bit FNV-1a of a string, as hex; keeps the snapshot short when the cases are large. */
-function fnv1a(text: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16);
-}
-
-/**
- * Stable JSON of everything a contract check depends on. A check is current
- * only while its stored snapshot equals this value for the live state.
- * The sandboxed check samples the cases through the split, and DSPy run code
- * calls the task model, so the data and both of those count too.
- */
-export function contractSnapshot(s: WizardV2State): string {
-  const target = optimizerTarget(s.task);
-  return stableJson({
-    artifactKind: s.task.artifactKind,
-    startingVersion: s.task.startingVersion,
-    mode: s.inputs.mode,
-    cases: s.inputs.cases.length > 0 ? fnv1a(stableJson(s.inputs.cases)) : null,
-    stagedDatasetId: s.inputs.cases.length > 0 ? null : s.inputs.stagedDatasetId,
-    inputFields: s.inputs.inputFields,
-    expectedField: s.inputs.expectedField,
-    split: s.inputs.split,
-    shuffle: s.inputs.shuffle,
-    resolvedOptimizer: target ? resolveOptimizer(s.optimizer.choice, target) : null,
-    taskModel: s.optimizer.taskModel?.name.trim() || null,
-    runCode: s.workspace.runCode,
-    metricCode: s.workspace.metricCode,
-    ...(s.workspace.metricModel && { metricModel: s.workspace.metricModel.name }),
-    // Left out when empty so a check stored before extra files existed stays current.
-    ...(Object.keys(s.workspace.files).length > 0 && { files: s.workspace.files }),
-    reflectionModel: s.optimizer.reflectionModel?.name ?? null,
-    metricTimeoutSeconds: s.workspace.metricTimeoutSeconds,
-    // The check runs under the spending limit, so a pass under one limit says
-    // nothing about another: a new limit runs the check again.
-    maxCostCents: s.optimizer.budgetUncapped ? null : s.optimizer.maxCostCents,
-    budgetUncapped: s.optimizer.budgetUncapped,
-  });
-}
-
-/**
- * The spec the sandboxed contract check sends: the server bills the check to
- * an execution budget and refuses one that names none.
- */
-export function withContractBudget(
-  spec: UnifiedRunRequest,
-  budget: Pick<ExecutionBudget, "id" | "revision">,
-): UnifiedRunRequest {
-  return { ...spec, execution_budget_id: budget.id, execution_budget_revision: budget.revision };
-}
-
 export interface WizardV2Context {
   state: WizardV2State;
   goTo(step: WizardStepId): void;
@@ -676,18 +532,12 @@ export interface WizardV2Context {
   resolvedOptimizer: string | null;
   optimizerCatalog: OptimizerCatalogResponse | null;
   optimizerCatalogLoading: boolean;
-  /** `lastCheckSnapshot !== contractSnapshot(state)`. */
-  contractStale: boolean;
-  /** An i18n key or the exact contract error text. */
+  /** An i18n key or the exact error text. */
   runBlockedReason: string | null;
-  buildPayload(): UnifiedRunRequest | null;
-  /** The wizard's execution budget, created on first use; the sandboxed check bills to it. */
+  /** The wizard's execution budget, created on first use. */
   ensureBudget(): Promise<ExecutionBudget>;
   submit(): Promise<void>;
   submitting: boolean;
-  /** The scheduled run set up on the last metric screen; it starts with the run. */
-  scheduledRun: ContinuousEnableRequest | null;
-  setScheduledRun(next: ContinuousEnableRequest | null): void;
   // TotalBudgetCard BudgetContext fields.
   /** The least the spending limit can be; null until the server's box hold loads. */
   runFloor: RunFloor | null;

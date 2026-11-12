@@ -14,7 +14,7 @@ registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { metricUsesModel, scorerCallsModel, withScorerImports } = await import(
+const { scorerCallsModel, withScorerImports } = await import(
   "./scorer-dependencies.ts"
 );
 
@@ -64,34 +64,4 @@ test("preserves existing imports, qualified calls and locally defined helpers", 
     'def llm(x): return x\nllm("x")',
   ])
     assert.equal(withScorerImports(code), code);
-});
-
-test("prefers the contract check's uses_llm while it was run on the current metric code", () => {
-  const code = "from skynet import llm\n\ndef score(i, o, e):\n    return 1.0";
-  const snapshot = JSON.stringify({ metricCode: code, runCode: "x" });
-  const state = (
-    metricCode: string,
-    uses_llm?: boolean,
-    lastCheckSnapshot: string | null = snapshot,
-  ) => ({
-    workspace: {
-      metricCode,
-      lastCheck: uses_llm === undefined ? null : { uses_llm },
-      lastCheckSnapshot,
-    },
-  });
-  assert.equal(metricUsesModel(state(code)), true);
-  assert.equal(metricUsesModel(state(code, false)), false);
-  assert.equal(
-    metricUsesModel(
-      state(
-        "def score(i, o, e):\n    return 1.0",
-        true,
-        JSON.stringify({ metricCode: "def score(i, o, e):\n    return 1.0" }),
-      ),
-    ),
-    true,
-  );
-  assert.equal(metricUsesModel(state(`${code}\n`, false)), true);
-  assert.equal(metricUsesModel(state(code, false, null)), true);
 });

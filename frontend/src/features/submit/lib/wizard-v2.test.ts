@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import type { UnifiedRunRequest } from "@/shared/types/unified-run";
-
 const unifiedRunUrl = new URL("../../../shared/types/unified-run.ts", import.meta.url).href;
 
 registerHooks({
@@ -17,20 +15,15 @@ registerHooks({
 
 const {
   WIZARD_V2_STEPS,
-  contractSnapshot,
   deleteWorkspaceFile,
   emptyRepoDraft,
   initialWizardV2State,
   optimizerModelsReady,
   defaultModels,
   presetEngine,
-  programTargetOptimizer,
-  repoTargetSlices,
-  targetPatch,
   taskIssue,
   withRepository,
   wizardSteps,
-  withContractBudget,
   withDefaultModels,
   withLevel,
   withOptimizerPatch,
@@ -41,69 +34,22 @@ const {
 } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 
-function checkedState() {
+// A repository run whose interview found it needs data, so every step shows.
+function filledState() {
   const state = initialWizardV2State();
   return {
     ...state,
-    task: { ...state.task, artifactKind: "dspy_program" as const, startingVersion: "Answer." },
+    task: { ...state.task, repo: { ...emptyRepoDraft(), repository: "acme/bot" }, needsData: true },
     inputs: {
       ...state.inputs,
-      mode: "labeled" as const,
+      mode: "pairs" as const,
       cases: [{ input: { q: "a" }, expected: { answer: "b" } }],
       inputFields: ["q"],
       expectedField: "answer",
     },
-    workspace: {
-      ...state.workspace,
-      runCode: "def run(a, i): ...",
-      metricCode: "def score(i, o): ...",
-    },
+    workspace: { ...state.workspace, metricCode: "def score(i, o): ..." },
   };
 }
-
-test("changing the cases, data source, split, models or metric timeout makes the check stale", () => {
-  const base = checkedState();
-  const snapshot = contractSnapshot(base);
-  assert.equal(contractSnapshot(checkedState()), snapshot);
-
-  const edits = [
-    {
-      ...base,
-      inputs: { ...base.inputs, cases: [{ input: { q: "z" }, expected: { answer: "b" } }] },
-    },
-    { ...base, inputs: { ...base.inputs, cases: [], stagedDatasetId: "ds-1" } },
-    { ...base, inputs: { ...base.inputs, split: { train: 0.5, val: 0.25, test: 0.25 } } },
-    { ...base, inputs: { ...base.inputs, shuffle: !base.inputs.shuffle } },
-    { ...base, optimizer: { ...base.optimizer, taskModel: { name: "openai/gpt-x" } } },
-    { ...base, optimizer: { ...base.optimizer, reflectionModel: { name: "openai/gpt-y" } } },
-    { ...base, workspace: { ...base.workspace, metricTimeoutSeconds: 5 } },
-    { ...base, workspace: { ...base.workspace, metricModel: { name: "anthropic/legacy" } } },
-  ];
-  for (const edited of edits) assert.notEqual(contractSnapshot(edited as typeof base), snapshot);
-
-  const stagedA = { ...base, inputs: { ...base.inputs, cases: [], stagedDatasetId: "ds-1" } };
-  const stagedB = { ...base, inputs: { ...base.inputs, cases: [], stagedDatasetId: "ds-2" } };
-  assert.notEqual(contractSnapshot(stagedA), contractSnapshot(stagedB));
-});
-
-test("changing the spending limit makes the check stale", () => {
-  const base = checkedState();
-  const capped = { ...base, optimizer: { ...base.optimizer, maxCostCents: 493 } };
-  const snapshot = contractSnapshot(capped);
-
-  const lowered = { ...capped, optimizer: { ...capped.optimizer, maxCostCents: 100 } };
-  const uncapped = { ...capped, optimizer: { ...capped.optimizer, budgetUncapped: true } };
-  assert.notEqual(contractSnapshot(lowered), snapshot);
-  assert.notEqual(contractSnapshot(uncapped), snapshot);
-});
-
-test("the sandboxed check's spec carries the execution budget id and revision", () => {
-  const spec = { payload_kind: "unified_v1" } as unknown as UnifiedRunRequest;
-  const sent = withContractBudget(spec, { id: "budget-1", revision: 7 });
-  assert.equal(sent.execution_budget_id, "budget-1");
-  assert.equal(sent.execution_budget_revision, 7);
-  assert.equal(spec.execution_budget_id, undefined);
-});
 
 test("a new wizard starts at Guided on Auto, with the Settings scorer runs or 200", () => {
   const state = initialWizardV2State();
@@ -231,14 +177,13 @@ test("unchanged defaults, a role with no default and an untracked setup leave th
   });
 });
 test("the Settings default engine applies only from Auto and only when it fits the task", () => {
-  assert.equal(presetEngine("auto", "gepa", "repo", "pairs"), "gepa");
-  assert.equal(presetEngine("auto", "gepa", "dspy_program", "pairs"), null);
-  assert.equal(presetEngine("best_of_n", "gepa", "repo", "pairs"), null);
-  assert.equal(presetEngine("auto", "auto", "repo", "pairs"), null);
+  assert.equal(presetEngine("auto", "gepa"), "gepa");
+  assert.equal(presetEngine("best_of_n", "gepa"), null);
+  assert.equal(presetEngine("auto", "auto"), null);
 });
 
 function readyState(level: "guided" | "standard" | "expert", withModels = true) {
-  const state = checkedState();
+  const state = filledState();
   const model = { name: "openai/gpt-default", token_source: "managed" as const };
   return {
     ...state,
@@ -314,36 +259,22 @@ test("switching level keeps every answer and re-lays out the current step", () =
   assert.deepEqual({ ...standard, level: "guided" }, onMetric);
 });
 
-test("a DSPy program without a task model counts as missing models", () => {
+test("the Optimizer step needs only a reflection model", () => {
   const state = readyState("guided");
-  const dspy = {
-    ...state,
-    task: { ...state.task, artifactKind: "dspy_program" as const },
-    optimizer: { ...state.optimizer, taskModel: null },
-  };
-  assert.equal(optimizerModelsReady(dspy), false);
-  assert.equal(optimizerModelsReady(readyState("guided")), true);
+  assert.equal(optimizerModelsReady({ ...state, optimizer: { ...state.optimizer, taskModel: null } }), true);
+  assert.equal(optimizerModelsReady(readyState("guided", false)), false);
 });
 
-test("before the task and inputs exist the Optimizer step has one placeholder screen", () => {
-  assert.deepEqual(stepPages("optimizer", initialWizardV2State("expert")), ["optimizer"]);
+test("before the data mode exists the Optimizer step has one placeholder screen", () => {
+  const state = initialWizardV2State("expert");
+  assert.deepEqual(stepPages("optimizer", { ...state, inputs: { ...state.inputs, mode: null } }), ["optimizer"]);
 });
 
-test("the task step clears once nothing is missing, with no separate confirm", () => {
+test("the task step clears once a repository is named, with no separate confirm", () => {
   const empty = initialWizardV2State().task;
   assert.equal("confirmed" in empty, false);
-  const withObjective = { ...empty, objective: "Summarize tickets" };
-  assert.equal(empty.artifactKind, "dspy_program");
-  assert.equal(taskIssue({ ...withObjective, artifactKind: null }), "submit.v2.task.issue.kind");
-  const withKind = withObjective;
-  assert.equal(taskIssue(withKind), "submit.v2.task.issue.starting");
-  assert.equal(taskIssue({ ...withKind, startingVersion: "   " }), "submit.v2.task.issue.starting");
-  assert.equal(
-    taskIssue({ ...withKind, startingVersion: { a: " ", b: "" } }),
-    "submit.v2.task.issue.starting",
-  );
-  assert.equal(taskIssue({ ...withKind, startingVersion: "Summarize:" }), null);
-  assert.equal(taskIssue({ ...withKind, startingVersion: { a: "", b: "Do it." } }), null);
+  assert.equal(taskIssue(empty), "submit.v2.repo.issue.repository");
+  assert.equal(taskIssue({ ...empty, repo: { ...empty.repo, repository: "acme/bot" } }), null);
 });
 
 test("run.py and metric.py write through to the run and metric code; others are extra files", () => {
@@ -385,27 +316,10 @@ test("a new file's path must be relative, clean, a known suffix and free", () =>
   assert.equal(workspacePathIssue("one_more.py", full), "submit.v2.metric.files.error.count");
 });
 
-test("extra files make the check stale, and a workspace without them keeps its old snapshot", () => {
-  const base = checkedState();
-  const snapshot = contractSnapshot(base);
-  assert.equal(
-    contractSnapshot({ ...base, workspace: { ...base.workspace, files: {} } }),
-    snapshot,
-  );
-  assert.notEqual(
-    contractSnapshot({ ...base, workspace: { ...base.workspace, files: { "h.py": "X = 1" } } }),
-    snapshot,
-  );
-});
-
 const withoutInputs = WIZARD_V2_STEPS.filter((step) => step !== "inputs");
 
-test("a DSPy program task keeps Inputs; a repository skips it", () => {
-  const state = initialWizardV2State("standard");
-  const program = { ...state, task: { ...state.task, artifactKind: "dspy_program" as const } };
-  assert.deepEqual(wizardSteps(program, false), WIZARD_V2_STEPS);
-  const repo = { ...program, task: { ...program.task, repo: emptyRepoDraft() } };
-  assert.deepEqual(wizardSteps(repo, false), withoutInputs);
+test("a repository skips Inputs by default", () => {
+  assert.deepEqual(wizardSteps(initialWizardV2State("standard"), false), withoutInputs);
 });
 
 test("a repository that needs data keeps Inputs", () => {
@@ -418,42 +332,6 @@ test("a repository that needs data keeps Inputs", () => {
   );
 });
 
-test("programTargetOptimizer returns a black-box engine to Auto", () => {
-  assert.deepEqual(programTargetOptimizer("gepa"), { choice: "auto" });
-  assert.deepEqual(programTargetOptimizer("shinka_evolve"), { choice: "auto" });
-  assert.equal(programTargetOptimizer("auto"), null);
-  assert.deepEqual(programTargetOptimizer("dspy_miprov2"), { choice: "auto" });
-});
-
-test("repoTargetSlices runs one case at a time, keeps Auto and replaces a DSPy optimizer", () => {
-  assert.deepEqual(repoTargetSlices("auto"), {
-    inputs: { mode: "single" },
-    optimizer: null,
-  });
-  assert.deepEqual(repoTargetSlices("dspy_miprov2"), {
-    inputs: { mode: "single" },
-    optimizer: { choice: "auto" },
-  });
-  assert.deepEqual(repoTargetSlices("shinka_evolve"), {
-    inputs: { mode: "single" },
-    optimizer: null,
-  });
-});
-
-test("targetPatch switches to a repository and back to a DSPy program", () => {
-  const toRepo = targetPatch("repo", null, "auto");
-  assert.deepEqual(toRepo.task, { repo: emptyRepoDraft() });
-  assert.deepEqual(toRepo.inputs, { mode: "single" });
-  assert.equal(toRepo.optimizer, null);
-  const kept = { ...emptyRepoDraft(), repository: "acme/bot" };
-  assert.equal(targetPatch("repo", kept, "gepa").task.repo, kept);
-  assert.deepEqual(targetPatch("dspy_program", kept, "gepa"), {
-    task: { repo: null, artifactKind: "dspy_program" },
-    inputs: null,
-    optimizer: { choice: "auto" },
-  });
-});
-
 test("withRepository picks a repository from its default branch", () => {
   const pinned = { ...emptyRepoDraft(), repository: "acme/old", branch: "dev", commit: "abc1234" };
   assert.deepEqual(withRepository(pinned, "acme/bot"), {
@@ -463,7 +341,6 @@ test("withRepository picks a repository from its default branch", () => {
     commit: "",
   });
   assert.equal(withRepository(pinned, "acme/old"), pinned);
-  assert.equal(withRepository(null, "acme/bot").repository, "acme/bot");
 });
 
 test("withRepository clears the created-by-Skynet flag for another repository", () => {

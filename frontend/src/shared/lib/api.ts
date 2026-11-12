@@ -1,8 +1,4 @@
-import type {
-  ExecutionRuntimeCatalog,
-  WizardPreflightRequest,
-  WizardPreflightResponse,
-} from "@/shared/types/wizard-preflight";
+import type { ExecutionRuntimeCatalog } from "@/shared/types/wizard-preflight";
 import type {
   BlackboxAgentRunResponse,
   BlackboxCandidate,
@@ -32,13 +28,9 @@ import type {
   WorkflowDryRunResponse,
 } from "@/shared/types/api";
 import type {
-  CheckTerminalEvent,
-  ContractCheckRequest,
-  ContractCheckResponse,
   DataMode,
   OptimizerCatalogResponse,
   OptimizerTarget,
-  UnifiedRunRequest,
 } from "@/shared/types/unified-run";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { forgetOAuthReturn } from "@/shared/lib/oauth-return";
@@ -72,7 +64,6 @@ import type { ApiSource } from "@/shared/lib/api-route";
 import { wasLinked } from "@/shared/hooks/use-linked-account";
 import { readResourcePick, resolveResourceMode } from "@/shared/lib/resource-mode";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
-import { readServerSentEvents } from "@/shared/lib/sse";
 
 // Resolve the runtime API base lazily on every call. Capturing it once at
 // module load races the injected `window.__APP_ENV__` script: the framework
@@ -575,14 +566,6 @@ export interface WorkflowDryRunStreamHandlers {
   signal?: AbortSignal;
 }
 
-export function submitUnifiedRun(req: UnifiedRunRequest, opts?: { idempotencyKey?: string }) {
-  return request<OptimizationSubmissionResponse>("/optimize", {
-    method: "POST",
-    body: JSON.stringify(req),
-    ...(opts?.idempotencyKey ? { headers: { "Idempotency-Key": opts.idempotencyKey } } : {}),
-  });
-}
-
 /** Queue a repository run on `/optimize`. */
 export function submitRepoRun(
   req: BlackboxRunRequest,
@@ -612,48 +595,6 @@ export function getOptimizerCatalog(
 ) {
   const query = `artifact_kind=${encodeURIComponent(target)}&data_mode=${encodeURIComponent(mode)}`;
   return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal }, source);
-}
-
-// The server words each check's `message` in this locale for API readers;
-// the wizard itself renders `message_code`.
-export async function runContractCheck(
-  req: ContractCheckRequest,
-  signal?: AbortSignal,
-  onPhase?: (phase: string) => void,
-  onTerminal?: (event: CheckTerminalEvent) => void,
-): Promise<ContractCheckResponse> {
-  if (!onPhase)
-    return request<ContractCheckResponse>("/optimizations/contract-check", {
-      method: "POST",
-      body: JSON.stringify({ ...req, locale: getActiveLocale() }),
-      signal,
-    });
-  const response = await fetchWithAuthRetry(`${apiBase()}/optimizations/contract-check/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ ...req, locale: getActiveLocale() }),
-    signal,
-  });
-  if (!response.ok || !response.body)
-    throw new Error(parseErrorMessage(await response.text()) ?? msg("submit.preflight.failed"));
-  let result: ContractCheckResponse | undefined;
-  await readServerSentEvents(response.body, ({ event, data }) => {
-    if (event === "phase" && typeof data.phase === "string") onPhase(data.phase);
-    if (event === "terminal") onTerminal?.(data as unknown as CheckTerminalEvent);
-    if (event === "result") result = data as unknown as ContractCheckResponse;
-    if (event === "error")
-      throw new Error(parseErrorMessage(JSON.stringify(data)) ?? msg("submit.preflight.failed"));
-  });
-  if (!result) throw new Error(msg("submit.preflight.failed"));
-  return result;
-}
-
-export function staticContractCheck(req: ContractCheckRequest, signal?: AbortSignal) {
-  return request<ContractCheckResponse>("/optimizations/contract-check/static", {
-    method: "POST",
-    body: JSON.stringify({ ...req, locale: getActiveLocale() }),
-    signal,
-  });
 }
 
 export function getExecutionRuntimes(hasImageInputs: boolean, signal?: AbortSignal) {
@@ -690,36 +631,6 @@ export function getModelCallHolds(
     { method: "POST", body: JSON.stringify({ models }), signal },
     source,
   );
-}
-
-export async function runWizardPreflight(
-  payload: WizardPreflightRequest,
-  signal?: AbortSignal,
-  onPhase?: (phase: string) => void,
-): Promise<WizardPreflightResponse> {
-  if (!onPhase)
-    return request<WizardPreflightResponse>("/wizard/preflight", {
-      method: "POST",
-      body: JSON.stringify({ ...payload, locale: getActiveLocale() }),
-      signal,
-    });
-  const response = await fetchWithAuthRetry(`${apiBase()}/wizard/preflight/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ ...payload, locale: getActiveLocale() }),
-    signal,
-  });
-  if (!response.ok || !response.body)
-    throw new Error(parseErrorMessage(await response.text()) ?? msg("submit.preflight.failed"));
-  let result: WizardPreflightResponse | undefined;
-  await readServerSentEvents(response.body, ({ event, data }) => {
-    if (event === "phase" && typeof data.phase === "string") onPhase(data.phase);
-    if (event === "result") result = data as unknown as WizardPreflightResponse;
-    if (event === "error")
-      throw new Error(parseErrorMessage(JSON.stringify(data)) ?? msg("submit.preflight.failed"));
-  });
-  if (!result) throw new Error(msg("submit.preflight.failed"));
-  return result;
 }
 
 export function createExecutionBudget(

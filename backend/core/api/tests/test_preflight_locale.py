@@ -1,4 +1,4 @@
-"""The setup check words its contract failure in the caller's language, English by default."""
+"""The setup check words its known messages in the caller's language, English by default."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.api.auth import AuthenticatedUser, get_authenticated_user
-from core.api.preflight_execution import WizardPreflightCheck, WizardPreflightResponse
+from core.api.preflight_execution import WizardPreflightResponse
 from core.api.routers import wizard_preflight
 from core.api.routers.execution_budgets import ExecutionBudgetResponse
-from core.i18n import request_locale, t, t_locale
+from core.i18n import request_locale, t_locale
 
 RUN_CODE = "def run(artifact, input):\n    return artifact\n"
 METRIC_CODE = "def score(input, output, expected=None):\n    return 1.0, {'feedback': 'ok'}\n"
@@ -27,21 +27,6 @@ def test_missing_scorer_model_message_has_localized_code() -> None:
     message = "Set the model with llm(model=...) in the metric code."
     assert wizard_preflight._message_code(message) == ("submit.preflight.scorer_model", {})
     assert t_locale("he", "submit.preflight.scorer_model") != message
-
-
-def _spec() -> dict[str, Any]:
-    """Build a unified spec as the wizard sends it."""
-    return {
-        "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
-        "data": {
-            "mode": "pairs",
-            "cases": [{"input": {"q": str(i)}, "expected": "p"} for i in range(3)],
-            "input_fields": ["q"],
-        },
-        "optimizer": {"choice": "dspy_gepa"},
-        "models": {"reflection_model": {"name": "openrouter/task"}},
-        "workspace": {"run_code": RUN_CODE, "metric_code": METRIC_CODE},
-    }
 
 
 def _budget() -> ExecutionBudgetResponse:
@@ -70,79 +55,12 @@ def _budget() -> ExecutionBudgetResponse:
     )
 
 
-def _failed_sample(*, coded: bool) -> dict[str, Any]:
-    """Build the failed metric sample the sandbox reports, with or without its code.
-
-    Args:
-        coded: Whether the sandbox's backend already sends ``message_code``.
-
-    Returns:
-        One contract check item as JSON.
-    """
-    params = {"index": 1, "error": ERROR}
-    item: dict[str, Any] = {
-        "key": "metric.shape",
-        "status": "failed",
-        "message": t("contract.metric_error", **params),
-        "sample_index": 0,
-        "detail": TRACE,
-    }
-    if coded:
-        item.update(message_code="contract.metric_error", message_params=params)
-    return item
-
-
-@pytest.fixture
-def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Answer every setup check with a failed contract worded in the Hebrew base.
-
-    Args:
-        monkeypatch: Replaces the paid setup work.
-
-    Returns:
-        The sample the stored contract reports; tests may edit it before calling.
-    """
-    sample = _failed_sample(coded=True)
-
-    def run(request: Any, user: Any, store: Any) -> WizardPreflightResponse:
-        """Return what the sandbox check stored, as the real path does."""
-        return WizardPreflightResponse(
-            id="p1",
-            fingerprint="f",
-            status="failed",
-            may_advance=False,
-            checks=[
-                WizardPreflightCheck(
-                    key="metric.contract",
-                    status="failed",
-                    message=f"{sample['message']}\n{TRACE}",
-                    field="workspace",
-                )
-            ],
-            budget=_budget(),
-            workflow_result={
-                "contract": {
-                    "ok": False,
-                    "optimizer_resolved": "best_of_n",
-                    "checks": [sample],
-                    "samples": [],
-                    "fingerprint": "f",
-                }
-            },
-        )
-
-    monkeypatch.setattr(wizard_preflight, "run_preflight", run)
-    monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
-    monkeypatch.setattr(wizard_preflight, "_materialize_unified_cases", lambda *args, **kwargs: None)
-    return sample
-
-
 def _body(**extra: Any) -> dict[str, Any]:
-    """Build a unified evaluation setup check request."""
+    """Build an evaluation setup check request."""
     return {
         "scope": "evaluation",
-        "workflow": "unified",
-        "payload": _spec(),
+        "workflow": "anything",
+        "payload": {"scorer": {"kind": "python", "metric_code": "def metric(candidate, case):\n    return 1.0\n"}},
         "execution_budget_id": "b1",
         "execution_budget_revision": 1,
         **extra,
@@ -168,63 +86,6 @@ def _post(path: str, body: dict[str, Any], headers: dict[str, str] | None = None
         return client.post(path, json=body, headers=headers or {})
 
 
-def _contract_check(payload: dict[str, Any]) -> dict[str, Any]:
-    """Return the ``metric.contract`` check of a setup check response."""
-    return next(check for check in payload["checks"] if check["key"] == "metric.contract")
-
-
-def test_english_account_without_accept_language_reads_english(stored: dict[str, Any]) -> None:
-    """With no locale and no ``Accept-Language`` the failure reads in English, not Hebrew."""
-    response = _post("/wizard/preflight", _body())
-
-    assert response.status_code == 200
-    check = _contract_check(response.json())
-    english = t_locale("en", "contract.metric_error", index=1, error=ERROR)
-    assert english != t("contract.metric_error", index=1, error=ERROR)
-    assert check["message"] == f"{english}\n{TRACE}"
-    assert check["message_code"] == "contract.metric_error"
-    assert check["message_params"] == {"index": 1, "error": ERROR}
-
-
-def test_ui_locale_wins_over_the_browser_language(stored: dict[str, Any]) -> None:
-    """An English UI in a Hebrew browser still reads English."""
-    response = _post("/wizard/preflight", _body(locale="en"), headers={"Accept-Language": "he-IL,he;q=0.9"})
-
-    english = t_locale("en", "contract.metric_error", index=1, error=ERROR)
-    assert _contract_check(response.json())["message"] == f"{english}\n{TRACE}"
-
-
-def test_accept_language_is_used_when_the_body_names_no_locale(stored: dict[str, Any]) -> None:
-    """A Hebrew ``Accept-Language`` with no body locale keeps the Hebrew wording."""
-    response = _post("/wizard/preflight", _body(), headers={"Accept-Language": "he"})
-
-    hebrew = t("contract.metric_error", index=1, error=ERROR)
-    assert _contract_check(response.json())["message"] == f"{hebrew}\n{TRACE}"
-
-
-def test_an_uncoded_sandbox_failure_is_recovered_and_worded_in_english(stored: dict[str, Any]) -> None:
-    """An older sandbox image sends no message code; the host recovers it from the Hebrew text."""
-    stored.clear()
-    stored.update(_failed_sample(coded=False))
-
-    check = _contract_check(_post("/wizard/preflight", _body()).json())
-
-    assert check["message_code"] == "contract.metric_error"
-    assert check["message"].startswith(t_locale("en", "contract.metric_error", index=1, error=ERROR))
-
-
-def test_stream_result_reads_english_without_accept_language(stored: dict[str, Any]) -> None:
-    """The streaming setup check words its final result the same way."""
-    response = _post("/wizard/preflight/stream", _body())
-
-    frames = [
-        json.loads(line.removeprefix("data: ")) for line in response.text.splitlines() if line.startswith("data: ")
-    ]
-    result = frames[-1]
-    english = t_locale("en", "contract.metric_error", index=1, error=ERROR)
-    assert _contract_check(result)["message"] == f"{english}\n{TRACE}"
-
-
 @pytest.mark.parametrize(
     ("explicit", "header", "expected"),
     [
@@ -242,16 +103,6 @@ def test_request_locale_prefers_the_ui_then_the_browser_then_english(
 ) -> None:
     """The body locale wins, then the best-ranked browser language, then English."""
     assert request_locale(explicit, header) == expected
-
-
-def test_nested_contract_checks_read_english_without_accept_language(stored: dict[str, Any]) -> None:
-    """API callers that read ``workflow_result.contract`` get English, not the stored Hebrew."""
-    payload = _post("/wizard/preflight", _body()).json()
-
-    nested = payload["workflow_result"]["contract"]["checks"][0]
-    assert nested["message"] == t_locale("en", "contract.metric_error", index=1, error=ERROR)
-    assert nested["message_code"] == "contract.metric_error"
-    assert stored["message"] == t("contract.metric_error", index=1, error=ERROR)
 
 
 def _fixed_text_response(message: str) -> WizardPreflightResponse:
@@ -294,7 +145,6 @@ def test_fixed_english_texts_are_worded_in_the_callers_locale(
     """A known fixed English text gets its catalog code and reads in the caller's language."""
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(message))
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
-    monkeypatch.setattr(wizard_preflight, "_materialize_unified_cases", lambda *args, **kwargs: None)
 
     payload = _post("/wizard/preflight", _body(locale=locale)).json()
 
@@ -324,7 +174,6 @@ def test_stream_error_reads_in_the_callers_locale(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(wizard_preflight, "run_preflight", fail)
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
-    monkeypatch.setattr(wizard_preflight, "_materialize_unified_cases", lambda *args, **kwargs: None)
 
     for headers, locale in (({}, "en"), ({"Accept-Language": "he"}, "he")):
         response = _post("/wizard/preflight/stream", _body(), headers=headers)
@@ -332,22 +181,6 @@ def test_stream_error_reads_in_the_callers_locale(monkeypatch: pytest.MonkeyPatc
             json.loads(line.removeprefix("data: ")) for line in response.text.splitlines() if line.startswith("data: ")
         ]
         assert frames[-1] == {"detail": t_locale(locale, "submit.preflight.could_not_finish")}
-
-
-def test_static_contract_check_uses_accept_language_then_english(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The static contract check reads English with no locale, and follows ``Accept-Language``."""
-    monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
-    spec = _spec()
-    spec["workspace"]["metric_code"] = "def score(:\n"
-
-    english = _post("/optimizations/contract-check/static", {"spec": spec}).json()
-    hebrew = _post("/optimizations/contract-check/static", {"spec": spec}, headers={"Accept-Language": "he"}).json()
-
-    failed = next(item for item in english["checks"] if item["status"] == "failed")
-    assert failed["message"] == t_locale("en", failed["message_code"], **failed["message_params"])
-    assert failed["message"] != t(failed["message_code"], **failed["message_params"])
-    hebrew_failed = next(item for item in hebrew["checks"] if item["key"] == failed["key"])
-    assert hebrew_failed["message"] == t(failed["message_code"], **failed["message_params"])
 
 
 BUDGET_TEXT = "The next operation needs up to $1.35, but only $0.53 of the $0.53 limit remain."
@@ -367,7 +200,6 @@ def test_setup_fallback_texts_are_worded_in_the_callers_locale(monkeypatch: pyte
     """The setup fallback texts have catalog codes and read in Hebrew for a Hebrew caller."""
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(message))
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
-    monkeypatch.setattr(wizard_preflight, "_materialize_unified_cases", lambda *args, **kwargs: None)
 
     payload = _post("/wizard/preflight", _body(locale="he")).json()
 
@@ -381,7 +213,6 @@ def test_budget_limit_text_keeps_its_amounts_in_the_callers_locale(monkeypatch: 
     """The spending limit text is coded with its amounts as params, on the check and the pending reason."""
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(BUDGET_TEXT))
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
-    monkeypatch.setattr(wizard_preflight, "_materialize_unified_cases", lambda *args, **kwargs: None)
 
     english = _post("/wizard/preflight", _body()).json()
     hebrew = _post("/wizard/preflight", _body(locale="he")).json()
@@ -404,7 +235,6 @@ def test_sandbox_budget_text_keeps_its_amounts_in_the_callers_locale(monkeypatch
     """The setup refusal for budget held by the check's own sandboxes is coded with its amounts as params."""
     monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(SANDBOXES_TEXT))
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
-    monkeypatch.setattr(wizard_preflight, "_materialize_unified_cases", lambda *args, **kwargs: None)
 
     english = _post("/wizard/preflight", _body()).json()
     hebrew = _post("/wizard/preflight", _body(locale="he")).json()
@@ -420,13 +250,18 @@ def test_sandbox_budget_text_keeps_its_amounts_in_the_callers_locale(monkeypatch
     assert hebrew["pending_reason"]["message"] == worded
 
 
-def test_contract_check_without_a_budget_is_refused_in_the_callers_locale(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 402 detail reads in English by default and follows ``Accept-Language``."""
+def test_ui_locale_wins_then_the_browser_language_then_english(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The body locale wins over ``Accept-Language``, which wins over the English default."""
+    message = "Provider or sandbox usage is awaiting final confirmation."
+    key = "submit.preflight.usage_pending"
+    monkeypatch.setattr(wizard_preflight, "run_preflight", lambda *args: _fixed_text_response(message))
     monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda username: None)
 
-    english = _post("/optimizations/contract-check", {"spec": _spec()})
-    hebrew = _post("/optimizations/contract-check", {"spec": _spec()}, headers={"Accept-Language": "he"})
+    def usage(body: dict[str, Any], headers: dict[str, str] | None = None) -> str:
+        """Return the usage check's message for one request."""
+        payload = _post("/wizard/preflight", body, headers=headers).json()
+        return next(check["message"] for check in payload["checks"] if check["key"] == "usage")
 
-    assert english.status_code == hebrew.status_code == 402
-    assert english.json()["detail"] == "Choose a spending budget before running the contract check."
-    assert hebrew.json()["detail"] == t_locale("he", "submit.preflight.contract_budget_missing")
+    assert usage(_body()) == t_locale("en", key) == message
+    assert usage(_body(), {"Accept-Language": "he"}) == t_locale("he", key)
+    assert usage(_body(locale="en"), {"Accept-Language": "he-IL,he;q=0.9"}) == message

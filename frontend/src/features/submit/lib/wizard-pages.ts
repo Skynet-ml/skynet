@@ -15,8 +15,6 @@ export type WizardPageId =
   | "budget"
   | "metric"
   | "harden"
-  | "check"
-  | "schedule"
   | "overview";
 
 const OPTIMIZER_SCREENS: readonly WizardPageId[] = ["optimizer", "models", "budget"];
@@ -28,7 +26,7 @@ const OPTIMIZER_SCREENS: readonly WizardPageId[] = ["optimizer", "models", "budg
  * gets Expert's screens so every choice is in reach.
  */
 function optimizerPages(state: WizardV2State): readonly WizardPageId[] {
-  if (!(state.task.repo || state.task.artifactKind) || !state.inputs.mode) return ["optimizer"];
+  if (!state.inputs.mode) return ["optimizer"];
   return state.level === "standard" ? ["plan"] : OPTIMIZER_SCREENS;
 }
 
@@ -43,11 +41,7 @@ export function stepPages(step: WizardStepId, state: WizardV2State): readonly Wi
       return optimizerPages(state);
     case "metric":
       // Hardening attacks the metric right after the code, before anything runs it.
-      // A repository's setup check runs on the server at submit, so it has no check screen.
-      if (state.task.repo) return ["metric", "harden", "overview"];
-      // The sandbox check closes the setup on a screen of its own, and Run
-      // sits on the overview after it, away from the code editors. Between them
-      // the user may set the run to repeat on a schedule.
-      return ["metric", "harden", "check", "schedule", "overview"];
+      // The setup check runs on the server at submit, so there is no check screen.
+      return ["metric", "harden", "overview"];
   }
 }
