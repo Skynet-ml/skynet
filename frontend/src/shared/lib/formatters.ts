@@ -97,22 +97,6 @@ export function formatScore(n: number | undefined | null): string {
 }
 
 /**
- * Format a millisecond duration compactly and in the active locale's units.
- * @example 412 → "412 ms", 4893.7 → "4.9 sec", 75_000 → "1:15"
- */
-export function formatElapsedMs(ms: number | undefined | null): string {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
-  if (ms >= 60_000) return formatDuration(ms / 1000);
-  const inSeconds = ms >= 1000;
-  return new Intl.NumberFormat(getActiveIntlLocale(), {
-    style: "unit",
-    unit: inSeconds ? "second" : "millisecond",
-    unitDisplay: "short",
-    maximumFractionDigits: inSeconds ? 1 : 0,
-  }).format(inSeconds ? ms / 1000 : ms);
-}
-
-/**
  * Format an aggregate metric on the canonical 0–100 percentage scale.
  * @example 85.6 → "85.6%", 60.3 → "60.3%"
  */

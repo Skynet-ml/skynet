@@ -18,7 +18,6 @@ from core.storage.remote import ORPHANED_RUN_MESSAGE
 from core.storage.tests.test_remote_jobstore import SQLiteJobStore, _fund_checkpoint
 from core.worker.checkpoint_compat import (
     CheckpointCompatibilityError,
-    checkpoint_incumbent,
     checkpoint_manifest,
     evaluated_incumbent_from_progress,
     validate_checkpoint,
@@ -76,7 +75,7 @@ def test_subprocess_emits_budget_terminal_without_error(evaluated: bool) -> None
     stopped.result = {"best_candidate": "tested", "optimized_test_metric": None} if evaluated else None
     stopped.evidence = {"final_evaluation_completed": False, "final_evaluation_reason": "budget_reached"}
     with patch("core.worker.subprocess_runner.run_blackbox_optimization", side_effect=stopped):
-        run_service_in_subprocess(dict(REAL_RUN_PAYLOAD), "job", events, "spawn")
+        run_service_in_subprocess(dict(REAL_RUN_PAYLOAD), "job", events)
     messages = list(events.queue)
     assert not any(event["type"] == EVENT_ERROR for event in messages)
     terminal = next(event["outcome"] for event in messages if event["type"] == EVENT_TERMINAL)
@@ -112,7 +111,7 @@ def test_manifest_retains_upstream_counters_and_requires_exact_evidence(tmp_path
         checkpoint_manifest(pickle.dumps(old), payload, "fixture-v1")
 
 
-def test_checkpoint_incumbent_accepts_only_finite_completed_candidate_events() -> None:
+def test_evaluated_incumbent_accepts_only_finite_completed_candidate_events() -> None:
     """Reject malformed, unevaluated, and non-finite progress as recovery results."""
     payload = {"optimizer_name": "GEPA", "split_fractions": {"train": 0.8, "val": 0.0, "test": 0.2}}
     metrics = {
@@ -124,10 +123,8 @@ def test_checkpoint_incumbent_accepts_only_finite_completed_candidate_events() -
     incumbent = evaluated_incumbent_from_progress(PROGRESS_CANDIDATE, metrics, payload)
     assert incumbent is not None
     assert incumbent["selection_scope"] == "training"
-    assert checkpoint_incumbent({"evaluated_incumbent": incumbent}) == incumbent
     assert evaluated_incumbent_from_progress(PROGRESS_CANDIDATE, {**metrics, "score": float("nan")}, payload) is None
     assert evaluated_incumbent_from_progress(PROGRESS_CANDIDATE, {**metrics, "per_example": []}, payload) is None
-    assert checkpoint_incumbent({"evaluated_incumbent": {**incumbent, "candidate": {"predict": 3}}}) is None
 
 
 def test_orphaned_run_stays_failed() -> None:

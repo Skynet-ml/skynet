@@ -15,7 +15,6 @@ from core.service_gateway.optimization.data import (
     _is_signature_field,
     extract_signature_fields,
     image_input_field_names,
-    load_metric_from_code,
     load_signature_from_code,
 )
 
@@ -86,38 +85,6 @@ class PredictDecade(dspy.Signature):
     # is a distinct object that compares unequal, so UP006 must not rewrite this.
     assert sig.model_fields["subcategories"].annotation == typing.List[str]  # noqa: UP006
     sig.with_instructions("rebuilt")  # GEPA rebuild path must not raise
-
-
-def test_load_metric_from_code_returns_callable() -> None:
-    """A valid ``def metric`` source loads as a callable."""
-    code = "def metric(example, prediction, trace=None): return 1.0"
-
-    result = load_metric_from_code(code)
-
-    assert callable(result)
-
-
-def test_load_metric_from_code_named_metric_preferred() -> None:
-    """When multiple callables exist, the one named 'metric' is selected."""
-    code = """
-def helper(): pass
-def metric(example, prediction, trace=None): return 1.0
-"""
-    result = load_metric_from_code(code)
-
-    assert result.__name__ == "metric"
-
-
-def test_load_metric_from_code_no_callable_raises_service_error() -> None:
-    """Source without any callable raises ``ServiceError``."""
-    with pytest.raises(ServiceError, match="must define a callable"):
-        load_metric_from_code("x = 42")
-
-
-def test_load_metric_from_code_syntax_error_raises_service_error() -> None:
-    """A syntax error in metric source raises ``ServiceError``."""
-    with pytest.raises(ServiceError, match="syntax error"):
-        load_metric_from_code("def !!!")
 
 
 _SIG_CODE = """\

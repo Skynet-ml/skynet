@@ -50,7 +50,7 @@ function sourceLabel(source: string): string {
 /** Rows newer than this many pixels from the newest edge count as "scrolled away". */
 const FOLLOW_SLACK_PX = 24;
 
-export function LiveMarker({ status }: { status: RunLogStreamStatus }) {
+function LiveMarker({ status }: { status: RunLogStreamStatus }) {
   if (status !== "live" && status !== "reconnecting") return null;
   const live = status === "live";
   return (

@@ -362,44 +362,6 @@ def evaluated_incumbent_from_progress(
         return None
 
 
-def checkpoint_incumbent(manifest: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return only a well-formed evaluated incumbent stored with a checkpoint.
-
-    Args:
-        manifest: Persisted compatibility and result evidence.
-
-    Returns:
-        A detached JSON-safe incumbent, or ``None`` when evidence is invalid.
-    """
-    if not isinstance(manifest, dict):
-        return None
-    incumbent = manifest.get("evaluated_incumbent")
-    if not isinstance(incumbent, dict):
-        return None
-    score = incumbent.get("selection_score")
-    candidate = incumbent.get("candidate")
-    if (
-        isinstance(score, bool)
-        or not isinstance(score, int | float)
-        or not math.isfinite(float(score))
-        or not isinstance(candidate, dict)
-        or not candidate
-        or any(not isinstance(key, str) or not isinstance(value, str) for key, value in candidate.items())
-    ):
-        return None
-    if incumbent.get("candidate_origin") not in {"seed", "optimized"}:
-        return None
-    if incumbent.get("selection_scope") not in {"validation", "training"}:
-        return None
-    evaluated_examples = incumbent.get("evaluated_examples")
-    if not isinstance(evaluated_examples, int) or isinstance(evaluated_examples, bool) or evaluated_examples <= 0:
-        return None
-    try:
-        return json.loads(json.dumps(incumbent, allow_nan=False))
-    except (TypeError, ValueError):
-        return None
-
-
 def validate_checkpoint(
     data: bytes,
     manifest: dict[str, Any] | None,

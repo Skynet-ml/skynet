@@ -12,7 +12,7 @@ export type RewardComponent = "accuracy" | "speed" | "cost";
 
 export const REWARD_COMPONENTS: readonly RewardComponent[] = ["accuracy", "speed", "cost"];
 
-export interface RewardComponentSpec {
+interface RewardComponentSpec {
   /** The metric's own name for this part; empty when the spec gives none. */
   name: string;
   meaning: string;
@@ -119,7 +119,7 @@ function positive(value: unknown): number | null {
 }
 
 /** Validate a raw spec the way the harness's `reward_spec` does; `null` when it would refuse it. */
-export function rewardSpecFrom(raw: unknown): RewardSpec | null {
+function rewardSpecFrom(raw: unknown): RewardSpec | null {
   if (!isRecord(raw) || !isRecord(raw.weights)) return null;
   const weights = {} as Record<RewardComponent, number>;
   for (const name of REWARD_COMPONENTS) {

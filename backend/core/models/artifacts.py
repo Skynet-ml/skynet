@@ -1,4 +1,4 @@
-"""Compiled DSPy program artifact models (prompts, demos, serialized pickle)."""
+"""Compiled DSPy program artifact models (prompts, demos and program state)."""
 
 from __future__ import annotations
 
@@ -28,15 +28,10 @@ class OptimizedPredictor(BaseModel):
     """Extracted prompt and demos from a single predictor in the compiled program."""
 
     predictor_name: str
-    signature_name: str | None = None
     instructions: str
     input_fields: list[str] = Field(default_factory=list)
     output_fields: list[str] = Field(default_factory=list)
     demos: list[OptimizedDemo] = Field(default_factory=list)
-    formatted_prompt: str = Field(
-        default="",
-        description="Complete prompt as a single formatted string including instructions and demos.",
-    )
 
 
 # Tool-level overlay carried by a react ``POST /run`` artifact: the optimized
@@ -87,29 +82,6 @@ class NodeArtifact(BaseModel):
     )
 
 
-def _field_label(field: dict[str, Any]) -> str | None:
-    """Render one saved signature field as a prompt label line.
-
-    Args:
-        field: A ``{"prefix": ..., "description": ...}`` entry from a saved
-            ``signature.fields`` list.
-
-    Returns:
-        A ``"Prefix: description"`` line — the description dropped when it is a
-        ``${...}`` adapter placeholder or empty — or ``None`` when the field
-        carries no usable prefix.
-    """
-    prefix = field.get("prefix")
-    if not isinstance(prefix, str) or not prefix.strip():
-        return None
-    desc = field.get("description")
-    if isinstance(desc, str):
-        desc = desc.strip()
-        if desc and not (desc.startswith("${") and desc.endswith("}")):
-            return f"{prefix} {desc}"
-    return prefix
-
-
 def _demo_fields(demo: dict[str, Any]) -> dict[str, Any]:
     """Strip DSPy bookkeeping keys from a serialized demo dict.
 
@@ -129,12 +101,10 @@ def _demo_fields(demo: dict[str, Any]) -> dict[str, Any]:
 def _predictor_from_node_state(predictor_name: str, state: dict[str, Any]) -> OptimizedPredictor | None:
     """Rebuild a workflow node's prompt view from its saved predictor state.
 
-    Recovers instructions, few-shot demos, and a readable prompt string from
-    the state JSON alone — the surface a node needs when its run was persisted
-    before per-node prompts were extracted at write time. State carries field
-    *prefixes* (what the LM actually sees) but not field names or input/output
-    roles, so fields render by prefix and demos carry no role split; the
-    live-program extractor recovers those for new runs.
+    Recovers instructions and few-shot demos from the state JSON alone — the
+    surface a node needs when its run was persisted before per-node prompts
+    were extracted at write time. State carries no input/output roles, so
+    demos carry no role split.
 
     Args:
         predictor_name: The predictor's saved-state key (a ``named_predictors``
@@ -152,15 +122,6 @@ def _predictor_from_node_state(predictor_name: str, state: dict[str, Any]) -> Op
     raw_instructions = signature.get("instructions")
     instructions = raw_instructions if isinstance(raw_instructions, str) else ""
 
-    field_lines: list[str] = []
-    fields = signature.get("fields")
-    if isinstance(fields, list):
-        for field in fields:
-            if isinstance(field, dict):
-                line = _field_label(field)
-                if line is not None:
-                    field_lines.append(line)
-
     raw_demos = state.get("demos")
     demos: list[OptimizedDemo] = (
         [OptimizedDemo(inputs=_demo_fields(demo)) for demo in raw_demos if isinstance(demo, dict)]
@@ -168,29 +129,10 @@ def _predictor_from_node_state(predictor_name: str, state: dict[str, Any]) -> Op
         else []
     )
 
-    parts: list[str] = []
-    if instructions:
-        parts.append(instructions)
-        parts.append("")
-    if field_lines:
-        parts.append("Fields:")
-        parts.extend(field_lines)
-        parts.append("")
-    if demos:
-        parts.append("---")
-        parts.append("Examples:")
-        parts.append("")
-        for index, demo in enumerate(demos, 1):
-            parts.append(f"Example {index}:")
-            for name, value in demo.inputs.items():
-                parts.append(f"  {name}: {value}")
-            parts.append("")
-
     return OptimizedPredictor(
         predictor_name=predictor_name,
         instructions=instructions,
         demos=demos,
-        formatted_prompt="\n".join(parts).strip(),
     )
 
 
@@ -207,14 +149,6 @@ class ProgramArtifact(BaseModel):
             "State-only JSON dump from ``module.save(path.json)``. Loaded by "
             "reconstructing the module from signature_code + module_name and "
             "calling ``program.load(json_path)``."
-        ),
-    )
-    program_pickle_base64: str | None = Field(
-        default=None,
-        description=(
-            "Deprecated. Base64-encoded ``program.pkl`` retained only so jobs "
-            "saved before the JSON migration can still be served. New jobs "
-            "leave this field unset."
         ),
     )
     metadata: dict[str, Any] | None = Field(
@@ -282,9 +216,7 @@ class ProgramArtifact(BaseModel):
             self.optimized_component_srcs = {
                 path: state["module_src"]
                 for path, state in self.program_state_json.items()
-                if isinstance(state, dict)
-                and isinstance(state.get("module_src"), str)
-                and state["module_src"].strip()
+                if isinstance(state, dict) and isinstance(state.get("module_src"), str) and state["module_src"].strip()
             }
         return self
 

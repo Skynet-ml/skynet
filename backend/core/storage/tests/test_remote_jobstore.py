@@ -2230,19 +2230,18 @@ def test_requeue_for_resume_banks_finished_leg_runtime(store: SQLiteJobStore, mo
 
 
 def test_gepa_checkpoints_are_isolated_per_key(store: SQLiteJobStore) -> None:
-    """A job keeps an independent checkpoint per ``pair_index`` key; delete-all clears them."""
+    """A job keeps an independent checkpoint per ``pair_index`` key."""
     store.create_job("g1")
     store.save_gepa_checkpoint("g1", b"P0", iteration=1, pair_index=0)
     store.save_gepa_checkpoint("g1", b"P1", iteration=2, pair_index=1)
-    assert {c.pair_index for c in store.list_gepa_checkpoints("g1")} == {0, 1}
+    assert store.get_gepa_checkpoint("g1", 0).data == b"P0"
     assert store.get_gepa_checkpoint("g1", 1).data == b"P1"
 
     store.delete_gepa_checkpoint("g1", 0)
-    assert {c.pair_index for c in store.list_gepa_checkpoints("g1")} == {1}
+    assert store.get_gepa_checkpoint("g1", 0) is None
     assert store.has_gepa_checkpoint("g1") is True
 
-    store.delete_all_gepa_checkpoints("g1")
-    assert store.list_gepa_checkpoints("g1") == []
+    store.delete_gepa_checkpoint("g1", 1)
     assert store.has_gepa_checkpoint("g1") is False
 
 

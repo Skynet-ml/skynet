@@ -252,7 +252,6 @@ def test_run_scores_baseline_and_best_in_a_separate_final_run(fake_lm: FakeRefle
     assert [(lane.engine, lane.phase, lane.status) for lane in response.lanes] == [
         (BLACKBOX_ENGINE_BEST_OF_N, "single", "completed")
     ]
-    assert response.num_lm_calls == len(fake_lm.history) > 0
     assert response.total_tokens == 15 * len(fake_lm.history)
     assert [(u.model, u.input_tokens, u.output_tokens) for u in response.usage_by_model] == [
         ("fake/model", 10 * len(fake_lm.history), 5 * len(fake_lm.history))
@@ -879,24 +878,6 @@ def test_combined_usage_preserves_distinct_native_model_keys() -> None:
     assert native.usage_by_model["fake/model"] == {"prompt_tokens": 3, "completion_tokens": 1}
 
 
-def test_native_call_count_sums_in_sandbox_requests() -> None:
-    """Proposer CLI requests made inside the sandbox count toward the run's LM calls."""
-    native = NativeOptions(
-        runtime="vercel",
-        model="fake/model",
-        gateway=GatewayConfig(url="https://unused.example/v1", api_key="test-key"),
-        max_token_cost=1.0,
-        usage_by_model={
-            "fake/model": {"prompt_tokens": 3, "calls": 4},
-            "native/other-model": {"prompt_tokens": 7, "calls": 2},
-            "native/legacy": {"prompt_tokens": 1},
-        },
-    )
-
-    assert service_mod._native_call_count(native) == 6
-    assert service_mod._native_call_count(None) == 0
-
-
 @pytest.mark.parametrize(
     ("strategy", "native"),
     [
@@ -1062,7 +1043,6 @@ def test_scorer_llm_usage_is_billed_with_the_run(
     usage = {u.model: (u.input_tokens, u.output_tokens) for u in response.usage_by_model}
     assert usage["fake/judge"] == (3 * calls, calls)
     assert usage["fake/model"] == (10 * len(fake_lm.history), 5 * len(fake_lm.history))
-    assert response.num_lm_calls == len(fake_lm.history) + calls
     assert response.total_tokens == 15 * len(fake_lm.history) + 4 * calls
 
 

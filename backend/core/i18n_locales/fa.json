@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "عملیات بعدی تا {needed} لازم دارد، اما سندباکس‌های این بررسی {held} از {remaining} باقی‌مانده را نگه داشته‌اند.",
     "submit.preflight.contract_budget_missing": "پیش از اجرای بررسی کد، یک بودجهٔ هزینه انتخاب کنید.",
     "submit.unified.optimizer_not_allowed": "بهینه‌ساز «{optimizer}» با این تنظیمات سازگار نیست. یکی از این‌ها را انتخاب کنید: {allowed}.",
-    "submit.unified.pairs_need_cases": "اجرای جفت‌های ورودی/خروجی دست‌کم به دو جفت یا یک مجموعه‌دادهٔ بارگذاری‌شده نیاز دارد.",
-    "submit.unified.single_needs_one_case": "اجرای تک‌ورودی دقیقاً به یک ورودی نیاز دارد.",
     "accounts.identity_in_use": "این حساب از قبل به حساب {term.appName} دیگری وارد می‌شود.",
     "accounts.identity_not_found": "این حساب متصل نیست.",
     "accounts.last_sign_in_method": "این تنها راه ورود شماست. ابتدا یک رمز عبور یا کلید عبور اضافه کنید.",

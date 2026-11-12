@@ -43,7 +43,7 @@ def test_anything_guest_binds_contained_runtime_around_optimizer(
     )
     observed: list[Any] = []
 
-    def run(payload: dict[str, Any], artifact_id: str, events: Any, start_method: str) -> None:
+    def run(payload: dict[str, Any], artifact_id: str, events: Any) -> None:
         """Capture the runtime visible at the optimizer entry point."""
         observed.append(current_sandbox_runtime())
 

@@ -25,12 +25,8 @@ from ...billing.metering import estimate_run_cents, meter_llm_run
 from ...config import settings
 from ...constants import (
     OPTIMIZATION_TYPE_BLACKBOX,
-    PAYLOAD_OVERVIEW_COMPILE_KWARGS,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
-    PAYLOAD_OVERVIEW_OPTIMIZER_KWARGS,
     PAYLOAD_OVERVIEW_SEED,
-    PAYLOAD_OVERVIEW_SHUFFLE,
-    PAYLOAD_OVERVIEW_SPLIT_FRACTIONS,
     TOKEN_SOURCE_MANAGED,
     WORKER_RESTART_CAUSE,
 )
@@ -907,11 +903,7 @@ def build_summary(job_data: dict) -> OptimizationSummaryResponse:
         elapsed_seconds=elapsed_secs,
         estimated_remaining=est_remaining,
         **overview_to_base_fields(overview),
-        split_fractions=overview.get(PAYLOAD_OVERVIEW_SPLIT_FRACTIONS),
-        shuffle=overview.get(PAYLOAD_OVERVIEW_SHUFFLE),
         seed=overview.get(PAYLOAD_OVERVIEW_SEED),
-        optimizer_kwargs=overview.get(PAYLOAD_OVERVIEW_OPTIMIZER_KWARGS, {}),
-        compile_kwargs=overview.get(PAYLOAD_OVERVIEW_COMPILE_KWARGS, {}),
         latest_metrics=latest_metrics,
         progress_count=job_data.get("progress_count", 0),
         log_count=job_data.get("log_count", 0),

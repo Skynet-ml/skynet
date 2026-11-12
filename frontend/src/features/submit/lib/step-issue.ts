@@ -13,7 +13,7 @@ import {
   type WizardV2State,
 } from "./wizard-v2";
 
-export const hasModel = (config: ModelConfig | null | undefined): config is ModelConfig =>
+const hasModel = (config: ModelConfig | null | undefined): config is ModelConfig =>
   Boolean(config?.name.trim());
 
 /** The catalog entry for the current choice, when the catalog matches the setup. */

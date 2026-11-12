@@ -16,7 +16,6 @@ from core.config import Settings, app_env, legacy_env_name, with_legacy_env
 _SETTINGS_ENV_VARS = (
     "REMOTE_DB_URL",
     "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
     "WORKER_CONCURRENCY",
     "WORKER_POLL_INTERVAL",
     "WORKER_STALE_THRESHOLD",
@@ -37,9 +36,7 @@ _SETTINGS_ENV_VARS = (
     "HOST",
     "PORT",
     "API_PORT",
-    "RELOAD",
     "ALLOWED_ORIGINS",
-    "LOG_LEVEL",
     "MAX_JOBS_PER_USER",
     "MAX_TOTAL_USERS",
     "MAX_MONTHLY_ACTIVE_USERS",
@@ -159,20 +156,6 @@ def test_settings_defaults_port() -> None:
     assert s.port == 8000
 
 
-def test_settings_defaults_reload() -> None:
-    """Default ``reload`` is ``False``."""
-    s = Settings(_env_file=None)
-
-    assert s.reload is False
-
-
-def test_settings_defaults_log_level() -> None:
-    """Default ``log_level`` is ``"INFO"``."""
-    s = Settings(_env_file=None)
-
-    assert s.log_level == "INFO"
-
-
 def test_settings_defaults_max_jobs_per_user() -> None:
     """Default ``max_jobs_per_user`` is 100."""
     s = Settings(_env_file=None)
@@ -185,7 +168,6 @@ def test_settings_defaults_api_keys_are_none() -> None:
     s = Settings(_env_file=None)
 
     assert s.openai_api_key is None
-    assert s.anthropic_api_key is None
     assert s.remote_db_url is None
 
 
@@ -303,33 +285,6 @@ def test_settings_env_override_port(monkeypatch: pytest.MonkeyPatch) -> None:
     s = Settings(_env_file=None)
 
     assert s.port == 9090
-
-
-def test_settings_env_override_reload_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``RELOAD=true`` parses to ``reload is True``."""
-    monkeypatch.setenv("RELOAD", "true")
-
-    s = Settings(_env_file=None)
-
-    assert s.reload is True
-
-
-def test_settings_env_override_reload_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``RELOAD=false`` parses to ``reload is False``."""
-    monkeypatch.setenv("RELOAD", "false")
-
-    s = Settings(_env_file=None)
-
-    assert s.reload is False
-
-
-def test_settings_env_override_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``LOG_LEVEL`` env var overrides ``log_level``."""
-    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-
-    s = Settings(_env_file=None)
-
-    assert s.log_level == "DEBUG"
 
 
 def test_settings_env_override_cors_origins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -565,16 +520,6 @@ def test_settings_coerces_string_int_for_port(monkeypatch: pytest.MonkeyPatch) -
 
     assert isinstance(s.port, int)
     assert s.port == 8080
-
-
-def test_settings_coerces_string_bool_reload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``RELOAD=1`` is coerced to ``bool``-typed ``True``."""
-    monkeypatch.setenv("RELOAD", "1")
-
-    s = Settings(_env_file=None)
-
-    assert isinstance(s.reload, bool)
-    assert s.reload is True
 
 
 def test_settings_coerces_string_float_poll_interval(monkeypatch: pytest.MonkeyPatch) -> None:

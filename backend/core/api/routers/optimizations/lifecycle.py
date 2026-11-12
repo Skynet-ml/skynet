@@ -51,7 +51,6 @@ from ._local import bulk_set_flag
 from .schemas import (
     BulkMetadataRequest,
     BulkMetadataResponse,
-    CloneJobRequest,
     CloneJobResponse,
 )
 
@@ -381,7 +380,7 @@ def register_lifecycle_routes(
         summary="Duplicate an optimization and queue N copies",
         tags=["agent"],
     )
-    def clone_job(optimization_id: str, req: CloneJobRequest, current_user: AuthenticatedUserDep) -> CloneJobResponse:
+    def clone_job(optimization_id: str, current_user: AuthenticatedUserDep) -> CloneJobResponse:
         """Refuse to clone a stored optimization; the submission wizard starts copies.
 
         A repository run needs new setup evidence and a new budget, so this
@@ -389,7 +388,6 @@ def register_lifecycle_routes(
 
         Args:
             optimization_id: Source optimization id.
-            req: Clone request with ``count`` and optional ``name_prefix``.
             current_user: Authenticated caller resolved from the bearer token.
 
         Returns:

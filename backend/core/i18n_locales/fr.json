@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "La prochaine opération nécessite jusqu’à {needed}, mais les bacs à sable de cette vérification retiennent {held} sur les {remaining} restants.",
     "submit.preflight.contract_budget_missing": "Choisissez un budget de dépenses avant de lancer la vérification du code.",
     "submit.unified.optimizer_not_allowed": "L'optimiseur « {optimizer} » ne convient pas à cette configuration. Choisissez l'un de ceux-ci : {allowed}.",
-    "submit.unified.pairs_need_cases": "Une exécution sur des paires entrée/sortie nécessite au moins deux paires ou un jeu de données importé.",
-    "submit.unified.single_needs_one_case": "Une exécution à entrée unique nécessite exactement une entrée.",
     "accounts.identity_in_use": "Ce compte se connecte déjà à un autre compte {term.appName}.",
     "accounts.identity_not_found": "Ce compte n'est pas associé.",
     "accounts.last_sign_in_method": "C'est votre seul moyen de connexion. Ajoutez d'abord un mot de passe ou une clé d'accès.",

@@ -372,8 +372,6 @@
     "email.account.sign_in.ignore": "אם לא ניסית להיכנס, אפשר להתעלם מהמייל הזה.",
     "optimization.dspy_run_retired": "Skynet מבצע עכשיו אופטימיזציה למאגרי קוד בלבד. כבר אי אפשר להפעיל, להמשיך, לשכפל, להגיש או לתזמן הרצות של תוכניות DSPy. כדי להמשיך, התחילו אופטימיזציה חדשה של מאגר.",
     "submit.unified.optimizer_not_allowed": "האופטימייזר '{optimizer}' לא מתאים להגדרה הזו. בחרו אחד מאלה: {allowed}.",
-    "submit.unified.single_needs_one_case": "ריצה עם קלט יחיד צריכה בדיוק קלט אחד.",
-    "submit.unified.pairs_need_cases": "ריצה על זוגות קלט/פלט צריכה לפחות שני זוגות או דאטאסט שהועלה.",
     "submit.unified.contract_budget": "מגבלת ההוצאה נמוכה מדי להרצת הקוד על דוגמאות: {error} הגדילו את המגבלה ובדקו שוב.",
     "submit.preflight.scorer_ready": "פונקציית ההערכה נטענת; הניקוד ממתין למועמד הראשון שייווצר.",
     "submit.preflight.endpoint_ready": "נקודת הקצה אומתה; התשובה שלה תיבדק עם המועמד הראשון שייווצר.",
@@ -466,10 +464,6 @@
     "budget.below_minimum": "תקרת ההוצאה נמוכה מהמינימום שהריצה הזאת צריכה. הזינו תקרה גבוהה יותר."
   },
   "backend": {
-    "constants": {
-      "cloneNamePrefix": "עותק של",
-      "retryNamePrefix": "הרצה חוזרת של"
-    },
     "sampleDatasets": {
       "sentiment-he": {
         "name": "ניתוח רגש בעברית",

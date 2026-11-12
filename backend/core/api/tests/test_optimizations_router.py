@@ -397,7 +397,7 @@ _BOB = AuthenticatedUser(username="bob", role="user", groups=())
 def test_run_calls_serve_the_owner_a_page_with_a_cursor(store: _ExtendedFakeJobStore) -> None:
     """The owner gets calls in write order; ``next_since`` and ``has_more`` drive the next poll."""
     _seed_owned_run(store, "rc1")
-    seqs = [store.record_run_call("rc1", _run_call(target=f"t{i}"), []) for i in range(3)]
+    seqs = [store._run_call_store().record_call("rc1", _run_call(target=f"t{i}"), []) for i in range(3)]
     client = _client_as(store, _ALICE)
 
     first = client.get("/optimizations/rc1/candidates/cand-1/calls?limit=2").json()
@@ -417,7 +417,7 @@ def test_run_calls_serve_the_owner_a_page_with_a_cursor(store: _ExtendedFakeJobS
 def test_run_calls_strip_secrets_before_they_are_served(store: _ExtendedFakeJobStore) -> None:
     """A secret given at write time never appears in the served record."""
     _seed_owned_run(store, "rc2")
-    store.record_run_call("rc2", _run_call(request="token=tok-123", response="echo tok-123"), ["tok-123"])
+    store._run_call_store().record_call("rc2", _run_call(request="token=tok-123", response="echo tok-123"), ["tok-123"])
 
     [call] = _client_as(store, _ALICE).get("/optimizations/rc2/candidates/cand-1/calls").json()["calls"]
 
@@ -428,8 +428,8 @@ def test_run_calls_strip_secrets_before_they_are_served(store: _ExtendedFakeJobS
 def test_run_calls_report_running_from_candidate_and_run_state(store: _ExtendedFakeJobStore) -> None:
     """A done candidate stops running; an open candidate of a failed run reads as not running."""
     _seed_owned_run(store, "rc3")
-    store.record_run_call("rc3", _run_call(), [])
-    store.record_run_call("rc3", _run_call(candidate_id="cand-2"), [])
+    store._run_call_store().record_call("rc3", _run_call(), [])
+    store._run_call_store().record_call("rc3", _run_call(candidate_id="cand-2"), [])
     store._run_call_store().finish_candidate("rc3", "cand-1", "done")
     client = _client_as(store, _ALICE)
 
@@ -456,9 +456,11 @@ def test_run_calls_for_an_unknown_candidate_are_empty(store: _ExtendedFakeJobSto
 def test_run_candidates_list_role_state_count_and_cost(store: _ExtendedFakeJobStore) -> None:
     """The candidate list shows each candidate's totals; open candidates of a finished run read as done."""
     _seed_owned_run(store, "rc5")
-    store.record_run_call("rc5", _run_call(cost_usd=0.1), [])
-    store.record_run_call("rc5", _run_call(cost_usd=0.2), [])
-    store.record_run_call("rc5", _run_call(candidate_id="cand-2", role="judge", kind="evaluator", cost_usd=None), [])
+    store._run_call_store().record_call("rc5", _run_call(cost_usd=0.1), [])
+    store._run_call_store().record_call("rc5", _run_call(cost_usd=0.2), [])
+    store._run_call_store().record_call(
+        "rc5", _run_call(candidate_id="cand-2", role="judge", kind="evaluator", cost_usd=None), []
+    )
     store._run_call_store().finish_candidate("rc5", "cand-2", "failed")
     client = _client_as(store, _ALICE)
 
@@ -488,7 +490,7 @@ def test_run_candidates_page_with_limit_and_offset(store: _ExtendedFakeJobStore)
     """The candidate list pages with ``limit`` and ``next_offset`` and refuses a page over 500."""
     _seed_owned_run(store, "rc10")
     for index in range(3):
-        store.record_run_call("rc10", _run_call(candidate_id=f"cand-{index}"), [])
+        store._run_call_store().record_call("rc10", _run_call(candidate_id=f"cand-{index}"), [])
     client = _client_as(store, _ALICE)
 
     first = client.get("/optimizations/rc10/candidates?limit=2").json()
@@ -515,7 +517,7 @@ def test_run_calls_refuse_a_candidate_id_over_64_characters(store: _ExtendedFake
 def test_run_record_returns_404_to_another_user(store: _ExtendedFakeJobStore, path: str) -> None:
     """A user with no access to the run cannot learn that its record exists."""
     _seed_owned_run(store, "rc7")
-    store.record_run_call("rc7", _run_call(), [])
+    store._run_call_store().record_call("rc7", _run_call(), [])
 
     resp = _client_as(store, _BOB).get(path)
 
@@ -528,7 +530,7 @@ def test_run_record_is_owner_only_for_shared_members(
 ) -> None:
     """A shared member who may read the run still gets 404 on its call bodies."""
     _seed_owned_run(store, "rc8")
-    store.record_run_call("rc8", _run_call(), [])
+    store._run_call_store().record_call("rc8", _run_call(), [])
     monkeypatch.setattr(helpers_module, "_grant_role", lambda job_store, optimization_id, username: ShareRole.editor)
     client = _client_as(store, _BOB)
 

@@ -17,7 +17,7 @@ from gepa.image import Image
 from core.billing.model_gateway import ROUTE_KEY
 from core.exceptions import ServiceError
 from core.models.common import ModelConfig
-from core.service_gateway.language_models import lm_call_count, total_tokens_from_history, usage_by_model_from_history
+from core.service_gateway.language_models import total_tokens_from_history, usage_by_model_from_history
 
 from .. import sandbox_log
 from .. import sandbox_scorer as sandbox_scorer_mod
@@ -33,7 +33,6 @@ from ..sandbox_scorer import (
     ScorerGateway,
     ScorerProbeResult,
     ScorerUsage,
-    probe_scorer,
     revive_images,
     scorer_gateway,
 )
@@ -263,7 +262,6 @@ def test_sandbox_scorer_installs_the_runner_once_and_runs_one_call_per_directory
     assert box.closed is True
     assert scorer.usage is not None
     assert usage_by_model_from_history(scorer.usage) == {"fake/judge": (6, 2)}
-    assert lm_call_count(scorer.usage) == 2
     assert total_tokens_from_history(scorer.usage) == 8
 
 
@@ -654,9 +652,28 @@ def test_revive_images_only_touches_data_urls() -> None:
     assert revived["n"] == 1
 
 
-def test_probe_scorer_runs_the_real_runner_through_the_local_runtime() -> None:
+def _score_once(code: str, candidate: Any, case: Any = None, *, timeout_seconds: float = 45.0) -> ScorerProbeResult:
+    """Score one candidate with ``code`` in a throwaway local box.
+
+    Args:
+        code: The scorer source.
+        candidate: The version to score.
+        case: The case to score it on, if any.
+        timeout_seconds: Longest the call may run.
+
+    Returns:
+        The score and side information, or the scorer's error.
+    """
+    scorer = SandboxPythonScorer(code, runtime=LocalSubprocessRuntime(), gateway=None, timeout_seconds=timeout_seconds)
+    try:
+        return scorer.run(candidate, case)
+    finally:
+        scorer.close()
+
+
+def test_sandbox_scorer_runs_the_real_runner_through_the_local_runtime() -> None:
     """End to end on the host: the vowel scorer scores a seed and returns its side info."""
-    probe = probe_scorer(scorer_code=VOWEL_SCORER_CODE, candidate="aeiou", runtime=LocalSubprocessRuntime())
+    probe = _score_once(VOWEL_SCORER_CODE, "aeiou")
 
     assert probe == ScorerProbeResult(
         score=1.0, side_info={"feedback": "5 vowel(s)", "vowels": 5}, error=None, usage_by_model={}
@@ -673,27 +690,27 @@ def test_probe_scorer_runs_the_real_runner_through_the_local_runtime() -> None:
         (_LLM_SCORER, "Add model= to llm() or check the reflection model"),
     ],
 )
-def test_probe_scorer_reports_failures_as_data(code: str, error: str) -> None:
+def test_sandbox_scorer_reports_failures_as_data(code: str, error: str) -> None:
     """Probe failures come back in ``error`` rather than as exceptions.
 
     Args:
         code: The scorer source.
         error: Expected fragment of the error.
     """
-    probe = probe_scorer(scorer_code=code, candidate="x", case={"input": "i"}, runtime=LocalSubprocessRuntime())
+    probe = _score_once(code, "x", {"input": "i"})
 
     assert probe.score is None
     assert error in (probe.error or "")
 
 
-def test_probe_scorer_carries_large_side_info_and_images_back_from_the_box() -> None:
+def test_sandbox_scorer_carries_large_side_info_and_images_back_from_the_box() -> None:
     """Multi-megabyte side info, image objects and odd types all survive the file round trip."""
     code = (
         "def score(candidate, case=None):\n"
         "    return 0.5, {'feedback': 'f', 'blob': 'x' * 3_000_000, 'render': Image(base64_data='aGk=', media_type='image/png'), 'odd': {1, 2}}\n"
     )
 
-    probe = probe_scorer(scorer_code=code, candidate="x", runtime=LocalSubprocessRuntime())
+    probe = _score_once(code, "x")
 
     assert probe.error is None
     assert probe.score == 0.5
@@ -702,22 +719,19 @@ def test_probe_scorer_carries_large_side_info_and_images_back_from_the_box() -> 
     assert probe.side_info["odd"] == "{1, 2}"
 
 
-def test_probe_scorer_stops_a_scorer_that_outruns_its_timeout() -> None:
+def test_sandbox_scorer_stops_a_scorer_that_outruns_its_timeout() -> None:
     """A hanging scorer is killed at the deadline and reported as a timeout."""
     started = time.monotonic()
 
-    probe = probe_scorer(
-        scorer_code="import time\ndef score(c, case=None):\n    time.sleep(30)\n    return 1\n",
-        candidate="x",
-        timeout_seconds=1,
-        runtime=LocalSubprocessRuntime(),
+    probe = _score_once(
+        "import time\ndef score(c, case=None):\n    time.sleep(30)\n    return 1\n", "x", timeout_seconds=1
     )
 
     assert probe.error == "scorer exceeded the 1s timeout"
     assert time.monotonic() - started < 10
 
 
-def test_probe_scorer_calls_the_gateway_from_inside_the_box_and_bills_the_tokens() -> None:
+def test_sandbox_scorer_calls_the_gateway_from_inside_the_box_and_bills_the_tokens() -> None:
     """The scorer's ``llm()`` reaches the gateway with the key from the environment and its usage is returned."""
     with FakeGateway(reply="0.75", usage=(5, 2)) as judge:
         gateway = ScorerGateway(url=judge.url, model="judge", api_key="secret-key", billing_model="fake/judge")
@@ -862,7 +876,7 @@ def test_scorer_log_events_reach_the_run_log_tagged_with_their_candidate_and_cas
     sandbox_log.stream_logger.addHandler(handler)
     try:
         with sandbox_log.event_scope(candidate="3", case="1"):
-            probe = probe_scorer(scorer_code=code, candidate="x", runtime=LocalSubprocessRuntime())
+            probe = _score_once(code, "x")
     finally:
         sandbox_log.stream_logger.removeHandler(handler)
     assert probe.score == 1.0

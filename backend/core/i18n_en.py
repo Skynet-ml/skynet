@@ -269,8 +269,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "submission.vision_required": "Dataset contains image columns ({fields}) but the selected model ('{model}') does not support image inputs. Pick a vision-capable model.",
     "submit.no_models_available": "No models available in the catalog — configure a provider API key first.",
     "submit.unified.optimizer_not_allowed": "The optimizer '{optimizer}' does not fit this setup. Choose one of: {allowed}.",
-    "submit.unified.single_needs_one_case": "A single-input optimization needs exactly one input.",
-    "submit.unified.pairs_need_cases": "An optimization on input/output pairs needs at least two pairs or an uploaded dataset.",
     "submit.unified.contract_budget": "The spending limit is too low to run the code on samples: {error} Raise the limit and check again.",
     "contract.metric_model_declaration": 'llm() calls must name at most one model as a string literal, like model="openai/gpt-4.1-mini". Without model=, the reflection model is used. Call llm() directly. Pass settings as named arguments, not **kwargs.',
     "contract.metric_model_empty": "The model= value in llm() must not be empty or contain only whitespace.",

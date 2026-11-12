@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "Следующей операции нужно до {needed}, но песочницы этой проверки удерживают {held} из оставшихся {remaining}.",
     "submit.preflight.contract_budget_missing": "Выберите бюджет расходов, прежде чем запускать проверку кода.",
     "submit.unified.optimizer_not_allowed": "Оптимизатор «{optimizer}» не подходит к этой настройке. Выберите один из: {allowed}.",
-    "submit.unified.pairs_need_cases": "Для запуска на парах вход/выход нужно не меньше двух пар или загруженный набор данных.",
-    "submit.unified.single_needs_one_case": "Для запуска с одним входом нужен ровно один вход.",
     "accounts.identity_in_use": "Этот аккаунт уже используется для входа в другой аккаунт {term.appName}.",
     "accounts.identity_not_found": "Этот аккаунт не связан.",
     "accounts.last_sign_in_method": "Это ваш единственный способ входа. Сначала добавьте пароль или ключ доступа.",

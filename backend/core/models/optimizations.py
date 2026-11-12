@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from .blackbox import BlackboxRunResponse
-from .common import ColumnMapping, Composition, OptimizationStatus, OptimizationType, SplitFractions
+from .common import ColumnMapping, Composition, OptimizationStatus, OptimizationType
 from .telemetry import JobLogEntry, ProgressEvent
 
 
@@ -158,11 +158,7 @@ class OptimizationStatusResponse(_JobResponseBase):
 class OptimizationSummaryResponse(_JobResponseBase):
     """Lightweight dashboard view of an optimization."""
 
-    split_fractions: SplitFractions | None = None
-    shuffle: bool | None = None
     seed: int | None = None
-    optimizer_kwargs: dict[str, Any] = Field(default_factory=dict)
-    compile_kwargs: dict[str, Any] = Field(default_factory=dict)
     progress_count: int = 0
     log_count: int = 0
 

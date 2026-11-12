@@ -1,11 +1,11 @@
 import type { RunFolder, SidebarJobItem } from "@/shared/lib/api";
 import { isActiveStatus } from "@/shared/constants/job-status";
 
-export type ActivityWindow = "all" | "7" | "30" | "90";
-export type StatusFilter = "all" | "active" | "success" | "stopped";
+type ActivityWindow = "all" | "7" | "30" | "90";
+type StatusFilter = "all" | "active" | "success" | "stopped";
 /** Runs of a continuous plan (automations) against one-off runs. */
-export type AutomationFilter = "all" | "automated" | "manual";
-export type GroupBy = "folder" | "none";
+type AutomationFilter = "all" | "automated" | "manual";
+type GroupBy = "folder" | "none";
 export type SortBy = "recent" | "name";
 
 /** How the sidebar filters, groups and sorts its runs. */
@@ -57,7 +57,7 @@ export function isFiltered(view: RunView): boolean {
 }
 
 /** Display name a run row shows, also used to sort by name. */
-export function runDisplayName(job: SidebarJobItem): string {
+function runDisplayName(job: SidebarJobItem): string {
   return (
     job.name ||
     [job.module_name, job.optimizer_name].filter(Boolean).join(" · ") ||

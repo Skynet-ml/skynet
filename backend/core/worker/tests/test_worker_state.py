@@ -7,7 +7,6 @@ Methods tested (no forking, no real threads started):
   BackgroundWorker._get_next_job
   BackgroundWorker._mark_job_done
   BackgroundWorker.cancel_job
-  BackgroundWorker.is_running
   BackgroundWorker.threads_alive  (before start())
   BackgroundWorker.seconds_since_last_activity  (before any activity recorded)
   BackgroundWorker._touch_activity  (via seconds_since_last_activity)
@@ -58,11 +57,6 @@ def test_worker_initial_queue_size_is_zero(worker: BackgroundWorker) -> None:
 def test_worker_initial_active_jobs_is_zero(worker: BackgroundWorker) -> None:
     """A fresh worker reports 0 active jobs."""
     assert worker.active_jobs() == 0
-
-
-def test_worker_initial_is_not_running(worker: BackgroundWorker) -> None:
-    """A fresh worker is not running."""
-    assert worker.is_running() is False
 
 
 def test_worker_initial_threads_alive_is_false(worker: BackgroundWorker) -> None:

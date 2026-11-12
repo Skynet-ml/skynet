@@ -6,7 +6,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from ....i18n import CLONE_NAME_PREFIX
 from ....models import OptimizationSubmissionResponse
 
 
@@ -42,17 +41,6 @@ class SidebarJobsResponse(BaseModel):
 
     items: list[SidebarJobItem]
     total: int
-
-
-class CloneJobRequest(BaseModel):
-    """Request body for cloning an optimization."""
-
-    count: int = Field(default=1, ge=1, le=5, description="Number of copies to create (1–5).")
-    name_prefix: str | None = Field(
-        default=None,
-        max_length=100,
-        description=f"Prefix prepended to each clone's name. Defaults to '{CLONE_NAME_PREFIX}'.",
-    )
 
 
 class CloneJobResponse(BaseModel):

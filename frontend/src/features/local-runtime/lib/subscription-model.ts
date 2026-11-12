@@ -14,7 +14,7 @@ import type { RunUsageRow } from "@/shared/types/run-usage";
 
 export { CLI_PROVIDERS, isCliProvider } from "@/shared/lib/cli-providers";
 
-export const SUBSCRIPTION_MODEL_PREFIX = "subscription/";
+const SUBSCRIPTION_MODEL_PREFIX = "subscription/";
 
 /** One coding-agent CLI as `GET /local/status` reports it. */
 export interface CliStatus {
@@ -125,7 +125,7 @@ export function parseSubscriptionModelId(
  * model through a gateway prefix (`openrouter/anthropic/...`), which still
  * names the same model as the CLI's bare `anthropic/...` slug.
  */
-export function catalogValueMatchesSlug(value: string, slug: string): boolean {
+function catalogValueMatchesSlug(value: string, slug: string): boolean {
   return value === slug || value.endsWith(`/${slug}`);
 }
 

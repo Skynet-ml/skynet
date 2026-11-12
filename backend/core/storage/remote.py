@@ -1544,19 +1544,6 @@ class RemoteDBJobStore:
         """
         return self._agent_runs.get(optimization_id, run_id)
 
-    def record_run_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
-        """Write one relay call of a run, with its secrets removed and its bodies cut.
-
-        Args:
-            optimization_id: Owning job id.
-            call: The call record the relay builds.
-            secrets: Every secret value the call could carry.
-
-        Returns:
-            The new call's ``seq``, which is also its cursor.
-        """
-        return self._run_calls.record_call(optimization_id, call, secrets)
-
     def list_run_calls(
         self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
     ) -> list[dict]:
@@ -1642,17 +1629,6 @@ class RemoteDBJobStore:
         """
         return self._checkpoints.get(optimization_id, pair_index)
 
-    def list_gepa_checkpoints(self, optimization_id: str) -> list[GepaCheckpoint]:
-        """Return every saved checkpoint for a job.
-
-        Args:
-            optimization_id: Job whose checkpoints are read.
-
-        Returns:
-            The job's :class:`GepaCheckpoint` rows (possibly empty).
-        """
-        return self._checkpoints.list_for_optimization(optimization_id)
-
     def delete_gepa_checkpoint(self, optimization_id: str, pair_index: int = -1) -> None:
         """Drop one run/pair's GEPA checkpoint (no-op when absent).
 
@@ -1661,14 +1637,6 @@ class RemoteDBJobStore:
             pair_index: Checkpoint key; ``-1`` for a run.
         """
         self._checkpoints.delete(optimization_id, pair_index)
-
-    def delete_all_gepa_checkpoints(self, optimization_id: str) -> None:
-        """Drop every checkpoint for a job (e.g. once it succeeds).
-
-        Args:
-            optimization_id: Job whose checkpoints are freed.
-        """
-        self._checkpoints.delete_all(optimization_id)
 
     def has_gepa_checkpoint(self, optimization_id: str) -> bool:
         """Return whether any resumable GEPA checkpoint exists for ``optimization_id``.

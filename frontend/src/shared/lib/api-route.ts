@@ -4,7 +4,7 @@
 export type ApiSource = "local" | "hosted";
 
 /** Local API route that forwards a call to the linked hosted account. */
-export const HOSTED_PROXY_PREFIX = "/local/hosted";
+const HOSTED_PROXY_PREFIX = "/local/hosted";
 
 /** The path to send to the local API base for `source`. */
 export function apiPath(path: string, source: ApiSource = "local"): string {
@@ -70,7 +70,7 @@ export function parseSourceKey(key: string): { source: ApiSource; id: string } {
  * agent settings and whole-account actions. The Mac never sends these through
  * the hosted proxy, even when a caller asks for the hosted source.
  */
-export const HOSTED_CLOSED_PATHS: readonly string[] = [
+const HOSTED_CLOSED_PATHS: readonly string[] = [
   "/billing/byok/keys",
   "/billing/payment-methods",
   "/billing/checkout",

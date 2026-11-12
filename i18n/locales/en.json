@@ -372,8 +372,6 @@
     "email.account.sign_in.ignore": "If you didn't try to sign in, you can ignore this email.",
     "optimization.dspy_run_retired": "Skynet now optimizes repositories only. DSPy program runs can no longer be started, resumed, cloned, served or scheduled. Start a new repository optimization instead.",
     "submit.unified.optimizer_not_allowed": "The optimizer '{optimizer}' does not fit this setup. Choose one of: {allowed}.",
-    "submit.unified.single_needs_one_case": "A single-input run needs exactly one input.",
-    "submit.unified.pairs_need_cases": "A run on input/output pairs needs at least two pairs or an uploaded dataset.",
     "submit.unified.contract_budget": "The spending limit is too low to run the code on samples: {error} Raise the limit and check again.",
     "submit.preflight.scorer_ready": "Evaluator loads; scoring waits for the first generated candidate.",
     "submit.preflight.endpoint_ready": "Endpoint validated; its response will be checked with the first generated candidate.",

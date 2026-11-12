@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "تحتاج العملية التالية إلى ما يصل إلى {needed}، لكن بيئات الحماية الخاصة بهذا الفحص تحجز {held} من أصل {remaining} المتبقية.",
     "submit.preflight.contract_budget_missing": "اختر ميزانية إنفاق قبل تشغيل فحص الكود.",
     "submit.unified.optimizer_not_allowed": "المُحسِّن '{optimizer}' لا يناسب هذا الإعداد. اختر واحدًا من: {allowed}.",
-    "submit.unified.pairs_need_cases": "يحتاج تشغيل بأزواج إدخال/إخراج إلى زوجين على الأقل أو إلى مجموعة بيانات مرفوعة.",
-    "submit.unified.single_needs_one_case": "يحتاج تشغيل بمُدخل واحد إلى مُدخل واحد بالضبط.",
     "accounts.identity_in_use": "هذا الحساب يسجّل الدخول بالفعل إلى حساب {term.appName} آخر.",
     "accounts.identity_not_found": "هذا الحساب غير مرتبط.",
     "accounts.last_sign_in_method": "هذه طريقتك الوحيدة لتسجيل الدخول. أضف كلمة مرور أو مفتاح مرور أولاً.",

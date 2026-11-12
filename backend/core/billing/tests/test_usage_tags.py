@@ -14,7 +14,6 @@ from core.billing.usage_tags import (
     header_tags,
     parse_tags,
     usage_scope,
-    usage_tags_token,
     with_tags_header,
 )
 
@@ -40,15 +39,6 @@ def test_scopes_nest_and_restore() -> None:
             assert current_tags() == {"candidate": "1", "case": "b"}
         assert current_tags() == {"candidate": "1", "case": "a"}
     assert current_tags() == {}
-
-
-def test_token_reset_restores_outer_tags() -> None:
-    """A callback-opened scope closes back to the outer tags."""
-    with usage_scope(stage="baseline"):
-        token = usage_tags_token(kind=2)
-        assert current_tags() == {"stage": "baseline", "kind": "2"}
-        token.reset()
-        assert current_tags() == {"stage": "baseline"}
 
 
 def test_trusted_tags_override_guest_header() -> None:

@@ -158,7 +158,7 @@ export interface WizardV2Shell extends WizardV2Context {
   sandboxProviders: SandboxProviders;
 }
 
-export type HostedCatalogState = "ready" | "loading" | "failed";
+type HostedCatalogState = "ready" | "loading" | "failed";
 
 /**
  * Why a setup cannot start on the web from the Mac app, or null when it can.

@@ -1,6 +1,6 @@
 """Subprocess isolation for validation-time exec of user-authored code.
 
-User-authored signature, transform, metric and scorer code has to be
+User-authored signature, transform and scorer code has to be
 exec'd at some point to validate it. Running exec() directly in the API process leaks arbitrary
 user code into the web server — a simple ``while True: pass`` would hang a
 request worker, and ``import os; os.kill(1, 9)`` would be much worse.
@@ -8,7 +8,7 @@ request worker, and ``import os; os.kill(1, 9)`` would be much worse.
 This module wraps validation in a subprocess boundary: each call spawns a
 fresh child via ``multiprocessing.spawn``, exec-s the code there, extracts
 only the metadata the parent actually needs (field names, callable param
-names, a result-shape probe), and returns a pickleable result. If the
+names), and returns a pickleable result. If the
 child hangs, we kill it after a timeout; if it raises, the parent
 re-raises a ``ServiceError``.
 
@@ -21,18 +21,15 @@ inside the preview sandbox and exec directly.
 
 from __future__ import annotations
 
-import ast
 import inspect
 import multiprocessing as mp
 import threading
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from typing import Any
-
-import dspy
 
 from ..exceptions import ServiceError
 from .optimization.blackbox.runner import IMAGE_HELPER_NAME, LLM_HELPER_NAME, LOG_HELPER_NAME, Image, log, missing_llm
@@ -40,14 +37,11 @@ from .optimization.blackbox.scorer import load_scorer_from_code
 from .optimization.data import (
     extract_signature_fields,
     image_input_field_names,
-    load_metric_from_code,
     load_signature_from_code,
     load_transform_from_code,
 )
-from .optimization.logged_scores import drain_logged_metrics, reset_logged_metrics
 
 _DEFAULT_PARSE_TIMEOUT_SECONDS = 30.0
-_DEFAULT_PROBE_TIMEOUT_SECONDS = 45.0
 _TERMINATE_GRACE_SECONDS = 2.0
 _QUEUE_READ_SECONDS = 5.0
 _QUEUE_POLL_SECONDS = 0.25
@@ -63,7 +57,6 @@ _NO_RESULT = object()
 _signature_cache: dict[str, SignatureIntrospection] = {}
 _transform_cache: dict[str, TransformIntrospection] = {}
 _scorer_cache: dict[str, bool] = {}
-_workspace_cache: dict[str, WorkspaceCodeIntrospection] = {}
 _dogpile_locks: dict[str, threading.Lock] = {}
 _locks_mutex = threading.Lock()
 
@@ -119,61 +112,6 @@ class TransformIntrospection:
 
     callable_name: str
     param_names: list[str]
-
-
-@dataclass(frozen=True)
-class FunctionShape:
-    """The positional arity of one top-level function, as its source declares it.
-
-    ``capacity`` and ``required`` are ``None`` when the name is bound by an
-    assignment or import, whose signature only the sandbox can see.
-    """
-
-    capacity: int | None
-    required: int | None
-
-
-@dataclass(frozen=True)
-class WorkspaceCodeIntrospection:
-    """What the source of one piece of workspace code declares, read without running it.
-
-    ``syntax_error`` is ``"<Type>: <message>"`` when the code does not parse;
-    ``functions`` then is empty.
-    """
-
-    syntax_error: str | None
-    functions: dict[str, FunctionShape]
-    uses_llm: bool
-
-
-@dataclass(frozen=True)
-class MetricProbeResult:
-    """Shape of a metric invocation on a sample row, captured in a subprocess.
-
-    ``result_kind`` is one of:
-
-    - ``"none"``       — the metric returned ``None``.
-    - ``"prediction"`` — the metric returned a ``dspy.Prediction`` with a
-      ``score`` attribute (GEPA-shaped).
-    - ``"numeric"``    — the metric returned an ``int``, ``float``, or ``bool``.
-    - ``"other"``      — the metric returned something else (e.g. a string).
-    - ``"error"``      — the metric itself raised when invoked; ``error`` is
-      the stringified exception.
-
-    ``score`` is the metric's numeric output as a float (the ``.score`` of a
-    prediction, or the numeric value itself), or ``None`` when unavailable.
-
-    ``logged_metrics`` holds whatever the metric recorded via ``log_metrics``
-    during the probe call — contract violations inside ``log_metrics`` raise
-    and therefore surface as ``result_kind == "error"`` instead.
-    """
-
-    result_kind: str
-    result_type_name: str
-    has_score_attr: bool
-    error: str | None
-    score: float | None
-    logged_metrics: dict[str, float] = field(default_factory=dict)
 
 
 def _run_in_subprocess(
@@ -371,7 +309,7 @@ def validate_transform_code(
 ) -> TransformIntrospection:
     """Parse user-authored transform code in a subprocess and return its shape.
 
-    Memoized per-process like the signature/metric validators: concurrent
+    Memoized per-process like the signature validator: concurrent
     submissions of the same transform share one subprocess spawn.
 
     Args:
@@ -406,142 +344,6 @@ def validate_transform_code(
         return introspection
 
 
-def _probe_worker(
-    metric_code: str,
-    example_payload: dict[str, Any],
-    prediction_payload: dict[str, Any],
-    input_field_names: list[str],
-    image_input_fields: list[str],
-    queue: Any,
-) -> None:
-    """Child-side entry point for ``probe_metric_on_sample``.
-
-    Args:
-        metric_code: User-authored metric callable source.
-        example_payload: Field values for a sample row.
-        prediction_payload: Field values for a fake prediction.
-        input_field_names: Inputs that should be marked on the example.
-        image_input_fields: Subset of inputs that need ``dspy.Image`` wrapping.
-        queue: Multiprocessing queue used to return a result dict.
-    """
-    try:
-        metric = load_metric_from_code(metric_code)
-        prepared_payload = dict(example_payload)
-        image_type = getattr(dspy, "Image", None)
-        if image_type is not None:
-            for field_name in image_input_fields:
-                value = prepared_payload.get(field_name)
-                if value is None or isinstance(value, image_type):
-                    continue
-                prepared_payload[field_name] = image_type(url=value)
-        example = dspy.Example(**prepared_payload).with_inputs(*input_field_names)
-        prediction = dspy.Prediction(**prediction_payload)
-        reset_logged_metrics()
-        try:
-            result = metric(example, prediction, trace=None)
-        except BaseException as call_exc:
-            queue.put(
-                {
-                    "ok": True,
-                    "result_kind": "error",
-                    "result_type_name": type(call_exc).__name__,
-                    "has_score_attr": False,
-                    "error": str(call_exc),
-                    "score": None,
-                    "logged_metrics": {},
-                }
-            )
-            return
-        logged_metrics = drain_logged_metrics()
-
-        if result is None:
-            kind = "none"
-        elif isinstance(result, dspy.Prediction) and hasattr(result, "score"):
-            kind = "prediction"
-        elif isinstance(result, (int, float, bool)):
-            kind = "numeric"
-        else:
-            kind = "other"
-
-        score: float | None
-        try:
-            if kind == "prediction":
-                score = float(result.score)
-            elif kind == "numeric":
-                score = float(result)
-            else:
-                score = None
-        except BaseException:  # non-numeric .score / unconvertible value — treat as no score
-            score = None
-
-        queue.put(
-            {
-                "ok": True,
-                "result_kind": kind,
-                "result_type_name": type(result).__name__,
-                "has_score_attr": hasattr(result, "score"),
-                "error": None,
-                "score": score,
-                "logged_metrics": logged_metrics,
-            }
-        )
-    except BaseException as exc:  # code failed to parse or dspy setup failed — report, don't raise
-        queue.put(_error_payload(exc))
-
-
-def probe_metric_on_sample(
-    *,
-    metric_code: str,
-    example_payload: dict[str, Any],
-    prediction_payload: dict[str, Any],
-    input_field_names: list[str],
-    image_input_fields: list[str] | None = None,
-    timeout_seconds: float = _DEFAULT_PROBE_TIMEOUT_SECONDS,
-) -> MetricProbeResult:
-    """Invoke user-authored metric code on a sample row inside a subprocess.
-
-    A metric that simply raised on the sample row is reported via
-    ``MetricProbeResult.error`` — not as an exception from this function.
-    Only ``ServiceError`` (parse failure, subprocess crash, timeout) escapes.
-
-    Args:
-        metric_code: User-authored metric callable source.
-        example_payload: Field values for a sample row.
-        prediction_payload: Field values for a fake prediction.
-        input_field_names: Inputs to mark on the example.
-        image_input_fields: Subset of inputs needing ``dspy.Image`` wrapping.
-        timeout_seconds: Maximum time to wait for the child to finish.
-
-    Returns:
-        Shape and outcome of invoking the metric on the sample.
-
-    Raises:
-        ServiceError: When the metric fails to load or the child errors out.
-    """
-    result = _run_in_subprocess(
-        _probe_worker,
-        (
-            metric_code,
-            example_payload,
-            prediction_payload,
-            input_field_names,
-            list(image_input_fields or []),
-        ),
-        timeout_seconds=timeout_seconds,
-    )
-    if not result.get("ok"):
-        _raise_child_error(result)
-    raw_score = result.get("score")
-    return MetricProbeResult(
-        result_kind=str(result["result_kind"]),
-        result_type_name=str(result["result_type_name"]),
-        has_score_attr=bool(result["has_score_attr"]),
-        error=result.get("error"),
-        score=float(raw_score) if raw_score is not None else None,
-        logged_metrics=dict(result.get("logged_metrics") or {}),
-    )
-
-
 def _scorer_worker(scorer_code: str, queue: Any) -> None:
     """Child-side entry point for ``validate_scorer_code``: load the code, report whether it defines a scorer.
 
@@ -561,7 +363,7 @@ def _scorer_worker(scorer_code: str, queue: Any) -> None:
 def validate_scorer_code(code: str, *, timeout_seconds: float = _DEFAULT_PARSE_TIMEOUT_SECONDS) -> None:
     """Load user-authored scorer code in a subprocess to prove it defines a scorer.
 
-    Memoized per-process like the metric validator, for the same dogpile reason.
+    Memoized per-process like the signature validator, for the same dogpile reason.
 
     Args:
         code: User-authored scorer source.
@@ -580,111 +382,3 @@ def validate_scorer_code(code: str, *, timeout_seconds: float = _DEFAULT_PARSE_T
         if not result.get("ok"):
             _raise_child_error(result)
         _bounded_cache_put(_scorer_cache, code, True)
-
-
-# Arity reported for ``*args``: large enough to satisfy every contract.
-_VARARGS_CAPACITY = 1_000
-
-
-def _function_shape(node: ast.FunctionDef | ast.AsyncFunctionDef) -> FunctionShape:
-    """Read a function definition's positional capacity and required count.
-
-    Args:
-        node: A parsed function definition.
-
-    Returns:
-        How many positional arguments it accepts and how many it requires.
-    """
-    args = node.args
-    positional = [*args.posonlyargs, *args.args]
-    capacity = _VARARGS_CAPACITY if args.vararg is not None else len(positional)
-    return FunctionShape(capacity=capacity, required=len(positional) - len(args.defaults))
-
-
-def _introspect_source(code: str) -> dict[str, Any]:
-    """Parse workspace code and describe its top-level names without executing it.
-
-    Args:
-        code: User-authored source.
-
-    Returns:
-        A pickleable description: syntax error, function shapes and ``llm`` use.
-    """
-    try:
-        tree = ast.parse(code)
-    except (SyntaxError, ValueError) as exc:
-        return {"syntax_error": f"{type(exc).__name__}: {exc}", "functions": {}, "uses_llm": False}
-    functions: dict[str, tuple[int | None, int | None]] = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            shape = _function_shape(node)
-            functions[node.name] = (shape.capacity, shape.required)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    functions[target.id] = (None, None)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                functions[(alias.asname or alias.name).split(".")[0]] = (None, None)
-    uses_llm = any(
-        (isinstance(node, ast.Name) and node.id == "llm")
-        or (isinstance(node, ast.Attribute) and node.attr == "llm")
-        or (isinstance(node, ast.alias) and node.name == "llm")
-        for node in ast.walk(tree)
-    )
-    return {"syntax_error": None, "functions": functions, "uses_llm": uses_llm}
-
-
-def _workspace_worker(code: str, queue: Any) -> None:
-    """Child-side entry point for ``introspect_workspace_code``.
-
-    Args:
-        code: User-authored workspace source.
-        queue: Multiprocessing queue used to return a result dict.
-    """
-    try:
-        queue.put({"ok": True, **_introspect_source(code)})
-    except BaseException as exc:  # a hostile source can exhaust the parser — report, never raise
-        queue.put(_error_payload(exc))
-
-
-def introspect_workspace_code(
-    code: str, *, timeout_seconds: float = _DEFAULT_PARSE_TIMEOUT_SECONDS
-) -> WorkspaceCodeIntrospection:
-    """Describe unified workspace code's top-level functions in a subprocess.
-
-    The code is parsed, never executed: its imports may only exist in the
-    sandbox image, so the sandbox contract check is what runs it.
-
-    Args:
-        code: User-authored run or metric source.
-        timeout_seconds: Maximum time to wait for the child to finish.
-
-    Returns:
-        The syntax error, if any, each top-level name's positional arity and
-        whether the code calls the ``llm`` helper.
-
-    Raises:
-        ServiceError: When the child fails or times out.
-    """
-    cached = _workspace_cache.get(code)
-    if cached is not None:
-        return cached
-    with _dogpile_lock(f"ws:{code}"):
-        cached = _workspace_cache.get(code)
-        if cached is not None:
-            return cached
-        result = _run_in_subprocess(_workspace_worker, (code,), timeout_seconds=timeout_seconds)
-        if not result.get("ok"):
-            _raise_child_error(result)
-        introspection = WorkspaceCodeIntrospection(
-            syntax_error=result["syntax_error"],
-            functions={
-                name: FunctionShape(capacity=capacity, required=required)
-                for name, (capacity, required) in result["functions"].items()
-            },
-            uses_llm=bool(result["uses_llm"]),
-        )
-        _bounded_cache_put(_workspace_cache, code, introspection)
-        return introspection

@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "下一個操作最多要 {needed}，但係呢次檢查嘅沙盒佔住咗剩低 {remaining} 入面嘅 {held}。",
     "submit.preflight.contract_budget_missing": "行程式碼檢查之前，請揀一個支出預算。",
     "submit.unified.optimizer_not_allowed": "優化器「{optimizer}」唔啱呢個設定。請由以下選項揀一個：{allowed}。",
-    "submit.unified.pairs_need_cases": "用輸入/輸出對嘅運行最少需要兩對資料或者一個已上載嘅資料集。",
-    "submit.unified.single_needs_one_case": "單一輸入嘅運行只需要一個輸入。",
     "accounts.identity_in_use": "呢個帳戶已經用嚟登入另一個 {term.appName} 帳戶。",
     "accounts.identity_not_found": "呢個帳戶未連結。",
     "accounts.last_sign_in_method": "呢個係你唯一嘅登入方法。請先加密碼或通行密鑰。",

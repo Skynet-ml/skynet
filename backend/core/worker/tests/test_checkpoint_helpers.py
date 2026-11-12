@@ -22,7 +22,6 @@ from core.storage import JobStore
 from core.worker import checkpoint_compat
 from core.worker.checkpoint_compat import (
     CheckpointCompatibilityError,
-    checkpoint_incumbent,
     checkpoint_manifest,
     validate_checkpoint,
 )
@@ -86,10 +85,6 @@ class _CheckpointStore:
             stored_bytes=len(row[0]),
             manifest=self.manifests.get(pair_index) or checkpoint_manifest(row[0], _PAYLOAD, None),
         )
-
-    def list_gepa_checkpoints(self, optimization_id: str):
-        """Return every stored checkpoint record."""
-        return [self.get_gepa_checkpoint(optimization_id, idx) for idx in self.checkpoints]
 
     def delete_gepa_checkpoint(self, optimization_id: str, pair_index: int = -1) -> None:
         """Drop one run/pair's checkpoint."""
@@ -174,7 +169,7 @@ def test_checkpoint_persists_best_json_safe_evaluated_incumbent() -> None:
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
-    incumbent = checkpoint_incumbent(store.manifests[-1])
+    incumbent = store.manifests[-1]["evaluated_incumbent"]
     assert incumbent is not None
     assert incumbent["candidate"] == {"predict": "better"}
     assert incumbent["selection_score"] == 0.75

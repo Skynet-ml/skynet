@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "다음 작업에는 최대 {needed}이(가) 필요하지만 남은 {remaining} 중 {held}을(를) 이 검사의 샌드박스가 점유하고 있습니다.",
     "submit.preflight.contract_budget_missing": "코드 검사를 실행하기 전에 지출 예산을 선택하세요.",
     "submit.unified.optimizer_not_allowed": "옵티마이저 '{optimizer}'은(는) 이 설정에 맞지 않습니다. 다음 중 하나를 선택하세요: {allowed}.",
-    "submit.unified.pairs_need_cases": "입력/출력 쌍으로 실행하려면 최소 두 개의 쌍이나 업로드한 데이터셋이 필요합니다.",
-    "submit.unified.single_needs_one_case": "단일 입력으로 실행하려면 입력이 정확히 하나 필요합니다.",
     "accounts.identity_in_use": "이 계정은 이미 다른 {term.appName} 계정에 로그인됩니다.",
     "accounts.identity_not_found": "이 계정은 연결되어 있지 않습니다.",
     "accounts.last_sign_in_method": "유일한 로그인 방법입니다. 먼저 비밀번호나 패스키를 추가하세요.",

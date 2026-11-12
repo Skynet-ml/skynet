@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "Sonraki işlem en fazla {needed} gerektiriyor, ancak bu kontrolün korumalı alanları kalan {remaining} tutarın {held} kadarını tutuyor.",
     "submit.preflight.contract_budget_missing": "Kod kontrolünü çalıştırmadan önce bir harcama bütçesi seçin.",
     "submit.unified.optimizer_not_allowed": "'{optimizer}' optimize edicisi bu kuruluma uymuyor. Şunlardan birini seçin: {allowed}.",
-    "submit.unified.pairs_need_cases": "Girdi/çıktı çiftleriyle bir çalıştırma için en az iki çift veya yüklenmiş bir veri kümesi gerekir.",
-    "submit.unified.single_needs_one_case": "Tek girdili bir çalıştırma için tam olarak bir girdi gerekir.",
     "accounts.identity_in_use": "Bu hesap zaten başka bir {term.appName} hesabında oturum açıyor.",
     "accounts.identity_not_found": "Bu hesap bağlı değil.",
     "accounts.last_sign_in_method": "Bu, oturum açmanın tek yolu. Önce bir parola veya geçiş anahtarı ekleyin.",

@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "A próxima operação precisa de até {needed}, mas as sandboxes desta verificação retêm {held} dos {remaining} que restam.",
     "submit.preflight.contract_budget_missing": "Escolha um orçamento de gastos antes de executar a verificação do código.",
     "submit.unified.optimizer_not_allowed": "O otimizador '{optimizer}' não é adequado a esta configuração. Escolha um destes: {allowed}.",
-    "submit.unified.pairs_need_cases": "Uma execução com pares de entrada/saída precisa de pelo menos dois pares ou de um conjunto de dados carregado.",
-    "submit.unified.single_needs_one_case": "Uma execução de entrada única precisa de exatamente uma entrada.",
     "accounts.identity_in_use": "Essa conta já inicia sessão noutra conta {term.appName}.",
     "accounts.identity_not_found": "Essa conta não está associada.",
     "accounts.last_sign_in_method": "Este é o seu único modo de iniciar sessão. Adicione primeiro uma palavra-passe ou chave de acesso.",

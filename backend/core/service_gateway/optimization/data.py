@@ -1,6 +1,6 @@
 """Loaders and introspection for user-authored workflow code.
 
-Helpers that load a user-authored :class:`dspy.Signature`, metric or
+Helpers that load a user-authored :class:`dspy.Signature` or
 transform callable from source and read the signature's fields. Two
 callers use them: the ``safe_exec`` validators, which run them in a
 spawned child process, and the workflow preview
@@ -16,7 +16,6 @@ from typing import Any
 import dspy
 
 from ...exceptions import ServiceError
-from .logged_scores import log_metrics
 
 
 def extract_signature_fields(signature_cls: type[dspy.Signature]) -> tuple[list[str], list[str]]:
@@ -188,46 +187,6 @@ def _resolve_signature_annotations(
         resolved = hints.get(field_name)
         if resolved is not None and getattr(field_info, "annotation", None) is not resolved:
             field_info.annotation = resolved
-
-
-def load_metric_from_code(code: str) -> Callable[..., Any]:
-    """Execute user-provided code and return the metric callable it defines.
-
-    Same trust boundary as :func:`load_signature_from_code`: the metric body
-    runs in the calling process via ``exec``, so callers must isolate it.
-
-    Args:
-        code: User-authored metric source code.
-
-    Returns:
-        The metric callable extracted from the namespace.
-
-    Raises:
-        ServiceError: When the code has a syntax error or defines no callable.
-    """
-
-    # log_metrics: the named-score side channel (see logged_scores.py) —
-    # metric code calls it to surface precision/recall-style components
-    # alongside the single scalar the optimizer consumes.
-    namespace: dict[str, Any] = {"dspy": dspy, "log_metrics": log_metrics}
-    try:
-        # dont_inherit=True: keep this module's PEP 563 ``from __future__ import
-        # annotations`` from stringizing the metric's annotations, matching
-        # load_signature_from_code so user code always sees eager annotations.
-        exec(compile(code, "<metric_code>", "exec", dont_inherit=True), namespace)
-    except SyntaxError as exc:
-        raise ServiceError(f"metric_code has a syntax error: {exc}") from exc
-    metric = namespace.get("metric")
-    if not callable(metric):
-        # The injected log_metrics helper is itself callable — exclude it so a
-        # metric under any other name still satisfies the single-callable
-        # fallback.
-        callables = [obj for obj in namespace.values() if callable(obj) and obj is not log_metrics]
-        if len(callables) == 1:
-            metric = callables[0]
-    if not callable(metric):
-        raise ServiceError("metric_code must define a callable named 'metric'.")
-    return metric
 
 
 def load_transform_from_code(code: str) -> Callable[..., Any]:

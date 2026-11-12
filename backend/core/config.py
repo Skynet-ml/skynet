@@ -171,10 +171,6 @@ class Settings(BaseSettings):
     remote_db_url: SecretStr | None = Field(default=None, description="PostgreSQL connection string for remote storage")
 
     openai_api_key: SecretStr | None = Field(default=None, description="OpenAI API key for model access")
-    openai_api_base: str | None = Field(
-        default=None,
-        description=("Base URL of the OpenAI-compatible LLM gateway (LiteLLM reads the same env var for serving)."),
-    )
     transcription_api_key: SecretStr | None = Field(
         default=None,
         description=(
@@ -183,7 +179,6 @@ class Settings(BaseSettings):
             "dictation with a typed 503."
         ),
     )
-    anthropic_api_key: SecretStr | None = Field(default=None, description="Anthropic API key for Claude models")
 
     stripe_secret_key: SecretStr | None = Field(
         default=None,
@@ -807,47 +802,6 @@ class Settings(BaseSettings):
         ),
         alias="JOB_STALL_TIMEOUT",
     )
-    gepa_eval_num_threads: int = Field(
-        default=8,
-        ge=1,
-        le=64,
-        description=(
-            "Eval/rollout thread count injected into GEPA when the submission "
-            "doesn't set num_threads. GEPA's own default is sequential "
-            "candidate evaluation, and runs are LM-latency-bound, so parallel "
-            "eval cuts wall-clock roughly linearly. An explicit user-supplied "
-            "num_threads always wins; job_lm_max_concurrency bounds the "
-            "multiplied total either way."
-        ),
-        alias="GEPA_EVAL_NUM_THREADS",
-    )
-    gepa_pxn_parents: int = Field(
-        default=1,
-        ge=1,
-        le=16,
-        description=(
-            "GEPA PxN batched sampling — parent count (p). Each reflective "
-            "iteration mutates p distinct parent candidates, drawing "
-            "gepa_pxn_proposals (n) proposals from each, and evaluates all p*n "
-            "as one batch. The default of 1 reproduces GEPA's classic "
-            "single-mutation sampling; raising p (or n) above 1 switches GEPA to "
-            "PxNSampling(p, n) — better wall-clock and generalization at higher "
-            "LM cost, bounded per job by job_lm_max_concurrency. A submission "
-            "that supplies its own gepa_kwargs.sampling_strategy always wins."
-        ),
-        alias="GEPA_PXN_PARENTS",
-    )
-    gepa_pxn_proposals: int = Field(
-        default=1,
-        ge=1,
-        le=16,
-        description=(
-            "GEPA PxN batched sampling — proposals per parent (n); see "
-            "gepa_pxn_parents. Raising n (or p) above 1 activates "
-            "PxNSampling(p, n). Defaults to 1 (classic single-mutation GEPA)."
-        ),
-        alias="GEPA_PXN_PROPOSALS",
-    )
     react_native_tool_calling: bool = Field(
         default=False,
         description=(
@@ -943,7 +897,6 @@ class Settings(BaseSettings):
         description="Server port",
         validation_alias=AliasChoices("API_PORT", "PORT"),
     )
-    reload: bool = Field(default=False, description="Enable auto-reload on code changes (dev only)")
 
     cors_origins: str = Field(
         default="http://localhost:3000,http://localhost:3001",
@@ -974,8 +927,6 @@ class Settings(BaseSettings):
             "re-evaluating provider key availability. 0 disables caching."
         ),
     )
-
-    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
 
     alert_webhook_url: str = Field(
         default="",

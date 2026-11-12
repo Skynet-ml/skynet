@@ -1379,7 +1379,6 @@ REMEMBER_TOOL = "remember_for_later"
 CONTINUE_TOOL = "continue_to_next_screen"
 GO_BACK_TOOL = "go_back_to_screen"
 ASK_USER_TOOL = "ask_user"
-SCREEN_NAV_TOOLS = frozenset({REMEMBER_TOOL, CONTINUE_TOOL, GO_BACK_TOOL, ASK_USER_TOOL})
 _MAX_SCREEN_NOTES = 10
 _MAX_NOTE_CHARS = 1000
 # A go-back request becomes the earlier screen agent's opening message, so it
@@ -2209,8 +2208,8 @@ Capabilities worth knowing about:
   any warning. Call it before patching a non-default
   ``split_fractions``, or when the dataset is small, instead of
   guessing whether a split is viable.
-* Existing jobs: ``clone_job`` duplicates a job (1–5 copies),
-  ``retry_job`` re-runs a failed/cancelled one, ``bulk_pin_jobs``
+* Existing jobs: ``clone_job`` and ``retry_job`` cannot re-run a
+  repository run yet and return a conflict, ``bulk_pin_jobs``
   toggles pin state in batch, ``bulk_cancel_jobs`` stops many
   running/pending jobs at once, ``bulk_delete_jobs`` removes many
   terminal jobs at once. ``pause_job`` checkpoints a running job and

@@ -84,7 +84,6 @@ from ....sandbox.timeouts import Phase
 from ...language_models import (
     build_language_model,
     canonical_model_id,
-    lm_call_count,
     model_usages_from_history,
     total_tokens_from_history,
 )
@@ -1108,21 +1107,6 @@ def _combined_usage(
     return combine_usages(usages)
 
 
-def _native_call_count(native: NativeOptions | None) -> int:
-    """Count the model requests the in-sandbox proposer CLI made.
-
-    Args:
-        native: Shared native usage collector, if the recipe uses one.
-
-    Returns:
-        The summed per-model ``calls``, or 0 without a native collector.
-    """
-    if native is None:
-        return 0
-    with native.usage_lock:
-        return sum(counts.get("calls", 0) for counts in native.usage_by_model.values())
-
-
 def _run_job(
     job: JobSpec,
     base_scorer: Any,
@@ -1486,7 +1470,6 @@ def _run_job(
         candidate_tree=candidate_tree,
         total_scorer_runs=server.used,
         runtime_seconds=time.perf_counter() - started,
-        num_lm_calls=sum(lm_call_count(model) or 0 for model in lms) + _native_call_count(native_options),
         lm_activity=_reflection_activity(reflection_durations_ms),
         total_tokens=sum(row.input_tokens + row.output_tokens for row in usage) or total_tokens_from_history(*lms),
         usage_by_model=[ModelTokenUsage(**asdict(row)) for row in usage],

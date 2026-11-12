@@ -155,16 +155,6 @@ class PostgresCheckpointBlobStore:
             )
             session.commit()
 
-    def delete_all(self, optimization_id: str) -> None:
-        """Remove every checkpoint for a job.
-
-        Args:
-            optimization_id: Job whose checkpoints are dropped.
-        """
-        with Session(self._engine) as session:
-            session.execute(delete(GepaCheckpointModel).where(GepaCheckpointModel.optimization_id == optimization_id))
-            session.commit()
-
     def has_any(self, optimization_id: str) -> bool:
         """Return whether the job has any saved checkpoint.
 

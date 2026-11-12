@@ -41,11 +41,9 @@ def test_optimized_predictor_defaults() -> None:
     """Verify OptimizedPredictor optional fields default to expected empties."""
     p = OptimizedPredictor(predictor_name="pred0", instructions="Do X.")
 
-    assert p.signature_name is None
     assert p.input_fields == []
     assert p.output_fields == []
     assert p.demos == []
-    assert p.formatted_prompt == ""
 
 
 def test_optimized_predictor_accepts_demos() -> None:
@@ -65,16 +63,12 @@ def test_optimized_predictor_with_full_fields() -> None:
     p = OptimizedPredictor(
         predictor_name="pred0",
         instructions="Do X.",
-        signature_name="MySignature",
         input_fields=["question"],
         output_fields=["answer"],
-        formatted_prompt="question: ...\nanswer: ...",
     )
 
-    assert p.signature_name == "MySignature"
     assert p.input_fields == ["question"]
     assert p.output_fields == ["answer"]
-    assert "question" in p.formatted_prompt
 
 
 def test_program_artifact_all_defaults_none() -> None:
@@ -82,7 +76,6 @@ def test_program_artifact_all_defaults_none() -> None:
     art = ProgramArtifact()
 
     assert art.path is None
-    assert art.program_pickle_base64 is None
     assert art.metadata is None
     assert art.optimized_prompt is None
 
@@ -111,13 +104,6 @@ def test_program_artifact_with_metadata() -> None:
     assert art.path == "/opt/artifacts/job123"
     assert art.metadata is not None
     assert art.metadata["score"] == pytest.approx(0.95)
-
-
-def test_program_artifact_with_pickle() -> None:
-    """Verify ProgramArtifact stores a base64-encoded program pickle."""
-    art = ProgramArtifact(program_pickle_base64="abc123==")
-
-    assert art.program_pickle_base64 == "abc123=="
 
 
 def test_program_artifact_backfills_module_src_from_flex_state() -> None:
@@ -271,19 +257,12 @@ def test_optimized_nodes_backfills_prompt_from_state() -> None:
     assert prompt.instructions == "Answer."
     # DSPy bookkeeping keys are dropped; the real field values survive.
     assert prompt.demos == [OptimizedDemo(inputs={"q": "2+2", "a": "4"})]
-    assert "Q: the question" in prompt.formatted_prompt
-    # The ``${a}`` adapter placeholder is elided, leaving the bare prefix.
-    assert "A:" in prompt.formatted_prompt
-    assert "${a}" not in prompt.formatted_prompt
-    assert "q: 2+2" in prompt.formatted_prompt
 
 
 def test_optimized_nodes_backfill_groups_cot_predict_under_node() -> None:
     """A cot node's ``.predict`` predictor state folds back to its node key."""
     art = ProgramArtifact(
-        program_state_json={
-            "n_polish.predict": {"demos": [], "signature": {"instructions": "Polish.", "fields": []}}
-        }
+        program_state_json={"n_polish.predict": {"demos": [], "signature": {"instructions": "Polish.", "fields": []}}}
     )
 
     assert set(art.optimized_nodes) == {"n_polish"}

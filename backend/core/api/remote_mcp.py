@@ -123,9 +123,8 @@ def _request_locale() -> str:
 def _run_summary(job_data: dict[str, Any], locale: str) -> dict[str, Any]:
     """Return a run summary whose stored stop reason reads in ``locale``.
 
-    The service stores a cancel or pause reason as the Hebrew base term. The
-    web UI maps it back the same way (``localizeStoredReason``). Other
-    messages pass through unchanged.
+    The service stores a cancel or pause reason as the Hebrew base term, so
+    this maps that term to ``locale``. Other messages pass through unchanged.
 
     Args:
         job_data: The run row.

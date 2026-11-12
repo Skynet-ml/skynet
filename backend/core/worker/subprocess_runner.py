@@ -1,8 +1,8 @@
 """Subprocess-side entry point for repository optimization jobs.
 
-Houses the code that runs inside the child process forked/spawned by
-``BackgroundWorker`` — the log handler, the event-queue helpers, and
-the ``_run_service_in_subprocess`` function itself. Kept in its own
+Houses the code that runs inside the job's sandbox process, which
+``isolated_runner`` starts — the log handler, the event-queue helpers, and
+the ``run_service_in_subprocess`` function itself. Kept in its own
 module so ``engine.py`` can stay focused on the parent-side worker
 lifecycle.
 """
@@ -131,11 +131,10 @@ def run_service_in_subprocess(
     payload_dict: dict[str, Any],
     artifact_id: str,
     event_queue: Any,
-    start_method: str,
 ) -> None:
     """Execute a repository optimization in the child process, streaming events back to the parent.
 
-    This is the ``target`` function passed to ``mp.Process``.  It emits four event
+    ``isolated_runner`` calls it inside the sandbox process.  It emits four event
     types onto ``event_queue``:
 
     - ``EVENT_LOG`` — every record from the ``dspy`` logger and the
@@ -154,7 +153,6 @@ def run_service_in_subprocess(
             for resumable runs, the ``_gepa_log_dir`` path the worker owns.
         artifact_id: ID used to attach progress and logs to the right job.
         event_queue: Shared multiprocessing queue back to the parent.
-        start_method: The active multiprocessing start method (e.g. ``"fork"``).
     """
     payload_dict = dict(payload_dict)
     stable_job_id = payload_dict.pop("_job_id", artifact_id)

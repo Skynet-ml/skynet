@@ -10,11 +10,9 @@ genealogy tree, so the tests live in the unit suite.
 from __future__ import annotations
 
 import dataclasses
-import json
 import pickle
 import tempfile
 from pathlib import Path
-from typing import Any
 
 import cloudpickle
 import dspy
@@ -24,22 +22,14 @@ from gepa.proposer.reflective_mutation.reflective_mutation import (
     ReflectiveMutationProposer,
 )
 
-from core.constants import (
-    PROGRESS_CANDIDATE,
-    PROGRESS_MINIBATCH,
-    PROGRESS_VALSET_OUTPUTS,
-)
+from core.constants import PROGRESS_CANDIDATE
 from core.service_gateway.optimization.trajectory import (
     GEPA_STATE_FILENAME,
-    MINIBATCH_FEEDBACK_CHAR_CAP,
-    MINIBATCH_PREDICTION_CHAR_CAP,
     CandidateEvent,
-    MinibatchRecorder,
     RejectedEvent,
     TrajectoryWatcher,
     _current_proposal_iteration,
     _load_state,
-    _normalize_prediction,
     capture_proposal_prompts,
     current_proposal_iteration,
     extract_candidates_from_state,
@@ -341,195 +331,6 @@ class TestTrajectoryWatchNoop:
             pass
 
 
-class TestMinibatchRecorder:
-    """Composition wrapper that turns metric calls with feedback into SSE events."""
-
-    def test_passes_through_numeric_metric_without_emitting_minibatch(self) -> None:
-        """Bare-float returns mean a non-feedback eval; no minibatch event fires."""
-        events: list[tuple[str, dict]] = []
-        ex = dspy.Example(q="a").with_inputs("q")
-        recorder = MinibatchRecorder(
-            lambda *_, **__: 0.75,
-            [ex],
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        result = recorder(ex, dspy.Prediction(answer="x"))
-        assert result == 0.75
-        assert not any(e == PROGRESS_MINIBATCH for e, _ in events)
-
-    def test_emits_when_metric_returns_prediction_with_feedback(self) -> None:
-        """Prediction-shaped returns with ``feedback`` text fire one event each."""
-        events: list[tuple[str, dict]] = []
-        ex = dspy.Example(q="a").with_inputs("q")
-        recorder = MinibatchRecorder(
-            lambda *_, **__: dspy.Prediction(score=0.4, feedback="needs more context"),
-            [ex],
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        recorder(ex, dspy.Prediction(answer="x"))
-        minibatch_events = [m for e, m in events if e == PROGRESS_MINIBATCH]
-        assert len(minibatch_events) == 1
-        metrics = minibatch_events[0]
-        assert metrics["example_id"] == "0"
-        assert metrics["score"] == 0.4
-        assert metrics["feedback"] == "needs more context"
-        assert "prediction" in metrics
-        assert metrics["iteration"] is None
-
-    def test_iteration_is_carried_from_contextvar_when_set(self) -> None:
-        """A propose()-scoped iteration leaks onto feedback events via contextvar."""
-        events: list[tuple[str, dict]] = []
-        ex = dspy.Example(q="a").with_inputs("q")
-        recorder = MinibatchRecorder(
-            lambda *_, **__: dspy.Prediction(score=0.5, feedback="reflect"),
-            [ex],
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        token = _current_proposal_iteration.set(7)
-        try:
-            recorder(ex, dspy.Prediction(answer="x"))
-        finally:
-            _current_proposal_iteration.reset(token)
-        minibatch_events = [m for e, m in events if e == PROGRESS_MINIBATCH]
-        assert minibatch_events[0]["iteration"] == 7
-
-    def test_returns_underlying_metric_value_unchanged(self) -> None:
-        """Wrapper is transparent — the optimizer sees exactly what the metric returned."""
-        ex = dspy.Example(q="a").with_inputs("q")
-        pred_obj = dspy.Prediction(score=0.9, feedback="nice")
-        recorder = MinibatchRecorder(
-            lambda *_, **__: pred_obj,
-            [ex],
-            lambda *_: None,
-        )
-        assert recorder(ex, dspy.Prediction(answer="x")) is pred_obj
-
-    def test_example_id_falls_back_when_identity_unknown(self) -> None:
-        """Unknown example identities surface as ``"?"`` rather than raising."""
-        events: list[tuple[str, dict]] = []
-        ex_registered = dspy.Example(q="a").with_inputs("q")
-        ex_unknown = dspy.Example(q="b").with_inputs("q")
-        recorder = MinibatchRecorder(
-            lambda *_, **__: dspy.Prediction(score=0.0, feedback="missed"),
-            [ex_registered],
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        recorder(ex_unknown, dspy.Prediction(answer="?"))
-        assert events[0][1]["example_id"] == "?"
-
-    def test_feedback_is_truncated_to_cap(self) -> None:
-        """Oversized feedback is capped so SSE payloads stay bounded."""
-        events: list[tuple[str, dict]] = []
-        ex = dspy.Example(q="a").with_inputs("q")
-        big = "x" * (MINIBATCH_FEEDBACK_CHAR_CAP + 50)
-        recorder = MinibatchRecorder(
-            lambda *_, **__: dspy.Prediction(score=0.0, feedback=big),
-            [ex],
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        recorder(ex, dspy.Prediction(answer="x"))
-        assert len(events[0][1]["feedback"]) == MINIBATCH_FEEDBACK_CHAR_CAP
-
-    def test_prediction_is_structured_field_map_with_per_field_cap(self) -> None:
-        """A Prediction reaches the wire as a field→value map (so the drawer renders
-        it structurally), with each leaf string capped rather than the whole repr."""
-        events: list[tuple[str, dict]] = []
-        ex = dspy.Example(q="a").with_inputs("q")
-        recorder = MinibatchRecorder(
-            lambda *_, **__: dspy.Prediction(score=0.0, feedback="short"),
-            [ex],
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        recorder(ex, dspy.Prediction(answer="y" * (MINIBATCH_PREDICTION_CHAR_CAP + 200)))
-        prediction = events[0][1]["prediction"]
-        assert isinstance(prediction, dict)
-        assert set(prediction) == {"answer"}
-        assert len(prediction["answer"]) == MINIBATCH_PREDICTION_CHAR_CAP + 1
-        assert prediction["answer"].endswith("…")
-
-    def test_callback_exception_does_not_break_metric_call(self) -> None:
-        """A raising progress callback never aborts the optimizer's metric call."""
-        ex = dspy.Example(q="a").with_inputs("q")
-
-        def raising(event: str, metrics: dict) -> None:
-            """Progress callback that always raises to test that the metric still returns."""
-            raise RuntimeError("downstream broke")
-
-        recorder = MinibatchRecorder(
-            lambda *_, **__: dspy.Prediction(score=1.0, feedback="ok"),
-            [ex],
-            raising,
-        )
-        result = recorder(ex, dspy.Prediction(answer="x"))
-        assert result.score == 1.0
-
-    def test_forwards_extra_args_and_kwargs_to_metric(self) -> None:
-        """GEPA passes ``trace``/``pred_name``/``pred_trace`` — they must reach the metric."""
-        seen: dict[str, Any] = {}
-        ex = dspy.Example(q="a").with_inputs("q")
-
-        def metric(example: Any, prediction: Any, *args: Any, **kwargs: Any) -> float:
-            """Stand-in metric that records the extra args/kwargs the recorder forwards."""
-            seen["args"] = args
-            seen["kwargs"] = kwargs
-            return 0.5
-
-        recorder = MinibatchRecorder(metric, [ex], lambda *_: None)
-        recorder(ex, dspy.Prediction(answer="x"), "trace-obj", pred_name="qa")
-        assert seen["args"] == ("trace-obj",)
-        assert seen["kwargs"] == {"pred_name": "qa"}
-
-    def test_full_valset_sweep_emits_one_outputs_event_with_indices(self) -> None:
-        """Once the buffer covers every valset id the recorder flushes a snapshot."""
-        events: list[tuple[str, dict]] = []
-        examples = [dspy.Example(q=str(i)).with_inputs("q") for i in range(3)]
-        recorder = MinibatchRecorder(
-            lambda ex, _pred, *_, **__: 0.5,
-            examples,
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        for idx, ex in enumerate(examples):
-            recorder(ex, dspy.Prediction(answer=f"a{idx}"))
-
-        outputs_events = [m for e, m in events if e == PROGRESS_VALSET_OUTPUTS]
-        assert len(outputs_events) == 1
-        assert outputs_events[0]["candidate_index"] == 0
-        predictions = outputs_events[0]["predictions"]
-        assert [p["example_id"] for p in predictions] == ["0", "1", "2"]
-        assert all(p["score"] == 0.5 for p in predictions)
-
-    def test_consecutive_sweeps_increment_candidate_index(self) -> None:
-        """Successive full passes attribute to candidate 0, 1, 2, … in order."""
-        events: list[tuple[str, dict]] = []
-        examples = [dspy.Example(q=str(i)).with_inputs("q") for i in range(2)]
-        recorder = MinibatchRecorder(
-            lambda *_, **__: 0.0,
-            examples,
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        for _ in range(3):
-            for idx, ex in enumerate(examples):
-                recorder(ex, dspy.Prediction(answer=f"a{idx}"))
-
-        outputs_events = [m for e, m in events if e == PROGRESS_VALSET_OUTPUTS]
-        assert [m["candidate_index"] for m in outputs_events] == [0, 1, 2]
-
-    def test_partial_minibatch_calls_do_not_emit_outputs_event(self) -> None:
-        """A subset that never covers every id can't flush a sweep."""
-        events: list[tuple[str, dict]] = []
-        examples = [dspy.Example(q=str(i)).with_inputs("q") for i in range(3)]
-        recorder = MinibatchRecorder(
-            lambda *_, **__: dspy.Prediction(score=0.1, feedback="hint"),
-            examples,
-            lambda event, metrics: events.append((event, metrics)),
-        )
-        recorder(examples[0], dspy.Prediction(answer="a"))
-        recorder(examples[1], dspy.Prediction(answer="b"))
-
-        assert not any(e == PROGRESS_VALSET_OUTPUTS for e, _ in events)
-        assert sum(1 for e, _ in events if e == PROGRESS_MINIBATCH) == 2
-
-
 class TestCaptureProposalPrompts:
     """The propose() wrapper writes prompt snapshots onto the latest trace entry."""
 
@@ -640,42 +441,6 @@ class TestCaptureProposalPrompts:
 
         assert seen == [4, 4]
         assert current_proposal_iteration() is None
-
-
-class TestNormalizePrediction:
-    """``_normalize_prediction`` serializes candidate outputs for the drawer.
-
-    The drawer renders an object prediction the same way it renders the expected
-    answer (a field→value map); these pin that contract so the candidate stops
-    arriving as a Python repr the frontend can't parse once it's truncated.
-    """
-
-    def test_react_prediction_becomes_field_map_with_json_nested_field(self) -> None:
-        """A react Prediction flattens to ``{field: value}``: scalar fields stay
-        plain strings, nested ``history`` becomes a JSON string the drawer trees."""
-        pred = dspy.Prediction(
-            assistant_message="hello",
-            history=dspy.History(
-                messages=[{"role": "user", "content": "Hi"}],
-            ),
-        )
-        out = _normalize_prediction(pred)
-        assert isinstance(out, dict)
-        assert out["assistant_message"] == "hello"
-        parsed = json.loads(out["history"])
-        assert parsed["messages"][0]["content"] == "Hi"
-
-    def test_non_prediction_input_falls_back_to_capped_string(self) -> None:
-        """A non-Prediction, non-dict input degrades to a single capped string."""
-        assert _normalize_prediction("plain") == "plain"
-
-    def test_oversized_leaf_string_is_capped_per_field(self) -> None:
-        """Each leaf string is capped independently, keeping the field map valid."""
-        pred = dspy.Prediction(answer="z" * (MINIBATCH_PREDICTION_CHAR_CAP + 50))
-        out = _normalize_prediction(pred)
-        assert isinstance(out, dict)
-        assert len(out["answer"]) == MINIBATCH_PREDICTION_CHAR_CAP + 1
-        assert out["answer"].endswith("…")
 
 
 class TestResumeBaseline:

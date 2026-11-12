@@ -6,17 +6,17 @@
  * updating it fails at type-check, so a status cannot silently belong to
  * neither set. `ACTIVE_STATUSES` and `TERMINAL_STATUSES` are derived from it.
  *
- * `STATUS_LABELS` and `JOB_TYPE_LABELS` are locale-lazy (`perLocale`) i18n
- * lookups pulling from `@/shared/lib/terms` (the glossary catalogue).
+ * `STATUS_LABELS` is a locale-lazy (`perLocale`) i18n lookup pulling from
+ * `@/shared/lib/terms` (the glossary catalogue).
  *
- * `getStatusLabel` and `getJobTypeLabel` deliberately accept `string` — see
- * their JSDoc for the fallback contract.
+ * `getStatusLabel` deliberately accepts `string` — see its JSDoc for the
+ * fallback contract.
  */
 
 import { perLocale } from "@/shared/lib/per-locale";
 import { msg } from "@/shared/lib/messages";
 import { TERMS } from "@/shared/lib/terms";
-import type { JobStatus, OptimizationType } from "@/shared/types/api";
+import type { JobStatus } from "@/shared/types/api";
 
 type StatusLifecycle = "active" | "terminal";
 
@@ -70,10 +70,6 @@ const STATUS_LABELS: Record<JobStatus, string> = perLocale(() => ({
   stopped: msg("optimization.budget_reached.title"),
 }));
 
-const JOB_TYPE_LABELS: Record<OptimizationType, string> = perLocale(() => ({
-  blackbox: TERMS.optimizationTypeBlackbox,
-}));
-
 /**
  * Resolve a Hebrew display label for a status string.
  *
@@ -86,24 +82,10 @@ export function getStatusLabel(status: string): string {
   return isJobStatus(status) ? STATUS_LABELS[status] : status;
 }
 
-/**
- * Resolve a Hebrew display label for a job-type string.
- *
- * Same fallback contract as `getStatusLabel` — unknown values pass through
- * unchanged.
- */
-export function getJobTypeLabel(type: string): string {
-  return isOptimizationType(type) ? JOB_TYPE_LABELS[type] : type;
-}
-
 export function isActiveStatus(status: string): status is JobStatus {
   return isJobStatus(status) && ACTIVE_STATUSES.has(status);
 }
 
 function isJobStatus(status: string): status is JobStatus {
   return Object.prototype.hasOwnProperty.call(STATUS_LABELS, status);
-}
-
-function isOptimizationType(type: string): type is OptimizationType {
-  return Object.prototype.hasOwnProperty.call(JOB_TYPE_LABELS, type);
 }

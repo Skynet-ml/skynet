@@ -182,7 +182,7 @@ def main() -> None:
                 result = _run_preflight(document["payload"], preflight, events)
                 events.put({"type": "preflight_result", "result": result})
             else:
-                run_service_in_subprocess(document["payload"], document["artifact_id"], events, "spawn")
+                run_service_in_subprocess(document["payload"], document["artifact_id"], events)
     except BudgetReached as error:
         events.put({"type": "error", "error": str(error), "code": "budget_reached", "traceback": ""})
     except Exception as error:

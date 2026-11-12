@@ -53,7 +53,6 @@ from core.billing.protected_credentials import (
 from core.billing.runtime import BudgetRuntime, OperationCompletedError, UsagePendingError
 from core.billing.usage_tags import (
     CALLER_PROPOSER,
-    KIND_EMBEDDING,
     USAGE_TAGS_HEADER,
     encode_tags,
     usage_scope,
@@ -1768,7 +1767,7 @@ def test_shinka_novelty_adds_a_billed_embeddings_route(gateway: ModelGateway, no
     assert "provider-secret" not in json.dumps(protected)
     forward = model_forwarder(protected)
     body = {"model": SHINKA_EMBEDDING_MODEL, "input": ["def f(): pass"]}
-    tags = {USAGE_TAGS_HEADER: encode_tags({"caller": CALLER_PROPOSER, "kind": KIND_EMBEDDING})}
+    tags = {USAGE_TAGS_HEADER: encode_tags({"caller": CALLER_PROPOSER, "kind": "embedding"})}
     with pytest.raises(ValueError, match="unknown metered model capability"):
         forward(route["token"], "/v1/embeddings", body, {})
     with pytest.raises(ValueError, match="unknown metered model capability"):
@@ -1798,7 +1797,7 @@ def test_shinka_novelty_adds_a_billed_embeddings_route(gateway: ModelGateway, no
         [evidence] = session.scalars(select(ExecutionUsageEvidenceModel)).all()
     assert operation.state == "settled"
     assert operation.role == "optimization"
-    assert evidence.evidence["tags"] == {"caller": CALLER_PROPOSER, "kind": KIND_EMBEDDING}
+    assert evidence.evidence["tags"] == {"caller": CALLER_PROPOSER, "kind": "embedding"}
 
 
 def test_readiness_probes_skip_the_novelty_embeddings_route(gateway: ModelGateway) -> None:

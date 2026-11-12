@@ -379,8 +379,6 @@ class I18nKey(StrEnum):
     SUBMIT_PREFLIGHT_USAGE_STILL_PENDING = 'submit.preflight.usage_still_pending'
     SUBMIT_UNIFIED_CONTRACT_BUDGET = 'submit.unified.contract_budget'
     SUBMIT_UNIFIED_OPTIMIZER_NOT_ALLOWED = 'submit.unified.optimizer_not_allowed'
-    SUBMIT_UNIFIED_PAIRS_NEED_CASES = 'submit.unified.pairs_need_cases'
-    SUBMIT_UNIFIED_SINGLE_NEEDS_ONE_CASE = 'submit.unified.single_needs_one_case'
     SYNC_BUNDLE_TOO_LARGE = 'sync.bundle_too_large'
     SYNC_EXPORT_NOT_FINISHED = 'sync.export_not_finished'
     SYNC_IMPORT_LOCAL_ONLY_DISABLED = 'sync.import_local_only_disabled'

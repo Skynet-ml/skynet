@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from core.models.common import ColumnMapping, OptimizationStatus, SplitFractions
+from core.models.common import ColumnMapping, OptimizationStatus
 from core.models.optimizations import (
     BulkCancelRequest,
     BulkCancelResponse,
@@ -149,16 +149,6 @@ def test_optimization_summary_response_metric_fields_default_none() -> None:
     assert resp.metric_improvement is None
     assert resp.progress_count == 0
     assert resp.log_count == 0
-
-
-def test_optimization_summary_response_persists_split_fractions() -> None:
-    """Verify OptimizationSummaryResponse persists nested SplitFractions."""
-    payload = _required_base_fields()
-    payload["split_fractions"] = SplitFractions()
-    resp = OptimizationSummaryResponse.model_validate(payload)
-
-    assert resp.split_fractions is not None
-    assert resp.split_fractions.train == pytest.approx(0.7)
 
 
 def test_paginated_jobs_response_defaults() -> None:

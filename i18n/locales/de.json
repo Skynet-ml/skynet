@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "Der nächste Vorgang braucht bis zu {needed}, aber die Sandboxes dieser Prüfung belegen {held} der verbleibenden {remaining}.",
     "submit.preflight.contract_budget_missing": "Wähle ein Ausgabenbudget, bevor du die Code-Prüfung startest.",
     "submit.unified.optimizer_not_allowed": "Der Optimierer „{optimizer}“ passt nicht zu dieser Einrichtung. Wählen Sie einen von: {allowed}.",
-    "submit.unified.pairs_need_cases": "Ein Lauf mit Eingabe-/Ausgabe-Paaren braucht mindestens zwei Paare oder einen hochgeladenen Datensatz.",
-    "submit.unified.single_needs_one_case": "Ein Lauf mit einer einzelnen Eingabe braucht genau eine Eingabe.",
     "accounts.identity_in_use": "Dieses Konto meldet sich bereits bei einem anderen {term.appName}-Konto an.",
     "accounts.identity_not_found": "Dieses Konto ist nicht verknüpft.",
     "accounts.last_sign_in_method": "Das ist deine einzige Anmeldemethode. Füge zuerst ein Passwort oder einen Passkey hinzu.",

@@ -122,7 +122,6 @@ class ServeInfoResponse(BaseModel):
     input_fields: list[str]
     output_fields: list[str]
     instructions: str | None = None
-    demo_count: int = 0
     sample_inputs: dict[str, str] = Field(default_factory=dict)
     serving_enabled: bool = False
     endpoint_url: str | None = None

@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "अगले ऑपरेशन को {needed} तक चाहिए, लेकिन इस जाँच के सैंडबॉक्स बचे हुए {remaining} में से {held} रोके हुए हैं।",
     "submit.preflight.contract_budget_missing": "कोड जाँच चलाने से पहले एक खर्च बजट चुनें।",
     "submit.unified.optimizer_not_allowed": "ऑप्टिमाइज़र '{optimizer}' इस सेटअप के अनुकूल नहीं है। इनमें से एक चुनें: {allowed}।",
-    "submit.unified.pairs_need_cases": "इनपुट/आउटपुट जोड़ियों वाले रन को कम से कम दो जोड़ियाँ या एक अपलोड किया गया डेटासेट चाहिए।",
-    "submit.unified.single_needs_one_case": "एकल इनपुट वाले रन को ठीक एक इनपुट चाहिए।",
     "accounts.identity_in_use": "यह खाता पहले से किसी दूसरे {term.appName} खाते में साइन इन करता है।",
     "accounts.identity_not_found": "यह खाता जुड़ा हुआ नहीं है।",
     "accounts.last_sign_in_method": "साइन इन करने का यही आपका एकमात्र तरीका है। पहले पासवर्ड या पासकी जोड़ें।",

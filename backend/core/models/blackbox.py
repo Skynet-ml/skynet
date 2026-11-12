@@ -648,30 +648,6 @@ class BlackboxRunRequest(BaseModel):
             raise ValueError("A repository target runs Auto or one repository engine.")
 
 
-# ``POST /blackbox/scorer/dry-run``: score one version on one case before
-# submitting, so a broken scorer fails in the wizard rather than in the job.
-class ScorerDryRunRequest(BaseModel):
-    scorer: BlackboxScorer
-    candidate: BlackboxCandidate
-    case: dict[str, Any] | None = None
-    execution_budget_id: str | None = Field(default=None, min_length=1, max_length=64)
-    execution_budget_revision: int | None = Field(default=None, ge=1)
-
-
-class ScorerDryRunResponse(BaseModel):
-    ok: bool
-    score: float | None = None
-    side_info: dict[str, Any] = Field(default_factory=dict)
-    error: str | None = None
-    elapsed_ms: float
-    usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
-    # What this one check debited, so the wizard can show setup spend against the total budget.
-    cents_charged: int = 0
-    budget: dict[str, Any] | None = None
-    preview_status: Literal["succeeded", "failed", "pending"] | None = None
-    preflight_id: str | None = None
-
-
 # One engine lane of a run. ``explore`` lanes share the budget; the
 # ``continue`` lane resumes from the best explore result.
 class BlackboxLaneResult(BaseModel):
@@ -769,7 +745,6 @@ class BlackboxRunResponse(BaseModel):
     candidate_tree: list[BlackboxCandidateNode] = Field(default_factory=list)
     total_scorer_runs: int = 0
     runtime_seconds: float
-    num_lm_calls: int = 0
     total_tokens: int | None = None
     usage_by_model: list[ModelTokenUsage] = Field(default_factory=list)
     # Reflection-LM timing on the shared LMActivity shape, so the run view

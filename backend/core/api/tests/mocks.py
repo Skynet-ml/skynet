@@ -156,10 +156,6 @@ class _BaseFakeJobStore:
                 session.execute(delete(RunCandidateModel).where(RunCandidateModel.optimization_id == optimization_id))
                 session.commit()
 
-    def record_run_call(self, optimization_id: str, call: dict, secrets: list[str]) -> int:
-        """Write one relay call through the real store; see :meth:`PostgresRunCallStore.record_call`."""
-        return self._run_call_store().record_call(optimization_id, call, secrets)
-
     def list_run_calls(
         self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
     ) -> list[dict]:
@@ -225,20 +221,9 @@ class _BaseFakeJobStore:
             stored_bytes=len(row["data"]),
         )
 
-    def list_gepa_checkpoints(self, optimization_id: str):
-        """Return every stored checkpoint record for a job."""
-        return [
-            self.get_gepa_checkpoint(optimization_id, pair_index)
-            for pair_index in self._checkpoints.get(optimization_id, {})
-        ]
-
     def delete_gepa_checkpoint(self, optimization_id: str, pair_index: int = -1) -> None:
         """Drop one run/pair's in-memory checkpoint."""
         self._checkpoints.get(optimization_id, {}).pop(pair_index, None)
-
-    def delete_all_gepa_checkpoints(self, optimization_id: str) -> None:
-        """Drop every checkpoint for a job."""
-        self._checkpoints.pop(optimization_id, None)
 
     def has_gepa_checkpoint(self, optimization_id: str) -> bool:
         """Return whether any checkpoint exists for the job (single run or any pair)."""

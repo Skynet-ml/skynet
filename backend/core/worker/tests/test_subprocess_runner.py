@@ -255,7 +255,7 @@ def test_run_service_in_subprocess_happy_path_emits_result_event() -> None:
     q: queue.Queue[dict] = queue.Queue()
 
     with _patch_run(return_value=_blackbox_result({"best_score": 0.8})):
-        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-1", q, "spawn")
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-1", q)
 
     events = _drain_queue(q)
     result_events = [e for e in events if e.get("type") == EVENT_RESULT]
@@ -268,7 +268,7 @@ def test_run_service_in_subprocess_exception_emits_error_event() -> None:
     q: queue.Queue[dict] = queue.Queue()
 
     with _patch_run(side_effect=RuntimeError("model exploded")):
-        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-3", q, "spawn")
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-3", q)
 
     events = _drain_queue(q)
     error_events = [e for e in events if e.get("type") == EVENT_ERROR]
@@ -284,7 +284,7 @@ def test_run_service_in_subprocess_classifies_trusted_transport_interruption() -
     q: queue.Queue[dict] = queue.Queue()
 
     with _patch_run(side_effect=InfrastructureInterruptionError("provider stream ended")):
-        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-transient", q, "spawn")
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-transient", q)
 
     [event] = [value for value in _drain_queue(q) if value.get("type") == EVENT_ERROR]
     assert event["failure_kind"] == INFRASTRUCTURE_INTERRUPTION
@@ -301,7 +301,7 @@ def test_run_service_in_subprocess_rejects_a_retired_job_kind(optimization_type:
     q: queue.Queue[dict] = queue.Queue()
 
     with _patch_run() as run_bb:
-        run_service_in_subprocess({**_BLACKBOX_PAYLOAD, "_optimization_type": optimization_type}, "art-5", q, "spawn")
+        run_service_in_subprocess({**_BLACKBOX_PAYLOAD, "_optimization_type": optimization_type}, "art-5", q)
 
     run_bb.assert_not_called()
     [event] = [value for value in _drain_queue(q) if value.get("type") == EVENT_ERROR]
@@ -315,7 +315,7 @@ def test_run_service_in_subprocess_blackbox_type_calls_run_blackbox_optimization
     fake_result.model_dump.return_value = {"best_candidate": "aeiou", "optimized_test_metric": 1.0}
 
     with patch("core.worker.subprocess_runner.run_blackbox_optimization", return_value=fake_result) as run_bb:
-        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-9", q, "spawn")
+        run_service_in_subprocess(dict(_BLACKBOX_PAYLOAD), "art-9", q)
 
     run_bb.assert_called_once()
     payload_arg = run_bb.call_args.args[0]
@@ -356,7 +356,7 @@ def test_run_service_in_subprocess_blackbox_progress_is_forwarded() -> None:
         return fake_result
 
     with patch("core.worker.subprocess_runner.run_blackbox_optimization", side_effect=_fake_run):
-        run_service_in_subprocess({**_BLACKBOX_PAYLOAD, "_skynet_evaluator_route": relay}, "art-10", q, "spawn")
+        run_service_in_subprocess({**_BLACKBOX_PAYLOAD, "_skynet_evaluator_route": relay}, "art-10", q)
 
     events = _drain_queue(q)
     progress_events = [e for e in events if e.get("type") == EVENT_PROGRESS]

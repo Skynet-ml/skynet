@@ -37,8 +37,6 @@ from .blackbox import (
     BlackboxRunResponse,
     BlackboxScorer,
     BlackboxStrategy,
-    ScorerDryRunRequest,
-    ScorerDryRunResponse,
 )
 from .common import (
     BulkDeleteByIdsRequest,
@@ -98,7 +96,6 @@ from .unified import (
     UnifiedCase,
     UnifiedModels,
     UnifiedSplitCounts,
-    UnifiedWorkspace,
     optimizer_family,
     optimizers_for,
 )
@@ -190,8 +187,6 @@ __all__ = [
     "ProgressEvent",
     "QueueStatusResponse",
     "ReactOverlay",
-    "ScorerDryRunRequest",
-    "ScorerDryRunResponse",
     "ServeInfoResponse",
     "ServeRequest",
     "ServeResponse",
@@ -203,7 +198,6 @@ __all__ = [
     "UnifiedCase",
     "UnifiedModels",
     "UnifiedSplitCounts",
-    "UnifiedWorkspace",
     "ValidateCodeRequest",
     "ValidateCodeResponse",
     "ValidateDatasetRequest",

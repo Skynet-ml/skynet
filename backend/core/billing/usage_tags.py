@@ -30,9 +30,6 @@ CALLER_PROPOSER = "proposer"
 CALLER_REFLECTION = "reflection"
 # ``kind`` values: what an engine that makes several sorts of model calls used one for.
 KIND_MUTATION = "mutation"
-KIND_META_NOTES = "meta_notes"
-KIND_NOVELTY_JUDGE = "novelty_judge"
-KIND_EMBEDDING = "embedding"
 # ``lane`` names the Auto lane (``<phase>-<engine>``) a call ran in. Unlike the
 # other keys it follows the call into threads started inside the lane, because
 # engines score and reflect on their own pools where the lane's context is gone.
@@ -161,35 +158,6 @@ def usage_scope(**tags: Any) -> Iterator[None]:
         yield
     finally:
         _scope.reset(token)
-
-
-class TagsToken:
-    """Undo one :func:`usage_tags_token` from the context that opened it."""
-
-    def __init__(self, token: contextvars.Token[dict[str, str] | None]) -> None:
-        """Hold the context variable token to restore.
-
-        Args:
-            token: Token returned when the tags were set.
-        """
-        self._token = token
-
-    def reset(self) -> None:
-        """Restore the outer tags; a no-op when called from another context."""
-        with contextlib.suppress(ValueError):
-            _scope.reset(self._token)
-
-
-def usage_tags_token(**tags: Any) -> TagsToken:
-    """Open a tag scope that a callback closes later, unlike :func:`usage_scope`.
-
-    Args:
-        **tags: Tags to add; ``None`` keeps the outer value.
-
-    Returns:
-        A token whose ``reset`` restores the outer tags.
-    """
-    return TagsToken(_scope.set({**current_tags(), **clean_tags(tags)}))
 
 
 def with_tags_header(headers: Mapping[str, str] | None, tags: Mapping[str, Any]) -> dict[str, str]:

@@ -17,10 +17,6 @@ export type OptimizationType = "blackbox";
 // accepting any backend-future level without a TS error.
 type LogLevel = "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL";
 
-// Same brand pattern: documented values plus an escape hatch for any
-// backend-future kind (`backend/core/models/dataset.py:42`).
-type ProfileKind = "categorical" | "numeric" | "freeform";
-
 export interface ModelConfig {
   name: string;
   /** Billing/auth source for this model only. Older saved configs default to managed. */
@@ -44,7 +40,7 @@ export interface ModelConfig {
   economy_mode?: boolean;
 }
 
-export interface ColumnMapping {
+interface ColumnMapping {
   inputs: Record<string, string>;
   outputs: Record<string, string>;
 }
@@ -71,7 +67,7 @@ interface WorkflowNodePosition {
   y: number;
 }
 
-export interface WorkflowFieldSpec {
+interface WorkflowFieldSpec {
   name: string;
   // Python type expression ("str", "list[str]", ...). Opaque server-side;
   // the canvas uses it for port coloring.
@@ -95,7 +91,7 @@ interface WorkflowOutputNodeSpec extends WorkflowNodeSpecBase {
   fields: WorkflowFieldSpec[];
 }
 
-export interface WorkflowSignatureNodeSpec extends WorkflowNodeSpecBase {
+interface WorkflowSignatureNodeSpec extends WorkflowNodeSpecBase {
   kind: "signature";
   module_name: "predict" | "cot" | "react" | "flex";
   signature_code: string;
@@ -108,7 +104,7 @@ export interface WorkflowSignatureNodeSpec extends WorkflowNodeSpecBase {
   tool_filter?: string[] | null;
 }
 
-export interface WorkflowTransformNodeSpec extends WorkflowNodeSpecBase {
+interface WorkflowTransformNodeSpec extends WorkflowNodeSpecBase {
   kind: "transform";
   transform_code: string;
   input_fields: WorkflowFieldSpec[];
@@ -122,14 +118,14 @@ interface WorkflowMcpNodeSpec extends WorkflowNodeSpecBase {
   output_field: WorkflowFieldSpec;
 }
 
-export type WorkflowNodeSpec =
+type WorkflowNodeSpec =
   | WorkflowInputNodeSpec
   | WorkflowOutputNodeSpec
   | WorkflowSignatureNodeSpec
   | WorkflowTransformNodeSpec
   | WorkflowMcpNodeSpec;
 
-export interface WorkflowEdgeSpec {
+interface WorkflowEdgeSpec {
   source: string;
   source_port: string;
   target: string;
@@ -139,16 +135,6 @@ export interface WorkflowEdgeSpec {
 export interface WorkflowSpec {
   nodes: WorkflowNodeSpec[];
   edges: WorkflowEdgeSpec[];
-}
-
-export type ExecutionRuntime = "vercel";
-
-export interface RuntimeCostProfile {
-  billing_basis: "at_cost" | "included_in_model_markup";
-  minimum_session_cents: string | null;
-  maximum_session_cents: string | null;
-  maximum_lifetime_seconds: number | null;
-  vcpus: number | null;
 }
 
 export interface OptimizationSubmissionResponse {
@@ -244,11 +230,7 @@ export interface OptimizationSummaryResponse {
   task_model_name?: string | null;
   generation_models?: ModelConfig[];
   reflection_models?: ModelConfig[];
-  split_fractions?: SplitFractions;
-  shuffle?: boolean;
   seed?: number | null;
-  optimizer_kwargs?: Record<string, unknown>;
-  compile_kwargs?: Record<string, unknown>;
   progress_count?: number | null;
   log_count?: number | null;
   baseline_test_metric?: number | null;
@@ -267,7 +249,7 @@ export interface PaginatedJobsResponse {
 }
 
 /** Where a run-log line came from; sandbox sources are attributed by the host. */
-export type LogSource = "host" | "engine" | "proposer" | "scorer" | "sandbox";
+type LogSource = "host" | "engine" | "proposer" | "scorer" | "sandbox";
 
 export interface OptimizationLogEntry {
   /** Row id: the live stream's resume cursor. Absent on demo data. */
@@ -290,12 +272,12 @@ export interface ProgressEvent {
   metrics: Record<string, unknown>;
 }
 
-export interface LMStageStats {
+interface LMStageStats {
   calls: number;
   avg_response_time_ms?: number | null;
 }
 
-export interface LMActivity {
+interface LMActivity {
   generation: Record<string, LMStageStats>;
   reflection: Record<string, LMStageStats>;
 }
@@ -353,9 +335,9 @@ export type BlackboxHarness =
   | "kimi_code"
   | "code_puppy"
   | "custom";
-export type BlackboxProposerRuntime = "vercel";
+type BlackboxProposerRuntime = "vercel";
 
-export interface ScorerDependencyLock {
+interface ScorerDependencyLock {
   code_sha256: string;
   requirements: string[];
   inferred: string[];
@@ -395,7 +377,7 @@ export interface BlackboxBudget {
 }
 
 /** One environment variable the repository scorer receives: typed in, or saved on the account. */
-export interface BlackboxRepoSecret {
+interface BlackboxRepoSecret {
   name: string;
   value?: string | null;
   saved_secret_id?: string | null;
@@ -404,7 +386,7 @@ export interface BlackboxRepoSecret {
 }
 
 /** A GitHub, GitLab or Bitbucket repository optimized as a whole; each version is a patch against `commit`. */
-export interface BlackboxRepoSource {
+interface BlackboxRepoSource {
   provider?: "github" | "gitlab" | "bitbucket";
   repository: string;
   branch?: string | null;
@@ -530,28 +512,10 @@ export interface BlackboxRunRequest {
   estimated_cents_high?: number | null;
 }
 
-export interface ScorerDryRunRequest {
-  scorer: BlackboxScorer;
-  candidate: BlackboxCandidate;
-  case?: Record<string, unknown> | null;
-}
-
 export interface ModelTokenUsage {
   model: string;
   input_tokens: number;
   output_tokens: number;
-}
-
-export interface ScorerDryRunResponse {
-  ok: boolean;
-  score?: number | null;
-  side_info: Record<string, unknown>;
-  error?: string | null;
-  elapsed_ms: number;
-  // Per-model token usage when the scorer called the injected `llm()` helper.
-  usage_by_model?: ModelTokenUsage[];
-  // Optional per-check attribution; the shared budget owns cumulative setup spending.
-  cents_charged?: number;
 }
 
 interface BlackboxLaneResult {
@@ -596,7 +560,7 @@ export interface BlackboxNamedScore {
 }
 
 /** One case of the final run: the starting version and the winner, scored afresh. */
-export interface BlackboxCaseResult {
+interface BlackboxCaseResult {
   index: number;
   baseline_score?: number | null;
   best_score?: number | null;
@@ -609,7 +573,7 @@ export interface BlackboxCaseResult {
 }
 
 /** One response's trusted observation: its time, model attempts and metered cost. */
-export interface BlackboxObservation {
+interface BlackboxObservation {
   timing?: { task_ms?: number | null; [key: string]: unknown } | null;
   cost?: {
     usd?: number | null;
@@ -660,7 +624,6 @@ export interface BlackboxRunResult {
   candidate_tree?: BlackboxCandidateNode[];
   total_scorer_runs: number;
   runtime_seconds: number;
-  num_lm_calls: number;
   total_tokens?: number | null;
   usage_by_model: Array<Record<string, unknown>>;
   /** Reflection-model stage timing; absent on runs recorded before it existed. */
@@ -694,40 +657,6 @@ export interface RepositoryFileResponse {
   /** Not in the pinned commit — normal for a file a version adds. */
   missing: boolean;
   size: number | null;
-}
-
-export interface BlackboxEngineInfo {
-  id: BlackboxEngineId;
-  label: string;
-  description: string;
-  available: boolean;
-  unavailable_reason?: string | null;
-  requires_agent_target: boolean;
-  supports_parts: boolean;
-  checkpoint_recovery_supported: boolean;
-  checkpoint_recovery_reason: string | null;
-}
-
-export interface BlackboxEngineCatalogResponse {
-  target_kind: "text" | "agent" | "repo";
-  sandbox_available: boolean;
-  sandbox_reason?: string | null;
-  engines: BlackboxEngineInfo[];
-  auto_engines: BlackboxEngineId[];
-  auto_available: boolean;
-  auto_unavailable_reason: string | null;
-  auto_checkpoint_recovery_supported: boolean;
-  auto_checkpoint_recovery_reason: string | null;
-  upstream_revision: string;
-  run_recovery_eligibility: string;
-  proposer_runtimes: Array<{
-    id: BlackboxProposerRuntime;
-    available: boolean;
-    unavailable_reason: string | null;
-    cost: RuntimeCostProfile;
-    checkpoint_restore_supported: boolean;
-    checkpoint_restore_reason: string | null;
-  }>;
 }
 
 /** One sandboxed agent run of a black-box optimization, with a transcript tail. */
@@ -772,24 +701,6 @@ export interface OptimizationStatusResponse extends OptimizationSummaryResponse 
   effective_role?: "viewer" | "editor" | "owner" | null;
 }
 
-export interface ValidateCodeResponse {
-  valid: boolean;
-  signature_fields?: { inputs: string[]; outputs: string[] };
-  errors: string[];
-  warnings: string[];
-}
-
-export interface ValidateDatasetRequest {
-  row_count: number;
-  fractions: SplitFractions;
-}
-
-export interface ValidateDatasetResponse {
-  valid: boolean;
-  errors: string[];
-  warnings: string[];
-}
-
 export interface QueueStatusResponse {
   pending_jobs: number;
   active_jobs: number;
@@ -812,7 +723,6 @@ export interface ServeInfoResponse {
   input_fields: string[];
   output_fields: string[];
   instructions?: string | null;
-  demo_count: number;
   /** Example input values (from a demo or the dataset) to prefill usage snippets. */
   sample_inputs?: Record<string, string>;
   /** Whether the run's owner turned serving on; serve calls refuse while it is off. */
@@ -907,29 +817,6 @@ export interface ModelCatalogResponse {
   models: CatalogModel[];
 }
 
-interface TargetColumnProfile {
-  name: string;
-  kind: ProfileKind | (string & {});
-  unique_values: number;
-  class_histogram: Record<string, number>;
-}
-
-type ColumnKind = "text" | "image";
-
-interface InputColumnProfile {
-  name: string;
-  kind: ColumnKind;
-}
-
-export interface DatasetProfile {
-  row_count: number;
-  column_count: number;
-  target: TargetColumnProfile | null;
-  targets: TargetColumnProfile[];
-  inputs: InputColumnProfile[];
-  duplicate_count: number;
-}
-
 export interface SplitPlan {
   fractions: SplitFractions;
   shuffle: boolean;
@@ -938,16 +825,4 @@ export interface SplitPlan {
   // Black-box engine the fractions were sized for; null/absent is the GEPA-tuned default.
   engine?: BlackboxEngineId | null;
   rationale: string[];
-}
-
-export interface ProfileDatasetRequest {
-  dataset: Array<Record<string, unknown>>;
-  column_mapping: ColumnMapping;
-  seed?: number | null;
-  engine?: BlackboxEngineId | null;
-}
-
-export interface ProfileDatasetResponse {
-  profile: DatasetProfile;
-  plan: SplitPlan;
 }

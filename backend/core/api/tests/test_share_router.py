@@ -265,7 +265,6 @@ def _serve_info_stub() -> ServeInfoResponse:
         input_fields=["question"],
         output_fields=["answer"],
         instructions="Be helpful.",
-        demo_count=0,
     )
 
 

@@ -135,7 +135,6 @@ function blackboxResult(
     ],
     total_scorer_runs: 48,
     runtime_seconds: 240,
-    num_lm_calls: 96,
     usage_by_model: [],
     optimization_metadata: {},
     details: {},

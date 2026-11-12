@@ -12,11 +12,7 @@ import pytest
 from core.exceptions import ServiceError
 from core.service_gateway import safe_exec
 from core.service_gateway.safe_exec import (
-    FunctionShape,
-    MetricProbeResult,
     SignatureIntrospection,
-    introspect_workspace_code,
-    probe_metric_on_sample,
     validate_scorer_code,
     validate_signature_code,
 )
@@ -35,26 +31,6 @@ class VisionQA(dspy.Signature):
     question: str = dspy.InputField()
     answer: str = dspy.OutputField()
 """
-
-_VALID_NUMERIC_METRIC = "def metric(example, prediction, trace=None):\n    return 1.0\n"
-
-_VALID_PREDICTION_METRIC = (
-    "import dspy\n"
-    "def metric(example, prediction, trace=None,"
-    " pred_name=None, pred_trace=None):\n"
-    "    return dspy.Prediction(score=0.5, feedback='ok')\n"
-)
-
-# Metric that asserts the picture cell really is a dspy.Image at metric time.
-# Returns 1.0 only when the runtime type is Image; on a string fallback the
-# isinstance check fails and the whole probe surfaces an error — exactly the
-# regression we want to catch.
-_IMAGE_AWARE_METRIC = (
-    "import dspy\n"
-    "def metric(example, prediction, trace=None):\n"
-    "    assert isinstance(example.picture, dspy.Image), type(example.picture)\n"
-    "    return 1.0\n"
-)
 
 
 class TestValidateSignatureCode:
@@ -94,112 +70,6 @@ class TestValidateSignatureCode:
         # a `while True` in module-level scope hangs the validator forever.
         with pytest.raises(ServiceError, match="timeout"):
             validate_signature_code("while True: pass", timeout_seconds=2.0)
-
-
-class TestProbeMetricOnSample:
-    """Tests for ``probe_metric_on_sample``."""
-
-    def test_numeric_return_is_reported(self) -> None:
-        """A numeric metric return is reported as ``result_kind='numeric'``."""
-        probe = probe_metric_on_sample(
-            metric_code=_VALID_NUMERIC_METRIC,
-            example_payload={"question": "q", "answer": "a"},
-            prediction_payload={"question": "q", "answer": "a"},
-            input_field_names=["question"],
-        )
-
-        assert isinstance(probe, MetricProbeResult)
-        assert probe.result_kind == "numeric"
-        assert probe.error is None
-        assert probe.result_type_name == "float"
-
-    def test_dspy_prediction_return_is_reported(self) -> None:
-        """A ``dspy.Prediction`` return is reported as ``result_kind='prediction'``."""
-        probe = probe_metric_on_sample(
-            metric_code=_VALID_PREDICTION_METRIC,
-            example_payload={"question": "q", "answer": "a"},
-            prediction_payload={"question": "q", "answer": "a"},
-            input_field_names=["question"],
-        )
-
-        assert probe.result_kind == "prediction"
-        assert probe.has_score_attr is True
-        assert probe.error is None
-
-    def test_metric_exception_is_caught(self) -> None:
-        """A user-raised exception inside the metric is caught and surfaced as ``error``."""
-        probe = probe_metric_on_sample(
-            metric_code=("def metric(example, prediction, trace=None):\n    raise RuntimeError('kaboom')\n"),
-            example_payload={"question": "q", "answer": "a"},
-            prediction_payload={"question": "q", "answer": "a"},
-            input_field_names=["question"],
-        )
-
-        assert probe.result_kind == "error"
-        assert probe.error is not None
-        assert "kaboom" in probe.error
-
-    def test_broken_metric_code_surfaces_as_service_error(self) -> None:
-        """A syntactically broken metric raises ``ServiceError`` from the probe entry-point."""
-        with pytest.raises(ServiceError, match="syntax error"):
-            probe_metric_on_sample(
-                metric_code="def !!!",
-                example_payload={"question": "q", "answer": "a"},
-                prediction_payload={"question": "q", "answer": "a"},
-                input_field_names=["question"],
-            )
-
-    def test_image_field_value_is_wrapped_into_dspy_image(self) -> None:
-        """Image input cells are wrapped into ``dspy.Image`` inside the probe subprocess."""
-        probe = probe_metric_on_sample(
-            metric_code=_IMAGE_AWARE_METRIC,
-            example_payload={
-                "picture": "https://example.com/cat.png",
-                "question": "what?",
-                "answer": "cat",
-            },
-            prediction_payload={"answer": "cat"},
-            input_field_names=["picture", "question"],
-            image_input_fields=["picture"],
-        )
-
-        # The metric's isinstance(example.picture, dspy.Image) assertion would
-        # fail with AssertionError if the wrap didn't happen — surfaced via
-        # ``probe.error``. A clean numeric return proves it did.
-        assert probe.error is None
-        assert probe.result_kind == "numeric"
-
-    def test_image_field_unwrapped_when_no_image_fields_declared(self) -> None:
-        """Without ``image_input_fields`` the cell stays a string and the assertion fails."""
-        # Without image_input_fields, the cell stays a plain string — the metric's
-        # isinstance(..., dspy.Image) assertion is expected to fail and surface via probe.error.
-        probe = probe_metric_on_sample(
-            metric_code=_IMAGE_AWARE_METRIC,
-            example_payload={
-                "picture": "https://example.com/cat.png",
-                "question": "what?",
-                "answer": "cat",
-            },
-            prediction_payload={"answer": "cat"},
-            input_field_names=["picture", "question"],
-            # image_input_fields not passed — defaults to None
-        )
-
-        assert probe.result_kind == "error"
-        assert probe.error is not None
-
-    def test_image_input_fields_none_is_equivalent_to_empty(self) -> None:
-        """Passing ``image_input_fields=None`` behaves the same as an empty list."""
-        probe = probe_metric_on_sample(
-            metric_code=_VALID_NUMERIC_METRIC,
-            example_payload={"question": "q", "answer": "a"},
-            prediction_payload={"question": "q", "answer": "a"},
-            input_field_names=["question"],
-            image_input_fields=None,
-        )
-
-        assert probe.result_kind == "numeric"
-        assert probe.error is None
 
 
 class TestBoundedCachePut:
@@ -266,47 +136,3 @@ class TestValidateScorerCode:
         code = "from skynet import llm, Image\n\ndef score(candidate, case=None):\n    return 1.0\n"
 
         assert validate_scorer_code(code) is None
-
-
-class TestIntrospectWorkspaceCode:
-    """Source-level description of unified workspace code, parsed in a child process."""
-
-    def test_reports_positional_arity(self) -> None:
-        """Defaults lower the required count; ``*args`` lifts the capacity."""
-        info = introspect_workspace_code(
-            "def run(artifact, input):\n    return 1\ndef metric(gold, pred, trace=None, *rest):\n    return 1\n"
-        )
-
-        assert info.syntax_error is None
-        assert info.functions["run"] == FunctionShape(capacity=2, required=2)
-        assert info.functions["metric"].required == 2
-        assert info.functions["metric"].capacity >= 5
-
-    def test_never_executes_the_code(self) -> None:
-        """A module-level crash or a missing import does not matter: nothing runs."""
-        info = introspect_workspace_code(
-            "import not_installed_anywhere\nraise SystemExit(3)\ndef run(a, i):\n    pass\n"
-        )
-
-        assert info.syntax_error is None
-        assert "run" in info.functions
-
-    def test_syntax_error_is_reported_as_data(self) -> None:
-        """Unparseable code comes back as ``"<Type>: <message>"``, not an exception."""
-        info = introspect_workspace_code("def !!!")
-
-        assert info.syntax_error is not None
-        assert info.syntax_error.startswith("SyntaxError: ")
-        assert info.functions == {}
-
-    def test_detects_llm_use(self) -> None:
-        """Both ``llm(...)`` and ``skynet.llm`` count as calling the model."""
-        assert introspect_workspace_code("from skynet import llm\ndef score(i, o):\n    return llm('x')\n").uses_llm
-        assert introspect_workspace_code("import skynet\ndef score(i, o):\n    return skynet.llm('x')\n").uses_llm
-        assert not introspect_workspace_code("def score(i, o):\n    return 1.0, {'feedback': ''}\n").uses_llm
-
-    def test_assigned_names_have_unknown_arity(self) -> None:
-        """A name bound by assignment has a signature only the sandbox can see."""
-        info = introspect_workspace_code("score = lambda i, o: (1.0, {'feedback': ''})\n")
-
-        assert info.functions["score"] == FunctionShape(capacity=None, required=None)

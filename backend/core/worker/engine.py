@@ -1596,14 +1596,6 @@ class BackgroundWorker:
         self._threads.clear()
         logger.info("Stopped background workers")
 
-    def is_running(self) -> bool:
-        """Return True if the worker has been started.
-
-        Returns:
-            ``True`` while ``start`` has been called and ``stop`` has not.
-        """
-        return self._running
-
     def _record_setup_command(self, optimization_id: str, command: str) -> None:
         """Store an inferred repository setup command on the run's own payload.
 

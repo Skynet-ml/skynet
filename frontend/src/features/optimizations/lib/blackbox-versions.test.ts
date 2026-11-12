@@ -24,7 +24,6 @@ function runResult(overrides: Partial<BlackboxRunResult>): BlackboxRunResult {
     lanes: [],
     total_scorer_runs: 3,
     runtime_seconds: 1,
-    num_lm_calls: 0,
     usage_by_model: {},
     optimization_metadata: {},
     details: {},

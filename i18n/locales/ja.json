@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "次の操作には最大 {needed} が必要ですが、残りの {remaining} のうち {held} をこのチェックのサンドボックスが確保しています。",
     "submit.preflight.contract_budget_missing": "コードのチェックを実行する前に支出予算を選んでください。",
     "submit.unified.optimizer_not_allowed": "オプティマイザー「{optimizer}」はこの設定に合いません。次のいずれかを選んでください: {allowed}。",
-    "submit.unified.pairs_need_cases": "入力と出力のペアでの実行には、2 つ以上のペアかアップロードしたデータセットが必要です。",
-    "submit.unified.single_needs_one_case": "単一入力での実行には、入力がちょうど 1 つ必要です。",
     "accounts.identity_in_use": "このアカウントはすでに別の {term.appName} アカウントにサインインしています。",
     "accounts.identity_not_found": "このアカウントは連携されていません。",
     "accounts.last_sign_in_method": "これが唯一のサインイン方法です。先にパスワードかパスキーを追加してください。",

@@ -42,7 +42,7 @@ def test_request_file_is_gone_once_loaded(tmp_path: Path, monkeypatch: pytest.Mo
     _write_request(request, payload)
     observed: list[dict[str, Any]] = []
 
-    def run(received: dict[str, Any], artifact_id: str, events: Any, start_method: str) -> None:
+    def run(received: dict[str, Any], artifact_id: str, events: Any) -> None:
         """Record the payload the optimizer entry point receives."""
         assert not request.exists()
         observed.append(received)

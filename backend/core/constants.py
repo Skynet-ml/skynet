@@ -24,11 +24,7 @@ PAYLOAD_OVERVIEW_TASK_MODEL = "task_model_name"
 PAYLOAD_OVERVIEW_COLUMN_MAPPING = "column_mapping"
 PAYLOAD_OVERVIEW_DATASET_ROWS = "dataset_rows"
 PAYLOAD_OVERVIEW_DATASET_FILENAME = "dataset_filename"
-PAYLOAD_OVERVIEW_SPLIT_FRACTIONS = "split_fractions"
-PAYLOAD_OVERVIEW_SHUFFLE = "shuffle"
 PAYLOAD_OVERVIEW_SEED = "seed"
-PAYLOAD_OVERVIEW_OPTIMIZER_KWARGS = "optimizer_kwargs"
-PAYLOAD_OVERVIEW_COMPILE_KWARGS = "compile_kwargs"
 PAYLOAD_OVERVIEW_TASK_FINGERPRINT = "task_fingerprint"
 # Token source the run bills against: "managed" (the Skynet balance) or "byok"
 # (the user's own provider key). Threaded from the wizard so billing mode is
@@ -51,12 +47,6 @@ PAYLOAD_OVERVIEW_IS_PRIVATE = "is_private"
 # was by-reference. Persisted so the optimization detail surfaces a live link
 # back to the dataset and the dataset page can list the runs that used it.
 PAYLOAD_OVERVIEW_SOURCE_DATASET_ID = "source_dataset_id"
-# Unified (wizard v2) runs are stored as black-box runs; these keys tell them
-# apart and record how the wizard configured them.
-PAYLOAD_OVERVIEW_OPTIMIZER_CHOICE = "optimizer_choice"
-PAYLOAD_OVERVIEW_OPTIMIZER_RESOLVED = "optimizer_resolved"
-PAYLOAD_OVERVIEW_DATA_MODE = "data_mode"
-PAYLOAD_OVERVIEW_SPLIT_COUNTS = "split_counts"
 
 PROGRESS_SPLITS_READY = "dataset_splits_ready"
 PROGRESS_BASELINE = "baseline_evaluated"
@@ -130,7 +120,6 @@ TOKEN_SOURCE_BYOK = "byok"
 # "subscription" runs on the user's own logged-in coding CLI (local mode only)
 # and is never billed.
 TOKEN_SOURCE_SUBSCRIPTION = "subscription"
-CLI_PROVIDERS = ("codex", "claude")
 
 
 TQDM_TOTAL_KEY = "tqdm_total"

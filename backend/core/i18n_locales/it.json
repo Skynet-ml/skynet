@@ -95,8 +95,6 @@
     "submit.preflight.budget_sandboxes": "La prossima operazione richiede fino a {needed}, ma le sandbox di questo controllo trattengono {held} dei {remaining} rimanenti.",
     "submit.preflight.contract_budget_missing": "Scegli un budget di spesa prima di eseguire il controllo del codice.",
     "submit.unified.optimizer_not_allowed": "L'ottimizzatore '{optimizer}' non è adatto a questa configurazione. Scegline uno tra: {allowed}.",
-    "submit.unified.pairs_need_cases": "Un'esecuzione su coppie input/output richiede almeno due coppie o un dataset caricato.",
-    "submit.unified.single_needs_one_case": "Un'esecuzione a input singolo richiede esattamente un input.",
     "accounts.identity_in_use": "Questo account accede già a un altro account {term.appName}.",
     "accounts.identity_not_found": "Questo account non è collegato.",
     "accounts.last_sign_in_method": "È il tuo unico modo per accedere. Aggiungi prima una password o una passkey.",
