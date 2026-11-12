@@ -8,7 +8,6 @@ export const PHONE_DETAIL_TABS: ReadonlySet<string> = new Set([
   "overview",
   "playground",
   "best",
-  "reward",
   "artifact",
   "logs",
   "usage",

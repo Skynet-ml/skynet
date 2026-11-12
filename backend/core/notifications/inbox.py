@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from ..storage.models import NotificationModel
-from .catalog import FOCUSED_EVENTS, PRODUCT_NEWS
+from .catalog import EVENT_TYPES, FOCUSED_EVENTS, PRODUCT_NEWS
 from .news import live_news_keys
 
 InboxTab = Literal["focused", "everything"]
@@ -32,6 +32,8 @@ def _tab_filter(username: str, tab: InboxTab) -> list[ColumnElement[bool]]:
     clauses: list[ColumnElement[bool]] = [
         NotificationModel.username == username,
         NotificationModel.in_inbox.is_(True),
+        # Rows of a retired event type (``needs_input``, SKY-677) stay stored but hidden.
+        NotificationModel.event_type.in_(EVENT_TYPES),
         or_(NotificationModel.event_type != PRODUCT_NEWS, NotificationModel.dedupe_key.in_(live_news_keys())),
     ]
     if tab == "focused":

@@ -24,7 +24,6 @@ import {
   Cube,
   Coins,
   Repeat,
-  Trophy,
   PaperPlaneTilt,
 } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
@@ -84,8 +83,7 @@ import { StatusBadge } from "@/shared/ui/status-badge";
 import { ConfigTab } from "./ConfigTab";
 import { CodeTab } from "./CodeTab";
 import { OverviewTab } from "./OverviewTab";
-import { HeldOutNotice, isNotHeldOut } from "./RewardComparison";
-import { RewardTab, hasRewardTab } from "./RewardTab";
+import { HeldOutNotice, isNotHeldOut } from "./HeldOutNotice";
 import { RunLifecycleNotice } from "./RunLifecycleNotice";
 import { isBudgetPause } from "../lib/run-lifecycle";
 import { RunCostChip } from "./RunCostChip";
@@ -771,7 +769,6 @@ export function OptimizationDetailView({
   // A remote-scorer black-box run has no code to show at all.
   const showCodeTab = (!jobIsBlackbox || !!metricCode) && levelShowsTab("code");
   const showConfigTab = levelShowsTab("config");
-  const showRewardTab = jobIsBlackbox && hasRewardTab(payload?.payload) && levelShowsTab("reward");
   // Usage reads the run's billing records, which only an authenticated viewer can fetch.
   // The billing reads behind it have no hosted route.
   const showUsageTab = !skipNetwork && source === "local";
@@ -1077,7 +1074,6 @@ export function OptimizationDetailView({
                   "overview",
                   ...(showBestVersionTab ? ["best"] : []),
                   ...(showCodeTab ? ["code"] : []),
-                  ...(showRewardTab ? ["reward"] : []),
                   ...(showLogsTab ? ["logs"] : []),
                   ...(showUsageTab ? ["usage"] : []),
                   ...(showServeTab ? ["playground"] : []),
@@ -1105,12 +1101,6 @@ export function OptimizationDetailView({
                 <TabsTrigger value="code" className={tabCls}>
                   <Code className="size-3.5" />
                   {msg("auto.app.optimizations.id.page.17")}
-                </TabsTrigger>
-              )}
-              {showRewardTab && (
-                <TabsTrigger value="reward" className={tabCls}>
-                  <Trophy className="size-3.5" />
-                  {msg("reward_tab.title")}
                 </TabsTrigger>
               )}
               {showLogsTab && (
@@ -1172,15 +1162,6 @@ export function OptimizationDetailView({
             {!isPhone && showCodeTab && (
               <TabsContent value="code" className="space-y-6 mt-4">
                 <CodeTab metricCode={metricCode ?? ""} />
-              </TabsContent>
-            )}
-
-            {showRewardTab && (
-              <TabsContent value="reward" className="mt-4">
-                <RewardTab
-                  payload={payload?.payload}
-                  result={job.status === "success" ? (job.blackbox_result ?? null) : null}
-                />
               </TabsContent>
             )}
 

@@ -11,7 +11,6 @@ La page d'exécution n'affiche que les onglets qui s'appliquent à l'exécution.
 | **Artefact**               | Une exécution avec un résultat                                       | Les versions de votre dépôt, avec la meilleure version                            |
 | **Données**                | Une exécution terminée avec des cas                                  | Les données réparties en ensembles d'entraînement, de validation et de test       |
 | **Code**                   | Quand l'exécution a du code à afficher                               | L'évaluateur                                                                      |
-| **Récompense**             | Une exécution dont l'évaluateur déclare des parts de récompense      | Les composantes de la récompense et leurs poids                                   |
 | **Journaux**               | La plupart des exécutions                                            | Le journal de l'exécution                                                         |
 | **Utilisation et coût**    | Quand vous êtes connecté                                             | Ce que l'exécution a dépensé                                                      |
 | **Exécution planifiée**    | Une exécution réussie                                                | Une planification pour relancer l'optimisation à partir de la meilleure version   |

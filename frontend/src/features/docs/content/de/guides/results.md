@@ -11,7 +11,6 @@ Die Seite des Durchlaufs zeigt nur die Tabs, die für den Durchlauf gelten. Eini
 | **Artefakt**            | Ein Durchlauf mit Ergebnis                                         | Die Versionen Ihres Repositorys, mit der besten Version                         |
 | **Daten**               | Ein abgeschlossener Durchlauf mit Fällen                           | Die Aufteilung der Daten in Trainings-, Validierungs- und Testmenge             |
 | **Code**                | Wenn der Durchlauf Code zum Anzeigen hat                           | Der Scorer                                                                      |
-| **Belohnung**           | Ein Durchlauf, dessen Scorer Belohnungsteile angibt                | Die Belohnungsteile und ihre Gewichte                                           |
 | **Logs**                | Die meisten Durchläufe                                             | Das Log des Durchlaufs                                                          |
 | **Nutzung und Kosten**  | Wenn Sie angemeldet sind                                           | Was der Durchlauf ausgegeben hat                                                |
 | **Geplanter Lauf**      | Ein erfolgreicher Durchlauf                                        | Ein Zeitplan, um die Optimierung ab der besten Version erneut auszuführen       |

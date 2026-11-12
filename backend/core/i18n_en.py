@@ -210,7 +210,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "hosted_link.page_open_app": f"Open {APP_NAME}",
     "hosted_link.page_failed_title": "This Mac is not linked",
     "hosted_link.linked_unknown_account": "your account",
-    "notifier.body.needs_input": "Projected spend exceeds the spending limit, so the optimization was paused. Raise the limit to continue from where it stopped.",
     "notifier.body.stuck": "No improvement over the last {percent}% of the optimization's evaluation budget.",
     "optimization.already_terminal": "Optimization is already in terminal state '{status}'.",
     "optimization.cannot_delete": "Cannot delete an optimization in state '{status}'. Cancel it first.",

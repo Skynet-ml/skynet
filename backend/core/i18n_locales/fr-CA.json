@@ -12,7 +12,6 @@
     "budget.idempotency_required": "Send a unique Idempotency-Key for this request.",
     "serve.caller_tool_connection_required": "This run uses an owner-bound tool connection. Connect the tool to your account before invoking it.",
     "serve.protected_interaction_failed": "The sandboxed request failed: {error}",
-    "email.event.needs_input.reason": "Vous recevez des courriels quand une exécution attend votre réponse.",
     "email.event.budget_near.reason": "Vous recevez des courriels quand une exécution approche de sa limite de dépenses.",
     "email.event.failed.reason": "Vous recevez des courriels quand une exécution échoue.",
     "email.event.finished.reason": "Vous recevez des courriels quand une exécution se termine.",

@@ -84,8 +84,8 @@ test("a missing number falls back to the plain wording", () => {
 
 test("urgent events show spend against the limit", () => {
   assert.deepEqual(
-    itemLine(item({ event_type: "needs_input", facts: { spent: 4, limit: 5 } }), fmt),
-    { key: "notifications.item.needs_input", params: { spent: "$4", limit: "$5" } },
+    itemLine(item({ event_type: "budget_near", facts: { spent: 4, limit: 5 } }), fmt),
+    { key: "notifications.item.budget_near", params: { spent: "$4", limit: "$5" } },
   );
 });
 
@@ -94,22 +94,6 @@ test("a share line names who shared and the kind of share", () => {
     itemLine(item({ event_type: "shared", facts: { actor: "dana", kind: "role" } }), fmt),
     { key: "notifications.item.shared_role", params: { actor: "dana" } },
   );
-});
-
-test("a hardening job asks for review and reports when it is done", () => {
-  const hardening = { kind: "hardening", spent: 4, limit: 5, score: 0.8 };
-  assert.deepEqual(itemLine(item({ event_type: "needs_input", facts: hardening }), fmt), {
-    key: "notifications.item.hardening_review",
-    params: {},
-  });
-  assert.deepEqual(itemLine(item({ event_type: "finished", facts: hardening }), fmt), {
-    key: "notifications.item.hardening_done",
-    params: {},
-  });
-  assert.deepEqual(itemLine(item({ event_type: "budget_near", facts: hardening }), fmt), {
-    key: "notifications.item.budget_near",
-    params: { spent: "$4", limit: "$5" },
-  });
 });
 
 test("news uses its headline as written", () => {

@@ -14,7 +14,7 @@ from core.constants import (
     TQDM_N_KEY,
     TQDM_TOTAL_KEY,
 )
-from core.notifications.catalog import BUDGET_NEAR, NEEDS_INPUT, NEW_BEST, STUCK
+from core.notifications.catalog import BUDGET_NEAR, FINISHED, NEW_BEST, STUCK
 from core.notifications.notifier import (
     notify_run_budget,
     notify_run_new_best,
@@ -132,15 +132,15 @@ def test_events_switched_off_everywhere_emit_nothing() -> None:
 def test_for_run_skips_only_when_no_in_run_event_reaches_the_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """A watcher is built unless every in-run event is off everywhere, or there is no owner.
 
-    Needs-input alone builds no watcher: the watcher never sends that event.
+    Finished alone builds no watcher: the watcher never sends that event.
     """
     monkeypatch.setattr(watcher_module, "notification_settings", lambda _u: _settings())
     assert RunNotificationWatcher.for_run(_JOB, _USER, _ClaimStore()) is not None
     assert RunNotificationWatcher.for_run(_JOB, None, _ClaimStore()) is None
 
-    only_needs_input = _settings(off=(NEW_BEST, STUCK, BUDGET_NEAR))
-    assert only_needs_input.any_enabled(NEEDS_INPUT)
-    monkeypatch.setattr(watcher_module, "notification_settings", lambda _u: only_needs_input)
+    only_finished = _settings(off=(NEW_BEST, STUCK, BUDGET_NEAR))
+    assert only_finished.any_enabled(FINISHED)
+    monkeypatch.setattr(watcher_module, "notification_settings", lambda _u: only_finished)
     assert RunNotificationWatcher.for_run(_JOB, _USER, _ClaimStore()) is None
 
 
