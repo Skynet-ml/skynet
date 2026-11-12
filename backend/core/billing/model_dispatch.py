@@ -45,8 +45,11 @@ FUNDS_REFUSAL_HOLD_SECONDS = 60.0
 # OpenRouter can answer a generation lookup with 404 for a short time after the
 # answer ends, while it still indexes the bill, and a Responses stream can carry
 # no cost. settle() asks again after each delay before it holds the call for the
-# reconciler, so a call waits at most a few more seconds (SKY-657).
+# reconciler (SKY-657). Each lookup has its own short timeout, because the
+# dispatch client allows a long model answer; the worst case is four timed-out
+# lookups plus the delays, about 44 seconds.
 GENERATION_LOOKUP_DELAYS = (0.5, 1.0, 2.0)
+GENERATION_LOOKUP_TIMEOUT_SECONDS = 10.0
 
 FUNDS_BUSY = "provider_budget_busy"
 MANAGED_FUNDS_EXHAUSTED = "managed_funds_exhausted"
@@ -580,10 +583,16 @@ class ProviderDispatcher:
                     evidence["generation"] = record
                 else:
                     receipt = (
-                        "no usage" if usage is None else "no cost" if usage.get("cost") is None else "an unusable cost"
+                        "an interrupted answer"
+                        if interrupted
+                        else "an answer with no usage"
+                        if usage is None
+                        else "an answer with no cost"
+                        if usage.get("cost") is None
+                        else "an answer with an unusable cost"
                     )
                     logger.warning(
-                        "No confirmed cost for a %s call (%s): the answer had %s, and the generation lookup gave %s.",
+                        "No confirmed cost for a %s call (%s): the provider sent %s, and the generation lookup gave %s.",
                         self.model,
                         identity,
                         receipt,
@@ -680,6 +689,7 @@ class ProviderDispatcher:
                 "https://openrouter.ai/api/v1/generation",
                 params={"id": generation_id},
                 headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=GENERATION_LOOKUP_TIMEOUT_SECONDS,
             )
             status = response.status_code
             if not response.is_success:
@@ -718,7 +728,7 @@ class ProviderDispatcher:
         except UnpricedOperationError:
             return None, "an invalid total_cost", False
         if amount is None:
-            return None, "a BYOK record with no upstream cost", False
+            return None, "an ambiguous billing scope", False
         return (amount, safe), "a confirmed cost", False
 
 

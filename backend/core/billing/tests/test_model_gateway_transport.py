@@ -10,7 +10,7 @@ import shutil
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
@@ -1289,18 +1289,49 @@ def test_mailbox_retries_have_independent_coverage_and_duplicate_frames_do_not_r
     ]
 
 
-def test_responses_stream_without_cost_settles_when_a_later_generation_lookup_finds_it(
-    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Settle a Codex Responses call whose cost OpenRouter indexes only after the first lookup (SKY-657).
+class _OneCallSession:
+    """Emit one mailbox frame and keep the parent's answer."""
+
+    def __init__(self, document: dict[str, Any]) -> None:
+        """Hold the one frame and an inspectable in-memory guest filesystem.
+
+        Args:
+            document: The mailbox request frame the guest sends.
+        """
+        self.document = document
+        self.files: dict[str, str] = {}
+
+    def write_files(self, files: dict[str, str]) -> None:
+        """Persist supervisor inputs and responses by guest path."""
+        self.files.update(files)
+
+    def run(self, _command: str, **kwargs: Any) -> CommandResult:
+        """Send the one model request frame."""
+        config_path = next(path for path in self.files if path.endswith("/config.json"))
+        prefix = json.loads(self.files[config_path])["prefix"]
+        kwargs["on_output"]("stdout", prefix + json.dumps(self.document) + "\n")
+        return CommandResult(exit_code=0)
+
+    def answer(self) -> dict[str, Any]:
+        """Return the parent's answer to the frame."""
+        name = f"{self.document['id']}.json"
+        return json.loads(next(text for path, text in self.files.items() if path.endswith(name)))
+
+
+def _costless_responses_call(
+    gateway: ModelGateway, generation: Callable[[int], httpx.Response]
+) -> tuple[dict[str, Any], int]:
+    """Send one guest Responses call whose stream ends with token usage and no cost.
 
     Args:
         gateway: Parent protocol over the capped fixture budget.
-        monkeypatch: Removes the lookup backoff so the test does not sleep.
+        generation: Answers the n-th ``/generation`` lookup, counted from 1.
+
+    Returns:
+        The mailbox answer and the number of ``/generation`` lookups.
     """
-    monkeypatch.setattr(model_dispatch, "GENERATION_LOOKUP_DELAYS", (0.0, 0.0, 0.0), raising=False)
     gateway._client.close()
-    lookups: list[httpx.Request] = []
+    lookups = 0
     completed = {
         "type": "response.completed",
         "response": {
@@ -1317,15 +1348,13 @@ def test_responses_stream_without_cost_settles_when_a_later_generation_lookup_fi
     ).encode()
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """Serve prices, a cost-free Responses stream, and a generation record on the second lookup."""
+        """Serve prices, a cost-free Responses stream, and the scripted generation lookups."""
+        nonlocal lookups
         if request.url.path.endswith("/endpoints"):
             return httpx.Response(200, json={"data": CATALOG})
         if request.url.path == "/api/v1/generation":
-            lookups.append(request)
-            if len(lookups) == 1:
-                return httpx.Response(404, json={"error": {"message": "Generation not found"}})
-            record = {"id": "gen-codex-1", "model": "fixture/text", "total_cost": 0.002, "is_byok": False}
-            return httpx.Response(200, json={"data": record})
+            lookups += 1
+            return generation(lookups)
         assert request.url.path == "/api/v1/responses"
         return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
 
@@ -1333,41 +1362,90 @@ def test_responses_stream_without_cost_settles_when_a_later_generation_lookup_fi
     protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
     route = protected["model_config"]["extra"][ROUTE_KEY]
     body = {"model": "fixture/text", "input": [{"role": "user", "content": "propose"}], "stream": True}
-    document = {
-        "id": "c" * 32,
-        "path": "/v1/responses",
-        "body": base64.b64encode(json.dumps(body).encode()).decode(),
-        "headers": {"authorization": f"Bearer {route['token']}"},
-    }
-
-    class OneCallSession:
-        """Emit one Responses mailbox frame and keep the parent's answer."""
-
-        def __init__(self) -> None:
-            """Create an inspectable in-memory guest filesystem."""
-            self.files: dict[str, str] = {}
-
-        def write_files(self, files: dict[str, str]) -> None:
-            """Persist supervisor inputs and responses by guest path."""
-            self.files.update(files)
-
-        def run(self, _command: str, **kwargs: Any) -> CommandResult:
-            """Send the one model request frame."""
-            config_path = next(path for path in self.files if path.endswith("/config.json"))
-            prefix = json.loads(self.files[config_path])["prefix"]
-            kwargs["on_output"]("stdout", prefix + json.dumps(document) + "\n")
-            return CommandResult(exit_code=0)
-
-    session = OneCallSession()
+    session = _OneCallSession(
+        {
+            "id": "c" * 32,
+            "path": "/v1/responses",
+            "body": base64.b64encode(json.dumps(body).encode()).decode(),
+            "headers": {"authorization": f"Bearer {route['token']}"},
+        }
+    )
     ModelMailbox(gateway.dispatch_guest, concurrency=1).run(session, "ignored")
+    return session.answer(), lookups
 
-    answer = json.loads(next(text for path, text in session.files.items() if path.endswith("c" * 32 + ".json")))
+
+def _generation_record(model: str = "fixture/text") -> httpx.Response:
+    """Answer a generation lookup with a confirmed $0.002 bill.
+
+    Args:
+        model: The model the record names.
+
+    Returns:
+        The provider's generation answer.
+    """
+    record = {"id": "gen-codex-1", "model": model, "total_cost": 0.002, "is_byok": False}
+    return httpx.Response(200, json={"data": record})
+
+
+def _not_found() -> httpx.Response:
+    """Answer a generation lookup the way OpenRouter does before it indexes the bill."""
+    return httpx.Response(404, json={"error": {"message": "Generation not found"}})
+
+
+def test_responses_stream_without_cost_settles_when_a_later_generation_lookup_finds_it(
+    gateway: ModelGateway,
+) -> None:
+    """Settle a Codex Responses call whose cost OpenRouter indexes only after the first lookup (SKY-657).
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+    """
+    answer, lookups = _costless_responses_call(gateway, lambda n: _not_found() if n == 1 else _generation_record())
+
     assert answer["status"] == 200, base64.b64decode(answer["body"])
-    assert len(lookups) == 2
+    assert lookups == 2
     snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
     assert snapshot.setup_spent_cents == Decimal("0.2")
     assert snapshot.reserved_cents == 0
     assert snapshot.pending_operations == 0
+
+
+def test_a_generation_model_mismatch_is_not_retried(gateway: ModelGateway) -> None:
+    """Hold a call at once when the generation record names another model; time cannot change it.
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+    """
+    answer, lookups = _costless_responses_call(gateway, lambda _n: _generation_record("fixture/other"))
+
+    assert answer["status"] == 424
+    assert lookups == 1
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.pending_operations == 1
+
+
+def test_an_unindexed_generation_is_retried_then_held_with_its_reason_logged(
+    gateway: ModelGateway, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ask once and once per backoff delay, then hold the call and log why no cost came back.
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+        caplog: Captures the dispatch warning.
+    """
+    with caplog.at_level("WARNING", logger=model_dispatch.__name__):
+        answer, lookups = _costless_responses_call(gateway, lambda _n: _not_found())
+
+    assert answer["status"] == 424
+    assert json.loads(base64.b64decode(answer["body"]))["error"]["type"] == "usage_pending"
+    assert lookups == 1 + len(model_dispatch.GENERATION_LOOKUP_DELAYS) == 4
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    assert any(
+        "an answer with no cost" in record.getMessage() and "HTTP 404" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_mailbox_names_this_calls_pending_usage_not_previous_usage() -> None:
@@ -1377,30 +1455,12 @@ def test_mailbox_names_this_calls_pending_usage_not_previous_usage() -> None:
         """Fail the way the runtime fails a dispatched call without a confirmed cost."""
         raise UsagePendingError("Provider usage is not yet confirmed; the reservation remains active.")
 
-    document = {"id": "d" * 32, "path": "/v1/responses", "body": base64.b64encode(b"{}").decode(), "headers": {}}
-
-    class OneCallSession:
-        """Emit one mailbox frame and keep the parent's answer."""
-
-        def __init__(self) -> None:
-            """Create an inspectable in-memory guest filesystem."""
-            self.files: dict[str, str] = {}
-
-        def write_files(self, files: dict[str, str]) -> None:
-            """Persist supervisor inputs and responses by guest path."""
-            self.files.update(files)
-
-        def run(self, _command: str, **kwargs: Any) -> CommandResult:
-            """Send the one model request frame."""
-            config_path = next(path for path in self.files if path.endswith("/config.json"))
-            prefix = json.loads(self.files[config_path])["prefix"]
-            kwargs["on_output"]("stdout", prefix + json.dumps(document) + "\n")
-            return CommandResult(exit_code=0)
-
-    session = OneCallSession()
+    session = _OneCallSession(
+        {"id": "d" * 32, "path": "/v1/responses", "body": base64.b64encode(b"{}").decode(), "headers": {}}
+    )
     ModelMailbox(dispatch, concurrency=1).run(session, "ignored")
 
-    answer = json.loads(next(text for path, text in session.files.items() if path.endswith("d" * 32 + ".json")))
+    answer = session.answer()
     error = json.loads(base64.b64decode(answer["body"]))["error"]
     assert answer["status"] == 424
     assert error["type"] == "usage_pending"
