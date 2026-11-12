@@ -5,10 +5,7 @@
  * on browsers without web push; they report "unsupported" and do nothing.
  */
 
-import {
-  getPushVapidKey,
-  savePushSubscription,
-} from "@/shared/lib/api";
+import { getPushVapidKey, savePushSubscription } from "@/shared/lib/api";
 
 import {
   shouldSyncPush,

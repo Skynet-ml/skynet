@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   INTAKE_PHASES,
   clearIntakeDraft,
-  coerceSkipPhases,
   emptyDraft,
   emptyIntake,
   languageChoices,
@@ -38,18 +37,6 @@ beforeEach(() => {
 afterEach(() => {
   delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
 });
-
-function outcome(partial: Partial<IntakeTurnOutcome>): IntakeTurnOutcome {
-  return {
-    message: "",
-    options: [],
-    phase_done: false,
-    profile_patch: null,
-    skip_phases: [],
-    skip_rest: false,
-    ...partial,
-  };
-}
 
 test("the agenda is settings only: the language, then the account settings", () => {
   assert.deepEqual(INTAKE_PHASES, ["language", "billing", "privacy", "trust"]);

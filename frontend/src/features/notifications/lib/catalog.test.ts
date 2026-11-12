@@ -196,6 +196,11 @@ test("the Mac app preserves hosted preferences without local provider setup", ()
   assert.equal(cellShownOn(true, "slack", null), true);
 });
 
+test("unavailable native delivery is neither editable nor shown", () => {
+  assert.equal(cellEditable("finished", "macos", true, localState({ macos: false })), false);
+  assert.equal(cellShownOn(true, "macos", localState({ macos: false })), false);
+});
+
 test("the hold covers macOS only in the Mac app", () => {
   assert.deepEqual(heldChannels(null), HELD_CHANNELS);
   assert.ok(!heldChannels(null).includes("macos"));

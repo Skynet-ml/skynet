@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import type { ModelConfig } from "@/shared/types/api";
-
 const unifiedRunUrl = new URL("../../../shared/types/unified-run.ts", import.meta.url).href;
 
 registerHooks({
@@ -26,8 +24,6 @@ const {
 
 const mixTotal = (s: typeof DEFAULT_SHINKA_SETTINGS) =>
   SHINKA_PATCH_KINDS.reduce((sum, kind) => sum + s[kind], 0);
-
-const model = (name: string): ModelConfig => ({ name }) as ModelConfig;
 
 test("defaults match the backend contract", () => {
   assert.deepEqual(
@@ -113,4 +109,11 @@ test("out-of-range and invalid shares clamp", () => {
   assert.equal(setPatchPercent(DEFAULT_SHINKA_SETTINGS, "patch_cross", -1).patch_cross, 0);
   assert.equal(setPatchPercent(DEFAULT_SHINKA_SETTINGS, "patch_cross", Number.NaN).patch_cross, 0);
   assert.equal(patchPercent(0.6), 60);
+});
+
+test("extra optimization models go only to ShinkaEvolve, up to the backend limit", () => {
+  assert.equal(takesExtraModels("shinka_evolve"), true);
+  assert.equal(takesExtraModels("auto"), false);
+  assert.equal(takesExtraModels("gepa"), false);
+  assert.equal(MAX_EXTRA_OPTIMIZATION_MODELS, 4);
 });

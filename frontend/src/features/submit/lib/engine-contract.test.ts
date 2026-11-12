@@ -20,7 +20,6 @@ const {
   supportsIterationLimit,
   usesNativeProposer,
 } = await import("./engine-contract.ts");
-const { DEFAULT_SHINKA_SETTINGS } = await import("./shinka-settings.ts");
 const { BLACKBOX_OPTIMIZERS } = await import(unifiedRunUrl);
 
 test("iteration limits apply only to a version-capped engine", () => {
@@ -53,4 +52,10 @@ test("proposer knobs follow the engine that reads them, and Auto exposes them al
   assert.deepEqual(proposerKnobs("autosaddler"), { candidates: false, ralph: false });
   assert.deepEqual(proposerKnobs("shinka_evolve"), { candidates: false, ralph: false });
   assert.deepEqual(proposerKnobs("auto"), { candidates: true, ralph: true });
+});
+
+test("the tool-call cap defaults to 100 within the backend range", () => {
+  assert.equal(DEFAULT_PROPOSER.max_tool_calls, 100);
+  assert.ok(DEFAULT_PROPOSER.max_tool_calls! >= MAX_TOOL_CALLS_LIMITS.min);
+  assert.ok(DEFAULT_PROPOSER.max_tool_calls! <= MAX_TOOL_CALLS_LIMITS.max);
 });

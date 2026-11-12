@@ -275,6 +275,14 @@ test("the task step clears once a repository is named, with no separate confirm"
   assert.equal(taskIssue({ ...empty, repo: { ...empty.repo, repository: "acme/bot" } }), null);
 });
 
+test("run.py and metric.py write through to the run and metric code; others are extra files", () => {
+  const ws = initialWizardV2State().workspace;
+  assert.deepEqual(writeWorkspaceFile(ws, "run.py", "r"), { runCode: "r" });
+  assert.deepEqual(writeWorkspaceFile(ws, "metric.py", "m"), { metricCode: "m" });
+  const withHelper = { ...ws, ...writeWorkspaceFile(ws, "lib/helpers.py", "X = 1") };
+  assert.deepEqual(withHelper.files, { "lib/helpers.py": "X = 1" });
+});
+
 test("only extra files can be deleted", () => {
   const ws = { ...initialWizardV2State().workspace, files: { "helpers.py": "X = 1" } };
   assert.equal(deleteWorkspaceFile(ws, "run.py"), null);
