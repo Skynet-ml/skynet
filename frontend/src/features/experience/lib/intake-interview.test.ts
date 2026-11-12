@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   INTAKE_PHASES,
   clearIntakeDraft,
+  coerceSkipPhases,
   emptyDraft,
   emptyIntake,
   languageChoices,
@@ -36,6 +37,10 @@ beforeEach(() => {
 });
 afterEach(() => {
   delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
+});
+
+test("coerceSkipPhases keeps known phases in agenda order and drops the rest", () => {
+  assert.deepEqual(coerceSkipPhases(["trust", "bogus", "language"]), ["language", "trust"]);
 });
 
 test("the agenda is settings only: the language, then the account settings", () => {

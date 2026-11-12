@@ -31,7 +31,8 @@ export type WalletStatus = "healthy" | "low" | "empty";
 export type LedgerKind = "run" | "topup" | "grant";
 
 /** Value of one cent, in USD. */
-const CENT_USD_VALUE = 0.01;
+// Exported for the backend parity test (test_billing_constants_parity.py), which reads it.
+export const CENT_USD_VALUE = 0.01;
 
 /**
  * Bounds for a custom (user-chosen) top-up, mirroring the backend's
