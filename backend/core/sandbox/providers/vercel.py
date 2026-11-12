@@ -657,9 +657,10 @@ class VercelEnvironment(SandboxEnvironment):
         script = f"{EGRESS_PREFIX}{token}.py"
         log = f"{EGRESS_PREFIX}{token}.log"
         lifetime = math.ceil(self.spec.lifetime_seconds)
-        # A box with no python3 or setsid, or a proxy that exits, ends the wait at once.
+        # A box with no python3, setsid or nohup, or a proxy that exits, ends the wait at once.
+        # One `command -v` with several names succeeds when any one exists, so check each name.
         launch = (
-            "command -v python3 setsid nohup > /dev/null || exit 1; "
+            "for tool in python3 setsid nohup; do command -v $tool > /dev/null || exit 1; done; "
             f"setsid nohup python3 -I {script} {EGRESS_PROXY_PORT} {lifetime} '*' > {log} 2>&1 < /dev/null & "
             "proxy=$!; "
             f"for _ in $(seq {EGRESS_READY_POLLS}); do grep -qx {READY_MARKER} {log} 2>/dev/null && exit 0; "

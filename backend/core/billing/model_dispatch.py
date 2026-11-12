@@ -30,7 +30,7 @@ from .operation_pricing import (
 )
 from .responses_adapter import price_responses_request, responses_failure, responses_receipt
 from .runtime import BudgetRuntime, PaidResult
-from .usage_tags import header_tags
+from .usage_tags import BOX_KEY, FOR_BOX_KEY, header_tags
 
 MODEL_ATTEMPT_HEADER = "x-app-model-attempt-id"
 
@@ -651,6 +651,8 @@ class ProviderDispatcher:
             cost_kind="model",
             role=self.role,
             attempt=attempt,
+            box=tags.get(BOX_KEY),
+            for_box=tags.get(FOR_BOX_KEY),
         )
 
     def stop_batch(self) -> None:

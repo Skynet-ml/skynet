@@ -848,6 +848,16 @@ def test_read_only_reach_tools_always_available() -> None:
         assert _needs_approval(name, "ask") is False
 
 
+def test_tagging_guide_tools_always_available() -> None:
+    """The chat reads a tagging guide freely and saves it with a safe-mutation gate."""
+    allowed = tools_for(WizardState())
+    assert "get_tagging_guide_for_agent" in allowed
+    assert "save_tagging_guide_for_agent" in allowed
+    assert _needs_approval("get_tagging_guide_for_agent", "ask") is False
+    assert _needs_approval("save_tagging_guide_for_agent", "ask") is True
+    assert _needs_approval("save_tagging_guide_for_agent", "auto_safe") is False
+
+
 def test_dataset_library_tools_always_available() -> None:
     """The saved-dataset library read + by-reference picker are always exposed."""
     allowed = tools_for(WizardState())

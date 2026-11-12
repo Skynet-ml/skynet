@@ -3,11 +3,7 @@ import type {
   BlackboxShinkaSettings,
   ModelConfig,
 } from "@/shared/types/api";
-import {
-  resolveOptimizer,
-  type OptimizerTarget,
-  type OptimizerChoice,
-} from "@/shared/types/unified-run";
+import { resolveOptimizer, type OptimizerChoice } from "@/shared/types/unified-run";
 
 /**
  * ShinkaEvolve's defaults, mirroring `BlackboxShinkaSettings` on the backend.
@@ -141,9 +137,8 @@ export function patchPercent(share: number): number {
 export function submittedShinka(
   settings: BlackboxShinkaSettings | null,
   choice: OptimizerChoice,
-  kind: OptimizerTarget,
 ): BlackboxShinkaSettings | undefined {
-  const resolved = resolveOptimizer(choice, kind);
+  const resolved = resolveOptimizer(choice);
   if (resolved === "shinka_evolve") return { ...(settings ?? DEFAULT_SHINKA_SETTINGS) };
   if (resolved === "auto") return settings ? { ...settings } : undefined;
   return undefined;

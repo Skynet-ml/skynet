@@ -65,7 +65,7 @@ import string
 import threading
 import uuid
 from collections.abc import Generator, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlencode
@@ -80,7 +80,7 @@ from ....billing.model_gateway import _tool_target
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
-from ....billing.usage_tags import LANE_KEY, current_tags
+from ....billing.usage_tags import LANE_KEY, box_tag, current_tags
 from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
@@ -442,12 +442,13 @@ class RepoScorer:
             # The pool thread does not inherit the usage-scope contextvar, so
             # the metric box's hold is tagged from a copy of this context.
             opener = ThreadPoolExecutor(max_workers=1, thread_name_prefix="metric-box")
-            metric_box = opener.submit(contextvars.copy_context().run, self._workspace.open_metric)
+            metric_box = opener.submit(contextvars.copy_context().run, self._open_parked_metric)
             try:
                 try:
                     ran = self._run_candidate(opened, call, case, env, secrets) if self._run_entry is not None else None
                 finally:
                     opened.close()
+                    self._unpark(metric_box)
                 if ran is not None and ran.get("error"):
                     error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
                     error = error[len(RUN_FAILED) :]
@@ -466,6 +467,32 @@ class RepoScorer:
                 if metric_box.exception() is None:
                     # Closing twice is a no-op; this closes a box no path above used.
                     metric_box.result().close()
+
+    def _open_parked_metric(self) -> MetricBox:
+        """Open the metric box and park it in the run budget until the candidate box ended.
+
+        The open metric box only waits for the candidate box, so the run
+        budget may stop a run whose candidate box waits on a model call (SKY-647).
+
+        Returns:
+            The open metric box.
+        """
+        metric = self._workspace.open_metric()
+        park = getattr(self._budget, "park", None)
+        if park is not None and metric.key is not None:
+            park(box_tag(metric.key))
+        return metric
+
+    def _unpark(self, metric_box: Future[MetricBox]) -> None:
+        """Wait for the metric box to open, then end its park, once the candidate box ended.
+
+        Args:
+            metric_box: The metric box being opened; a failed open parked nothing.
+        """
+        if metric_box.exception() is None:
+            key = metric_box.result().key
+            if key is not None and getattr(self._budget, "park", None) is not None:
+                self._budget.unpark(box_tag(key))
 
     def _score_in_metric_box(
         self,

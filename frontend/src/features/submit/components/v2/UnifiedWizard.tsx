@@ -7,7 +7,6 @@ import { toast } from "react-toastify";
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";
 import { useAddFundsAction, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
-import { msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 import { slideVariants } from "../../constants";
@@ -19,7 +18,6 @@ import {
   runBalance,
   type BudgetShortfall,
 } from "../../lib/budget-limit";
-import type { RunFailureCause } from "../../lib/run-failure";
 import {
   WIZARD_SCREEN_KEY,
   keepSessionValue,
@@ -29,7 +27,7 @@ import {
 import { stepPages } from "../../lib/wizard-pages";
 import { WIZARD_V2_STEPS, type WizardStepId } from "../../lib/wizard-v2";
 import { WIZARD_STAGE, canMoveForward } from "../../lib/wizard-steps";
-import { SubmitNav, type RunFailureNotice } from "../SubmitNav";
+import { SubmitNav } from "../SubmitNav";
 import { SubmitSplash } from "../SubmitSplash";
 import { SubmitStepper } from "../SubmitStepper";
 import { belowFloorMessage, shortBalanceMessage } from "../TotalBudgetCard";
@@ -59,12 +57,6 @@ function shortfallMessage(shortfall: BudgetShortfall): string {
     ? shortBalanceMessage(shortfall.needed)
     : belowFloorMessage(shortfall.needed);
 }
-
-const RUN_FAILURE_TEXT = {
-  limit: "submit.run.failure.limit",
-  balance: "submit.run.failure.balance",
-  other: "submit.run.failure.other",
-} as const satisfies Record<RunFailureCause, string>;
 
 // Arrow keys page the wizard only when they have no job where focus sits:
 // fields, editors, radio groups, tabs, menus and open dialogs keep them.
@@ -118,7 +110,7 @@ function UnifiedWizardFrame() {
   const pageCount = stepPages(current, w.state).length;
   const page = Math.min(pages[current], pageCount - 1);
   const lastScreen = position === steps.length - 1 && page === pageCount - 1;
-  const { goNext, goPrev, advancing, submitting } = w;
+  const { goNext, goPrev, submitting } = w;
   const visibleScreen = stepPages(current, w.state)[page] ?? "";
   useEffect(() => keepSessionValue(WIZARD_SCREEN_KEY, visibleScreen), [visibleScreen]);
   const { totalCents, available: balanceKnown, shown } = useBalance();
@@ -266,22 +258,6 @@ function UnifiedWizardFrame() {
     [steps, position, current, page, inputsOpen, pricing, shortfall, runShort, w.costSettled, forward, goTo, canEnter, stepIssue, w.state],
   );
 
-  // Guided's flow skips the screen that sets the limit, so its notice has no button.
-  const limitScreen = LIMIT_SCREENS.find((screen) =>
-    steps.some((step) => (stepPages(step, w.state) as readonly string[]).includes(screen)),
-  );
-  const failureCause = w.runFailure?.cause;
-  const runFailure: RunFailureNotice | null = w.runFailure && {
-    text: msg(RUN_FAILURE_TEXT[w.runFailure.cause]),
-    detail: w.runFailure.detail,
-    action:
-      failureCause === "balance"
-        ? { label: addFunds.label, onClick: addFunds.run }
-        : failureCause === "limit" && limitScreen
-          ? { label: msg("submit.run.failure.raise_limit"), onClick: () => goToScreen(limitScreen) }
-          : undefined,
-  };
-
   // The agent edits only the screen on view, so it is told which one that
   // is; unmounting the wizard clears it and leaves the agent unscoped. Its
   // Continue runs this frame's own ``forward``, the button's handler.
@@ -341,7 +317,7 @@ function UnifiedWizardFrame() {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
       if (event.defaultPrevented || arrowsBelongElsewhere(event.target)) return;
-      if (advancing || submitting) return;
+      if (submitting) return;
       // Forward is toward the reading end: right in English, left in Hebrew.
       const toEnd = (event.key === "ArrowRight") === (getActiveDir() !== "rtl");
       if (toEnd && lastScreen) return;
@@ -351,7 +327,7 @@ function UnifiedWizardFrame() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [forward, back, advancing, submitting, lastScreen]);
+  }, [forward, back, submitting, lastScreen]);
 
   const metricHeld = runShort || !w.costSettled;
   const reachable = (step: WizardStepId) =>
@@ -377,7 +353,7 @@ function UnifiedWizardFrame() {
       }`}
     >
       <div className="shrink-0">
-        <SubmitStepper w={stepper} locked={w.advancing} />
+        <SubmitStepper w={stepper} />
       </div>
 
       <div
@@ -413,7 +389,6 @@ function UnifiedWizardFrame() {
           nextDisabled={!inputsOpen}
           showSubmit={lastScreen}
           screen={{ index: page, count: pageCount }}
-          runFailure={runFailure}
         />
       </div>
 

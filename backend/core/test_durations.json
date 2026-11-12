@@ -24,7 +24,6 @@
   "core/api/tests/test_connectors_pruning.py": 0.04551034024916589,
   "core/api/tests/test_connectors_router.py": 2.4083462591515854,
   "core/api/tests/test_continuous.py": 64.00567362090806,
-  "core/api/tests/test_contract_check_route.py": 27.333928225270938,
   "core/api/tests/test_converters.py": 0.03285341791342944,
   "core/api/tests/test_cors_preflight.py": 11.24302669102326,
   "core/api/tests/test_dashboard_router.py": 0.27069990016752854,

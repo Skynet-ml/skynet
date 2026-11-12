@@ -790,7 +790,7 @@ def preflight_draft(
     except BudgetError as error:
         raise budget_http_error(error) from error
     request.max_cost_cents = budget.total_cents
-    response, _spec = checked_preflight(
+    response = checked_preflight(
         WizardPreflightRequest(
             scope="execution",
             workflow=_BLACKBOX_WORKFLOW,
@@ -801,7 +801,7 @@ def preflight_draft(
         user,
         job_store,
     )
-    answer = localize_preflight(response, None, locale).model_dump(mode="json", exclude_none=True)
+    answer = localize_preflight(response, locale).model_dump(mode="json", exclude_none=True)
     if response.may_advance:
         answer["next_tool"] = "repo_draft_submit"
         answer["note"] = (

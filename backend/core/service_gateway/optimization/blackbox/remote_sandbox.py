@@ -14,6 +14,7 @@ import httpx
 from ....billing import budgets
 from ....billing.runtime import OperationCompletedError, UsagePendingError
 from ....billing.signals import BudgetReached
+from ....billing.usage_tags import box_tag
 from ....exceptions import InfrastructureInterruptionError, ServiceError
 from .sandbox_contract import CommandResult, OutputSink, SandboxSpec
 
@@ -124,10 +125,11 @@ class RemoteSandboxRuntime:
         Returns:
             A guest handle containing only an opaque broker identity.
         """
+        request_id = spec.operation_key or uuid.uuid4().hex
         value = self._request(
             "open",
             {
-                "request_id": spec.operation_key or uuid.uuid4().hex,
+                "request_id": request_id,
                 "spec": {
                     "lifetime_seconds": spec.lifetime_seconds,
                     "env": dict(spec.env),
@@ -142,7 +144,11 @@ class RemoteSandboxRuntime:
         identity = value.get("sandbox_id")
         if not isinstance(identity, str) or not identity:
             raise ServiceError("The parent did not return a sandbox capability.")
-        return RemoteSandboxSession(self, identity, spec.lifetime_seconds)
+        session = RemoteSandboxSession(self, identity, spec.lifetime_seconds)
+        # The parent names this box the same way, so the guest can tag the work
+        # that this box waits on, such as its evaluator requests (SKY-647).
+        session.box = box_tag(f"sandbox:{request_id}")
+        return session
 
 
 class RemoteSandboxSession:
@@ -160,6 +166,7 @@ class RemoteSandboxSession:
         self._identity = identity
         self._lifetime = lifetime_seconds
         self._closed = False
+        self.box: str | None = None
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write text files in the owned guest directory.

@@ -196,9 +196,6 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
     monkeypatch.setattr(preflight_execution, "check_repository", lambda *args, **kwargs: [])
     monkeypatch.setattr(preflight_execution, "infer_repo_setup", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
-    # The unified sandbox verifier is replaced the same way so no sandbox or
-    # provider is reached.
-    monkeypatch.setattr(preflight_execution, "_verify_unified", verify_anything)
     # Holds here are sized against tight budgets in raw provider cost; the markup is pricing policy, tested in core/billing.
     monkeypatch.setattr(submissions.settings, "usage_markup", 1.0)
     monkeypatch.setattr(submissions.settings, "worker_enabled", False)
@@ -248,38 +245,6 @@ def _payload(*, total: int = 20) -> dict[str, Any]:
             "setup_command": "npm ci",
         },
         "reflection_model_config": {"name": "fixture/text"},
-        "max_cost_cents": total,
-    }
-
-
-def _unified_payload(*, total: int = 20) -> dict[str, Any]:
-    """Build a valid unified request body with no budget or verification metadata.
-
-    Args:
-        total: Approved total setup and run allowance.
-
-    Returns:
-        Request exercising the production schema and canonicalization.
-    """
-    return {
-        "username": "spoofed-owner",
-        "task": {
-            "objective": "Answer the question in one word.",
-            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
-        },
-        "data": {
-            "mode": "pairs",
-            "cases": [{"input": {"question": f"Q{index}?"}, "expected": "A"} for index in range(10)],
-            "input_fields": ["question"],
-        },
-        "optimizer": {"choice": "dspy_gepa"},
-        "models": {"reflection_model": {"name": "fixture/text"}, "task_model": {"name": "fixture/task"}},
-        "workspace": {
-            "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
-            "metric_code": (
-                "def score(input, output, expected=None):\n    return float(output == expected), {'feedback': ''}\n"
-            ),
-        },
         "max_cost_cents": total,
     }
 
@@ -666,7 +631,7 @@ def test_attachment_rolls_back_job_when_budget_already_attached(harness: _Harnes
             preflight_id=payload["preflight_id"],
             preflight_fingerprint=payload["preflight_fingerprint"],
             preflight_payload=existing["payload"],
-            preflight_workflow="unified",
+            preflight_workflow="anything",
         )
     assert harness.count(JobModel) == 1
     with pytest.raises(KeyError):
@@ -861,20 +826,20 @@ def test_parallel_submissions_with_their_own_keys_both_start(harness: _Harness) 
     assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 2
 
 
-def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
+def _check_models(harness: _Harness, reflection: dict[str, Any]) -> tuple[Any, str]:
     """Run the wizard's Ready-to-run check with the given model roles.
 
     Args:
         harness: Funded real API fixture.
-        models: The unified ``models`` block to check.
+        reflection: The reflection model to check.
 
     Returns:
         The HTTP response and the status of the check's durable row.
     """
     budget = harness.budgets.create(harness.username, 20, idempotency_key="models")
     payload = {
-        **_unified_payload(),
-        "models": models,
+        **_payload(),
+        "reflection_model_config": reflection,
         "execution_budget_id": budget.id,
         "execution_budget_revision": budget.revision,
     }
@@ -882,7 +847,7 @@ def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
         "/wizard/preflight",
         json={
             "scope": "execution",
-            "workflow": "unified",
+            "workflow": "anything",
             "payload": payload,
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -893,32 +858,24 @@ def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
     return response, status
 
 
-def test_local_check_accepts_subscription_task_and_reflection_models(
+def test_local_check_accepts_a_subscription_reflection_model(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Finish a local Ready-to-run check whose roles both run on a subscription CLI.
+    """Finish a local Ready-to-run check whose reflection model runs on a subscription CLI.
 
     Args:
         harness: Real setup and wallet services.
         monkeypatch: Turns local mode on.
     """
     monkeypatch.setattr(submissions.settings, "local_mode", True)
-    subscription = {"token_source": "subscription", "cli_provider": "claude"}
-    models = {
-        "reflection_model": {"name": "anthropic/claude-sonnet-4.6", **subscription},
-        "task_model": {"name": "anthropic/claude-haiku-4.5", **subscription},
-    }
+    reflection = {"name": "anthropic/claude-sonnet-4.6", "token_source": "subscription", "cli_provider": "claude"}
 
-    response, status = _check_models(harness, models)
+    response, status = _check_models(harness, reflection)
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "succeeded", response.json()
     assert status == "succeeded"
-    sent = harness.calls[0]["payload"]["models"]
-    assert {role: sent[role]["token_source"] for role in ("reflection_model", "task_model")} == {
-        "reflection_model": "subscription",
-        "task_model": "subscription",
-    }
+    assert harness.calls[0]["payload"]["reflection_model_config"]["token_source"] == "subscription"
 
 
 def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running(
@@ -933,12 +890,9 @@ def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running
     view = SimpleNamespace(provider="openai", api_base=None, status="verified")
     vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
     monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
-    models = {
-        "reflection_model": {"name": "fixture/text"},
-        "task_model": {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"},
-    }
+    reflection = {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"}
 
-    response, status = _check_models(harness, models)
+    response, status = _check_models(harness, reflection)
 
     assert response.status_code == 200, response.text
     body = response.json()

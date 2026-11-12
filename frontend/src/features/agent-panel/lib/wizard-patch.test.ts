@@ -30,16 +30,15 @@ const extractWizardPatch = declaration("extractWizardPatch", {
   isRecord,
   isStringList: declaration("isStringList", {}),
   parseScreenNotes: declaration("parseScreenNotes", { isRecord }),
-  parseStartingVersion: declaration("parseStartingVersion", { isRecord }),
   rolesFields: () => null,
   ARTIFACT_KINDS: declaration("ARTIFACT_KINDS", {}),
   DATA_MODES: declaration("DATA_MODES", {}),
   storedOptimizerChoice,
 });
 
-test("a DSPy optimizer from the agent becomes Auto", () => {
+test("a DSPy optimizer from the agent is dropped", () => {
   for (const id of ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]) {
-    assert.equal(extractWizardPatch({ wizard_state: { optimizer_choice: id } }).optimizer_choice, "auto");
+    assert.equal(extractWizardPatch({ wizard_state: { optimizer_choice: id } }).optimizer_choice, undefined);
   }
 });
 

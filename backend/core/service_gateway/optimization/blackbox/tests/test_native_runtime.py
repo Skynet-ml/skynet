@@ -28,7 +28,7 @@ from core.billing.guest_model_proxy import MCP_TOKEN_ENV, SERVICES_ENV
 from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY
 from core.billing.pricing import model_token_costs
 from core.billing.runtime import UsagePendingError
-from core.billing.usage_tags import USAGE_TAGS_HEADER
+from core.billing.usage_tags import USAGE_TAGS_HEADER, current_tags
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
 from core.exceptions import ServiceError
@@ -2014,6 +2014,28 @@ def test_the_parent_restores_cases_from_the_list_it_started_with() -> None:
 
     assert mailbox.error is None
     assert scored == [{"input": {"q": "b"}, "expected": "B"}]
+
+
+def test_the_parent_scores_each_request_in_the_engine_box_scope() -> None:
+    """The scorer's calls name the engine box, so the parent knows that box waits on them (SKY-647)."""
+    boxes: list[str | None] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the box tag that the scorer's calls carry."""
+        boxes.append(current_tags().get("box"))
+        return 1.0, {}
+
+    session = FakeSession()
+    session.box = "e" * 32  # type: ignore[attr-defined]
+    cases = [{"input": {"q": "a"}, "expected": "A"}]
+    mailbox = native_runtime._EvaluatorMailbox(session, EvalServer(score, max_evals=3), "nonce", cases=cases)
+    request = {"id": "0" * 32, "candidate": "seed", "example": {"id": 0}}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert mailbox.error is None
+    assert boxes == ["e" * 32]
+    assert current_tags().get("box") is None
 
 
 def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) -> None:

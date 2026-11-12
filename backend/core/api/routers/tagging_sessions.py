@@ -227,6 +227,23 @@ def _row_to_detail(row: TaggingSessionModel, role: str = "owner") -> TaggingSess
     )
 
 
+def refuse_while_autotag_runs(row: TaggingSessionModel) -> None:
+    """Refuse a write to a session while its bulk auto-tag job runs.
+
+    The job owns the row while it runs. A stale tab's autosave, or a chat
+    that saves a labeling guide, would otherwise overwrite what it wrote.
+
+    Args:
+        row: The loaded session row.
+
+    Raises:
+        DomainError: 409 while the job runs.
+    """
+    autotag = (cast("dict[str, Any]", row.assist) or {}).get("autotag") or {}
+    if autotag.get("status") == "running":
+        raise DomainError("tagger.assist.autotag_running", status=409)
+
+
 def create_tagging_session_router(*, job_store) -> APIRouter:
     """Build the tagger-session persistence router.
 
@@ -488,11 +505,7 @@ def create_tagging_session_router(*, job_store) -> APIRouter:
             if row is None:
                 raise DomainError("tagger.session.not_found", status=404)
             role = require_role(session, session_id, user, ShareRole.editor)
-            # The bulk auto-tag job owns the row while it runs — a stale tab's
-            # autosave would otherwise overwrite the labels it already wrote.
-            autotag = (cast("dict[str, Any]", row.assist) or {}).get("autotag") or {}
-            if autotag.get("status") == "running":
-                raise DomainError("tagger.assist.autotag_running", status=409)
+            refuse_while_autotag_runs(row)
             row.annotations = cast(Any, req.annotations)
             if req.assist is not None:
                 row.assist = cast(Any, req.assist)

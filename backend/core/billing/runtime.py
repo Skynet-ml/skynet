@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -117,16 +118,26 @@ class BudgetRuntime:
         self.wait_timeout = wait_timeout
         self._changed = threading.Condition()
         self._pinned: dict[str, int] = {}
+        # The box tag of each pinned box that runs work; a snapshot hold runs none.
+        self._boxes: dict[str, str | None] = {}
+        self._waiting: Counter[str] = Counter()
+        self._parked: Counter[str] = Counter()
 
-    def pin(self, operation_id: str, units: int) -> None:
+    def pin(self, operation_id: str, units: int, *, box: str | None = None, work: bool = True) -> None:
         """Record sandbox coverage that stays held until the work that opened it ends.
 
         Args:
             operation_id: The sandbox's admitted operation.
             units: Its current coverage in cent units.
+            box: The box tag that the box's own model calls carry; see
+                :func:`core.billing.usage_tags.box_tag`.
+            work: False for a hold that runs no work, such as a run-scoped
+                snapshot. Its coverage still counts as held.
         """
         with self._changed:
             self._pinned[operation_id] = units
+            if work:
+                self._boxes[operation_id] = box
 
     def unpin(self, operation_id: str) -> None:
         """Forget a sandbox's coverage once it settled or was released.
@@ -136,33 +147,136 @@ class BudgetRuntime:
         """
         with self._changed:
             self._pinned.pop(operation_id, None)
+            self._boxes.pop(operation_id, None)
             self._changed.notify_all()
 
-    def _wait_cannot_help(self, error: BudgetInFlightError) -> BudgetInsufficientError | None:
-        """Refuse a setup operation that only this check's own open sandboxes keep out.
+    def park(self, box: str) -> None:
+        """Mark a box as idle between uses, so it cannot end its own work.
 
-        A setup check runs its samples one at a time inside sandboxes it opened
-        itself, and those stay open while it waits, so their coverage can never
-        make room. A run's lanes do release each other's coverage, so only the
-        setup phase gives up early.
+        A pinned work box counts as working from its start until its unpin,
+        through its commands, file transfers, the gaps between them and its
+        stop. Only trusted parent code that drives the box calls this, never a
+        guest, and only for the time the box really waits for its next use,
+        such as a repository scorer box between evaluations.
+
+        Args:
+            box: The box tag; see :func:`core.billing.usage_tags.box_tag`.
+        """
+        with self._changed:
+            self._parked[box] += 1
+
+    def unpark(self, box: str) -> None:
+        """End the idle time that :meth:`park` started.
+
+        Args:
+            box: The box tag that :meth:`park` got.
+        """
+        with self._changed:
+            self._parked[box] -= 1
+            if self._parked[box] <= 0:
+                del self._parked[box]
+
+    def _begin_wait(self, box: str | None, for_box: str | None = None) -> tuple[str, ...]:
+        """Count one waiting call as waiting work of the pinned boxes it holds up.
+
+        The call counts for its own box. It also counts for ``for_box``, the
+        box that waits for the call's box to finish, but only when both are
+        pinned work boxes of this runtime. A box that waits on work outside
+        a pinned box can still go on when that work ends, so it never counts.
+        A call with no box tag, or with a tag that names no pinned work box
+        of this runtime, counts for no box. A guest can forge the tags, but
+        only for its own run's boxes, and a count can only make the run stop
+        earlier; it never admits more work.
+
+        Args:
+            box: The box tag of the call, or None.
+            for_box: The box tag of the box that waits for the call's box, or None.
+
+        Returns:
+            The box tags to pass to :meth:`_end_wait`; empty when the call counts for no box.
+        """
+        with self._changed:
+            pinned = set(self._boxes.values())
+            if box is None or box not in pinned:
+                return ()
+            counted = (box, for_box) if for_box is not None and for_box != box and for_box in pinned else (box,)
+            self._waiting.update(counted)
+            return counted
+
+    def _end_wait(self, boxes: tuple[str, ...]) -> None:
+        """Stop counting a call that :meth:`_begin_wait` counted.
+
+        Args:
+            boxes: The value that :meth:`_begin_wait` returned.
+        """
+        if not boxes:
+            return
+        with self._changed:
+            for box in boxes:
+                self._waiting[box] -= 1
+                if self._waiting[box] <= 0:
+                    del self._waiting[box]
+
+    def _fits_after_unpinned_work(self, error: BudgetInFlightError) -> bool:
+        """Tell whether an operation fits once the unpinned in-flight work settles.
+
+        Args:
+            error: The admission refusal, with its limit arithmetic when it has one.
+
+        Returns:
+            True when the refusal has no limit arithmetic, or when the scope
+            fits in the room that the pinned coverage leaves.
+        """
+        if error.scope_units is None or error.room_units is None:
+            return True
+        with self._changed:
+            pinned = sum(self._pinned.values())
+        return error.scope_units <= error.room_units - pinned
+
+    def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
+        """Refuse an operation that only this runtime's own blocked sandboxes keep out.
+
+        A setup check runs its samples one at a time inside boxes it opened
+        itself, so its pinned coverage never makes room. A run's lanes share
+        this runtime, and a box frees its coverage when its work ends. A
+        snapshot hold stays for the whole run. A run therefore refuses early
+        only when no pinned work box can end: each one has a model call that
+        waits, waits for another pinned box whose call waits (such as a
+        native engine box on its scorer box), or is parked between uses (such
+        as an idle repository scorer box between evaluations, see :meth:`park`). Then waiting
+        only stalls until the timeout (SKY-647).
+        Unpinned in-flight work still settles, so the operation waits
+        whenever it would fit once that work is done.
 
         Args:
             error: The admission refusal, with its limit arithmetic when it has one.
 
         Returns:
             The refusal to raise instead of waiting, or None when waiting may help.
+            In the run phase it is the stop latch's ``BudgetReached``, after
+            the budget stopped admitting work, like any other run refusal.
         """
-        if self.phase != "setup" or error.scope_units is None or error.room_units is None:
+        if self._fits_after_unpinned_work(error):
             return None
         with self._changed:
             pinned = sum(self._pinned.values())
-        if error.scope_units <= error.room_units - pinned:
+            # With no pinned work box, only run-long holds such as snapshots
+            # remain, and they never end during the run, so stopping is correct.
+            every_box_waits = all(
+                box is not None and (self._waiting[box] > 0 or self._parked[box] > 0) for box in self._boxes.values()
+            )
+        if self.phase != "setup" and not every_box_waits:
             return None
-        return BudgetInsufficientError(
-            f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this check's "
+        owner = "check's" if self.phase == "setup" else "run's"
+        message = (
+            f"The next operation needs up to {usd_text(ceil_cents(error.scope_units))}, but this {owner} "
             f"sandboxes hold {usd_text(ceil_cents(pinned))} of the "
             f"{usd_text(max(error.room_units, 0) // CENT_SCALE)} that remain."
         )
+        if self.phase == "setup":
+            return BudgetInsufficientError(message)
+        self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
+        return self.stop.trip(message)
 
     def check_admission(self) -> None:
         """Fence unpaid control calls against the same cancellation and recovery authority.
@@ -190,6 +304,8 @@ class BudgetRuntime:
         cost_kind: str,
         role: str | None = None,
         attempt: int = 0,
+        box: str | None = None,
+        for_box: str | None = None,
     ) -> OperationSnapshot:
         """Wait for in-flight coverage before declaring genuine budget exhaustion.
 
@@ -199,6 +315,10 @@ class BudgetRuntime:
             cost_kind: Model or sandbox cost attribution.
             role: Task, judge, optimization, or runtime role.
             attempt: Physical retry number with independent usage coverage.
+            box: The box tag of the box whose work makes this call, from the
+                call's usage tags; None for work outside a box.
+            for_box: The box tag of the box that waits for ``box`` to finish,
+                from the call's usage tags; None when no box waits for it.
 
         Returns:
             The admitted physical attempt or its existing idempotent record.
@@ -230,15 +350,24 @@ class BudgetRuntime:
                     "Previous work is awaiting confirmed usage; its coverage is retained."
                 ) from error
             except BudgetInFlightError as error:
-                refusal = self._wait_cannot_help(error)
-                if refusal is not None:
-                    raise refusal from error
-                if time.monotonic() >= deadline:
-                    raise UsagePendingError(
-                        "Covered work has not settled; no overlapping work was admitted."
-                    ) from error
-                with self._changed:
-                    self._changed.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+                # A call counts as waiting work only while the run's pinned coverage
+                # keeps it out, and never while it retries: a call that may fit after
+                # unpinned work settles, or that may be admitted now, can still let
+                # its box end (SKY-647).
+                fits = self._fits_after_unpinned_work(error)
+                waiting = () if fits else self._begin_wait(box, for_box)
+                try:
+                    refusal = self._wait_cannot_help(error)
+                    if refusal is not None:
+                        raise refusal from error
+                    if time.monotonic() >= deadline:
+                        raise UsagePendingError(
+                            "Covered work has not settled; no overlapping work was admitted."
+                        ) from error
+                    with self._changed:
+                        self._changed.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+                finally:
+                    self._end_wait(waiting)
             except BudgetInsufficientError as error:
                 if self.phase == "setup":
                     raise
@@ -305,6 +434,8 @@ class BudgetRuntime:
         cost_kind: str,
         role: str | None = None,
         attempt: int = 0,
+        box: str | None = None,
+        for_box: str | None = None,
     ) -> T:
         """Dispatch once under coverage and settle actual usage on every outcome.
 
@@ -316,6 +447,8 @@ class BudgetRuntime:
             cost_kind: Model or sandbox category.
             role: Optional model role attribution.
             attempt: Independent physical retry number.
+            box: The box tag of the box whose work makes this call; see :meth:`reserve`.
+            for_box: The box tag of the box that waits for ``box``; see :meth:`reserve`.
 
         Returns:
             Provider result after evidence has been durably recorded.
@@ -333,6 +466,8 @@ class BudgetRuntime:
             cost_kind=cost_kind,
             role=role,
             attempt=attempt,
+            box=box,
+            for_box=for_box,
         )
         if operation.state == "settled":
             raise OperationCompletedError("The operation already completed; retrieve its saved result.")

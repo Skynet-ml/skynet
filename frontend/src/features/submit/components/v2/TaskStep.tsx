@@ -13,7 +13,7 @@ import {
 } from "@/features/agent-panel";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
-import { targetPatch, taskIssue } from "../../lib/wizard-v2";
+import { taskIssue } from "../../lib/wizard-v2";
 import { AuthoringShell } from "../steps/AuthoringShell";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { RepoTargetCard } from "./RepoTargetCard";
@@ -27,19 +27,9 @@ import { WizardScreen } from "./WizardScreen";
  * optimizes a repository.
  */
 export function TaskStep({ page }: { page: number }) {
-  const { state, guided, patchTask, patchInputs, patchOptimizer } = useWizardV2();
+  const { state, guided, patchTask } = useWizardV2();
   const task = state.task;
   const t = (key: string) => v2Msg(key, guided);
-
-  // A fresh wizard and an older draft both start without a repository target;
-  // move them onto one so the repository card and the repo optimizers apply.
-  React.useEffect(() => {
-    if (task.repo) return;
-    const patch = targetPatch("repo", null, state.optimizer.choice);
-    patchTask(patch.task);
-    if (patch.inputs) patchInputs(patch.inputs);
-    if (patch.optimizer) patchOptimizer(patch.optimizer);
-  }, [task.repo]);
 
   return (
     <AuthoringShell
@@ -80,19 +70,17 @@ export function TaskStep({ page }: { page: number }) {
         active={page === 1}
         className="relative flex flex-col gap-5 px-4 py-5 sm:px-6 sm:py-6"
       >
-        {task.repo && (
-          <RepoTargetCard
-            repo={task.repo}
-            onChange={(repo) => patchTask({ repo })}
-            issue={taskIssue(task)}
-            guided={guided}
-            seed={{
-              objective: task.objective,
-              scorerCode: state.workspace.metricCode,
-              cases: state.inputs.cases,
-            }}
-          />
-        )}
+        <RepoTargetCard
+          repo={task.repo}
+          onChange={(repo) => patchTask({ repo })}
+          issue={taskIssue(task)}
+          guided={guided}
+          seed={{
+            objective: task.objective,
+            scorerCode: state.workspace.metricCode,
+            cases: state.inputs.cases,
+          }}
+        />
       </WizardScreen>
     </AuthoringShell>
   );

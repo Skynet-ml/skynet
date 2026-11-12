@@ -834,6 +834,36 @@ def test_a_failed_dispatch_keeps_the_call_maximum_in_the_hold(engine: Engine) ->
     assert final.actual_cents == quote.maximum.total
 
 
+@pytest.mark.parametrize("cloud", [True, False], ids=["job-hold", "budget-runtime"])
+def test_the_meter_accepts_the_box_tags_that_the_dispatcher_passes(engine: Engine, cloud: bool) -> None:
+    """The model dispatcher passes box and for_box to every runtime, so the meter must take them (SKY-647)."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    service = BudgetService(engine=engine)
+    held = HardeningBudget(service, username=_USER, budget_id=budget_id).reserve(job, 2.0) if cloud else None
+    meter = HardeningMeter(
+        service,
+        operation_id=held,
+        username=_USER,
+        budget_id=budget_id,
+        generation=service.get(budget_id, _USER).generation,
+        phase="setup",
+    )
+    quote, policy = _quote("tags")
+
+    value = meter.execute(
+        quote,
+        policy,
+        lambda: PaidResult(value="ok", provider_usd=Decimal("0.01"), evidence={"fixture": True}),
+        operation_key="call",
+        cost_kind="model",
+        box=None,
+        for_box=None,
+    )
+
+    assert value == "ok"
+
+
 def test_a_spent_hold_sets_exhausted_before_it_refuses_a_call(engine: Engine) -> None:
     """A call whose maximum passes the hold sets exhausted, raises, and never dispatches."""
     budget_id = _budget(engine)

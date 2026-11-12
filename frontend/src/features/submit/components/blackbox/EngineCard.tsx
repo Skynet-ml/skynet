@@ -20,7 +20,7 @@ import {
   GWire,
 } from "../steps/PickerSlide";
 
-/** What a card shows about one optimizer: a black-box engine, a DSPy optimizer or Auto. */
+/** What a card shows about one optimizer: a black-box engine or Auto. */
 export interface EngineSlideInfo {
   id: string;
   label: string;

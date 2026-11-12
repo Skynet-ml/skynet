@@ -439,16 +439,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const isStringList = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((x) => typeof x === "string");
 
-/** A starting version is text or a map of named text parts; anything else is dropped. */
-function parseStartingVersion(value: unknown): string | Record<string, string> | null {
-  if (typeof value === "string") return value;
-  if (!isRecord(value)) return null;
-  const entries = Object.entries(value);
-  return entries.every(([, part]) => typeof part === "string")
-    ? (Object.fromEntries(entries) as Record<string, string>)
-    : null;
-}
-
 /** Notes screen agents left for later screens; anything malformed drops the list. */
 function parseScreenNotes(value: unknown): ScreenNote[] | null {
   if (!Array.isArray(value)) return null;
@@ -502,11 +492,9 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
 
   const kind = ARTIFACT_KINDS.find((k) => k === wrap.artifact_kind);
   if (kind) patch.artifact_kind = kind;
-  const startingVersion = parseStartingVersion(wrap.starting_version);
-  if (startingVersion !== null) patch.starting_version = startingVersion;
   const mode = DATA_MODES.find((m) => m === wrap.data_mode);
   if (mode) patch.data_mode = mode;
-  // A DSPy optimizer id from the agent maps to Auto, since only repository engines run.
+  // Only Auto and repository engines run, so any other id from the agent is dropped.
   const choice = storedOptimizerChoice(wrap.optimizer_choice);
   if (choice) patch.optimizer_choice = choice;
 

@@ -2,124 +2,68 @@
 
 import type { ReactNode } from "react";
 import {
-  CheckCircle,
   Coins,
-  Columns,
   Cpu,
-  Cube,
-  Database,
   Desktop,
-  FileText,
   GitBranch,
   Gauge,
   Globe,
   Key,
   Lightbulb,
   Lock,
-  Shuffle,
   Stack,
   Tag,
   Target,
-  Trophy,
   TextAlignLeft,
   User,
   Wallet,
   Warning,
-  XCircle,
 } from "@/shared/ui/icons";
 import { byokHintKey } from "@/features/local-runtime";
-import { HelpTip } from "@/shared/ui/help-tip";
 import {
   SummaryTabs,
   SummaryRow as Row,
   SummaryTextRow as TextRow,
   SummaryModel as ReadOnlyModel,
 } from "@/shared/ui/run-summary";
-import { RolePill } from "@/shared/ui/role-pill";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { tip } from "@/shared/lib/tooltips";
 import { cn } from "@/shared/lib/utils";
-import { readRewardSpec } from "@/shared/lib/reward";
 import type { ModelConfig } from "@/shared/types/api";
 import { HARDENING_SURVIVED, hardeningSurvived, type HardeningJob } from "@/shared/types/hardening";
-import type { ContractCheckState } from "../../hooks/use-contract-check";
 import { useWizardV2ShellOptional } from "../../hooks/use-unified-wizard";
 import { economyEligible } from "../../lib/model-config";
 import { aggregateTokenSource, runModels, storedMetricModel } from "../../lib/run-floor";
-import { metricUsesModel } from "../../lib/scorer-dependencies";
+import { scorerCallsModel } from "../../lib/scorer-dependencies";
 import type { WizardV2State } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { optimizerLabel } from "./OptimizerPicker";
-import { RewardPreview } from "@/shared/ui/reward/reward-preview";
 
 const DASH = "—";
 const ICON = "size-3.5 shrink-0";
 
 const TAB_ICONS: Record<OverviewTab, ReactNode> = {
   general: <User className={ICON} aria-hidden />,
-  data: <Database className={ICON} aria-hidden />,
   models: <Cpu className={ICON} aria-hidden />,
   budget: <Coins className={ICON} aria-hidden />,
-  reward: <Trophy className={ICON} aria-hidden />,
 };
 
-function CheckStatus({ cc, guided }: { cc: ContractCheckState; guided: boolean }) {
-  const last = cc.lastCheck;
-  const [key, tone, icon] = cc.checking
-    ? (["submit.v2.metric.check.running", "muted", null] as const)
-    : !last
-      ? (["submit.v2.metric.check.needed", "muted", null] as const)
-      : cc.stale
-        ? ([
-            "submit.v2.metric.check.stale",
-            "warn",
-            <Warning key="i" className="size-4 shrink-0" aria-hidden />,
-          ] as const)
-        : last.ok
-          ? ([
-              "submit.v2.metric.check.passed",
-              "ok",
-              <CheckCircle key="i" className="size-4 shrink-0" aria-hidden />,
-            ] as const)
-          : ([
-              "submit.v2.metric.check.failed",
-              "bad",
-              <XCircle key="i" className="size-4 shrink-0" aria-hidden />,
-            ] as const);
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 font-medium",
-        tone === "ok" && "text-[var(--success)]",
-        tone === "warn" && "text-[var(--warning)]",
-        tone === "bad" && "text-destructive",
-        tone === "muted" && "text-muted-foreground",
-      )}
-    >
-      {icon}
-      {v2Msg(key, guided)}
-    </span>
-  );
-}
-
-type OverviewTab = "general" | "data" | "models" | "budget" | "reward";
+type OverviewTab = "general" | "models" | "budget";
 
 /**
  * The wizard's last screen: what the run will optimize, on what, with which
- * optimizer, and whether the contract check has passed. Run lives here, below
+ * optimizer, and how far hardening got. Run lives here, below
  * it, so it never sits over the code editors. The details sit in tabs so the
  * whole setup reads at a glance without a long scroll.
  */
 export function RunOverview({
   state,
-  cc,
   guided,
   hardening = null,
 }: {
   state: WizardV2State;
-  cc: ContractCheckState;
   guided: boolean;
   /** The setup's hardening job; a job that ended well adds its line under the check. */
   hardening?: HardeningJob | null;
@@ -127,18 +71,9 @@ export function RunOverview({
   const t = (key: string, params?: Record<string, string | number>) => v2Msg(key, guided, params);
   const locale = getActiveIntlLocale();
   const fmt = (n: number) => new Intl.NumberFormat(locale).format(n);
-  const pct = (n: number) => new Intl.NumberFormat(locale, { style: "percent" }).format(n);
-  const yesNo = (on: boolean) => t(on ? "submit.v2.overview.yes" : "submit.v2.overview.no");
-  const { task, inputs, optimizer, workspace, meta } = state;
-  // A repository run reads its own files, so it has no data tab. A metric
-  // that declares an accuracy, speed and cost reward gets its review tab.
-  const reward = task.repo ? null : readRewardSpec(workspace.metricCode);
-  const tabs: readonly OverviewTab[] = [
-    ...(task.repo
-      ? (["general", "models", "budget"] as const)
-      : (["general", "data", "models", "budget"] as const)),
-    ...(reward && reward.kind !== "none" ? (["reward"] as const) : []),
-  ];
+  const { task, optimizer, workspace, meta } = state;
+  // A repository run reads its own files, so it has no data tab.
+  const tabs: readonly OverviewTab[] = ["general", "models", "budget"];
   const reflectionModels = [optimizer.reflectionModel, ...optimizer.extraReflectionModels].filter(
     (m): m is NonNullable<typeof m> => m != null,
   );
@@ -149,7 +84,7 @@ export function RunOverview({
     aggregateTokenSource(
       runModels(
         optimizer,
-        metricUsesModel(state),
+        scorerCallsModel(state.workspace.metricCode),
         workspace.metricCode,
         storedMetricModel(workspace.metricModel, workspace.metricCode),
       ),
@@ -169,18 +104,6 @@ export function RunOverview({
           optimizer.maxCostCents / 100,
         )
       : DASH;
-  const dataset = inputs.datasetLabel !== null;
-  const columnRoles: Array<[string, "input" | "output"]> = dataset
-    ? [
-        ...inputs.inputFields.map((c): [string, "input"] => [c, "input"]),
-        ...(inputs.expectedField ? [[inputs.expectedField, "output"] as [string, "output"]] : []),
-      ]
-    : [];
-  const splitParts = [
-    ["train", "bg-primary-fill", inputs.split.train],
-    ["val", "bg-chart-3", inputs.split.val],
-    ["test", "bg-muted-foreground", inputs.split.test],
-  ] as const;
 
   return (
     <div className="flex max-h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-card/80 shadow-lg backdrop-blur-xl">
@@ -195,11 +118,7 @@ export function RunOverview({
           <span className="text-xs font-medium text-muted-foreground">
             {t("submit.v2.metric.check.title")}
           </span>
-          {task.repo ? (
-            <span className="text-muted-foreground">{t("submit.v2.repo.check_on_submit")}</span>
-          ) : (
-            <CheckStatus cc={cc} guided={guided} />
-          )}
+          <span className="text-muted-foreground">{t("submit.v2.repo.check_on_submit")}</span>
         </div>
         {hardening && HARDENING_SURVIVED.has(hardening.status) && (
           <p className="text-sm text-muted-foreground">
@@ -247,30 +166,19 @@ export function RunOverview({
                     <span dir="auto">{meta.name}</span>
                   </Row>
                 )}
-                {task.repo ? (
-                  <Row
-                    icon={<GitBranch className={ICON} aria-hidden />}
-                    label={t("submit.v2.repo.repository_label")}
-                  >
-                    <span className="break-all font-mono" dir="ltr">
-                      {task.repo.repository}
-                      {task.repo.commit.trim()
-                        ? ` @ ${task.repo.commit.trim().slice(0, 7)}`
-                        : task.repo.branch.trim()
-                          ? ` @ ${task.repo.branch.trim()}`
-                          : ""}
-                    </span>
-                  </Row>
-                ) : (
-                  task.artifactKind && (
-                    <Row
-                      icon={<Cube className={ICON} aria-hidden />}
-                      label={t("submit.v2.task.artifact.kind_label")}
-                    >
-                      {t(`submit.v2.task.artifact.kind.${task.artifactKind}`)}
-                    </Row>
-                  )
-                )}
+                <Row
+                  icon={<GitBranch className={ICON} aria-hidden />}
+                  label={t("submit.v2.repo.repository_label")}
+                >
+                  <span className="break-all font-mono" dir="ltr">
+                    {task.repo.repository}
+                    {task.repo.commit.trim()
+                      ? ` @ ${task.repo.commit.trim().slice(0, 7)}`
+                      : task.repo.branch.trim()
+                        ? ` @ ${task.repo.branch.trim()}`
+                        : ""}
+                  </span>
+                </Row>
                 <Row
                   icon={<Target className={ICON} aria-hidden />}
                   label={msg("submit.v2.stage.optimizer" as MessageKey)}
@@ -318,101 +226,6 @@ export function RunOverview({
                     {msg(byok ? "billing.mode.byok" : "billing.mode.managed")}
                   </Row>
                 )}
-              </>
-            )}
-            {current === "data" && (
-              <>
-                <Row
-                  icon={<FileText className={ICON} aria-hidden />}
-                  label={
-                    dataset
-                      ? msg("auto.features.submit.components.steps.summarystep.7")
-                      : t("submit.v2.overview.row.source")
-                  }
-                  help={dataset ? tip("submit.dataset_file") : undefined}
-                >
-                  <span dir="auto">
-                    {dataset
-                      ? inputs.datasetLabel
-                      : t("submit.v2.overview.cases", { count: fmt(inputs.cases.length) })}
-                  </span>
-                </Row>
-                {dataset && (
-                  <Row
-                    icon={<Database className={ICON} aria-hidden />}
-                    label={msg("auto.features.submit.components.steps.summarystep.8")}
-                    help={tip("submit.dataset_size")}
-                  >
-                    {t("submit.v2.inputs.source.loaded", {
-                      rows: fmt(inputs.rowCount),
-                      cols: fmt(inputs.columns.length),
-                    })}
-                  </Row>
-                )}
-                {columnRoles.length > 0 && (
-                  <div className="space-y-2 pb-1 pt-3">
-                    <dt>
-                      <HelpTip text={tip("submit.column_roles")}>
-                        <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <Columns className={ICON} aria-hidden />
-                          {msg("auto.features.submit.components.steps.summarystep.11")}
-                        </span>
-                      </HelpTip>
-                    </dt>
-                    <dd className="space-y-1.5">
-                      {columnRoles.map(([col, role]) => (
-                        <div key={col} className="flex items-center justify-between gap-2 py-1">
-                          <span className="truncate font-mono text-xs" dir="ltr">
-                            {col}
-                          </span>
-                          <RolePill role={role}>
-                            {msg(
-                              role === "input"
-                                ? "auto.features.submit.components.steps.summarystep.literal.6"
-                                : "auto.features.submit.components.steps.summarystep.literal.7",
-                            )}
-                          </RolePill>
-                        </div>
-                      ))}
-                    </dd>
-                  </div>
-                )}
-                <div className="mt-1 space-y-3 border-t border-border py-4">
-                  <dt>
-                    <HelpTip text={tip("data.split_explanation")}>
-                      <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Stack className={ICON} aria-hidden />
-                        {t("submit.v2.overview.row.split")}
-                      </span>
-                    </HelpTip>
-                  </dt>
-                  <dd className="space-y-3">
-                    <div className="flex h-3 overflow-hidden rounded-full" aria-hidden>
-                      {splitParts.map(([part, color, value]) => (
-                        <div key={part} className={color} style={{ width: `${value * 100}%` }} />
-                      ))}
-                    </div>
-                    <div className="grid grid-cols-3 gap-4">
-                      {splitParts.map(([part, color, value]) => (
-                        <HelpTip
-                          key={part}
-                          text={tip(`data.split.${part}`)}
-                          className="items-center gap-1.5 text-xs tabular-nums"
-                        >
-                          <span className={cn("inline-block size-2 rounded-full", color)} />
-                          {msg(`submit.split.label_${part}`)} <bdi>{pct(value)}</bdi>
-                        </HelpTip>
-                      ))}
-                    </div>
-                  </dd>
-                </div>
-                <Row
-                  icon={<Shuffle className={ICON} aria-hidden />}
-                  label={msg("auto.features.submit.components.steps.summarystep.16")}
-                  help={tip("data.shuffle_explanation")}
-                >
-                  {yesNo(inputs.shuffle)}
-                </Row>
               </>
             )}
             {current === "models" && (
@@ -476,14 +289,6 @@ export function RunOverview({
                   </Row>
                 )}
               </>
-            )}
-            {current === "reward" && reward && (
-              <div>
-                <dt className="sr-only">{t("submit.v2.overview.tab.reward")}</dt>
-                <dd>
-                  <RewardPreview read={reward} />
-                </dd>
-              </div>
             )}
           </>
         )}

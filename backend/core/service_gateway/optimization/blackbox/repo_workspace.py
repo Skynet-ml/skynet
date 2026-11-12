@@ -458,17 +458,19 @@ class CandidateBox:
 class MetricBox:
     """One evaluation's metric box M: the metric state, the metric files and the runner, no repository."""
 
-    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str) -> None:
+    def __init__(self, workspace: RepoWorkspace, session: SandboxSession, root: str, key: str | None) -> None:
         """Bind an open metric box.
 
         Args:
             workspace: The workspace that opened the box.
             session: The box.
             root: The box's working directory.
+            key: The box's operation key, or ``None`` when the spec has none.
         """
         self._workspace = workspace
         self.session = session
         self.root = root
+        self.key = key
         self.repo_path = f"{root}/{METRIC_REPO_DIR}"
         self.site_path = f"{root}/{METRIC_SITE_DIR}"
         self._closed = False
@@ -1044,7 +1046,7 @@ class RepoWorkspace:
                     raise (_SnapshotLostError if lost else RepoSetupError)(
                         "The metric box does not hold the metric packages."
                     )
-            return MetricBox(self, session, box_root(session))
+            return MetricBox(self, session, box_root(session), spec.operation_key)
         except BaseException:
             _close_quietly(session, "The metric box")
             raise
