@@ -701,14 +701,14 @@ def test_dispatch_sends_and_reserves_the_marked_body(database: Engine) -> None:
 
 
 def test_dispatch_passes_the_box_tag_to_admission(database: Engine) -> None:
-    """The ``box`` usage tag tells the runtime which pinned box the call waits for (SKY-647)."""
+    """The ``box`` and ``for_box`` usage tags tell the runtime which pinned boxes the call holds up (SKY-647)."""
     runtime = _runtime(database)
-    boxes: list[str | None] = []
+    boxes: list[tuple[str | None, str | None]] = []
     execute = runtime.execute
 
     def admitted(*args: Any, **kwargs: Any) -> Any:
-        """Record the box that admission sees, then admit as usual."""
-        boxes.append(kwargs.get("box"))
+        """Record the boxes that admission sees, then admit as usual."""
+        boxes.append((kwargs.get("box"), kwargs.get("for_box")))
         return execute(*args, **kwargs)
 
     runtime.execute = admitted  # type: ignore[method-assign]
@@ -728,9 +728,11 @@ def test_dispatch_passes_the_box_tag_to_admission(database: Engine) -> None:
             policy=ChargePolicy("managed_model"),
             client=client,
         )
-        dispatcher.dispatch("/chat/completions", REQUEST, protocol_headers={"x-app-usage-tags": '{"box":"b1"}'})
+        dispatcher.dispatch(
+            "/chat/completions", REQUEST, protocol_headers={"x-app-usage-tags": '{"box":"b1","for_box":"b0"}'}
+        )
         dispatcher.dispatch("/chat/completions", REQUEST)
-    assert boxes == ["b1", None]
+    assert boxes == [("b1", "b0"), (None, None)]
 
 
 def test_dispatch_records_usage_tags_and_latency_without_forwarding_them(database: Engine) -> None:

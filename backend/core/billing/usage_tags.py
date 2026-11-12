@@ -3,10 +3,10 @@
 Tags travel with the request as one header, so they cross every boundary a
 call can take: a worker child's HTTP call to the gateway, a sandbox command's
 mailbox document, and the guest proxy. They are display attribution only,
-except ``box``. The money a call costs and the role it is billed under come
-from the trusted route, never from a tag, so a forged tag can only mislabel
-its own run's rows. A forged ``box`` tag can at most stop its own run early
-(see ``BudgetRuntime.pin``).
+except ``box`` and ``for_box``. The money a call costs and the role it is
+billed under come from the trusted route, never from a tag, so a forged tag
+can only mislabel its own run's rows. A forged ``box`` or ``for_box`` tag can
+at most stop its own run early (see ``BudgetRuntime.pin``).
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ USAGE_TAGS_HEADER = "x-app-usage-tags"
 # Still sent by the pinned sandbox image and older clients; read, never written.
 LEGACY_USAGE_TAGS_HEADER = "x-skynet-usage-tags"
 USAGE_TAGS_HEADERS = frozenset({USAGE_TAGS_HEADER, LEGACY_USAGE_TAGS_HEADER})
-TAG_KEYS = ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box")
+TAG_KEYS = ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
 # ``caller`` values: which optimizer drove an optimization-route call.
 CALLER_PROPOSER = "proposer"
 CALLER_REFLECTION = "reflection"
@@ -41,6 +41,10 @@ LANE_KEY = "lane"
 # over the guest's tags for every call that a box's mailbox relays, so the
 # budget runtime can tell when every pinned box waits on its own model calls.
 BOX_KEY = "box"
+# ``for_box`` names the pinned box that waits for a call's box to finish, such
+# as a native engine box whose evaluator request runs in a parent scorer box.
+# The parent sets it from the box of the scope that opened the work (SKY-647).
+FOR_BOX_KEY = "for_box"
 _MAX_VALUE_CHARS = 64
 _MAX_HEADER_CHARS = 512
 _VALUE = re.compile(r"[A-Za-z0-9_.:@/+ -]+")
@@ -146,8 +150,8 @@ def usage_scope(**tags: Any) -> Iterator[None]:
     Scopes nest: an inner one keeps the outer's tags and overrides those it sets.
 
     Args:
-        **tags: ``stage``, ``pair``, ``candidate``, ``case``, ``caller``, ``kind``, ``lane`` or ``box``;
-            ``None`` keeps the outer value.
+        **tags: ``stage``, ``pair``, ``candidate``, ``case``, ``caller``, ``kind``, ``lane``, ``box`` or
+            ``for_box``; ``None`` keeps the outer value.
 
     Yields:
         Nothing; the scope ends when the block does.

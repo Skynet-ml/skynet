@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
-from ....billing.usage_tags import box_tag, usage_scope
+from ....billing.usage_tags import BOX_KEY, box_tag, current_tags, usage_scope
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, quote_vercel_sandbox
 from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
@@ -192,7 +192,11 @@ class ParentSandboxSession:
             # A root setup command needs no model route, so it skips the mailbox.
             return self._session.run(command, **options, sudo=True)
         if self._command_runner is not None:
-            with usage_scope(box=self._box):
+            # A parent box that runs inside another box's scope does that box's
+            # work, such as a scorer box for a native engine box's evaluator
+            # request. That box waits while this one does (SKY-647).
+            outer = current_tags().get(BOX_KEY)
+            with usage_scope(box=self._box, for_box=outer if outer != self._box else None):
                 return self._command_runner(self._session, command, **options)
         return self._session.run(command, **options)
 

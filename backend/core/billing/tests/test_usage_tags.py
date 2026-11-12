@@ -88,7 +88,7 @@ def test_with_tags_header_writes_the_merged_tags_under_both_names() -> None:
 
 def test_lane_is_a_known_key() -> None:
     """``lane`` survives cleaning and the header round trip; existing keys are unchanged."""
-    assert TAG_KEYS == ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box")
+    assert TAG_KEYS == ("stage", "pair", "candidate", "case", "caller", "kind", "lane", "box", "for_box")
     assert parse_tags('{"lane":"explore-gepa","stage":"training"}') == {"lane": "explore-gepa", "stage": "training"}
     assert header_tags(with_tags_header(None, {"lane": "continue-gepa"})) == {"lane": "continue-gepa"}
 

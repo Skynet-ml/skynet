@@ -149,38 +149,46 @@ class BudgetRuntime:
             self._boxes.pop(operation_id, None)
             self._changed.notify_all()
 
-    def _begin_wait(self, box: str | None) -> str | None:
-        """Count one waiting call as waiting work of the pinned box it serves.
+    def _begin_wait(self, box: str | None, for_box: str | None = None) -> tuple[str, ...]:
+        """Count one waiting call as waiting work of the pinned boxes it holds up.
 
+        The call counts for its own box. It also counts for ``for_box``, the
+        box that waits for the call's box to finish, but only when both are
+        pinned work boxes of this runtime. A box that waits on work outside
+        a pinned box can still go on when that work ends, so it never counts.
         A call with no box tag, or with a tag that names no pinned work box
-        of this runtime, counts for no box. A guest can forge the tag, but
+        of this runtime, counts for no box. A guest can forge the tags, but
         only for its own run's boxes, and a count can only make the run stop
         earlier; it never admits more work.
 
         Args:
             box: The box tag of the call, or None.
+            for_box: The box tag of the box that waits for the call's box, or None.
 
         Returns:
-            The box tag to pass to :meth:`_end_wait`, or None when the call counts for no box.
+            The box tags to pass to :meth:`_end_wait`; empty when the call counts for no box.
         """
         with self._changed:
-            if box is None or box not in self._boxes.values():
-                return None
-            self._waiting[box] += 1
-            return box
+            pinned = set(self._boxes.values())
+            if box is None or box not in pinned:
+                return ()
+            counted = (box, for_box) if for_box is not None and for_box != box and for_box in pinned else (box,)
+            self._waiting.update(counted)
+            return counted
 
-    def _end_wait(self, box: str | None) -> None:
+    def _end_wait(self, boxes: tuple[str, ...]) -> None:
         """Stop counting a call that :meth:`_begin_wait` counted.
 
         Args:
-            box: The value that :meth:`_begin_wait` returned.
+            boxes: The value that :meth:`_begin_wait` returned.
         """
-        if box is None:
+        if not boxes:
             return
         with self._changed:
-            self._waiting[box] -= 1
-            if self._waiting[box] <= 0:
-                del self._waiting[box]
+            for box in boxes:
+                self._waiting[box] -= 1
+                if self._waiting[box] <= 0:
+                    del self._waiting[box]
 
     def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
         """Refuse an operation that only this runtime's own blocked sandboxes keep out.
@@ -189,8 +197,10 @@ class BudgetRuntime:
         itself, so its pinned coverage never makes room. A run's lanes share
         this runtime, and a box frees its coverage when its work ends. A
         snapshot hold stays for the whole run. A run therefore refuses early
-        only when every pinned work box has a model call that waits: then no
-        box can end, and waiting only stalls until the timeout (SKY-647).
+        only when every pinned work box has a model call that waits, or waits
+        for another pinned box whose call waits, such as a native engine box
+        on its scorer box: then no box can end, and waiting only stalls until
+        the timeout (SKY-647).
         Unpinned in-flight work still settles, so the operation waits
         whenever it would fit once that work is done.
 
@@ -249,6 +259,7 @@ class BudgetRuntime:
         role: str | None = None,
         attempt: int = 0,
         box: str | None = None,
+        for_box: str | None = None,
     ) -> OperationSnapshot:
         """Wait for in-flight coverage before declaring genuine budget exhaustion.
 
@@ -260,6 +271,8 @@ class BudgetRuntime:
             attempt: Physical retry number with independent usage coverage.
             box: The box tag of the box whose work makes this call, from the
                 call's usage tags; None for work outside a box.
+            for_box: The box tag of the box that waits for ``box`` to finish,
+                from the call's usage tags; None when no box waits for it.
 
         Returns:
             The admitted physical attempt or its existing idempotent record.
@@ -269,7 +282,7 @@ class BudgetRuntime:
             BudgetReached: When no covered work can release sufficient allowance.
         """
         deadline = time.monotonic() + self.wait_timeout
-        waiting: str | None = None
+        waiting: tuple[str, ...] = ()
         counted = False
         try:
             while True:
@@ -295,7 +308,7 @@ class BudgetRuntime:
                     ) from error
                 except BudgetInFlightError as error:
                     if not counted:
-                        waiting, counted = self._begin_wait(box), True
+                        waiting, counted = self._begin_wait(box, for_box), True
                     refusal = self._wait_cannot_help(error)
                     if refusal is not None:
                         raise refusal from error
@@ -374,6 +387,7 @@ class BudgetRuntime:
         role: str | None = None,
         attempt: int = 0,
         box: str | None = None,
+        for_box: str | None = None,
     ) -> T:
         """Dispatch once under coverage and settle actual usage on every outcome.
 
@@ -386,6 +400,7 @@ class BudgetRuntime:
             role: Optional model role attribution.
             attempt: Independent physical retry number.
             box: The box tag of the box whose work makes this call; see :meth:`reserve`.
+            for_box: The box tag of the box that waits for ``box``; see :meth:`reserve`.
 
         Returns:
             Provider result after evidence has been durably recorded.
@@ -404,6 +419,7 @@ class BudgetRuntime:
             role=role,
             attempt=attempt,
             box=box,
+            for_box=for_box,
         )
         if operation.state == "settled":
             raise OperationCompletedError("The operation already completed; retrieve its saved result.")
