@@ -31,6 +31,31 @@ With `APP_LOCAL_MODE=1` (the Mac app), the protected parent opens its boxes as c
 
 Known gaps against Vercel: the setup box's egress has no byte cap (Vercel's `SANDBOX_NETWORK_BYTES_CAP`), and the proxy allows port 443 only. The box and command environment reach each command over stdin, never as `docker` arguments, because the box environment can hold the gateway key. tmpfs pages count toward the container's memory limit.
 
+## Repository scoring boxes
+
+A repository run scores each version in two new boxes (SKY-398). The
+candidate box opens from the saved after-setup state and runs the `[run]`
+entry. The metric box opens from the saved metric state and holds only the
+metric files and the runner. Each box has its own `operation_key`, so each
+reserves its own hold. On Vercel the saved states are snapshots. In local
+Docker mode they are tar files that the parent keeps, because a box keeps
+`--read-only` and the parent does not use `docker commit`. `SandboxSpec`
+names the state in `snapshot_id` or `snapshot_archive`. The opener checks the
+prepared tree's digest before it lays out a version.
+
+The parent starts the `[run]` supervisor with `sudo: true`, through the model
+mailbox, so the entry keeps its model route. On Vercel the exec wrapper sends
+the supervisor's stdout to a root-owned `/tmp/.app-output-<token>.out` file.
+The supervisor checks that file, then starts the entry as the owner of the
+candidate tree, so the entry cannot write the wrapper's files. In a local
+Docker box the supervisor's stdout is a pipe and its root has no
+capabilities, so it cannot switch users and the entry runs as the
+supervisor's user. A root with capabilities switches users also with a pipe.
+Only the supervisor command gets a root model proxy. That proxy starts from
+`/usr/local/bin/python3` and runs only the proxy and config bytes whose
+digests the parent sent. `test_metric_isolation.py` proves the user switch on Docker with a
+privileged `docker exec` that stands in for Vercel's root.
+
 ## Offline dependencies
 
 | Dependency | Execution identity |

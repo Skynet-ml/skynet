@@ -26,7 +26,9 @@ from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.service_gateway.optimization.blackbox import runner as runner_module
 from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
+from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, LocalSubprocessSession
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import hardening_runner
 from core.worker.hardening_job import HardeningWorkspace
@@ -55,6 +57,35 @@ _SCORER = {"metric_code": "def score(): return 1\n"}
 # A placeholder managed key, so a pass gets past the start checks.
 _KEYED = settings.model_copy(update={"openrouter_api_key": SecretStr("test-managed-key")})
 _END_STATUSES = ["done", "clean_stop", "budget_stop", "failed", "preflight_failed", "rejected", "stale"]
+
+
+@pytest.fixture(autouse=True)
+def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+    """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
 
 
 @pytest.fixture
@@ -1346,3 +1377,99 @@ def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
         ),
     ):
         pass
+
+
+# The metric adds the [metric] file's key to the [run] output, so a score
+# proves that the metric box got both.
+_METRIC_TREE_SCORER = {
+    "metric_code": (
+        "from pathlib import Path\n"
+        "def score(repo_path, case=None, output=None):\n"
+        "    key = int((Path(repo_path) / 'eval' / 'key.txt').read_text())\n"
+        "    value = int(output['stdout'].split('=')[1])\n"
+        "    return {'score': key * 10 + value, 'feedback': 'read'}\n"
+    )
+}
+_KEY_FIX = "diff --git a/eval/key.txt b/eval/key.txt\n--- a/eval/key.txt\n+++ b/eval/key.txt\n@@ -1 +1 @@\n-1\n+2\n"
+
+
+def test_each_hardening_scorer_box_gets_the_metric_files_and_the_run_output(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metric box of a pass reads its tree's metric files and the ``[run]`` output (SKY-398).
+
+    The base box reads the trusted key; a box with a fix to the metric file reads the fixed key.
+    """
+    monkeypatch.setattr(runner_module, "RELAY_PORT", 0)
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id, scorer=dict(_METRIC_TREE_SCORER))
+    trusted = tmp_path / "trusted"
+    (trusted / "src").mkdir(parents=True)
+    (trusted / "eval").mkdir()
+    (trusted / "src" / "app.py").write_text("VALUE = 3\n")
+    (trusted / "eval" / "key.txt").write_text("1\n")
+    (trusted / "optimize.toml").write_text(
+        'version = 1\n[run]\nentry = ["cat", "src/app.py"]\n[metric]\nfiles = ["eval/key.txt"]\n'
+    )
+
+    class LocalGateway:
+        """Opens the scorer boxes as local processes."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            return payload
+
+        def parent_sandbox_runtime(self) -> LocalSubprocessRuntime:
+            """Return a local runtime.
+
+            Returns:
+                The runtime.
+            """
+            return LocalSubprocessRuntime()
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", LocalGateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 120, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+
+    with open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+    ) as hardening:
+        assert hardening._score(None, "") == 13.0
+        assert hardening._score(_KEY_FIX, "") == 23.0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import secrets
@@ -24,6 +25,23 @@ from .signals import BudgetReached
 from .usage_tags import current_tags, with_tags_header
 
 logger = logging.getLogger(__name__)
+
+# The image's root-owned interpreter. The box user can write a python3 that PATH
+# finds first (for example in /app/.venv/bin), so a root proxy never uses PATH.
+ROOT_PYTHON = "/usr/local/bin/python3"
+# The box user can rewrite the proxy and config files, so a root proxy runs only
+# the bytes whose digests the parent sent, from memory and a root-only copy.
+ROOT_PROXY_BOOT = (
+    "import hashlib,os,sys,tempfile\n"
+    "source,config=(open(path,'rb').read() for path in sys.argv[3:5])\n"
+    "if [hashlib.sha256(data).hexdigest() for data in (source,config)]!=sys.argv[1:3]:\n"
+    " sys.exit('The model proxy files changed before they ran.')\n"
+    "handle,copy=tempfile.mkstemp()\n"
+    "os.write(handle,config)\n"
+    "os.close(handle)\n"
+    "sys.argv=[sys.argv[3],copy,*sys.argv[5:]]\n"
+    "exec(compile(source,sys.argv[0],'exec'),{'__name__':'__main__'})\n"
+)
 
 
 class ModelMailbox:
@@ -47,6 +65,7 @@ class ModelMailbox:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: Callable[[str, str], None] | None = None,
+        sudo: bool = False,
     ) -> Any:
         """Wrap one sandbox command and service its model mailbox alongside output.
 
@@ -56,6 +75,8 @@ class ModelMailbox:
             env: Guest environment containing only scoped route credentials.
             timeout_seconds: Command limit already covered by the sandbox reservation.
             on_output: Existing progress or upstream evaluator mailbox callback.
+            sudo: Run the proxy and the command as root, as the scorer's supervisor needs (SKY-398).
+                The root proxy starts from the image's interpreter and runs only the bytes the parent wrote.
 
         Returns:
             The sandbox's original command result.
@@ -68,12 +89,17 @@ class ModelMailbox:
         source_path = f"{directory}/proxy.py"
         config_path = f"{directory}/config.json"
         response_directory = f"{directory}/responses"
+        source = Path(guest_model_proxy.__file__).read_text(encoding="utf-8")
+        config = json.dumps(
+            {"prefix": prefix, "response_dir": response_directory, "timeout_seconds": timeout_seconds or 600}
+        )
         session.write_files(
             {
-                source_path: Path(guest_model_proxy.__file__).read_text(encoding="utf-8"),
-                config_path: json.dumps(
-                    {"prefix": prefix, "response_dir": response_directory, "timeout_seconds": timeout_seconds or 600}
-                ),
+                source_path: source,
+                config_path: config,
+                # A root proxy would make this folder, and the parent could not write
+                # its answers into a root-owned folder. So the parent makes it first.
+                **({f"{response_directory}/.keep": ""} if sudo else {}),
             }
         )
         pending = {"stdout": "", "stderr": ""}
@@ -223,8 +249,21 @@ class ModelMailbox:
                 f"python3 -I {shlex.quote(source_path)} {shlex.quote(config_path)}"
                 f" bash --noprofile --norc -c {shlex.quote(command)}"
             )
+            if sudo:
+                digests = " ".join(hashlib.sha256(text.encode()).hexdigest() for text in (source, config))
+                wrapped = (
+                    f"{ROOT_PYTHON} -I -S -c {shlex.quote(ROOT_PROXY_BOOT)} {digests}"
+                    f" {shlex.quote(source_path)} {shlex.quote(config_path)}"
+                    f" /bin/bash --noprofile --norc -c {shlex.quote(command)}"
+                )
             try:
-                result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)
+                result = session.run(
+                    wrapped,
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                    on_output=output,
+                    **({"sudo": True} if sudo else {}),
+                )
             finally:
                 finished.set()
             for future in futures:

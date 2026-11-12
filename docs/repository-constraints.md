@@ -137,10 +137,58 @@ which holds:
 The brief names no hidden path. It says only that some files are hidden and
 that the agent cannot change them.
 
-Each version's candidate runs in a box with no network. Setup runs first
-with package-registry network only. Then the box goes offline, a probe
-confirms it, and only then does version code run. A box that stays online
-stops the run.
+## Candidate box and metric box
+
+Each box holds only the code that it needs. The run uses these boxes:
+
+- **Setup box.** It runs once, before any version. It gets the repository
+  without the metric files, runs `[setup] command` with package-registry
+  network only, and closes. The parent saves the prepared state and its
+  digest.
+- **Metric setup.** It runs once, in a separate box, only when the
+  repository has `.optimize/metric-requirements.txt`. It installs only the
+  packages in that file, with package-registry network for the install only.
+  The parent saves this second state. It holds no repository code.
+- **Candidate box.** Each evaluation opens a new one from the prepared
+  state. The parent checks the digest and lays out the version. The box
+  runs the `[run]` entry on the case's `input` and reaches only the `[run]`
+  services and MCP servers. The parent reads the output, then closes the
+  box. Every process that the version started ends with the box.
+- **Metric box.** Each evaluation opens a new one from the metric state,
+  while the candidate box runs. It holds only the metric files and the
+  scorer's runner, never the repository tree. It gets the metric files and
+  the `[run]` output only after the candidate box closed. It reaches only
+  the `[metric]` services and MCP servers.
+
+Each box reserves its own budget hold, and releases or settles it when the
+evaluation ends or fails. The relay refuses a `[metric]` call from the
+candidate box and a `[run]` call from the metric box.
+
+The metric is called as `score(repo_path, case, output)`. In the metric
+box, `repo_path` is a folder that holds only the `[metric] files`, at their
+repository paths. For example, `[metric] files = ["eval"]` puts the metric
+at `repo_path/eval/`. The folder holds no other repository file and no
+version code.
+
+`.optimize/metric-requirements.txt` lists the metric's packages, one
+requirement on each line, in the pip format (for example `numpy==2.1.0`).
+Comments and blank lines are allowed. Options such as `-r`, `-e` or
+`--index-url`, and paths or URLs, fail setup. The packages go into a folder
+in the metric box, and the metric's runner puts that folder on `sys.path`
+before the image's packages. Without the file, the metric box has only the
+image's packages.
+
+The metric cannot run version code. A check that needs the version's code
+belongs in a `[run]` entry: the entry runs the code in the candidate box, and
+the metric judges the entry's output. Setup warns when a metric file imports
+a repository module that is not a metric file. The warning names the module
+and the fix: move the check into a `[run]` entry. The metric box holds no
+version file, so a `[metric]` needs a `[run]` section or a
+`[target.<name>]` stage whose outputs it scores. A `[metric]` with neither
+fails setup, because it would give each version the same score.
+
+The box user can be root. The boxes depend on the microVM boundary between
+boxes, not on file permissions inside a box.
 
 ## Run time for the metric
 
@@ -164,15 +212,21 @@ default. A metric with
 
 The `[run]` supervisor measures the time in its own process, with a
 monotonic clock. The time starts just before the entry starts. It stops when
-the entry exits and the supervisor stopped every process that the entry
-left, so work in a left process also counts. It includes the Python start
+the entry exits and the supervisor kills the entry's process group. A
+process that the entry starts in a new session is not part of that time,
+and it ends when Skynet closes the candidate box. Until then, that process
+can write any file that the entry can write. Thus the supervisor sends its
+result as one line on its own stdout, not in a file. The entry never gets
+that stdout: a function entry's prints go to stderr, and a command entry's
+stdout is a pipe that the supervisor reads. The time includes the Python start
 for a function entry. It does not include setup or the metric. The
 entry's code runs in other processes, so it cannot patch this clock. A time
 that the candidate puts in its `output` is not trusted. Use `elapsed_s`.
 
-`elapsed_s` is only as trusted as the metric's score. Until SKY-398 (run
-candidate code and the metric in separate sandboxes), candidate code from an
-earlier case can change both; see the residual risk below.
+`elapsed_s` is only as trusted as the supervisor in the candidate box.
+Each case gets a new candidate box, so candidate code from an earlier case
+cannot change it. The metric runs in a separate metric box, so candidate
+code cannot change the metric or the score.
 
 The supervisor starts with the image's root-owned base interpreter
 (`/usr/local/bin/python3`), not with `python3` from `PATH`. The box user can
@@ -184,33 +238,47 @@ installed. The entry is candidate code, so its interpreter does not need
 trust; the clock stays in the supervisor. The shell that starts the
 supervisor replaces itself with it (`exec`), so no shell of Skynet's waits
 for its exit code. These steps make the supervisor harder to change. They
-do not isolate the cases; see the residual risk below. Skynet trusts the
-supervisor's result
-only when the supervisor exits cleanly, so an entry that writes a false
-result and then kills the supervisor gets no score. On Linux the supervisor
-sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks same-user
-`ptrace` and `/proc/<pid>/mem` access to it, also when Yama is off.
+do not replace the separate boxes; see the residual risk below. Skynet
+trusts the supervisor's result only when the supervisor exits cleanly, so an
+entry that kills the supervisor gets no score. On Linux the supervisor
+sets itself as not dumpable (`PR_SET_DUMPABLE`). This blocks `ptrace` and
+`/proc/<pid>/mem` access to it, also when Yama is off. It also blocks access
+to its open files through `/proc/<pid>/fd`.
+
+On Vercel the supervisor runs as root (`sudo`). The box's exec wrapper sends
+its stdout to a root-owned file in `/tmp` whose name holds a new random
+token for each command. The supervisor checks that file before the entry
+starts: root owns it, no other user can write it, it is not a link, and its
+name matches the wrapper's. If a check fails, the supervisor stops and the
+case fails. The
+supervisor then starts the entry as the owner of the candidate tree, not as
+root. So the entry cannot signal, trace or read the supervisor, and it
+cannot replace or write the wrapper's output and exit code files (SKY-398).
+A root supervisor that holds Linux capabilities always switches to the tree
+owner, also when its stdout is a pipe. The entry runs as the supervisor's
+user only when the supervisor is not root, or when it is a root with no
+capabilities and a pipe stdout (a local Docker box drops all capabilities).
+Such a root cannot switch users, and a pipe has no file that the entry could
+replace.
+
+The model mailbox wraps only the supervisor command in a root proxy. Other
+root commands run without a proxy. The root proxy starts from
+`/usr/local/bin/python3`, never from `PATH`. It runs only the proxy and
+config bytes whose sha256 digests the parent sent, so a box user who
+rewrites those files gets no code run as root.
 
 Residual risk:
 
-- Code that gets root in the box (for example through `sudo`) could still
-  trace or change the supervisor process.
-- A version's metric step or `[run]` entry can plant a `.pth` file in the
-  shared site-packages (`/app/.venv/lib/python3.12/site-packages`, which the
-  box user can write). That file runs in every later Python that loads
-  site-packages: the entry and the metric of later cases. In the metric it
-  can change `elapsed_s` and the score. It can also start a process that
-  rewrites the supervisor's result after the supervisor exits. SKY-398 (run
-  candidate code and the metric in separate sandboxes, in progress) covers
-  the root fix.
-- The box's command wrapper (`timeout` and the outer shell that records the
-  exit code) runs as the same user as the version's code. Where the box
-  allows same-user `ptrace` of that wrapper, version code could change the
-  exit code that Skynet reads. All cases of a version share one box user, so
-  only SKY-398 (in progress) gives each case full isolation.
-- Cached state that one case leaves in `$HOME` or `/tmp` (for example a
-  download, a model file or a warm cache) can make later cases faster. So
-  the measured times of later cases can be shorter than a cold run.
+- Code that gets root in the box could still trace or change the supervisor
+  process and its output files. If the tree owner can use `sudo` in the box,
+  the entry can get root. Then only the separate boxes and the microVM
+  boundary protect the metric and the score.
+- The `[run]` entry can plant a `.pth` file in the candidate box's
+  site-packages. That file runs only in that candidate box. The box ends
+  after the case, and the metric box never gets the file (SKY-398).
+- Each case starts from the state that `[setup]` left. A cache that
+  `[setup]` fills (for example a download or a model file) makes every case
+  faster, but a case leaves nothing for the next case.
 - Where the image has no `/usr/local/bin/python3` (for example a local test
   host), the supervisor falls back to `python3` from `PATH`.
 
@@ -223,7 +291,9 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
-| `[setup] command` | Runs once on the starting commit, with package-registry network and no secrets. The box goes offline before any version runs. |
+| `[setup] command` | Runs once on the starting commit, in its own box, with package-registry network and no secrets. No version runs in that box. |
+| `[run] network`, `[metric] network` | The candidate box or the metric box reaches only these hosts, besides the relay. With no `network` key, or `network = []`, the box is offline except for the relay. |
+| `[run] vcpus`, `[metric] vcpus` | The size of the candidate box or the metric box: `1`, or an even number from 2 to 32. Another value fails the setup check. With no key, the box gets the run's default size. |
 | `instructions` | Not enforced. The agent reads the file in its brief. The scorer decides the score. |
 | `[proposer] illegal` | Enforced by judge models. See "Plain-language rules" below. |
 | Rule files | The `instructions` file and every `illegal` file (in `[proposer]`, `[run]`, `[metric]` and `[target.<name>]`) are protected, so no version can change its own rules. |
@@ -269,7 +339,7 @@ A timeout or other `[run]` failure scores 0, and the metric does not run.
 The setup check response includes `environment`. The run saves the same
 record under `target.repo.environment`. It holds the commit, the editable,
 protected and read-only paths, the secret names (never values), the setup
-command, the network for setup and for versions, and each role's services
+command, the network for setup, for versions (`[run]`) and for the metric, and each role's services
 and MCP servers.
 A resumed run that arrives at different rules fails instead of continuing.
 

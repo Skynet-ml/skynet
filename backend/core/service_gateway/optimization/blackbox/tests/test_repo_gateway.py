@@ -7,7 +7,10 @@ mailbox, so the box needs no network and never holds a provider key.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from decimal import Decimal
@@ -19,6 +22,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from core.billing import model_mailbox
 from core.billing.budgets import BudgetService
 from core.billing.model_gateway import ROUTE_KEY, ModelGateway
 from core.billing.model_mailbox import ModelMailbox
@@ -31,8 +35,8 @@ from core.worker import repo_staging
 from ..preflight import verify_anything_in_sandbox
 from ..repo_scorer import RepoScorer
 from ..repo_workspace import RepoWorkspace
-from ..sandbox import LocalSubprocessRuntime, SandboxSpec
-from ..sandbox_broker import SandboxBroker
+from ..sandbox import LocalSubprocessRuntime, LocalSubprocessSession, SandboxSpec
+from ..sandbox_broker import ParentSandboxSession, SandboxBroker
 from .test_repo_workspace import _archive
 
 IMAGE = "fixture@sha256:" + "a" * 64
@@ -51,7 +55,8 @@ CATALOG = {
     ],
 }
 # The version's own code calls the route the way any OpenAI-compatible SDK would.
-APP = """
+APP = (
+    """
 import json, os, urllib.request
 
 def ask(text):
@@ -68,23 +73,70 @@ def ask(text):
     with urllib.request.urlopen(request) as response:
         return json.load(response)["choices"][0]["message"]["content"]
 """
-SCORER = f"""
-import os, sys
+    f"""
 
-def score(repo_path):
-    sys.path.insert(0, os.path.join(repo_path, "src"))
-    import app
-    direct = app.ask("candidate prompt")
+def run(value):
+    leaked = any(key in item for item in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r}))
+    return {{"direct": ask("candidate prompt"), "leaked": leaked, "has_key": bool(os.environ.get("APP_API_KEY"))}}
+"""
+)
+# The metric box holds no repository file, so the version's own call runs
+# in the candidate box through the [run] entry, and the metric gets its output (SKY-398).
+SCORER = f"""
+import os
+
+def score(repo_path, case, output):
+    direct = output["direct"]
     judged = llm("judge prompt")
-    leaked = any(key in value for value in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r}))
+    leaked = output["leaked"] or any(
+        key in value for value in os.environ.values() for key in ({MANAGED_KEY!r}, {BYOK_KEY!r})
+    )
     return {{
         "score": 1.0 if direct == "OK" and judged == "OK" else 0.0,
         "feedback": direct + " " + judged,
         "secret": os.environ.get("API_KEY"),
         "leaked": leaked,
-        "has_key": bool(os.environ.get("APP_API_KEY")),
+        "has_key": output["has_key"] and bool(os.environ.get("APP_API_KEY")),
     }}
 """
+
+
+@pytest.fixture(autouse=True)
+def root_commands_in_local_boxes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+    The root proxy uses the test's interpreter, because a host may have no image path.
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+
+    Returns:
+        The commands that asked for root, in order.
+    """
+    run = LocalSubprocessSession.run
+    root_commands: list[str] = []
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user, and record a root request.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Recorded, then ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        if sudo:
+            root_commands.append(command)
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
+    monkeypatch.setattr(model_mailbox, "ROOT_PYTHON", sys.executable)
+    return root_commands
 
 
 @pytest.fixture(autouse=True)
@@ -167,15 +219,17 @@ def _score(
     model: dict[str, Any],
     managed_key: str,
     metric_code: str = SCORER,
+    run_entry: str | None = "src/app.py:run",
 ) -> dict[str, Any]:
-    """Scope a repository run's scorer model, then score its baseline in the parent's box.
+    """Scope a repository run's scorer model, then score its baseline in the parent's boxes.
 
     Args:
         model_gateway: The run's gateway.
         tmp_path: Scratch folder.
         model: The scorer's model configuration.
         managed_key: The platform's provider key.
-        metric_code: The scorer the box runs.
+        metric_code: The scorer the metric box runs.
+        run_entry: The ``[run]`` entry the candidate box runs, if any.
 
     Returns:
         The protected payload's scorer and the scored document.
@@ -200,6 +254,7 @@ def _score(
         metric_code,
         timeout_seconds=60,
         gateway=repo_staging._repo_model_gateway(protected["scorer"]),
+        run_entry=run_entry,
     )
     try:
         return {"scorer": protected["scorer"], "document": scorer.score("")}
@@ -208,11 +263,15 @@ def _score(
 
 
 def test_a_managed_call_from_the_box_is_metered(
-    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
+    gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path, root_commands_in_local_boxes: list[str]
 ) -> None:
     """Version code and the scorer's llm() reach the managed route; the parent pays and meters both."""
     model_gateway, sent = gateway
     result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY)
+    # The [run] supervisor runs as root, and the mailbox still wraps it, so the entry keeps its model route.
+    supervisors = [command for command in root_commands_in_local_boxes if "--candidate" in command]
+    assert supervisors
+    assert all(command.startswith(f"{sys.executable} -I -S -c ") for command in supervisors)
 
     document = result["document"]
     assert document["score"] == 1.0
@@ -302,7 +361,7 @@ def _status(path, token):
     except urllib.error.HTTPError as error:
         return error.code
 
-def score(repo_path):
+def score(repo_path, case, output):
     route = os.environ["APP_API_KEY"]
     statuses = [
         _status("/_evaluator", route),
@@ -313,7 +372,7 @@ def score(repo_path):
     return {{"score": 0.0, "feedback": json.dumps(statuses)}}
 """
     started = time.monotonic()
-    result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY, probe)
+    result = _score(model_gateway, tmp_path, {"name": "fixture/text", "max_tokens": 16}, MANAGED_KEY, probe, None)
 
     assert time.monotonic() - started < 60
     statuses = json.loads(result["document"]["feedback"])
@@ -346,13 +405,23 @@ def test_route_dispatch_refuses_every_non_route_token_and_capability_path(
             model_gateway.dispatch_route(token, path, {}, {})
 
 
-def _repo_setup_check(model_gateway: ModelGateway, tmp_path: Path, metric_code: str, **extra: Any) -> dict[str, Any]:
+_READ_README = "def read(value):\n    with open('README') as handle:\n        return handle.read()\n"
+
+
+def _repo_setup_check(
+    model_gateway: ModelGateway,
+    tmp_path: Path,
+    metric_code: str,
+    run_entry: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
     """Run a repository setup check through a real parent ``RepoScorer`` on a checkout whose README is ``hello``.
 
     Args:
         model_gateway: The real parent gateway.
         tmp_path: Scratch folder for the checkout archive.
         metric_code: The repository's metric.
+        run_entry: The ``[run]`` entry; ``run.py:read`` returns the README.
         **extra: Payload keys to add, such as ``seed_candidate``.
 
     Returns:
@@ -362,7 +431,7 @@ def _repo_setup_check(model_gateway: ModelGateway, tmp_path: Path, metric_code: 
         RepoWorkspace(
             runtime=model_gateway.parent_sandbox_runtime(),
             spec=SandboxSpec(lifetime_seconds=120, image=IMAGE, network_disabled=True, operation_key="repo-scorer:job"),
-            archive=_archive(tmp_path, {"README": "hello"}),
+            archive=_archive(tmp_path, {"README": "hello", "run.py": _READ_README}),
             editable_paths=["README"],
             readonly_paths=[],
             setup_command=None,
@@ -370,6 +439,7 @@ def _repo_setup_check(model_gateway: ModelGateway, tmp_path: Path, metric_code: 
         ),
         metric_code,
         timeout_seconds=60,
+        run_entry=run_entry,
     )
     payload = {
         "scorer": {"kind": "python", "metric_code": metric_code},
@@ -389,15 +459,17 @@ def _repo_setup_check(model_gateway: ModelGateway, tmp_path: Path, metric_code: 
 def test_the_setup_check_scores_the_checkout_the_run_scores(
     gateway: tuple[ModelGateway, list[httpx.Request]], tmp_path: Path
 ) -> None:
-    """The setup check scores through the parent's repository scorer, so the metric reads the real checkout (SKY-644)."""
+    """The setup check scores through the parent's repository scorer, so the metric gets the real checkout's output (SKY-644).
+
+    The metric box holds no repository file (SKY-398), so the ``[run]``
+    entry reads the checkout and the metric scores its output.
+    """
     metric_code = (
-        "from pathlib import Path\n"
-        "def score(repo_path, case):\n"
-        "    text = Path(repo_path, 'README').read_text()\n"
-        "    return {'score': 1.0 if text == 'hello' else 0.0, 'feedback': text}\n"
+        "def score(repo_path, case, output):\n"
+        "    return {'score': 1.0 if output == 'hello' else 0.0, 'feedback': str(output)}\n"
     )
 
-    result = _repo_setup_check(gateway[0], tmp_path, metric_code, seed_candidate="")
+    result = _repo_setup_check(gateway[0], tmp_path, metric_code, run_entry="run.py:read", seed_candidate="")
 
     assert result["checks"] == [{"key": "scorer", "status": "succeeded", "field": "scorer"}]
     assert result["scorer_result"]["score"] == 1.0
@@ -420,3 +492,120 @@ def test_a_repository_metric_that_raises_fails_the_setup_check_without_a_seed(
     assert check["status"] == "failed"
     assert "The scorer raised an error" in check["message"]
     assert "evaluator_readiness" not in result
+
+
+def _boot(tmp_path: Path, source: str, config: str, digests: tuple[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the root proxy boot on two files the box user could have rewritten.
+
+    Args:
+        tmp_path: Folder for the proxy and config files.
+        source: Text of the proxy file on disk.
+        config: Text of the config file on disk.
+        digests: The sha256 digests the parent sent for the source and the config.
+
+    Returns:
+        The finished boot process.
+    """
+    (tmp_path / "proxy.py").write_text(source, encoding="utf-8")
+    (tmp_path / "config.json").write_text(config, encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            *("-I", "-S", "-c", model_mailbox.ROOT_PROXY_BOOT, *digests),
+            *(str(tmp_path / "proxy.py"), str(tmp_path / "config.json"), "echo", "hi"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _sha(text: str) -> str:
+    """Return the hex sha256 of a text.
+
+    Args:
+        text: The text.
+
+    Returns:
+        Its digest.
+    """
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_the_root_proxy_refuses_a_proxy_file_the_box_user_changed(tmp_path: Path) -> None:
+    """A root proxy runs nothing when the proxy file differs from what the parent wrote (SKY-398)."""
+    sent = "print('parent proxy')\n"
+
+    result = _boot(tmp_path, "print('candidate code as root')\n", "{}", (_sha(sent), _sha("{}")))
+
+    assert result.returncode != 0
+    assert "The model proxy files changed before they ran." in result.stderr
+    assert "candidate code as root" not in result.stdout
+
+
+def test_the_root_proxy_runs_the_sent_bytes_with_a_private_config_copy(tmp_path: Path) -> None:
+    """With matching digests the boot runs the proxy on a config copy, not the box user's file."""
+    source = "import sys\nprint(open(sys.argv[1]).read(), sys.argv[1], *sys.argv[2:], sep='|')\n"
+
+    result = _boot(tmp_path, source, '{"k": 1}', (_sha(source), _sha('{"k": 1}')))
+
+    assert result.returncode == 0, result.stderr
+    config, copy, *command = result.stdout.strip().split("|")
+    assert config == '{"k": 1}'
+    assert copy != str(tmp_path / "config.json")
+    assert command == ["echo", "hi"]
+
+
+class _RecordingSession:
+    """Record each command a parent box runs, and whether it asked for root."""
+
+    def __init__(self) -> None:
+        """Start with no commands."""
+        self.commands: list[tuple[str, str, bool]] = []
+
+    def run(self, command: str, *, sudo: bool = False, **_options: Any) -> str:
+        """Record a direct run.
+
+        Args:
+            command: The shell command.
+            sudo: Whether the command asked for root.
+            **_options: Ignored run options.
+
+        Returns:
+            A marker for the direct path.
+        """
+        self.commands.append(("direct", command, sudo))
+        return "direct"
+
+
+def test_only_the_root_supervisor_goes_through_the_model_mailbox(tmp_path: Path) -> None:
+    """A root setup command skips the mailbox, so no root proxy runs for it; the supervisor keeps its route."""
+    session = _RecordingSession()
+
+    def mailbox(box: Any, command: str, *, sudo: bool = False, **_options: Any) -> str:
+        """Record a run through the mailbox.
+
+        Args:
+            box: The wrapped box.
+            command: The shell command.
+            sudo: Whether the command asked for root.
+            **_options: Ignored run options.
+
+        Returns:
+            A marker for the mailbox path.
+        """
+        session.commands.append(("mailbox", command, sudo))
+        return "mailbox"
+
+    box = ParentSandboxSession(session, mailbox)  # type: ignore[arg-type]
+    supervisor = f"/usr/local/bin/python3 -I -S -c boot runner.py abc --candidate {tmp_path}/candidate"
+
+    box.run("chmod 0700 /vercel/sandbox/.app-repo", sudo=True)
+    box.run(supervisor, sudo=True)
+    box.run("python3 setup.py")
+
+    assert session.commands == [
+        ("direct", "chmod 0700 /vercel/sandbox/.app-repo", True),
+        ("mailbox", supervisor, True),
+        ("mailbox", "python3 setup.py", False),
+    ]

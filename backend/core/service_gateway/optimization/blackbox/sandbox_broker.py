@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import shlex
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -17,6 +18,7 @@ from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
 from ....sandbox.snapshots import SnapshotCache
 from ....sandbox.sync_bridge import run as bridge_run
+from . import runner
 from .sandbox_contract import (
     CommandResult,
     OutputSink,
@@ -42,6 +44,7 @@ class SandboxCommandRunner(Protocol):
         env: Mapping[str, str] | None,
         timeout_seconds: float | None,
         on_output: OutputSink | None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Execute through the trusted parent's model transport.
 
@@ -51,6 +54,7 @@ class SandboxCommandRunner(Protocol):
             env: Requested guest environment.
             timeout_seconds: Command deadline within the sandbox lifetime.
             on_output: Consumer for non-protocol output after model interception.
+            sudo: Run as root; only the parent's own commands ask for it.
 
         Returns:
             Guest command outcome.
@@ -182,23 +186,25 @@ class ParentSandboxSession:
             env: Extra environment for this command.
             timeout_seconds: Kill the command after this long.
             on_output: Receives output as it streams.
-            sudo: Run as root; only the parent's own setup commands ask for it.
+            sudo: Run as root; only the parent's own commands ask for it.
 
         Returns:
             The command's outcome.
         """
         options = {"env": env, "timeout_seconds": timeout_seconds, "on_output": on_output}
-        if sudo:
-            # A root setup command needs no model route, so it skips the mailbox.
+        if sudo and runner.CANDIDATE_FLAG not in shlex.split(command):
+            # A root setup command needs no model route, so no root proxy runs for it.
             return self._session.run(command, **options, sudo=True)
+        # The scorer's root supervisor starts a candidate that calls models (SKY-398).
+        root = {"sudo": True} if sudo else {}
         if self._command_runner is not None:
             # A parent box that runs inside another box's scope does that box's
             # work, such as a scorer box for a native engine box's evaluator
             # request. That box waits while this one does (SKY-647).
             outer = current_tags().get(BOX_KEY)
             with usage_scope(box=self._box, for_box=outer if outer != self._box else None):
-                return self._command_runner(self._session, command, **options)
-        return self._session.run(command, **options)
+                return self._command_runner(self._session, command, **options, **root)
+        return self._session.run(command, **options, **root)
 
     def snapshot(self, cache: SnapshotCache, cache_key: str) -> str | None:
         """Save the box in a snapshot cache, when its runtime can save boxes.

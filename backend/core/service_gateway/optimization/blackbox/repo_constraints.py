@@ -26,8 +26,9 @@ timeout; with no ``[run]``, nothing runs and the metric judges only the tree
 and the patch), and ``[data] cases`` (the path of a JSONL file that holds
 the run's cases, one ``{"input": ..., "expected": ...}`` object for each
 line; it is hidden from the agent and the candidate like the metric
-files). ``[run]`` and ``[metric]`` also take the role keys mcp,
-services and illegal; they share one box, so network and vcpus fail. Every
+files). ``[run]`` and ``[metric]`` also take the role keys mcp, network,
+services, illegal and vcpus: the candidate and the metric run in separate
+boxes, so each role sizes and walls off its own box (SKY-398). Every
 role's mcp is the path of a standard ``.mcp.json`` file in the repository,
 read from the same snapshot and checked here; a role's ``tools`` key fails
 and points to mcp (E46). No box gets the proposer's or a target's MCP
@@ -86,18 +87,14 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "paths": frozenset({"editable", "protected"}),
     "setup": frozenset({"command"}),
     "proposer": _ROLE_KEYS,
-    "metric": frozenset({"files", "exploits", "reference", "mcp", "services", "illegal"}),
-    "run": frozenset({"entry", "timeout", "mcp", "services", "illegal"}),
+    "metric": frozenset({"files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus"}),
+    "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
     "data": frozenset({"cases"}),
     # Compose services run beside the scorer; [services.<name>] stays the API relay.
     "sandbox": frozenset({"compose"}),
 }
 # Every role names its MCP servers in a .mcp.json file, not catalog tool names (E46).
 _ROLE_SECTIONS = frozenset({"proposer", "run", "metric"})
-_RUN_ROLE_SECTIONS = ("run", "metric")
-# The candidate and the metric share one box today (E37), so neither can size
-# or wall off its own box; these keys fail with that reason, not as unknown.
-_SHARED_BOX_KEYS = frozenset({"network", "vcpus"})
 _BULLET = re.compile(r"[-*+](?:[ \t]+(.*))?")
 # Only an ATX heading counts; "#1 Do not ..." or "#tag" is text and must not be dropped as a heading.
 _HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
@@ -283,10 +280,14 @@ class RepoConstraints:
     # None means the file has no [run] section, so no candidate runs (E39).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = _DEFAULT_TIMEOUT_SECONDS
-    # network is always None for these two roles: they share one box (E37).
-    # Each role gets only the services it lists and only its own MCP file (E55).
+    # The candidate box runs [run] and the metric box runs [metric] (SKY-398),
+    # so each role sets its own network and vcpus. Each role gets only the
+    # services it lists and only its own MCP file (E55).
     run_role: RoleEnvironment = RoleEnvironment()
     metric_role: RoleEnvironment = RoleEnvironment()
+    # None keeps the runtime's default size for the box.
+    run_vcpus: int | None = None
+    metric_vcpus: int | None = None
     instructions_file: str | None = None
     intent: str | None = None
     rules: tuple[str, ...] = ()
@@ -604,6 +605,34 @@ def _role(section: Mapping[str, Any], label: str, services: Mapping[str, Service
     }
 
 
+def _vcpus(value: Any, label: str, section: str) -> int:
+    """Check a box size: 1, or an even number from 2 to 32.
+
+    Args:
+        value: The ``vcpus`` value from the file.
+        label: The table as the file names it, used in errors.
+        section: The section name the error points to.
+
+    Returns:
+        The number of vCPUs.
+
+    Raises:
+        ConstraintsError: When the value is not a valid box size.
+    """
+    # bool is an int in Python, so ``vcpus = true`` would otherwise read as 1.
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not (value == 1 or (value % 2 == 0 and 2 <= value <= 32))
+    ):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to 32.",
+            section=section,
+            key="vcpus",
+        )
+    return value
+
+
 def _tools_moved(label: str) -> ConstraintsError:
     """Build the error for a role's ``tools`` key, which names catalog tools instead of an MCP file (E46).
 
@@ -717,22 +746,10 @@ def _target(section: Any, name: str, services: Mapping[str, ServiceSpec]) -> Tar
             section=f"target.{name}",
             key="entry",
         )
-    vcpus = section.get("vcpus", _DEFAULT_VCPUS)
-    # bool is an int in Python, so ``vcpus = true`` would otherwise read as 1.
-    if (
-        not isinstance(vcpus, int)
-        or isinstance(vcpus, bool)
-        or not (vcpus == 1 or (vcpus % 2 == 0 and 2 <= vcpus <= 32))
-    ):
-        raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to 32.",
-            section=f"target.{name}",
-            key="vcpus",
-        )
     return TargetStage(
         **_role(section, label, services),
         entry=_entry(section["entry"], label),
-        vcpus=vcpus,
+        vcpus=_vcpus(section.get("vcpus", _DEFAULT_VCPUS), label, f"target.{name}"),
         timeout=_timeout(section, label, "skynet.call"),
     )
 
@@ -1305,16 +1322,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
             raise ConstraintsError(f"{CONSTRAINTS_FILE}: {name} must be a [{name}] table.", key=name)
         if name in _NAMED_SECTIONS:
             continue
-        shared = sorted(set(section) & _SHARED_BOX_KEYS) if name in _RUN_ROLE_SECTIONS else []
         if name in _ROLE_SECTIONS and "tools" in section:
             raise _tools_moved(f"[{name}]")
-        if shared:
-            raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: [{name}] {shared[0]} is not supported: the candidate and the metric"
-                " share one box, so neither can set its own network or vcpus. Remove the setting.",
-                section=name,
-                key=shared[0],
-            )
         unknown = sorted(set(section) - _SECTIONS[name])
         # The split comes from the run seed (E59), so a split key would be ignored, not obeyed.
         if name == "data" and "split" in unknown:
@@ -1381,6 +1390,16 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_entry,
         [path for path in metric_only if path is not None],
     )
+    run_vcpus = _vcpus(run_section["vcpus"], "[run]", "run") if "vcpus" in run_section else None
+    metric_vcpus = _vcpus(metric_section["vcpus"], "[metric]", "metric") if "vcpus" in metric_section else None
+    # The metric box holds no repository tree (SKY-398), so a metric with no [run]
+    # and no target stage sees nothing of the version and gives each one the same score.
+    if "metric" in document and run_entry is None and not targets:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [metric] has nothing to judge. The metric box holds no repository"
+            " files, so add a [run] section or a [target.<name>] stage whose outputs the metric scores.",
+            section="metric",
+        )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
@@ -1390,6 +1409,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_timeout=run_timeout,
         run_role=RoleEnvironment(**run_role),
         metric_role=RoleEnvironment(**metric_role),
+        run_vcpus=run_vcpus,
+        metric_vcpus=metric_vcpus,
         instructions_file=instructions_file,
         proposer=RoleEnvironment(**proposer),
         targets=targets,
