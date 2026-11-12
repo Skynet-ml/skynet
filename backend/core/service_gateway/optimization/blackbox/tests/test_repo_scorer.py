@@ -44,10 +44,12 @@ from core.worker.scoped_relay import CallRecorder
 
 from .. import repo_scorer, runner
 from ..harness import ENV_API_KEY, ENV_MODEL
+from ..protocol import STATUS_KEY
 from ..remote_evaluator import RemoteEvaluatorClient
 from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
 from ..repo_scorer import (
     _STAGE_LAYOUT_SECONDS,
+    RUN_FAILED_STATUS,
     SETUP_ALLOWANCE_SECONDS,
     RepoScoreError,
     RepoScorer,
@@ -55,7 +57,7 @@ from ..repo_scorer import (
     _StageRelay,
     fold_case_scores,
 )
-from ..repo_workspace import RepoWorkspace
+from ..repo_workspace import CandidateBox, RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
@@ -193,10 +195,17 @@ class _ParkLog:
         self.events.append(("unpark", box))
 
 
-def test_only_the_metric_box_is_parked_while_it_waits_for_the_candidate_box(tmp_path: Path) -> None:
-    """The metric box is parked until the candidate box ended; no box stays open to park between evaluations (SKY-647)."""
+def _park_scorer(tmp_path: Path, budget: _ParkLog) -> tuple[RepoScorer, Path]:
+    """Open a scorer whose run budget records parks, over a tree with a ``[run]`` entry.
+
+    Args:
+        tmp_path: Scratch folder.
+        budget: Records the park and unpark calls.
+
+    Returns:
+        The scorer and its archive.
+    """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "README": "r\n"})
-    budget = _ParkLog()
     scorer = RepoScorer(
         RepoWorkspace(
             runtime=LocalSubprocessRuntime(),
@@ -212,13 +221,75 @@ def test_only_the_metric_box_is_parked_while_it_waits_for_the_candidate_box(tmp_
         budget=budget,  # type: ignore[arg-type]
         run_entry=SCORER_RUN,
     )
+    return scorer, archive
+
+
+def test_only_the_metric_box_is_parked_while_it_waits_for_the_candidate_box(tmp_path: Path) -> None:
+    """The metric box is parked until the candidate box ended; no box stays open to park between evaluations (SKY-647)."""
+    budget = _ParkLog()
+    scorer, archive = _park_scorer(tmp_path, budget)
+    metric = box_tag("repo-scorer:owner:metric-2")
+    seen: list[list[tuple[str, str]]] = []
+    run = scorer._run_candidate
+
+    def watched(*args: Any) -> Any:
+        """Record the parks once the metric box is open, while the candidate box still runs.
+
+        Args:
+            *args: The candidate run's arguments.
+
+        Returns:
+            The candidate run's result.
+        """
+        deadline = time.monotonic() + 30
+        while not budget.events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        seen.append(list(budget.events))
+        return run(*args)
+
+    scorer._run_candidate = watched  # type: ignore[method-assign]
     scorer.prepare()
     assert budget.events == []
     assert scorer.score("")["score"] == pytest.approx(0.1)
-    metric = box_tag("repo-scorer:owner:metric-2")
+    assert seen == [[("park", metric)]]
     assert budget.events == [("park", metric), ("unpark", metric)]
     with pytest.raises(RepoScoreError, match="README"):
         scorer.score(_patch(tmp_path / "bad", archive, {"README": "changed\n"}))
+    scorer.close()
+    assert budget.events == [("park", metric), ("unpark", metric)]
+
+
+@pytest.mark.parametrize("failure", ["run_raises", "run_failed", "close_raises"])
+def test_the_metric_box_is_unparked_once_when_the_candidate_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A raising candidate run, a failed ``[run]`` entry or a raising candidate close each unpark the metric box once."""
+    budget = _ParkLog()
+    scorer, _ = _park_scorer(tmp_path, budget)
+    metric = box_tag("repo-scorer:owner:metric-2")
+    if failure == "run_raises":
+
+        def raises(*_args: Any) -> Any:
+            """Fail the candidate run with a budget error."""
+            raise BudgetReached("stopped")
+
+        monkeypatch.setattr(scorer, "_run_candidate", raises)
+    elif failure == "run_failed":
+        monkeypatch.setattr(scorer, "_run_candidate", lambda *_args: {"error": "boom"})
+    else:
+        close = CandidateBox.close
+
+        def close_raises(self: CandidateBox) -> None:
+            """End the box, then report its bill as unconfirmed."""
+            close(self)
+            raise UsagePendingError("pending")
+
+        monkeypatch.setattr(CandidateBox, "close", close_raises)
+    if failure == "run_failed":
+        assert scorer.score("")[STATUS_KEY] == RUN_FAILED_STATUS
+    else:
+        with pytest.raises((BudgetReached, UsagePendingError)):
+            scorer.score("")
     scorer.close()
     assert budget.events == [("park", metric), ("unpark", metric)]
 

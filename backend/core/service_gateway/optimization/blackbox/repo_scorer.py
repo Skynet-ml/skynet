@@ -447,8 +447,11 @@ class RepoScorer:
                 try:
                     ran = self._run_candidate(opened, call, case, env, secrets) if self._run_entry is not None else None
                 finally:
-                    opened.close()
-                    self._unpark(metric_box)
+                    # A budget error from the close must not leave the metric box parked.
+                    try:
+                        opened.close()
+                    finally:
+                        self._unpark(metric_box)
                 if ran is not None and ran.get("error"):
                     error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
                     error = error[len(RUN_FAILED) :]
