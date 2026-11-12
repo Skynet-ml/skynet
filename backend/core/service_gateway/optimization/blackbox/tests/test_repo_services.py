@@ -14,7 +14,6 @@ from core.service_gateway.optimization.blackbox import repo_services
 from core.service_gateway.optimization.blackbox.repo_constraints import (
     McpServer,
     RoleEnvironment,
-    ServiceSpec,
     parse_constraints,
 )
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
@@ -171,14 +170,6 @@ def test_an_empty_allowlist_refuses_every_host() -> None:
     assert not repo_services.host_allowed("pypi.org", [])
 
 
-def test_wildcards_and_ports_are_flagged_as_unenforceable() -> None:
-    """The egress holds only exact hosts on 443, so other forms must stop the run."""
-    assert repo_services.unenforceable_hosts(["pypi.org", "*.example.com", "db.local:5432"]) == [
-        "*.example.com",
-        "db.local:5432",
-    ]
-
-
 def test_no_secret_reaches_a_stage_box() -> None:
     """A stage box is offline and gets no environment, so no service key is inside it."""
     for spec in _specs(("planner", "router")).values():
@@ -221,103 +212,6 @@ def test_a_target_network_list_gives_its_box_no_host() -> None:
     assert spec.network_disabled
 
 
-def test_a_service_gets_only_the_secrets_it_names() -> None:
-    """The edge-held service environment holds its own keys and no other run secret."""
-    secrets = {"GOOGLE_MAPS_API_KEY": _SECRET, "API_KEY": "other-value"}
-
-    environment = repo_services.service_environment("maps", ServiceSpec(secrets=("GOOGLE_MAPS_API_KEY",)), secrets)
-
-    assert list(environment) == ["GOOGLE_MAPS_API_KEY"]
-    assert "other-value" not in environment.values()
-
-
-@pytest.mark.parametrize("secrets", [{}, {"GOOGLE_MAPS_API_KEY": ""}])
-def test_a_service_without_its_secret_fails_without_printing_values(secrets: dict[str, str]) -> None:
-    """A missing or empty key stops the service, and the message names it but holds no value."""
-    with pytest.raises(repo_services.ServiceSecretError, match="maps needs the secret GOOGLE_MAPS_API_KEY") as raised:
-        repo_services.service_environment("maps", ServiceSpec(secrets=("GOOGLE_MAPS_API_KEY",)), secrets)
-    assert _SECRET not in str(raised.value)
-
-
-def test_the_connector_probe_uses_the_parent_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The probe reaches the connector with the parent-held headers and reports what the sender says."""
-    sent: list[tuple[str, Mapping[str, str]]] = []
-    monkeypatch.setattr(repo_services, "connector_endpoint", lambda connector: (connector.url, {"X-Key": _SECRET}))
-
-    def send(url: str, headers: Mapping[str, str]) -> bool:
-        """Record the probe request.
-
-        Args:
-            url: The connector URL.
-            headers: The credential headers.
-
-        Returns:
-            ``True``, a healthy connector.
-        """
-        sent.append((url, headers))
-        return True
-
-    assert repo_services.probe_connector("mapstools.googleapis.com", send)
-    assert sent == [("https://mapstools.googleapis.com/mcp", {"X-Key": _SECRET})]
-
-
-def test_a_connector_without_a_key_or_an_answer_is_unhealthy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A name that is not a catalog host, a missing parent key, a no, or a raising sender all fail the health check."""
-
-    def no_key(connector: object) -> tuple[str, dict[str, str]]:
-        """Fail like a connector with no key in config.
-
-        Args:
-            connector: The catalog entry.
-
-        Raises:
-            ValueError: Always.
-        """
-        raise ValueError("no key")
-
-    def unreachable(url: str, headers: Mapping[str, str]) -> bool:
-        """Fail like a connector that cannot be reached.
-
-        Args:
-            url: The connector URL.
-            headers: The credential headers.
-
-        Raises:
-            ConnectionError: Always.
-        """
-        raise ConnectionError("no route")
-
-    assert not repo_services.probe_connector("maps", lambda url, headers: True)
-    monkeypatch.setattr(repo_services, "connector_endpoint", lambda connector: (connector.url, {}))
-    assert not repo_services.probe_connector("mapstools.googleapis.com", lambda url, headers: False)
-    assert not repo_services.probe_connector("mapstools.googleapis.com", unreachable)
-    monkeypatch.setattr(repo_services, "connector_endpoint", no_key)
-    assert not repo_services.probe_connector("mapstools.googleapis.com", lambda url, headers: True)
-
-
-def test_an_unhealthy_service_fails_the_check() -> None:
-    """A probe that says no, or that raises, marks the service unhealthy."""
-
-    def probe(name: str) -> bool:
-        """Answer the fake health probe.
-
-        Args:
-            name: The service name.
-
-        Returns:
-            Whether the service is healthy.
-
-        Raises:
-            ConnectionError: For the service that cannot be reached.
-        """
-        if name == "broken":
-            raise ConnectionError("no route")
-        return name == "maps"
-
-    assert repo_services.unhealthy_services(["maps", "down", "broken"], probe) == ["down", "broken"]
-    assert repo_services.unhealthy_services(["maps"], probe) == []
-
-
 def test_allowed_calls_work_forbidden_calls_fail_and_no_key_is_exposed() -> None:
     """The SKY-82 pattern for one role: its listed host and server pass, others fail, the box holds no key."""
     constraints = parse_constraints(_FILE)
@@ -329,8 +223,6 @@ def test_allowed_calls_work_forbidden_calls_fail_and_no_key_is_exposed() -> None
     assert not repo_services.host_allowed("maps.googleapis.com", proposer.allowed_hosts)
     assert proposer.mcp_servers == ()
     spec = repo_services.stage_spec("planner", planner, evaluation_id="c1-e1", lifetime_seconds=60, tags={})
-    service = repo_services.service_environment("maps", constraints.services["maps"], {"GOOGLE_MAPS_API_KEY": _SECRET})
-    assert service == {"GOOGLE_MAPS_API_KEY": _SECRET}
     assert _SECRET not in repr(spec)
     assert _SECRET not in repr(proposer.record())
 

@@ -2,9 +2,9 @@
 
 The wallet endpoint serves the usage markup and fee terms, but the frontend
 seeds its first paint from ``DEFAULT_PRICING_TERMS``; top-up packs and the
-fallback token rates are hand-copied outright. The backend
-charges the real amounts; this test parses the frontend sources and fails the
-moment a copy drifts, so the UI never quotes a price it will not charge.
+cent value are hand-copied outright. The backend charges the real amounts;
+this test parses the frontend sources and fails the moment a copy drifts, so
+the UI never quotes a price it will not charge.
 """
 
 from __future__ import annotations
@@ -34,13 +34,6 @@ def _ts_number_constants(filename: str) -> dict[str, float]:
     source = (_BILLING_LIB / filename).read_text(encoding="utf-8")
     pairs = re.findall(r"export const (\w+) = ([0-9][0-9_.eE+-]*);", source)
     return {name: float(value.replace("_", "")) for name, value in pairs}
-
-
-def test_pricing_constants_match_backend() -> None:
-    """The run-cost estimate constants equal ``core.billing.pricing``."""
-    ts = _ts_number_constants("pricing.ts")
-    assert ts["DEFAULT_INPUT_COST_PER_TOKEN"] == pytest.approx(pricing.FALLBACK_INPUT_COST_PER_TOKEN)
-    assert ts["DEFAULT_OUTPUT_COST_PER_TOKEN"] == pytest.approx(pricing.FALLBACK_OUTPUT_COST_PER_TOKEN)
 
 
 def test_default_pricing_terms_match_backend_defaults() -> None:

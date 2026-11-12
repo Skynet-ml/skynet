@@ -3,19 +3,17 @@
 ``[proposer]`` and each ``[target.<name>]`` get their own box (E1, E2). This
 module turns a role's parsed environment into what its box gets, and opens a
 candidate's stage boxes all or none (E29-E32). It holds no secret value in
-anything it returns for a box: only a service's own environment carries the
-values it names (D28).
+anything it returns for a box (D28).
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from urllib.parse import quote
 
-from ....billing.env_connectors import CONNECTORS, connector_endpoint
 from .docker_egress_proxy import target_allowed
 from .repo_constraints import RepoConstraints, RoleEnvironment, ServiceSpec, TargetStage
 from .sandbox_contract import SandboxRuntime, SandboxSession, SandboxSpec
@@ -44,10 +42,6 @@ class RolePlan:
             "mcp_servers": list(self.mcp_servers),
             "services": list(self.services),
         }
-
-
-class ServiceSecretError(ValueError):
-    """A service names a secret that has no value; the message names the service and the secret."""
 
 
 class RoleRelayError(ValueError):
@@ -107,94 +101,6 @@ def host_allowed(host: str, allowed: Collection[str]) -> bool:
     return target_allowed(
         (name.rstrip(".").lower(), int(port)), frozenset(entry.rstrip(".").lower() for entry in allowed)
     )
-
-
-def unenforceable_hosts(allowed: Collection[str]) -> list[str]:
-    """List the allowlist entries the egress cannot hold the box to.
-
-    ``optimize.toml`` accepts ``*.example.com`` and ``host:port``, but the
-    egress proxy and the edge policy allow only exact hosts on 443, so such an
-    entry must stop the run instead of silently allowing less or more.
-
-    Args:
-        allowed: The role's allowlist.
-
-    Returns:
-        The wildcard entries and the entries with a port, in order.
-    """
-    return [entry for entry in allowed if entry.startswith("*.") or ":" in entry]
-
-
-def service_environment(name: str, spec: ServiceSpec, secrets: Mapping[str, str]) -> dict[str, str]:
-    """Build one service's environment from only the secrets it names.
-
-    The secrets are the ``${NAME}`` placeholders of its headers (E53); no
-    sidecar process, command or image runs for it.
-
-    Args:
-        name: The ``[services.<name>]`` table name.
-        spec: Its declaration.
-        secrets: Every secret this run has, by name.
-
-    Returns:
-        The named secrets, and nothing else.
-
-    Raises:
-        ServiceSecretError: When a named secret has no value.
-    """
-    missing = [secret for secret in spec.secrets if not secrets.get(secret)]
-    if missing:
-        raise ServiceSecretError(f"Service {name} needs the secret {missing[0]}, which has no value.")
-    return {secret: secrets[secret] for secret in spec.secrets}
-
-
-def probe_connector(host: str, send: Callable[[str, Mapping[str, str]], bool]) -> bool:
-    """Check that one service's connector answers, with the key the parent holds.
-
-    The parent sends the probe, so the key never enters a box.
-
-    Args:
-        host: The connector's catalog host, such as ``mapstools.googleapis.com``.
-        send: Sends one request to the URL with the headers, and returns
-            whether the connector answered as healthy.
-
-    Returns:
-        ``False`` when the host is not in the catalog, Skynet holds no key for
-        it, or ``send`` says no or raises.
-    """
-    connector = CONNECTORS.get(host)
-    if connector is None:
-        return False
-    try:
-        url, headers = connector_endpoint(connector)
-        return bool(send(url, headers))
-    except Exception:
-        return False
-
-
-def unhealthy_services(services: Collection[str], probe: Callable[[str], bool]) -> list[str]:
-    """List the services whose health probe fails, in order.
-
-    A probe that raises counts as unhealthy, so a broken service never passes
-    the gate.
-
-    Args:
-        services: The service names to check.
-        probe: Returns whether one named service is healthy, for example
-            :func:`probe_connector` with a sender.
-
-    Returns:
-        The names of the unhealthy services.
-    """
-    failed = []
-    for name in services:
-        try:
-            healthy = probe(name)
-        except Exception:
-            healthy = False
-        if not healthy:
-            failed.append(name)
-    return failed
 
 
 def stage_spec(

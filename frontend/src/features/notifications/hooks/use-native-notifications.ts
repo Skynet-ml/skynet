@@ -14,7 +14,7 @@ import { maybeLocalHost } from "../lib/catalog";
 import { nativePermission, showNative } from "../lib/native";
 import { probeUntilAnswered, showClaimed } from "../lib/native-poll";
 
-export const NATIVE_POLL_MS = 10_000;
+const NATIVE_POLL_MS = 10_000;
 
 /**
  * The Mac app's channel states, or null on a hosted server. Only loopback

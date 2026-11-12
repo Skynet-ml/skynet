@@ -42,7 +42,7 @@ from core.sandbox.snapshots import (
     snapshot_expiration,
     snapshot_hold_retention,
 )
-from core.sandbox.tests.test_provider_vercel import FakeBox, FakeClient, FakeClock, FakeSession, make_env
+from core.sandbox.tests.test_provider_vercel import FakeBox, FakeClient, FakeSession, make_env
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
 
 TEST_DB_URL = app_env("APP_BUDGET_TEST_DB_URL")
@@ -243,70 +243,19 @@ async def test_failed_delete_is_kept_for_the_next_close() -> None:
     assert provider.deletes == ["snap-1"]
 
 
-async def test_idle_entry_leaves_the_cache_without_a_provider_delete() -> None:
-    """Check that eviction drops only the idle entry and close still deletes it."""
-    provider = Provider()
-    clock = FakeClock()
-    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=clock)
-    await cache.get_or_build(_key(), provider.build)
-    clock.now = 100.0
-    await cache.get_or_build(_key(install_command="uv sync"), provider.build)
-    clock.now = 150.0
-    assert await cache.evict_idle(120.0) == [_key()]
-    assert provider.deletes == []
-    assert (await cache.get_or_build(_key(), provider.build)).snapshot_id == "snap-1"
-    assert len(provider.builds) == 2
-    await cache.close()
-    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
-
-
-async def test_evicted_entry_without_lookup_is_rebuilt_and_both_are_deleted_at_close() -> None:
-    """Check that a rebuilt key keeps the first snapshot for the run-end delete."""
-    provider = Provider()
-    clock = FakeClock()
-    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
-    await cache.get_or_build(_key(), provider.build)
-    clock.now = 1_000.0
-    assert await cache.evict_idle(600.0) == [_key()]
-    assert (await cache.get_or_build(_key(), provider.build)).snapshot_id == "snap-2"
-    assert provider.deletes == []
-    await cache.close()
-    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
-
-
 async def test_borrowed_snapshot_is_only_dropped_from_the_cache() -> None:
     """Check that a pod never deletes a snapshot that another pod built."""
     provider = Provider()
-    owner_clock, borrower_clock = FakeClock(), FakeClock()
-    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=owner_clock)
-    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=borrower_clock)
+    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
     built = await owner.get_or_build(_key(), provider.build)
     assert (await borrower.get_or_build(_key(), provider.build)).snapshot_id == built.snapshot_id
-    borrower_clock.now = 1_000.0
-    assert await borrower.evict_idle(600.0) == [_key()]
     await borrower.close()
     assert provider.deletes == []
     assert (await owner.get_or_build(_key(), provider.build)).snapshot_id == built.snapshot_id
     await owner.close()
     assert provider.deletes == [built.snapshot_id]
     assert len(provider.builds) == 1
-
-
-async def test_owner_eviction_keeps_a_snapshot_that_a_borrower_still_uses() -> None:
-    """Check that the owner's idle time never deletes a snapshot in use on another pod."""
-    provider = Provider()
-    owner_clock, borrower_clock = FakeClock(), FakeClock()
-    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=owner_clock)
-    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=borrower_clock)
-    built = await owner.get_or_build(_key(), provider.build)
-    await borrower.get_or_build(_key(), provider.build)
-    owner_clock.now = borrower_clock.now = 1_000.0
-    await borrower.get_or_build(_key(), provider.build)
-    assert await owner.evict_idle(600.0) == [_key()]
-    assert provider.deletes == []
-    assert provider.live[built.builder_name].snapshot_id == built.snapshot_id
-    await owner.close()
-    assert provider.deletes == [built.snapshot_id]
 
 
 async def test_build_that_ends_after_close_is_deleted_and_refused() -> None:
@@ -1069,19 +1018,6 @@ async def test_failed_release_is_retried_by_close_and_deleted_once() -> None:
     await cache.release(_key())
     assert calls == ["snap-1", "snap-1"]
     assert provider.deletes == ["snap-1"]
-
-
-async def test_release_of_an_evicted_and_rebuilt_key_deletes_both_snapshots() -> None:
-    """Check that release finds the evicted snapshot of its key by its recorded id."""
-    provider = Provider()
-    clock = FakeClock()
-    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
-    await cache.get_or_build(_key(), provider.build)
-    clock.now = 1_000.0
-    assert await cache.evict_idle(600.0) == [_key()]
-    await cache.get_or_build(_key(), provider.build)
-    await cache.release(_key())
-    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
 
 
 async def test_release_of_a_borrowed_snapshot_only_drops_it() -> None:

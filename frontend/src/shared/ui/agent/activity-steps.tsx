@@ -28,7 +28,7 @@ import {
 import { Reveal } from "./reveal";
 
 /** The icon a kind of step shows, on its summary line and on a row with no icon of its own. */
-export const ACTIVITY_ICONS: Record<ActivityKind, Icon> = {
+const ACTIVITY_ICONS: Record<ActivityKind, Icon> = {
   edit: PencilSimple,
   act: MagicWand,
   check: CheckCircle,

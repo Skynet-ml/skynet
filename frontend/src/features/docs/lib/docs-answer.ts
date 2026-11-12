@@ -14,7 +14,7 @@ export type DocsAgentMessage = Pick<AgentMessage, "role" | "content" | "createdA
 /** The most messages the panel keeps in the browser session. */
 export const MAX_KEPT_MESSAGES = 12;
 /** The most earlier messages sent with a question, so requests stay small. */
-export const MAX_SENT_HISTORY = 6;
+const MAX_SENT_HISTORY = 6;
 
 // The backend rejects longer fields with 422 (backend/core/api/routers/docs_agent.py).
 // A history turn may be an earlier question, so it has the same limit.

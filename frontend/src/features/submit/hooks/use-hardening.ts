@@ -51,7 +51,7 @@ export type HardeningSettings = Omit<
 >;
 
 /** The error key a start throws when the setup has no scorer yet. */
-export const HARDENING_NO_SCORER = "submit.v2.harden.no_scorer";
+const HARDENING_NO_SCORER = "submit.v2.harden.no_scorer";
 
 /**
  * The run submit's repository target (see repo-run.ts), without secrets: the

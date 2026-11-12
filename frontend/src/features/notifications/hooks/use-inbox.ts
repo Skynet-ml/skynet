@@ -20,7 +20,7 @@ import { msg } from "@/shared/lib/messages";
 
 import { appendPage, mergeHead } from "../lib/catalog";
 
-export const INBOX_POLL_MS = 30_000;
+const INBOX_POLL_MS = 30_000;
 
 /**
  * Run `tick` now and every `intervalMs` while `enabled`, pausing while the
@@ -58,7 +58,7 @@ function usePolling(
 
 const NO_UNREAD: NotificationUnreadCounts = { focused: 0, everything: 0 };
 
-export type InboxStatus = "loading" | "ready" | "error";
+type InboxStatus = "loading" | "ready" | "error";
 
 export interface Inbox {
   counts: NotificationUnreadCounts;

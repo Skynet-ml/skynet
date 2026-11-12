@@ -32,7 +32,7 @@ export const DEFAULT_UNIFIED_SPLIT: Readonly<SplitFractions> = {
   val: 0.15,
   test: 0.15,
 };
-export const DEFAULT_METRIC_TIMEOUT_SECONDS = 60;
+const DEFAULT_METRIC_TIMEOUT_SECONDS = 60;
 
 /**
  * A GitHub, GitLab or Bitbucket repository the run optimizes. Empty
@@ -68,7 +68,7 @@ export interface RepoSecretDraft {
 export const emptyRepoSecret = (): RepoSecretDraft => ({ name: "", value: "", allowedHosts: "" });
 
 /** The whole repository, the editable paths a new repository run starts with. */
-export const WHOLE_REPOSITORY: readonly string[] = ["."];
+const WHOLE_REPOSITORY: readonly string[] = ["."];
 
 export const emptyRepoDraft = (): RepoDraft => ({
   repository: "",
@@ -232,7 +232,7 @@ export function taskIssue(task: TaskSlice): string | null {
   return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
 }
 
-export const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 // The server's REPO_PATH_PATTERN: a GitLab project can sit in nested subgroups.
 const GITLAB_PATH_PATTERN = /^[A-Za-z0-9_.-]{1,255}(\/[A-Za-z0-9_.-]{1,255}){1,20}$/;
 
@@ -245,9 +245,9 @@ const COMMIT_SHA = /^[0-9a-f]{40}$/i;
 // (backend/core/models/blackbox.py); keep them in step.
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const SECRET_HOST = /^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
-export const MAX_ALLOWED_HOSTS = 20;
-export const MAX_SECRET_VALUE = 16384;
-export const MAX_SECRETS = 100;
+const MAX_ALLOWED_HOSTS = 20;
+const MAX_SECRET_VALUE = 16384;
+const MAX_SECRETS = 100;
 
 /**
  * The allowed hosts as the server stores them: split on commas or spaces,
@@ -426,14 +426,13 @@ export function presetEngine(
 /** The two files every workspace has; their text is `runCode` / `metricCode`. */
 export const RUN_FILE = "run.py";
 export const METRIC_FILE = "metric.py";
-export const FIXED_FILES: readonly string[] = [RUN_FILE, METRIC_FILE];
+const FIXED_FILES: readonly string[] = [RUN_FILE, METRIC_FILE];
 
 // Mirror backend/core/models/unified.py so a bad name is caught as it is typed.
-export const WORKSPACE_FILE_MAX_COUNT = 20;
-export const WORKSPACE_FILE_MAX_CHARS = 200_000;
+const WORKSPACE_FILE_MAX_COUNT = 20;
 const WORKSPACE_PATH_MAX_CHARS = 120;
 const WORKSPACE_PATH_MAX_DEPTH = 4;
-export const WORKSPACE_FILE_SUFFIXES: readonly string[] = [
+const WORKSPACE_FILE_SUFFIXES: readonly string[] = [
   ".py",
   ".txt",
   ".md",
@@ -473,21 +472,6 @@ export function workspacePathIssue(
     return "submit.v2.metric.files.error.exists";
   if (taken.length >= WORKSPACE_FILE_MAX_COUNT) return "submit.v2.metric.files.error.count";
   return null;
-}
-
-/** Every workspace file's path: run.py, metric.py, then the extra files by path. */
-export function workspacePaths(ws: Pick<WorkspaceSlice, "files">): string[] {
-  return [...FIXED_FILES, ...Object.keys(ws.files).sort()];
-}
-
-/** One file's text, or null for a path the workspace does not hold. */
-export function workspaceFileText(
-  ws: Pick<WorkspaceSlice, "runCode" | "metricCode" | "files">,
-  path: string,
-): string | null {
-  if (path === RUN_FILE) return ws.runCode;
-  if (path === METRIC_FILE) return ws.metricCode;
-  return ws.files[path] ?? null;
 }
 
 /** The patch that writes one file, creating an extra file that does not exist yet. */

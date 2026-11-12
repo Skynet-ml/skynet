@@ -23,7 +23,6 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from ..api.errors import DomainError
 from .transport import label
 
-TOKEN_URL = "https://oauth2.googleapis.com/token"
 API_TIMEOUT = httpx.Timeout(30.0)
 ASSERTION_TTL_SECONDS = 3600
 TOKEN_REFRESH_MARGIN_SECONDS = 300

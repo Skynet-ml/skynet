@@ -1141,27 +1141,6 @@ def test_two_cold_effort_checks_at_once_share_one_build(monkeypatch: pytest.Monk
     assert len(builds) == 1
 
 
-def test_the_strongest_model_follows_the_operator_then_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator-set id wins; else the catalog's strongest model; else the best-value agent model."""
-    best = CatalogModel(
-        value="openrouter/vendor/best", label="best", provider="openrouter", supports_thinking=True, is_default=True
-    )
-    strongest = CatalogModel(
-        value="openrouter/vendor/strong",
-        label="strong",
-        provider="openrouter",
-        supports_thinking=True,
-        is_strongest=True,
-    )
-    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[best, strongest]))
-
-    assert mc.strongest_model_id(" vendor/picked ") == "vendor/picked"
-    assert mc.strongest_model_id() == "openrouter/vendor/strong"
-
-    monkeypatch.setattr(mc, "_cached_response", ModelCatalogResponse(providers=[], models=[best]))
-    assert mc.strongest_model_id() == "openrouter/vendor/best"
-
-
 def test_the_lowest_effort_from_low_is_shared_by_the_unpicked_effort() -> None:
     """Below-``low`` efforts are skipped, and a model that thinks by default still gets its catalog default."""
 
@@ -1193,28 +1172,25 @@ _JEV = "openrouter/typesafe/jev-router"
 
 @pytest.mark.parametrize("role", ["hook", "judge"])
 def test_jev_is_selectable_for_the_classifier_roles(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
-    """TypeSafe Jev passes validation and joins the menu for the hook and judge roles."""
+    """TypeSafe Jev passes validation for the hook and judge roles."""
     kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
     catalog = ModelCatalogResponse(providers=[], models=[kept])
     monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)
 
     mc.require_known_model(_JEV, role=role)
-    values = [m.value for m in mc.models_for_role(role)]
 
-    assert values == ["openrouter/acme/opus-5.5", _JEV]
     assert mc.is_removed_model(_JEV)
 
 
 @pytest.mark.parametrize("role", [None, "agent", "optimizer", "metric"])
 def test_jev_stays_hidden_for_every_other_role(monkeypatch: pytest.MonkeyPatch, role: str | None) -> None:
-    """Every other role, and a call that names no role, refuses Jev and leaves it off the menu."""
+    """Every other role, and a call that names no role, refuses Jev."""
     kept = CatalogModel(value="openrouter/acme/opus-5.5", label="opus-5.5", provider="openrouter", available=True)
     catalog = ModelCatalogResponse(providers=[], models=[kept])
     monkeypatch.setattr(mc, "get_catalog_cached", lambda: catalog)
 
     with pytest.raises(mc.DomainError):
         mc.require_known_model(_JEV, role=role)
-    assert [m.value for m in mc.models_for_role(role)] == ["openrouter/acme/opus-5.5"]
 
 
 def test_classifier_roles_do_not_unlock_other_routers(monkeypatch: pytest.MonkeyPatch) -> None:

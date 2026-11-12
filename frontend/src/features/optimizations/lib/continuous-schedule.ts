@@ -17,7 +17,7 @@ export const MAX_EVERY: Record<ScheduleFrequency, number> = {
 export const FREQUENCIES: readonly ScheduleFrequency[] = ["hourly", "daily", "weekly", "monthly"];
 
 /** Monday = 0, as the backend counts. */
-export const WEEKDAYS: readonly number[] = [0, 1, 2, 3, 4, 5, 6];
+const WEEKDAYS: readonly number[] = [0, 1, 2, 3, 4, 5, 6];
 const MONDAY_TO_FRIDAY = [0, 1, 2, 3, 4];
 
 interface WeekInfo {
@@ -241,7 +241,7 @@ function pad(n: number): string {
 }
 
 /** A calendar date as `YYYY-MM-DD`. */
-export function dateKey(day: Date): string {
+function dateKey(day: Date): string {
   return `${day.getUTCFullYear()}-${pad(day.getUTCMonth() + 1)}-${pad(day.getUTCDate())}`;
 }
 

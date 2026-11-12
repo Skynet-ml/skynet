@@ -9,7 +9,7 @@ lookup, the commit pin and the opening of the pull or merge request.
 from __future__ import annotations
 
 from types import ModuleType
-from typing import Any, Literal
+from typing import Any
 
 from ..api.errors import DomainError
 from . import bitbucket, github, gitlab
@@ -20,7 +20,6 @@ from .oauth import current_oauth_token
 from .transport import label
 from .vault import ConnectorVault
 
-RepoProvider = Literal["github", "gitlab", "bitbucket"]
 HOSTS: dict[str, ModuleType] = {github.PROVIDER: github, gitlab.PROVIDER: gitlab, bitbucket.PROVIDER: bitbucket}
 DEFAULT_PROVIDER = github.PROVIDER
 

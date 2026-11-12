@@ -47,10 +47,15 @@ export interface CliCredits {
 }
 
 /** What Codex answered when the user used a free limit reset; `error` means no clear answer. */
-export type CodexResetOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed" | "error";
+export type CodexResetOutcome =
+  | "reset"
+  | "nothingToReset"
+  | "noCredit"
+  | "alreadyRedeemed"
+  | "error";
 
 /** `reconnect`: the CLI sign-in expired or is missing. `unavailable`: the CLI did not answer. */
-export interface CliQuota {
+interface CliQuota {
   status: "ok" | "reconnect" | "unavailable";
   windows: CliQuotaWindow[];
   account?: CliAccount | null;
@@ -103,4 +108,3 @@ export function formatTime(iso: string, locale: string): string | null {
   if (Number.isNaN(time.getTime())) return null;
   return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(time);
 }
-

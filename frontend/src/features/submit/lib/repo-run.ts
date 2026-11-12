@@ -35,7 +35,7 @@ const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
  * Returns:
  *   Each secret name mapped to its host; a service with no valid url adds none.
  */
-export function serviceSecretHosts(toml: string): Map<string, string> {
+function serviceSecretHosts(toml: string): Map<string, string> {
   const services = new Map<string, { url: string | null; names: string[] }>();
   let current: { url: string | null; names: string[] } | null = null;
   let own = false;
@@ -90,7 +90,7 @@ export function serviceSecretHosts(toml: string): Map<string, string> {
  *   One request entry per service secret whose saved secret approves its host,
  *   carrying the approved host entry that covers it.
  */
-export function savedServiceSecrets(
+function savedServiceSecrets(
   toml: string,
   saved: ReadonlyArray<{ id: string; name: string; allowed_hosts?: string[] }>,
   typed: ReadonlySet<string>,
@@ -120,7 +120,7 @@ const hasModel = (config: ModelConfig | null): config is ModelConfig =>
  * Returns:
  *   The scorer, or null while `metric.py` is empty.
  */
-export function repoRunScorer(workspace: WizardV2State["workspace"]): BlackboxScorer | null {
+function repoRunScorer(workspace: WizardV2State["workspace"]): BlackboxScorer | null {
   if (!workspace.metricCode.trim()) return null;
   const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
   return {

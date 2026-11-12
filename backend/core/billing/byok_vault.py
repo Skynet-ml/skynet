@@ -617,26 +617,6 @@ class ProviderKeyVault:
             raise DomainError("billing.byok_key_undecryptable", status=409, provider=provider) from exc
         return ResolvedConnection(provider=provider, secret=secret, api_base=api_base, params=params)
 
-    def reveal_secret(self, username: str, provider: str) -> str | None:
-        """Decrypt and return a stored secret for a run that bills the user's key.
-
-        Thin wrapper over :meth:`resolve_connection` for callers that need only
-        the plaintext key. Returns ``None`` when no connection is stored.
-
-        Args:
-            username: Account the connection belongs to.
-            provider: Provider slug whose secret is needed.
-
-        Returns:
-            The plaintext provider key, or ``None`` when none is stored.
-
-        Raises:
-            DomainError: 503 when the vault key is unconfigured; 409 when the
-                stored ciphertext can't be decrypted with the current vault key.
-        """
-        resolved = self.resolve_connection(username, provider)
-        return resolved.secret if resolved is not None else None
-
     def _probe(self, provider: str, secret: str, api_base: str | None = None) -> str:
         """Make one authenticated request to a provider and classify the verdict.
 

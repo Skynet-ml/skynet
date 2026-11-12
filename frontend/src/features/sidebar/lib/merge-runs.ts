@@ -133,15 +133,3 @@ const HOSTED_RETRY_MS = [1000, 2000, 4000];
 export function hostedRetryDelay(failures: number): number | null {
   return failures >= 1 && failures <= HOSTED_RETRY_MS.length ? (HOSTED_RETRY_MS[failures - 1] ?? null) : null;
 }
-
-/** Add two count objects field by field; a missing hosted side returns the local counts. */
-export function sumCounts<C extends object>(local: C, hosted: C | null): C {
-  if (!hosted) return local;
-  const sum = { ...local } as Record<string, unknown>;
-  for (const [key, value] of Object.entries(hosted)) {
-    if (typeof value !== "number") continue;
-    const base = sum[key];
-    sum[key] = (typeof base === "number" ? base : 0) + value;
-  }
-  return sum as C;
-}

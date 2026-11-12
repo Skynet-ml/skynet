@@ -44,7 +44,6 @@ from ....sandbox.errors import (
     SandboxTransientError,
 )
 from ....sandbox.factory import create_environment, load_provider
-from ....sandbox.network import NetworkPolicyError
 from ....sandbox.pool import TrialFingerprintError
 from ....sandbox.snapshots import BuiltSnapshot, SnapshotCache
 from ....sandbox.sync_bridge import SyncSession, open_session
@@ -407,7 +406,7 @@ def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
         raise
     except (SandboxTransientError, SandboxRunOutcomeError):
         raise
-    except (SandboxError, NetworkPolicyError, UnsafeArchiveError, TrialFingerprintError) as error:
+    except (SandboxError, UnsafeArchiveError, TrialFingerprintError) as error:
         raise ServiceError(f"The sandbox refused the request: {error}") from error
 
 

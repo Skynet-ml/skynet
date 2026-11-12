@@ -77,7 +77,7 @@ export function writeColorTheme(theme: ColorTheme): void {
   }
 }
 
-export function systemPrefersDark(): boolean {
+function systemPrefersDark(): boolean {
   return typeof window !== "undefined" && window.matchMedia(DARK_QUERY).matches;
 }
 

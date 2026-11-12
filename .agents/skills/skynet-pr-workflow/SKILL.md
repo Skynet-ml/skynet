@@ -23,26 +23,25 @@ full PR, review and merge procedure.
   stops. An implementer and its reviewers never work in the same worktree at
   the same time.
 - Each agent runs at most one headless browser at a time and closes it when
-  done. Prefer the cloud preview (AWS). Start a local dev server only when
-  there is no other way.
+  done.
 
-### 1a. Fix bugs locally, deploy once (MANDATORY)
+### 1a. Fix bugs locally, push once (MANDATORY)
 
-Each push rebuilds the PR preview (the sandbox image too) and starts a new
-automated review. A bug found after the push costs a full rebuild. Find the
-bugs before you push. Follow this order for every PR:
+Shared staging replaces PR previews (Gilad, 2026-11-11). Each push starts a
+new automated review. A bug found after the push costs a new review round.
+Find the bugs before you push. Follow this order for every PR:
 
 1. Build the change. Run the tests, lint and typecheck locally.
 2. Review the full diff locally. Use two reviewers with fresh context (for
    example, two subagents). Verify each finding with a failing test, then
    fix it. Repeat until a review finds nothing new.
-3. Push once. Let the PR checks, the preview build and the automated review
-   gate run. The full CI runs later on the batch (section 7).
-4. Run the acceptance checks on the PR preview. A visual-only change may use
-   the section 4 exemption.
+3. Push once. Let the PR checks and the automated review gate run. The full
+   CI runs later on the batch (section 7).
+4. After the merge reaches staging, the orchestrator runs the acceptance
+   checks on staging (section 4).
 
-If the review gate or the acceptance checks find a bug, fix all findings
-locally, check them again, and then push them together in one push.
+If the review gate finds a bug, fix all findings locally, check them again,
+and then push them together in one push.
 
 A PR that adds a harness to `BLACKBOX_HARNESSES` in
 `backend/core/models/blackbox.py` must also update the frontend in the same
@@ -85,9 +84,10 @@ Use the repository template when there is one. Include, in this order:
 
 1. Problem and resulting behavior (one concrete before-and-after example when
    useful).
-2. Review evidence: the acceptance checks for the changed behavior, or the
-   section 4 exemption that applies. Say if the change is visible in the UI.
-   UI PRs need no Before and After images or videos (section 5).
+2. Review evidence: the local checks for the changed behavior, the acceptance
+   checks for staging after the merge, or the section 4 exemption that
+   applies. Say if the change is visible in the UI. UI PRs need no Before and
+   After images or videos (section 5).
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
 5. Automated review verdicts.
@@ -102,8 +102,9 @@ for review until the evidence is there.
 ## 3. Automated review gate (RevEngine)
 
 - One review by Claude Opus 5.5 (`claude-opus-5-5`) at medium effort must
-  approve the current head commit and its base commit. Do not substitute
-  another model silently. Do not add a GPT review or a paid review service.
+  approve the current head commit and its base commit with 0 findings. Do
+  not substitute another model silently. Do not add a GPT review or a paid
+  review service.
 - The orchestrator starts a fresh reviewer subagent after implementation
   stops. **The implementer never reviews its own work as the final gate.**
 - RevEngine steps: **Review, Verify, Rank.**
@@ -147,39 +148,43 @@ for review until the evidence is there.
   delegates the fix. The fix PR is the first PR in the next batch (SKY-625,
   SKY-626).
 
-## 4. Acceptance on staging or the PR preview
+## 4. Acceptance on staging after the merge
 
-- Run unit tests, lint and builds locally or in CI. Run application
-  acceptance checks on AWS staging or the PR's isolated preview copied from
-  staging. Sign in with the `skynet-test-accounts` skill.
+- Run unit tests, lint and builds locally or in CI before the merge.
+- Shared staging replaces PR previews (Gilad, 2026-11-11). After the merge
+  reaches staging, the orchestrator runs the issue's acceptance checks on
+  `https://staging.skynetml.com` with a test account. Sign in with the
+  `skynet-test-accounts` skill.
+- A failed acceptance check becomes a new bug issue in Linear. Link it to
+  the merged PR and its issue.
 - AWS staging (us-east-2, AWS profile `skynet`, Terraform root
   `infra/terraform/environments/staging`): app `https://staging.skynetml.com`,
   API `https://api-staging.skynetml.com`. Railway is deleted (2026-10-29);
   never log in to, call, deploy to or test on it.
-- Use shared staging for baseline checks. Use the PR preview for changed
-  behavior. Never overwrite shared staging with an unmerged branch.
+- Never overwrite shared staging with an unmerged branch.
 - Until AWS staging serves a needed flow, use local Docker evidence and state
   the gap in the PR body.
-- You may deploy the issue's isolated preview. Never deploy production, run
-  billing transactions or change live billing configuration.
-- Use only staging or preview databases, queues, storage, credentials and
-  test accounts. Never use production services or data.
-- Put in the PR: environment, app and API URLs, baseline and tested head
-  commits, deployment versions, exact acceptance checks and results.
+- Never deploy production, run billing transactions or change live billing
+  configuration.
+- Use only staging databases, queues, storage, credentials and test
+  accounts. Never use production services or data.
+- Record on the Linear issue: the app and API URLs, the staging commit you
+  tested, the exact acceptance checks and their results.
 - Check `/health` on the API and `/api/version` on the frontend. Each
-  affected service must serve the tested commit. An unchanged service may run
-  an older SHA only with proof that it misses no relevant change.
-- Use real acceptance for feasible flows. Missing access, deployment or
-  evidence keeps the PR draft. An infrastructure failure is a blocker, not a
-  pass.
+  affected service must serve the merged commit or a later one. An unchanged
+  service may run an older SHA only with proof that it misses no relevant
+  change.
+- Use real acceptance for feasible flows. Record missing access or
+  deployment as a coverage gap. An infrastructure failure is a blocker, not
+  a pass.
 - Documentation-only work with no runtime effect may skip staging acceptance.
   Explain that exemption in the description.
 - A visual-only change with no app logic under test (layout, styling, copy,
-  labels, static states) may skip the preview acceptance checks and the
+  labels, static states) may skip the staging acceptance checks and the
   served-commit check. Explain that exemption in the description.
-- The Opus 5.5 review must approve the staging evidence, the visual-only
-  exemption, the costly-flow alternative or the documentation exemption. A
-  changed review policy cancels earlier approval.
+- The Opus 5.5 review must approve the visual-only exemption, the costly-flow
+  alternative or the documentation exemption. A changed review policy cancels
+  earlier approval.
 
 ### Real data and costly workflows
 
@@ -190,27 +195,28 @@ for review until the evidence is there.
   validation and authentication. Record material differences. Never silently
   replace a real integration with a test substitute.
 - A test-account login is access setup, not proof of email verification.
-  Never disable verification on previews. Test authentication changes with
+  Never disable verification on staging. Test authentication changes with
   fresh accounts and real codes.
 - Use only test allowances that already exist. Never add funds, grant
   credits, change balances or create charges. The one exception is the
   staging test-credit grant command in the `skynet-test-accounts` skill
   ("Grant test credit"). Use it only for a check account you created for
   this check, only after Gilad approves that grant in chat, and within the
-  one $50 UTC-day cap on the staging database. The command refuses PR
-  previews. Amounts depend on the check. Before each grant, ask Gilad
-  in chat for a specific dollar amount: the smallest amount the check needs,
-  with a short cost estimate. Gilad approves that amount, or a larger one if
-  he thinks the check needs more. Record his approval text. Spend as little
-  as possible. Never grant on production, to real customers or to manual
-  accounts. Never use a raw wallet INSERT, Stripe or any other path.
+  one $50 UTC-day cap on the staging database. Amounts depend on the check.
+  Before each grant, ask Gilad in chat for a specific dollar amount: the
+  smallest amount the check needs, with a short cost estimate. Gilad
+  approves that amount, or a larger one if he thinks the check needs more.
+  Record his approval text. Spend as little as possible. Never grant on
+  production, to real customers or to manual accounts. Never use a raw
+  wallet INSERT, Stripe or any other path.
 - Mocks are allowed for focused unit tests or unavailable dependencies.
   Explain the reason, boundary and coverage gap.
 - Costly or rare workflows (for example expensive scheduled runs): backend
   algorithmic tests and source review may verify the backend. The frontend
   may use clearly labeled simulated state on the real running UI. Label the
-  simulated state in the PR. State the cost, the simulated boundary, the real
-  coverage and the remaining gap. Never claim the expensive run happened.
+  simulated state on the Linear issue. State the cost, the simulated
+  boundary, the real coverage and the remaining gap. Never claim the
+  expensive run happened.
 - This exception does not cover cheap authentication, data or navigation
   flows. Test those on real staging.
 
@@ -248,8 +254,9 @@ for review until the evidence is there.
 
 A PR merges into `staging` only when **all** of these gates pass:
 
-1. Agent code review is clean.
-2. Tests and the Linear issue's acceptance checks pass in the PR environment.
+1. One Opus 5.5 medium-effort review approves the current head with 0
+   findings (section 3).
+2. The local tests and checks in `AGENTS.md` ("Verification") pass.
 3. The diff touches only the files in the issue's `## Files` list.
 4. Batch CI: the PR's approved head goes into a batch branch made from the
    latest `staging`, and the full CI passes on the batch (see "PR tests and
@@ -258,6 +265,9 @@ A PR merges into `staging` only when **all** of these gates pass:
    PR's merge commit from the batch right away (`git revert -m 1 <merge
    commit>`) and reopen its issue with the failure. The revert goes in its
    own PR and through the batch CI flow below.
+
+After the merge reaches staging, the orchestrator runs the acceptance checks
+on staging (section 4). A failed check becomes a new bug issue.
 
 ### Every PR merges on the gates (Gilad, 2026-11-11)
 
@@ -320,7 +330,7 @@ A manual hold on a change or on a promotion still stops it.
   `staging`. Before every push, run the local gate in `AGENTS.md`
   ("Verification"). Put the exact commands and their results in the PR body.
 - The policy checks still run on every PR: gitleaks, pr files scope
-  (`scope`), pr kind label, preview and terraform.
+  (`scope`), pr kind label and terraform.
 - CI runs on each batch (dispatch), on the `staging` → `main` promotion PR
   and on the push to `main`.
 - An individual PR never merges on its own. The orchestrator merges approved
@@ -337,9 +347,7 @@ A manual hold on a change or on a promotion still stops it.
   3. Run `gh workflow run ci.yml --ref batch/<date>-<n>` and `gh workflow
      run i18n.yml --ref batch/<date>-<n>`. Wait for both runs to pass.
   4. Open one PR from `batch/<date>-<n>` to `staging`. List the included PRs
-     and their merged heads, and link the CI run. The batch PR also asks
-     for a preview slot. A "Preview skipped" (no free slot) comment on it is
-     harmless.
+     and their merged heads, and link the CI run.
   5. Merge it with a merge commit (`gh pr merge <pr> --merge --delete-branch
      --match-head-commit <sha>`).
 - The `staging merge gates` ruleset requires only `scope`. So the

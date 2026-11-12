@@ -29,7 +29,7 @@ export interface JobsColumn {
   shared?: boolean;
 }
 
-export const JOBS_COLUMNS: readonly JobsColumn[] = [
+const JOBS_COLUMNS: readonly JobsColumn[] = [
   { key: "optimization_id", width: 86 },
   { key: "name", width: 104 },
   { key: "username", width: 94, collapse: "md", shared: true },

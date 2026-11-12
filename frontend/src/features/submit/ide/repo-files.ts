@@ -11,7 +11,7 @@ export interface RepoEntry {
 }
 
 /** Why a repository file has no text to show. */
-export type RepoReadIssue = "binary" | "too_large" | "missing";
+type RepoReadIssue = "binary" | "too_large" | "missing";
 
 /** What the workbench needs to browse a repository: its folder name, its tree, and lazy reads. */
 export interface RepoSource {

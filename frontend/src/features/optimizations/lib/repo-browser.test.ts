@@ -11,9 +11,11 @@ registerHooks({
   },
 });
 
-const { ancestors, buildRepoTree, changedFolders, hasFile, repoFileKind, visibleRows } =
-  await import("./repo-browser.ts");
+const { ancestors, buildRepoTree, changedFolders, hasFile, repoFileKind } = await import(
+  "./repo-browser.ts"
+);
 const { parsePatch } = await import("./repo-patch.ts");
+const { treeRows } = await import("../../../shared/ui/file-tree-model.ts");
 
 const ENTRIES = [
   { path: "README.md", type: "file" as const, size: 10 },
@@ -71,8 +73,8 @@ test("changedFolders opens only folders holding a change", () => {
   assert.deepEqual([...changedFolders(root)].sort(), ["src", "src/new"]);
 });
 
-test("visibleRows hides collapsed folders' children", () => {
-  const rows = visibleRows(root, new Set(["src"]), "");
+test("treeRows hides collapsed folders' children", () => {
+  const rows = treeRows(root, new Set(["src"]), "");
   assert.deepEqual(
     rows.map((r) => [r.node.path, r.depth]),
     [
@@ -86,8 +88,8 @@ test("visibleRows hides collapsed folders' children", () => {
   );
 });
 
-test("visibleRows filters by path and opens the matches' folders", () => {
-  const rows = visibleRows(root, new Set(), "GUIDE");
+test("treeRows filters by path and opens the matches' folders", () => {
+  const rows = treeRows(root, new Set(), "GUIDE");
   assert.deepEqual(
     rows.map((r) => [r.node.path, r.expanded]),
     [
@@ -95,7 +97,17 @@ test("visibleRows filters by path and opens the matches' folders", () => {
       ["docs/guide.md", false],
     ],
   );
-  assert.deepEqual(visibleRows(root, new Set(), "nothing-like-this"), []);
+  assert.deepEqual(treeRows(root, new Set(), "nothing-like-this"), []);
+});
+
+test("treeRows include splits the changed files from the rest", () => {
+  const all = new Set(["src", "src/new", "docs"]);
+  const changed = treeRows(root, all, "", (n) => n.changedCount > 0).map((r) => r.node.path);
+  const other = treeRows(root, all, "", (n) => n.fileCount > n.changedCount).map(
+    (r) => r.node.path,
+  );
+  assert.deepEqual(changed, ["src", "src/new", "src/new/mod.py", "src/app.py", "src/old.py"]);
+  assert.deepEqual(other, ["docs", "docs/guide.md", "README.md"]);
 });
 
 test("hasFile finds files, not folders", () => {
@@ -116,13 +128,8 @@ test("repoFileKind reads the extension", () => {
   assert.equal(repoFileKind("Makefile"), "code");
 });
 
-test("scoped rows split the changed files from the rest", () => {
+test("buildRepoTree counts files and changed files", () => {
   const root = buildRepoTree(ENTRIES, parsePatch(PATCH));
-  const all = new Set(["src", "src/new", "docs"]);
-  const changed = visibleRows(root, all, "", "changed").map((r) => r.node.path);
-  const other = visibleRows(root, all, "", "unchanged").map((r) => r.node.path);
-  assert.deepEqual(changed, ["src", "src/new", "src/new/mod.py", "src/app.py", "src/old.py"]);
-  assert.deepEqual(other, ["docs", "docs/guide.md", "README.md"]);
   assert.equal(root.fileCount, 5);
   assert.equal(root.changedCount, 3);
 });
