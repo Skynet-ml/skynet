@@ -1064,6 +1064,79 @@ def test_run_waits_for_room_held_by_unpinned_work(engine: Engine) -> None:
     assert service.get(budget.id, "alice").blocked_reason is None
 
 
+def test_a_call_that_fits_after_unpinned_work_settles_does_not_count_as_waiting(engine: Engine) -> None:
+    """A box whose call fits once unpinned work settles can still end, so the other box's call waits (SKY-647)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-fits-later")
+    service.attach_to_job(budget.id, "alice", "fits-later-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=3)
+    _pinned_box(runtime, "box-a", 20)
+    _pinned_box(runtime, "box-b", 17)
+    unpinned = runtime.reserve(_quote(5), operation_key="unpinned-call", cost_kind="model")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        call_b = pool.submit(
+            runtime.reserve, _quote(10), operation_key="call-b", cost_kind="model", box=box_tag("box-b")
+        )
+        time.sleep(0.5)
+        call_a = pool.submit(
+            runtime.reserve, _quote(20), operation_key="call-a", cost_kind="model", box=box_tag("box-a")
+        )
+        time.sleep(0.5)
+        assert not call_b.done()
+        assert not call_a.done()
+        service.mark_dispatched(unpinned.id, "alice")
+        service.settle(unpinned.id, "alice", evidence_key="unpinned-usage", actual_cents=1, evidence={"usage": "u"})
+        assert call_b.result(timeout=5).max_cents == 10
+        with pytest.raises(UsagePendingError):
+            call_a.result(timeout=10)
+
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_a_call_does_not_count_as_waiting_while_it_retries(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retry may be admitted, so its box can still end while the retry runs (SKY-647)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-retry-count")
+    service.attach_to_job(budget.id, "alice", "retry-count-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=10)
+    _pinned_box(runtime, "box-a", 20)
+    box_b = _pinned_box(runtime, "box-b", 20)
+    seen: list[dict[str, int]] = []
+    reserve = service.reserve
+
+    def recording_reserve(*args: Any, **kwargs: Any) -> Any:
+        """Record the waiting counts that each attempt of the box-a call sees.
+
+        Args:
+            *args: Positional arguments of ``BudgetService.reserve``.
+            **kwargs: Keyword arguments of ``BudgetService.reserve``.
+
+        Returns:
+            The result of ``BudgetService.reserve``.
+        """
+        if "call-a" in kwargs["operation_key"]:
+            seen.append(dict(runtime._waiting))
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(service, "reserve", recording_reserve)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        call_a = pool.submit(
+            runtime.reserve, _quote(15), operation_key="call-a", cost_kind="model", box=box_tag("box-a")
+        )
+        time.sleep(1.5)
+        assert not call_a.done()
+        assert runtime._waiting == {box_tag("box-a"): 1}
+        service.mark_dispatched(box_b.id, "alice")
+        service.settle(box_b.id, "alice", evidence_key="box-b-usage", actual_cents=1, evidence={"usage": "box-b"})
+        runtime.unpin(box_b.id)
+        assert call_a.result(timeout=5).max_cents == 15
+
+    assert len(seen) >= 2
+    assert all(waiting == {} for waiting in seen)
+    assert runtime._waiting == {}
+
+
 def _settled_run_call(service: BudgetService, budget_id: str, key: str, cents: int, generation: int = 0) -> None:
     """Reserve, dispatch, and settle one run-phase model call.
 

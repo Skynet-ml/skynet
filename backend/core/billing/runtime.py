@@ -190,6 +190,22 @@ class BudgetRuntime:
                 if self._waiting[box] <= 0:
                     del self._waiting[box]
 
+    def _fits_after_unpinned_work(self, error: BudgetInFlightError) -> bool:
+        """Tell whether an operation fits once the unpinned in-flight work settles.
+
+        Args:
+            error: The admission refusal, with its limit arithmetic when it has one.
+
+        Returns:
+            True when the refusal has no limit arithmetic, or when the scope
+            fits in the room that the pinned coverage leaves.
+        """
+        if error.scope_units is None or error.room_units is None:
+            return True
+        with self._changed:
+            pinned = sum(self._pinned.values())
+        return error.scope_units <= error.room_units - pinned
+
     def _wait_cannot_help(self, error: BudgetInFlightError) -> BaseException | None:
         """Refuse an operation that only this runtime's own blocked sandboxes keep out.
 
@@ -212,13 +228,11 @@ class BudgetRuntime:
             In the run phase it is the stop latch's ``BudgetReached``, after
             the budget stopped admitting work, like any other run refusal.
         """
+        if self._fits_after_unpinned_work(error):
+            return None
         with self._changed:
             pinned = sum(self._pinned.values())
             every_box_waits = all(box is not None and self._waiting[box] > 0 for box in self._boxes.values())
-        if error.scope_units is None or error.room_units is None:
-            return None
-        if error.scope_units <= error.room_units - pinned:
-            return None
         if self.phase != "setup" and not every_box_waits:
             return None
         owner = "check's" if self.phase == "setup" else "run's"
@@ -282,33 +296,35 @@ class BudgetRuntime:
             BudgetReached: When no covered work can release sufficient allowance.
         """
         deadline = time.monotonic() + self.wait_timeout
-        waiting: tuple[str, ...] = ()
-        counted = False
-        try:
-            while True:
-                self.stop.check()
+        while True:
+            self.stop.check()
+            try:
+                return self.service.reserve(
+                    self.budget_id,
+                    self.username,
+                    operation_key=generation_operation_key(operation_key, self.generation),
+                    generation=self.generation,
+                    phase=self.phase,
+                    cost_kind=cost_kind,
+                    request_fingerprint=quote.request_fingerprint,
+                    price_snapshot=quote.price_snapshot,
+                    max_cents=quote.maximum.total,
+                    max_wallet_cents=quote.maximum.wallet,
+                    attempt=attempt,
+                    role=role,
+                )
+            except BudgetUnreconciledError as error:
+                raise UsagePendingError(
+                    "Previous work is awaiting confirmed usage; its coverage is retained."
+                ) from error
+            except BudgetInFlightError as error:
+                # A call counts as waiting work only while its box's coverage keeps
+                # it out, and never while it retries: a call that may fit after
+                # unpinned work settles, or that may be admitted now, can still let
+                # its box end (SKY-647).
+                fits = self._fits_after_unpinned_work(error)
+                waiting = () if fits else self._begin_wait(box, for_box)
                 try:
-                    return self.service.reserve(
-                        self.budget_id,
-                        self.username,
-                        operation_key=generation_operation_key(operation_key, self.generation),
-                        generation=self.generation,
-                        phase=self.phase,
-                        cost_kind=cost_kind,
-                        request_fingerprint=quote.request_fingerprint,
-                        price_snapshot=quote.price_snapshot,
-                        max_cents=quote.maximum.total,
-                        max_wallet_cents=quote.maximum.wallet,
-                        attempt=attempt,
-                        role=role,
-                    )
-                except BudgetUnreconciledError as error:
-                    raise UsagePendingError(
-                        "Previous work is awaiting confirmed usage; its coverage is retained."
-                    ) from error
-                except BudgetInFlightError as error:
-                    if not counted:
-                        waiting, counted = self._begin_wait(box, for_box), True
                     refusal = self._wait_cannot_help(error)
                     if refusal is not None:
                         raise refusal from error
@@ -318,13 +334,13 @@ class BudgetRuntime:
                         ) from error
                     with self._changed:
                         self._changed.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
-                except BudgetInsufficientError as error:
-                    if self.phase == "setup":
-                        raise
-                    self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
-                    raise self.stop.trip(str(error)) from error
-        finally:
-            self._end_wait(waiting)
+                finally:
+                    self._end_wait(waiting)
+            except BudgetInsufficientError as error:
+                if self.phase == "setup":
+                    raise
+                self.service.stop_admission(self.budget_id, self.username, reason="budget_reached")
+                raise self.stop.trip(str(error)) from error
 
     def extend(
         self,
