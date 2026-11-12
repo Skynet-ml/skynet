@@ -26,7 +26,19 @@ function sources(dir: string): string[] {
   });
 }
 
-test("every setup stop is unique", () => {
+/*
+ * The tour stays short: every stop past this is one the user would skip.
+ * Ten covers the two looks the user sees change behind the card (level
+ * and theme), the one stop a billing answer can add (the key)
+ * and the two places the user connects things (data sources and the update
+ * grid).
+ */
+const MAX_SETUP_STOPS = 10;
+
+test("the setup stays short and every stop is unique", () => {
+  for (const billing of ["platform", "byok", "subscription"] as const) {
+    assert.ok(setupStops(billing).length <= MAX_SETUP_STOPS, `${billing}: too many stops`);
+  }
   assert.equal(new Set(SETUP_STOPS.map((s) => s.id)).size, SETUP_STOPS.length);
 });
 
@@ -99,6 +111,7 @@ test("only stops about a Settings control open Settings", () => {
 test("the model key stop shows only after a bring-your-own-key answer", () => {
   assert.ok(setupStops("byok").some((s) => s.id === "providers"));
   assert.ok(!setupStops("platform").some((s) => s.id === "providers"));
+  assert.ok(setupStops("byok").length <= MAX_SETUP_STOPS);
 });
 
 test("a CLI subscription answer adds no stop", () => {
