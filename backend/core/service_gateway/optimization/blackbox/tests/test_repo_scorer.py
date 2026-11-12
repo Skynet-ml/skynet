@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import http.server
-import itertools
 import json
 import logging
 import os
@@ -3294,6 +3293,7 @@ def test_the_scorer_gives_each_role_only_the_servers_of_its_own_mcp_file(tmp_pat
 
 # A stage that calls its own ``search`` MCP server through the stage box's loopback relay (SKY-611).
 _LOOKUP_STAGE = """
+import json
 import os
 import time
 import urllib.error
@@ -3307,8 +3307,8 @@ class _Keep(urllib.request.HTTPRedirectHandler):
 
 def lookup(value):
     started = time.time()
-    # Long enough that calls in parallel boxes would overlap.
-    time.sleep(0.3)
+    # Long enough that parallel calls in one stage box overlap.
+    time.sleep(1.0)
     body = value["body"].encode() if value.get("body") else None
     url = os.environ["SKYNET_MCP_SEARCH_URL"] + value.get("path", "")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Keep)
@@ -3317,7 +3317,14 @@ def lookup(value):
             status, text = response.status, response.read().decode()
     except urllib.error.HTTPError as error:
         status, text = error.code, ""
-    return {"status": status, "body": text, "key_in_env": "JUDGE_KEY" in os.environ, "span": [started, time.time()]}
+    return {
+        "status": status,
+        "body": text,
+        "key_in_env": "JUDGE_KEY" in os.environ,
+        "span": [started, time.time()],
+        "url": os.environ["SKYNET_MCP_SEARCH_URL"],
+        "config": json.load(open(os.environ["SKYNET_MCP_CONFIG"])),
+    }
 """
 _LOOKUP_COMMAND = (
     "python3",
@@ -3340,9 +3347,10 @@ _LOOKUP_SCORER = (
 def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
     tmp_path: Path, echo: _Echo, entry: str | tuple[str, ...]
 ) -> None:
-    """Stage calls with MCP run one at a time even at ``max_concurrency=3``, and each gets its own redacted answer.
+    """Stage calls with MCP run in parallel at ``max_concurrency=3``, and each gets its own redacted answer.
 
-    A redirect stays unfollowed, and each call is recorded.
+    Each call serves its own relay port and MCP file (SKY-624). A redirect
+    stays unfollowed, and each call is recorded.
     """
     echo.release.set()
     sink = _CallSink()
@@ -3366,8 +3374,10 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
         scorer.close()
 
     posted, redirected, streamed = json.loads(result["feedback"])
-    spans = sorted(answer["span"] for answer in (posted, redirected, streamed))
-    assert all(earlier[1] <= later[0] for earlier, later in itertools.pairwise(spans))
+    answers = (posted, redirected, streamed)
+    assert max(answer["span"][0] for answer in answers) < min(answer["span"][1] for answer in answers)
+    assert len({answer["url"] for answer in answers}) == 3
+    assert all(answer["config"]["mcpServers"]["search"]["url"] == answer["url"] for answer in answers)
     assert (posted["status"], json.loads(posted["body"])) == (200, {"seen": "[REDACTED]"})
     assert redirected["status"] == 302
     assert streamed["status"] == 200
@@ -3379,6 +3389,57 @@ def test_a_stage_reaches_its_own_mcp_server_through_its_box_relay(
     assert sorted((call["role"], call["kind"], call["candidate_id"]) for _, call, _ in sink.calls) == [
         *[("metric", "stage", "cand-1")] * 3,
         *[("target.lookup", "mcp", "cand-1")] * 3,
+    ]
+
+
+_TWO_LOOKUPS_SCORER = (
+    "import json\n"
+    "from concurrent.futures import ThreadPoolExecutor\n"
+    "from skynet import call\n"
+    "def score(repo_path, case=None):\n"
+    "    asks = [{'path': '', 'body': '{}'}, {'path': '/redirect'}]\n"
+    "    with ThreadPoolExecutor(2) as pool:\n"
+    "        answers = list(pool.map(lambda ask: call('lookup', ask), asks))\n"
+    "    return {'score': 1.0, 'feedback': json.dumps(answers)}\n"
+)
+
+
+def test_two_parallel_calls_to_one_mcp_stage_each_get_their_own_answer_and_record(tmp_path: Path, echo: _Echo) -> None:
+    """Two calls to one MCP stage overlap, each gets its own answer, and each records one call for the candidate.
+
+    The recorder has no candidate of its own: each call's relay is built on a
+    stage pool thread, and still records the scorer thread's candidate (SKY-624).
+    """
+    sink = _CallSink()
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        _TWO_LOOKUPS_SCORER,
+        RecordingRuntime(),
+        {"lookup": TargetStage(entry="src/lookup.py:lookup", timeout=30)},
+        tree={"src/lookup.py": _LOOKUP_STAGE},
+        secrets={"JUDGE_KEY": "judge-secret-value"},
+        mcp_roles={"target.lookup": _mcp_role(echo.port)},
+        secret_hosts={"JUDGE_KEY": "judge.example.test"},
+        secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+        recorder=CallRecorder(sink, "opt-1", "", ""),
+        max_concurrency=2,
+    )
+    try:
+        with usage_scope(candidate="cand-7"):
+            result = scorer.score("")
+    finally:
+        scorer.close()
+
+    posted, redirected = json.loads(result["feedback"])
+    assert max(posted["span"][0], redirected["span"][0]) < min(posted["span"][1], redirected["span"][1])
+    assert posted["url"] != redirected["url"]
+    assert (posted["status"], json.loads(posted["body"])) == (200, {"seen": "[REDACTED]"})
+    assert (redirected["status"], redirected["body"]) == (302, "")
+    assert "judge-secret-value" not in result["feedback"]
+    assert sorted(echo.paths) == ["/echo", "/echo/redirect"]
+    assert sorted((call["role"], call["kind"], call["candidate_id"]) for _, call, _ in sink.calls) == [
+        *[("metric", "stage", "cand-7")] * 2,
+        *[("target.lookup", "mcp", "cand-7")] * 2,
     ]
 
 
@@ -3434,21 +3495,31 @@ def test_the_evaluation_reads_a_budget_stop_a_stage_relay_kept_after_its_call(tm
     )
     box = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, network_disabled=True))
     relay = scorer._relay({"lookup": box}, "calls/000001/stages")
+    template = relay._stage_relays["lookup"]
+    call_relay = template.for_call("abc")
     try:
         assert relay.first_control() is None
-        relay._stage_relays["lookup"].control = {"code": "budget_reached", "message": "spent"}
+        call_relay.control = {"code": "budget_reached", "message": "spent"}
+        assert template.control is None
         assert relay.control is None
         assert relay.first_control() == {"code": "budget_reached", "message": "spent"}
+        call_relay.control = None
+        template.control = {"code": "budget_reached", "message": "template"}
+        assert relay.first_control() == {"code": "budget_reached", "message": "template"}
         relay.control = {"code": "usage_pending", "message": "pending"}
         assert relay.first_control() == {"code": "usage_pending", "message": "pending"}
     finally:
+        call_relay.close()
         relay.close()
         scorer.close()
         box.close()
 
 
-def test_a_stage_relay_refuses_another_roles_server_and_names_the_stage_mcp_file(tmp_path: Path) -> None:
+def test_a_stage_relay_refuses_another_roles_server_and_names_the_stage_mcp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A stage reaches only the servers of its own MCP file, and the refusal names that file (SKY-611)."""
+    monkeypatch.setattr(runner, "RELAY_PORT", 8799)
     stage = TargetStage(
         entry="src/stages.py:double",
         mcp="agents/.mcp.json",
@@ -3472,9 +3543,16 @@ def test_a_stage_relay_refuses_another_roles_server_and_names_the_stage_mcp_file
         stage_relay = relay._stage_relays["lookup"]
         assert stage_relay.config("../..")["mcp"] == ["search"]
         assert stage_relay.config("../..")["mcp_file"] == "agents/.mcp.json"
-        assert stage_relay.config("../..")["response_dir"] == "../../.app-stage/relay"
+        call_config = stage_relay.for_call("abc").config("../..")
+        assert call_config["response_dir"] == "../../.app-stage/calls/abc/relay"
+        assert call_config["port"] == 0
+        assert call_config["prefix"] != stage_relay.for_call("def").config("../..")["prefix"]
         refusal = stage_relay._mcp_refusal("grader")
         assert relay.config("/work")["mcp"] == ["grader"]
+        # The metric relay answers in its box too, but its MCP file names the fixed port.
+        metric_relay = scorer._relay({}, "calls/000001", box=box)
+        assert metric_relay.config("/work")["port"] == 8799
+        metric_relay.close()
     finally:
         relay.close()
         scorer.close()

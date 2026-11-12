@@ -840,19 +840,21 @@ def test_stage_mode_runs_the_entry_function(tmp_path: Path, source: str, answer:
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == answer
 
 
-def _stage_call(tmp_path: Path, port: int) -> tuple[Path, Path]:
-    """Lay out a stage tree and one call folder whose relay config names one MCP server.
+def _stage_call(tmp_path: Path, port: int, call: str = "one", mcp: tuple[str, ...] = ("search",)) -> tuple[Path, Path]:
+    """Lay out a stage tree and one call folder whose relay config names its MCP servers.
 
     Args:
         tmp_path: The test's folder, which stands for the stage box.
         port: The relay port the config asks for.
+        call: The call's folder name.
+        mcp: The MCP servers the config names.
 
     Returns:
         The stage tree and the call folder.
     """
     tree = tmp_path / "tree"
-    tree.mkdir()
-    call_dir = tmp_path / "calls" / "one"
+    tree.mkdir(exist_ok=True)
+    call_dir = tmp_path / "calls" / call
     call_dir.mkdir(parents=True)
     (call_dir / runner.INPUT_FILE).write_text("3")
     config = {
@@ -860,7 +862,7 @@ def _stage_call(tmp_path: Path, port: int) -> tuple[Path, Path]:
         "response_dir": "../relay",
         "names": [],
         "services": [],
-        "mcp": ["search"],
+        "mcp": list(mcp),
         "mcp_file": ".mcp.json",
         "port": port,
     }
@@ -868,8 +870,8 @@ def _stage_call(tmp_path: Path, port: int) -> tuple[Path, Path]:
     return tree, call_dir
 
 
-def test_stage_mode_serves_the_stage_relay_and_names_the_stages_own_mcp_file(tmp_path: Path) -> None:
-    """``--stage`` with a relay config gives the entry its MCP variables and the stage's own MCP file."""
+def test_stage_mode_serves_the_stage_relay_and_names_the_calls_own_mcp_file(tmp_path: Path) -> None:
+    """``--stage`` with a relay config gives the entry its MCP variables and the call's own MCP file (SKY-624)."""
     tree, call_dir = _stage_call(tmp_path, 0)
     (tree / "stage.py").write_text(
         "import os\n"
@@ -889,7 +891,62 @@ def test_stage_mode_serves_the_stage_relay_and_names_the_stages_own_mcp_file(tmp
     assert url.hostname == "127.0.0.1"
     assert url.port
     assert url.path == "/mcp/search"
-    assert env["SKYNET_MCP_CONFIG"] == str((tree / ".mcp.json").resolve())
+    assert env["SKYNET_MCP_CONFIG"] == str((call_dir / "mcp.json").resolve())
+    assert json.loads((call_dir / "mcp.json").read_text()) == {
+        "mcpServers": {"search": {"type": "http", "url": env["SKYNET_MCP_SEARCH_URL"]}}
+    }
+
+
+def test_two_parallel_stage_calls_in_one_box_each_get_their_own_port_and_mcp_file(tmp_path: Path) -> None:
+    """Two calls that run at the same time in one stage box serve their relays on two ports (SKY-624)."""
+    entry = (
+        "import json, os, time\n"
+        "def run(value):\n"
+        "    time.sleep(1.0)\n"
+        "    path = os.environ['SKYNET_MCP_CONFIG']\n"
+        "    return {'url': os.environ['SKYNET_MCP_SEARCH_URL'], 'file': path, 'config': json.load(open(path))}\n"
+    )
+    calls = [_stage_call(tmp_path, 0, call) for call in ("one", "two")]
+    tree = calls[0][0]
+    (tree / "stage.py").write_text(entry)
+    processes = [
+        subprocess.Popen(
+            [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
+            cwd=tree,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+        )
+        for _, call_dir in calls
+    ]
+    for process in processes:
+        _, stderr = process.communicate(timeout=30)
+        assert process.returncode == 0, stderr
+    outputs = [json.loads((call_dir / runner.OUTPUT_FILE).read_text())["output"] for _, call_dir in calls]
+
+    ports = {urllib.parse.urlsplit(output["url"]).port for output in outputs}
+    assert len(ports) == 2
+    for (_, call_dir), output in zip(calls, outputs, strict=True):
+        assert output["file"] == str((call_dir / "mcp.json").resolve())
+        assert output["config"] == {"mcpServers": {"search": {"type": "http", "url": output["url"]}}}
+
+
+def test_a_calls_own_mcp_file_keeps_servers_whose_variable_names_collide(tmp_path: Path) -> None:
+    """Servers "a-b" and "a_b" share one variable name, so the call's MCP file must name each one's own URL."""
+    tree, call_dir = _stage_call(tmp_path, 0, mcp=("a-b", "a_b"))
+    (tree / "stage.py").write_text("def run(value):\n    return value\n")
+    completed = subprocess.run(
+        [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    servers = json.loads((call_dir / "mcp.json").read_text())["mcpServers"]
+    assert {name: urllib.parse.urlsplit(entry["url"]).path for name, entry in servers.items()} == {
+        "a-b": "/mcp/a-b",
+        "a_b": "/mcp/a_b",
+    }
 
 
 def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exit_code(tmp_path: Path) -> None:
