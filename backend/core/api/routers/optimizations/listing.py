@@ -132,7 +132,7 @@ def register_listing_routes(router: APIRouter, *, job_store) -> None:
             description="Exact-match status filter: pending, validating, running, success, failed, cancelled",
         ),
         username: str | None = Query(default=None, description="Only include optimizations submitted by this user"),
-        optimization_type: str | None = Query(default=None, description="'run' (single optimization) or 'blackbox'"),
+        optimization_type: str | None = Query(default=None, description="Only 'blackbox' is accepted"),
         limit: int = Query(
             default=AGENT_DEFAULT_LIST,
             ge=1,
@@ -172,7 +172,7 @@ def register_listing_routes(router: APIRouter, *, job_store) -> None:
             current_user: Authenticated caller resolved from the bearer token.
             status: Optional exact-match status filter.
             username: Optional submitter filter (admin-only).
-            optimization_type: Optional ``"run"`` / ``"blackbox"`` filter.
+            optimization_type: Optional ``"blackbox"`` filter.
             limit: Page size (clamped to ``AGENT_MAX_LIST``).
             offset: Number of optimizations to skip.
             include_shared: Union in runs shared with the caller (non-admin).

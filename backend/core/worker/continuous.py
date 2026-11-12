@@ -1278,7 +1278,7 @@ class ContinuousSweeper:
 
         Args:
             job_store: Job store.
-                interval_seconds: Seconds between sweeps.
+            interval_seconds: Seconds between sweeps.
         """
         self._job_store = job_store
         self._interval_seconds = interval_seconds
