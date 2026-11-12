@@ -56,6 +56,7 @@ from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.usage_tags import box_tag
 from core.billing.vercel_usage import (
     SANDBOX_NETWORK_BYTES_CAP,
     SessionNotStoppedError,
@@ -608,20 +609,43 @@ class VercelEnvironment(SandboxEnvironment):
         """
         if self._stop_task is not None:
             raise SandboxInfraError("The Vercel sandbox is stopped; it cannot start again.")
-        self._starting = asyncio.ensure_future(self._start())
+        with self._working():
+            self._starting = asyncio.ensure_future(self._start())
+            try:
+                await self._starting
+            except BaseException as error:
+                if self._stop_task is None:
+                    self._stop_task = asyncio.ensure_future(self._teardown(error))
+                await asyncio.shield(self._stop_task)
+                current = asyncio.current_task()
+                if isinstance(error, asyncio.CancelledError) and current is not None and not current.cancelling():
+                    # Only stop() cancelled the start task; the caller was not
+                    # cancelled, so it must not see a CancelledError.
+                    raise SandboxInfraError("The Vercel sandbox stopped during start.") from None
+                raise
+            await self._start_egress_proxy()
+
+    @contextlib.contextmanager
+    def _working(self) -> Iterator[None]:
+        """Count a start or command as work of this protected box in its budget runtime.
+
+        A pinned box that runs nothing cannot end by itself, so the runtime
+        may stop a run whose other boxes all wait (SKY-647). Counting here
+        covers every path that drives the box, not only the broker.
+
+        Yields:
+            Control to the box work.
+        """
+        begin = getattr(self._budget, "begin_work", None)
+        if begin is None:
+            yield
+            return
+        box = box_tag(self.spec.operation_key)
+        begin(box)
         try:
-            await self._starting
-        except BaseException as error:
-            if self._stop_task is None:
-                self._stop_task = asyncio.ensure_future(self._teardown(error))
-            await asyncio.shield(self._stop_task)
-            current = asyncio.current_task()
-            if isinstance(error, asyncio.CancelledError) and current is not None and not current.cancelling():
-                # Only stop() cancelled the start task; the caller was not
-                # cancelled, so it must not see a CancelledError.
-                raise SandboxInfraError("The Vercel sandbox stopped during start.") from None
-            raise
-        await self._start_egress_proxy()
+            yield
+        finally:
+            self._budget.end_work(box)
 
     async def _run_box_script(self, session: Any, script: str) -> Any:
         """Run one short Skynet script in the box and capture its output.
@@ -1047,7 +1071,7 @@ class VercelEnvironment(SandboxEnvironment):
         session = self._require_session()
         if env:
             self._secret_exposed = True
-        with self.timings.phase("run"):
+        with self._working(), self.timings.phase("run"):
             token = uuid.uuid4().hex
             sentinel = f"{EXIT_PREFIX}{token}"
             out_path = f"{OUTPUT_PREFIX}{token}.out"

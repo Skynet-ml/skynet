@@ -121,6 +121,7 @@ class BudgetRuntime:
         # The box tag of each pinned box that runs work; a snapshot hold runs none.
         self._boxes: dict[str, str | None] = {}
         self._waiting: Counter[str] = Counter()
+        self._busy: Counter[str] = Counter()
 
     def pin(self, operation_id: str, units: int, *, box: str | None = None, work: bool = True) -> None:
         """Record sandbox coverage that stays held until the work that opened it ends.
@@ -148,6 +149,28 @@ class BudgetRuntime:
             self._pinned.pop(operation_id, None)
             self._boxes.pop(operation_id, None)
             self._changed.notify_all()
+
+    def begin_work(self, box: str) -> None:
+        """Count one start or command that runs in a box.
+
+        Only trusted parent code that drives the box calls this, never a guest.
+
+        Args:
+            box: The box tag; see :func:`core.billing.usage_tags.box_tag`.
+        """
+        with self._changed:
+            self._busy[box] += 1
+
+    def end_work(self, box: str) -> None:
+        """Stop counting a start or command that :meth:`begin_work` counted.
+
+        Args:
+            box: The box tag that :meth:`begin_work` got.
+        """
+        with self._changed:
+            self._busy[box] -= 1
+            if self._busy[box] <= 0:
+                del self._busy[box]
 
     def _begin_wait(self, box: str | None, for_box: str | None = None) -> tuple[str, ...]:
         """Count one waiting call as waiting work of the pinned boxes it holds up.
@@ -213,10 +236,11 @@ class BudgetRuntime:
         itself, so its pinned coverage never makes room. A run's lanes share
         this runtime, and a box frees its coverage when its work ends. A
         snapshot hold stays for the whole run. A run therefore refuses early
-        only when every pinned work box has a model call that waits, or waits
-        for another pinned box whose call waits, such as a native engine box
-        on its scorer box: then no box can end, and waiting only stalls until
-        the timeout (SKY-647).
+        only when no pinned work box can end: each one has a model call that
+        waits, waits for another pinned box whose call waits (such as a
+        native engine box on its scorer box), or runs no command at all (such
+        as an idle repository scorer box between evaluations). Then waiting
+        only stalls until the timeout (SKY-647).
         Unpinned in-flight work still settles, so the operation waits
         whenever it would fit once that work is done.
 
@@ -232,7 +256,11 @@ class BudgetRuntime:
             return None
         with self._changed:
             pinned = sum(self._pinned.values())
-            every_box_waits = all(box is not None and self._waiting[box] > 0 for box in self._boxes.values())
+            # With no pinned work box, only run-long holds such as snapshots
+            # remain, and they never end during the run, so stopping is correct.
+            every_box_waits = all(
+                box is not None and (self._waiting[box] > 0 or self._busy[box] == 0) for box in self._boxes.values()
+            )
         if self.phase != "setup" and not every_box_waits:
             return None
         owner = "check's" if self.phase == "setup" else "run's"
