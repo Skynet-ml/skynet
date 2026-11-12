@@ -34,20 +34,3 @@ export function suggestedRunName(objective: string, maxChars = 60): string {
   const lastSpace = cut.lastIndexOf(" ");
   return `${(lastSpace > maxChars / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
 }
-
-const TEMPLATE_DOCSTRING = "Describe the task here.";
-
-// A Signature docstring the user wrote names the run; the dataset file's stem
-// is the fallback.
-export function suggestedDspyRunName(
-  signatureCode: string,
-  datasetFileName: string | null,
-): string {
-  const doc = /"""\s*([^\n"]+)/.exec(signatureCode)?.[1]?.trim() ?? "";
-  if (doc && doc !== TEMPLATE_DOCSTRING) return suggestedRunName(doc);
-  const stem = (datasetFileName ?? "")
-    .replace(/\.[^.]+$/, "")
-    .replace(/[_-]+/g, " ")
-    .trim();
-  return suggestedRunName(stem);
-}

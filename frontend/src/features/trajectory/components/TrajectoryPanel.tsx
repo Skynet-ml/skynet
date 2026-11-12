@@ -25,13 +25,6 @@ import { TrajectoryDrawer, type DrawerSelection } from "./TrajectoryDrawer";
 
 const NEWEST_HIGHLIGHT_MS = 2200;
 
-// A black-box run rendered with nothing but the job in hand still gets
-// black-box terminology — just no cases or renders to go on.
-const BLACKBOX_FALLBACK: BlackboxTrajectoryContext = {
-  hasCases: false,
-  rendersByText: new Map(),
-};
-
 type Selected = { kind: "candidate" | "rejected"; id: string };
 
 function generationText(gen: number): string {
@@ -46,12 +39,11 @@ export interface TrajectoryPanelProps {
   job: OptimizationStatusResponse;
   // Run configuration of a black-box run, forwarded to the drawer so it names
   // candidates by kind and shows per-case scores only when cases exist.
-  blackbox?: BlackboxTrajectoryContext | null;
+  blackbox: BlackboxTrajectoryContext;
 }
 
 export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
   const live = isLive(job);
-  const blackboxCtx = blackbox ?? (job.optimization_type === "blackbox" ? BLACKBOX_FALLBACK : null);
   const { candidates, rejected, minibatch } = useMemo(() => {
     const events = job.progress_events ?? [];
     const scoped = scopeToLatestLane(events);
@@ -224,14 +216,14 @@ export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
             newestId={newestId}
             onSelectCandidate={handleSelectCandidate}
             onSelectRejected={handleSelectRejected}
-            ringMode={blackboxCtx === null ? "pass_fail" : "score"}
+            ringMode="score"
           />
           <TrajectoryDrawer
             selection={drawerSelection}
             open={drawerOpen}
             onOpenChange={setDrawerOpen}
             minibatch={minibatch}
-            blackbox={blackboxCtx}
+            blackbox={blackbox}
           />
           <div ref={liveRegionRef} role="status" aria-live="polite" className="sr-only" />
         </CardContent>

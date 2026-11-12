@@ -74,7 +74,6 @@
   "submit.validation.split_too_small": "The dataset is too small to run an optimisation — at least a few examples are needed for val or test",
   "tagger.page.title": "Text labeling",
   "trajectory.a11y.tree_label": "The optimisation's candidate tree",
-  "trajectory.prompt.react.tools.explain": "The description of each tool and its arguments, as updated during the optimisation. Page through the tools to see the full detail.",
   "tooltip.submit.blackbox.scorer_install": "Runs once inside the offline cloud sandbox. Use packages already in the pinned image or deployment-owned package artifacts; public apt and package registries are unavailable.",
   "submit.blackbox.roles.optimization.managed_hint": "Uses the model's default sampling settings; billing can use your {term.appName} balance or your OpenRouter key.",
   "submit.nav.screen": "Screen {index} of {count}",

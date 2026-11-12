@@ -243,7 +243,7 @@ def _incumbent_payload() -> dict[str, Any]:
 
 
 def _result(baseline: float, best: float, *, test: int = 2, held_out: bool = True, guard: bool = False) -> dict:
-    """Build a finished unified run result.
+    """Build a finished repository run result.
 
     Args:
         baseline: Final-run score of the starting version.
@@ -499,7 +499,7 @@ def test_enable_inspect_pause_resume_and_next_check(env: _Env) -> None:
     assert env.client.get(f"/optimizations/{source_id}/continuous").json()["plan"]["id"] == plan["id"]
 
 
-def test_only_a_successful_unified_run_can_enable(env: _Env) -> None:
+def test_only_a_successful_repository_run_can_enable(env: _Env) -> None:
     """A failed run is not eligible, and a plan needs at least one model switch on."""
     response = env.client.post("/blackbox/run", json=_incumbent_payload())
     optimization_id = response.json()["optimization_id"]
@@ -1907,7 +1907,7 @@ def test_a_replacement_billed_another_way_in_another_role_gives_the_next_best_it
 
 
 def test_a_repository_run_with_cases_can_enable_a_plan(env: _Env) -> None:
-    """A successful repository run with inline cases is eligible, the same as a unified run."""
+    """A successful repository run with inline cases is eligible."""
     source_id = _incumbent(env)
 
     assert env.client.get(f"/optimizations/{source_id}/continuous").json()["eligible"] is True

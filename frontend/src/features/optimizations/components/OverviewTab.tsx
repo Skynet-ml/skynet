@@ -73,10 +73,8 @@ function OverviewTabImpl({
   source?: ApiSource;
 }) {
   const metrics = job.latest_metrics ?? {};
-  const isBlackbox = job.optimization_type === "blackbox";
-  const isRepo = isBlackbox && payload?.payload?.recipe === "repo";
+  const isRepo = payload?.payload?.recipe === "repo";
   const blackboxTrajectory = useMemo(() => {
-    if (!isBlackbox) return null;
     const context = buildBlackboxTrajectoryContext(job.blackbox_result ?? null, payload ?? null);
     const versions = job.blackbox_result ? buildVersions(job.blackbox_result) : [];
     const renderVersionFeedback = (prompt: Record<string, string>) => {
@@ -99,26 +97,21 @@ function OverviewTabImpl({
         />
       ),
     };
-  }, [isBlackbox, isRepo, job.blackbox_result, job.optimization_id, payload]);
+  }, [isRepo, job.blackbox_result, job.optimization_id, payload]);
   const scoreChartArtifact = useMemo(
-    () =>
-      isBlackbox
-        ? describeBlackboxArtifact(job.blackbox_result ?? null, payload ?? null)
-        : undefined,
-    [isBlackbox, job.blackbox_result, payload],
+    () => describeBlackboxArtifact(job.blackbox_result ?? null, payload ?? null),
+    [job.blackbox_result, payload],
   );
   // A hill-climbing lane (Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve) gets the
   // climb view instead of the tree; the lane that produced the newest
   // versions decides.
   const strategyEngine = (payload?.payload.strategy as Partial<BlackboxStrategy> | undefined)
     ?.engine;
-  const climbEngine = isBlackbox
-    ? climbEngineOf(
-        job.progress_events ?? [],
-        job.blackbox_result?.engine_used ?? null,
-        strategyEngine ?? null,
-      )
-    : null;
+  const climbEngine = climbEngineOf(
+    job.progress_events ?? [],
+    job.blackbox_result?.engine_used ?? null,
+    strategyEngine ?? null,
+  );
   const showClimb = climbEngine !== null;
   const stagePlan = planPipelineStages(job, payload);
   const currentStage = stageInPlan(stagePlan, job.status === "success" ? "done" : detectStage(job));
@@ -135,7 +128,7 @@ function OverviewTabImpl({
 
   // Black-box runs persist their scores on `blackbox_result` (raw scorer
   // values, not percentages).
-  const bbResult = isBlackbox ? job.blackbox_result : null;
+  const bbResult = job.blackbox_result ?? null;
   const baseline = blackboxBaselineScore(bbResult);
   const optimized = blackboxBestScore(bbResult);
   const improvement =
