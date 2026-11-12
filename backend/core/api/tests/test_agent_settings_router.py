@@ -328,6 +328,17 @@ def test_open_page_keeps_a_narrow_query_string() -> None:
         assert client.post("/agent/open-page", json={"path": path}).status_code == 422, path
 
 
+def test_open_page_keeps_a_query_string_only_for_the_tagger() -> None:
+    """Only /tagger takes a query, so a setup route keeps its exact path (SKY-651)."""
+    client, _ = _client()
+    for path in ("/tagger?new=1", "/tagger?dataset=0123abcd"):
+        assert client.post("/agent/open-page", json={"path": path}).json() == {
+            "navigate": {"kind": "route", "path": path}
+        }, path
+    for path in ("/submit?folder=x", "/optimizations?a=1", "/tagger/x?a=1"):
+        assert client.post("/agent/open-page", json={"path": path}).status_code == 422, path
+
+
 def test_mask_secrets_keeps_flags_and_masks_shapes() -> None:
     """Booleans, numbers and empty values stay; credential strings are masked."""
     masked = mask_secrets(

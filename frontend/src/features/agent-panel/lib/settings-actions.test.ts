@@ -45,6 +45,16 @@ test("a route keeps a narrow query string and rejects open-redirect shapes", () 
   }
 });
 
+// SKY-651: a setup route such as /submit must keep its exact path.
+test("only /tagger keeps a query string", () => {
+  for (const path of ["/tagger?new=1", "/tagger?dataset=0123abcd"]) {
+    assert.deepEqual(parseAgentNavigation({ navigate: { kind: "route", path } }), { kind: "route", path });
+  }
+  for (const path of ["/submit?folder=x", "/optimizations?a=1", "/tagger/x?a=1"]) {
+    assert.equal(parseAgentNavigation({ navigate: { kind: "route", path } }), null, path);
+  }
+});
+
 test("a route path is at most 200 characters in total, as on the backend", () => {
   const at200 = `/tagger?dataset=${"a".repeat(200 - "/tagger?dataset=".length)}`;
   assert.equal(at200.length, 200);
