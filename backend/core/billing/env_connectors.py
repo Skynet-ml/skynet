@@ -58,7 +58,6 @@ class Connector:
     name: str
     url: str
     key_setting: str
-    key_env: str
     # Allowed tool names and the provider USD charged for one call; a call settles at this ceiling.
     tools: Mapping[str, Decimal]
     price_source: str
@@ -76,7 +75,6 @@ CONNECTORS: Mapping[str, Connector] = {
             name="maps",
             url="https://mapstools.googleapis.com/mcp",
             key_setting="google_maps_api_key",
-            key_env="GOOGLE_MAPS_API_KEY",
             # Pro SKU ($14 per 1000) bounds search and routes; weather is always Essentials ($7 per 1000).
             tools={
                 "search_places": Decimal("0.014"),
@@ -89,7 +87,6 @@ CONNECTORS: Mapping[str, Connector] = {
             name="web_search",
             url="https://mcp.firecrawl.dev/v2/mcp",
             key_setting="firecrawl_api_key",
-            key_env="FIRECRAWL_API_KEY",
             # Pay-as-you-go credits cost up to $0.005: a search uses 2 credits, a scrape 1.
             tools={
                 "firecrawl_search": Decimal("0.01"),
@@ -101,7 +98,6 @@ CONNECTORS: Mapping[str, Connector] = {
             name="browser",
             url="https://mcp.browserbase.com/mcp",
             key_setting="browserbase_api_key",
-            key_env="BROWSERBASE_API_KEY",
             # Browser hours cost $0.12; each step bounds about five minutes of session time.
             tools={
                 "start": Decimal("0.02"),
