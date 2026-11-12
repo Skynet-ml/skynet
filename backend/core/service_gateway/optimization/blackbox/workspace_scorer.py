@@ -1,9 +1,8 @@
-"""Fan sync scorer calls out over a sandbox pool, and shape a case for the harness.
+"""Fan sync scorer calls out over a sandbox pool.
 
 :func:`run_on_pool` runs the scorers' blocking calls through the shared
 :class:`~core.sandbox.pool.SandboxPool`, so every fan-out obeys its
-``workers`` limit. :func:`case_document` gives the workspace harness the
-``{"input", "expected"}`` form of one case.
+``workers`` limit.
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ from typing import Any, ClassVar, TypeVar
 
 import anyio
 
-from ....models.unified import UnifiedCase
 from ....sandbox import EnvironmentCapabilities, ExecResult, OutputSink, SandboxEnvironment, SandboxSpec, sync_bridge
 from ....sandbox.pool import BoxOutcome, BoxWork, SandboxPool
 from ....sandbox.timeouts import Phase
@@ -309,28 +307,3 @@ def _call_in_context(context: contextvars.Context, func: Callable[[], R]) -> tup
         return context.run(func), None
     except BaseException as exc:
         return None, exc
-
-
-def case_document(case: Any) -> dict[str, Any]:
-    """Return the ``{"input", "expected"}`` form the harness reads.
-
-    The harness gives the candidate only ``input`` (E42, E62). A dict with no
-    ``input`` key is its own input, so its ``expected`` key moves out of that
-    input and becomes the case's ``expected``.
-
-    Args:
-        case: A :class:`UnifiedCase`, a case mapping or ``None``.
-
-    Returns:
-        The case as plain data.
-    """
-    if isinstance(case, UnifiedCase):
-        return case.model_dump(mode="json")
-    if isinstance(case, dict):
-        if "input" in case:
-            return {"input": dict(case.get("input") or {}), "expected": case.get("expected")}
-        return {
-            "input": {key: value for key, value in case.items() if key != "expected"},
-            "expected": case.get("expected"),
-        }
-    return {"input": {}, "expected": None}

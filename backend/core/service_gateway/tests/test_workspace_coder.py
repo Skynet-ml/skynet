@@ -175,7 +175,7 @@ def test_coding_agent_is_offered_on_the_metric_screen_only() -> None:
     assert coding_agent_tools(other, turn, lm=None, emit=lambda _e: None, github_token=None) == []
 
 
-def test_coding_agent_reads_the_repository_only_for_a_repository_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_coding_agent_reads_a_github_repository_but_not_a_gitlab_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """A GitHub repository opens with the caller's token; a GitLab repository does not open."""
     _fake_github(monkeypatch, [])
 

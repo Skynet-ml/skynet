@@ -1,4 +1,4 @@
-"""Tests for the sandbox-pool fan-out and the harness case document."""
+"""Tests for the sandbox-pool fan-out."""
 
 from __future__ import annotations
 
@@ -14,31 +14,8 @@ from core.sandbox import sync_bridge
 from core.sandbox.timeouts import Phase
 
 from .. import workspace_scorer as workspace_scorer_mod
-from ..workspace_scorer import case_document
 
 CALLER_TAG: contextvars.ContextVar[str] = contextvars.ContextVar("caller_tag", default="unset")
-
-
-@pytest.mark.parametrize(
-    ("case", "document"),
-    [
-        ({"q": "2+2?", "expected": "4"}, {"input": {"q": "2+2?"}, "expected": "4"}),
-        ({"q": "2+2?"}, {"input": {"q": "2+2?"}, "expected": None}),
-        ({"input": None, "expected": "4"}, {"input": {}, "expected": "4"}),
-        (
-            {"input": {"q": "2+2?", "expected": "nested"}},
-            {"input": {"q": "2+2?", "expected": "nested"}, "expected": None},
-        ),
-    ],
-)
-def test_case_document_keeps_expected_out_of_the_input(case: dict[str, Any], document: dict[str, Any]) -> None:
-    """Only a top-level ``expected`` is a case's answer; a nested one is part of the input by design.
-
-    Args:
-        case: The case the engine passes.
-        document: The form the harness reads.
-    """
-    assert case_document(case) == document
 
 
 @pytest.mark.parametrize("phase", [Phase.RUN, Phase.SCORE])

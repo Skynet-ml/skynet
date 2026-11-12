@@ -67,7 +67,6 @@ from ..sandbox import (
     CommandResult,
     SandboxSpec,
 )
-from ..workspace_scorer import case_document
 
 
 class FakeSession:
@@ -1565,27 +1564,27 @@ def test_a_bare_case_reaches_the_guest_whole_without_expected() -> None:
         {"id": 0, "input": {"question": "2+2?", "answer": "4"}},
         {"id": 1, "input": {"question": "3+3?"}},
     ]
-    assert case_document(task.cases[0])["input"] == sent[0]["input"]
 
 
 @pytest.mark.parametrize(
-    "case",
+    ("case", "guest_input"),
     [
-        {"question": "2+2?", "expected": "4"},
-        {"question": "2+2?"},
-        {"input": None, "expected": "4"},
-        {"input": {"question": "2+2?"}, "expected": "4"},
+        ({"question": "2+2?", "expected": "4"}, {"question": "2+2?"}),
+        ({"question": "2+2?"}, {"question": "2+2?"}),
+        ({"input": None, "expected": "4"}, {}),
+        ({"input": {"question": "2+2?"}, "expected": "4"}, {"question": "2+2?"}),
     ],
 )
-def test_the_guest_gets_the_parent_input_and_no_expected_key(case: dict[str, Any]) -> None:
-    """The guest's input equals the input the parent's candidate gets, and no guest case has ``expected``.
+def test_the_guest_gets_the_input_and_no_expected_key(case: dict[str, Any], guest_input: dict[str, Any]) -> None:
+    """The guest gets the case's input without ``expected``, and an empty input becomes ``{}``.
 
     Args:
         case: A train case.
+        guest_input: The input the guest must get.
     """
     [sent] = native_task_payload("autosaddler", Task("seed", cases=[case]))["train_set"]
 
-    assert sent == {"id": 0, "input": case_document(case)["input"]}
+    assert sent == {"id": 0, "input": guest_input}
     assert "expected" not in sent
     assert "expected" not in sent["input"]
 
