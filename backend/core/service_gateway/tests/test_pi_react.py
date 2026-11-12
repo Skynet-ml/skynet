@@ -777,7 +777,6 @@ _SETUP_REPLY = "All set. Shall we go on?"
 _READY: dict[str, Any] = {
     "job_name": "My run",
     "task_objective": "Answer support questions",
-    "artifact_kind": "repo",
     "repository": "acme/bot",
     "data_mode": "pairs",
     "dataset_ready": True,

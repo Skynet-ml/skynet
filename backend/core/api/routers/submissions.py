@@ -68,7 +68,6 @@ from ...models import (
     OptimizerCatalogResponse,
     OptimizerChoice,
     OptimizerOption,
-    OptimizerTarget,
     optimizer_family,
     optimizers_for,
 )
@@ -965,7 +964,6 @@ def create_submissions_router(*, job_store) -> APIRouter:
     )
     def optimizer_catalog(
         current_user: AuthenticatedUserDep,
-        artifact_kind: OptimizerTarget,
         data_mode: DataMode,
     ) -> OptimizerCatalogResponse:
         """Describe the optimizers the wizard may offer for a repository run.
@@ -975,7 +973,6 @@ def create_submissions_router(*, job_store) -> APIRouter:
 
         Args:
             current_user: Authenticated caller resolved from the bearer token.
-            artifact_kind: ``repo``: every run optimizes a repository (SKY-316).
             data_mode: Whether the run has one input or input/output pairs.
 
         Returns:
@@ -983,10 +980,9 @@ def create_submissions_router(*, job_store) -> APIRouter:
         """
         del current_user
         catalog = engine_catalog(BLACKBOX_TARGET_REPO)
-        options = [_optimizer_option(option, catalog) for option in optimizers_for(artifact_kind, data_mode)]
+        options = [_optimizer_option(option, catalog) for option in optimizers_for(data_mode)]
         auto_resolves_to = ["auto"] if any(option.id == "auto" for option in options) else []
         return OptimizerCatalogResponse(
-            artifact_kind=artifact_kind,
             data_mode=data_mode,
             run_entry=RUN_ENTRY,
             metric_signature=METRIC_SIGNATURE,

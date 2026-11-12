@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import type { BlackboxHarness, ModelConfig } from "@/shared/types/api";
-import type { OptimizerTarget, OptimizerChoice } from "@/shared/types/unified-run";
+import type { OptimizerChoice } from "@/shared/types/unified-run";
 import { resolveOptimizer } from "@/shared/types/unified-run";
 import { HarnessLogo } from "@/shared/ui/harness-logo";
 import { HelpTip } from "@/shared/ui/help-tip";
@@ -80,7 +80,7 @@ type Editing = {
  * and the proposer settings of the engines that drive a coding agent. The
  * metric model lives with the metric in step 4.
  */
-export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice: OptimizerChoice }) {
+export function ModelsSection({ choice }: { choice: OptimizerChoice }) {
   const { state, patchOptimizer, guided, runSource, sandboxProviders } =
     useWizardV2Shell();
   const t = (key: string) => v2Msg(key, guided);
@@ -263,7 +263,7 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
         />
       </ModelRoleRow>
 
-      {showsSandboxPicker(kind, sandboxProviders) && (
+      {showsSandboxPicker(sandboxProviders) && (
         <SandboxProviderField
           sandboxProvider={sandboxProvider}
           sandboxProviders={sandboxProviders}

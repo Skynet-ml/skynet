@@ -21,9 +21,6 @@ from .blackbox import UnifiedSplitCounts
 from .common import ModelConfig
 from .scorer_dependencies import ScorerDependencyLock
 
-# What the optimizer catalog is asked about: every run optimizes a
-# repository, which has no artifact and runs only the black-box engines.
-OptimizerTarget = Literal["repo"]
 DataMode = Literal["single", "pairs"]
 OptimizerChoice = Literal[
     "auto",
@@ -50,20 +47,22 @@ MIN_PAIRS_FOR_HELD_OUT = 5
 OPTIMIZER_AUTO = "auto"
 
 
-def optimizers_for(target: OptimizerTarget, data_mode: DataMode) -> list[OptimizerChoice]:
-    """List the optimizer choices a new run may pick for a target and data mode.
+def optimizers_for(data_mode: DataMode) -> list[OptimizerChoice]:
+    """List the optimizer choices a new run may pick for a data mode.
+
+    Every run optimizes a repository (SKY-316), so the list is the same for
+    every run.
 
     Runtime availability (sandbox, installed engines) is filtered separately
     by the catalog route; this is the static relevance rule.
 
     Args:
-        target: ``"repo"``: every run optimizes a repository (SKY-316).
         data_mode: Whether the run has one input or input/output pairs.
 
     Returns:
         ``"auto"`` first, then the black-box engines.
     """
-    del target, data_mode
+    del data_mode
     return [OPTIMIZER_AUTO, *BLACKBOX_OPTIMIZERS]
 
 
@@ -221,7 +220,6 @@ class OptimizerOption(BaseModel):
 # ``GET /optimizers``. ``auto_resolves_to`` lists what Auto runs.
 # ``run_entry`` and ``metric_signature`` are the one contract every optimizer runs.
 class OptimizerCatalogResponse(BaseModel):
-    artifact_kind: OptimizerTarget
     data_mode: DataMode
     run_entry: str
     metric_signature: str
@@ -246,7 +244,6 @@ __all__ = [
     "OptimizerChoice",
     "OptimizerFamily",
     "OptimizerOption",
-    "OptimizerTarget",
     "UnifiedCase",
     "UnifiedModels",
     "UnifiedSplitCounts",

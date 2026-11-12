@@ -70,11 +70,11 @@ export function OptimizerStep({ page }: { page: number }) {
           shown === "plan" ? (
             <WizardScreen active className="flex flex-col gap-5">
               <AgentFieldLock fields={OPTIMIZER_FIELDS}>
-                <OptimizerPicker kind="repo" mode={mode} plain />
+                <OptimizerPicker mode={mode} plain />
               </AgentFieldLock>
               {askModels && (
                 <AgentFieldLock fields={MODEL_FIELDS}>
-                  <ModelsSection kind="repo" choice={choice} />
+                  <ModelsSection choice={choice} />
                 </AgentFieldLock>
               )}
               <AgentFieldLock fields={BUDGET_FIELDS}>
@@ -85,12 +85,12 @@ export function OptimizerStep({ page }: { page: number }) {
             <>
               <WizardScreen active={shown === "optimizer"}>
                 <AgentFieldLock fields={OPTIMIZER_FIELDS}>
-                  <OptimizerPicker kind="repo" mode={mode} />
+                  <OptimizerPicker mode={mode} />
                 </AgentFieldLock>
               </WizardScreen>
               <WizardScreen active={shown === "models"}>
                 <AgentFieldLock fields={MODEL_FIELDS}>
-                  <ModelsSection kind="repo" choice={choice} />
+                  <ModelsSection choice={choice} />
                 </AgentFieldLock>
               </WizardScreen>
               <WizardScreen active={shown === "budget"}>

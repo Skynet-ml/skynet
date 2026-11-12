@@ -4,9 +4,8 @@
  * The metric declares `REWARD_SPEC` as plain Python data and returns
  * `reward(REWARD_SPEC, accuracy, feedback)`; the run's harness applies it with
  * the trusted time and cost of each response. This module reads the same spec
- * and applies the same formula (`blend_reward` in
- * `backend/.../workspace_harness.py`), so the setup preview and the results
- * show exactly what the run scores. No imports: `node --test` loads it as is.
+ * and applies the same formula, so the setup preview shows what the run
+ * scores. No imports: `node --test` loads it as is.
  */
 
 export type RewardComponent = "accuracy" | "speed" | "cost";

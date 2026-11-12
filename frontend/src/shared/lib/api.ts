@@ -23,11 +23,7 @@ import type {
   ValidateDatasetRequest,
   ValidateDatasetResponse,
 } from "@/shared/types/api";
-import type {
-  DataMode,
-  OptimizerCatalogResponse,
-  OptimizerTarget,
-} from "@/shared/types/unified-run";
+import type { DataMode, OptimizerCatalogResponse } from "@/shared/types/unified-run";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { forgetOAuthReturn } from "@/shared/lib/oauth-return";
 import { I18N_KEY, tI18n } from "@/shared/lib/i18n";
@@ -576,14 +572,12 @@ export function submitRepoRun(
   );
 }
 
-export function getOptimizerCatalog(
-  target: OptimizerTarget,
-  mode: DataMode,
-  signal?: AbortSignal,
-  source?: ApiSource,
-) {
-  const query = `artifact_kind=${encodeURIComponent(target)}&data_mode=${encodeURIComponent(mode)}`;
-  return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal }, source);
+export function getOptimizerCatalog(mode: DataMode, signal?: AbortSignal, source?: ApiSource) {
+  return request<OptimizerCatalogResponse>(
+    `/optimizers?data_mode=${encodeURIComponent(mode)}`,
+    { signal },
+    source,
+  );
 }
 
 export function getExecutionRuntimes(hasImageInputs: boolean, signal?: AbortSignal) {

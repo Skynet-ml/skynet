@@ -31,7 +31,6 @@ const extractWizardPatch = declaration("extractWizardPatch", {
   isStringList: declaration("isStringList", {}),
   parseScreenNotes: declaration("parseScreenNotes", { isRecord }),
   rolesFields: () => null,
-  ARTIFACT_KINDS: declaration("ARTIFACT_KINDS", {}),
   DATA_MODES: declaration("DATA_MODES", {}),
   storedOptimizerChoice,
 });
@@ -41,14 +40,15 @@ test("repository engines pass through and unknown ids are dropped", () => {
   assert.equal(extractWizardPatch({ optimizer_choice: "grid_search" }).optimizer_choice, undefined);
 });
 
-test("only the repository artifact kind is taken from the agent", () => {
-  assert.equal(extractWizardPatch({ artifact_kind: "repo" }).artifact_kind, "repo");
-  assert.equal(extractWizardPatch({ artifact_kind: "dspy_program" }).artifact_kind, undefined);
+test("a stale artifact kind from an old agent reply is dropped", () => {
+  for (const kind of ["repo", "dspy_program"]) {
+    assert.deepEqual(extractWizardPatch({ artifact_kind: kind, repository: "acme/bot" }), { repository: "acme/bot" });
+  }
 });
 
 test("a created repository keeps its created-by-Skynet mark", () => {
   const patch = extractWizardPatch({
-    wizard_state: { artifact_kind: "repo", repository: "acme/new-bot", repo_created_by_skynet: true },
+    wizard_state: { repository: "acme/new-bot", repo_created_by_skynet: true },
   });
-  assert.deepEqual(patch, { artifact_kind: "repo", repository: "acme/new-bot", repo_created_by_skynet: true });
+  assert.deepEqual(patch, { repository: "acme/new-bot", repo_created_by_skynet: true });
 });

@@ -64,20 +64,6 @@ export function StatTile({
   );
 }
 
-/** A pass/fail marker: green filled dot on pass, dimmed red dot on fail. */
-export function PassDot({ pass }: { pass: boolean }) {
-  return (
-    <span
-      aria-hidden="true"
-      className="inline-block size-2 shrink-0 rounded-full"
-      style={{
-        backgroundColor: pass ? "var(--success)" : "var(--danger)",
-        opacity: pass ? 1 : 0.55,
-      }}
-    />
-  );
-}
-
 /** Run badge, localized via the shared TERMS vocabulary. */
 export function TypeBadge() {
   return <Badge variant="secondary">{TERMS.optimizationTypeRun}</Badge>;

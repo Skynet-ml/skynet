@@ -90,16 +90,15 @@ test("the picker shows the pick, else the server default, else the first offered
   assert.equal(shownSandboxProvider(null, { providers: [], default_provider: "vercel" }), undefined);
 });
 
-test("only a repository run shows the sandbox picker", () => {
-  assert.equal(showsSandboxPicker("repo", web), true);
-  assert.equal(showsSandboxPicker("dspy_program", web), false);
+test("a ready list of providers shows the sandbox picker", () => {
+  assert.equal(showsSandboxPicker(web), true);
 });
 
 test("the picker waits for the list, notes a failed read, and hides an empty list", () => {
-  assert.equal(showsSandboxPicker("repo", loading), false);
-  assert.equal(showsSandboxPicker("repo", failed), true);
+  assert.equal(showsSandboxPicker(loading), false);
+  assert.equal(showsSandboxPicker(failed), true);
   assert.equal(
-    showsSandboxPicker("repo", {
+    showsSandboxPicker({
       status: "ready",
       catalog: { providers: [], default_provider: "vercel" },
     }),

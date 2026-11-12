@@ -2,11 +2,7 @@
 
 import * as React from "react";
 
-import {
-  storedOptimizerChoice,
-  type DataMode,
-  type OptimizerTarget,
-} from "@/shared/types/unified-run";
+import { storedOptimizerChoice, type DataMode } from "@/shared/types/unified-run";
 import type { LineComment } from "@/shared/ui/agent/line-comments";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
@@ -428,8 +424,6 @@ export function useAgentFieldLock(field: keyof WizardState | ReadonlyArray<keyof
   return fields.some((f) => writing.includes(f));
 }
 
-// Skynet is repo-only (SKY-316): an agent that still names a DSPy program gets no artifact write.
-const ARTIFACT_KINDS: readonly OptimizerTarget[] = ["repo"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -490,8 +484,6 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
   const roles = rolesFields(wrap.column_roles);
   if (roles && !patch.input_fields && !patch.expected_field) Object.assign(patch, roles);
 
-  const kind = ARTIFACT_KINDS.find((k) => k === wrap.artifact_kind);
-  if (kind) patch.artifact_kind = kind;
   const mode = DATA_MODES.find((m) => m === wrap.data_mode);
   if (mode) patch.data_mode = mode;
   // Only Auto and repository engines run, so any other id from the agent is dropped.

@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...models import DataMode, OptimizerChoice, OptimizerTarget, optimizers_for
+from ...models import DataMode, OptimizerChoice, optimizers_for
 from ...models.blackbox import BlackboxCandidate
 from ...service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, parse_constraints
 from ..errors import DomainError
@@ -53,10 +53,6 @@ class WizardUpdateRequest(BaseModel):
         default=None,
         max_length=20_000,
         description="Task step: context the optimizer should know about the task.",
-    )
-    artifact_kind: OptimizerTarget | None = Field(
-        default=None,
-        description="Task step: what is optimized. Every run optimizes a GitHub repository, so send 'repo'.",
     )
     starting_version: BlackboxCandidate | None = Field(
         default=None,
@@ -242,10 +238,10 @@ def create_wizard_router() -> APIRouter:
         the whole file; the wizard's setup check runs it before Run.
 
         BATCHING — make ONE call per turn covering every field you intend
-        to set together (``task_objective`` + ``artifact_kind`` +
-        ``repository`` + …), not one call per field. Sequential
-        same-turn calls render as duplicate spinner pills in the UI and
-        waste turns on identical round-trips.
+        to set together (``task_objective`` + ``repository`` + …), not
+        one call per field. Sequential same-turn calls render as
+        duplicate spinner pills in the UI and waste turns on identical
+        round-trips.
 
         Args:
             req: The partial-update body (every field optional).
@@ -256,7 +252,7 @@ def create_wizard_router() -> APIRouter:
         Raises:
             DomainError: 422 if any supplied field fails validation
                 (blank text, bad split sum, malformed model dict, an
-                optimizer that does not fit the artifact and data mode,
+                optimizer that does not fit the data mode,
                 blank workspace code, etc.).
         """
         supplied = req.model_dump(by_alias=True, exclude_unset=True)
@@ -285,7 +281,7 @@ def create_wizard_router() -> APIRouter:
         if supplied.get("task_background") is not None:
             patch["task_background"] = supplied["task_background"].strip()
 
-        for literal_key in ("artifact_kind", "data_mode", "optimizer_choice", "staged_dataset_id", "repository"):
+        for literal_key in ("data_mode", "optimizer_choice", "staged_dataset_id", "repository"):
             if supplied.get(literal_key) is not None:
                 patch[literal_key] = supplied[literal_key]
 
@@ -295,7 +291,7 @@ def create_wizard_router() -> APIRouter:
         # Skynet is repo-only (SKY-316), so a choice sent alone is checked
         # against the repository engines; the repo list ignores the data mode.
         if req.optimizer_choice is not None:
-            allowed = optimizers_for(req.artifact_kind or "repo", req.data_mode or "single")
+            allowed = optimizers_for(req.data_mode or "single")
             if req.optimizer_choice not in allowed:
                 raise DomainError(
                     "submit.unified.optimizer_not_allowed",

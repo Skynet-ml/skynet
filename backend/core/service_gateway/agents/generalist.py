@@ -684,7 +684,7 @@ class _ApprovalGatedTool:
             kwargs["staged_dataset_id"] = self._staged_dataset_id
         # The check needs a column mapping with an input, but a repository
         # scorer reads the checkout, not columns, so any mapping fits it.
-        if self._tool_name == VALIDATE_CODE_TOOL and self._wizard_state.get("artifact_kind") == "repo":
+        if self._tool_name == VALIDATE_CODE_TOOL:
             kwargs["column_mapping"] = REPO_COLUMN_MAPPING
         self._emit(
             {
@@ -783,14 +783,10 @@ class _ApprovalGatedTool:
                 if isinstance(shown, dict):
                     shown = {**shown, "previous": self._previous_values(kwargs)}
                 self._authoring_flag.wizard_patch.update(kwargs)
-                # The wizard treats a repository write alone as a switch to a repository run,
-                # so the screen gate must see the same target this turn.
-                if kwargs.get("repository") and "artifact_kind" not in kwargs:
-                    self._authoring_flag.wizard_patch["artifact_kind"] = "repo"
                 if str(kwargs.get("job_name") or "").strip():
                     self._authoring_flag.job_named = True
             elif self._tool_name == GITHUB_CREATE_REPO_TOOL and isinstance(shown, dict) and shown.get("full_name"):
-                created = {"artifact_kind": "repo", "repository": shown["full_name"], "repo_created_by_skynet": True}
+                created = {"repository": shown["full_name"], "repo_created_by_skynet": True}
                 shown = {**shown, "wizard_state": created}
                 self._authoring_flag.wizard_patch.update(created)
             self._emit(
@@ -935,9 +931,6 @@ class WizardState(TypedDict, total=False):
     is_private: bool
     task_objective: str
     task_background: str
-    # Always ``repo`` for a new run: every run optimizes a repository.
-    # Older runs may still carry ``dspy_program`` and a starting version.
-    artifact_kind: str
     starting_version: str | dict[str, str]
     # The repository the run optimizes, as ``owner/name`` (GitLab adds subgroups).
     repository: str
@@ -1142,11 +1135,6 @@ def _inputs_ready(state: WizardState) -> bool:
     return mode == "pairs" and _dataset_ready(state)
 
 
-def _code_ready(state: WizardState) -> bool:
-    """Return True when both workspace slots carry authored code."""
-    return bool(str(state.get("run_code") or "").strip() and str(state.get("metric_code") or "").strip())
-
-
 def _model_ready(state: WizardState) -> bool:
     """Return True when the reflection model, which every optimizer needs, is chosen."""
     reflection_cfg = state.get("reflection_model_config") or {}
@@ -1170,9 +1158,7 @@ def tools_for(state: WizardState) -> set[str]:
         allowed |= _DATASET_READY_TOOLS
     # A repository run often has no dataset, and the static code check reads
     # no rows, so its Metric screen keeps the check without one.
-    is_repo = state.get("artifact_kind") == "repo"
-    if is_repo:
-        allowed.add(VALIDATE_CODE_TOOL)
+    allowed.add(VALIDATE_CODE_TOOL)
     return allowed
 
 
@@ -1190,7 +1176,6 @@ _FIELD_STEP: dict[str, int] = {
     "is_private": 0,
     "task_objective": 1,
     "task_background": 1,
-    "artifact_kind": 1,
     "starting_version": 1,
     "repository": 1,
     "data_mode": 2,
@@ -1275,7 +1260,7 @@ def validate_wizard_patch_order(patch: dict[str, Any], state: WizardState) -> st
 # so nothing changes out of sight. Mirrors the frontend's ``wizard-pages``.
 _SCREEN_FIELDS: dict[str, frozenset[str]] = {
     "brief": frozenset({"task_objective", "task_background"}),
-    "artifact": frozenset({"artifact_kind", "repository"}),
+    "artifact": frozenset({"repository"}),
     "source": frozenset({"data_mode", "staged_dataset_id", "split_fractions", "shuffle", "seed"}),
     "plan": frozenset({"optimizer_choice", "model_config", "reflection_model_config", "spending_limit_usd"}),
     "optimizer": frozenset({"optimizer_choice"}),
@@ -1324,13 +1309,9 @@ def validate_wizard_screen(tool_name: str, kwargs: dict[str, Any], state: Wizard
 # metric screen needs the task and the data its code runs on.
 _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
     "artifact": frozenset({"task_objective", "github_connected", "repo_provider"}),
-    "source": frozenset(
-        {"task_objective", "artifact_kind", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}
-    ),
-    "plan": frozenset(
-        {"task_objective", "artifact_kind", "data_mode", "model_configured", "max_cost_cents", "spending_floor_cents"}
-    ),
-    "optimizer": frozenset({"artifact_kind", "data_mode"}),
+    "source": frozenset({"task_objective", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}),
+    "plan": frozenset({"task_objective", "data_mode", "model_configured", "max_cost_cents", "spending_floor_cents"}),
+    "optimizer": frozenset({"data_mode"}),
     "models": frozenset({"optimizer_choice", "model_configured"}),
     "budget": frozenset(
         {"optimizer_choice", "model_config", "reflection_model_config", "max_cost_cents", "spending_floor_cents"}
@@ -1338,7 +1319,6 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
     "metric": frozenset(
         {
             "task_objective",
-            "artifact_kind",
             "repository",
             "input_fields",
             "expected_field",
@@ -1566,12 +1546,9 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
         short = _limit_below_floor(state)
         if short:
             return [short]
-    if screen == "metric" and state.get("artifact_kind") == "repo":
-        # A repository run has no run.py: its scorer reads the checkout itself.
-        if not str(state.get("metric_code") or "").strip():
-            return ["metric_code must be written"]
-    elif screen == "metric" and not _code_ready(state):
-        return ["run_code and metric_code must both be written"]
+    # A repository run has no run.py: its scorer reads the checkout itself.
+    if screen == "metric" and not str(state.get("metric_code") or "").strip():
+        return ["metric_code must be written"]
     if screen == "overview":
         return ["this is the last screen; the user starts the run from it"]
     return []
@@ -2092,7 +2069,7 @@ The wizard screen on view:
   looking at, and each turn you may change only the fields on it (plus
   ``job_name``, ``job_description`` and ``is_private``, which show on no
   screen). Screens: ``brief`` (task_objective, task_background),
-  ``artifact`` (artifact_kind, repository), ``source`` (data_mode,
+  ``artifact`` (repository), ``source`` (data_mode,
   staged_dataset_id, split_fractions, shuffle, seed), ``plan``
   (optimizer_choice, model_config, reflection_model_config,
   spending_limit_usd), ``optimizer`` (optimizer_choice), ``models``
@@ -2133,8 +2110,8 @@ Rules:
     2. Task — set ``task_objective`` (what "better" means, in the
        user's words) and ``task_background`` (context). Every run
        optimizes a repository on GitHub, GitLab or Bitbucket: set
-       ``repository`` (``owner/name``); ``artifact_kind`` is always
-       ``repo`` and there is no starting version. Call
+       ``repository`` (``owner/name``); there is no starting version.
+       Call
        ``list_github_repositories_connectors_github_repos_get`` to find
        the user's repository, or
        ``list_host_repositories_connectors`` with
@@ -2243,7 +2220,7 @@ Capabilities worth knowing about:
   that, and prefer ``resume_job`` for a paused job).
 * Any wizard field: ``update_wizard_state`` patches any subset of
   editable fields — job_name, job_description, is_private,
-  task_objective, task_background, artifact_kind,
+  task_objective, task_background,
   repository, data_mode, staged_dataset_id, split_fractions, shuffle, seed,
   optimizer_choice, model_config (task model), reflection_model_config,
   plus spending_limit_usd (dollars; send null to remove the limit).
@@ -2519,7 +2496,7 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "artifact": (
         "Repository: every run optimizes a repository on GitHub, GitLab or Bitbucket. Set ``repository`` as "
-        "``owner/name`` (GitLab can add subgroups) and ``artifact_kind`` ``repo``; there is no starting version. "
+        "``owner/name`` (GitLab can add subgroups); there is no starting version. "
         "The user picks the host in the picker, and ``repo_provider`` shows it; never change it. "
         "When ``repo_provider`` is ``gitlab`` or ``bitbucket``, find the repository with "
         "``list_host_repositories_connectors`` (pass ``repo_provider`` as ``provider`` and the name as ``search``), copy "

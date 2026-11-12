@@ -53,7 +53,6 @@ PAYLOAD_OVERVIEW_IS_PRIVATE = "is_private"
 PAYLOAD_OVERVIEW_SOURCE_DATASET_ID = "source_dataset_id"
 # Unified (wizard v2) runs are stored as black-box runs; these keys tell them
 # apart and record how the wizard configured them.
-PAYLOAD_OVERVIEW_ARTIFACT_KIND = "artifact_kind"
 PAYLOAD_OVERVIEW_OPTIMIZER_CHOICE = "optimizer_choice"
 PAYLOAD_OVERVIEW_OPTIMIZER_RESOLVED = "optimizer_resolved"
 PAYLOAD_OVERVIEW_DATA_MODE = "data_mode"

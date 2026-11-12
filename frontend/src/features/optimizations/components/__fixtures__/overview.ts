@@ -286,7 +286,7 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
     expect: { ...finished, climb: true },
   },
   {
-    name: "unified-dspy-program",
+    name: "unified-split-counts",
     job: blackboxJob("gepa", {
       optimizer_name: "gepa",
       optimizer_resolved: "gepa",
@@ -294,7 +294,7 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
       best_val_score: 0.8,
       split_counts: { train: 36, val: 12, test: 12 },
     }),
-    payload: blackboxPayload("gepa", { artifact_kind: "dspy_program" }),
+    payload: blackboxPayload("gepa"),
     scorePoints: BLACKBOX_SERIES,
     expect: finished,
   },

@@ -55,19 +55,6 @@ export interface SplitFractions {
   test: number;
 }
 
-// React (ReAct-agent) optimization configuration. Mirrors the backend
-// `ToolSource` model on legacy DSPy run payloads. React is a generic GEPA module that
-// carries a live tool roster; it is otherwise identical to predict/cot, scored
-// by the same standard `metric_code`. Only sent when `module_name === "react"`.
-export interface ToolSource {
-  kind: "live_mcp" | "dataset_snapshot";
-  mcp_url?: string | null;
-  // Secret bearer/auth header for the MCP endpoint. Never persisted by the
-  // backend and never mirrored into shared agent state.
-  mcp_auth_header?: string | null;
-  tool_filter?: string[] | null;
-}
-
 interface SplitCounts {
   train: number;
   val: number;
@@ -621,7 +608,7 @@ export interface BlackboxCaseResult {
   best_observation?: BlackboxObservation | null;
 }
 
-/** One response's trusted observation; see `workspace_harness.build_observation`. */
+/** One response's trusted observation: its time, model attempts and metered cost. */
 export interface BlackboxObservation {
   timing?: { task_ms?: number | null; [key: string]: unknown } | null;
   cost?: {

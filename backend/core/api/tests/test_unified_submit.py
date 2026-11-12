@@ -47,6 +47,6 @@ def test_a_new_run_cannot_choose_a_dspy_optimizer(data_mode: str) -> None:
     Args:
         data_mode: Single input or pairs.
     """
-    repo = optimizers_for("repo", data_mode)
+    repo = optimizers_for(data_mode)
     assert repo[0] == "auto"
     assert not any(choice.startswith("dspy_") for choice in repo)

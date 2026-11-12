@@ -717,8 +717,8 @@ class BlackboxNamedScore(BaseModel):
 
 # The final run's fresh scores of the starting point and the winner on one case.
 # ``*_observation`` is the trusted measurement of that version's run on the
-# case (time in ms, each model attempt, metered service cost); see
-# ``workspace_harness.build_observation``. ``None`` where nothing measured it.
+# case (time in ms, each model attempt, metered service cost). ``None`` where
+# nothing measured it.
 class BlackboxCaseResult(BaseModel):
     index: int
     baseline_score: float | None = None
