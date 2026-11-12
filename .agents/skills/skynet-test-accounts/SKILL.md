@@ -31,8 +31,7 @@ curl -s "${DOH[@]}" "$API/health"        # backend:  {"commit": "<sha>", "status
 - Compare `commit` with the full SHA of the merged commit or a later
   `origin/staging` commit.
 - If staging serves an older SHA, the deploy is not done. Wait for the
-  staging deploy, or report it. Never record evidence on a stale
-  deployment.
+  staging deploy, or report it. Never record evidence on a stale deployment.
 - An unchanged service may run an older SHA only with proof that it misses
   no relevant change.
 
@@ -144,9 +143,9 @@ secret changes nothing and exits 0.
 
 ### Credit on new accounts
 
-- A new staging account gets no credit. For a check that needs a paid
-  run, get Gilad's approval in chat and fund the check account with "Grant
-  test credit" below. Or record the gap.
+- A new staging account gets no credit. For a check that needs a paid run,
+  get Gilad's approval in chat and fund the check account with "Grant test
+  credit" below. Or record the gap.
 - Never add funds except through "Grant test credit" below.
 - Staging keeps the setup intake for new accounts.
 
@@ -217,13 +216,13 @@ aws logs tail "$(jq -r .migrate_log <<<"$CFG")" --log-stream-names "migrate/migr
   `Already granted` means the first run wrote the grant. Report the result.
 - Exit code `2` with usage text and no `Grant refused:` means a missing or
   bad argument. Fix the command line; nothing was written.
-- Record the grant (account id, dollars, key) in the PR test scope.
+- Record the grant (account id, dollars, key) on the Linear issue.
 
 ### Authentication changes
 
 A check of sign-up, email verification or login uses the same fresh
 account flow. The sign-up and the real email code are part of that test.
-Record in the PR that you used fresh accounts and real codes.
+Record on the Linear issue that you used fresh accounts and real codes.
 
 ## 5. Secrets
 

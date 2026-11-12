@@ -112,10 +112,9 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   never merge, and never post `Approved for merge` or `Changes requested:`.
 - A PR merges into `staging` when one Opus 5.5 review at medium effort
   approves its current head commit with 0 findings, and CI passes (Gilad,
-  2026-11-11). This includes CI
-  (`.github/**`), deploy and infra config, and the agent rule files. A PR
-  that Gilad marks "do not merge" stays unmerged. The automatic merge never
-  covers `main` or production.
+  2026-11-11). This includes CI (`.github/**`), deploy and infra config, and
+  the agent rule files. A PR that Gilad marks "do not merge" stays unmerged.
+  The automatic merge never covers `main` or production.
 - After the merge reaches staging, the orchestrator runs the acceptance
   checks on `https://staging.skynetml.com` with a test account. A failed
   check becomes a new bug issue.
@@ -150,15 +149,15 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   grant (see `skynet-test-accounts`). Or record the gap.
 - Never add funds, grant credits or change balances, with one exception: the
   staging test-credit grant command (`skynet-test-accounts`, "Grant test
-  credit"). Use it only for a check account you created for this check,
-  only after Gilad approves that grant in chat, and within the one $50
-  UTC-day cap on the staging database.
-  Amounts depend on the check. Before each grant, ask Gilad in chat for
-  a specific dollar amount: the smallest amount the check needs, with a short
-  cost estimate. Gilad approves that amount, or a larger one if he thinks the
-  check needs more. Record his approval text. Spend as little as possible.
-  Never grant on production, to real customers or to manual accounts. Never
-  use a raw wallet INSERT, Stripe or any other path.
+  credit"). Use it only for a check account you created for this check, only
+  after Gilad approves that grant in chat, and within the one $50 UTC-day cap
+  on the staging database. Amounts depend on the check. Before each grant,
+  ask Gilad in chat for a specific dollar amount: the smallest amount the
+  check needs, with a short cost estimate. Gilad approves that amount, or a
+  larger one if he thinks the check needs more. Record his approval text.
+  Spend as little as possible. Never grant on production, to real customers
+  or to manual accounts. Never use a raw wallet INSERT, Stripe or any other
+  path.
 - Never change live billing configuration. Never deploy production.
 - Create, sign in, delete, served-commit check: `skynet-test-accounts`.
 

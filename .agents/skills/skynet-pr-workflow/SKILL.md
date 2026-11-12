@@ -84,10 +84,10 @@ Use the repository template when there is one. Include, in this order:
 
 1. Problem and resulting behavior (one concrete before-and-after example when
    useful).
-2. Review evidence: the local checks for the changed behavior, the
-   acceptance checks for staging after the merge, or the section 4
-   exemption that applies. Say if the change is visible in the UI.
-   UI PRs need no Before and After images or videos (section 5).
+2. Review evidence: the local checks for the changed behavior, the acceptance
+   checks for staging after the merge, or the section 4 exemption that
+   applies. Say if the change is visible in the UI. UI PRs need no Before and
+   After images or videos (section 5).
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
 5. Automated review verdicts.
@@ -182,9 +182,9 @@ for review until the evidence is there.
 - A visual-only change with no app logic under test (layout, styling, copy,
   labels, static states) may skip the staging acceptance checks and the
   served-commit check. Explain that exemption in the description.
-- The Opus 5.5 review must approve the visual-only exemption, the
-  costly-flow alternative or the documentation exemption. A
-  changed review policy cancels earlier approval.
+- The Opus 5.5 review must approve the visual-only exemption, the costly-flow
+  alternative or the documentation exemption. A changed review policy cancels
+  earlier approval.
 
 ### Real data and costly workflows
 

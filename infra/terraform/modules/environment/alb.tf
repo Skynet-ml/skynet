@@ -251,8 +251,9 @@ locals {
   mcp_certificate_enabled = var.mcp_domain != "" && !local.mcp_on_wildcard
 }
 
-# mcp.staging.skynetml.com uses this wildcard certificate. ACM issues the wildcard with the
-# same DNS validation record as the certificate for var.wildcard_domain itself.
+# mcp.staging.skynetml.com uses this wildcard certificate. ACM issues the
+# wildcard with the same DNS validation record as the certificate for
+# var.wildcard_domain itself.
 resource "aws_acm_certificate" "wildcard" {
   #checkov:skip=CKV2_AWS_71:The remote MCP host directly under var.wildcard_domain uses this wildcard.
   count = local.wildcard_enabled ? 1 : 0
