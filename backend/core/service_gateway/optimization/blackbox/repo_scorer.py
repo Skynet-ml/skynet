@@ -1394,7 +1394,7 @@ class _StageRelay:
             "mcp": [server.name for server in self._mcp.mcp_servers],
             "mcp_file": self._mcp.mcp,
             # Parallel calls share a stage box, so no call may hold the fixed port (SKY-624).
-            # The metric box also has a box, so the role tells a stage's relay apart.
+            # The metric relays write to the metric box too (SKY-398), so only the role marks a stage's relay.
             "port": 0 if self._role.startswith(_TARGET_ROLE) else runner.RELAY_PORT,
             "role": self._role,
         }

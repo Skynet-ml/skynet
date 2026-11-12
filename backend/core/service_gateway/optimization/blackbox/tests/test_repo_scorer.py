@@ -3495,14 +3495,21 @@ def test_the_evaluation_reads_a_budget_stop_a_stage_relay_kept_after_its_call(tm
     )
     box = LocalSubprocessRuntime().open(SandboxSpec(lifetime_seconds=60, network_disabled=True))
     relay = scorer._relay({"lookup": box}, "calls/000001/stages")
+    template = relay._stage_relays["lookup"]
+    call_relay = template.for_call("abc")
     try:
         assert relay.first_control() is None
-        relay._stage_relays["lookup"].control = {"code": "budget_reached", "message": "spent"}
+        call_relay.control = {"code": "budget_reached", "message": "spent"}
+        assert template.control is None
         assert relay.control is None
         assert relay.first_control() == {"code": "budget_reached", "message": "spent"}
+        call_relay.control = None
+        template.control = {"code": "budget_reached", "message": "template"}
+        assert relay.first_control() == {"code": "budget_reached", "message": "template"}
         relay.control = {"code": "usage_pending", "message": "pending"}
         assert relay.first_control() == {"code": "usage_pending", "message": "pending"}
     finally:
+        call_relay.close()
         relay.close()
         scorer.close()
         box.close()
