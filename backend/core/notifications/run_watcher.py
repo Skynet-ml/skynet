@@ -1,4 +1,4 @@
-"""In-run notification triggers (new best, stuck, near budget, needs input) for one job.
+"""In-run notification triggers (new best, stuck, near budget) for one job.
 
 The worker feeds every persisted progress event and periodic spend reading of
 a run to one :class:`RunNotificationWatcher`. The watcher emits each event
@@ -20,7 +20,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..constants import PROGRESS_CANDIDATE, TQDM_N_KEY, TQDM_TOTAL_KEY
-from .catalog import BUDGET_NEAR, NEEDS_INPUT, NEW_BEST, STUCK
+from .catalog import BUDGET_NEAR, NEW_BEST, STUCK
 from .notifier import notify_run_budget, notify_run_new_best, notify_run_stuck
 from .preferences import NotificationSettings, notification_settings
 
@@ -105,7 +105,7 @@ class RunNotificationWatcher:
         if not username:
             return None
         settings = notification_settings(username)
-        if not any(settings.any_enabled(event) for event in (NEW_BEST, STUCK, BUDGET_NEAR, NEEDS_INPUT)):
+        if not any(settings.any_enabled(event) for event in (NEW_BEST, STUCK, BUDGET_NEAR)):
             return None
         return cls(optimization_id=optimization_id, username=username, job_store=job_store, settings=settings)
 

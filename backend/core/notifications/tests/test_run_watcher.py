@@ -119,7 +119,7 @@ def _watcher(store: Any, sent: _Sent, *, off: tuple[str, ...] = (), **overrides:
 def test_events_switched_off_everywhere_emit_nothing() -> None:
     """An event with every grid cell off is never emitted."""
     sent = _Sent()
-    watcher = _watcher(_ClaimStore(), sent, off=(NEW_BEST, STUCK, BUDGET_NEAR, NEEDS_INPUT))
+    watcher = _watcher(_ClaimStore(), sent, off=(NEW_BEST, STUCK, BUDGET_NEAR))
 
     watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.1})
     watcher.observe_progress(PROGRESS_CANDIDATE, {"score": 0.9})
@@ -130,16 +130,17 @@ def test_events_switched_off_everywhere_emit_nothing() -> None:
 
 
 def test_for_run_skips_only_when_no_in_run_event_reaches_the_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A watcher is built unless every in-run event is off everywhere, or there is no owner."""
+    """A watcher is built unless every in-run event is off everywhere, or there is no owner.
+
+    Needs-input alone builds no watcher: the watcher never sends that event.
+    """
     monkeypatch.setattr(watcher_module, "notification_settings", lambda _u: _settings())
     assert RunNotificationWatcher.for_run(_JOB, _USER, _ClaimStore()) is not None
     assert RunNotificationWatcher.for_run(_JOB, None, _ClaimStore()) is None
 
-    monkeypatch.setattr(
-        watcher_module,
-        "notification_settings",
-        lambda _u: _settings(off=(NEW_BEST, STUCK, BUDGET_NEAR, NEEDS_INPUT)),
-    )
+    only_needs_input = _settings(off=(NEW_BEST, STUCK, BUDGET_NEAR))
+    assert only_needs_input.any_enabled(NEEDS_INPUT)
+    monkeypatch.setattr(watcher_module, "notification_settings", lambda _u: only_needs_input)
     assert RunNotificationWatcher.for_run(_JOB, _USER, _ClaimStore()) is None
 
 
