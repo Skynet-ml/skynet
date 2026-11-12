@@ -28,8 +28,8 @@ export const BLACKBOX_OPTIMIZERS = [
 const FEEDBACK_OPTIMIZERS: ReadonlySet<string> = new Set(["gepa", "auto"]);
 export const MIN_PAIRS_FOR_HELD_OUT = 5;
 
-/** Optimizer choices that fit a target and data mode: Auto and the six repository engines. */
-export function optimizersFor(target: OptimizerTarget, mode: DataMode): OptimizerChoice[] {
+/** The optimizer choices a repository run accepts: Auto and the six repository engines. */
+export function optimizersFor(): OptimizerChoice[] {
   return ["auto", ...BLACKBOX_OPTIMIZERS];
 }
 
@@ -42,7 +42,7 @@ export function storedOptimizerChoice(value: unknown): OptimizerChoice | null {
 }
 
 /** The optimizer that actually runs: the choice itself, Auto included. */
-export function resolveOptimizer(choice: OptimizerChoice, target: OptimizerTarget): string {
+export function resolveOptimizer(choice: OptimizerChoice): string {
   return choice;
 }
 
@@ -51,8 +51,8 @@ export function optimizerFamily(resolved: string): OptimizerFamily {
 }
 
 /** Whether the resolved optimizer reads the metric's feedback text. */
-export function usesFeedback(choice: OptimizerChoice, target: OptimizerTarget): boolean {
-  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice, target));
+export function usesFeedback(choice: OptimizerChoice): boolean {
+  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice));
 }
 
 export interface UnifiedCase {
@@ -93,51 +93,4 @@ export interface OptimizerCatalogResponse {
   auto_resolves_to: string[];
   sandbox_available: boolean;
   sandbox_reason?: string | null;
-}
-
-/** A Check row the terminal log files its events under. */
-export type CheckTerminalPhase = "budget" | "sandbox" | "evaluator";
-
-interface CheckTerminalEventBase {
-  /** Milliseconds since the check started. */
-  t: number;
-  phase: CheckTerminalPhase;
-  /** Zero-based evaluator sample the event belongs to. */
-  sample?: number;
-}
-
-/**
- * One line of the Check's live log. Output is already redacted and clipped by
- * the server; `note` codes are worded by the client.
- */
-export type CheckTerminalEvent = CheckTerminalEventBase &
-  (
-    | { kind: "note"; note: string; params?: Record<string, string | number> }
-    | { kind: "command"; id: number; label: string }
-    | { kind: "output"; id: number; stream: "stdout" | "stderr" | "log"; text: string }
-    | {
-        kind: "exit";
-        id: number;
-        duration_ms: number;
-        exit_code?: number;
-        timed_out?: boolean;
-        error?: string;
-      }
-    | {
-        kind: "sample";
-        total: number;
-        state: "running" | "done" | "failed";
-        score?: number;
-        error?: string;
-        duration_ms?: number;
-      }
-  );
-
-export interface CheckTerminalLog {
-  version: number;
-  events: CheckTerminalEvent[];
-  /** Phases whose output hit the server's cap. */
-  truncated: CheckTerminalPhase[];
-  /** Set when an identical earlier check answered, so this is its stored log. */
-  reused?: boolean;
 }

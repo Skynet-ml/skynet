@@ -78,7 +78,7 @@ export function OptimizerStep({ page }: { page: number }) {
                 </AgentFieldLock>
               )}
               <AgentFieldLock fields={BUDGET_FIELDS}>
-                <BudgetSection kind="repo" choice={choice} />
+                <BudgetSection choice={choice} />
               </AgentFieldLock>
             </WizardScreen>
           ) : (
@@ -95,7 +95,7 @@ export function OptimizerStep({ page }: { page: number }) {
               </WizardScreen>
               <WizardScreen active={shown === "budget"}>
                 <AgentFieldLock fields={BUDGET_FIELDS}>
-                  <BudgetSection kind="repo" choice={choice} />
+                  <BudgetSection choice={choice} />
                 </AgentFieldLock>
               </WizardScreen>
             </>

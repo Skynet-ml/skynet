@@ -97,9 +97,9 @@ export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice:
 
   const { taskModel, reflectionModel, extraReflectionModels, proposer, shinka, sandboxProvider } =
     state.optimizer;
-  const resolved = resolveOptimizer(choice, kind);
-  const nativeProposer = usesNativeProposer(choice, kind);
-  const knobs = proposerKnobs(choice, kind);
+  const resolved = resolveOptimizer(choice);
+  const nativeProposer = usesNativeProposer(choice);
+  const knobs = proposerKnobs(choice);
   const extraModels = takesExtraModels(choice);
   const showShinka = resolved === "shinka_evolve" || resolved === "auto";
   const taskLabel = t("submit.v2.optimizer.models.task.label");

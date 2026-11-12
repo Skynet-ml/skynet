@@ -2,19 +2,15 @@ import type {
   BlackboxProposer,
   BlackboxShinkaSettings,
 } from "@/shared/types/api";
-import {
-  resolveOptimizer,
-  type OptimizerTarget,
-  type OptimizerChoice,
-} from "@/shared/types/unified-run";
+import { resolveOptimizer, type OptimizerChoice } from "@/shared/types/unified-run";
 
 /**
  * Whether the run's proposer is a coding agent. Auto and the agent-driven
  * engines drive one; GEPA and Best-of-N call their
  * optimization model directly, and ShinkaEvolve edits through its own editor.
  */
-export function usesNativeProposer(choice: OptimizerChoice, kind: OptimizerTarget): boolean {
-  const resolved = resolveOptimizer(choice, kind);
+export function usesNativeProposer(choice: OptimizerChoice): boolean {
+  const resolved = resolveOptimizer(choice);
   return (
     resolved === "auto" ||
     resolved === "meta_harness" ||
@@ -41,11 +37,8 @@ export const DEFAULT_PROPOSER: BlackboxProposer = {
 export const MAX_TOOL_CALLS_LIMITS = { min: 1, max: 1_000 } as const;
 
 /** Which engine-specific proposer knobs the choice exposes; black-box Auto may run any engine. */
-export function proposerKnobs(
-  choice: OptimizerChoice,
-  kind: OptimizerTarget,
-): { candidates: boolean; ralph: boolean } {
-  const resolved = resolveOptimizer(choice, kind);
+export function proposerKnobs(choice: OptimizerChoice): { candidates: boolean; ralph: boolean } {
+  const resolved = resolveOptimizer(choice);
   const auto = resolved === "auto";
   return {
     candidates: auto || resolved === "meta_harness",
@@ -57,9 +50,8 @@ export function proposerKnobs(
 export function submittedProposer(
   proposer: BlackboxProposer,
   choice: OptimizerChoice,
-  kind: OptimizerTarget,
 ): BlackboxProposer {
-  const knobs = proposerKnobs(choice, kind);
+  const knobs = proposerKnobs(choice);
   return {
     ...proposer,
     max_candidates_per_iter: knobs.candidates ? (proposer.max_candidates_per_iter ?? null) : null,
@@ -79,12 +71,11 @@ export function submittedProposer(
 export function submittedRunProposer(input: {
   proposer: BlackboxProposer;
   choice: OptimizerChoice;
-  kind: OptimizerTarget;
   shinka: BlackboxShinkaSettings | null;
 }): BlackboxProposer | undefined {
-  const { proposer, choice, kind, shinka } = input;
-  if (usesNativeProposer(choice, kind)) return submittedProposer(proposer, choice, kind);
-  if (resolveOptimizer(choice, kind) !== "shinka_evolve" || shinka?.editor !== "agent")
+  const { proposer, choice, shinka } = input;
+  if (usesNativeProposer(choice)) return submittedProposer(proposer, choice);
+  if (resolveOptimizer(choice) !== "shinka_evolve" || shinka?.editor !== "agent")
     return undefined;
   return {
     harness: DEFAULT_PROPOSER.harness,
@@ -93,8 +84,8 @@ export function submittedRunProposer(input: {
 }
 
 /** Whether the resolved engine honours `budget.max_iterations`. */
-export function supportsIterationLimit(choice: OptimizerChoice, kind: OptimizerTarget): boolean {
-  const resolved = resolveOptimizer(choice, kind);
+export function supportsIterationLimit(choice: OptimizerChoice): boolean {
+  const resolved = resolveOptimizer(choice);
   return (
     resolved === "meta_harness" || resolved === "autosaddler" || resolved === "shinka_evolve"
   );
@@ -104,6 +95,6 @@ export function supportsIterationLimit(choice: OptimizerChoice, kind: OptimizerT
 export const AUTO_MIN_SCORER_RUNS = 6;
 
 /** The smallest scorer-run budget the resolved optimizer can spend. */
-export function minScorerRuns(choice: OptimizerChoice, kind: OptimizerTarget): number {
-  return resolveOptimizer(choice, kind) === "auto" ? AUTO_MIN_SCORER_RUNS : 1;
+export function minScorerRuns(choice: OptimizerChoice): number {
+  return resolveOptimizer(choice) === "auto" ? AUTO_MIN_SCORER_RUNS : 1;
 }

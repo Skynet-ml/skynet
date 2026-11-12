@@ -517,7 +517,7 @@ export function WizardV2Provider({
     if (prev) goTo(prev);
   }, [steps, state.step, goTo]);
 
-  const resolvedOptimizer = resolveOptimizer(state.optimizer.choice, kind);
+  const resolvedOptimizer = resolveOptimizer(state.optimizer.choice);
 
   // While the wizard's agent works, missing code reads as being written.
   const agentWriting = useWizardStateOptional()?.agentBusy ?? false;
@@ -774,7 +774,7 @@ export function WizardV2Provider({
   useEffect(() => {
     if (enginePresetDone.current || !mode) return;
     enginePresetDone.current = true;
-    const engine = presetEngine(state.optimizer.choice, readPref("optimizerEngine"), kind, mode);
+    const engine = presetEngine(state.optimizer.choice, readPref("optimizerEngine"));
     if (engine) patchOptimizer({ choice: engine });
     // Runs once, when the setup first exists; the choice is read from that render.
   }, [kind, mode]);

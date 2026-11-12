@@ -52,7 +52,7 @@ export function computeStepIssue(
     }
     case "optimizer": {
       if (!inputs.mode) return "submit.v2.optimizer.needs_setup";
-      if (!optimizersFor("repo", inputs.mode).includes(optimizer.choice))
+      if (!optimizersFor().includes(optimizer.choice))
         return "submit.v2.optimizer.issue.choice";
       const option = catalogOption(state, catalog);
       if (option === null) return "submit.v2.optimizer.issue.choice";

@@ -55,9 +55,9 @@ export function optimizerOptions(input: {
 }): OptimizerOptionView[] {
   const { kind, mode, guided, choice } = input;
   const catalog = catalogFor(input.catalog, kind, mode);
-  const views = optimizersFor(kind, mode).map((id): OptimizerOptionView => {
+  const views = optimizersFor().map((id): OptimizerOptionView => {
     const entry = catalog?.options.find((option) => option.id === id);
-    const resolved = resolveOptimizer(id, kind);
+    const resolved = resolveOptimizer(id);
     return {
       id,
       family: entry?.family ?? optimizerFamily(resolved),
@@ -65,9 +65,9 @@ export function optimizerOptions(input: {
       unavailableReason: entry && !entry.available ? (entry.unavailable_reason?.trim() || null) : null,
       checking: catalog == null,
       needsReflectionModel: entry?.needs_reflection_model ?? true,
-      usesFeedback: entry?.uses_feedback ?? usesFeedback(id, kind),
-      supportsIterationLimit: entry?.supports_iteration_limit ?? supportsIterationLimit(id, kind),
-      nativeProposer: entry?.native_proposer ?? usesNativeProposer(id, kind),
+      usesFeedback: entry?.uses_feedback ?? usesFeedback(id),
+      supportsIterationLimit: entry?.supports_iteration_limit ?? supportsIterationLimit(id),
+      nativeProposer: entry?.native_proposer ?? usesNativeProposer(id),
     };
   });
   return guided ? views.filter((view) => view.available || view.id === choice) : views;
@@ -89,7 +89,7 @@ export function optimizerChoiceIssue(input: {
   choice: OptimizerChoice;
 }): OptimizerChoiceIssue | null {
   const { kind, mode, choice } = input;
-  if (!optimizersFor(kind, mode).includes(choice)) return { kind: "not_allowed" };
+  if (!optimizersFor().includes(choice)) return { kind: "not_allowed" };
   const catalog = catalogFor(input.catalog, kind, mode);
   const entry = catalog?.options.find((option) => option.id === choice);
   if (entry && !entry.available)

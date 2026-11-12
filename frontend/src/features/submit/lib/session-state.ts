@@ -91,6 +91,35 @@ export function decodeWizardSession(
 }
 
 /**
+ * Whether the wizard offers the account's left setup back before it mounts.
+ *
+ * A clone starts from its source run, and a reload finds the tab's own setup,
+ * so neither gets the offer. A tab copy this build cannot read does not count
+ * as a reload, so it does not hide the left setup.
+ *
+ * Args:
+ *   input.tab: The tab's saved setup text, if any.
+ *   input.left: The account's left setup text, if any.
+ *   input.account: The signed-in account.
+ *   input.steps: The wizard's step ids.
+ *   input.cloning: Whether the page opens a clone of a run.
+ *
+ * Returns:
+ *   True when the left setup is readable and nothing else takes its place.
+ */
+export function offersLeftSetup(input: {
+  tab: string | null;
+  left: string | null;
+  account: string;
+  steps: readonly string[];
+  cloning: boolean;
+}): boolean {
+  const { tab, left, account, steps, cloning } = input;
+  if (cloning || decodeWizardSession(tab, account, steps) !== null) return false;
+  return decodeWizardSession(left, account, steps) !== null;
+}
+
+/**
  * Read one of the tab's saved values, or null when storage is blocked.
  *
  * Args:

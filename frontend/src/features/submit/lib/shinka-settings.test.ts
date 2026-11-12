@@ -119,28 +119,28 @@ test("out-of-range and invalid shares clamp", () => {
 });
 
 test("a ShinkaEvolve run always sends its settings, the defaults when untouched", () => {
-  const sent = submittedShinka(DEFAULT_SHINKA_SETTINGS, "shinka_evolve", "code");
+  const sent = submittedShinka(DEFAULT_SHINKA_SETTINGS, "shinka_evolve");
   assert.deepEqual(sent, DEFAULT_SHINKA_SETTINGS);
   assert.notEqual(sent, DEFAULT_SHINKA_SETTINGS);
-  assert.deepEqual(submittedShinka(null, "shinka_evolve", "repo"), DEFAULT_SHINKA_SETTINGS);
+  assert.deepEqual(submittedShinka(null, "shinka_evolve"), DEFAULT_SHINKA_SETTINGS);
 });
 
 test("the editor choice goes out with the settings, for ShinkaEvolve and Auto", () => {
   const agent = { ...DEFAULT_SHINKA_SETTINGS, editor: "agent" as const };
-  assert.equal(submittedShinka(agent, "shinka_evolve", "code")?.editor, "agent");
-  assert.equal(submittedShinka(agent, "auto", "code")?.editor, "agent");
+  assert.equal(submittedShinka(agent, "shinka_evolve")?.editor, "agent");
+  assert.equal(submittedShinka(agent, "auto")?.editor, "agent");
 });
 
 test("other optimizers never send ShinkaEvolve settings", () => {
   for (const choice of ["gepa", "meta_harness", "autosaddler"] as const) {
-    assert.equal(submittedShinka(DEFAULT_SHINKA_SETTINGS, choice, "code"), undefined);
+    assert.equal(submittedShinka(DEFAULT_SHINKA_SETTINGS, choice), undefined);
   }
 });
 
 test("black-box Auto sends the settings only once the user edited them", () => {
-  assert.equal(submittedShinka(null, "auto", "repo"), undefined);
+  assert.equal(submittedShinka(null, "auto"), undefined);
   const tuned = { ...DEFAULT_SHINKA_SETTINGS, num_islands: 4 };
-  assert.deepEqual(submittedShinka(tuned, "auto", "repo"), tuned);
+  assert.deepEqual(submittedShinka(tuned, "auto"), tuned);
 });
 
 test("extra optimization models go out only for ShinkaEvolve", () => {

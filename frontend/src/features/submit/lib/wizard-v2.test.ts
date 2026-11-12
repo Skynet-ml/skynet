@@ -177,9 +177,9 @@ test("unchanged defaults, a role with no default and an untracked setup leave th
   });
 });
 test("the Settings default engine applies only from Auto and only when it fits the task", () => {
-  assert.equal(presetEngine("auto", "gepa", "repo", "pairs"), "gepa");
-  assert.equal(presetEngine("best_of_n", "gepa", "repo", "pairs"), null);
-  assert.equal(presetEngine("auto", "auto", "repo", "pairs"), null);
+  assert.equal(presetEngine("auto", "gepa"), "gepa");
+  assert.equal(presetEngine("best_of_n", "gepa"), null);
+  assert.equal(presetEngine("auto", "auto"), null);
 });
 
 function readyState(level: "guided" | "standard" | "expert", withModels = true) {

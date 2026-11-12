@@ -18,7 +18,6 @@ import {
   type DataMode,
   type OptimizerCatalogResponse,
   type OptimizerChoice,
-  type OptimizerTarget,
   type UnifiedCase,
 } from "@/shared/types/unified-run";
 import type { TokenSourceMode } from "@/features/billing";
@@ -418,11 +417,9 @@ export function withOptimizerPatch(
 export function presetEngine(
   choice: OptimizerChoice,
   engine: OptimizerChoice,
-  target: OptimizerTarget,
-  mode: DataMode,
 ): OptimizerChoice | null {
   if (choice !== "auto" || engine === "auto") return null;
-  return optimizersFor(target, mode).includes(engine) ? engine : null;
+  return optimizersFor().includes(engine) ? engine : null;
 }
 
 /* ── Workspace files ─────────────────────────────────────────────────── */

@@ -17,7 +17,8 @@ registerHooks({
 });
 
 const { WIZARD_V2_STEPS, emptyRepoDraft, initialWizardV2State } = await import("./wizard-v2.ts");
-const { decodeWizardSession, encodeWizardSession, setupWorthKeeping } = await import("./session-state.ts");
+const { decodeWizardSession, encodeWizardSession, offersLeftSetup, setupWorthKeeping } =
+  await import("./session-state.ts");
 
 const STEPS = WIZARD_V2_STEPS as readonly string[];
 
@@ -201,4 +202,19 @@ test("a saved setup keeps its repository secrets without their values", () => {
     { name: "API_KEY", value: "", allowedHosts: "api.example.com" },
   ]);
   assert.equal(state.task.repo?.secrets?.[0].value, "do-not-store");
+});
+
+test("the left setup is offered only when no clone or readable tab setup takes its place", () => {
+  const left = encodeWizardSession("a@x.io", initialWizardV2State("guided"));
+  const tab = encodeWizardSession("a@x.io", initialWizardV2State("guided"));
+  const otherAccount = encodeWizardSession("b@x.io", initialWizardV2State("guided"));
+  const base = { tab: null, left, account: "a@x.io", steps: STEPS, cloning: false };
+
+  assert.equal(offersLeftSetup(base), true);
+  assert.equal(offersLeftSetup({ ...base, cloning: true }), false);
+  assert.equal(offersLeftSetup({ ...base, tab }), false);
+  assert.equal(offersLeftSetup({ ...base, tab: "{not json" }), true);
+  assert.equal(offersLeftSetup({ ...base, tab: otherAccount }), true);
+  assert.equal(offersLeftSetup({ ...base, left: null }), false);
+  assert.equal(offersLeftSetup({ ...base, left: "{not json" }), false);
 });
