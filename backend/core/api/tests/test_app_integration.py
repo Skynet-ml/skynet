@@ -3,7 +3,7 @@
 Covers lifespan startup, ``/health``, ``/queue``, cache-control middleware, the
 SIGTERM handler, and ``/openapi.public.json``. These tests use the real
 ``create_app()`` factory but stub out every external dependency (Postgres, the
-background worker, the DSPy service) so the suite runs without any I/O.
+background worker, the service registry) so the suite runs without any I/O.
 """
 
 from __future__ import annotations

@@ -204,8 +204,8 @@ def register_lifecycle_routes(
     def cancel_job(optimization_id: str, current_user: AuthenticatedUserDep) -> JobCancelResponse:
         """Cooperatively cancel an active optimization.
 
-        Flips status to ``cancelled`` immediately; the worker stops between
-        DSPy calls. One-way — no uncancel.
+        Flips status to ``cancelled`` immediately; the worker stops at its
+        next cancellation check. One-way — no uncancel.
 
         Args:
             optimization_id: Optimization id to cancel.
@@ -232,7 +232,7 @@ def register_lifecycle_routes(
 
         A manual pause is intentional, not a failure: it flips status to
         ``paused`` (distinct from ``cancelled``) and signals the worker, which
-        stops between DSPy calls and persists the GEPA checkpoint on its way out —
+        stops at its next cancellation check and persists the GEPA checkpoint —
         the same cooperative path cancel uses. Valid only while the run is
         actively ``running`` and already has a saved checkpoint, so a pause is
         always resumable; pausing before the first checkpoint is rejected. Resume
@@ -289,7 +289,7 @@ def register_lifecycle_routes(
         """Cancel a batch of non-terminal optimizations and report per-id outcomes.
 
         Same semantics as single-ID ``POST /optimizations/{id}/cancel``: flips
-        status to ``cancelled`` immediately, worker stops between DSPy calls,
+        status to ``cancelled`` immediately, worker stops at its next check,
         one-way. Duplicate ids in the request are deduplicated. IDs that don't
         exist, are already terminal, or are not owned by the caller (when
         non-admin) are reported in ``skipped`` with the reason ``not_found``.

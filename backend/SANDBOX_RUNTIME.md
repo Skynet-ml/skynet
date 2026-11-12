@@ -110,7 +110,6 @@ An interrupted run is never restarted automatically: a worker shutdown, a lost l
 
 | Path | Manual Resume |
 | --- | --- |
-| DSPy GEPA, including independent GEPA grid pairs | Exact compatible persisted GEPA state |
 | Anything, single GEPA engine | Exact compatible persisted GEPA state |
 | Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve, Auto/omni, other optimizers | Not supported; Retry or Clone instead |
 

@@ -126,9 +126,10 @@ def _leaves(value: Any) -> Iterable[str]:
 def row_fingerprint(row: Any) -> str:
     """Fingerprint one row by its values, ignoring keys and nesting.
 
-    The wizard ships a sample as flat DSPy rows, as black-box cases or as
-    unified ``{"input", "expected"}`` cases; all three carry the same values,
-    so a value-only fingerprint matches a sample whichever shape staged it.
+    A stored payload holds a sample as flat DSPy rows (older runs), as
+    black-box cases or as unified ``{"input", "expected"}`` cases; all three
+    carry the same values, so a value-only fingerprint matches a sample
+    whichever shape staged it.
 
     Args:
         row: One dataset row or case.

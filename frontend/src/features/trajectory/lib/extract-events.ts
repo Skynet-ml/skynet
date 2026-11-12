@@ -22,8 +22,8 @@ const MINIBATCH_EVENT = "minibatch_feedback";
  *
  * Black-box strategies run engines in sequential lanes and candidate ids
  * restart at "0" in each one, so mixing lanes would corrupt the tree. Events
- * without a ``lane_index`` (every DSPy run) are lane 0, making this a no-op
- * for them.
+ * without a ``lane_index`` (single-engine runs and older stored DSPy runs)
+ * are lane 0, making this a no-op for them.
  */
 export function scopeToLatestLane(events: ProgressEvent[]): ProgressEvent[] {
   const laneOf = (event: ProgressEvent): number => {
@@ -192,7 +192,7 @@ export function extractValset(events: ProgressEvent[]): ValsetRow[] {
   return [];
 }
 
-// A prediction arrives as a flat field→value map (the backend serializes a dspy
+// A prediction arrives as a flat field→value map (older stored DSPy runs hold a
 // Prediction this way, nested fields as JSON strings) or a plain string (legacy
 // runs). Map values are coerced to strings so each renders via the structured
 // FieldValue cell. Anything else (null, array, number) degrades to "".

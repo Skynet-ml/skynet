@@ -161,10 +161,10 @@ class Task:
     ``cases``. The test split never reaches a task: the service's final run
     re-scores the starting point and the winner on it afterwards.
 
-    ``context`` is private run context (artifact kind, workspace code,
-    models, DSPy optimizer settings) for in-process adapters such as the
-    DSPy engine. It holds the metric source, so it must never be exported to
-    a proposer, a native engine payload, a prompt or an agent workspace.
+    ``context`` is private run context for in-process adapters. No current
+    job fills it. When set, it can hold the metric source, so it must never
+    be exported to a proposer, a native engine payload, a prompt or an agent
+    workspace.
     """
 
     seed_candidate: Candidate | None
@@ -349,9 +349,8 @@ class EvalServer:
         with usage_scope(stage=STAGE_TRAINING):
             score, side_info = root._score(candidate, example)
         # Per-call heartbeat at DEBUG so it surfaces only in the Logs tab's
-        # verbose view — the black-box counterpart of the DSPy per-example eval
-        # heartbeat, so every run type gets the same normal=aggregates /
-        # verbose=per-call split. Counted against the run-wide budget.
+        # verbose view: normal logs show aggregates, verbose logs show each
+        # call. Counted against the run-wide budget.
         if score is None:
             logger.debug("scorer eval %d/%d %s: %s", root.used, root.max_evals, METRIC_ERROR, side_info.get("error"))
         else:
@@ -362,9 +361,8 @@ class EvalServer:
     def charge(self, candidate: Candidate | None, score: float | None, side_info: SideInfo | None = None) -> None:
         """Count one evaluation scored outside the scorer against every budget in the chain.
 
-        In-process adapters (the DSPy engine) run the metric themselves; this
-        keeps their metric calls inside the run's scorer-run budget and
-        progress, so budgets hold for every optimizer.
+        An in-process adapter that runs the metric itself calls this, so its
+        metric calls stay inside the run's scorer-run budget and progress.
 
         Args:
             candidate: The version that was scored, or ``None`` when the

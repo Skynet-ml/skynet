@@ -29,7 +29,7 @@ class SandboxProviderCatalogResponse(BaseModel):
 
 
 def execution_runtime_catalog(*, has_image_inputs: bool = False) -> dict[str, Any]:
-    """Report the DSPy sandbox without launching billable validation.
+    """Report the managed sandbox without launching billable validation.
 
     Args:
         has_image_inputs: Whether the current task needs metered image input support.

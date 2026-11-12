@@ -887,7 +887,7 @@ def _reflection_caller(lm: dspy.LM) -> tuple[Callable[[str | list[dict[str, Any]
 
         @property
         def lm(self) -> dspy.LM:
-            """Return the metered model itself, for in-process DSPy optimizers."""
+            """Return the metered model itself."""
             return lm
 
         @property
@@ -1077,13 +1077,13 @@ def _combined_usage(
     """Preserve each native model's identity when combining token accounting.
 
     Args:
-        lms: Metered DSPy models and scorer ledgers.
+        lms: Metered models and scorer ledgers.
         native: Shared native usage collector, if the recipe uses one.
         excluded_native_models: Native model IDs whose usage does not count toward this total.
 
     Returns:
         One usage row per model across both transports, with any reported cost
-        the DSPy lane recorded.
+        the metered models recorded.
     """
     usages = list(model_usages_from_history(*lms) or [])
     if native is not None:

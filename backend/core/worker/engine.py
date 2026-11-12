@@ -1,4 +1,4 @@
-"""Background worker for DSPy optimization jobs.
+"""Background worker for optimization jobs.
 
 Threaded worker that claims pending jobs from a shared job store and processes
 them with configurable concurrency. Multi-pod safety is delegated to the store:
@@ -1576,7 +1576,7 @@ class BackgroundWorker:
             return
         # Worker threads run concurrently, so a single shared deadline lets any
         # one in-flight job use up to the full ``timeout`` to finish its current
-        # DSPy/LLM call — instead of a fixed ``timeout / N`` slice that reaps a
+        # model call — instead of a fixed ``timeout / N`` slice that reaps a
         # slow child early — while still bounding total shutdown to ``timeout``.
         deadline = time.monotonic() + timeout
         for thread in self._threads:

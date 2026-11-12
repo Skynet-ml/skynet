@@ -174,7 +174,7 @@ def with_tags_header(headers: Mapping[str, str] | None, tags: Mapping[str, Any])
     result = {name: value for name, value in (headers or {}).items() if name.lower() not in USAGE_TAGS_HEADERS}
     encoded = encode_tags({**header_tags(headers), **clean_tags(tags)})
     if encoded:
-        # The DSPy guest runs the pinned image's backend copy while the parent
+        # The sandbox guest runs the pinned image's backend copy while the parent
         # ships the model proxy, so either side may be the older one; an older
         # proxy forwards and an older gateway reads only the legacy name.
         result[USAGE_TAGS_HEADER] = encoded

@@ -471,7 +471,7 @@ def fetch_corpus_facets(
         models: Active model filter, or ``None`` / empty for no filter.
         optimizers: Active optimizer / engine filter.
         optimization_types: Active run-type filter.
-        modules: Active DSPy module filter.
+        modules: Active module filter.
         date_from: Inclusive lower bound on ``created_at`` (date precision).
         date_to: Inclusive upper bound on ``created_at`` (date precision).
         value_query: Optional substring to match values against; blank means

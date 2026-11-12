@@ -107,8 +107,8 @@ BLACKBOX_ITERATION_LIMIT_ENGINES = frozenset(
 CLAUDE_CODE_RETIRED = "Claude Code is no longer available as an agent harness. Choose another one, such as codex."
 # Extra optimization models a single run may add beyond the reflection model.
 BLACKBOX_MAX_EXTRA_REFLECTION_MODELS = 4
-# Stands in for ``module_name`` in the job overview and notifications, where
-# DSPy jobs record the program they optimized.
+# Stands in for ``module_name`` in the job overview and notifications. Older
+# stored DSPy jobs hold the program they optimized there.
 BLACKBOX_MODULE_NAME = "blackbox"
 
 # A text artifact under optimization. ``dict`` form names several parts that
@@ -471,8 +471,7 @@ class BlackboxStrategy(BaseModel):
         return self
 
 
-# Submission payload for ``POST /blackbox/run``. Not a subclass of the DSPy
-# request base: there is no module, signature or column mapping here.
+# Submission payload for ``POST /blackbox/run``.
 class BlackboxRunRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
