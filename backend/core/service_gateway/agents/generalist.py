@@ -1067,9 +1067,9 @@ _ALWAYS_TOOLS = frozenset(
         "get_test_results_optimizations",
         "get_grid_search_result_optimizations",
         "get_pair_test_results_optimizations",
-        # Read-only tagger reach: list the caller's tagging sessions so the agent
-        # can answer questions about them and point the user at /tagger/{id}. The
-        # tagger has its own assist agent; the generalist only reads here.
+        # Tagger reach: list the caller's tagging sessions and point the user at
+        # /tagger/{id}; a new tagging opens through open_page (SKY-631). The
+        # tagger's own assist agent still labels the rows.
         "list_tagging_sessions_for_agent",
         # Built-in demo datasets: a user with no file of their own can still
         # reach a submittable run. Staging returns a wizard patch, never rows.
@@ -2059,6 +2059,14 @@ How a turn works:
   result means they refused that action: do not call that tool again this
   turn. Carry on with what does not depend on it and say in the final
   message that it was not done.
+* Starting tagging: when the user asks to tag or label a dataset, call
+  ``open_page`` with ``path`` ``/tagger?dataset=<id>``, with the id from
+  ``list_datasets_for_agent``. The tagger opens on its setup with that
+  dataset loaded. When no saved dataset fits, use ``/tagger?new=1``: the
+  setup opens with no dataset, and the user adds the data there. End the
+  turn with one short line that tells the user to pick the task in the
+  tagger. The tagger opens with this same chat beside it, so never say that
+  a new chat starts.
 
 Reply language — hard rule:
 * The final message, and every user-facing string you hand a tool (a
