@@ -45,9 +45,11 @@ FUNDS_REFUSAL_HOLD_SECONDS = 60.0
 # OpenRouter can answer a generation lookup with 404 for a short time after the
 # answer ends, while it still indexes the bill, and a Responses stream can carry
 # no cost. settle() asks again after each delay before it holds the call for the
-# reconciler (SKY-657). Each lookup has its own short timeout, because the
-# dispatch client allows a long model answer; the worst case is four timed-out
-# lookups plus the delays, about 44 seconds.
+# reconciler (SKY-657). The lookup has its own short httpx timeout, because the
+# dispatch client allows a long model answer. httpx applies it to each connect
+# and each read step, not to the whole lookup: four lookups that time out on
+# read add about 44 seconds with the delays, and a slow connect plus a slow
+# read, or a slow-drip answer, can take longer.
 GENERATION_LOOKUP_DELAYS = (0.5, 1.0, 2.0)
 GENERATION_LOOKUP_TIMEOUT_SECONDS = 10.0
 
