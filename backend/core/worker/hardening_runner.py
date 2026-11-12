@@ -152,6 +152,8 @@ class HardeningMeter(BudgetRuntime):
         cost_kind: str,
         role: str | None = None,
         attempt: int = 0,
+        box: str | None = None,
+        for_box: str | None = None,
     ) -> T:
         """Dispatch one call and settle its cost into the job's hold.
 
@@ -163,6 +165,8 @@ class HardeningMeter(BudgetRuntime):
             cost_kind: Model or sandbox category.
             role: Optional model role attribution.
             attempt: Physical retry number.
+            box: Box id of the sandbox that makes the call, if any.
+            for_box: Box id of the sandbox that waits for that box, if any.
 
         Returns:
             The provider result.
@@ -176,7 +180,15 @@ class HardeningMeter(BudgetRuntime):
             raise HardeningClaimLostError("Another pod took the hardening job.")
         if self.operation_id is None or cost_kind != "model":
             return super().execute(
-                quote, policy, dispatch, operation_key=operation_key, cost_kind=cost_kind, role=role, attempt=attempt
+                quote,
+                policy,
+                dispatch,
+                operation_key=operation_key,
+                cost_kind=cost_kind,
+                role=role,
+                attempt=attempt,
+                box=box,
+                for_box=for_box,
             )
         if quote.price_snapshot.get("policy") != policy.snapshot():
             raise ValueError("Settlement policy must match the admitted quote.")
