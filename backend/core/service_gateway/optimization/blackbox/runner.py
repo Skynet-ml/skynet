@@ -363,7 +363,13 @@ def _env_part(name: str) -> str:
 
 
 def start_service_proxy(
-    client: StageClient, names: Sequence[str], mcp: Sequence[str] = (), *, port: int = 0, mcp_file: str | None = None
+    client: StageClient,
+    names: Sequence[str],
+    mcp: Sequence[str] = (),
+    *,
+    port: int = 0,
+    mcp_file: str | None = None,
+    own_mcp_file: Path | None = None,
 ) -> dict[str, str]:
     """Serve the run's services and MCP servers on a loopback port whose requests go through the parent's relay.
 
@@ -377,6 +383,8 @@ def start_service_proxy(
         mcp: The servers of the role's own MCP file.
         port: The loopback port; ``0`` picks a free one.
         mcp_file: The role's ``.mcp.json``, relative to the working directory.
+        own_mcp_file: A file to write with this proxy's servers and name in
+            ``SKYNET_MCP_CONFIG`` instead of ``mcp_file``.
 
     Returns:
         ``SKYNET_SERVICE_<NAME>_URL`` for each service, ``SKYNET_MCP_<NAME>_URL``
@@ -471,17 +479,25 @@ def start_service_proxy(
     env = {service_env_name(name): f"{base}/service/{urllib.parse.quote(name, safe='')}/" for name in names}
     servers = {name: f"{base}/mcp/{urllib.parse.quote(name, safe='')}" for name in mcp}
     env.update({mcp_env_name(name): url for name, url in servers.items()})
-    if servers and mcp_file:
+    if servers and own_mcp_file is not None:
+        # Built from the server names, not the variables: "a-b" and "a_b" share
+        # one variable name but must keep their own URLs (SKY-624).
+        own = {"mcpServers": {name: {"type": "http", "url": url} for name, url in servers.items()}}
+        own_mcp_file.write_text(json.dumps(own, indent=2) + "\n", encoding="utf-8")
+        env[MCP_CONFIG_ENV] = str(own_mcp_file.resolve())
+    elif servers and mcp_file:
         env[MCP_CONFIG_ENV] = str(Path(mcp_file).resolve())
     return env
 
 
-def _relay_env(client: StageClient, stages: dict[str, Any]) -> dict[str, str]:
+def _relay_env(client: StageClient, stages: dict[str, Any], own_mcp_file: Path | None = None) -> dict[str, str]:
     """Start the loopback proxy when the role may reach a service or an MCP server.
 
     Args:
         client: The relay client of this call.
         stages: The call's relay config.
+        own_mcp_file: A file for the proxy to write with its own servers, as
+            in ``start_service_proxy``.
 
     Returns:
         The proxy's variables, or nothing when the role reaches neither.
@@ -497,6 +513,7 @@ def _relay_env(client: StageClient, stages: dict[str, Any]) -> dict[str, str]:
         mcp,
         port=int(stages.get("port") or 0),
         mcp_file=mcp_file if isinstance(mcp_file, str) else None,
+        own_mcp_file=own_mcp_file,
     )
 
 
@@ -1672,16 +1689,7 @@ def _stage_relay_env(call_dir: Path) -> dict[str, str]:
     config = json.loads(path.read_text(encoding="utf-8"))
     # The stage's code may change its directory; the answer folder must not move with it.
     config["response_dir"] = str(Path(str(config["response_dir"])).resolve())
-    client = StageClient(config)
-    env = _relay_env(client, config)
-    servers = {name: env[mcp_env_name(name)] for name in (str(name) for name in config.get("mcp") or ())}
-    if servers:
-        # The same entries that staging writes, so a client reads it like the tree's file.
-        own = {"mcpServers": {name: {"type": "http", "url": url} for name, url in servers.items()}}
-        mcp_file = call_dir / _STAGE_MCP_FILE
-        mcp_file.write_text(json.dumps(own, indent=2) + "\n", encoding="utf-8")
-        env[MCP_CONFIG_ENV] = str(mcp_file.resolve())
-    return env
+    return _relay_env(StageClient(config), config, own_mcp_file=call_dir / _STAGE_MCP_FILE)
 
 
 if __name__ == "__main__":

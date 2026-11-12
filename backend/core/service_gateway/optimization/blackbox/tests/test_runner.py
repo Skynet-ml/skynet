@@ -840,13 +840,14 @@ def test_stage_mode_runs_the_entry_function(tmp_path: Path, source: str, answer:
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == answer
 
 
-def _stage_call(tmp_path: Path, port: int, call: str = "one") -> tuple[Path, Path]:
-    """Lay out a stage tree and one call folder whose relay config names one MCP server.
+def _stage_call(tmp_path: Path, port: int, call: str = "one", mcp: tuple[str, ...] = ("search",)) -> tuple[Path, Path]:
+    """Lay out a stage tree and one call folder whose relay config names its MCP servers.
 
     Args:
         tmp_path: The test's folder, which stands for the stage box.
         port: The relay port the config asks for.
         call: The call's folder name.
+        mcp: The MCP servers the config names.
 
     Returns:
         The stage tree and the call folder.
@@ -861,7 +862,7 @@ def _stage_call(tmp_path: Path, port: int, call: str = "one") -> tuple[Path, Pat
         "response_dir": "../relay",
         "names": [],
         "services": [],
-        "mcp": ["search"],
+        "mcp": list(mcp),
         "mcp_file": ".mcp.json",
         "port": port,
     }
@@ -927,6 +928,25 @@ def test_two_parallel_stage_calls_in_one_box_each_get_their_own_port_and_mcp_fil
     for (_, call_dir), output in zip(calls, outputs, strict=True):
         assert output["file"] == str((call_dir / "mcp.json").resolve())
         assert output["config"] == {"mcpServers": {"search": {"type": "http", "url": output["url"]}}}
+
+
+def test_a_calls_own_mcp_file_keeps_servers_whose_variable_names_collide(tmp_path: Path) -> None:
+    """Servers "a-b" and "a_b" share one variable name, so the call's MCP file must name each one's own URL."""
+    tree, call_dir = _stage_call(tmp_path, 0, mcp=("a-b", "a_b"))
+    (tree / "stage.py").write_text("def run(value):\n    return value\n")
+    completed = subprocess.run(
+        [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "stage.py:run"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    servers = json.loads((call_dir / "mcp.json").read_text())["mcpServers"]
+    assert {name: urllib.parse.urlsplit(entry["url"]).path for name, entry in servers.items()} == {
+        "a-b": "/mcp/a-b",
+        "a_b": "/mcp/a_b",
+    }
 
 
 def test_stage_command_mode_serves_the_relay_and_keeps_the_command_files_and_exit_code(tmp_path: Path) -> None:
