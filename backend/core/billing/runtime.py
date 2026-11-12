@@ -318,8 +318,8 @@ class BudgetRuntime:
                     "Previous work is awaiting confirmed usage; its coverage is retained."
                 ) from error
             except BudgetInFlightError as error:
-                # A call counts as waiting work only while its box's coverage keeps
-                # it out, and never while it retries: a call that may fit after
+                # A call counts as waiting work only while the run's pinned coverage
+                # keeps it out, and never while it retries: a call that may fit after
                 # unpinned work settles, or that may be admitted now, can still let
                 # its box end (SKY-647).
                 fits = self._fits_after_unpinned_work(error)
