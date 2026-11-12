@@ -2420,13 +2420,17 @@ async def test_stop_records_the_in_box_proxy_requests_as_cooperative(client: Fak
     assert json.loads(call["request"])["source"] == egress_record.VERCEL_SOURCE
 
 
-def _run_start_script(start: str, tools: Path, python: str | None) -> tuple[int, float]:
+def _run_start_script(start: str, tools: Path, python: str | None, missing: str | None = None) -> tuple[int, float]:
     """Run a proxy start script in local bash with only the given tools on PATH.
+
+    The ``setsid`` and ``nohup`` stubs write their name to ``launched`` next
+    to ``tools`` when they run.
 
     Args:
         start: The start script.
         tools: An empty folder for the tools.
         python: The ``python3`` stub, or ``None`` for no python3.
+        missing: The name of one tool to leave off PATH, or ``None``.
 
     Returns:
         The exit code and the seconds the script ran.
@@ -2434,8 +2438,10 @@ def _run_start_script(start: str, tools: Path, python: str | None) -> tuple[int,
     tools.mkdir()
     for tool in ("grep", "seq", "sleep"):
         (tools / tool).symlink_to(shutil.which(tool))
-    for tool, body in (("setsid", '#!/bin/sh\nexec "$@"\n'), ("nohup", '#!/bin/sh\nexec "$@"\n'), ("python3", python)):
-        if body is not None:
+    launched = tools.parent / "launched"
+    stubs = {name: f'#!/bin/sh\necho {name} >> "{launched}"\nexec "$@"\n' for name in ("setsid", "nohup")}
+    for tool, body in (*stubs.items(), ("python3", python)):
+        if body is not None and tool != missing:
             (tools / tool).write_text(body)
             (tools / tool).chmod(0o755)
     began = time.monotonic()
@@ -2460,6 +2466,37 @@ async def test_the_proxy_start_gives_up_at_once_without_a_working_python(
     code, seconds = await asyncio.to_thread(_run_start_script, start, tmp_path / "bin", python)
     assert code != 0
     assert seconds < 10
+
+
+@pytest.mark.parametrize("missing", ["python3", "setsid", "nohup"])
+async def test_the_proxy_start_launches_nothing_when_one_tool_is_missing(
+    client: FakeClient, log: list[str], tmp_path: Path, missing: str
+) -> None:
+    """Exit 1 before the launch when any one of python3, setsid and nohup is missing (SKY-655)."""
+    recorder, _ = _egress_recorder()
+    env = make_env(client, log, recorder=recorder)
+    await env.start()
+    [start] = client.boxes[env.name].current_session.scripts
+    await env.stop()
+    code, _ = await asyncio.to_thread(_run_start_script, start, tmp_path / "bin", "#!/bin/sh\nexit 1\n", missing)
+    assert code == 1
+    # The old check passed when any one tool existed, so the launch ran; a stub records a launch that reaches it.
+    assert not (tmp_path / "launched").exists()
+
+
+async def test_the_proxy_start_launches_the_proxy_when_every_tool_is_present(
+    client: FakeClient, log: list[str], tmp_path: Path
+) -> None:
+    """Exit 0 once the proxy logs its ready line when python3, setsid and nohup all exist."""
+    recorder, _ = _egress_recorder()
+    env = make_env(client, log, recorder=recorder)
+    await env.start()
+    [start] = client.boxes[env.name].current_session.scripts
+    await env.stop()
+    python = f"#!/bin/sh\necho {egress_record.READY_MARKER}\n"
+    code, _ = await asyncio.to_thread(_run_start_script, start, tmp_path / "bin", python)
+    assert code == 0
+    assert (tmp_path / "launched").read_text().split() == ["setsid", "nohup"]
 
 
 async def test_a_snapshot_records_the_proxy_requests_first(client: FakeClient, log: list[str]) -> None:
