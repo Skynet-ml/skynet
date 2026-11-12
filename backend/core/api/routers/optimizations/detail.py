@@ -34,7 +34,6 @@ from ....models.run_calls import RunCallPage, RunCandidateList
 from ...auth import AuthenticatedUser, get_authenticated_user
 from ...converters import (
     compute_elapsed,
-    extract_estimated_remaining,
     overview_to_base_fields,
     parse_overview,
     parse_timestamp,
@@ -258,10 +257,6 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         started_at = parse_timestamp(job_data.get("started_at"))
         completed_at = parse_timestamp(job_data.get("completed_at"))
 
-        est_remaining = None
-        if status not in TERMINAL_STATUSES:
-            est_remaining = extract_estimated_remaining(job_data)
-
         elapsed_str, elapsed_secs = compute_elapsed(
             created_at, started_at, completed_at, job_data.get("accumulated_runtime_seconds") or 0.0
         )
@@ -276,7 +271,6 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
             completed_at=completed_at,
             elapsed=elapsed_str,
             elapsed_seconds=elapsed_secs,
-            estimated_remaining=est_remaining,
             **overview_to_base_fields(overview),
             message=job_data.get("message"),
             stop_reason=job_data.get("stop_reason"),

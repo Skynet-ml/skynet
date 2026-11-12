@@ -7,11 +7,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ...constants import PAYLOAD_OVERVIEW_COMPOSITION, TQDM_REMAINING_KEY
+from ...constants import PAYLOAD_OVERVIEW_COMPOSITION
 from ...models import OptimizationStatus
 from ..converters import (
     compute_elapsed,
-    extract_estimated_remaining,
     overview_to_base_fields,
     parse_overview,
     parse_timestamp,
@@ -211,40 +210,6 @@ def test_parse_overview_missing_key_returns_empty_dict() -> None:
     assert parse_overview({}) == {}
 
 
-def test_extract_estimated_remaining_returns_formatted_seconds() -> None:
-    """Integer seconds remaining are formatted as ``HH:MM:SS``."""
-    job = {"latest_metrics": {TQDM_REMAINING_KEY: 125}}  # 2m 5s
-    assert extract_estimated_remaining(job) == "00:02:05"
-
-
-def test_extract_estimated_remaining_float_input() -> None:
-    """Float seconds remaining are also formatted as ``HH:MM:SS``."""
-    job = {"latest_metrics": {TQDM_REMAINING_KEY: 3661.9}}  # 1h 1m 1s
-    assert extract_estimated_remaining(job) == "01:01:01"
-
-
-def test_extract_estimated_remaining_zero_returns_formatted_zero() -> None:
-    """Zero seconds remaining renders as ``00:00:00`` rather than ``None``."""
-    job = {"latest_metrics": {TQDM_REMAINING_KEY: 0}}
-    assert extract_estimated_remaining(job) == "00:00:00"
-
-
-def test_extract_estimated_remaining_missing_key_returns_none() -> None:
-    """A missing ``remaining`` key yields ``None``."""
-    assert extract_estimated_remaining({"latest_metrics": {}}) is None
-
-
-def test_extract_estimated_remaining_none_metrics_returns_none() -> None:
-    """A ``None`` metrics blob yields ``None``."""
-    assert extract_estimated_remaining({"latest_metrics": None}) is None
-
-
-def test_extract_estimated_remaining_negative_value_returns_none() -> None:
-    """Negative remaining values are treated as missing data."""
-    job = {"latest_metrics": {TQDM_REMAINING_KEY: -5}}
-    assert extract_estimated_remaining(job) is None
-
-
 def test_overview_to_base_fields_defaults_type_to_blackbox() -> None:
     """``optimization_type`` defaults to ``blackbox`` when no key is present."""
     fields = overview_to_base_fields({})
@@ -271,8 +236,8 @@ def test_overview_to_base_fields_passes_through_model_name() -> None:
 
 def test_overview_to_base_fields_passes_through_composition() -> None:
     """``composition`` is propagated when present in the overview."""
-    fields = overview_to_base_fields({PAYLOAD_OVERVIEW_COMPOSITION: "workflow"})
-    assert fields["composition"] == "workflow"
+    fields = overview_to_base_fields({PAYLOAD_OVERVIEW_COMPOSITION: "single"})
+    assert fields["composition"] == "single"
 
 
 def test_overview_to_base_fields_composition_defaults_to_none() -> None:

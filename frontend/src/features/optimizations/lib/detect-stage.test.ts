@@ -23,7 +23,6 @@ test("progress events drive the running-job stage", () => {
   assert.equal(at("optimizer_progress"), "optimizing");
   assert.equal(at("baseline_evaluated"), "optimizing");
   assert.equal(at("candidate"), "optimizing");
-  assert.equal(at("dataset_splits_ready"), "baseline");
 });
 
 test("a black-box lane handoff moves the run into refining", () => {

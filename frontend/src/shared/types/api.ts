@@ -208,7 +208,6 @@ export interface OptimizationSummaryResponse {
   completed_at?: string | null;
   elapsed?: string | null;
   elapsed_seconds?: number | null;
-  estimated_remaining?: string | null;
   username?: string | null;
   module_name?: string | null;
   module_kwargs?: Record<string, unknown>;

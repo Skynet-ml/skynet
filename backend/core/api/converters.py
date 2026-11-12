@@ -26,7 +26,6 @@ from ..constants import (
     PAYLOAD_OVERVIEW_TASK_FINGERPRINT,
     PAYLOAD_OVERVIEW_TASK_MODEL,
     PAYLOAD_OVERVIEW_USERNAME,
-    TQDM_REMAINING_KEY,
 )
 from ..models import OptimizationStatus
 
@@ -184,22 +183,6 @@ def job_owner(job_data: dict) -> str | None:
     raw = overview.get(PAYLOAD_OVERVIEW_USERNAME)
     if isinstance(raw, str) and raw.strip():
         return raw.strip().lower()
-    return None
-
-
-def extract_estimated_remaining(job_data: dict) -> str | None:
-    """Read the tqdm-derived remaining-time metric and format it as ``HH:MM:SS``.
-
-    Args:
-        job_data: Raw job dict; the ``latest_metrics`` field is consulted.
-
-    Returns:
-        ``HH:MM:SS`` string, or ``None`` when no usable remaining-time value is present.
-    """
-    metrics = job_data.get("latest_metrics") or {}
-    val = metrics.get(TQDM_REMAINING_KEY)
-    if isinstance(val, (int, float)) and val >= 0:
-        return _seconds_to_hhmmss(val)
     return None
 
 

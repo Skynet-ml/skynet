@@ -29,10 +29,6 @@ export function detectStage(job: OptimizationStatusResponse): PipelineStage {
   // measurement and iterating.
   if (eventNames.includes("candidate") || eventNames.includes("candidate_rejected"))
     return "optimizing";
-  const splits = events.find((e) => e.event === "dataset_splits_ready");
-  // Black-box runs fall back to the val/train cases for their baseline and
-  // always pass through it.
-  if (splits) return "baseline";
 
   // Fallback: use latest_metrics hints (e.g. tqdm from optimizer)
   if (metrics.tqdm_desc || metrics.tqdm_percent != null) return "optimizing";

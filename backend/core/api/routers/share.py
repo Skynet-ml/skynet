@@ -72,7 +72,6 @@ from ...storage.models import (
 from ..auth import AuthenticatedUser, get_authenticated_user, is_admin
 from ..converters import (
     compute_elapsed,
-    extract_estimated_remaining,
     overview_to_base_fields,
     parse_overview,
     parse_timestamp,
@@ -97,7 +96,6 @@ from ._helpers import (
     get_job_no_payload,
     job_owner,
 )
-from .constants import TERMINAL_STATUSES
 from .serve import ServeInferenceEvent, _repo_run, _repo_serve_call, repo_serve_info, require_serving_enabled
 
 logger = logging.getLogger(__name__)
@@ -265,7 +263,6 @@ def _build_status_response(job_store, optimization_id: str, job_data: dict[str, 
     created_at = parse_timestamp(job_data.get("created_at")) or datetime.now(UTC)
     started_at = parse_timestamp(job_data.get("started_at"))
     completed_at = parse_timestamp(job_data.get("completed_at"))
-    est_remaining = None if status in TERMINAL_STATUSES else extract_estimated_remaining(job_data)
 
     latest_metrics = job_data.get("latest_metrics", {})
 
@@ -295,7 +292,6 @@ def _build_status_response(job_store, optimization_id: str, job_data: dict[str, 
         completed_at=completed_at,
         elapsed=elapsed_str,
         elapsed_seconds=elapsed_secs,
-        estimated_remaining=est_remaining,
         **base_fields,
         message=job_data.get("message"),
         latest_metrics=latest_metrics,

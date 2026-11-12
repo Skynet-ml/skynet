@@ -52,7 +52,6 @@ PAYLOAD_OVERVIEW_SOURCE_DATASET_ID = "source_dataset_id"
 # key, so the run sync refuses those bundles (SKY-656).
 PAYLOAD_OVERVIEW_PAYLOAD_KIND = "payload_kind"
 
-PROGRESS_SPLITS_READY = "dataset_splits_ready"
 PROGRESS_BASELINE = "baseline_evaluated"
 PROGRESS_OPTIMIZED = "optimized_evaluated"
 # Fires when the optimizer has finished and the final held-out scoring of
@@ -87,7 +86,6 @@ PROGRESS_LANE_HANDOFF = "lane_handoff"
 # orphan nodes the frontend cannot resolve.
 STRUCTURAL_PROGRESS_EVENTS = frozenset(
     {
-        PROGRESS_SPLITS_READY,
         PROGRESS_BASELINE,
         PROGRESS_OPTIMIZED,
         PROGRESS_EVALUATION_STARTED,
@@ -105,8 +103,8 @@ PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE = "optimization_type"
 OPTIMIZATION_TYPE_BLACKBOX = "blackbox"
 
 # Composition classifier — orthogonal to optimization_type, hoisted to the
-# indexed ``jobs.composition`` column. Every new run stores ``single``; rows of
-# retired DSPy workflow runs may still hold ``"workflow"``.
+# indexed ``jobs.composition`` column. Every run stores ``"single"``: the
+# SKY-656 migration deleted the retired DSPy runs, the only ``"workflow"`` rows.
 PAYLOAD_OVERVIEW_COMPOSITION = "composition"
 COMPOSITION_SINGLE = "single"
 # Tagger bulk auto-tag jobs: claimed by the same worker fleet but run in the
@@ -125,7 +123,6 @@ TOKEN_SOURCE_SUBSCRIPTION = "subscription"
 TQDM_TOTAL_KEY = "tqdm_total"
 TQDM_N_KEY = "tqdm_n"
 TQDM_PERCENT_KEY = "tqdm_percent"
-TQDM_REMAINING_KEY = "tqdm_remaining"
 TQDM_DESC_KEY = "tqdm_desc"
 
 # Every optimizer-progress snapshot key shares this prefix; the job store carries

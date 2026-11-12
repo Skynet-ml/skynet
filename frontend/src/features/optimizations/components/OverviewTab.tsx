@@ -2,9 +2,9 @@
 
 import { ProgressBar } from "@/shared/ui/progress-bar";
 import { PingDot } from "@/shared/ui/ping-dot";
-import { memo, useMemo, type ReactNode } from "react";
+import { memo, useMemo } from "react";
 import dynamic from "next/dynamic";
-import { Gauge, Hourglass, Timer, TrendUp } from "@/shared/ui/icons";
+import { TrendUp } from "@/shared/ui/icons";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/primitives/card";
 import { FadeIn, StaggerContainer, StaggerItem, TiltCard } from "@/shared/ui/motion";
 import { HelpTip } from "@/shared/ui/help-tip";
@@ -17,7 +17,7 @@ import type {
 import type { PipelineStage } from "../constants";
 import { detectStage } from "../lib/detect-stage";
 import { planPipelineStages, stageInPlan } from "../lib/pipeline-plan";
-import { formatBlackboxDelta, formatBlackboxScore, formatDuration } from "@/shared/lib";
+import { formatBlackboxDelta, formatBlackboxScore } from "@/shared/lib";
 import { tip } from "@/shared/lib/tooltips";
 import { TERMS } from "@/shared/lib/terms";
 import type { ScorePoint } from "../lib/extract-scores";
@@ -36,25 +36,6 @@ const ScoreChart = dynamic(() => import("@/shared/ui/score-chart").then((m) => m
   ssr: false,
   loading: () => <div className="h-full" />,
 });
-
-/**
- * One live-telemetry metric: a muted icon + label over the value, sized to fill
- * an equal share of the panel width. The icon inherits the label's muted color
- * so it reads as quiet wayfinding, not decoration.
- */
-function LiveStat({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1">
-      <span className="flex items-center gap-1.5 text-muted-foreground/70">
-        {icon}
-        <span className="truncate text-[0.625rem] font-semibold uppercase tracking-[0.14em] rtl:tracking-normal">
-          {label}
-        </span>
-      </span>
-      <span className="truncate text-sm font-semibold tabular-nums text-foreground">{value}</span>
-    </div>
-  );
-}
 
 function OverviewTabImpl({
   job,
@@ -206,33 +187,6 @@ function OverviewTabImpl({
           if (tqdmPercent == null) return null;
           const tqdmN = metrics.tqdm_n as number | undefined;
           const tqdmTotal = metrics.tqdm_total as number | undefined;
-          const tqdmElapsed = metrics.tqdm_elapsed as number | undefined;
-          const tqdmRemaining = metrics.tqdm_remaining as number | undefined;
-          const tqdmRate = metrics.tqdm_rate as number | undefined;
-          const stats: Array<{ key: string; icon: ReactNode; label: string; value: string }> = [];
-          if (tqdmElapsed != null)
-            stats.push({
-              key: "elapsed",
-              icon: <Timer className="size-3.5 shrink-0" />,
-              label: msg("auto.features.optimizations.components.overviewtab.literal.2"),
-              value: formatDuration(tqdmElapsed),
-            });
-          if (tqdmRemaining != null)
-            stats.push({
-              key: "remaining",
-              icon: <Hourglass className="size-3.5 shrink-0" />,
-              label: msg("auto.features.optimizations.components.overviewtab.literal.3"),
-              value: formatDuration(Number(tqdmRemaining)),
-            });
-          if (tqdmRate != null)
-            stats.push({
-              key: "rate",
-              icon: <Gauge className="size-3.5 shrink-0" />,
-              label: msg("auto.features.optimizations.components.overviewtab.literal.4"),
-              value: formatMsg("auto.features.optimizations.components.overviewtab.template.5", {
-                p1: tqdmRate.toFixed(2),
-              }),
-            });
 
           return (
             <FadeIn>
@@ -252,13 +206,6 @@ function OverviewTabImpl({
                   </span>
                 </div>
                 <ProgressBar value={tqdmPercent} className="mt-2" />
-                {stats.length > 0 && (
-                  <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-4 border-t border-border/70 pt-3.5 sm:grid-cols-3">
-                    {stats.map((s) => (
-                      <LiveStat key={s.key} icon={s.icon} label={s.label} value={s.value} />
-                    ))}
-                  </div>
-                )}
               </div>
             </FadeIn>
           );

@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 import pytest
 from fastapi import HTTPException
 
-from ...constants import TQDM_REMAINING_KEY
 from ...models import OptimizationStatus
 from ...storage.usage import StorageUsage
 from ..errors import DomainError
@@ -122,47 +121,6 @@ def test_build_summary_computes_improvement() -> None:
     assert summary.baseline_test_metric == 52.89
     assert summary.optimized_test_metric == 75.9
     assert summary.metric_improvement == pytest.approx(23.01, abs=1e-2)
-
-
-def test_build_summary_estimated_remaining_set_for_running_job() -> None:
-    """A running job exposes a formatted ``estimated_remaining`` value."""
-    now = datetime.now(UTC).isoformat()
-    job_data = {
-        "optimization_id": "r1",
-        "status": "running",
-        "created_at": now,
-        "started_at": now,
-        "completed_at": None,
-        "payload_overview": {},
-        "result": None,
-        "latest_metrics": {TQDM_REMAINING_KEY: 90},
-        "progress_count": 0,
-        "log_count": 0,
-    }
-    summary = build_summary(job_data)
-
-    assert summary.estimated_remaining == "00:01:30"
-
-
-def test_build_summary_estimated_remaining_absent_for_finished_job() -> None:
-    """A finished job suppresses ``estimated_remaining`` even when metrics linger."""
-    now = datetime.now(UTC).isoformat()
-    fixture_result = {"baseline_test_metric": 52.89, "optimized_test_metric": 75.9}
-    job_data = {
-        "optimization_id": "r2",
-        "status": "success",
-        "created_at": now,
-        "started_at": now,
-        "completed_at": now,
-        "payload_overview": {},
-        "result": fixture_result,
-        "latest_metrics": {TQDM_REMAINING_KEY: 999},
-        "progress_count": 0,
-        "log_count": 0,
-    }
-    summary = build_summary(job_data)
-
-    assert summary.estimated_remaining is None
 
 
 class _StorageJobStore:

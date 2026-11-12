@@ -16,11 +16,6 @@ class TestProgressEventKeys:
 
     # These exact strings cross the subprocess→parent boundary; renaming silently breaks the worker.
 
-    def test_progress_splits_ready_value_and_type(self) -> None:
-        """``PROGRESS_SPLITS_READY`` is the string ``"dataset_splits_ready"``."""
-        assert C.PROGRESS_SPLITS_READY == "dataset_splits_ready"
-        assert isinstance(C.PROGRESS_SPLITS_READY, str)
-
     def test_progress_baseline_value_and_type(self) -> None:
         """``PROGRESS_BASELINE`` is the string ``"baseline_evaluated"``."""
         assert C.PROGRESS_BASELINE == "baseline_evaluated"
@@ -53,11 +48,6 @@ class TestProgressEventKeys:
 
 class TestTqdmKeys:
     """Pin the tqdm wire keys read by the API layer."""
-
-    def test_tqdm_remaining_key_value_and_type(self) -> None:
-        """``TQDM_REMAINING_KEY`` is the string ``"tqdm_remaining"``."""
-        assert C.TQDM_REMAINING_KEY == "tqdm_remaining"
-        assert isinstance(C.TQDM_REMAINING_KEY, str)
 
     def test_tqdm_total_key_value_and_type(self) -> None:
         """``TQDM_TOTAL_KEY`` is the string ``"tqdm_total"``."""

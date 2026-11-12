@@ -745,7 +745,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
         ),
         job_type: str | None = Query(
             default=None,
-            description="Job-type bucket filter: 'run', 'blackbox' or 'workflow'.",
+            description="Job-type bucket filter: 'blackbox'.",
         ),
         module: str | None = Query(default=None, description="Exact-match module name filter"),
         improvement_min: float | None = Query(
@@ -787,7 +787,7 @@ def create_analytics_router(*, job_store) -> APIRouter:
             include_shared: Union in runs shared with ``username``.
             owner: Restrict the aggregation to runs owned by this username.
             access: Restrict to a caller access tier (mine/owner/editor/viewer).
-            job_type: Restrict to one job-type bucket (run/blackbox/workflow).
+            job_type: Restrict to one job-type bucket (blackbox).
             module: Exact-match module name filter.
             improvement_min: Inclusive lower bound on improvement (points).
             improvement_max: Exclusive upper bound on improvement (points).

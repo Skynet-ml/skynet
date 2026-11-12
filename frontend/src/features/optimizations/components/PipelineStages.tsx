@@ -65,7 +65,6 @@ export function computeStageTimestamps(
 ): Partial<Record<PipelineStage, StageTs>> {
   const stageMap: Record<string, PipelineStage> = {
     validation_passed: "validating",
-    dataset_splits_ready: "splitting",
     baseline_evaluated: "baseline",
     optimizer_progress: "optimizing",
     evaluation_started: "optimizing",

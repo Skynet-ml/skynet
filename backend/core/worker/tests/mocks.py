@@ -40,8 +40,8 @@ REAL_RUN_PAYLOAD: dict = {
 }
 
 _PROGRESS = {
-    "event": "dataset_splits_ready",
-    "metrics": {"test_examples": 23, "train_examples": 105, "val_examples": 22},
+    "event": "optimizer_progress",
+    "metrics": {"tqdm_desc": "scorer runs", "tqdm_total": 12, "tqdm_n": 3, "tqdm_percent": 25.0},
     "timestamp": "2026-04-13T15:14:55.004686",
 }
 
@@ -55,7 +55,7 @@ def make_progress_event(
 
     Args:
         phase: Phase label.
-        metrics: Metric snapshot, defaults to a copy of a recorded first event.
+        metrics: Metric snapshot, defaults to a copy of a sample optimizer-progress event.
         timestamp: ISO 8601 timestamp string.
 
     Returns:

@@ -685,13 +685,13 @@ def test_set_payload_overview_without_username_preserves_column(store: SQLiteJob
 def test_set_payload_overview_hoists_composition_column(store: SQLiteJobStore) -> None:
     """The ``composition`` overview key is hoisted to the indexed job column."""
     store.create_job("o5")
-    store.set_payload_overview("o5", {"composition": "workflow"})
+    store.set_payload_overview("o5", {"composition": "single"})
     session = store._get_session()
     try:
         composition = session.query(JobModel.composition).filter(JobModel.optimization_id == "o5").scalar()
     finally:
         session.close()
-    assert composition == "workflow"
+    assert composition == "single"
 
 
 def test_list_jobs_no_filter_returns_all(store: SQLiteJobStore) -> None:

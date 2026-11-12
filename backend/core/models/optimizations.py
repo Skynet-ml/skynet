@@ -33,12 +33,11 @@ class _JobResponseBase(BaseModel):
     completed_at: datetime | None = None
     elapsed: str | None = None
     elapsed_seconds: float | None = None
-    estimated_remaining: str | None = None
 
     username: str | None = None
     module_name: str | None = None
-    # "single" (one atomic module) vs "workflow" (a DAG of module nodes). Derived
-    # at submit from module_name; null on rows submitted before this field existed.
+    # Always "single" since SKY-656 deleted the DSPy workflow runs. Set at
+    # submit; null on rows submitted before this field existed.
     composition: Composition | None = None
     module_kwargs: dict[str, Any] = Field(default_factory=dict)
     optimizer_name: str | None = None

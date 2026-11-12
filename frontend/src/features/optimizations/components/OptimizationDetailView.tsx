@@ -14,7 +14,6 @@ import {
   Code,
   Terminal,
   TrendUp,
-  Timer,
   Copy,
   Gear,
   ArrowCounterClockwise,
@@ -856,13 +855,6 @@ export function OptimizationDetailView({
                   completedAt={completedAt}
                   elapsedSeconds={elapsedSeconds}
                 />
-                {isActive && job.estimated_remaining && (
-                  <span className="flex items-center gap-1.5">
-                    <Timer className="size-3.5" />
-                    {msg("auto.app.optimizations.id.page.3")}
-                    {job.estimated_remaining}
-                  </span>
-                )}
                 {showStorageLink && !isPhone && (
                   <Link
                     href="/storage"

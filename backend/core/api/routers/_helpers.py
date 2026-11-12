@@ -40,7 +40,6 @@ from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
 from ..auth import AuthenticatedUser, is_admin
 from ..converters import (
     compute_elapsed,
-    extract_estimated_remaining,
     job_owner,
     overview_to_base_fields,
     parse_overview,
@@ -56,7 +55,6 @@ from ..sharing_access import (
     list_grants_for_user,
     role_rank,
 )
-from .constants import TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -873,10 +871,6 @@ def build_summary(job_data: dict) -> OptimizationSummaryResponse:
     overview = parse_overview(job_data)
     job_status = status_to_job_status(job_data.get("status", "pending"))
 
-    est_remaining = None
-    if job_status not in TERMINAL_STATUSES:
-        est_remaining = extract_estimated_remaining(job_data)
-
     result_data = job_data.get("result")
     latest_metrics = job_data.get("latest_metrics", {})
     baseline = None
@@ -901,7 +895,6 @@ def build_summary(job_data: dict) -> OptimizationSummaryResponse:
         completed_at=completed_at,
         elapsed=elapsed_str,
         elapsed_seconds=elapsed_secs,
-        estimated_remaining=est_remaining,
         **overview_to_base_fields(overview),
         seed=overview.get(PAYLOAD_OVERVIEW_SEED),
         latest_metrics=latest_metrics,
