@@ -360,9 +360,7 @@ function NotStartedView({
                   ? "continuous_tab.waiting.description"
                   : plan.pause_reason === "no_test_split"
                     ? "continuous_tab.no_test_split.description"
-                    : plan.pause_reason === "dspy_retired"
-                      ? "optimization.legacy_dspy.notice"
-                      : "continuous_tab.ended.description",
+                    : "continuous_tab.ended.description",
               )}
             </p>
           </div>

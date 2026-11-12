@@ -123,23 +123,15 @@ function VerbosityControl({
 
 export function LogsTab({
   logs,
-  pairNames,
   liveStatus = "idle",
 }: {
   logs: OptimizationLogEntry[];
-  pairNames?: Record<number, string>;
   liveStatus?: RunLogStreamStatus;
 }) {
-  const showPairCol = !!pairNames && Object.keys(pairNames).length > 0;
   const showSourceCol = useMemo(() => logs.some((l) => !!l.source), [logs]);
   const showCandidateCol = useMemo(() => logs.some((l) => !!l.candidate), [logs]);
   const showCaseCol = useMemo(() => logs.some((l) => !!l.case), [logs]);
-  const columnCount =
-    4 +
-    Number(showPairCol) +
-    Number(showSourceCol) +
-    Number(showCandidateCol) +
-    Number(showCaseCol);
+  const columnCount = 4 + Number(showSourceCol) + Number(showCandidateCol) + Number(showCaseCol);
   const [openFields, setOpenFields] = useState<ReadonlySet<string>>(() => new Set());
   const toggleFields = (key: string) =>
     setOpenFields((cur) => {
@@ -175,11 +167,7 @@ export function LogsTab({
         const val =
           col === "timestamp"
             ? logTimeBucket(l.timestamp)
-            : col === "pair_index"
-              ? l.pair_index != null
-                ? String(l.pair_index)
-                : "—"
-              : String((l as unknown as Record<string, unknown>)[col] ?? "");
+            : String((l as unknown as Record<string, unknown>)[col] ?? "");
         if (!allowed.has(val)) return false;
       }
       return true;
@@ -187,11 +175,7 @@ export function LogsTab({
     const collLocale = getActiveIntlLocale();
     result = [...result].sort((a, b) => {
       let cmp: number;
-      if (sortKey === "pair_index") {
-        // Numeric column — a direct subtraction beats spinning up the Intl
-        // collator on every comparison across a long log table.
-        cmp = (a.pair_index ?? -Infinity) - (b.pair_index ?? -Infinity);
-      } else if (sortKey === "timestamp") {
+      if (sortKey === "timestamp") {
         // ISO-8601 timestamps order correctly under plain string comparison,
         // so skip the collator on this hot path too.
         const av = String(a.timestamp ?? "");
@@ -222,20 +206,6 @@ export function LogsTab({
       .filter(Boolean)
       .sort()
       .map((v) => ({ value: v, label: v }));
-    const pairOpts = showPairCol
-      ? [...new Set(logs.map((l) => (l.pair_index != null ? String(l.pair_index) : "—")))]
-          .sort()
-          .map((v) => ({
-            value: v,
-            label:
-              v === "—"
-                ? msg("auto.features.optimizations.components.logstab.literal.1")
-                : (pairNames?.[parseInt(v)] ??
-                  formatMsg("auto.features.optimizations.components.logstab.template.1", {
-                    p1: parseInt(v) + 1,
-                  })),
-          }))
-      : [];
     return {
       level: unique("level"),
       logger: unique("logger"),
@@ -243,9 +213,8 @@ export function LogsTab({
       candidate: unique("candidate"),
       case: unique("case"),
       timestamp: timestampBuckets,
-      pair_index: pairOpts,
     };
-  }, [logs, showPairCol, pairNames]);
+  }, [logs]);
 
   // Follow the newest edge while the run streams: the top when newest-first,
   // the bottom when oldest-first. Scrolled away, new rows only bump a counter.
@@ -302,7 +271,6 @@ export function LogsTab({
               disabled={filtered.length === 0}
               getData={() => {
                 const columns = [
-                  ...(showPairCol ? ["pair_index"] : []),
                   "timestamp",
                   "level",
                   ...(showSourceCol ? ["source"] : []),
@@ -315,15 +283,6 @@ export function LogsTab({
                 ];
                 const rows = filtered.map((log) => {
                   const rec: Record<string, unknown> = {};
-                  if (showPairCol) {
-                    rec.pair_index =
-                      log.pair_index != null
-                        ? (pairNames?.[log.pair_index] ??
-                          formatMsg("auto.features.optimizations.components.logstab.template.3", {
-                            p1: log.pair_index + 1,
-                          }))
-                        : "—";
-                  }
                   rec.timestamp = formatLogTimestamp(log.timestamp);
                   rec.level = log.level;
                   if (showSourceCol) rec.source = log.source ?? "";
@@ -385,22 +344,13 @@ export function LogsTab({
               >
                 <Table className="w-full table-fixed">
                   <colgroup>
-                    {showPairCol && (
-                      <col
-                        data-collapse="lg"
-                        style={{ width: logResize.widths["pair_index"] ?? "12%" }}
-                      />
-                    )}
                     <col
                       data-collapse="md"
                       style={{
-                        width: logResize.widths["timestamp"] ?? (showPairCol ? "13%" : "15%"),
+                        width: logResize.widths["timestamp"] ?? "15%",
                       }}
                     />
-                    <col
-                      data-collapse="sm"
-                      style={{ width: logResize.widths["level"] ?? (showPairCol ? "10%" : "12%") }}
-                    />
+                    <col data-collapse="sm" style={{ width: logResize.widths["level"] ?? "12%" }} />
                     {showSourceCol && (
                       <col
                         data-collapse="md"
@@ -409,7 +359,7 @@ export function LogsTab({
                     )}
                     <col
                       data-collapse="lg"
-                      style={{ width: logResize.widths["logger"] ?? (showPairCol ? "14%" : "17%") }}
+                      style={{ width: logResize.widths["logger"] ?? "17%" }}
                     />
                     {showCandidateCol && (
                       <col
@@ -424,24 +374,6 @@ export function LogsTab({
                   </colgroup>
                   <TableHeader>
                     <TableRow>
-                      {showPairCol && (
-                        <ColumnHeader
-                          label={msg("auto.features.optimizations.components.logstab.literal.2")}
-                          sortKey="pair_index"
-                          currentSort={sortKey}
-                          sortDir={sortDir}
-                          onSort={toggleSort}
-                          filterCol="pair_index"
-                          filterOptions={filterOptions.pair_index}
-                          filters={logFilters.filters}
-                          onFilter={logFilters.setColumnFilter}
-                          openFilter={logFilters.openFilter}
-                          setOpenFilter={logFilters.setOpenFilter}
-                          width={logResize.widths["pair_index"]}
-                          onResize={logResize.setColumnWidth}
-                          collapse="lg"
-                        />
-                      )}
                       <ColumnHeader
                         label={msg("auto.features.optimizations.components.logstab.literal.3")}
                         sortKey="timestamp"
@@ -579,32 +511,6 @@ export function LogsTab({
                               }
                             }}
                           >
-                            {showPairCol && (
-                              <TableCell
-                                collapse="lg"
-                                className="text-xs font-mono truncate overflow-hidden"
-                                style={
-                                  logResize.widths["pair_index"]
-                                    ? {
-                                        width: logResize.widths["pair_index"],
-                                        maxWidth: logResize.widths["pair_index"],
-                                      }
-                                    : undefined
-                                }
-                              >
-                                {log.pair_index != null ? (
-                                  <Badge variant="secondary" size="sm" className="font-mono">
-                                    {pairNames?.[log.pair_index] ??
-                                      formatMsg(
-                                        "auto.features.optimizations.components.logstab.template.3",
-                                        { p1: log.pair_index + 1 },
-                                      )}
-                                  </Badge>
-                                ) : (
-                                  <span className="text-muted-foreground/40">—</span>
-                                )}
-                              </TableCell>
-                            )}
                             <TableCell
                               collapse="md"
                               className="text-xs font-mono text-muted-foreground truncate overflow-hidden"
@@ -718,17 +624,6 @@ export function LogsTab({
                               title={clipText(log.message)}
                             >
                               <div className="flex flex-wrap items-center gap-x-2">
-                                {showPairCol && log.pair_index != null && (
-                                  <TableInline at="lg" className="mb-1">
-                                    <Badge variant="secondary" size="sm" className="font-mono">
-                                      {pairNames?.[log.pair_index] ??
-                                        formatMsg(
-                                          "auto.features.optimizations.components.logstab.template.3",
-                                          { p1: log.pair_index + 1 },
-                                        )}
-                                    </Badge>
-                                  </TableInline>
-                                )}
                                 <TableInline at="md" className="mb-1" dir="ltr">
                                   {formatLogTimestamp(log.timestamp)}
                                 </TableInline>

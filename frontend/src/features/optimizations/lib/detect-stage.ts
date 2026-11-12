@@ -2,7 +2,7 @@
  * Pipeline-stage detection for an in-progress optimization.
  *
  * Looks at a job's progress event stream + latest metrics to classify
- * what step of the DSPy pipeline it is currently executing.
+ * what step of the pipeline it is currently executing.
  */
 import type { OptimizationStatusResponse } from "@/shared/types/api";
 import type { PipelineStage } from "../constants";
@@ -15,10 +15,8 @@ export function detectStage(job: OptimizationStatusResponse): PipelineStage {
   const eventNames = events.map((e) => e.event);
   const metrics = job.latest_metrics ?? {};
 
-  // Check progress events (works for both single-run and grid search)
-  if (eventNames.includes("optimized_evaluated") || eventNames.includes("grid_pair_completed"))
-    return "done";
-  // Every flow (DSPy, react, black-box) fires this once its optimizer is done
+  if (eventNames.includes("optimized_evaluated")) return "done";
+  // Every flow fires this once its optimizer is done
   // and the final held-out scoring of the winner begins.
   if (eventNames.includes("evaluation_started")) return "evaluating";
   // The black-box auto strategy hands its best explore candidate to a GEPA
@@ -26,12 +24,10 @@ export function detectStage(job: OptimizationStatusResponse): PipelineStage {
   if (eventNames.includes("lane_handoff")) return "refining";
   if (eventNames.includes("optimizer_progress")) return "optimizing";
   if (eventNames.includes("baseline_evaluated")) return "optimizing";
-  if (eventNames.includes("grid_pair_started")) return "baseline";
   // Reflective optimizers (GEPA) and black-box engines stream candidate-level
   // events instead of tqdm "optimizer_progress" bars. Once the seed is scored
   // on the valset (valset_outputs) or any candidate is recorded, the run is
-  // past baseline measurement and iterating. Checked after the grid markers so
-  // per-pair grid jobs still report their own stage.
+  // past baseline measurement and iterating.
   if (
     eventNames.includes("valset_outputs") ||
     eventNames.includes("candidate") ||
@@ -39,56 +35,13 @@ export function detectStage(job: OptimizationStatusResponse): PipelineStage {
   )
     return "optimizing";
   const splits = events.find((e) => e.event === "dataset_splits_ready");
-  if (splits) {
-    // DSPy runs only measure a baseline on a test split, so without one the
-    // optimizer starts right after splitting. Black-box runs fall back to the
-    // val/train cases for their baseline and always pass through it.
-    if (job.optimization_type !== "blackbox" && splits.metrics?.test_examples === 0)
-      return "optimizing";
-    return "baseline";
-  }
+  // Black-box runs fall back to the val/train cases for their baseline and
+  // always pass through it.
+  if (splits) return "baseline";
 
   // Fallback: use latest_metrics hints (e.g. tqdm from optimizer)
   if (metrics.tqdm_desc || metrics.tqdm_percent != null) return "optimizing";
 
   if (job.status === "running") return "splitting";
-  return "validating";
-}
-
-/**
- * Pair-scoped stage detection for grid_search jobs. Uses events carrying the
- * matching `pair_index` (grid_pair_started/completed/failed, baseline_evaluated,
- * optimized_evaluated); falls back to the job-level stage for events emitted
- * before any pair started (validation, dataset splits).
- */
-export function detectPairStage(job: OptimizationStatusResponse, pairIndex: number): PipelineStage {
-  // Authoritative signal: if the pair result itself has a final score, an
-  // artifact, or an error recorded, the pair is done — regardless of
-  // whether the progress-event stream survived (events can be dropped
-  // when the job is reloaded from storage without an active worker).
-  const pair = job.grid_result?.pair_results?.find((p) => p.pair_index === pairIndex);
-  if (pair && (pair.error || pair.optimized_test_metric != null || pair.program_artifact)) {
-    return "done";
-  }
-
-  const events = job.progress_events ?? [];
-  const pairEvents = events.filter((e) => {
-    const pi = e.metrics?.pair_index;
-    return typeof pi === "number" && pi === pairIndex;
-  });
-  const pairEventNames = pairEvents.map((e) => e.event);
-
-  if (pairEventNames.includes("grid_pair_failed")) return "done";
-  if (pairEventNames.includes("grid_pair_completed")) return "done";
-  if (pairEventNames.includes("optimized_evaluated")) return "evaluating";
-  if (pairEventNames.includes("evaluation_started")) return "evaluating";
-  if (pairEventNames.includes("baseline_evaluated")) return "optimizing";
-  if (pairEventNames.includes("grid_pair_started")) return "baseline";
-
-  // Pair hasn't started yet — reflect the job-level pre-pair stage.
-  const eventNames = events.map((e) => e.event);
-  if (eventNames.includes("dataset_splits_ready")) return "baseline";
-  if (eventNames.includes("validation_passed")) return "splitting";
-  if (job.status === "validating") return "validating";
   return "validating";
 }

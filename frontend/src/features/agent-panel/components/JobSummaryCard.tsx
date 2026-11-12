@@ -6,7 +6,7 @@ import { ArrowUpRight } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
 import { TERMS } from "@/shared/lib/terms";
-import { formatPercent, modelDisplayName, moduleLabel } from "@/shared/lib/formatters";
+import { formatPercent, modelDisplayName } from "@/shared/lib/formatters";
 import { getStatusLabel } from "@/shared/constants/job-status";
 import { StatusBadge } from "@/shared/ui/status-badge";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
@@ -71,7 +71,7 @@ export function JobSummaryCard({ call }: JobSummaryCardProps) {
           {job.name?.trim() || job.optimization_id.slice(0, 8)}
         </span>
         <StatusBadge status={job.status} compact />
-        <TypeBadge type={job.optimization_type} />
+        <TypeBadge />
       </div>
 
       {hasScore && (
@@ -93,11 +93,6 @@ export function JobSummaryCard({ call }: JobSummaryCardProps) {
       )}
 
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-        <StatTile
-          label={msg("auto.features.agent.panel.components.resultcards.module")}
-          value={job.module_name ? moduleLabel(job.module_name) : null}
-          valueDir="auto"
-        />
         <StatTile label={TERMS.optimizer} value={job.optimizer_name} valueDir="auto" />
         <StatTile
           label={TERMS.model}

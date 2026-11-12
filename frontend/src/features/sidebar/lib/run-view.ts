@@ -3,7 +3,6 @@ import { isActiveStatus } from "@/shared/constants/job-status";
 
 export type ActivityWindow = "all" | "7" | "30" | "90";
 export type StatusFilter = "all" | "active" | "success" | "stopped";
-export type TypeFilter = "all" | "run" | "grid_search" | "blackbox";
 /** Runs of a continuous plan (automations) against one-off runs. */
 export type AutomationFilter = "all" | "automated" | "manual";
 export type GroupBy = "folder" | "none";
@@ -13,7 +12,6 @@ export type SortBy = "recent" | "name";
 export interface RunView {
   activity: ActivityWindow;
   status: StatusFilter;
-  type: TypeFilter;
   automation: AutomationFilter;
   group: GroupBy;
   sort: SortBy;
@@ -22,7 +20,6 @@ export interface RunView {
 export const DEFAULT_RUN_VIEW: RunView = {
   activity: "all",
   status: "all",
-  type: "all",
   automation: "all",
   group: "folder",
   sort: "recent",
@@ -31,7 +28,6 @@ export const DEFAULT_RUN_VIEW: RunView = {
 const VIEW_OPTIONS: { [K in keyof RunView]: ReadonlyArray<RunView[K]> } = {
   activity: ["all", "7", "30", "90"],
   status: ["all", "active", "success", "stopped"],
-  type: ["all", "run", "grid_search", "blackbox"],
   automation: ["all", "automated", "manual"],
   group: ["folder", "none"],
   sort: ["recent", "name"],
@@ -57,12 +53,7 @@ export function parseRunView(raw: string | null): RunView {
 
 /** True when any filter (not grouping or sorting) narrows the list. */
 export function isFiltered(view: RunView): boolean {
-  return (
-    view.activity !== "all" ||
-    view.status !== "all" ||
-    view.type !== "all" ||
-    view.automation !== "all"
-  );
+  return view.activity !== "all" || view.status !== "all" || view.automation !== "all";
 }
 
 /** Display name a run row shows, also used to sort by name. */
@@ -90,7 +81,6 @@ export function applyRunView(
   const cutoff = view.activity === "all" ? null : now - Number(view.activity) * 86_400_000;
   const kept = jobs.filter((job) => {
     if (!matchesStatus(job.status, view.status)) return false;
-    if (view.type !== "all" && (job.optimization_type ?? "run") !== view.type) return false;
     if (view.automation !== "all" && !!job.automated !== (view.automation === "automated")) {
       return false;
     }

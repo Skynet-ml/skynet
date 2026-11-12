@@ -502,7 +502,7 @@ test("the local usage note says nothing was billed only for a subscription run",
     unpriced_calls: 0,
     ...patch,
   });
-  const done = { final: true, pairIndex: null };
+  const done = { final: true };
   const subscription = [row(), row({ calls: 3 })];
   const ownKey = [row({ billing: "byok", charged_cents: 1, provider_cents: 14 })];
   const mixed = [row(), ...ownKey];
@@ -527,11 +527,10 @@ test("the local subscription note waits for a final whole-run view", () => {
     calls: 12,
     unpriced_calls: 0,
   };
-  assert.equal(usageCostNoteKey(true, [row], { final: false, pairIndex: null }), null);
-  assert.equal(usageCostNoteKey(true, [row], { final: true, pairIndex: 0 }), null);
+  assert.equal(usageCostNoteKey(true, [row], { final: false }), null);
   const ownKey = { ...row, billing: "byok", provider_cents: 14 };
   assert.equal(
-    usageCostNoteKey(true, [ownKey], { final: false, pairIndex: 0 }),
+    usageCostNoteKey(true, [ownKey], { final: false }),
     "usage_tab.api_rates_note_local",
   );
 });
@@ -545,7 +544,7 @@ test("a final subscription run with an API-rate amount gets the API-rates subscr
     calls: 12,
     unpriced_calls: 0,
   };
-  const done = { final: true, pairIndex: null };
+  const done = { final: true };
   assert.equal(usageCostNoteKey(true, [row], done), "usage_tab.subscription_api_rates_note_local");
   // A row without calls needs no price.
   assert.equal(
@@ -556,8 +555,7 @@ test("a final subscription run with an API-rate amount gets the API-rates subscr
     usageCostNoteKey(true, [{ ...row, api_rate_cents: null }], done),
     "usage_tab.subscription_note_local",
   );
-  assert.equal(usageCostNoteKey(true, [row], { final: false, pairIndex: null }), null);
-  assert.equal(usageCostNoteKey(true, [row], { final: true, pairIndex: 1 }), null);
+  assert.equal(usageCostNoteKey(true, [row], { final: false }), null);
   assert.equal(usageCostNoteKey(false, [row], done), null);
 });
 
@@ -571,7 +569,7 @@ test("a subscription run with an unpriced model shows no partial API-rate amount
     unpriced_calls: 0,
   };
   const unpriced = { ...priced, api_rate_cents: null, calls: 4 };
-  const done = { final: true, pairIndex: null };
+  const done = { final: true };
   assert.equal(
     usageCostNoteKey(true, [priced, unpriced], done),
     "usage_tab.subscription_note_local",

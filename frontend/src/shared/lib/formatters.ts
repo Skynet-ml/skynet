@@ -162,23 +162,6 @@ export function formatId(id: string): string {
   return id;
 }
 
-/**
- * Friendly label for a DSPy module name. The backend may store either the
- * short alias ("cot") or the resolved dotted path ("dspy.ChainOfThought"), so
- * match on keywords rather than exact strings.
- * @example "dspy.ChainOfThought" → "CoT", "react" → "ReAct"
- */
-export function moduleLabel(raw: string | null | undefined): string {
-  if (!raw) return "—";
-  const v = raw.toLowerCase();
-  if (v === "workflow") return "Workflow";
-  if (v.includes("react")) return "ReAct";
-  if (v.includes("chain") || v === "cot") return "CoT";
-  if (v.includes("predict")) return "Predict";
-  if (v.includes("flex")) return "Flex";
-  return raw;
-}
-
 // Catalog-aware: pass the catalog to show its human `display_name`.
 export { modelDisplayName } from "@/shared/lib/model-provider";
 

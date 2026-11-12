@@ -6,11 +6,8 @@ import type {
   ScorerDependencyLock,
   BlackboxEngineCatalogResponse,
   ColumnMapping,
-  EvalExampleResult,
-  GridSearchResult,
   ModelCatalogResponse,
   ModelPrivacySettings,
-  OptimizationDatasetResponse,
   OptimizationPayloadResponse,
   OptimizationSubmissionResponse,
   OptimizationStatusResponse,
@@ -25,7 +22,6 @@ import type {
   ValidateCodeResponse,
   ValidateDatasetRequest,
   ValidateDatasetResponse,
-  WorkflowDryRunResponse,
 } from "@/shared/types/api";
 import type {
   DataMode,
@@ -557,13 +553,6 @@ export function postTelemetry(body: unknown): void {
       /* give up: telemetry never raises to the caller */
     }
   }
-}
-
-export interface WorkflowDryRunStreamHandlers {
-  onToken: (field: string, chunk: string) => void;
-  onFinal: (result: WorkflowDryRunResponse) => void;
-  onError: (message: string) => void;
-  signal?: AbortSignal;
 }
 
 /** Queue a repository run on `/optimize`. */
@@ -2228,7 +2217,6 @@ export interface DashboardAnalyticsJob {
   elapsed_seconds?: number | null;
   dataset_rows?: number | null;
   optimization_type?: string | null;
-  best_pair_label?: string | null;
   created_at?: string | null;
 }
 
@@ -2293,8 +2281,6 @@ export interface DashboardAnalytics {
   best_improvement: number | null;
   avg_runtime_seconds: number | null;
   total_dataset_rows: number;
-  total_pairs_run: number;
-  grid_search_count: number;
   single_run_count: number;
   improvement_histogram: DashboardAnalyticsRangeBucket[];
   runtime_histogram: DashboardAnalyticsRangeBucket[];
@@ -2391,10 +2377,9 @@ export function getJob(
   );
 }
 
-/** A run's charges and model activity, pre-aggregated per role, model, stage, pair and candidate. */
-export function getRunUsage(optimizationId: string, pairIndex?: number | null) {
-  const qs = pairIndex == null ? "" : `?pair_index=${pairIndex}`;
-  return request<RunUsage>(`/optimizations/${encodeURIComponent(optimizationId)}/usage${qs}`);
+/** A run's charges and model activity, pre-aggregated per role, model, stage and candidate. */
+export function getRunUsage(optimizationId: string) {
+  return request<RunUsage>(`/optimizations/${encodeURIComponent(optimizationId)}/usage`);
 }
 
 /** Continuous optimization of one run: its plan (or null) and whether one can start. */
@@ -2475,14 +2460,6 @@ export function getOptimizationPayload(optimizationId: string, source?: ApiSourc
   );
 }
 
-export function getOptimizationDataset(optimizationId: string, source?: ApiSource) {
-  return request<OptimizationDatasetResponse>(
-    `/optimizations/${optimizationId}/dataset`,
-    undefined,
-    source,
-  );
-}
-
 // A repository run's pinned commit never changes, so its tree and files are
 // cached for the page's lifetime.
 const REPOSITORY_CACHE_MS = Number.POSITIVE_INFINITY;
@@ -2504,13 +2481,6 @@ export function getRepositoryFile(optimizationId: string, path: string, source?:
     REPOSITORY_CACHE_MS,
     source,
   );
-}
-
-export function getTestResults(optimizationId: string, source?: ApiSource) {
-  return request<{
-    baseline: EvalExampleResult[];
-    optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/test-results`, undefined, source);
 }
 
 /**
@@ -2630,8 +2600,6 @@ export interface SharedOptimizationData {
   owner: string | null;
   status: OptimizationStatusResponse;
   payload: Record<string, unknown>;
-  dataset: OptimizationDatasetResponse | null;
-  test_results: { baseline: EvalExampleResult[]; optimized: EvalExampleResult[] } | null;
   serve_info: ServeInfoResponse | null;
 }
 
@@ -3299,15 +3267,6 @@ export async function deleteJob(optimizationId: string) {
   return res;
 }
 
-export async function deleteGridPair(optimizationId: string, pairIndex: number) {
-  const res = await request<GridSearchResult>(
-    `/optimizations/${optimizationId}/pair/${pairIndex}`,
-    { method: "DELETE" },
-  );
-  invalidateCache("/optimizations");
-  return res;
-}
-
 export async function bulkDeleteJobs(optimizationIds: string[]) {
   const res = await request<{
     deleted: string[];
@@ -3689,9 +3648,6 @@ export interface SidebarJobItem {
   created_at?: string | null;
   pinned?: boolean;
   optimization_type?: string | null;
-  total_pairs?: number | null;
-  completed_pairs?: number | null;
-  failed_pairs?: number | null;
   /** True when this run stopped mid-optimization and can be resumed in place; drives Resume vs Restart. */
   resumable?: boolean;
   /** True when this running job has a checkpoint and can pause without losing progress. */
@@ -3966,17 +3922,6 @@ export function setServingEnabled(optimizationId: string, enabled: boolean, sour
   );
 }
 
-export function getPairServeInfo(optimizationId: string, pairIndex: number) {
-  return request<ServeInfoResponse>(`/serve/${optimizationId}/pair/${pairIndex}/info`);
-}
-
-export function getPairTestResults(optimizationId: string, pairIndex: number, source?: ApiSource) {
-  return request<{
-    baseline: EvalExampleResult[];
-    optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/pair/${pairIndex}/test-results`, undefined, source);
-}
-
 export function serveProgram(
   optimizationId: string,
   inputs: Record<string, unknown>,
@@ -3992,20 +3937,6 @@ export function serveProgram(
     },
     source,
   );
-}
-
-/** Run inference through one grid-search pair (non-streaming). */
-export function servePairProgram(
-  optimizationId: string,
-  pairIndex: number,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-) {
-  return request<ServeResponse>(`/serve/${optimizationId}/pair/${pairIndex}`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
 }
 
 /** Deliver a message into the running turn opened with `steerKey`; resolves

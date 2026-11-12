@@ -386,7 +386,7 @@ type UsageNoteRow = Pick<
 export function usageCostNoteKey(
   localMode: boolean,
   rows: readonly UsageNoteRow[],
-  view: { final: boolean; pairIndex: number | null },
+  view: { final: boolean },
 ):
   | "usage_tab.api_rates_note_local"
   | "usage_tab.subscription_note_local"
@@ -394,7 +394,7 @@ export function usageCostNoteKey(
   | null {
   if (!localMode) return null;
   if (rows.some((r) => r.provider_cents != null)) return "usage_tab.api_rates_note_local";
-  if (!view.final || view.pairIndex != null) return null;
+  if (!view.final) return null;
   // Local mode refuses managed models (models.managed_unavailable_local), so a
   // local row with no charge and no own-key billing is a subscription call.
   const billed = rows.some(

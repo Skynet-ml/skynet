@@ -7,10 +7,9 @@
  * shows how far into the run it was reached (like chapter markers on a
  * video) plus the wall-clock time.
  *
- * Used by OverviewTab for both the job-wide pipeline and (when scoped by
- * pair_index) the per-pair pipeline inside a grid_search. Stage detection
- * + timestamp derivation live in the caller; this component is a pure,
- * non-interactive renderer.
+ * Used by OverviewTab for the run's pipeline. Stage detection + timestamp
+ * derivation live in the caller; this component is a pure, non-interactive
+ * renderer.
  */
 
 import { useEffect } from "react";
@@ -58,29 +57,19 @@ function secondsSince(originIso: string | null, iso: string | undefined): number
   return Number.isFinite(ms) && ms >= 0 ? ms / 1000 : null;
 }
 
-/**
- * Build `{stage → timestamp}` from a progress-event stream. When
- * `pairIndex` is provided, only events tagged with that pair are used
- * for pair-scoped stages (baseline/optimizing/evaluating); pre-pair
- * stages (validating/splitting) still fall back to the global events.
- */
+/** Build `{stage → timestamp}` from a progress-event stream. */
 export function computeStageTimestamps(
   events: ProgressEvent[],
   startedAt: string | null | undefined,
   completedAt: string | null | undefined,
-  pairIndex?: number,
 ): Partial<Record<PipelineStage, StageTs>> {
-  const globalMap: Record<string, PipelineStage> = {
+  const stageMap: Record<string, PipelineStage> = {
     validation_passed: "validating",
     dataset_splits_ready: "splitting",
-  };
-  const pairMap: Record<string, PipelineStage> = {
-    grid_pair_started: "baseline",
     baseline_evaluated: "baseline",
     optimizer_progress: "optimizing",
     evaluation_started: "optimizing",
     optimized_evaluated: "evaluating",
-    grid_pair_completed: "evaluating",
   };
 
   const stageTs: Partial<Record<PipelineStage, StageTs>> = {};
@@ -88,14 +77,7 @@ export function computeStageTimestamps(
   for (const ev of events) {
     if (!ev.event || !ev.timestamp) continue;
     if (ev.event === "lane_handoff") handoffIso = ev.timestamp;
-    const evPairIndex = ev.metrics?.pair_index;
-    const isPairScoped = ev.event in pairMap;
-
-    if (pairIndex != null && isPairScoped) {
-      if (typeof evPairIndex !== "number" || evPairIndex !== pairIndex) continue;
-    }
-
-    const sk = globalMap[ev.event] ?? pairMap[ev.event];
+    const sk = stageMap[ev.event];
     if (!sk) continue;
     stageTs[sk] = fmtTs(ev.timestamp);
   }
@@ -108,7 +90,7 @@ export function computeStageTimestamps(
   if (startedAt && !stageTs.validating) {
     stageTs.validating = fmtTs(startedAt);
   }
-  if (completedAt && !stageTs.evaluating && pairIndex == null) {
+  if (completedAt && !stageTs.evaluating) {
     stageTs.evaluating = fmtTs(completedAt);
   }
   return stageTs;

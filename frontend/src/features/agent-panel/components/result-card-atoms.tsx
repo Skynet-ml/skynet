@@ -78,15 +78,8 @@ export function PassDot({ pass }: { pass: boolean }) {
   );
 }
 
-/** Run vs grid-search badge, localized via the shared TERMS vocabulary. */
-export function TypeBadge({ type }: { type: string }) {
-  if (type === "grid_search") {
-    return (
-      <Badge variant="outline" className="border-primary-fill/30 text-primary">
-        {TERMS.optimizationTypeGrid}
-      </Badge>
-    );
-  }
+/** Run badge, localized via the shared TERMS vocabulary. */
+export function TypeBadge() {
   return <Badge variant="secondary">{TERMS.optimizationTypeRun}</Badge>;
 }
 

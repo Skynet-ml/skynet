@@ -71,8 +71,6 @@ const STATUS_LABELS: Record<JobStatus, string> = perLocale(() => ({
 }));
 
 const JOB_TYPE_LABELS: Record<OptimizationType, string> = perLocale(() => ({
-  run: TERMS.optimizationTypeRun,
-  grid_search: TERMS.optimizationTypeGrid,
   blackbox: TERMS.optimizationTypeBlackbox,
 }));
 

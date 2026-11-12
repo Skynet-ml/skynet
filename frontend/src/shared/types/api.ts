@@ -10,7 +10,7 @@ export type JobStatus =
   | "cancelled"
   | "paused"
   | "stopped";
-export type OptimizationType = "run" | "grid_search" | "blackbox";
+export type OptimizationType = "blackbox";
 
 // Levels emitted by the backend (`backend/core/api/routers/optimizations_meta.py`).
 // `(string & {})` keeps the union behaviour for autocomplete while still
@@ -154,34 +154,6 @@ export interface WorkflowSpec {
   edges: WorkflowEdgeSpec[];
 }
 
-// One node's execution record from a workflow inference or dry run.
-export interface WorkflowNodeTrace {
-  node_id: string;
-  kind: string;
-  name: string;
-  inputs: Record<string, unknown>;
-  outputs?: Record<string, unknown> | null;
-  elapsed_ms: number;
-  error?: string | null;
-}
-
-export interface WorkflowDryRunRequest {
-  workflow: WorkflowSpec;
-  inputs: Record<string, unknown>;
-  model_config: ModelConfig;
-  tool_source?: ToolSource | null;
-}
-
-// A node failure is an expected, renderable outcome (200): `error` and
-// `failed_node_id` are set and `outputs` is null.
-export interface WorkflowDryRunResponse {
-  outputs?: Record<string, unknown> | null;
-  node_traces: WorkflowNodeTrace[];
-  model_used: string;
-  error?: string | null;
-  failed_node_id?: string | null;
-}
-
 export type ExecutionRuntime = "vercel";
 
 export interface RuntimeCostProfile {
@@ -283,9 +255,6 @@ export interface OptimizationSummaryResponse {
   model_settings?: Record<string, unknown>;
   reflection_model_name?: string | null;
   task_model_name?: string | null;
-  total_pairs?: number | null;
-  completed_pairs?: number | null;
-  failed_pairs?: number | null;
   generation_models?: ModelConfig[];
   reflection_models?: ModelConfig[];
   split_fractions?: SplitFractions;
@@ -298,7 +267,6 @@ export interface OptimizationSummaryResponse {
   baseline_test_metric?: number | null;
   optimized_test_metric?: number | null;
   metric_improvement?: number | null;
-  best_pair_label?: string | null;
   summary_text?: string | null;
   /** Caller's share role when this run was reached via a member grant; null/absent for owned runs. */
   role?: "viewer" | "editor" | "owner" | null;
@@ -321,7 +289,6 @@ export interface OptimizationLogEntry {
   level: LogLevel | (string & {});
   logger: string;
   message: string;
-  pair_index?: number | null;
   source?: LogSource | (string & {});
   /** Typed event name, such as `candidate.scored`, or a scorer's own name. */
   event?: string | null;
@@ -334,87 +301,6 @@ export interface ProgressEvent {
   timestamp: string;
   event?: string | null;
   metrics: Record<string, unknown>;
-}
-
-interface OptimizedDemo {
-  inputs: Record<string, unknown>;
-  outputs: Record<string, unknown>;
-}
-
-export interface OptimizedPredictor {
-  predictor_name: string;
-  signature_name?: string | null;
-  instructions: string;
-  input_fields: string[];
-  output_fields: string[];
-  demos: OptimizedDemo[];
-  formatted_prompt: string;
-}
-
-// Optimized react-agent overlay: the actual artifact a react run produces —
-// GEPA-tuned per-tool descriptions, optional renamed display names, and the
-// loop budget. Mirrors backend ReactOverlay.
-export interface ReactOverlay {
-  tool_descriptions: Record<string, string>;
-  tool_arg_descriptions: Record<string, Record<string, string>>;
-  tool_schema_hashes: Record<string, string>;
-  max_iters: number;
-  tool_source?: Record<string, unknown> | null;
-  /** GEPA-proposed display names, { canonical: proposed }. */
-  tool_names?: Record<string, string> | null;
-  /**
-   * Per-tool approval severity ("info" | "warning" | "destructive") derived
-   * from the source MCP's tool annotations, { tool_name: severity }. Only tools
-   * whose server stated a hint appear; absent for pre-severity artifacts.
-   */
-  tool_severities?: Record<string, string>;
-}
-
-// The optimized surface of a single workflow node, keyed under its component
-// path (`n_<node_id>`) in `ProgramArtifact.optimized_nodes`. A signature node
-// carries `optimized_prompt` (and, for react nodes, a `react_overlay`); a flex
-// node carries its rewritten `optimized_src`. Mirrors backend NodeArtifact.
-export interface NodeArtifact {
-  optimized_prompt?: OptimizedPredictor | null;
-  react_overlay?: ReactOverlay | null;
-  optimized_src?: string | null;
-}
-
-interface ProgramArtifact {
-  path?: string | null;
-  program_state_json?: Record<string, unknown> | null;
-  program_pickle_base64?: string | null;
-  metadata?: Record<string, unknown>;
-  optimized_prompt?: OptimizedPredictor;
-  react_overlay?: ReactOverlay | null;
-  /**
-   * GEPA-rewritten module source for a dspy.Flex program — the optimized Python
-   * that runs in the serve sandbox. Absent for non-Flex artifacts, whose
-   * optimization lands in the prompt rather than the code.
-   */
-  optimized_module_src?: string | null;
-  /**
-   * GEPA-rewritten source per Flex submodule, keyed by its component path (a
-   * workflow's flex node is `n_<node_id>`). Empty unless the program nests Flex
-   * modules rather than being one itself.
-   */
-  optimized_component_srcs?: Record<string, string>;
-  /**
-   * Per-node optimized surface for a workflow program, keyed by component path
-   * (`n_<node_id>`): each node's prompt, react overlay, or rewritten code. Empty
-   * for scalar (single-module) programs.
-   */
-  optimized_nodes?: Record<string, NodeArtifact>;
-}
-
-export interface EvalExampleResult {
-  index: number;
-  outputs: Record<string, unknown>;
-  score: number;
-  pass: boolean;
-  error?: string | null;
-  // Named scores the metric logged via log_metrics while scoring this row.
-  logged_metrics?: Record<string, number>;
 }
 
 export interface LMStageStats {
@@ -440,65 +326,6 @@ export interface RunBillingOutcome {
   // submitted before an estimate was persisted (older runs).
   estimated_low?: number;
   estimated_high?: number;
-}
-
-export interface PairResult {
-  pair_index: number;
-  generation_model: string;
-  reflection_model: string;
-  generation_reasoning_effort?: string | null;
-  reflection_reasoning_effort?: string | null;
-  baseline_test_metric?: number | null;
-  optimized_test_metric?: number | null;
-  metric_improvement?: number | null;
-  runtime_seconds?: number | null;
-  num_lm_calls?: number | null;
-  avg_response_time_ms?: number | null;
-  lm_activity?: LMActivity | null;
-  program_artifact?: ProgramArtifact | null;
-  error?: string | null;
-  baseline_test_results?: EvalExampleResult[];
-  optimized_test_results?: EvalExampleResult[];
-  baseline_logged_metrics?: Record<string, number>;
-  optimized_logged_metrics?: Record<string, number>;
-}
-
-interface RunResult {
-  module_name: string;
-  optimizer_name: string;
-  metric_name?: string | null;
-  split_counts?: SplitCounts;
-  baseline_test_metric?: number | null;
-  optimized_test_metric?: number | null;
-  metric_improvement?: number | null;
-  optimization_metadata?: Record<string, unknown>;
-  details?: Record<string, unknown>;
-  program_artifact_path?: string | null;
-  program_artifact?: ProgramArtifact | null;
-  runtime_seconds?: number | null;
-  num_lm_calls?: number | null;
-  avg_response_time_ms?: number | null;
-  lm_activity?: LMActivity | null;
-  run_log?: OptimizationLogEntry[];
-  baseline_test_results?: EvalExampleResult[];
-  optimized_test_results?: EvalExampleResult[];
-  // log_metrics aggregates: each name macro-averaged over the test rows that
-  // logged it, for the baseline and optimized evaluations respectively.
-  baseline_logged_metrics?: Record<string, number>;
-  optimized_logged_metrics?: Record<string, number>;
-}
-
-export interface GridSearchResult {
-  module_name: string;
-  optimizer_name: string;
-  metric_name?: string | null;
-  split_counts?: SplitCounts;
-  total_pairs: number;
-  completed_pairs: number;
-  failed_pairs: number;
-  pair_results: PairResult[];
-  best_pair?: PairResult | null;
-  runtime_seconds?: number | null;
 }
 
 // ── Black-box ("Optimize Anything") ─────────────────────────────────────────
@@ -853,8 +680,6 @@ export interface BlackboxRunResult {
   lm_activity?: LMActivity | null;
   optimization_metadata: Record<string, unknown>;
   details: Record<string, unknown>;
-  /** Unified runs on a DSPy optimizer: the compiled program. */
-  program_artifact?: ProgramArtifact | null;
 }
 
 export interface RepositoryTreeEntry {
@@ -955,8 +780,6 @@ export interface OptimizationStatusResponse extends OptimizationSummaryResponse 
    */
   progress_offset?: number;
   logs_offset?: number;
-  result?: RunResult | null;
-  grid_result?: GridSearchResult | null;
   blackbox_result?: BlackboxRunResult | null;
   /** Caller's share role when reached via a member grant; null for the owner's own view. */
   effective_role?: "viewer" | "editor" | "owner" | null;
@@ -993,22 +816,6 @@ export interface OptimizationPayloadResponse {
   payload: Record<string, unknown>;
 }
 
-interface DatasetRow {
-  index: number;
-  row: Record<string, unknown>;
-}
-
-export interface OptimizationDatasetResponse {
-  total_rows: number;
-  splits: {
-    train: DatasetRow[];
-    val: DatasetRow[];
-    test: DatasetRow[];
-  };
-  column_mapping: ColumnMapping;
-  split_counts: SplitCounts;
-}
-
 export interface ServeInfoResponse {
   optimization_id: string;
   endpoint_url?: string | null;
@@ -1031,8 +838,6 @@ export interface ServeResponse {
   input_fields: string[];
   output_fields: string[];
   model_used: string;
-  // Per-node execution trace, present only for workflow runs.
-  node_traces?: WorkflowNodeTrace[] | null;
   cents_charged?: string | null;
   budget?: ExecutionBudget | null;
 }

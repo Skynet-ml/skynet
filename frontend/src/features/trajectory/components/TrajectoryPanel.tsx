@@ -46,30 +46,17 @@ function isLive(job: OptimizationStatusResponse): boolean {
 
 export interface TrajectoryPanelProps {
   job: OptimizationStatusResponse;
-  // When set, only candidate events tagged with this pair_index are kept —
-  // grid-search pair views need to scope the tree to a single pair.
-  pairIndex?: number;
-  // Tool name → approval severity from the run's persisted react_overlay,
-  // forwarded to the drawer so its tool cards match the Code tab.
-  toolSeverities?: Record<string, string>;
   // Run configuration of a black-box run, forwarded to the drawer so it names
   // candidates by kind and shows per-case scores only when cases exist.
   blackbox?: BlackboxTrajectoryContext | null;
 }
 
-export function TrajectoryPanel({
-  job,
-  pairIndex,
-  toolSeverities,
-  blackbox,
-}: TrajectoryPanelProps) {
+export function TrajectoryPanel({ job, blackbox }: TrajectoryPanelProps) {
   const live = isLive(job);
   const blackboxCtx = blackbox ?? (job.optimization_type === "blackbox" ? BLACKBOX_FALLBACK : null);
   const { candidates, rejected, valsetRows, minibatch, valsetOutputs } = useMemo(() => {
     const events = job.progress_events ?? [];
-    const scoped = scopeToLatestLane(
-      pairIndex === undefined ? events : events.filter((e) => e.metrics?.pair_index === pairIndex),
-    );
+    const scoped = scopeToLatestLane(events);
     return {
       candidates: extractCandidates(scoped),
       rejected: extractRejected(scoped),
@@ -77,14 +64,14 @@ export function TrajectoryPanel({
       minibatch: extractMinibatch(scoped),
       valsetOutputs: extractValsetOutputs(scoped),
     };
-  }, [job.progress_events, pairIndex]);
+  }, [job.progress_events]);
   const maxGeneration = useMemo(() => {
     let m = 0;
     for (const c of candidates) if (c.generation > m) m = c.generation;
     return m;
   }, [candidates]);
   const [generationFilter, setGenerationFilter] = useState<number | null>(null);
-  const hintKey = pairIndex === undefined ? job.optimization_id : `${job.optimization_id}#pair`;
+  const hintKey = job.optimization_id;
   const view = candidates.length === 0 ? "none" : maxGeneration > 0 ? "scrubber" : "plain";
   useEffect(() => {
     rememberTrajectoryView(hintKey, view);
@@ -251,7 +238,6 @@ export function TrajectoryPanel({
             minibatch={minibatch}
             blackbox={blackboxCtx}
             valsetOutputs={valsetOutputs}
-            toolSeverities={toolSeverities}
           />
           <div ref={liveRegionRef} role="status" aria-live="polite" className="sr-only" />
         </CardContent>

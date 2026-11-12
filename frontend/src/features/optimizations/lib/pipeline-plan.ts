@@ -1,13 +1,10 @@
 /**
  * Per-run pipeline plan for the stage tracker.
  *
- * Every flow validates and evaluates the winner, but the rest depends on the
- * run. DSPy runs split their dataset and, when there is a test split, measure
- * a baseline first; black-box runs do neither, since they score the starting
- * point in the final evaluation. The middle differs by algorithm: a DSPy
- * compile (MIPROv2, BootstrapFewShot…), a GEPA reflective search, a single
- * black-box engine, or the auto strategy's parallel exploration followed by a
- * GEPA refinement lane. The plan lists only the stages this run goes through,
+ * Every flow validates and evaluates the winner. Runs never split cases up
+ * front, since they score the starting point in the final evaluation. The
+ * middle differs by algorithm: a single engine, or the auto strategy's
+ * parallel exploration followed by a GEPA refinement lane. The plan lists only the stages this run goes through,
  * so the tracker reads as the run that actually happened.
  */
 import type { OptimizationPayloadResponse, OptimizationStatusResponse } from "@/shared/types/api";
@@ -33,35 +30,10 @@ const HILL_CLIMBING_ENGINES = new Set([
   "shinka_evolve",
 ]);
 
-// Optimizer names arrive as dotted DSPy paths ("dspy.teleprompt.MIPROv2") or
-// the bare "gepa" alias; the tracker wants the class name alone.
-function optimizerLabel(raw: string): string {
-  const name = raw.split(".").pop() ?? raw;
-  return name.toLowerCase() === "gepa" ? "GEPA" : name;
-}
-
 function middleStages(
   job: OptimizationStatusResponse,
   payload: OptimizationPayloadResponse | null | undefined,
 ): PlannedStage[] {
-  if (job.optimization_type !== "blackbox") {
-    const optimizer = job.optimizer_name ?? "";
-    const isGepa = job.module_name === "react" || optimizer.toLowerCase() === "gepa";
-    if (isGepa) {
-      const detail = job.module_name === "react" ? "GEPA · ReAct" : "GEPA";
-      return [{ key: "optimizing", label: msg("pipeline.stage.reflectiveSearch"), detail }];
-    }
-    if (optimizer)
-      return [
-        {
-          key: "optimizing",
-          label: msg("pipeline.stage.compile"),
-          detail: optimizerLabel(optimizer),
-        },
-      ];
-    return [{ key: "optimizing", label: TERMS.optimization }];
-  }
-
   const singleEngine = singleEngineOf(job, payload);
   if (singleEngine) {
     const id = singleEngine.toLowerCase();
@@ -110,8 +82,6 @@ export function planPipelineStages(
       key: "validating",
       label: msg("auto.features.optimizations.constants.literal.1"),
     },
-    splitting: { key: "splitting", label: msg("auto.features.optimizations.constants.literal.2") },
-    baseline: { key: "baseline", label: TERMS.baselineScore },
     evaluating: {
       key: "evaluating",
       label: msg("auto.features.optimizations.constants.literal.3"),

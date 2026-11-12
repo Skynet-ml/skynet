@@ -16,11 +16,6 @@ beforeEach(() => {
   hint.resetRunShapeHintsForTests();
 });
 
-test("a pair view keeps its own shape", () => {
-  assert.equal(hint.runShapeKey("r1", false), "r1");
-  assert.equal(hint.runShapeKey("r1", true), "r1#pair");
-});
-
 test("a remembered shape merges and survives a reload of the module cache", () => {
   hint.rememberRunKind("r1", "blackbox");
   hint.rememberRunShape("r1", { stages: [{ detail: true, foot: "chip" }], tabs: 7 });
@@ -30,17 +25,17 @@ test("a remembered shape merges and survives a reload of the module cache", () =
     stages: [{ detail: true, foot: "chip" }],
     tabs: 7,
   });
-  assert.equal(hint.runKindHint("r1"), "blackbox");
+  assert.equal(hint.runShapeHint("r1")?.kind, "blackbox");
 });
 
 test("a hint stored as a bare kind still reads", () => {
-  store.set("app-run-kind:r2", "grid_search");
-  assert.equal(hint.runKindHint("r2"), "grid_search");
+  store.set("app-run-kind:r2", "blackbox");
+  assert.equal(hint.runShapeHint("r2")?.kind, "blackbox");
 });
 
 test("an unreadable hint is ignored", () => {
   store.set("app-run-kind:r3", "{broken");
-  assert.equal(hint.runKindHint("r3"), undefined);
+  assert.deepEqual(hint.runShapeHint("r3"), {});
   assert.equal(hint.runShapeHint(undefined), undefined);
 });
 

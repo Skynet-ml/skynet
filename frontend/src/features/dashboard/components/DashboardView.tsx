@@ -552,7 +552,7 @@ export function DashboardView() {
           canManageShare={canManageSelectedShare}
           canPause={pausableSelectedIds.length > 0}
           canResume={resumableSelectedIds.length > 0}
-          canClone={selectedJob?.optimization_type !== "grid_search"}
+          canClone
           canStop={activeSelectedIds.length > 0}
           canTogglePin={canEditSelection}
           selectedJobId={selectedJob?.optimization_id ?? null}

@@ -6,7 +6,6 @@ import {
   hostedAvailable,
   hostedRouteOpen,
   isHostedPath,
-  pairHref,
   parseSourceKey,
   resolveSource,
   runHref,
@@ -47,13 +46,6 @@ test("run pages carry the source only for hosted runs", () => {
   assert.equal(sourceFromParam("local"), "local");
   assert.equal(sourceFromParam("other"), "local");
   assert.equal(sourceFromParam(null), "local");
-});
-
-test("pairHref keeps the source and adds the pair param", () => {
-  assert.equal(pairHref("abc", 2), "/optimizations/abc?pair=2");
-  assert.equal(pairHref("abc", 0, "hosted"), "/optimizations/abc?source=hosted&pair=0");
-  assert.equal(pairHref("abc", null, "hosted"), "/optimizations/abc?source=hosted");
-  assert.equal(pairHref("abc", null), "/optimizations/abc");
 });
 
 test("sourceKey keeps local IDs bare and keeps hosted IDs apart", () => {

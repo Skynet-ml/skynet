@@ -56,7 +56,7 @@ const { createRoot } = await import("react-dom/client");
 const { TooltipProvider } = await import("@/shared/ui/primitives/tooltip");
 const { ConfigTab } = await import("./ConfigTab");
 
-async function mount(type: "run" | "blackbox") {
+async function mount(type: "blackbox") {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -137,12 +137,12 @@ async function key(el: Element, key: string) {
   });
 }
 
-for (const type of ["run", "blackbox"] as const) {
+for (const type of ["blackbox"] as const) {
   void test(`${type} Config uses summary tabs and preserves full saved facts`, async () => {
     const m = await mount(type);
     try {
       const tabs = [...m.host.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-      assert.equal(tabs.length, type === "run" ? 4 : 5);
+      assert.equal(tabs.length, 5);
       assert.equal(tabs[0]!.getAttribute("aria-selected"), "true");
       assert.match(m.host.textContent!, /Saved configuration name/);
       assert.ok(m.host.textContent!.includes("Saved description ".repeat(35)));

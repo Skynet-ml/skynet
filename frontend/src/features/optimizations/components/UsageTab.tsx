@@ -116,10 +116,10 @@ function formatLatency(ms: number | null): string {
   return formatMsg("optimizations.duration.seconds", { value: seconds.toFixed(1) });
 }
 
-function useRunUsage(
-  job: OptimizationStatusResponse,
-  pairIndex: number | null,
-): { usage: RunUsage | null; error: boolean } {
+function useRunUsage(job: OptimizationStatusResponse): {
+  usage: RunUsage | null;
+  error: boolean;
+} {
   const [usage, setUsage] = useState<RunUsage | null>(null);
   const [error, setError] = useState(false);
   const running = ACTIVE_STATUSES.has(job.status);
@@ -129,7 +129,7 @@ function useRunUsage(
   useEffect(() => {
     let cancelled = false;
     const load = () =>
-      getRunUsage(job.optimization_id, pairIndex)
+      getRunUsage(job.optimization_id)
         .then((next) => {
           if (cancelled) return;
           setUsage(next);
@@ -147,7 +147,7 @@ function useRunUsage(
       window.clearInterval(timer);
     };
     // A status change refetches once more, so a finished run shows its final rows.
-  }, [job.optimization_id, job.status, pairIndex, polling, running]);
+  }, [job.optimization_id, job.status, polling, running]);
 
   return { usage, error };
 }
@@ -301,8 +301,7 @@ interface UsageShape {
   apiRate?: boolean;
 }
 
-const usageLayoutKey = (id: string, pairIndex: number | null) =>
-  `usage-tab:${id}:${pairIndex ?? ""}`;
+const usageLayoutKey = (id: string) => `usage-tab:${id}:`;
 
 const COLD_USAGE_SHAPE: UsageShape = {
   groupings: ["role", "model"],
@@ -438,7 +437,7 @@ export function UsageTabSkeleton({ budgeted, shape }: { budgeted: boolean; shape
 
 /** The Usage tab's skeleton for a run page still loading, from what the tab last rendered. */
 export function UsageTabBone({ optimizationId }: { optimizationId: string }) {
-  const shape = useLayoutHint<UsageShape>(usageLayoutKey(optimizationId, null));
+  const shape = useLayoutHint<UsageShape>(usageLayoutKey(optimizationId));
   return <UsageTabSkeleton budgeted={shape?.budgeted ?? false} shape={shape} />;
 }
 
@@ -448,14 +447,8 @@ export function UsageTabBone({ optimizationId }: { optimizationId: string }) {
  * add up to exactly what the run charged; sandbox compute and setup keep their
  * own rows under every grouping.
  */
-export function UsageTab({
-  job,
-  pairIndex,
-}: {
-  job: OptimizationStatusResponse;
-  pairIndex: number | null;
-}) {
-  const { usage, error } = useRunUsage(job, pairIndex);
+export function UsageTab({ job }: { job: OptimizationStatusResponse }) {
+  const { usage, error } = useRunUsage(job);
   const locale = getActiveIntlLocale();
   const running = ACTIVE_STATUSES.has(job.status);
 
@@ -467,14 +460,13 @@ export function UsageTab({
   const splitCost = hasProviderSpend(rows);
   const firstNonModel = groups.findIndex((g) => g.nonModel);
   const budgeted = !!(job.execution_budget ?? job.terminal_evidence?.execution_budget);
-  const layoutKey = usageLayoutKey(job.optimization_id, pairIndex);
+  const layoutKey = usageLayoutKey(job.optimization_id);
   const shapeHint = useLayoutHint<UsageShape>(layoutKey);
   const offeredKey = offered.join(",");
   const costNoteKey =
     usage && groups.length > 0
       ? usageCostNoteKey(isLocalMode(), rows, {
           final: !running && !usage.settling,
-          pairIndex,
         })
       : null;
   // Display only: a settled subscription run's tokens priced at API rates, never billed.

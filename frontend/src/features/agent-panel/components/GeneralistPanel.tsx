@@ -153,7 +153,6 @@ import { parseAgentNavigation, parseAppearancePatch } from "../lib/settings-acti
 const REQUEST_DATASET_TOOL = "request_user_dataset_datasets_request_upload_post";
 const REQUEST_LIBRARY_TOOL = "request_user_dataset_from_library";
 const REQUEST_INFERENCE_TOOL = "request_user_inference";
-const REQUEST_PAIR_INFERENCE_TOOL = "request_user_pair_inference";
 
 // Tools that keep their own interactive card instead of folding into the
 // turn's activity line as a plain step.
@@ -161,7 +160,6 @@ const RICH_CARD_TOOLS = new Set<string>([
   REQUEST_DATASET_TOOL,
   REQUEST_LIBRARY_TOOL,
   REQUEST_INFERENCE_TOOL,
-  REQUEST_PAIR_INFERENCE_TOOL,
 ]);
 
 // Submit tools whose success should mirror the manual wizard submit button:
@@ -1135,12 +1133,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         );
       }
       // A web chat's library and inference cards would act on the Mac's data.
-      if (
-        webChat &&
-        (call.tool === REQUEST_LIBRARY_TOOL ||
-          call.tool === REQUEST_INFERENCE_TOOL ||
-          call.tool === REQUEST_PAIR_INFERENCE_TOOL)
-      ) {
+      if (webChat && (call.tool === REQUEST_LIBRARY_TOOL || call.tool === REQUEST_INFERENCE_TOOL)) {
         return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={null} />;
       }
       if (call.tool === REQUEST_LIBRARY_TOOL) {
@@ -1154,7 +1147,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }
       // The question shows as the reply; its answers show under the chat.
       if (call.tool === ASK_USER_TOOL) return null;
-      if (call.tool === REQUEST_INFERENCE_TOOL || call.tool === REQUEST_PAIR_INFERENCE_TOOL) {
+      if (call.tool === REQUEST_INFERENCE_TOOL) {
         return <InferenceFormCard call={call} disabled={streaming} />;
       }
       const renderer = getToolRenderer(call.tool);
