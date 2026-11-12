@@ -33,7 +33,7 @@ void describe("HeldOutNotice", () => {
     assert.match(render(<HeldOutNotice splitCounts={notHeldOut} />), /not_held_out/);
     const heldOut = { ...notHeldOut, held_out: true };
     assert.equal(render(<HeldOutNotice splitCounts={heldOut} />), "");
-    // A legacy DSPy split has no held_out flag.
+    // A run recorded before the final run existed has no held_out flag.
     assert.equal(render(<HeldOutNotice splitCounts={{ train: 5, val: 2, test: 3 }} />), "");
   });
 
