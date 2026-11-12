@@ -950,6 +950,8 @@ class _ServiceRuntime(_SnapshotRuntime):
                 shutil.rmtree(self._fixed)
             inner._dir.rename(self._fixed)
             inner._dir = self._fixed
+            # The box env names its folder; GNU mktemp fails on a TMPDIR that the rename removed.
+            inner._env.update(HOME=str(self._fixed), TMPDIR=str(self._fixed / "tmp"))
         self.boxes[-1] = _ServiceBox(inner, spec)
         return self.boxes[-1]
 
