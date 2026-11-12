@@ -246,8 +246,53 @@ resource "aws_lb_listener_rule" "frontend" {
 # certificate unchanged. First apply: target aws_acm_certificate.mcp, create
 # the records of acm_validation_records, then apply the rest.
 locals {
-  mcp_on_preview_wildcard = local.preview_enabled && can(regex("^[^.]+\\.${replace(var.preview_domain, ".", "\\.")}$", var.mcp_domain))
-  mcp_certificate_enabled = var.mcp_domain != "" && !local.mcp_on_preview_wildcard
+  wildcard_enabled        = var.wildcard_domain != ""
+  mcp_on_wildcard         = local.wildcard_enabled && can(regex("^[^.]+\\.${replace(var.wildcard_domain, ".", "\\.")}$", var.mcp_domain))
+  mcp_certificate_enabled = var.mcp_domain != "" && !local.mcp_on_wildcard
+}
+
+# mcp.staging.skynetml.com uses this wildcard certificate. ACM issues the
+# wildcard with the same DNS validation record as the certificate for
+# var.wildcard_domain itself.
+resource "aws_acm_certificate" "wildcard" {
+  #checkov:skip=CKV2_AWS_71:The remote MCP host directly under var.wildcard_domain uses this wildcard.
+  count = local.wildcard_enabled ? 1 : 0
+
+  domain_name       = "*.${var.wildcard_domain}"
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_acm_certificate_validation" "wildcard" {
+  count = local.wildcard_enabled ? 1 : 0
+
+  certificate_arn         = aws_acm_certificate.wildcard[0].arn
+  validation_record_fqdns = [for o in aws_acm_certificate.wildcard[0].domain_validation_options : o.resource_record_name]
+}
+
+resource "aws_lb_listener_certificate" "wildcard" {
+  count = local.wildcard_enabled && var.enable_https ? 1 : 0
+
+  listener_arn    = aws_lb_listener.https[0].arn
+  certificate_arn = aws_acm_certificate_validation.wildcard[0].certificate_arn
+}
+
+moved {
+  from = aws_acm_certificate.preview
+  to   = aws_acm_certificate.wildcard
+}
+
+moved {
+  from = aws_acm_certificate_validation.preview
+  to   = aws_acm_certificate_validation.wildcard
+}
+
+moved {
+  from = aws_lb_listener_certificate.preview
+  to   = aws_lb_listener_certificate.wildcard
 }
 
 resource "aws_acm_certificate" "mcp" {

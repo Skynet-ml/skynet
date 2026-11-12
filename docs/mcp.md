@@ -13,7 +13,6 @@ connect flow. Only the URL is different.
 | --- | --- |
 | Production | `https://mcp.skynetml.com/mcp` |
 | Staging | `https://mcp.staging.skynetml.com/mcp` |
-| PR preview | `https://api-pr-<n>.staging.skynetml.com/remote-mcp` |
 
 The server uses OAuth. Add the URL to your client. The client opens a browser
 page. Sign in and approve the scopes:
