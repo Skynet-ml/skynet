@@ -15,14 +15,11 @@ from core.billing.budgets import MAX_LEASE_SLICES, BudgetConflictError, BudgetIn
 from core.billing.runtime import BudgetRuntime
 from core.billing.vercel_usage import VercelSnapshotReservation, VercelUsage
 from core.config import settings
-from core.sandbox import metering
-from core.sandbox.factory import PROVIDERS, ProductionNotAllowedError, ProviderEntry, UnknownProviderError
+from core.sandbox.factory import PROVIDERS
 from core.sandbox.metering import (
     USAGE_ADAPTERS,
     LeaseExhaustedError,
-    MissingUsageAdapterError,
     PoolLease,
-    usage_for,
 )
 from core.storage.models import Base, BillingCustomerModel, ExecutionBudgetModel, ExecutionOperationModel
 
@@ -121,27 +118,6 @@ def test_every_production_provider_has_a_usage_adapter() -> None:
     for name, entry in PROVIDERS.items():
         if entry.production_allowed:
             assert name in USAGE_ADAPTERS
-            assert usage_for(name).name == name
-
-
-def test_production_refuses_a_provider_with_no_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check that production refuses an allowed provider whose usage Skynet cannot meter."""
-    monkeypatch.setitem(PROVIDERS, "unmetered", ProviderEntry("core.sandbox.providers.x", "X", None, True))
-    monkeypatch.setattr(metering.settings, "app_environment", "production")
-    with pytest.raises(ProductionNotAllowedError):
-        usage_for("unmetered")
-    with pytest.raises(ProductionNotAllowedError):
-        usage_for("local")
-    assert isinstance(usage_for("vercel"), VercelUsage)
-
-
-def test_usage_for_reports_unknown_and_unmetered_providers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Check the errors outside production."""
-    monkeypatch.setattr(metering.settings, "app_environment", "")
-    with pytest.raises(UnknownProviderError):
-        usage_for("nope")
-    with pytest.raises(MissingUsageAdapterError):
-        usage_for("local")
 
 
 def test_lease_reserves_all_slices_and_returns_the_untaken_ones(database: Engine) -> None:

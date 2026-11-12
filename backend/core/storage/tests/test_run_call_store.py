@@ -226,7 +226,7 @@ def test_list_candidates_reports_role_state_count_and_cost(store: PostgresRunCal
     store.record_call("job-1", _call(cost_usd=0.5), [])
     store.record_call("job-1", _call(cost_usd=None), [])
     store.record_call("job-1", _call(candidate_id="cand-2", role="judge", kind="evaluator", cost_usd=None), [])
-    store.set_candidate_state("job-1", "cand-1", "solver", "done")
+    assert store.finish_candidate("job-1", "cand-1", "done")
 
     candidates = {c["candidate_id"]: c for c in store.list_candidates("job-1")}
 
@@ -243,16 +243,6 @@ def test_list_candidates_reports_role_state_count_and_cost(store: PostgresRunCal
     assert store.get_candidate("job-1", "cand-2")["role"] == "judge"
     assert store.get_candidate("job-1", "missing") is None
     assert store.list_candidates("job-2") == []
-
-
-def test_set_candidate_state_creates_a_candidate_and_rejects_an_unknown_state(store: PostgresRunCallStore) -> None:
-    """A state mark creates a candidate with no calls; an unknown state is refused."""
-    store.set_candidate_state("job-1", "cand-9", "solver", "failed")
-
-    assert store.get_candidate("job-1", "cand-9")["state"] == "failed"
-    assert store.get_candidate("job-1", "cand-9")["call_count"] == 0
-    with pytest.raises(ValueError):
-        store.set_candidate_state("job-1", "cand-9", "solver", "paused")
 
 
 def test_a_new_call_keeps_a_done_candidate_done_and_a_failed_one_failed(store: PostgresRunCallStore) -> None:

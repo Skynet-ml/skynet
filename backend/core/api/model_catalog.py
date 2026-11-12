@@ -1778,26 +1778,6 @@ def agent_model_id(configured: str = "") -> str:
     return default or DEFAULT_AGENT_MODEL_ID
 
 
-def strongest_model_id(configured: str = "") -> str:
-    """Return the model a server-side job runs when it needs the most careful reading.
-
-    Reads only the already-built catalog, like :func:`agent_model_id`.
-
-    Args:
-        configured: An operator-set model id (e.g. ``RULE_JUDGE_MODEL``);
-            it wins whenever non-empty.
-
-    Returns:
-        The configured id, else the catalog's flagged strongest model, else
-        :func:`agent_model_id`.
-    """
-    if configured.strip():
-        return configured.strip()
-    snapshot = catalog_snapshot()
-    strongest = next((m.value for m in snapshot.models if m.is_strongest), None) if snapshot else None
-    return strongest or agent_model_id()
-
-
 def _refresh_catalog_in_background() -> None:
     """Rebuild the catalog and swap it into the cache; never raises.
 
@@ -2140,27 +2120,6 @@ def is_hidden_model(name: str) -> bool:
         it dropped out keep working.
     """
     return name in _hidden_model_values
-
-
-def models_for_role(role: str | None = None) -> list[CatalogModel]:
-    """Return the catalog models one model role may pick.
-
-    Args:
-        role: The role the model fills, e.g. ``"hook"`` or ``"judge"``;
-            ``None`` for a role with no extra models.
-
-    Returns:
-        The catalog models, plus the classifier-only models for the
-        classifier roles.
-    """
-    models = list(get_catalog_cached().models)
-    if role in CLASSIFIER_ROLES:
-        listed = {m.value for m in models}
-        models += [
-            CatalogModel(value=value, label=_make_label(value), provider="openrouter", available=True)
-            for value in sorted(CLASSIFIER_ONLY_MODELS - listed)
-        ]
-    return models
 
 
 def require_known_model(model: str | None, *, role: str | None = None) -> None:
