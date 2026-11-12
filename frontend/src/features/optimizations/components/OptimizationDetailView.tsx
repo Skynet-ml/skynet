@@ -531,14 +531,13 @@ export function OptimizationDetailView({
         const progressed = progressCount > prev.progress;
         const statusChanged = sseData.status !== jobRef.current?.status;
         lastCountsRef.current = { logs: logCount, progress: progressCount };
-        // During an active run DSPy/GEPA emit log lines continuously, so a gate
-        // that re-fetches on every `log_count` bump re-downloads the full
+        // During an active run the sandbox writes log lines continuously, so a
+        // gate that re-fetches on every `log_count` bump re-downloads the full
         // (growing) progress_events+logs payload ~every tick — and since the
         // backend ETag is keyed on those counts, the 304 fast-path can never
-        // fire. Re-fetch only when progress advances (drives the trajectory /
-        // grid / score views, emitted throughout the run via capture_tqdm) or
-        // the status changes; for logs-only bumps, patch the lightweight live
-        // fields in place. The Logs tab catches up on the next progress tick and
+        // fire. Re-fetch only when progress advances (the run's progress events
+        // drive the trajectory and score views) or the status changes; for
+        // logs-only bumps, patch the lightweight live fields in place. The Logs tab catches up on the next progress tick and
         // a terminal status always triggers a final full fetch. Black-box jobs
         // also coalesce a fetch on log growth: see scheduleLogFetch.
         if (progressed || statusChanged) {

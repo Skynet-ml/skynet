@@ -24,7 +24,7 @@ class LMStageStats(BaseModel):
     avg_response_time_ms: float | None = None
 
 
-# Two-LM × N-stage matrix returned alongside RunResponse / PairResult.
+# Two-LM × N-stage matrix that BlackboxRunResponse.lm_activity returns.
 # Inner dicts are keyed by stage name ("baseline" / "training" /
 # "evaluation"); missing keys mean "no calls in that stage". The wire
 # shape is stable — the frontend renders rows in a fixed order.
