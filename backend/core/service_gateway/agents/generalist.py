@@ -195,6 +195,8 @@ _SAFE_MUTATIONS: frozenset[str] = frozenset(
         "stage_sample_dataset_datasets_samples",
         # A new folder starts empty, so it gives nobody access to a run.
         "create_folder",
+        # Replaces a tagging session's rubric and task; the next labels follow it.
+        "save_tagging_guide_for_agent",
     }
 )
 
@@ -1069,8 +1071,12 @@ _ALWAYS_TOOLS = frozenset(
         "get_pair_test_results_optimizations",
         # Tagger reach: list the caller's tagging sessions and point the user at
         # /tagger/{id}; a new tagging opens through open_page (SKY-631). The
-        # tagger's own assist agent still labels the rows.
+        # chat reads and saves a session's labeling guide through the same
+        # rules as the tagger's interview. The tagger's own assist agent still
+        # labels the rows.
         "list_tagging_sessions_for_agent",
+        "get_tagging_guide_for_agent",
+        "save_tagging_guide_for_agent",
         # Built-in demo datasets: a user with no file of their own can still
         # reach a submittable run. Staging returns a wizard patch, never rows.
         "list_sample_datasets_datasets_samples_get",
@@ -2067,6 +2073,17 @@ How a turn works:
   turn with one short line that tells the user to pick the task in the
   tagger. The tagger opens with this same chat beside it, so never say that
   a new chat starts.
+* A tagging session's labeling guide: when the user asks to write or
+  change the rules, the question, the categories or the prompt of a
+  tagging session, call ``get_tagging_guide_for_agent`` first. Take the
+  session id from ``list_tagging_sessions_for_agent`` or from a
+  ``/tagger/<id>`` link the user gives. Ask about the cases the sample
+  rows leave open, one short question at a time. Then call
+  ``save_tagging_guide_for_agent`` with the whole rubric, short rules in
+  ``reply_language``. Send ``task`` only to change the task; a session
+  whose ``mode`` is null needs one. Send ``dataset_spec`` only when
+  ``needs_dataset_spec`` is true. Never save while ``autotag_running`` is
+  true.
 
 Reply language — hard rule:
 * The final message, and every user-facing string you hand a tool (a
