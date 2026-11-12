@@ -19,10 +19,10 @@ import json
 import re
 import uuid
 from collections.abc import Callable, Collection, Generator, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, quote_plus, urlencode, urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 
 from ..config import settings
 from .credential_safety import DESKTOP_LINK_TOKEN_RE, REDACTED_CREDENTIAL, credential_fragments
@@ -58,15 +58,9 @@ class Connector:
     name: str
     url: str
     key_setting: str
-    key_env: str
     # Allowed tool names and the provider USD charged for one call; a call settles at this ceiling.
     tools: Mapping[str, Decimal]
     price_source: str
-    key_header: str | None = None
-    key_prefix: str = ""
-    key_query: str | None = None
-    # Optional non-secret settings sent as query parameters: settings field -> parameter name.
-    extra_query: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def host(self) -> str:
@@ -81,8 +75,6 @@ CONNECTORS: Mapping[str, Connector] = {
             name="maps",
             url="https://mapstools.googleapis.com/mcp",
             key_setting="google_maps_api_key",
-            key_env="GOOGLE_MAPS_API_KEY",
-            key_header="X-Goog-Api-Key",
             # Pro SKU ($14 per 1000) bounds search and routes; weather is always Essentials ($7 per 1000).
             tools={
                 "search_places": Decimal("0.014"),
@@ -95,9 +87,6 @@ CONNECTORS: Mapping[str, Connector] = {
             name="web_search",
             url="https://mcp.firecrawl.dev/v2/mcp",
             key_setting="firecrawl_api_key",
-            key_env="FIRECRAWL_API_KEY",
-            key_header="Authorization",
-            key_prefix="Bearer ",
             # Pay-as-you-go credits cost up to $0.005: a search uses 2 credits, a scrape 1.
             tools={
                 "firecrawl_search": Decimal("0.01"),
@@ -109,10 +98,6 @@ CONNECTORS: Mapping[str, Connector] = {
             name="browser",
             url="https://mcp.browserbase.com/mcp",
             key_setting="browserbase_api_key",
-            key_env="BROWSERBASE_API_KEY",
-            # The hosted server reads its key from the query string; the broker redacts query values.
-            key_query="browserbaseApiKey",
-            extra_query={"browserbase_project_id": "browserbaseProjectId"},
             # Browser hours cost $0.12; each step bounds about five minutes of session time.
             tools={
                 "start": Decimal("0.02"),
@@ -140,36 +125,6 @@ def _connector_key(connector: Connector) -> str | None:
     secret = getattr(settings, connector.key_setting, None)
     value = secret.get_secret_value() if secret is not None else ""
     return value.strip() or None
-
-
-def offered_connectors() -> tuple[str, ...]:
-    """Return the hosts of the catalog connectors whose provider key is configured."""
-    return tuple(host for host, connector in CONNECTORS.items() if _connector_key(connector))
-
-
-def connector_endpoint(connector: Connector) -> tuple[str, dict[str, str]]:
-    """Build the parent-only endpoint and credential headers for one connector.
-
-    Args:
-        connector: A configured catalog entry.
-
-    Returns:
-        The endpoint URL and the headers that carry the provider key.
-
-    Raises:
-        ValueError: When config does not hold the connector's key.
-    """
-    key = _connector_key(connector)
-    if key is None:
-        raise ValueError(f"The {connector.host} connector has no key in config ({connector.key_env}).")
-    headers = {connector.key_header: connector.key_prefix + key} if connector.key_header else {}
-    query = {connector.key_query: key} if connector.key_query else {}
-    for setting, parameter in connector.extra_query.items():
-        value = getattr(settings, setting, None)
-        if value:
-            query[parameter] = str(value)
-    url = f"{connector.url}?{urlencode(query)}" if query else connector.url
-    return url, headers
 
 
 def tool_meter(
@@ -572,6 +527,7 @@ def relay_request(
     recorder: CallRecorder | None = None,
     kind: str = "host",
     target: str = "",
+    record_secrets: Collection[str] = (),
 ) -> bytes | Generator[bytes, None, None]:
     """Send one ``[services]`` or MCP http request with its secrets filled in (E49-E53).
 
@@ -602,6 +558,9 @@ def relay_request(
             for a role ``.mcp.json`` call.
         target: The record target, such as ``server@host/tool``; the url's
             host when empty.
+        record_secrets: More values the record must mask, such as the box's
+            model route key. The relay does not fill them or mask them in the
+            answer.
 
     Returns:
         The answer body without any filled secret value: whole, or, when
@@ -640,7 +599,7 @@ def relay_request(
                 request=body,
                 response=answer,
                 cost_usd=state.cost_usd,
-                secrets=state.secrets,
+                secrets=state.secrets | set(record_secrets),
             )
             return
         recorder.record(
@@ -653,7 +612,7 @@ def relay_request(
             failure_reason=f"{type(error).__name__}: {error}",
             # A tool that failed after the send still settles its price.
             cost_usd=state.cost_usd if state.sent else None,
-            secrets=state.secrets,
+            secrets=state.secrets | set(record_secrets),
         )
 
     try:

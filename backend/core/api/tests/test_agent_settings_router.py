@@ -302,9 +302,41 @@ def test_open_page_returns_navigation() -> None:
     assert client.post("/agent/open-page", json={"path": "/optimizations"}).json() == {
         "navigate": {"kind": "route", "path": "/optimizations"}
     }
-    for path in ("//evil.example", "https://evil.example", "/a?b=1", "javascript:alert(1)", ""):
+    for path in ("//evil.example", "https://evil.example", "javascript:alert(1)", ""):
         assert client.post("/agent/open-page", json={"path": path}).status_code == 422
     assert client.post("/agent/open-page", json={"tab": "secret"}).status_code == 422
+
+
+def test_open_page_keeps_a_narrow_query_string() -> None:
+    """A plain query string opens, an open-redirect shape does not (SKY-631)."""
+    client, _ = _client()
+    assert client.post("/agent/open-page", json={"path": "/tagger?dataset=abc-123"}).json() == {
+        "navigate": {"kind": "route", "path": "/tagger?dataset=abc-123"}
+    }
+    for path in (
+        "//evil.com",
+        "/tagger?next=https://x",
+        "/tagger?next=//evil.com",
+        "/tagger?a=b\\c",
+        "/tagger?a=user@evil.com",
+        "/tagger?a=b#frag",
+        "/tagger#frag",
+        "/tagger?",
+        "/tagger?a=1?b=2",
+        "/tagger?a=%2F%2Fevil.com",
+    ):
+        assert client.post("/agent/open-page", json={"path": path}).status_code == 422, path
+
+
+def test_open_page_keeps_a_query_string_only_for_the_tagger() -> None:
+    """Only /tagger takes a query, so a setup route keeps its exact path (SKY-651)."""
+    client, _ = _client()
+    for path in ("/tagger?new=1", "/tagger?dataset=0123abcd"):
+        assert client.post("/agent/open-page", json={"path": path}).json() == {
+            "navigate": {"kind": "route", "path": path}
+        }, path
+    for path in ("/submit?folder=x", "/optimizations?a=1", "/tagger/x?a=1"):
+        assert client.post("/agent/open-page", json={"path": path}).status_code == 422, path
 
 
 def test_mask_secrets_keeps_flags_and_masks_shapes() -> None:
@@ -333,7 +365,8 @@ def test_settings_tools_are_on_the_generalist_roster() -> None:
     """Every settings tool is offered, with the right approval class."""
     assert set(_ALWAYS_TOOLS) >= _SETTINGS_TOOLS
     assert "change_setting" in _DESTRUCTIVE_TOOLS
-    assert {"change_protected_setting"} == _ALWAYS_CONFIRM_TOOLS
+    # request_secret (SKY-641) also asks in every trust mode: its card is where the user types the value.
+    assert {"change_protected_setting", "request_secret"} == _ALWAYS_CONFIRM_TOOLS
 
 
 def test_router_tags_every_route_for_the_agent() -> None:

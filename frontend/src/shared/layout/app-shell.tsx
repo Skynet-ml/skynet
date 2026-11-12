@@ -88,12 +88,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // The legal pages are public, standalone English documents that ship their
-  // own header and footer, so they render bare (no sidebar or app chrome) and
-  // force dir="ltr" regardless of the UI locale.
+  // The legal pages are public, standalone documents that ship their own
+  // header and footer, so they render bare (no sidebar or app chrome). They
+  // follow the UI locale, so they take its text direction.
   if (pathname === "/terms" || pathname === "/privacy") {
     return (
-      <main className="min-h-dvh" dir="ltr">
+      <main className="min-h-dvh" dir={dir}>
         {children}
       </main>
     );

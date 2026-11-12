@@ -23,8 +23,9 @@ from sqlalchemy.pool import StaticPool
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
+from core.billing.host_agent import attach_host_agent_token
 from core.billing.model_dispatch import ModelHTTPResult
-from core.billing.model_gateway import MCP_RELAY_ROUTE_KEY, ROUTE_KEY
+from core.billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
@@ -44,19 +45,53 @@ from core.service_gateway.optimization.blackbox.repo_constraints import (
     ServiceSpec,
     TargetStage,
 )
-from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
     WATCH_EVERY_ACTIONS,
     WITHHELD_STEP,
 )
-from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
+from core.service_gateway.optimization.blackbox.sandbox import (
+    CommandResult,
+    LocalSubprocessRuntime,
+    LocalSubprocessSession,
+    SandboxSpec,
+)
 from core.service_gateway.optimization.blackbox.service import legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
-from core.worker import repo_staging
+from core.storage.run_call_store import SECRET_MASK, PostgresRunCallStore
+from core.worker import repo_staging, scoped_relay
 from core.worker.repo_gate import check_hidden
 from core.worker.scoped_relay import McpRelay
+
+
+@pytest.fixture(autouse=True)
+def _local_boxes_run_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the scorer's root flag in a local box, which refuses root on the developer's machine.
+
+    The supervisor then runs as the test's user and starts the entry as that
+    user. The Docker tests prove the root supervisor and the user switch (SKY-398).
+
+    Args:
+        monkeypatch: Restores the local box's run after the test.
+    """
+    run = LocalSubprocessSession.run
+
+    def without_root(self: LocalSubprocessSession, command: str, *, sudo: bool = False, **options: Any) -> Any:
+        """Run the command as the test's user.
+
+        Args:
+            self: The local box.
+            command: The shell command.
+            sudo: Ignored.
+            **options: The run's other arguments.
+
+        Returns:
+            The command's result.
+        """
+        return run(self, command, **options)
+
+    monkeypatch.setattr(LocalSubprocessSession, "run", without_root)
 
 
 def _payload(commit: str | None) -> dict[str, Any]:
@@ -640,18 +675,16 @@ def test_only_repository_targets_are_staged() -> None:
 
 
 class _Box:
-    """Answer every command, tracking the network state a real box would have."""
+    """Answer every command, and record whether the box had network when each one ran."""
 
-    def __init__(self, spec: SandboxSpec, cutoff_works: bool) -> None:
+    def __init__(self, spec: SandboxSpec) -> None:
         """Open over ``spec``.
 
         Args:
             spec: The box's requested network profile.
-            cutoff_works: Whether switching the network off succeeds.
         """
         self.spec = spec
         self.online = not spec.network_disabled
-        self._cutoff_works = cutoff_works
         self.commands: list[tuple[str, bool]] = []
         self.closed = False
         self.service_bases: list[str] = []
@@ -664,12 +697,12 @@ class _Box:
         return None
 
     def run(self, command: str, **options: Any) -> CommandResult:
-        """Record the command, answering the reachability check and the prepared-tree digest as the box would."""
+        """Record the command, answering the prepared-tree digest and the working folder as the box would."""
         self.commands.append((command, self.online))
-        if "/dev/tcp/" in command:
-            return CommandResult(exit_code=1) if self.online else CommandResult(exit_code=0, stdout=_PROBE_OK)
         if "hashlib.sha256" in command:
             return CommandResult(exit_code=0, stdout="0" * 64)
+        if command == "pwd":
+            return CommandResult(exit_code=0, stdout="/box\n")
         if "pwd -P" in command:
             return CommandResult(exit_code=0, stdout="/box/.app-services\n")
         return CommandResult(exit_code=0)
@@ -681,12 +714,6 @@ class _Box:
             base_dir: The folder the services run in.
         """
         self.service_bases.append(base_dir)
-
-    def disable_network(self) -> None:
-        """Switch the network off, or fail like a provider that refused."""
-        if not self._cutoff_works:
-            raise ServiceError("policy update refused")
-        self.online = False
 
     def close(self) -> None:
         """Record shutdown."""
@@ -711,15 +738,10 @@ class _NoCatalogClient:
 class _Gateway:
     """Record the evaluator a repository run binds and the parent box it opens."""
 
-    def __init__(self, *, cutoff_works: bool = True) -> None:
-        """Start with no evaluator or box.
-
-        Args:
-            cutoff_works: Whether the parent box's network switch succeeds.
-        """
+    def __init__(self) -> None:
+        """Start with no evaluator or box."""
         self.evaluator: Any = None
         self.boxes: list[_Box] = []
-        self._cutoff_works = cutoff_works
         self.routes: dict[str, dict[str, Any]] = {}
         self.observers: dict[str, list[Any]] = {}
         self.judged: list[tuple[str, str]] = []
@@ -792,9 +814,13 @@ class _Gateway:
 
             def open(self, spec: SandboxSpec) -> _Box:
                 """Open a recording box over ``spec``."""
-                box = _Box(spec, gateway._cutoff_works)
+                box = _Box(spec)
                 gateway.boxes.append(box)
                 return box
+
+            def snapshot(self, session: _Box, cache_key: str) -> str:
+                """Save a box's state under a fake id, since the fake box holds no files."""
+                return f"snap-{len(gateway.boxes)}"
 
         return _Runtime()
 
@@ -807,7 +833,8 @@ class _Gateway:
         Returns:
             A fake route.
         """
-        assert all(not box.online for box in self.boxes)
+        # Setup ends before the guest exists, so no box is open then (SKY-398).
+        assert all(box.closed for box in self.boxes)
         self.evaluator = evaluator
         return {"url": "http://127.0.0.1:1/v1", "token": "evaluator-token"}
 
@@ -822,8 +849,7 @@ def _binding(tmp_path: Path, setup: str | None) -> tuple[dict[str, Any], repo_st
     Returns:
         The payload and the staged tree.
     """
-    archive = tmp_path / "tree.tgz"
-    archive.write_bytes(b"tree")
+    archive = _tree(tmp_path, {"src/app.py": "x = 1\n"})
     staged = repo_staging.StagedRepository(
         snapshot=RepoSnapshot(commit="a" * 40, archive=archive, readonly_paths=(), size_bytes=4),
         secrets={"API_KEY": "secret-value"},
@@ -864,7 +890,7 @@ def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> N
 
 
 def test_binding_starts_the_base_compose_services_next_to_the_scorer(tmp_path: Path) -> None:
-    """The scorer box gets the base commit's ``[sandbox] compose`` services, and only those."""
+    """Each candidate box gets the base commit's ``[sandbox] compose`` services; the setup box starts none."""
     payload, bare = _binding(tmp_path, None)
     db = ComposeService(name="db", command="postgres -D /data")
     staged = dataclasses.replace(bare, compose_services=(db,))
@@ -872,8 +898,11 @@ def test_binding_starts_the_base_compose_services_next_to_the_scorer(tmp_path: P
 
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
 
-    assert gateway.boxes[0].spec.services == (db,)
-    assert gateway.boxes[0].service_bases == ["/box/.app-services"]
+    assert gateway.boxes[0].service_bases == []
+    gateway.evaluator._workspace.open_candidate("").close()
+    candidate = gateway.boxes[-1]
+    assert candidate.spec.services == (db,)
+    assert candidate.service_bases == ["/box/.app-services"]
     staged.close_scorers()
 
 
@@ -1028,8 +1057,78 @@ def test_binding_hands_the_proposer_route_a_relay_for_its_services(tmp_path: Pat
     [relay] = relays
     assert relay._services == services
     assert relay._secrets == {"API_KEY": "secret-value"}
+    assert relay._record_secrets() == ("proposer-token", "mcp-token")
     assert "secret-value" not in repr(payload)
     assert "maps.example.com" not in repr(payload)
+    staged.close_scorers()
+
+
+_BOX_TOKENS = {
+    "model": "model-route-token-0123456789",
+    "host_agent": "host-agent-token-0123456789",
+    "embedding": "embedding-token-0123456789",
+    "mcp_relay": "mcp-relay-token-0123456789",
+    "extra_reflection": "extra-reflection-token-0123456789",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_BOX_TOKENS))
+def test_every_token_the_proposer_box_holds_is_masked_in_its_service_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Each token on the proposer's route is masked in a service call that carries it (SKY-640).
+
+    The host agent token joins the route after binding, as the worker attaches it.
+    """
+    # Pin the service host to a closed loopback port, so the call fails after the relay sends it.
+    monkeypatch.setattr(scoped_relay, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    payload, bare = _binding(tmp_path, None)
+    route = {
+        "url": "http://127.0.0.1:1/v1",
+        "token": _BOX_TOKENS["model"],
+        EMBEDDING_ROUTE_KEY: {"url": "http://127.0.0.1:1/v1", "token": _BOX_TOKENS["embedding"]},
+    }
+    payload["reflection_model_config"] = {"name": "vendor/m", "extra": {ROUTE_KEY: route}}
+    # A ShinkaEvolve box gets each extra reflection model's token as APP_SHINKA_KEY_<n>.
+    payload["extra_reflection_model_configs"] = [
+        {"name": "vendor/extra", "extra": {ROUTE_KEY: {"url": route["url"], "token": _BOX_TOKENS["extra_reflection"]}}}
+    ]
+    staged = dataclasses.replace(
+        bare,
+        proposer_role=RoleEnvironment(services=("maps",)),
+        services={"maps": ServiceSpec(url="http://maps.example.com:1/v1")},
+    )
+    gateway = _Gateway()
+    relays: list[McpRelay] = []
+
+    def bind_mcp_relay(relay: McpRelay) -> dict[str, str]:
+        """Keep the relay and hand back its route."""
+        relays.append(relay)
+        return {"url": "http://127.0.0.1:1/v1", "token": _BOX_TOKENS["mcp_relay"]}
+
+    gateway.bind_mcp_relay = bind_mcp_relay  # type: ignore[attr-defined]
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+    attach_host_agent_token(payload, _BOX_TOKENS["host_agent"])
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    store = PostgresRunCallStore(engine)
+    token = _BOX_TOKENS[kind]
+    body = json.dumps({"query": token}).encode()
+
+    answer = relays[0].service(
+        "maps",
+        "",
+        "POST",
+        body,
+        {"content-type": "application/json"},
+        scoped_relay.CallRecorder(store, "opt-1", "", ""),
+    )
+
+    assert answer.status == 502
+    [stored] = store.list_calls("opt-1", scoped_relay.NO_CANDIDATE_ID)
+    for field in ("target", "request", "response", "failure_reason"):
+        assert token not in (stored[field] or ""), field
+    assert SECRET_MASK in stored["request"]
     staged.close_scorers()
 
 
@@ -1059,8 +1158,8 @@ def test_binding_without_proposer_mcp_servers_adds_no_relay(tmp_path: Path) -> N
 def test_binding_opens_the_scorer_box_on_the_loopback_tree(tmp_path: Path) -> None:
     """The scorer box unpacks the tree with rewritten MCP files, never the fetched one."""
     payload, bare = _binding(tmp_path, None)
-    scorer_tree = tmp_path / "scorer-tree.tgz"
-    scorer_tree.write_bytes(b"tree")
+    (tmp_path / "scorer").mkdir()
+    scorer_tree = _tree(tmp_path / "scorer", {"src/app.py": "x = 1\n"})
     staged = dataclasses.replace(bare, scorer_archive=scorer_tree)
     gateway = _Gateway()
 
@@ -1090,7 +1189,7 @@ def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Pat
     box = gateway.boxes[0]
     assert box.spec.network_disabled is True
     assert box.spec.allowed_hosts == ()
-    assert payload["target"]["repo"]["environment"]["network"] == {"setup": [], "versions": []}
+    assert payload["target"]["repo"]["environment"]["network"] == {"setup": [], "versions": [], "metric": []}
     staged.close_scorers()
 
 
@@ -1443,28 +1542,15 @@ def test_setup_runs_online_in_the_parent_before_the_guest_gets_a_route(tmp_path:
     assert box.spec.allowed_hosts == PACKAGE_REGISTRY_HOSTS
     assert box.spec.network_disabled is False
     assert box.spec.env == {}
-    assert box.online is False
+    assert box.closed
     setup = [online for command, online in box.commands if "pip install" in command]
     assert setup == [True]
     assert payload["target"]["repo"]["environment"]["network"] == {
         "setup": list(PACKAGE_REGISTRY_HOSTS),
         "versions": [],
+        "metric": [],
     }
     assert payload["target"]["repo"]["environment"]["setup_command"] == "pip install -r requirements.txt"
-    staged.close_scorers()
-
-
-def test_a_failed_network_cutoff_aborts_the_run(tmp_path: Path) -> None:
-    """When the box cannot be taken offline, binding fails, the guest gets no route and the box is closed."""
-    payload, staged = _binding(tmp_path, "npm ci")
-    gateway = _Gateway(cutoff_works=False)
-
-    with pytest.raises(NetworkCutoffError):
-        repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
-
-    assert "_skynet_evaluator_route" not in payload
-    assert gateway.evaluator is None
-    assert gateway.boxes[0].closed
     staged.close_scorers()
 
 
@@ -1917,7 +2003,7 @@ def _names(archive: Path) -> set[str]:
 
 
 _METRIC_TREE = {
-    "optimize.toml": '[paths]\neditable = ["src"]\n\n[metric]\nfiles = ["eval/scorer.py"]\n',
+    "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
     "src/app.py": "x = 1\n",
     "eval/scorer.py": "def score(): ...\n",
     "eval/data.csv": "1\n",
@@ -2046,7 +2132,7 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
         **_FILES,
         "optimize.toml": _CONSTRAINTS
         + '\n[services.judge]\nurl = "https://judge.example.com/v1"\nheaders = { X-Key = "${JUDGE_KEY}" }\n'
-        + '\n[metric]\nservices = ["judge"]\n',
+        + '\n[run]\nentry = "a.py:f"\n[metric]\nservices = ["judge"]\n',
     }
     _, staged = _stage_with(files, monkeypatch)
     try:
@@ -2096,6 +2182,102 @@ def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
     # The parent keeps the key for the relay; the scorer tests check that no box env holds it.
     assert scorer._workspace.secrets["JUDGE_KEY"] == "judge-secret-value"
     staged.close_scorers()
+
+
+def test_staging_keeps_each_roles_network_and_vcpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The [run] and [metric] network and vcpus keys reach the staged run (SKY-398)."""
+    files = {
+        **_FILES,
+        "optimize.toml": _CONSTRAINTS
+        + '\n[run]\nentry = "src/geocode/app.py:main"\nnetwork = ["api.example.com"]\nvcpus = 4\n'
+        + '\n[metric]\nnetwork = ["judge.example.com"]\nvcpus = 2\n',
+    }
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert (staged.run_hosts, staged.run_vcpus) == (("api.example.com",), 4)
+        assert (staged.metric_hosts, staged.metric_vcpus) == (("judge.example.com",), 2)
+    finally:
+        staged.cleanup()
+
+
+@pytest.mark.parametrize(("section", "table"), [("run", 'entry = "src/geocode/app.py:main"\n'), ("metric", "")])
+def test_staging_refuses_a_bad_role_vcpus(monkeypatch: pytest.MonkeyPatch, section: str, table: str) -> None:
+    """A role vcpus value the provider cannot give fails setup before any box opens (SKY-398)."""
+    files = {**_FILES, "optimize.toml": _CONSTRAINTS + f"\n[{section}]\n{table}vcpus = 3\n"}
+    with pytest.raises(ConstraintsError, match=rf"\[{section}\] vcpus must be 1 or an even number"):
+        _stage_with(files, monkeypatch)
+
+
+def test_binding_gives_each_evaluation_box_its_roles_network_and_vcpus(tmp_path: Path) -> None:
+    """The candidate box gets the [run] hosts and vcpus, and the private metric box gets the [metric] ones."""
+    payload, bare = _binding(tmp_path, None)
+    staged = dataclasses.replace(
+        bare,
+        run_hosts=("api.example.com",),
+        run_vcpus=4,
+        metric_hosts=("judge.example.com",),
+        metric_vcpus=2,
+    )
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    workspace = gateway.evaluator._workspace
+    workspace.open_candidate("").close()
+    candidate = gateway.boxes[-1].spec
+    workspace.open_metric().close()
+    metric = gateway.boxes[-1].spec
+    assert (candidate.network_disabled, candidate.allowed_hosts, candidate.vcpus) == (False, ("api.example.com",), 4)
+    assert not candidate.private
+    assert (metric.network_disabled, metric.allowed_hosts, metric.vcpus) == (False, ("judge.example.com",), 2)
+    assert metric.private
+    assert payload["target"]["repo"]["environment"]["network"] == {
+        "setup": [],
+        "versions": ["api.example.com"],
+        "metric": ["judge.example.com"],
+    }
+    staged.close_scorers()
+
+
+def test_staging_warns_when_a_metric_imports_a_repo_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A metric that imports a repo module gets a setup warning that names the [run] fix, in the run's log."""
+    files = {
+        **_METRIC_TREE,
+        "eval/scorer.py": "from src import app\n\ndef score(): ...\n",
+        "src/__init__.py": "",
+    }
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        (warning,) = staged.metric_warnings
+        assert "eval/scorer.py" in warning
+        assert "[run]" in warning
+    finally:
+        staged.cleanup()
+    logged: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        repo_staging.sandbox_log.stream_logger,
+        "warning",
+        lambda message, text, extra: logged.append((text, extra)),
+    )
+    payload, bare = _binding(tmp_path, None)
+    bound = dataclasses.replace(bare, metric_warnings=(warning,))
+
+    repo_staging.bind_repo_scorer(payload, bound, _Gateway(), owner_id="job-1")
+
+    ((text, extra),) = logged
+    assert text == warning
+    assert "metric.imports_repo" in json.dumps(extra, default=str)
+    bound.close_scorers()
+
+
+def test_staging_does_not_warn_for_a_self_contained_metric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A metric that imports only the standard library and its own files gets no warning."""
+    files = {**_METRIC_TREE, "eval/scorer.py": "import json\n\ndef score(): ...\n"}
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert staged.metric_warnings == ()
+    finally:
+        staged.cleanup()
 
 
 def test_binding_without_stages_keeps_the_scorer_as_it_was(tmp_path: Path) -> None:
@@ -2479,7 +2661,7 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
             tmp_path,
             {
                 "optimize.toml": '[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
-                '\n\n[metric]\nmcp = ".mcp.json"\n',
+                '\n\n[run]\nentry = "a.py:f"\n[metric]\nmcp = ".mcp.json"\n',
                 ".mcp.json": '{"mcpServers": {}}\n',
                 "src/app.py": "def main(case):\n    return case\n",
             },
@@ -2493,7 +2675,7 @@ def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path
     ("toml", "inside"),
     [
         (
-            '[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[metric]\nfiles = ["eval"]\n',
+            '[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             "eval/labels.json",
         ),
         ('[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n', ".optimize/exploits/cheat.py"),
@@ -2521,11 +2703,11 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
     ("toml", "message"),
     [
         (
-            '[paths]\neditable = ["src", "eval"]\n\n[metric]\nfiles = ["eval"]\n',
+            '[paths]\neditable = ["src", "eval"]\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             r"'eval' is editable, but only the scorer reads it",
         ),
         (
-            '[proposer]\nillegal = "eval/rules.md"\n\n[metric]\nfiles = ["eval"]\n',
+            '[proposer]\nillegal = "eval/rules.md"\n\n[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             r"\[proposer\] illegal 'eval/rules\.md' is inside the hidden",
         ),
         ('[run]\nentry = "eval/run.py:main"\n\n[metric]\nfiles = ["eval"]\n', r"\[run\] entry names 'eval/run\.py'"),
@@ -2552,27 +2734,38 @@ def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
 @pytest.mark.parametrize(
     ("toml", "links", "linked"),
     [
-        pytest.param('[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "real")}, "scoring", id="inside"),
         pytest.param(
-            '[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "/etc")}, "scoring", id="outside-absolute"
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+            {"scoring": (tarfile.SYMTYPE, "real")},
+            "scoring",
+            id="inside",
         ),
         pytest.param(
-            '[metric]\nfiles = ["scoring"]\n',
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
+            {"scoring": (tarfile.SYMTYPE, "/etc")},
+            "scoring",
+            id="outside-absolute",
+        ),
+        pytest.param(
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring"]\n',
             {"scoring": (tarfile.SYMTYPE, "../../x")},
             "scoring",
             id="outside-relative",
         ),
         pytest.param(
-            '[metric]\nfiles = ["scoring/score.py"]\n',
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["scoring/score.py"]\n',
             {"scoring": (tarfile.SYMTYPE, "real")},
             "scoring/score.py",
             id="below-a-linked-folder",
         ),
         pytest.param(
-            '[metric]\nfiles = ["eval"]\n', {"eval/data": (tarfile.SYMTYPE, "../real")}, "eval", id="link-inside-folder"
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
+            {"eval/data": (tarfile.SYMTYPE, "../real")},
+            "eval",
+            id="link-inside-folder",
         ),
         pytest.param(
-            '[metric]\nfiles = ["eval"]\n',
+            '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
             {"eval/copy.py": (tarfile.LNKTYPE, "real/score.py")},
             "eval",
             id="hard-link-out",
@@ -2596,7 +2789,7 @@ def test_staging_refuses_a_hidden_path_with_a_link(
 def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it."""
     files = {
-        "optimize.toml": '[metric]\nfiles = ["eval"]\n',
+        "optimize.toml": '[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n',
         "eval/score.py": "def metric(case, output):\n    return 1.0\n",
         "src/app.py": "x = 1\n",
     }

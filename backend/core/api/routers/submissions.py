@@ -204,12 +204,16 @@ def _ensure_api_budget(
     if checked.status == "pending":
         raise DomainError("budget.pending", status=409)
     if checked.status != "succeeded":
-        # Only catalog-coded failures go out: an uncoded check message can be
-        # raw exception text, and the client words each code in its own locale.
+        # The client words each code in its own locale. An uncoded failure keeps
+        # its English text under a generic code, so the list never hides the
+        # cause; the same caller already reads that text from /wizard/preflight
+        # (SKY-646).
         failures = [
             {"key": check.message_code, "params": check.message_params or {}}
+            if check.message_code
+            else {"key": "workflow.validation_failed", "params": {"error": check.message or check.key}}
             for check in checked.checks
-            if check.status == "failed" and check.message_code
+            if check.status == "failed"
         ]
         raise DomainError("submission.validation_failed", status=409, failures=failures)
     payload.preflight_id = checked.id

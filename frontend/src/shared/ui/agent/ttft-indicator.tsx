@@ -61,7 +61,7 @@ export function TtftIndicator() {
 // breathes with a soft brand glow. It replaces the panel's flat `animate-ping`
 // halo so the pre-first-token wait reads as one distinct, premium Skynet moment
 // rather than a plain pulsing dot.
-export function EmberGlyph({ reduce }: { reduce: boolean }) {
+function EmberGlyph({ reduce }: { reduce: boolean }) {
   if (reduce) {
     return (
       <span className="relative inline-flex size-4 items-center justify-center shrink-0" aria-hidden="true">

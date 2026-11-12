@@ -143,20 +143,6 @@ def endpoint_speed(endpoints: list[dict]) -> tuple[float, float] | None:
     return best
 
 
-def reply_ms(endpoints: list[dict]) -> float | None:
-    """Return the fastest healthy endpoint's time to a short reply.
-
-    Args:
-        endpoints: OpenRouter's ``data.endpoints`` list for one model.
-
-    Returns:
-        Milliseconds to the first token plus :data:`_REPLY_TOKENS` at median
-        throughput, or ``None`` when no endpoint has stats and enough uptime.
-    """
-    speed = endpoint_speed(endpoints)
-    return _short_reply_ms(speed) if speed else None
-
-
 def choose(candidates: list[CatalogModel], times: dict[str, float]) -> str | None:
     """Return the fastest candidate no other candidate beats on every axis.
 

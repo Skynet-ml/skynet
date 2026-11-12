@@ -188,7 +188,7 @@ test("a setup with nothing in it is no draft", () => {
   const empty = {
     step: "task",
     furthestStep: "task",
-    task: { objective: " ", background: "", repo: null },
+    task: { objective: " ", background: "", repo: { repository: " " } },
     inputs: { cases: [], stagedDatasetId: null },
     meta: { name: "" },
   };

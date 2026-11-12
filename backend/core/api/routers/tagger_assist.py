@@ -65,6 +65,7 @@ from ..model_router import (
 from ..sharing_access import ShareRole
 from ..tagging_session_access import require_role
 from ._helpers import enforce_llm_balance, sse_from_events, stream_with_llm_metering
+from .tagging_sessions import refuse_while_autotag_runs
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,9 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 
 MAX_PREDICT_ROWS = 50
 MAX_INTERVIEW_TURNS = 40
+# A guide the chat saves stays as small as one the interview writes.
+MAX_GUIDE_RULES = 40
+MAX_GUIDE_RULE_CHARS = 1000
 
 # Job-row statuses that mean the worker fleet still owns the job.
 _ACTIVE_JOB_STATUSES = ("pending", "validating", "running")
@@ -205,6 +209,53 @@ class SynthesizeResponse(BaseModel):
     model: str
 
 
+class TaggingGuide(BaseModel):
+    """A tagging session's labeling guide and dataset, as the chat reads it."""
+
+    session_id: str
+    name: str
+    phase: str
+    mode: str | None = Field(
+        default=None,
+        description="Answer style: binary, multiclass or freetext. None until a provisional session gets one.",
+    )
+    question: str | None = None
+    categories: list[str] = Field(default_factory=list)
+    prompt: str | None = None
+    rubric: list[str] = Field(default_factory=list)
+    dataset_spec: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Brief, columns and row count for a session that has no rows yet.",
+    )
+    needs_dataset_spec: bool = Field(
+        default=False,
+        description="True when the session has no rows yet and its rows come from the dataset spec.",
+    )
+    dataset: str = Field(description="Row count, input columns and a few sample rows, as JSON text.")
+    autotag_running: bool = False
+
+
+class TaggingGuideSaveRequest(BaseModel):
+    """The labeling guide the chat saves on a tagging session."""
+
+    rubric: list[str] = Field(min_length=1, max_length=MAX_GUIDE_RULES)
+    task: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The task: ``mode`` (binary, multiclass or freetext) and its artifact, ``question`` for binary, "
+            "``categories`` (at least two labels) for multiclass, or ``prompt`` for freetext. Absent keeps "
+            "the session's task. A session whose answer style is not chosen yet needs it; a session whose "
+            "answer style is chosen keeps that mode."
+        ),
+    )
+    dataset_spec: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "``brief``, ``columns`` and ``rows`` for a session with no rows yet. Only that kind of session takes it."
+        ),
+    )
+
+
 def _load_for_role(
     session: Session,
     session_id: str,
@@ -326,6 +377,36 @@ def _interview_config(row: TaggingSessionModel) -> dict[str, Any]:
     # A synthetic session interviews for the data itself until it has rows.
     config["_synthetic_pending"] = bool(config.get("synthetic")) and not row.data
     return config
+
+
+def _guide_of(row: TaggingSessionModel) -> TaggingGuide:
+    """Project a session row onto the guide the chat reads.
+
+    Args:
+        row: The loaded tagging session.
+
+    Returns:
+        The session's effective task, rubric, dataset spec and a dataset sample.
+    """
+    config = _interview_config(row)
+    assist = cast("dict[str, Any]", row.assist) or {}
+    categories = config.get("categories") if isinstance(config.get("categories"), list) else []
+    return TaggingGuide(
+        session_id=str(row.id),
+        name=str(row.name or ""),
+        phase=str(row.phase or ""),
+        mode=None if config.get("modeProvisional") else (str(config.get("mode") or "") or None),
+        question=str(config.get("question") or "") or None,
+        categories=[str(c.get("label") if isinstance(c, dict) else c) for c in categories],
+        prompt=str(config.get("prompt") or "") or None,
+        rubric=tagging.clean_rubric(assist.get("rubric")),
+        dataset_spec=assist.get("datasetSpec") if isinstance(assist.get("datasetSpec"), dict) else {},
+        needs_dataset_spec=bool(config["_synthetic_pending"]),
+        dataset=tagging.summarize_dataset(
+            config, cast("list[str]", row.columns), cast("list[dict[str, Any]]", row.data)
+        ),
+        autotag_running=(assist.get("autotag") or {}).get("status") == "running",
+    )
 
 
 def _job_status(job_store: Any, job_id: str) -> str | None:
@@ -458,6 +539,8 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
         fast_config = byok_config or cli_fast_config(model, req.fast_mode)
         if req.fast_mode and model:
             fast_config = await asyncio.to_thread(with_fast_mode, fast_config or ModelConfig(name=model), True)
+        # A cold model catalog builds on the calling thread (SKY-603).
+        effort = await asyncio.to_thread(effective_reasoning_effort, model, req.reasoning_effort)
         usage_sink: list = []
 
         async def source() -> Any:
@@ -470,7 +553,7 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
                     [t.model_dump() for t in req.turns],
                     req.locale,
                     model=model,
-                    reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),
+                    reasoning_effort=effort,
                     usage_sink=usage_sink,
                     model_config=fast_config,
                 ):
@@ -585,7 +668,8 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
             data = cast("list[dict[str, Any]]", row.data)
             annotations = cast("dict[str, Any]", row.annotations)
             assist = cast("dict[str, Any]", row.assist) or {}
-        model_config = _resolve_assist_model(job_store, user.username, assist)
+        # A cold model catalog builds on the calling thread (SKY-603).
+        model_config = await asyncio.to_thread(_resolve_assist_model, job_store, user.username, assist)
         wanted = set(req.row_ids)
         rows = [r for r in data if str(r.get("id")) in wanted]
         if not rows:
@@ -890,5 +974,102 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
             row.updated_at = cast(Any, datetime.now(UTC))
             db.commit()
         return SynthesizeResponse(columns=columns, rows=data, cents=cents, model=model_config.name)
+
+    @router.get(
+        "/tagging-sessions/{session_id}/assist/guide",
+        response_model=TaggingGuide,
+        operation_id="get_tagging_guide_for_agent",
+        summary="Read a tagging session's labeling guide and a sample of its rows",
+        tags=["agent"],
+    )
+    def get_tagging_guide(session_id: str, user: AuthenticatedUserDep) -> TaggingGuide:
+        """Return the session's task, rubric and dataset spec, with a few sample rows.
+
+        Args:
+            session_id: UUID of the tagger session.
+            user: Authenticated caller; needs at least ``viewer`` access.
+
+        Returns:
+            The labeling guide as the chat reads it.
+        """
+        with Session(job_store.engine) as db:
+            return _guide_of(_load_for_role(db, session_id, user, ShareRole.viewer))
+
+    @router.put(
+        "/tagging-sessions/{session_id}/assist/guide",
+        response_model=TaggingGuide,
+        operation_id="save_tagging_guide_for_agent",
+        summary="Save a tagging session's labeling guide: rubric, task and dataset spec",
+        tags=["agent"],
+    )
+    def save_tagging_guide(session_id: str, req: TaggingGuideSaveRequest, user: AuthenticatedUserDep) -> TaggingGuide:
+        """Save the guide the interview would write, through the interview's own rules.
+
+        The rubric replaces the session's rubric. A task replaces the task
+        override wholesale, as the interview's confirmed contract does.
+
+        Args:
+            session_id: UUID of the tagger session.
+            req: The rubric, and the optional task and dataset spec.
+            user: Authenticated caller; needs at least ``editor`` access.
+
+        Returns:
+            The saved guide.
+
+        Raises:
+            DomainError: 409 when the session has no AI assist, when the bulk
+                job runs, or when a dataset spec goes to a session that has
+                rows; 422 when the rubric, task or dataset spec is not usable.
+        """
+        if any(len(rule) > MAX_GUIDE_RULE_CHARS for rule in req.rubric):
+            raise DomainError("tagger.assist.invalid_guide", status=422)
+        with Session(job_store.engine) as db:
+            row = _load_for_role(db, session_id, user)
+            assist = cast("dict[str, Any] | None", row.assist)
+            if not assist:
+                raise DomainError("tagger.assist.not_enabled", status=409)
+            refuse_while_autotag_runs(row)
+            # The stored config of a provisional session stays provisional; the
+            # chosen mode lives in the override, so the checks read the merge.
+            config = _effective_config(row)
+            rubric, override = tagging.normalize_guide(config, req.rubric, req.task)
+            # As in the interview, only a provisional session can pick its answer style.
+            asked_mode = str((req.task or {}).get("mode") or "").strip().lower()
+            mode_change = not config.get("modeProvisional") and asked_mode not in ("", config.get("mode"))
+            if not rubric or mode_change or (req.task is not None and not override):
+                raise DomainError("tagger.assist.invalid_guide", status=422)
+            stored_mode = str((assist.get("taskOverride") or {}).get("mode") or "")
+            if override and (row.config.get("modeProvisional") or stored_mode) and "mode" not in override:
+                # The override replaces the old one, so it must carry the mode the
+                # merge used: the provisional choice, or an autosaved override mode.
+                override = {"mode": config["mode"], **override}
+            # A provisional session has no answer style until a task gives it one.
+            task_override = override if req.task is not None else assist.get("taskOverride") or {}
+            if config.get("modeProvisional") and not str(task_override.get("mode") or ""):
+                raise DomainError("tagger.assist.invalid_guide", status=422)
+            pending = bool(_interview_config(row)["_synthetic_pending"])
+            spec: dict[str, Any] = {}
+            if req.dataset_spec is not None:
+                if not pending:
+                    raise DomainError("tagger.assist.not_synthetic", status=409)
+                spec = tagging.normalize_dataset_spec(req.dataset_spec)
+                if not spec:
+                    raise DomainError("tagger.assist.invalid_guide", status=422)
+            elif pending and not assist.get("datasetSpec"):
+                # The session gets its rows only from a dataset spec.
+                raise DomainError("tagger.assist.invalid_guide", status=422)
+            row.assist = cast(
+                Any,
+                {
+                    **assist,
+                    "rubric": rubric,
+                    **({"taskOverride": override} if req.task is not None else {}),
+                    **({"datasetSpec": spec} if spec else {}),
+                },
+            )
+            row.updated_at = cast(Any, datetime.now(UTC))
+            db.commit()
+            db.refresh(row)
+            return _guide_of(row)
 
     return router

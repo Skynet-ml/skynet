@@ -317,6 +317,7 @@
     "optimization.protected_interactive_sandbox_required": "Cette optimisation protégée ne peut pas être évaluée ni servie dans le processus API. Un bac à sable {runtime} facturé séparément est requis, mais il n’est pas encore disponible sur ce point de terminaison.",
     "sandbox.docker_unavailable": "Docker ne fonctionne pas sur cet ordinateur. Lancez Docker Desktop ou OrbStack, puis réessayez.",
     "sandbox.docker_image_missing": "L’image du bac à sable local n’est pas encore créée. Redémarrez l’application pour la créer.",
+    "sandbox.provider_unavailable": "Ce fournisseur de sandbox n’est pas disponible sur ce serveur. Choisissez un fournisseur dans la liste.",
     "repo_gate.unenforced_local": "optimize.toml définit {key}. Le bac à sable Docker local ne peut pas encore appliquer ce paramètre. Supprimez-le pour lancer l’exécution.",
     "repo_gate.unenforced_cloud": "optimize.toml définit {key}. Le bac à sable cloud ne peut pas encore appliquer ce paramètre. Supprimez-le pour lancer l’exécution.",
     "repo_gate.missing_secret": "Le service {service} dans optimize.toml a besoin du secret {secret}, mais cette exécution n’a aucun secret de ce nom. Ajoutez le secret à l’exécution ou retirez le nom du fichier.",

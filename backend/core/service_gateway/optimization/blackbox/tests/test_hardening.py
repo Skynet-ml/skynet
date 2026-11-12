@@ -10,7 +10,6 @@ import pytest
 
 from core.constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS
 from core.models.hardening import HardeningExploit, HardeningJob
-from core.notifications.catalog import HARDENING_DONE_EVENT, HARDENING_REVIEW_EVENT
 from core.service_gateway.optimization.blackbox.classification import ClassificationError
 from core.service_gateway.optimization.blackbox.hardening import (
     Candidate,
@@ -20,7 +19,6 @@ from core.service_gateway.optimization.blackbox.hardening import (
     decide_fix,
     exploit_passes,
     new_job,
-    notification_event,
     parse_verdict,
     record_verdict,
     retry,
@@ -301,7 +299,6 @@ def test_round_without_exploit_stops_clean_and_releases_the_rest(tmp_path: Path)
     assert job.rounds_detail[0].status == "clean"
     assert job.spent_usd == pytest.approx(0.6)
     assert job.reserved_usd == pytest.approx(job.spent_usd)
-    assert notification_event(job) == HARDENING_DONE_EVENT
 
 
 def test_exploits_wait_for_review_and_low_confidence_is_marked_unsure(tmp_path: Path) -> None:
@@ -312,7 +309,6 @@ def test_exploits_wait_for_review_and_low_confidence_is_marked_unsure(tmp_path: 
     job = _run(_job(attacker_model="openai/a", judge_model="openai/j"), runner, tmp_path)
 
     assert job.status == "waiting_review"
-    assert notification_event(job) == HARDENING_REVIEW_EVENT
     round_one = job.rounds_detail[0]
     assert (round_one.index, round_one.status, round_one.fix) == (1, "waiting_review", None)
     first, second = round_one.exploits
@@ -333,7 +329,6 @@ def test_full_round_drafts_a_fix_that_passes_every_check_and_writes_the_suite(tm
 
     job = _run(job, runner, tmp_path, reference)
     assert job.status == "waiting_fix"
-    assert notification_event(job) == HARDENING_REVIEW_EVENT
     fix = job.rounds_detail[0].fix
     assert fix is not None
     assert fix.diff.startswith("--- a/metric.py")
@@ -394,7 +389,6 @@ def test_a_failed_check_blocks_approval(tmp_path: Path, script: dict[str, bool],
     assert rejected.status == "rejected"
     assert rejected.rounds_detail[0].status == "rejected"
     assert rejected.reserved_usd == pytest.approx(rejected.spent_usd)
-    assert notification_event(rejected) is None
 
 
 def test_retry_after_a_rejected_fix_drafts_the_fix_again(tmp_path: Path) -> None:
@@ -454,7 +448,6 @@ def test_budget_stop_ends_the_job_cleanly(tmp_path: Path) -> None:
     assert job.error is None
     assert runner.names().count("judge") == 1
     assert job.reserved_usd == pytest.approx(job.spent_usd) == pytest.approx(2.05)
-    assert notification_event(job) == HARDENING_DONE_EVENT
 
 
 def test_job_stops_after_n_rounds(tmp_path: Path) -> None:

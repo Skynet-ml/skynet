@@ -22,10 +22,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .. import run_log
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
 from ..api.routers.package_registry import package_registry_for
-from ..billing.host_agent import _proposer_model_extra
-from ..billing.model_gateway import MCP_RELAY_ROUTE_KEY, ROUTE_KEY
+from ..billing.host_agent import HOST_AGENT_TOKEN_KEY, _proposer_model_extra
+from ..billing.model_gateway import EMBEDDING_ROUTE_KEY, MCP_RELAY_ROUTE_KEY, ROUTE_KEY
 from ..billing.operation_pricing import ChargePolicy
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
@@ -58,7 +59,7 @@ from ..exceptions import ServiceError
 from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..sandbox.services import ComposeService
-from ..service_gateway.optimization.blackbox import runner
+from ..service_gateway.optimization.blackbox import runner, sandbox_log
 from ..service_gateway.optimization.blackbox.harness_bridge import hidden_hashes
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
@@ -96,7 +97,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 )
 from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
-from .repo_gate import RepoGateError, check_hidden, sandbox_place
+from .repo_gate import RepoGateError, check_hidden, metric_import_warnings, sandbox_place
 from .scoped_relay import McpRelay
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ class StagedRepository:
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
     # The services each role lists, by role name: [run] for the version's entry,
-    # [metric] for the scorer. Each runs in its own process with its own relay (E37).
+    # [metric] for the scorer. Each runs in its own box with its own relay (E37, SKY-398).
     service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     # Each role with the servers of its own MCP file, ``target.<name>`` for each
     # stage: the relay checks each MCP request against the calling role only
@@ -150,9 +151,17 @@ class StagedRepository:
     # services it lists only through the parent's relay, behind its own token
     # (SKY-610, SKY-612).
     proposer_role: RoleEnvironment | None = None
-    # The [run] entry, which runs before the metric with the metric files out of the tree (E38).
+    # The [run] entry, which runs in the candidate box; the metric files are only in the metric box (E38, SKY-398).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = 60.0
+    # Each role's own box: [run] sizes and walls off the candidate box, [metric]
+    # the metric box. No hosts keeps the box offline; None keeps the default size.
+    run_hosts: tuple[str, ...] = ()
+    run_vcpus: int | None = None
+    metric_hosts: tuple[str, ...] = ()
+    metric_vcpus: int | None = None
+    # Each repository module a metric file imports; the metric box cannot import it (SKY-398).
+    metric_warnings: tuple[str, ...] = ()
     agent_archive: Path | None = None
     # The scorer box's tree: the full tree with every role's MCP file replaced
     # by loopback urls, so the box never holds a real upstream url (E49, E53).
@@ -411,6 +420,7 @@ def stage_repository(
         )
         if leaks:
             raise RepoGateError(leaks)
+        warnings = tuple(metric_import_warnings(snapshot.archive, metric.files))
         scorer_archive = (
             relay_mcp_archive(
                 snapshot.archive,
@@ -471,6 +481,11 @@ def stage_repository(
         proposer_role=environment.constraints.proposer if environment.constraints is not None else None,
         run_entry=environment.constraints.run_entry if environment.constraints is not None else None,
         run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
+        run_hosts=_role_hosts(environment.constraints.run_role if environment.constraints is not None else None),
+        run_vcpus=environment.constraints.run_vcpus if environment.constraints is not None else None,
+        metric_hosts=_role_hosts(environment.constraints.metric_role if environment.constraints is not None else None),
+        metric_vcpus=environment.constraints.metric_vcpus if environment.constraints is not None else None,
+        metric_warnings=warnings,
         agent_archive=agent_archive,
         scorer_archive=scorer_archive,
         compose_services=environment.constraints.compose_services if environment.constraints is not None else (),
@@ -479,6 +494,35 @@ def stage_repository(
         secret_hosts=environment.constraints.secret_hosts if environment.constraints is not None else {},
         secret_allowed_hosts=secret_allowed_hosts,
     )
+
+
+def _role_hosts(role: RoleEnvironment | None) -> tuple[str, ...]:
+    """Return the hosts a ``[run]`` or ``[metric]`` box may reach besides the relay.
+
+    Args:
+        role: The role's parsed environment, or ``None`` without a constraints file.
+
+    Returns:
+        The role's ``network`` hosts; empty keeps the box offline.
+    """
+    return tuple(role.network or ()) if role is not None else ()
+
+
+def _warn_metric_imports(owner_id: str, warnings: tuple[str, ...]) -> None:
+    """Write each metric import warning into the run's log at setup.
+
+    Args:
+        owner_id: The run the warnings belong to.
+        warnings: The messages from :func:`metric_import_warnings`.
+    """
+    for warning in warnings:
+        sandbox_log.stream_logger.warning(
+            "%s",
+            warning,
+            extra=run_log.event_extra(
+                source="host", event="metric.imports_repo", fields={"warning": warning}, sandbox_owner=owner_id
+            ),
+        )
 
 
 def relay_mcp_archive(archive: Path, roles: tuple[RoleEnvironment, ...], destination: Path) -> Path:
@@ -776,8 +820,9 @@ def bind_repo_scorer(
     never over the guest's control route, so it is billed and cleaned up like
     the guest's boxes while the guest never holds its secrets, its filesystem
     or a way to open a box with package-registry access. When the target has
-    a setup command the box opens reaching only package registries, runs
-    setup once, and goes offline before any version is laid out. When the
+    a setup command the setup box reaches only package registries, and its
+    state is saved; each version then runs in a new candidate box and is
+    scored in a new metric box, each with its own role's hosts (SKY-398). When the
     proposer's MCP file lists servers or ``[proposer] services`` lists
     services, the proposer's route also gets the token, server names and
     service names of a relay that reaches only those.
@@ -823,6 +868,10 @@ def bind_repo_scorer(
             secrets=staged.secrets,
             protected_paths=staged.protected_paths,
             hidden_paths=staged.hidden_paths,
+            run_hosts=staged.run_hosts,
+            run_vcpus=staged.run_vcpus,
+            metric_hosts=staged.metric_hosts,
+            metric_vcpus=staged.metric_vcpus,
         ),
         str(scorer_spec["metric_code"]),
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
@@ -847,10 +896,15 @@ def bind_repo_scorer(
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):
         environment["setup_command"] = target.get("setup_command")
-        environment["network"] = {"setup": list(hosts), "versions": []}
+        environment["network"] = {
+            "setup": list(hosts),
+            "versions": list(staged.run_hosts),
+            "metric": list(staged.metric_hosts),
+        }
     staged.scorers.append(scorer)
-    # Setup and the network cutoff finish here, in the parent, before the
-    # guest that writes versions exists; either failing fails the run.
+    _warn_metric_imports(owner_id, staged.metric_warnings)
+    # Setup finishes here, in the parent, before the guest that writes
+    # versions exists; a failure fails the run.
     scorer.prepare()
     payload["_skynet_evaluator_route"] = gateway.bind_evaluator(scorer)
     proposer = staged.proposer_role
@@ -867,6 +921,8 @@ def bind_repo_scorer(
             allowed_hosts=staged.secret_allowed_hosts,
             budget=getattr(gateway, "runtime", None),
             services=staged.services,
+            # Box code can put any token it holds into a call (SKY-640).
+            record_secrets=lambda: _box_route_tokens(payload, proposer_route),
         )
         # Beside the proposer's model route, as the host proposer's token is:
         # the guest's harness launch reads only that route.
@@ -875,6 +931,39 @@ def bind_repo_scorer(
             "servers": [server.name for server in proposer.mcp_servers],
             "services": list(proposer.services),
         }
+
+
+def _box_route_tokens(payload: Mapping[str, Any], route: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return every token the proposer box reads from its model routes.
+
+    The worker attaches the host agent token after the relay is made, so
+    the relay calls this for each record, not once.
+
+    Args:
+        payload: The run payload, whose extra reflection models a ShinkaEvolve
+            box also receives, one ``APP_SHINKA_KEY_<n>`` each.
+        route: The proposer's model route, which later steps change in place.
+
+    Returns:
+        The model, host agent, embedding, MCP relay and extra reflection
+        model tokens that are set.
+    """
+    embedding = route.get(EMBEDDING_ROUTE_KEY)
+    mcp = route.get(MCP_RELAY_ROUTE_KEY)
+    tokens = [
+        route.get("token"),
+        route.get(HOST_AGENT_TOKEN_KEY),
+        embedding.get("token") if isinstance(embedding, dict) else None,
+        mcp.get("token") if isinstance(mcp, dict) else None,
+    ]
+    # The same configs the blackbox service's ``_shinka_models`` turns into
+    # the box's ShinkaEvolve keys; one with no route reuses the proposer's token.
+    for config in payload.get("extra_reflection_model_configs") or ():
+        extra = config.get("extra") if isinstance(config, dict) else None
+        extra_route = extra.get(ROUTE_KEY) if isinstance(extra, dict) else None
+        if isinstance(extra_route, dict):
+            tokens.append(extra_route.get("token"))
+    return tuple(str(token) for token in tokens if token)
 
 
 def _repo_model_gateway(scorer_spec: dict[str, Any]) -> ScorerGateway | None:

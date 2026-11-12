@@ -28,7 +28,6 @@ export interface WizardState {
   task_background?: string;
   /** `"repo"` when the run optimizes a repository. */
   artifact_kind?: OptimizerTarget;
-  starting_version?: string | Record<string, string>;
   /** The repository a repository run optimizes, as `owner/name`. */
   repository?: string;
   /** The host of `repository`; the user picks it, the agent only reads it. */

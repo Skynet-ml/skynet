@@ -53,6 +53,7 @@
     "@fontsource-variable/noto-sans-sc": "^5.2.10",
     "@fontsource-variable/onest": "^5.3.1",
     "@fontsource-variable/vazirmatn": "^5.2.8",
+    "@lezer/common": "^1.5.1",
     "@lezer/highlight": "^1.2.3",
     "@lobehub/icons": "^5.10.0",
     "@phosphor-icons/react": "^2.1.10",

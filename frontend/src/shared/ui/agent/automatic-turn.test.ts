@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AUTOMATIC_TURN_PREFIX, automaticTurn, automaticTurnBody } from "./automatic-turn.ts";
+import { AUTOMATIC_TURN_PREFIX, automaticTurnBody } from "./automatic-turn.ts";
 
 test("an automatic turn reads back its body", () => {
-  const message = automaticTurn("- metric.py failed");
-  assert.ok(message.startsWith(AUTOMATIC_TURN_PREFIX));
+  const message = `${AUTOMATIC_TURN_PREFIX}\n\n- metric.py failed`;
   assert.equal(automaticTurnBody(message), "- metric.py failed");
 });
 

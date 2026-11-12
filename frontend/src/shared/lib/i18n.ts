@@ -192,16 +192,3 @@ export function tI18n(
   }
   return formatTemplate(template, params, locale);
 }
-
-/**
- * Render a contract check item's message in the active locale. The server's
- * `message` is the Hebrew base (the check can run in a worker with no request
- * locale), so the client renders from `message_code`; older servers omit it.
- */
-export function contractCheckMessage(check: {
-  message: string;
-  message_code?: string | null;
-  message_params?: Record<string, string | number>;
-}): string {
-  return check.message_code ? tI18n(check.message_code, check.message_params) : check.message;
-}

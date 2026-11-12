@@ -78,7 +78,6 @@ def test_filtered_defaults_and_raw_metadata(monkeypatch: pytest.MonkeyPatch) -> 
     assert shown.models[0].is_default
     assert shown.models[0].is_strongest
     assert model_catalog.agent_model_id() == kept.value
-    assert model_catalog.strongest_model_id() == kept.value
     assert raw.models == [removed, kept]
     assert not kept.is_default
     twin = _model("acme/fixed", reasoning_efforts=None)

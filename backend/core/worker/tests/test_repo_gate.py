@@ -76,7 +76,9 @@ def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
 
 def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
     """The message says which sandbox cannot enforce the key."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[metric]\nreference = "eval/reference.json"\n'})
+    archive = _archive(
+        tmp_path, {CONSTRAINTS_FILE: b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n'}
+    )
 
     [failure] = check_repository(archive, (), place="cloud")
 
@@ -122,12 +124,9 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
             b'[target.planner]\nentry = "agents/planner.py:plan"\nnetwork = ["api.example.com"]\n',
             "[target.planner] network",
         ),
-        (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
-        (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
-        (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
-        (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
+        (b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
         (b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
-        (b'[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
+        (b'[run]\nentry = "a.py:f"\n[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -142,22 +141,28 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
     ("raw", "key"),
     [
         (b'[services.cache]\nurl = "https://api.example.com"\n', "[services.cache]"),
+        (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
+        (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
+        (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
         (
             b'[services.maps]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
             "[run] services",
         ),
         (b'[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
-        (b'[services.grader]\nurl = "https://api.example.com"\n[metric]\nservices = ["grader"]\n', "[metric] services"),
-        (b"[metric]\nservices = []\n", "[metric] services"),
+        (
+            b'[services.grader]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\n[metric]\nservices = ["grader"]\n',
+            "[metric] services",
+        ),
+        (b"[run]\nentry = 'a.py:f'\n[metric]\nservices = []\n", "[metric] services"),
         (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
-        (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
+        (b'[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
         (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
         (b"[proposer]\nservices = []\n", "[proposer] services"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_stage_services_pass_in_every_place(tmp_path: Path, raw: bytes, key: str, place: str) -> None:
-    """The relays enforce the stage and proposer service lists and MCP files, so the gate passes them (SKY-612)."""
+    """The relays enforce the service lists and MCP files, and the run's supervisor its entry and timeout (SKY-635)."""
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert key not in [failure.key for failure in failures]
@@ -169,6 +174,28 @@ def test_a_proposer_mcp_file_and_proposer_services_pass(tmp_path: Path, place: s
     raw = b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nmcp = ".mcp.json"\nservices = ["maps"]\n'
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
+
+    assert failures == []
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_run_entry_that_calls_its_services_through_the_relay_passes(tmp_path: Path, place: str) -> None:
+    """A ``[run]`` entry with a timeout and services, each secret on its own host, starts the run (SKY-635)."""
+    raw = (
+        b'[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\n'
+        b'headers = { X-Goog-Api-Key = "${GOOGLE_MAPS_API_KEY}" }\n'
+        b'[services.llm]\nurl = "https://api.cerebras.ai/v1"\n'
+        b'headers = { Authorization = "Bearer ${CEREBRAS_API_KEY}" }\n'
+        b'[run]\nentry = "geocoding/run.py:geocode"\ntimeout = 120\nservices = ["geocode", "llm"]\n'
+    )
+    allowed_hosts = {"GOOGLE_MAPS_API_KEY": ("maps.googleapis.com",), "CEREBRAS_API_KEY": ("api.cerebras.ai",)}
+
+    failures = check_repository(
+        _archive(tmp_path, {CONSTRAINTS_FILE: raw}),
+        {"GOOGLE_MAPS_API_KEY", "CEREBRAS_API_KEY"},
+        place=place,  # type: ignore[arg-type]
+        allowed_hosts=allowed_hosts,
+    )
 
     assert failures == []
 
@@ -201,7 +228,7 @@ def test_a_target_mcp_file_passes_in_every_place(tmp_path: Path, place: str) -> 
 
 def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
     """Each failure renders in Hebrew with its own parameters, so the setup check shows it in the user's language."""
-    raw = b'[metric]\nreference = "eval/reference.json"\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
+    raw = b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     assert {failure.code for failure in failures} == {
@@ -219,15 +246,15 @@ def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
 
 def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> None:
     """The worker's error lists every reason and keeps the first one's code for a client that shows one message."""
-    raw = b'[run]\nentry = "a.py:f"\n[metric]\nreference = "eval/reference.json"\n'
-    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
+    raw = b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n[metric]\nreference = "eval/reference.json"\n'
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place="local")
 
     error = RepoGateError(failures)
 
     assert error.failures == failures
     assert error.code == I18nKey.REPO_GATE_UNENFORCED_LOCAL
-    assert error.params == {"key": "[run] entry"}
-    assert "[run] entry" in str(error)
+    assert error.params == {"key": "[run] illegal"}
+    assert "[run] illegal" in str(error)
     assert "[metric] reference" in str(error)
 
 
@@ -257,7 +284,7 @@ def _mcp_archive(tmp_path: Path, server: str) -> Path:
     Returns:
         The archive.
     """
-    raw = b'[metric]\nmcp = "eval/.mcp.json"\n'
+    raw = b'[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n'
     mcp = b'{"mcpServers": {"grader": ' + server.encode() + b"}}"
     return _archive(tmp_path, {CONSTRAINTS_FILE: raw, "eval/.mcp.json": mcp})
 
@@ -395,10 +422,10 @@ def test_local_mode_is_the_local_place() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        b'[metric]\nfiles = ["eval/scorer.py"]\n',
-        b"[metric]\nfiles = []\n",
-        b'[metric]\nexploits = "eval/exploits"\n',
-        b'[metric]\nexploits = ".optimize/exploits"\n',
+        b'[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval/scorer.py"]\n',
+        b"[run]\nentry = 'a.py:f'\n[metric]\nfiles = []\n",
+        b'[run]\nentry = "a.py:f"\n[metric]\nexploits = "eval/exploits"\n',
+        b'[run]\nentry = "a.py:f"\n[metric]\nexploits = ".optimize/exploits"\n',
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -555,6 +582,9 @@ def test_a_missing_hidden_path_names_its_setting(tmp_path: Path) -> None:
 
 
 _LABELLED_TOML = b"""
+[run]
+entry = "src/app.py:main"
+
 [metric]
 files = ["eval"]
 illegal = "rules/metric.md"
@@ -795,3 +825,79 @@ def test_a_proposer_mcp_file_gets_the_allowed_host_check(tmp_path: Path) -> None
 
     assert failure.code == I18nKey.REPO_GATE_SECRET_HOST_UNLISTED
     assert failure.key == "[proposer] mcp secrets"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'[run]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\n',
+        b'[run]\nentry = "a.py:f"\nvcpus = 4\n',
+        b'[run]\nentry = "a.py:f"\n[metric]\nnetwork = ["judge.example.com"]\n',
+        b"[run]\nentry = 'a.py:f'\n[metric]\nvcpus = 2\n",
+    ],
+)
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_role_network_and_vcpus_pass_the_gate(tmp_path: Path, raw: bytes, place: str) -> None:
+    """The candidate box and the metric box each open with their own role's hosts and vCPUs (SKY-398)."""
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
+_REPO_MODULES = {
+    "src/app/__init__.py": b"",
+    "src/app/core.py": b"def run(): ...\n",
+    "helpers.py": b"def help(): ...\n",
+    "eval/util.py": b"def util(): ...\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "module"),
+    [
+        (b"from app.core import run\n", "src/app/core.py"),
+        (b"import helpers\n", "helpers.py"),
+        (b"from util import util\n", "eval/util.py"),
+        (b"from . import util\n", "eval/util.py"),
+        (b"from .util import util\n", "eval/util.py"),
+    ],
+)
+def test_a_metric_that_imports_a_repo_module_gets_a_warning(tmp_path: Path, source: bytes, module: str) -> None:
+    """The metric box holds no repo file, so setup warns and names the [run] fix (SKY-398)."""
+    archive = _archive(tmp_path, {**_REPO_MODULES, "eval/score.py": source})
+
+    [warning] = repo_gate.metric_import_warnings(archive, ["eval/score.py"])
+
+    assert "eval/score.py" in warning
+    assert f"'{module}'" in warning
+    assert "[run] entry" in warning
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"import json\nimport numpy\n",
+        b"from helper import x\n",
+        b"from . import helper\n",
+        b"this is not python (\n",
+    ],
+)
+def test_a_self_contained_metric_gets_no_warning(tmp_path: Path, source: bytes) -> None:
+    """Imports of installed packages and of other metric files are fine, and a file that does not parse is skipped."""
+    files = {**_REPO_MODULES, "eval/score.py": source, "eval/helper.py": b"x = 1\n"}
+
+    assert repo_gate.metric_import_warnings(_archive(tmp_path, files), ["eval/score.py", "eval/helper.py"]) == []
+
+
+def test_a_metric_in_a_dot_folder_that_imports_a_repo_module_gets_a_warning(tmp_path: Path) -> None:
+    """A relative import from a dot folder such as ``.optimize`` still names a repository module."""
+    files = {".optimize/metric.py": b"from . import helpers\n", ".optimize/helpers.py": b"x = 1\n"}
+
+    [warning] = repo_gate.metric_import_warnings(_archive(tmp_path, files), [".optimize/metric.py"])
+
+    assert "'.optimize/helpers.py'" in warning
+
+
+def test_a_metric_folder_counts_as_metric_files(tmp_path: Path) -> None:
+    """A module inside a ``[metric] files`` folder goes into the metric box, so no warning names it."""
+    files = {**_REPO_MODULES, "eval/score.py": b"from util import util\n"}
+
+    assert repo_gate.metric_import_warnings(_archive(tmp_path, files), ["eval"]) == []

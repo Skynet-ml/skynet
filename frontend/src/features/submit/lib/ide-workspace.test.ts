@@ -5,7 +5,6 @@ import {
   FIXED_FILE_ISSUE,
   WorkspaceFs,
   WorkspaceFsError,
-  blankEntryFile,
   diffWorkspace,
   explorerEditIssue,
   fixedFileIssue,
@@ -226,15 +225,4 @@ test("explorerEditIssue refuses an explorer delete or rename that touches a fixe
   // Outside the workspace is the provider's business (not found), not a refusal.
   assert.equal(explorerEditIssue(["/elsewhere/run.py"]), null);
   assert.equal(explorerEditIssue([]), null);
-});
-
-test("blankEntryFile names the entry file a check cannot run without", () => {
-  assert.equal(
-    blankEntryFile("def run(a, i):\n    return a\n", "def score(*a):\n    return 1.0\n"),
-    null,
-  );
-  // The API refuses empty code, which surfaced only as "the check didn't finish".
-  assert.equal(blankEntryFile("def run(a, i):\n    return a\n", ""), "metric.py");
-  assert.equal(blankEntryFile("   \n", "def score(*a):\n    return 1.0\n"), "run.py");
-  assert.equal(blankEntryFile("", ""), "run.py");
 });

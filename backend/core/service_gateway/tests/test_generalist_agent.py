@@ -290,6 +290,31 @@ def test_system_prompt_names_the_screen_rule() -> None:
     assert "``wizard_state.wizard_screen`` names the wizard screen" in prompt
 
 
+def test_chat_outside_the_wizard_opens_the_setup_in_the_same_chat() -> None:
+    """A setup request outside the wizard opens /submit, which keeps the chat (SKY-631)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+    assert "``wizard_screen`` is absent, call ``open_page`` with ``path`` ``/submit``" in prompt
+    assert "open_page" in tools_for({})
+    screen_prompt = " ".join((generalist_module.SCREEN_AGENT_PROMPT or "").split())
+    assert "or from the chat in which the user asked for this setup" in screen_prompt
+
+
+def test_tagging_request_opens_the_tagger_in_the_same_chat() -> None:
+    """A tagging request outside a setup opens the tagger setup beside this chat (SKY-631)."""
+    prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
+    assert "call ``open_page`` with ``path`` ``/tagger?dataset=<id>``" in prompt
+    assert "``/tagger?new=1``" in prompt
+    # A wizard screen turn runs the screen agent, which has no open_page, so
+    # this rule covers only turns outside a setup. On the PR preview the model
+    # told a dashboard user that a new chat starts, so the rule forbids that.
+    assert "The tagger opens with this same chat beside it, so never say that a new chat starts" in prompt
+    assert "the tagger opens with a new chat" not in prompt
+    # The rule is not about a wizard screen, so it sits before that section
+    # of the prompt, not inside it.
+    assert prompt.index("Starting tagging:") < prompt.index("The wizard screen on view:")
+    assert {"open_page", "list_datasets_for_agent"} <= set(tools_for({}))
+
+
 _FULL_SNAPSHOT: dict[str, Any] = {
     "job_name": "Tickets",
     "job_description": "d",
@@ -821,6 +846,16 @@ def test_read_only_reach_tools_always_available() -> None:
     assert "list_tagging_sessions_for_agent" in allowed
     for name in ("get_wallet_for_agent", "list_tagging_sessions_for_agent"):
         assert _needs_approval(name, "ask") is False
+
+
+def test_tagging_guide_tools_always_available() -> None:
+    """The chat reads a tagging guide freely and saves it with a safe-mutation gate."""
+    allowed = tools_for(WizardState())
+    assert "get_tagging_guide_for_agent" in allowed
+    assert "save_tagging_guide_for_agent" in allowed
+    assert _needs_approval("get_tagging_guide_for_agent", "ask") is False
+    assert _needs_approval("save_tagging_guide_for_agent", "ask") is True
+    assert _needs_approval("save_tagging_guide_for_agent", "auto_safe") is False
 
 
 def test_dataset_library_tools_always_available() -> None:
@@ -1523,13 +1558,19 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
     assert [t["function"]["name"] for t in lm.requests[0]["tools"]] == [
         "list_models_for_agent",
         "search_docs",
+        "request_secret",
         "share_plan",
         "submit",
     ]
     # The second request only appends to the first: the cacheable prefix holds.
     assert lm.requests[1]["messages"][: len(first)] == first
     assert events[0]["event"] == "turn_metadata"
-    assert events[0]["data"]["allowed_tools"] == ["list_models_for_agent", "search_docs", "share_plan"]
+    assert events[0]["data"]["allowed_tools"] == [
+        "list_models_for_agent",
+        "request_secret",
+        "search_docs",
+        "share_plan",
+    ]
     assert [e["event"] for e in events if e["event"] in ("tool_start", "tool_end")] == ["tool_start", "tool_end"]
     # One clear per loop step, so a pending row whose call never ran is dropped.
     assert [e["event"] for e in events if e["event"] in ("tool_pending_clear", "tool_start")] == [
@@ -1642,7 +1683,9 @@ async def test_turn_offers_web_tools_when_firecrawl_is_configured(monkeypatch: p
     )
 
     assert reply == "found it"
-    assert events[0]["data"]["allowed_tools"] == sorted({*web_tools.WEB_TOOLS, "search_docs", "share_plan"})
+    assert events[0]["data"]["allowed_tools"] == sorted(
+        {*web_tools.WEB_TOOLS, "request_secret", "search_docs", "share_plan"}
+    )
     assert posted == [("/search", {"query": "dspy gepa", "limit": 5})]
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
     assert [(e["tool"], e["status"]) for e in ends] == [("web_search", "ok")]

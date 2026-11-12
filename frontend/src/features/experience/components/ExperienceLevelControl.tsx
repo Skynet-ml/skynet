@@ -20,11 +20,6 @@ const LEVEL_ICONS: Record<ExperienceLevel, Icon> = {
   expert: Wrench,
 };
 
-/** The localized name of a level, for the setup's summary row. */
-export function levelLabel(level: ExperienceLevel): string {
-  return msg(LEVEL_KEYS[level].label);
-}
-
 /**
  * The Guided / Standard / Expert picker that Settings shows.
  */

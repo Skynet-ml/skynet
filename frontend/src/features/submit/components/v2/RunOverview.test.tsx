@@ -11,7 +11,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { setClientLocale } from "@/shared/lib/runtime-locale";
 import { TooltipProvider } from "@/shared/ui/primitives/tooltip";
-import type { ContractCheckState } from "../../hooks/use-contract-check";
 import type { BlackboxRunRequest, CatalogModel } from "@/shared/types/api";
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { initialWizardV2State, type WizardV2State } from "../../lib/wizard-v2";
@@ -28,67 +27,19 @@ registerHooks({
 const { RunOverview } = await import("./RunOverview");
 const { hostedRunBlock } = await import("../../hooks/use-unified-wizard");
 
-const cc: ContractCheckState = {
-  staticResult: null,
-  staticPending: false,
-  lastCheck: null,
-  stale: false,
-  checking: false,
-  error: null,
-  timing: null,
-  terminal: null,
-  canCheck: true,
-  check: async () => null,
-};
-
 function render(state: WizardV2State, hardening: HardeningJob | null = null): string {
   setClientLocale("en");
   return renderToStaticMarkup(
     <TooltipProvider>
-      <RunOverview state={state} cc={cc} guided={false} hardening={hardening} />
+      <RunOverview state={state} guided={false} hardening={hardening} />
     </TooltipProvider>,
   );
 }
 
 void describe("RunOverview", () => {
-  void it("sums up the run in four tabs and opens on General", () => {
+  void it("sums up the repository run in three tabs and opens on General", () => {
     const state = initialWizardV2State("expert");
     state.task.objective = "Classify support tickets";
-    const html = render(state);
-    // The UI catalog does not load under jiti, so its strings render as their keys.
-    assert.equal(html.match(/role="tab"/g)?.length, 4);
-    for (const tab of ["general", "data", "models", "budget"]) {
-      assert.match(html, new RegExp(`submit\\.v2\\.overview\\.tab\\.${tab}<`));
-    }
-    assert.match(html, /aria-selected="true"[^>]*>.*?submit\.v2\.overview\.tab\.general</);
-    assert.match(html, /Classify support tickets/);
-    // The contract check gates Submit, so it shows on every tab.
-    assert.match(html, /submit\.v2\.metric\.check\.needed/);
-    // Each tab carries its icon, as the old summary step did.
-    assert.equal(html.match(/role="tab"[^>]*>\s*<svg/g)?.length, 4);
-    // General restores the old summary's optimizer, visibility and billing rows.
-    for (const key of [
-      "submit.v2.stage.optimizer",
-      "submit.basics.privacy.label",
-      "submit.budget.billing_source",
-    ]) {
-      assert.match(html, new RegExp(key.replace(/\./g, "\\.")));
-    }
-  });
-
-  void it("adds a reward tab when the metric declares REWARD_SPEC", () => {
-    const state = initialWizardV2State("expert");
-    state.workspace.metricCode =
-      "REWARD_SPEC = {'weights': {'accuracy': 1, 'speed': 1, 'cost': 1}, 'speed': {'reference': 500}, 'cost': {'reference': 0.01}}\n";
-    const html = render(state);
-    assert.equal(html.match(/role="tab"/g)?.length, 5);
-    assert.match(html, /submit\.v2\.overview\.tab\.reward</);
-    state.workspace.metricCode = "def score(example, output):\n    return 1.0\n";
-    assert.doesNotMatch(render(state), /submit\.v2\.overview\.tab\.reward</);
-  });
-
-  void it("drops the data tab for a repository run", () => {
-    const state = initialWizardV2State("expert");
     state.task.repo = {
       repository: "acme/agent",
       branch: "main",
@@ -97,10 +48,27 @@ void describe("RunOverview", () => {
       setupCommand: "",
     };
     const html = render(state);
+    // The UI catalog does not load under jiti, so its strings render as their keys.
     assert.equal(html.match(/role="tab"/g)?.length, 3);
+    for (const tab of ["general", "models", "budget"]) {
+      assert.match(html, new RegExp(`submit\\.v2\\.overview\\.tab\\.${tab}<`));
+    }
     assert.doesNotMatch(html, /submit\.v2\.overview\.tab\.data</);
+    assert.match(html, /aria-selected="true"[^>]*>.*?submit\.v2\.overview\.tab\.general</);
+    assert.match(html, /Classify support tickets/);
     assert.match(html, /acme\/agent @ main/);
+    // The server checks the setup at submit, so the overview says so on every tab.
     assert.match(html, /submit\.v2\.repo\.check_on_submit/);
+    // Each tab carries its icon, as the old summary step did.
+    assert.equal(html.match(/role="tab"[^>]*>\s*<svg/g)?.length, 3);
+    // General restores the old summary's optimizer, visibility and billing rows.
+    for (const key of [
+      "submit.v2.stage.optimizer",
+      "submit.basics.privacy.label",
+      "submit.budget.billing_source",
+    ]) {
+      assert.match(html, new RegExp(key.replace(/\./g, "\\.")));
+    }
   });
 
   void it("names the subscription as the billing source when every model runs on one", () => {
@@ -143,7 +111,7 @@ void describe("hostedRunBlock", () => {
       ...extra,
     }) as unknown as BlackboxRunRequest;
   const block = (over: Partial<Parameters<typeof hostedRunBlock>[0]> = {}) =>
-    hostedRunBlock({ repo: true, request: request(), linked: true, catalog: "ready", ...over });
+    hostedRunBlock({ request: request(), linked: true, catalog: "ready", ...over });
   const cliModel = { name: "openai/gpt-5", token_source: "subscription", cli_provider: "codex" };
 
   void it("lets a plain repository run start on the web", () => {
@@ -160,7 +128,6 @@ void describe("hostedRunBlock", () => {
   });
 
   void it("judges the models the request sends", () => {
-    assert.equal(block({ repo: false }), "submit.v2.run_on.blocked.repo_only");
     assert.equal(
       block({ request: request({ scorer: { model: cliModel } } as Partial<BlackboxRunRequest>) }),
       "submit.v2.run_on.blocked.cli_model",

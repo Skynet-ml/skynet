@@ -10,22 +10,10 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { contractCheckMessage } from "@/shared/lib/i18n";
-import { cn } from "@/shared/lib/utils";
 import { PingDot } from "@/shared/ui/ping-dot";
 import { Button } from "@/shared/ui/primitives/button";
-import {
-  ArrowsIn,
-  ArrowsOut,
-  CheckCircle,
-  CircleNotch,
-  ListChecks,
-  XCircle,
-} from "@/shared/ui/icons";
-import type { ContractCheckItem, ContractCheckResponse } from "@/shared/types/unified-run";
-import { contractConsole, type ContractConsole } from "../lib/contract-console";
-import { blankEntryFile, diffWorkspace, workspaceTexts } from "../lib/ide-workspace";
-import { METRIC_FILE, RUN_FILE } from "../lib/wizard-v2";
+import { ArrowsIn, ArrowsOut } from "@/shared/ui/icons";
+import { diffWorkspace, workspaceTexts } from "../lib/ide-workspace";
 import { v2Msg } from "../components/v2/ArtifactConfirmCard";
 import { park, unpark } from "./park";
 import type { RepoSource } from "./repo-files";
@@ -35,129 +23,6 @@ import { ZOOM_EASING, ZOOM_MS, prefersReducedMotion, zoomFrames } from "./zoom";
 
 function isDark(): boolean {
   return document.documentElement.classList.contains("dark");
-}
-
-/** One failed check as a line under its file. */
-function checkLine(item: ContractCheckItem, guided: boolean): string {
-  const where =
-    item.sample_index != null
-      ? `${v2Msg("submit.v2.metric.check.sample_title", guided, { index: item.sample_index + 1 })}: `
-      : "";
-  const head = `${where}${contractCheckMessage(item)}`;
-  return item.detail ? `${head}\n${item.detail}` : head;
-}
-
-/** What the last Check found in one file. */
-interface FileCheck {
-  path: string;
-  console: ContractConsole;
-}
-
-function CheckResults({
-  results,
-  failed,
-  emptyFile,
-  guided,
-  stale,
-  onOpen,
-}: {
-  results: FileCheck[];
-  failed: boolean;
-  /** The entry file that was empty, so the check was not sent. */
-  emptyFile: string | null;
-  guided: boolean;
-  /** The results predate the files on screen; said beside them. */
-  stale: boolean;
-  onOpen: (path: string) => void;
-}) {
-  if (emptyFile) {
-    return (
-      <p role="alert" className="px-4 py-2 text-xs text-destructive">
-        {v2Msg("submit.v2.ide.check.empty", guided, { path: emptyFile })}
-      </p>
-    );
-  }
-  if (failed) {
-    return (
-      <p role="alert" className="px-4 py-2 text-xs text-destructive">
-        {v2Msg("submit.v2.ide.check.failed", guided)}
-      </p>
-    );
-  }
-  // A clean check is one line, so its arrival barely moves the editor.
-  const clean = results.every(({ console: result }) => result.errors.length === 0);
-  const staleNote = stale && (
-    <p className={cn("px-4 text-xs text-muted-foreground", clean ? "py-2" : "pt-2")}>
-      {v2Msg("submit.v2.metric.check.stale", guided)}
-    </p>
-  );
-  if (clean) {
-    return (
-      <div className="flex flex-wrap items-center text-xs">
-        <ul className="flex flex-wrap items-center">
-          {results.map(({ path, console: result }) => (
-            <li key={path} className="px-4 py-2">
-              <button
-                type="button"
-                onClick={() => onOpen(path)}
-                className="flex items-center gap-2 font-mono hover:underline"
-                dir="ltr"
-              >
-                {result.valid ? (
-                  <CheckCircle className="size-4 text-[var(--success)]" aria-hidden />
-                ) : (
-                  <XCircle className="size-4 text-destructive" aria-hidden />
-                )}
-                {path}
-                <span className="font-sans text-muted-foreground">
-                  {result.valid
-                    ? v2Msg("submit.v2.ide.check.passed", guided)
-                    : v2Msg("submit.v2.metric.files.errors", guided, {
-                        count: result.errors.length,
-                      })}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-        {staleNote}
-      </div>
-    );
-  }
-  return (
-    <>
-      {staleNote}
-      <ul className="max-h-48 divide-y divide-border/40 overflow-y-auto text-xs">
-        {results.map(({ path, console: result }) => (
-          <li key={path} className="px-4 py-2">
-            <button
-              type="button"
-              onClick={() => onOpen(path)}
-              className="flex items-center gap-2 font-mono hover:underline"
-              dir="ltr"
-            >
-              {result.valid ? (
-                <CheckCircle className="size-4 text-[var(--success)]" aria-hidden />
-              ) : (
-                <XCircle className="size-4 text-destructive" aria-hidden />
-              )}
-              {path}
-              <span className="font-sans text-muted-foreground">
-                {result.valid
-                  ? v2Msg("submit.v2.ide.check.passed", guided)
-                  : v2Msg("submit.v2.metric.files.errors", guided, { count: result.errors.length })}
-              </span>
-            </button>
-            {result.errors.length > 0 && (
-              <pre dir="ltr" className="mt-1 whitespace-pre-wrap ps-6 font-mono text-destructive">
-                {result.errors.join("\n\n")}
-              </pre>
-            )}
-          </li>
-        ))}
-      </ul>
-    </>
-  );
 }
 
 /**
@@ -173,10 +38,6 @@ export function IdeWorkspace({
   files,
   onFileChange,
   onFileDelete,
-  onCheck,
-  checkPhase,
-  checkResult,
-  resultsStale,
   repo,
   lockedFiles,
   strip,
@@ -189,14 +50,6 @@ export function IdeWorkspace({
   files: Readonly<Record<string, string>>;
   onFileChange: (path: string, text: string) => void;
   onFileDelete: (path: string) => void;
-  /** Run Check; null for a repository run, whose scorer is checked when it is submitted. */
-  onCheck: (() => Promise<ContractCheckResponse | null>) | null;
-  /** The step the running Check stands in, said beside its spinner. */
-  checkPhase?: string | null;
-  /** The last Check (or the static check while it is fresher); each file gets its line. */
-  checkResult: ContractCheckResponse | null;
-  /** The shown results predate the files (or setup) on screen. */
-  resultsStale: boolean;
   /** A repository run's checkout, shown read-only in the explorer. */
   repo: RepoSource | null;
   /** Workspace files the setup agent may write now; the editor holds them read-only. */
@@ -219,15 +72,6 @@ export function IdeWorkspace({
   const slotRef = useRef<HTMLElement | null>(null);
   const layerRef = useRef<HTMLDivElement | null>(null);
   const growFrom = useRef<DOMRect | null>(null);
-  const [checking, setChecking] = useState(false);
-  // What the toolbar's own Check found that the wizard's result cannot say,
-  // until the next result (the agent's own Check, say) replaces it.
-  const [issue, setIssue] = useState<{
-    after: ContractCheckResponse | null;
-    emptyFile?: string;
-    failed?: boolean;
-  } | null>(null);
-  const checkIssue = issue && issue.after === checkResult ? issue : null;
 
   const texts = useMemo(
     () => workspaceTexts(runCode, metricCode, files),
@@ -359,43 +203,6 @@ export function IdeWorkspace({
     return () => grow.cancel();
   }, [fullScreen, workbench]);
 
-  const runCheck = useCallback(async () => {
-    if (!onCheck) return;
-    setChecking(true);
-    try {
-      await workbench?.saveAll();
-      const emptyFile = blankEntryFile(
-        latest.current[RUN_FILE] ?? "",
-        latest.current[METRIC_FILE] ?? "",
-      );
-      if (emptyFile) {
-        setIssue({ after: checkResult, emptyFile });
-        return;
-      }
-      setIssue(null);
-      if (!(await onCheck())) setIssue({ after: checkResult, failed: true });
-    } finally {
-      setChecking(false);
-    }
-  }, [workbench, onCheck, checkResult]);
-
-  const extraPaths = useMemo(() => Object.keys(files).sort(), [files]);
-  const results = useMemo<FileCheck[]>(() => {
-    if (!checkResult) return [];
-    const out: FileCheck[] = [];
-    for (const path of [RUN_FILE, METRIC_FILE, ...extraPaths]) {
-      const result = contractConsole(checkResult, path, (item) => checkLine(item, guided), extraPaths);
-      // The entry files always get a line; a helper file only when it has a problem.
-      if (result && (path === RUN_FILE || path === METRIC_FILE || !result.valid))
-        out.push({ path, console: result });
-    }
-    return out;
-  }, [checkResult, extraPaths, guided]);
-  const showResults = checkIssue !== null || results.length > 0;
-
-  const checkLabel = checking
-    ? v2Msg("submit.v2.metric.check.running", guided)
-    : v2Msg("submit.v2.metric.check.run", guided);
   const fullScreenLabel = fullScreen
     ? v2Msg("submit.v2.ide.exit_full_screen", guided)
     : v2Msg("submit.v2.ide.full_screen", guided);
@@ -410,26 +217,6 @@ export function IdeWorkspace({
           </span>
         )}
         <div className="ms-auto flex shrink-0 items-center gap-1">
-          {onCheck && checking && checkPhase && (
-            <span className="text-xs text-muted-foreground" aria-live="polite">
-              {checkPhase}
-            </span>
-          )}
-          {onCheck && (
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              onClick={runCheck}
-              disabled={!workbench || checking}
-              aria-label={checkLabel}
-            >
-              {checking ? (
-                <CircleNotch className="size-4 animate-spin" aria-hidden />
-              ) : (
-                <ListChecks className="size-4" aria-hidden />
-              )}
-            </Button>
-          )}
           <Button
             size="icon-sm"
             variant="ghost"
@@ -445,24 +232,6 @@ export function IdeWorkspace({
           </Button>
         </div>
       </header>
-      {showResults && (
-        <div
-          aria-live="polite"
-          className={cn(
-            "shrink-0 border-b border-border/60 transition-opacity",
-            resultsStale && checkIssue === null && "opacity-60",
-          )}
-        >
-          <CheckResults
-            results={results}
-            failed={checkIssue?.failed ?? false}
-            emptyFile={checkIssue?.emptyFile ?? null}
-            guided={guided}
-            stale={resultsStale && checkIssue === null}
-            onOpen={(path) => void workbench?.openFile(path)}
-          />
-        </div>
-      )}
       {strip && <div className="shrink-0 border-b border-border/60 px-4 py-2">{strip}</div>}
       <div className="flex min-h-0 flex-1">
         {/* VS Code lays out left to right whatever the page direction. */}

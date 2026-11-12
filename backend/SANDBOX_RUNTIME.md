@@ -31,6 +31,31 @@ With `APP_LOCAL_MODE=1` (the Mac app), the protected parent opens its boxes as c
 
 Known gaps against Vercel: the setup box's egress has no byte cap (Vercel's `SANDBOX_NETWORK_BYTES_CAP`), and the proxy allows port 443 only. The box and command environment reach each command over stdin, never as `docker` arguments, because the box environment can hold the gateway key. tmpfs pages count toward the container's memory limit.
 
+## Repository scoring boxes
+
+A repository run scores each version in two new boxes (SKY-398). The
+candidate box opens from the saved after-setup state and runs the `[run]`
+entry. The metric box opens from the saved metric state and holds only the
+metric files and the runner. Each box has its own `operation_key`, so each
+reserves its own hold. On Vercel the saved states are snapshots. In local
+Docker mode they are tar files that the parent keeps, because a box keeps
+`--read-only` and the parent does not use `docker commit`. `SandboxSpec`
+names the state in `snapshot_id` or `snapshot_archive`. The opener checks the
+prepared tree's digest before it lays out a version.
+
+The parent starts the `[run]` supervisor with `sudo: true`, through the model
+mailbox, so the entry keeps its model route. On Vercel the exec wrapper sends
+the supervisor's stdout to a root-owned `/tmp/.app-output-<token>.out` file.
+The supervisor checks that file, then starts the entry as the owner of the
+candidate tree, so the entry cannot write the wrapper's files. In a local
+Docker box the supervisor's stdout is a pipe and its root has no
+capabilities, so it cannot switch users and the entry runs as the
+supervisor's user. A root with capabilities switches users also with a pipe.
+Only the supervisor command gets a root model proxy. That proxy starts from
+`/usr/local/bin/python3` and runs only the proxy and config bytes whose
+digests the parent sent. `test_metric_isolation.py` proves the user switch on Docker with a
+privileged `docker exec` that stands in for Vercel's root.
+
 ## Offline dependencies
 
 | Dependency | Execution identity |
@@ -46,6 +71,7 @@ Known gaps against Vercel: the setup box's egress has no byte cap (Vercel's `SAN
 | Node for eve | `24.21.0` at `/opt/node24/bin/node`; eve only, because eve needs Node 24 or later |
 | eve | `eve@1.0.0-rc.6`, with `ai@7.0.165`, `@ai-sdk/openai-compatible@3.0.87` and `zod@4.6.7` |
 | ShinkaEvolve | `shinka-evolve==0.0.7` and its exact closure from `core/service_gateway/optimization/blackbox/shinka_requirements.txt`, in its own venv at `/opt/shinka/venv`; sandbox image builds only, with `--build-arg INCLUDE_SHINKA_EVOLVE=1` |
+| AutoSaddler | `microsoft/AutoSaddler@9df6d2e3` and its exact closure from `core/service_gateway/optimization/blackbox/autosaddler_requirements.txt`, in its own venv at `/opt/autosaddler/venv`; every image build (SKY-645) |
 | Deno, for the Flex-capable profile | `2.6.6`, with the prewarmed `/app/.deno` Pyodide cache |
 
 `sandbox-runtime/package-lock.json` locks the CLI dependency graph and package integrity. Pi 0.87.1 publishes an `npm-shrinkwrap.json` that pins its whole tree, `@earendil-works/pi-ai@0.87.1` included, although its `package.json` asks for `^0.87.1`. npm applies that shrinkwrap both to this lockfile and to the launch-time `npm install -g` fallback outside protected runs, so both resolve the same versions. A dependency's shrinkwrap takes precedence over root `overrides`, so an override here cannot change them. Prime Agent and its three `@earendil-works/*` runtime packages resolve from Prime Intellect's release host rather than the npm registry; lockfile integrity still applies. The Prime Agent kernel is built with the image's Python from the pinned `sandbox-runtime/prime-agent-kernel.txt`, and the Prime launch sets `PRIME_AGENT_KERNEL_PYTHON` to it so it never bootstraps over the network. ShinkaEvolve's pinned closure conflicts with the backend's own dependencies, so a sandbox image built with `--build-arg INCLUDE_SHINKA_EVOLVE=1` builds it into `/opt/shinka/venv` with the image's Python. The switch is off by default, so API/worker images omit the ~700 MB layer and its GPL packages; a protected ShinkaEvolve run uses that interpreter (`native_runtime.SHINKA_IMAGE_PYTHON`) and the native readiness check reports `shinka_ready` from it. An image without it reports `shinka_ready=false`: a single ShinkaEvolve run is refused and Auto drops its ShinkaEvolve lane. The eve launch builds a temporary project outside the workspace. When the image has eve, the project links each preinstalled package into its own `node_modules`, so `eve build` runs with no registry. Its tools run in the run workspace through a Skynet sandbox provider. Python dependencies come from `uv.lock` or the selected complete requirements lock.

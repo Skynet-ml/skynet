@@ -464,7 +464,7 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         """Record the setup check and answer with the configured status."""
         record["checks"].append((request, user.username))
         status = record["status"]
-        return SimpleNamespace(status=status, may_advance=status == "succeeded"), None
+        return SimpleNamespace(status=status, may_advance=status == "succeeded")
 
     monkeypatch.setattr(remote_mcp_repo, "BudgetService", _Budgets)
     monkeypatch.setattr(remote_mcp_repo, "resolve_submission_replay_keys", keys)
@@ -473,7 +473,7 @@ def preflight(harness: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(
         remote_mcp_repo,
         "localize_preflight",
-        lambda response, spec, locale: SimpleNamespace(model_dump=lambda **kwargs: {"status": response.status}),
+        lambda response, locale: SimpleNamespace(model_dump=lambda **kwargs: {"status": response.status}),
     )
     monkeypatch.setattr(settings, "local_mode", False)
     return client, engine, record

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import type { OptimizerCatalogResponse, OptimizerOption } from "@/shared/types/unified-run";
+import type { OptimizerCatalogResponse, OptimizerChoice, OptimizerOption } from "@/shared/types/unified-run";
 
 const srcUrl = new URL("../../../", import.meta.url);
 
@@ -23,7 +23,7 @@ const { optimizerChoiceIssue, optimizerOptions } = await import("./optimizer-opt
 function option(id: OptimizerOption["id"], available = true, reason?: string): OptimizerOption {
   return {
     id,
-    family: id === "auto" ? "auto" : id.startsWith("dspy_") ? "dspy" : "blackbox",
+    family: id === "auto" ? "auto" : "blackbox",
     available,
     unavailable_reason: reason ?? null,
     needs_reflection_model: true,
@@ -49,22 +49,6 @@ function catalog(
 }
 
 test("Auto leads and the list follows the setup's allowed optimizers", () => {
-  const ids = optimizerOptions({
-    kind: "dspy_program",
-    mode: "pairs",
-    catalog: null,
-    guided: false,
-    choice: "auto",
-  }).map((view) => view.id);
-  assert.deepEqual(ids, ["auto"]);
-  const single = optimizerOptions({
-    kind: "dspy_program",
-    mode: "single",
-    catalog: null,
-    guided: false,
-    choice: "auto",
-  }).map((view) => view.id);
-  assert.deepEqual(single, ["auto"]);
   const blackbox = optimizerOptions({
     kind: "repo",
     mode: "pairs",
@@ -78,9 +62,9 @@ test("Auto leads and the list follows the setup's allowed optimizers", () => {
 });
 
 test("without a matching catalog every option is pending, not unavailable", () => {
-  const stale = catalog([option("gepa", false, "no key")], "repo", "pairs");
+  const stale = catalog([option("gepa", false, "no key")], "repo", "single");
   const views = optimizerOptions({
-    kind: "dspy_program",
+    kind: "repo",
     mode: "pairs",
     catalog: stale,
     guided: false,
@@ -117,26 +101,19 @@ test("guided hides unavailable options but keeps the current choice", () => {
 });
 
 test("catalog entries outside the allowed list are dropped", () => {
+  const retired = option("gepa");
   const views = optimizerOptions({
-    kind: "dspy_program",
-    mode: "single",
-    catalog: catalog([option("auto"), option("dspy_gepa"), option("gepa")], "dspy_program", "single"),
+    kind: "repo",
+    mode: "pairs",
+    catalog: catalog([option("auto"), { ...retired, id: "dspy_gepa" as OptimizerOption["id"] }, option("gepa")]),
     guided: false,
     choice: "auto",
   }).map((view) => view.id);
-  assert.deepEqual(views, ["auto"]);
+  assert.equal(views.includes("dspy_gepa" as OptimizerOption["id"]), false);
+  assert.deepEqual(views.slice(0, 2), ["auto", "gepa"]);
 });
 
 test("fallback flags come from the shared rules while the catalog loads", () => {
-  const [auto] = optimizerOptions({
-    kind: "dspy_program",
-    mode: "pairs",
-    catalog: null,
-    guided: false,
-    choice: "auto",
-  });
-  assert.equal(auto.family, "dspy");
-  assert.equal(auto.usesFeedback, true);
   const repo = optimizerOptions({
     kind: "repo",
     mode: "pairs",
@@ -144,6 +121,8 @@ test("fallback flags come from the shared rules while the catalog loads", () => 
     guided: false,
     choice: "auto",
   });
+  assert.equal(repo[0].family, "auto");
+  assert.equal(repo[0].usesFeedback, true);
   assert.equal(repo.find((view) => view.id === "gepa")?.usesFeedback, true);
   const meta = repo.find((view) => view.id === "meta_harness");
   assert.equal(meta?.nativeProposer, true);
@@ -151,17 +130,12 @@ test("fallback flags come from the shared rules while the catalog loads", () => 
 });
 
 test("a choice the setup no longer allows is reported, never reset", () => {
-  const issue = optimizerChoiceIssue({
-    kind: "dspy_program",
-    mode: "single",
-    catalog: null,
-    choice: "dspy_miprov2",
-  });
-  assert.deepEqual(issue, { kind: "not_allowed" });
-  assert.deepEqual(
-    optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: null, choice: "dspy_gepa" }),
-    { kind: "not_allowed" },
-  );
+  for (const choice of ["dspy_miprov2", "dspy_gepa"]) {
+    assert.deepEqual(
+      optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: null, choice: choice as OptimizerChoice }),
+      { kind: "not_allowed" },
+    );
+  }
 });
 
 test("an unavailable choice reports the catalog's reason", () => {
@@ -190,5 +164,7 @@ test("a repository run offers Auto first, then the six repository engines", () =
   ]);
   assert.equal(optimizerChoiceIssue(input), null);
   assert.equal(optimizerChoiceIssue({ ...input, choice: "gepa" }), null);
-  assert.deepEqual(optimizerChoiceIssue({ ...input, choice: "dspy_gepa" }), { kind: "not_allowed" });
+  assert.deepEqual(optimizerChoiceIssue({ ...input, choice: "dspy_gepa" as OptimizerChoice }), {
+    kind: "not_allowed",
+  });
 });

@@ -30,11 +30,10 @@ export function optimizerLabel(choice: string, guided: boolean): string {
   return OPTIMIZER_NAMES[choice as keyof typeof OPTIMIZER_NAMES] ?? choice;
 }
 
-// Auto composes different engines for a repository than for a DSPy program, so it gets its own words.
-function optimizerDescription(view: OptimizerOptionView, kind: OptimizerTarget, guided: boolean): string {
+// Auto composes repository engines, so it gets its own words.
+function optimizerDescription(view: OptimizerOptionView, guided: boolean): string {
   if (view.id !== "auto") return v2Msg(`submit.v2.optimizer.option.${view.id}.desc`, guided);
-  const key = kind === "repo" ? "submit.v2.optimizer.option.auto.desc_repo" : "submit.v2.optimizer.option.auto.desc_dspy";
-  return v2Msg(key, guided);
+  return v2Msg("submit.v2.optimizer.option.auto.desc_repo", guided);
 }
 
 /**
@@ -139,7 +138,7 @@ export function OptimizerPicker({
                     engine={{
                       id: option.id,
                       label,
-                      description: optimizerDescription(option, kind, guided || plain),
+                      description: optimizerDescription(option, guided || plain),
                       available: option.available,
                       unavailable_reason: option.unavailableReason,
                     }}

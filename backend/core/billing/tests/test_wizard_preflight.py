@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import io
 import tarfile
 from collections.abc import Iterator
@@ -28,8 +27,6 @@ from core.api.routers import submissions as submission_router
 from core.api.routers import wizard_preflight as preflight_router
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.billing.budgets import BudgetConflictError
-from core.billing.byok_vault import ProviderKeyVault
-from core.billing.model_gateway import ROUTE_KEY
 from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.protected_credentials import (
     ProtectedCredentialVault,
@@ -160,11 +157,10 @@ def test_checked_preflight_runs_the_route_check_for_other_callers(setup_client) 
     budget = _budget(client)
     first = client.post("/wizard/preflight", json=_request(budget)).json()
     request = wizard_preflight.WizardPreflightRequest.model_validate(_request(budget))
-    response, spec = preflight_router.checked_preflight(
+    response = preflight_router.checked_preflight(
         request, AuthenticatedUser("alice", "user", ()), SimpleNamespace(engine=engine)
     )
     assert (response.id, response.status, response.may_advance) == (first["id"], "succeeded", True)
-    assert spec is None
     assert len(calls) == 1
 
 
@@ -450,128 +446,6 @@ def test_unresolved_paid_usage_blocks_stage_advancement(setup_client, monkeypatc
     assert result["may_advance"] is False
     assert result["pending_reason"]["category"] == "usage_reconciliation"
     assert any(check["key"] == "usage" and check["status"] == "pending" for check in result["checks"])
-
-
-@pytest.mark.parametrize(
-    ("metric_call", "expected_model"),
-    [("llm(output, model='fixture/judge')", "fixture/judge"), ("llm(output)", "fixture/text")],
-)
-def test_unified_metric_model_gets_a_metered_route(
-    setup_client, monkeypatch: pytest.MonkeyPatch, metric_call: str, expected_model: str
-) -> None:
-    """Route a unified run's metric model like the worker does, then hand the guest no legacy aliases."""
-    client, _engine, _calls = setup_client
-    seen: list[dict] = []
-
-    class _RoutingGateway(_Gateway):
-        """Stamp a route on the legacy scorer key only, as the real seam does."""
-
-        def protect_payload(self, payload: dict, **kwargs) -> dict:
-            """Mark the model reachable through the legacy ``scorer`` key."""
-            result = copy.deepcopy(payload)
-            scorer = result.get("scorer")
-            if isinstance(scorer, dict) and isinstance(scorer.get("model"), dict):
-                scorer["model"].setdefault("extra", {})[ROUTE_KEY] = {"url": "http://parent", "token": "t"}
-            return result
-
-    def verify(gateway, payload, **kwargs) -> dict:
-        """Record what the guest would receive."""
-        seen.append(payload)
-        return {"checks": [{"key": "metric.contract", "status": "succeeded"}]}
-
-    monkeypatch.setattr(wizard_preflight, "ModelGateway", _RoutingGateway)
-    monkeypatch.setattr(wizard_preflight, "_verify_unified", verify)
-    budget = _budget(client)
-    payload = {
-        "task": {
-            "objective": "Answer in one word.",
-            "artifact": {"kind": "dspy_program", "starting_version": "Answer: "},
-        },
-        "data": {
-            "mode": "pairs",
-            "cases": [{"input": {"question": f"Q{index}?"}, "expected": "A"} for index in range(10)],
-            "input_fields": ["question"],
-        },
-        "optimizer": {"choice": "dspy_gepa"},
-        "models": {
-            "reflection_model": {"name": "fixture/text"},
-            "task_model": {"name": "fixture/task"},
-        },
-        "workspace": {
-            "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
-            "metric_code": f"from skynet import llm\ndef score(input, output, expected=None):\n    return float({metric_call} == expected), {{}}\n",
-        },
-        "max_cost_cents": 20,
-    }
-    response = client.post("/wizard/preflight", json={**_request(budget, payload), "workflow": "unified"})
-    assert response.status_code == 200, response.text
-    assert ROUTE_KEY in seen[0]["models"]["metric_model"]["extra"]
-    assert seen[0]["models"]["metric_model"]["name"] == expected_model
-    assert not {"scorer", "task_model_config", "reflection_model_config"} & seen[0].keys()
-
-
-def test_unified_byok_roles_are_aliased_before_setup_protection(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep task, reflection, and BYOK metric aliases available at setup protection."""
-    client, engine, _calls = setup_client
-    monkeypatch.setattr(settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
-    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
-    monkeypatch.setattr(ProviderKeyVault, "_probe", lambda *args, **kwargs: "verified")
-    ProviderKeyVault(engine=engine).save_key("alice", "openai", "metric-private", api_base="https://public.example/v1")
-    events: list[str] = []
-    alias = wizard_preflight.alias_unified_model_roles
-
-    def alias_spy(payload: dict) -> None:
-        """Record when the setup adds its aliases."""
-        events.append("alias")
-        alias(payload)
-
-    class _RoutingGateway(_Gateway):
-        """Assert the protected boundary receives every aliased model."""
-
-        def protect_payload(self, payload: dict, **kwargs) -> dict:
-            """Check the roles and the resolved BYOK metric key."""
-            events.append("protect")
-            assert payload["task_model_config"] is payload["models"]["task_model"]
-            assert payload["reflection_model_config"] is payload["models"]["reflection_model"]
-            metric = payload["scorer"]["model"]
-            assert metric is payload["models"]["metric_model"]
-            assert metric["token_source"] == "byok"
-            assert metric["extra"]["api_key"] == "metric-private"
-            result = copy.deepcopy(payload)
-            result["scorer"]["model"]["extra"].pop("api_key")
-            return result
-
-    def verify(_gateway, payload, **kwargs) -> dict:
-        """Finish the setup without executing a sandbox."""
-        assert not {"scorer", "task_model_config", "reflection_model_config"} & payload.keys()
-        return {"checks": [{"key": "metric.contract", "status": "succeeded"}]}
-
-    monkeypatch.setattr(wizard_preflight, "alias_unified_model_roles", alias_spy)
-    monkeypatch.setattr(wizard_preflight, "ModelGateway", _RoutingGateway)
-    monkeypatch.setattr(wizard_preflight, "_verify_unified", verify)
-    payload = {
-        "task": {"objective": "Answer.", "artifact": {"kind": "dspy_program", "starting_version": "Answer: "}},
-        "data": {
-            "mode": "pairs",
-            "cases": [{"input": {"question": "Q"}, "expected": "A"}, {"input": {"question": "Q2"}, "expected": "A2"}],
-            "input_fields": ["question"],
-        },
-        "optimizer": {"choice": "dspy_gepa"},
-        "models": {
-            "task_model": {"name": "fixture/task"},
-            "reflection_model": {"name": "fixture/reflection"},
-            "metric_model": {"name": "openai/judge", "token_source": "byok", "byok_provider": "openai"},
-        },
-        "workspace": {
-            "run_code": "def run(artifact, input): return artifact",
-            "metric_code": "def score(input, output, expected=None): return 1.0, {}",
-        },
-        "max_cost_cents": 20,
-    }
-    response = client.post("/wizard/preflight", json={**_request(_budget(client), payload), "workflow": "unified"})
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "succeeded"
-    assert events == ["alias", "protect"]
 
 
 def test_preflight_shows_every_gate_failure_before_any_paid_setup(

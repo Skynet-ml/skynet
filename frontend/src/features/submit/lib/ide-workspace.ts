@@ -24,17 +24,6 @@ export const IDE_ROOT = "/workspace";
 /** Every workspace file, path to text, run.py and metric.py included. */
 export type WorkspaceTexts = Readonly<Record<string, string>>;
 
-/**
- * The entry file that has no code yet, or null when both do. The API refuses a
- * check with an empty run.py or metric.py, so the pop-up names the file
- * instead of sending one.
- */
-export function blankEntryFile(runCode: string, metricCode: string): string | null {
-  if (!runCode.trim()) return RUN_FILE;
-  if (!metricCode.trim()) return METRIC_FILE;
-  return null;
-}
-
 /** The wizard's workspace as one path-to-text map. */
 export function workspaceTexts(
   runCode: string,

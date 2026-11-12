@@ -18,7 +18,7 @@ from ..config import settings
 from ..storage.models import ExecutionBudgetModel, ProtectedCredentialModel
 from .byok_bridge import provider_slug_for_model
 from .byok_upstreams import UPSTREAMS
-from .byok_vault import STATUS_VERIFIED, ProviderKeyVault, byok_provider_for_litellm
+from .byok_vault import ProviderKeyVault, byok_provider_for_litellm
 from .credential_safety import endpoint_has_private_components, public_endpoint, scrub_model_config
 from .operation_pricing import json_fingerprint
 
@@ -356,14 +356,16 @@ def resolve_repo_secrets(
         Environment variable name to value; empty without a repository target.
 
     Raises:
-        ValueError: When a reference is incomplete or no longer current.
+        ValueError: When a reference is incomplete or no longer current, or
+            a saved secret asks for a host its owner did not approve.
     """
     repository, entries = _repo_secrets(payload)
     values: dict[str, str] = {}
     for entry in entries:
         name = str(entry.get("name") or "")
         if entry.get("saved_secret_id") is not None:
-            values[name] = saved.resolve(username, str(entry["saved_secret_id"]))
+            hosts = [str(host) for host in entry.get("allowed_hosts") or ()]
+            values[name] = saved.resolve(username, str(entry["saved_secret_id"]), hosts)
             continue
         identity = entry.get(REPO_SECRET_REF_FIELD)
         revision = entry.get(REPO_SECRET_REVISION_FIELD)
@@ -876,43 +878,3 @@ def prepare_protected_credentials(
         )
         config["extra"]["api_key"] = connection.secret
     return result
-
-
-def resolve_current_openrouter_key(
-    username: str,
-    digest: str,
-    *,
-    vault: ProviderKeyVault,
-    managed_key: str | None = None,
-) -> str | None:
-    """Return only an available original OpenRouter credential for usage reconciliation.
-
-    Args:
-        username: Authoritative operation owner, never a caller-supplied alternate account.
-        digest: Credential fingerprint persisted when the operation was admitted.
-        vault: Account-scoped encrypted credential storage.
-        managed_key: Optional current managed provider credential retained in the parent.
-
-    Returns:
-        Matching current managed or verified owner key, or None after rotation, removal, or invalidation.
-    """
-    if managed_key and json_fingerprint(managed_key) == digest:
-        return managed_key
-    providers = {"openrouter"}
-    providers.update(
-        view.provider
-        for view in vault.list_keys(username).keys
-        if view.status == STATUS_VERIFIED and view.api_base and _openrouter_endpoint(view.api_base)
-    )
-    for provider in sorted(providers):
-        try:
-            connection = vault.resolve_connection(username, provider, verified_only=True)
-        except DomainError:
-            continue
-        if (
-            connection is not None
-            and _openrouter_endpoint(connection.api_base)
-            and json_fingerprint(connection.secret) == digest
-        ):
-            return connection.secret
-    return None

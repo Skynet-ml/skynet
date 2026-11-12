@@ -47,7 +47,7 @@ export interface IntakeAnswers {
  * the run's own cost estimate: a guessed number here would change what the
  * run does without the user having chosen it.
  */
-export const DEFAULT_SPENDING_LIMIT_CENTS: number | null = null;
+const DEFAULT_SPENDING_LIMIT_CENTS: number | null = null;
 
 export function emptyIntake(): IntakeAnswers {
   return {
@@ -64,8 +64,6 @@ export function emptyIntake(): IntakeAnswers {
 
 const PRIVACY_POLICIES: readonly ModelDataPolicy[] = ["allow", "deny", "zdr"];
 const TRUST_MODES: readonly IntakeTrustMode[] = ["ask", "auto_safe", "yolo"];
-const LEVELS: readonly ExperienceLevel[] = ["guided", "standard", "expert"];
-
 const LOCALE_CODE = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 
 /** A locale-shaped code, or null. */
@@ -127,10 +125,6 @@ export type IntakePhase = "language" | IntakeLlmPhase;
 /** The agenda in the order it is asked. */
 export const INTAKE_PHASES: readonly IntakePhase[] = ["language", ...INTAKE_LLM_PHASES];
 
-export function isLlmPhase(phase: IntakePhase): phase is IntakeLlmPhase {
-  return phase !== "language";
-}
-
 /**
  * The phase to ask after `from`: the next unanswered one on the agenda,
  * wrapping to any earlier one still open; null when everything is answered.
@@ -162,78 +156,10 @@ export interface IntakeTurn {
   content: string;
 }
 
-/** Answers the interviewer may fill. */
-export type IntakeProfilePatch = Partial<
-  Pick<
-    IntakeAnswers,
-    "billing" | "byok_provider" | "spending_limit_cents" | "privacy" | "trust" | "level"
-  >
->;
-
-function privacyPolicy(value: unknown): ModelDataPolicy | null {
-  if (value === "no_training" || value === "no training") return "deny";
-  if (value === "zero_retention" || value === "zero retention") return "zdr";
-  return oneOf(PRIVACY_POLICIES, value);
-}
-
-/**
- * Coerce the interviewer's `profile_patch` into answers. Anything unknown or
- * out of range is dropped rather than guessed, so a confused model can only
- * leave a phase open, never set a value the user did not give. Returns the
- * patch and the phases it answers.
- */
-export function coerceProfilePatch(raw: unknown): {
-  patch: IntakeProfilePatch;
-  phases: IntakePhase[];
-} {
-  const patch: IntakeProfilePatch = {};
-  const phases: IntakePhase[] = [];
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { patch, phases };
-  const r = raw as Record<string, unknown>;
-
-  if (r.billing === "platform" || r.billing === "byok") {
-    patch.billing = r.billing;
-    patch.byok_provider =
-      r.billing === "byok" && typeof r.byok_provider === "string" && r.byok_provider.trim()
-        ? r.byok_provider.trim().toLowerCase()
-        : null;
-    // "My own key" without a provider still needs the billing question.
-    if (r.billing === "platform" || patch.byok_provider) phases.push("billing");
-  }
-
-  const privacy = privacyPolicy(r.privacy);
-  if (privacy) {
-    patch.privacy = privacy;
-    phases.push("privacy");
-  }
-
-  const trust = oneOf(TRUST_MODES, r.trust);
-  if (trust) {
-    patch.trust = trust;
-    phases.push("trust");
-  }
-
-  // The level is never asked: the interviewer's read only replaces the client's guess.
-  const level = oneOf(LEVELS, r.level);
-  if (level) patch.level = level;
-
-  return { patch, phases };
-}
-
 /** The phase names in a `skip_phases` list, dropping anything unknown. */
 export function coerceSkipPhases(raw: unknown): IntakePhase[] {
   if (!Array.isArray(raw)) return [];
   return INTAKE_PHASES.filter((phase) => raw.includes(phase));
-}
-
-/** Merge a coerced patch into the answers. */
-export function applyProfilePatch(
-  answers: IntakeAnswers,
-  patch: IntakeProfilePatch,
-): IntakeAnswers {
-  const next: IntakeAnswers = { ...answers, ...patch };
-  if (patch.level !== undefined) next.level_chosen = true;
-  return next;
 }
 
 /**
@@ -267,7 +193,7 @@ export function profileSoFar(
 /* ------------------------------------------------------------------------- */
 
 /** Where the setup is: a phase, or the closing line once every phase is done. */
-export type IntakeScreen = IntakePhase | "done";
+type IntakeScreen = IntakePhase | "done";
 
 /**
  * Everything needed to come back to the same screen: the answers, which
@@ -429,7 +355,7 @@ export function prepareLanguageSwitch(draft: IntakeDraft, next: string): IntakeD
   return prepared;
 }
 
-export function writeIntakeResume(resume: IntakeResume): void {
+function writeIntakeResume(resume: IntakeResume): void {
   try {
     sessionStorage.setItem(RESUME_KEY, JSON.stringify(resume));
   } catch {
@@ -478,73 +404,5 @@ export function resumeAfterLanguageSwitch(
     answers: { ...base.answers, language },
     answered: markAnswered(base.answered, ["language"]),
     screen: resume.resumePhase,
-  };
-}
-
-/* ------------------------------------------------------------------------- */
-/* Interview turns                                                            */
-/* ------------------------------------------------------------------------- */
-
-/** The most transcript turns one request may carry (the server's cap). */
-export const MAX_REQUEST_TURNS = 8;
-
-/** The transcript tail a request sends; a phase rarely gets near the cap. */
-export function requestTurns(turns: readonly IntakeTurn[]): IntakeTurn[] {
-  return turns.slice(-MAX_REQUEST_TURNS);
-}
-
-/** The parts of an `interview_done` payload the draft keeps. */
-export interface IntakeTurnOutcome {
-  message: string;
-  options: InterviewOption[];
-  phase_done: boolean;
-  profile_patch: unknown;
-  skip_phases: unknown;
-  skip_rest: boolean;
-}
-
-/**
- * Fold one finished interviewer turn into the draft. `sent` is the
- * transcript the request carried (ending in the user's answer). Volunteered
- * answers for later phases are kept and those phases skipped; a finished
- * phase moves the setup on, to the closing screen when the user asked to
- * skip ahead.
- */
-export function applyInterviewTurn(
-  draft: IntakeDraft,
-  phase: IntakeLlmPhase,
-  sent: readonly IntakeTurn[],
-  outcome: IntakeTurnOutcome,
-): IntakeDraft {
-  const { patch, phases } = coerceProfilePatch(outcome.profile_patch);
-  const answers = applyProfilePatch(draft.answers, patch);
-  const skipped = [...phases, ...coerceSkipPhases(outcome.skip_phases)];
-  const message = outcome.message.trim();
-  const turns: IntakeTurn[] = message
-    ? [...sent, { role: "assistant", content: message }]
-    : [...sent];
-
-  if (!outcome.phase_done) {
-    return {
-      ...draft,
-      answers,
-      answered: markAnswered(
-        draft.answered,
-        skipped.filter((p) => p !== phase),
-      ),
-      turns: { ...draft.turns, [phase]: turns },
-      options: { ...draft.options, [phase]: outcome.options },
-      screen: phase,
-    };
-  }
-
-  const answered = markAnswered(draft.answered, [phase, ...skipped]);
-  return {
-    ...draft,
-    answers,
-    answered,
-    turns: { ...draft.turns, [phase]: turns },
-    options: { ...draft.options, [phase]: [] },
-    screen: outcome.skip_rest ? "done" : (nextPhase(answered, phase) ?? "done"),
   };
 }

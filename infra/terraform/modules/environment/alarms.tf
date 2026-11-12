@@ -267,8 +267,7 @@ resource "aws_cloudwatch_metric_alarm" "service_below_desired" {
 # is a crash: the essential container exited, the task failed to start, a
 # health check failed, or someone stopped it by hand. Deploys and scale-in
 # stop tasks with ServiceSchedulerInitiated and a "Scaling activity" reason,
-# so they do not match. The exact service group leaves out the migrate task
-# and the PR preview services.
+# so they do not match. The exact service group leaves out the migrate task.
 resource "aws_cloudwatch_event_rule" "task_crashed" {
   for_each = aws_cloudwatch_metric_alarm.service_running
 

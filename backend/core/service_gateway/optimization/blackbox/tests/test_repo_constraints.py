@@ -543,6 +543,15 @@ def test_an_empty_network_list_means_offline_and_a_missing_one_keeps_the_default
     assert default.proposer.network is None
 
 
+def test_a_metric_with_no_run_and_no_target_fails_the_setup_check() -> None:
+    """The metric box holds no repository files, so a metric with nothing to judge would score every version alike."""
+    with pytest.raises(ConstraintsError, match=r"\[metric\] has nothing to judge"):
+        parse_constraints(b'[metric]\nfiles = ["eval"]\n')
+
+    assert parse_constraints(b'[metric]\nfiles = ["eval"]\n[run]\nentry = "src/app.py:run"\n').run_entry
+    assert parse_constraints(b'[metric]\nfiles = ["eval"]\n[target.solver]\nentry = "solver.py:solve"\n').targets
+
+
 def test_a_file_with_no_target_parses() -> None:
     """The target section is optional."""
     assert parse_constraints(b"[proposer]\nservices = []\n").targets == {}
@@ -673,7 +682,7 @@ def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
     assert replace(constraints, rules=(), proposer=parsed.proposer, targets=parsed.targets) == parsed
 
 
-@pytest.mark.parametrize("raw", [b"[proposer]\n[metric]\n", b'[paths]\neditable = ["src"]\n'])
+@pytest.mark.parametrize("raw", [b'[proposer]\n[run]\nentry = "a.py:f"\n[metric]\n', b'[paths]\neditable = ["src"]\n'])
 def test_a_file_that_names_no_rule_file_reads_as_it_parses(tmp_path: Path, raw: bytes) -> None:
     """Without instructions or rule files, reading the snapshot adds nothing to the parsed file."""
     assert read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw})) == parse_constraints(raw)
@@ -790,10 +799,11 @@ def test_metric_services_empty_list_gives_the_metric_no_services() -> None:
 @pytest.mark.parametrize(
     ("raw", "message"),
     [
-        (b'[run]\nentry = "a.py:f"\nnetwork = []\n', r"\[run\] network is not supported: .* share one box"),
-        (b'[run]\nentry = "a.py:f"\nvcpus = 2\n', r"\[run\] vcpus is not supported: .* share one box"),
-        (b"[metric]\nnetwork = []\n", r"\[metric\] network is not supported: .* share one box"),
-        (b"[metric]\nvcpus = 4\n", r"\[metric\] vcpus is not supported: .* share one box"),
+        (b'[run]\nentry = "a.py:f"\nnetwork = "a.example.com"\n', r"\[run\] network must be a list"),
+        (b'[run]\nentry = "a.py:f"\nvcpus = 3\n', r"\[run\] vcpus must be 1 or an even number"),
+        (b'[metric]\nnetwork = ["https://a.example.com/x"]\n', r"\[metric\] network entry .* must be a host"),
+        (b"[metric]\nvcpus = true\n", r"\[metric\] vcpus must be 1 or an even number"),
+        (b"[metric]\nvcpus = 34\n", r"\[metric\] vcpus must be 1 or an even number"),
         (
             b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
             r"\[run\] services names 'maps', but .* \[services\.maps\]",
@@ -807,9 +817,23 @@ def test_metric_services_empty_list_gives_the_metric_no_services() -> None:
     ],
 )
 def test_bad_run_or_metric_role_keys_fail_with_a_reason(raw: bytes, message: str) -> None:
-    """network and vcpus fail (one shared box, E37); tools points to mcp (E46); services must be declared."""
+    """A bad network or vcpus value fails; tools points to mcp (E46); services must be declared."""
     with pytest.raises(ConstraintsError, match=message):
         parse_constraints(raw)
+
+
+def test_run_and_metric_set_their_own_network_and_vcpus() -> None:
+    """[run] sizes and walls off the candidate box, [metric] the metric box (SKY-398)."""
+    raw = b'[run]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\nvcpus = 4\n[metric]\nnetwork = []\nvcpus = 1\n'
+
+    constraints = parse_constraints(raw)
+
+    assert (constraints.run_role.network, constraints.run_vcpus) == (("api.example.com",), 4)
+    assert (constraints.metric_role.network, constraints.metric_vcpus) == ((), 1)
+    assert (parse_constraints(b'[run]\nentry = "a.py:f"\n').run_vcpus, parse_constraints(b"").metric_vcpus) == (
+        None,
+        None,
+    )
 
 
 def test_an_empty_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
@@ -824,7 +848,9 @@ def test_an_empty_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
 def test_a_missing_mcp_file_fails_with_a_reason(tmp_path: Path, label: str) -> None:
     """An mcp path that names no file in the snapshot fails the setup check (E46)."""
     entry = b'entry = "a.py:f"\n' if label == "run" else b""
-    raw = b"[" + label.encode() + b"]\n" + entry + b'mcp = "tools/.mcp.json"\n'
+    # A [metric] needs a [run] to judge (SKY-398).
+    run = b'[run]\nentry = "a.py:f"\n' if label == "metric" else b""
+    raw = run + b"[" + label.encode() + b"]\n" + entry + b'mcp = "tools/.mcp.json"\n'
 
     with pytest.raises(ConstraintsError, match=rf"\[{label}\] mcp names 'tools/\.mcp\.json', but .* no such file"):
         read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw, "tools/other.json": b"{}"}))
@@ -854,6 +880,77 @@ def test_a_service_built_in_code_with_one_secret_keeps_the_bearer_default() -> N
     service = ServiceSpec(secrets=("JUDGE_KEY",), url="https://llm.example.com/v1")
 
     assert service.request_headers == {"Authorization": "Bearer ${JUDGE_KEY}"}
+
+
+def test_a_service_query_names_its_secret_and_drops_the_bearer_default() -> None:
+    """Each query value is one ${NAME}; a query-only service sends no Authorization header (SKY-630)."""
+    raw = b'[services.geocode]\nurl = "https://maps.googleapis.com/maps/api/geocode"\nquery = { key = "${MAPS_KEY}" }\n'
+    service = parse_constraints(raw).services["geocode"]
+
+    assert (service.secrets, service.query, service.request_headers) == (("MAPS_KEY",), {"key": "${MAPS_KEY}"}, {})
+
+
+def test_a_service_takes_its_secrets_from_headers_then_query() -> None:
+    """Header and query placeholders both count as the service's secrets, each name once (SKY-630)."""
+    raw = (
+        b'[services.judge]\nurl = "https://llm.example.com"\n'
+        b'headers = { X-Org = "${ORG}" }\nquery = { key = "${JUDGE_KEY}", org = "${ORG}" }\n'
+    )
+
+    assert parse_constraints(raw).services["judge"].secrets == ("ORG", "JUDGE_KEY")
+
+
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        (f'{{ key = "{_RAW_KEY}" }}', r"query key must be one \$\{NAME\} placeholder"),
+        ('{ key = "abc" }', r"query key must be one \$\{NAME\} placeholder"),
+        ('{ key = "x${MAPS_KEY}" }', r"query key must be one \$\{NAME\} placeholder"),
+        ('{ key = "${MAPS_KEY}${OTHER}" }', r"query key must be one \$\{NAME\} placeholder"),
+        ('{ key = "${maps_key}" }', r"query key must be one \$\{NAME\} placeholder"),
+        ('{ key = "${MAPS_KEY" }', r"query key must be one \$\{NAME\} placeholder"),
+        ("{ key = 3 }", r"query key must be one \$\{NAME\} placeholder"),
+        ('"key=${MAPS_KEY}"', r"query must be a table"),
+        ('{ "a b" = "${MAPS_KEY}" }', r"query name 'a b' must use only"),
+    ],
+)
+def test_a_bad_service_query_fails_without_repeating_the_value(query: str, message: str) -> None:
+    """A query value is exactly one ${NAME}: a raw value or a malformed placeholder fails the setup check (SKY-630)."""
+    raw = f'[services.geocode]\nurl = "https://maps.example.com"\nquery = {query}\n'
+
+    with pytest.raises(ConstraintsError, match=message) as error:
+        parse_constraints(raw.encode())
+
+    assert _RAW_KEY not in str(error.value)
+    assert (error.value.section, error.value.key) == ("services.geocode", "query")
+
+
+def test_a_query_secret_and_a_header_secret_still_go_to_one_host() -> None:
+    """A secret in one service's query cannot go to a second host in another service's headers (SKY-630)."""
+    raw = (
+        b'[services.a]\nurl = "https://a.example.com"\nquery = { key = "${KEY}" }\n'
+        b'[services.b]\nurl = "https://b.example.com"\nheaders = { Authorization = "Bearer ${KEY}" }\n'
+    )
+
+    with pytest.raises(ConstraintsError, match=r"\$\{KEY\} goes to a\.example\.com and, in \[services\.b\]"):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        b'[proposer]\nservices = ["geo"]\n',
+        b'[target.s]\nentry = "s.py:f"\nservices = ["geo"]\n',
+        b'[run]\nentry = "run.py:main"\nservices = ["geo"]\n[metric]\nservices = ["geo"]\n',
+    ],
+)
+def test_every_role_can_use_a_service_with_a_query(roles: bytes) -> None:
+    """Every role's relay fills a query secret, so any role may list the service (SKY-630, SKY-638)."""
+    raw = b'[services.geo]\nurl = "https://maps.example.com"\nquery = { key = "${MAPS_KEY}" }\n' + roles
+
+    constraints = parse_constraints(raw)
+
+    assert constraints.services["geo"].query == {"key": "${MAPS_KEY}"}
 
 
 @pytest.mark.parametrize(
@@ -1192,7 +1289,7 @@ def test_a_secret_value_in_an_mcp_url_is_refused(tmp_path: Path, run: bytes, mes
 _STDIO_ROLES = {
     "[proposer]": b"[proposer]\n",
     "[run]": b'[run]\nentry = "a.py:f"\n',
-    "[metric]": b"[metric]\n",
+    "[metric]": b'[run]\nentry = "a.py:f"\n[metric]\n',
     "[target.planner]": b'[target.planner]\nentry = "p.py:plan"\n',
 }
 
@@ -1386,7 +1483,9 @@ def test_a_run_entry_that_names_a_shared_mcp_file_is_allowed() -> None:
 
 def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
     """One ``.mcp.json`` for ``[proposer]`` and ``[metric]`` is not inside a hidden folder, so it stays valid."""
-    constraints = parse_constraints(b'[proposer]\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n')
+    constraints = parse_constraints(
+        b'[proposer]\nmcp = ".mcp.json"\n\n[run]\nentry = "a.py:f"\n\n[metric]\nmcp = ".mcp.json"\n'
+    )
 
     assert constraints.proposer.mcp == ".mcp.json"
 
@@ -1394,13 +1493,13 @@ def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
 @pytest.mark.parametrize(
     ("toml", "editable"),
     [
-        ('[metric]\nfiles = ["eval"]\n', "eval"),
-        ('[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n', "eval"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
         ('[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
         ("", ".optimize/exploits"),
-        ('[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
         ("", "optimize.toml"),
-        ('[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
+        ('[run]\nentry = "a.py:f"\n[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
     ],
     ids=[
         "metric-folder",
@@ -1508,7 +1607,8 @@ def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.
         (b"[proposer]\nnetwork = ['https://a.example.com']\n", "proposer", "network"),
         (b'[proposer]\nillegal = ["no"]\n', "proposer", "illegal"),
         (b'[proposer]\nservices = ["maps"]\n', "proposer", "services"),
-        (b"[run]\nnetwork = []\n", "run", "network"),
+        (b'[run]\nentry = "a.py:f"\nvcpus = 3\n', "run", "vcpus"),
+        (b"[metric]\nnetwork = 1\n", "metric", "network"),
         (b'[run]\nentry = "a.py:f"\ntimeout = 0\n', "run", "timeout"),
         (b"[run]\ntimeout = 5\n", "run", "entry"),
         (b"[target]\nplanner = 1\n", "target", "planner"),

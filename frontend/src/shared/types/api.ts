@@ -522,14 +522,21 @@ export type BlackboxHarness =
   | "opencode_v2"
   | "prime"
   | "aider"
+  | "mini_swe_agent"
+  | "swe_agent"
   | "openhands"
   | "openhands_sdk"
+  | "qwen_code"
   | "antigravity_sdk"
+  | "fabric"
+  | "terminus"
   | "goose"
   | "hermes"
   | "eve"
+  | "grok_build"
   | "deerflow"
   | "cline"
+  | "kimi_code"
   | "code_puppy"
   | "custom";
 export type BlackboxProposerRuntime = "vercel";
@@ -689,6 +696,8 @@ export interface BlackboxRunRequest {
   budget: BlackboxBudget;
   strategy: BlackboxStrategy;
   proposer_runtime?: BlackboxProposerRuntime;
+  // One id from GET /sandbox-providers; unset runs on the server default.
+  sandbox_provider?: string | null;
   proposer?: BlackboxProposer;
   target: BlackboxTarget;
   task_model_config?: ModelConfig | null;

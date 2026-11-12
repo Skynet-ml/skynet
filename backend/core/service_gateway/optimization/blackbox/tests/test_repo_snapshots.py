@@ -1,8 +1,9 @@
-"""Tests for the after-setup snapshots of the scorer box and of the stage boxes (SKY-531)."""
+"""Tests for the saved setup states of the repository boxes and for the stage snapshots (SKY-531, SKY-398)."""
 
 from __future__ import annotations
 
 import shutil
+import subprocess
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -22,7 +23,7 @@ from core.sandbox.services import ComposeService
 from core.storage.models import Base, BillingCustomerModel
 
 from ..repo_scorer import _STAGE_LAYOUT_SECONDS, RepoScoreError
-from ..repo_workspace import PREPARED_DIR, SERVICES_DIR, WORK_DIR, RepoWorkspace
+from ..repo_workspace import PREPARED_DIR, SERVICES_DIR, WORK_DIR, CandidateBox, RepoWorkspace
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 from ..sandbox_contract import SandboxSession
@@ -91,10 +92,10 @@ class _SnapshotRuntime:
             raise self._open_error
         inner = self._local.open(spec)
         if spec.snapshot_id is not None:
-            shutil.copytree(self.saved[spec.snapshot_id], inner.path, dirs_exist_ok=True)
+            shutil.copytree(self.saved[spec.snapshot_id], inner.path, dirs_exist_ok=True, symlinks=True)
             if self._tamper is not None:
                 self._tamper(inner.path)
-        box = _Box(inner, online=not spec.network_disabled, cutoff="ok")
+        box = _Box(inner, spec)
         self.boxes.append(box)
         return box
 
@@ -117,7 +118,7 @@ class _SnapshotRuntime:
         if not self._saves:
             return None
         snapshot_id = f"snap-{len(self.saved)}"
-        shutil.copytree(session._inner.path, self._root / snapshot_id, symlinks=True)
+        shutil.copytree(session.path, self._root / snapshot_id, symlinks=True)
         self.saved[snapshot_id] = self._root / snapshot_id
         return snapshot_id
 
@@ -304,12 +305,13 @@ def _budget(tmp_path: Path) -> BudgetRuntime:
     return BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
 
 
-def _space(archive: Path, runtime: Any) -> RepoWorkspace:
+def _space(archive: Path, runtime: Any, **options: Any) -> RepoWorkspace:
     """Build an online workspace with one secret and a setup command.
 
     Args:
         archive: Packed tree.
         runtime: Where its boxes open.
+        **options: More :class:`RepoWorkspace` arguments.
 
     Returns:
         The workspace.
@@ -322,7 +324,23 @@ def _space(archive: Path, runtime: Any) -> RepoWorkspace:
         readonly_paths=[],
         setup_command=_SETUP,
         secrets={"API_KEY": "very-secret-value"},
+        **options,
     )
+
+
+def _candidate(space: RepoWorkspace, patch: str = "") -> CandidateBox:
+    """Open a candidate box that must lay the version out.
+
+    Args:
+        space: The workspace.
+        patch: The version.
+
+    Returns:
+        The open box.
+    """
+    opened = space.open_candidate(patch)
+    assert isinstance(opened, CandidateBox), opened
+    return opened
 
 
 def _setups(box: _Box) -> int:
@@ -334,7 +352,7 @@ def _setups(box: _Box) -> int:
     Returns:
         How many commands ran the setup.
     """
-    return sum("built.txt" in command for command, _, _ in box.commands)
+    return sum("built.txt" in command for command, _ in box.commands)
 
 
 def _texts(folder: Path) -> str:
@@ -349,8 +367,19 @@ def _texts(folder: Path) -> str:
     return "\n".join(path.read_text(errors="replace") for path in folder.rglob("*") if path.is_file())
 
 
-def test_prepared_box_is_saved_and_the_kept_box_opens_from_it_offline(tmp_path: Path) -> None:
-    """Save the prepared box once, then open the kept box deny-all from that snapshot with no second setup.
+def _tamper(folder: Path) -> None:
+    """Change the prepared tree in a box restored from the repository snapshot.
+
+    Args:
+        folder: The restored box's folder.
+    """
+    prepared = folder / PREPARED_DIR / "src/app.py"
+    if prepared.is_file():
+        prepared.write_text("x = 99\n")
+
+
+def test_the_setup_state_is_saved_once_and_each_candidate_box_opens_from_it_offline(tmp_path: Path) -> None:
+    """Save the setup box once, then open every candidate box deny-all from that snapshot with no second setup.
 
     Args:
         tmp_path: Scratch folder.
@@ -359,57 +388,49 @@ def test_prepared_box_is_saved_and_the_kept_box_opens_from_it_offline(tmp_path: 
     runtime = _SnapshotRuntime(tmp_path / "snaps")
     space = _space(archive, runtime)
     try:
-        space.session()
-        space.checkout(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"}))
-        assert space.session().read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
+        first = _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"}))
+        assert first.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
+        first.close()
+        second = _candidate(space)
+        assert second.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
+        second.close()
     finally:
         space.close()
 
-    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0"]
-    restored = runtime.specs[1]
-    assert restored.network_disabled is True
-    assert restored.allowed_hosts == ()
-    assert runtime.boxes[0].closed
-    assert _setups(runtime.boxes[0]) == 1
-    assert _setups(runtime.boxes[1]) == 0
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", "snap-0"]
+    assert all(spec.network_disabled and spec.allowed_hosts == () for spec in runtime.specs[1:])
+    assert all(box.closed for box in runtime.boxes)
+    assert [_setups(box) for box in runtime.boxes] == [1, 0, 0]
     assert "very-secret-value" not in _texts(runtime.saved["snap-0"])
 
 
-def test_snapshot_without_the_prepared_tree_falls_back_to_a_normal_box(tmp_path: Path) -> None:
-    """Close a box from a snapshot whose prepared tree changed, and set up a normal box instead.
+def test_a_candidate_box_without_the_prepared_tree_sets_up_again_with_tar_states(tmp_path: Path) -> None:
+    """Close a box from a snapshot whose prepared tree changed, and set up again with a tar state in the same call.
 
     Args:
         tmp_path: Scratch folder.
     """
-
-    def tamper(folder: Path) -> None:
-        """Change the prepared tree in the restored box.
-
-        Args:
-            folder: The restored box's folder.
-        """
-        (folder / PREPARED_DIR / "src/app.py").write_text("x = 99\n")
-
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    runtime = _SnapshotRuntime(tmp_path / "snaps", tamper=tamper)
+    runtime = _SnapshotRuntime(tmp_path / "snaps", tamper=_tamper)
     space = _space(archive, runtime)
     try:
-        space.checkout("")
-        assert space.session().read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
-        assert space.session() is runtime.boxes[-1]
+        box = _candidate(space)
+        assert box.session.read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
+        box.close()
+        _candidate(space).close()
     finally:
         space.close()
-    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", None]
-    assert runtime.boxes[0].closed
-    assert runtime.boxes[1].closed
-    assert _setups(runtime.boxes[2]) == 1
-    assert not runtime.boxes[2].online
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", None, None, None]
+    assert [bool(spec.snapshot_archive) for spec in runtime.specs] == [False, False, False, True, True]
+    assert all(box.closed for box in runtime.boxes)
+    assert [_setups(box) for box in runtime.boxes] == [1, 0, 1, 0, 0]
     assert len(runtime.saved) == 1
+    assert space._snapshots_off
 
 
 @pytest.mark.parametrize("fault", ["snapshot", "open"])
-def test_snapshot_fault_falls_back_to_a_normal_box(tmp_path: Path, fault: str) -> None:
-    """Set up a normal box when the snapshot cannot be saved or a box cannot open from it.
+def test_a_snapshot_fault_keeps_the_state_as_a_tar(tmp_path: Path, fault: str) -> None:
+    """Keep a tar state when the snapshot cannot be saved or a box cannot open from it.
 
     Args:
         tmp_path: Scratch folder.
@@ -424,82 +445,37 @@ def test_snapshot_fault_falls_back_to_a_normal_box(tmp_path: Path, fault: str) -
     )
     space = _space(archive, runtime)
     try:
-        space.checkout("")
-        assert space.session().read_file(f"{WORK_DIR}/built.txt") == "x = 1\n"
+        box = _candidate(space)
+        assert box.session.read_file(f"{WORK_DIR}/built.txt") == "x = 1\n"
+        box.close()
     finally:
         space.close()
-    expected = [None, None] if fault == "snapshot" else [None, "snap-0", None]
+    expected = [None, None] if fault == "snapshot" else [None, "snap-0", None, None]
     assert [spec.snapshot_id for spec in runtime.specs] == expected
-    assert _setups(runtime.boxes[-1]) == 1
+    assert runtime.specs[-1].snapshot_archive
     assert not runtime.boxes[-1].online
-    assert runtime.boxes[0].closed
+    assert all(box.closed for box in runtime.boxes)
 
 
-@pytest.mark.parametrize("path", ["restored", "bad-tree", "snapshot-fault"])
-def test_each_workspace_box_reserves_under_its_own_operation_key(tmp_path: Path, path: str) -> None:
-    """Reserve the setup, restored and fallback boxes in the real ledger without a reused-key conflict.
-
-    Args:
-        tmp_path: Scratch folder.
-        path: Which boxes open: the setup box then a restored box, or a fallback
-            after a restored box with a bad tree, or after a failed snapshot.
-    """
-
-    def tamper(folder: Path) -> None:
-        """Change the prepared tree in the restored box.
-
-        Args:
-            folder: The restored box's folder.
-        """
-        (folder / PREPARED_DIR / "src/app.py").write_text("x = 99\n")
-
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    runtime = _BilledSnapshotRuntime(
-        tmp_path / "snaps",
-        _budget(tmp_path),
-        tamper=tamper if path == "bad-tree" else None,
-        snapshot_error=ServiceError("refused") if path == "snapshot-fault" else None,
-    )
-    space = RepoWorkspace(
-        runtime=runtime,
-        spec=replace(_ONLINE, operation_key="repo-scorer:job"),
-        archive=archive,
-        editable_paths=["src"],
-        readonly_paths=[],
-        setup_command=_SETUP,
-        secrets={"API_KEY": "very-secret-value"},
-    )
-    try:
-        space.checkout("")
-        assert space.session().read_file(f"{WORK_DIR}/built.txt") == "x = 1\n"
-    finally:
-        space.close()
-    expected = {
-        "restored": ["repo-scorer:job", "repo-scorer:job:restored-1"],
-        "bad-tree": ["repo-scorer:job", "repo-scorer:job:restored-1", "repo-scorer:job:fallback-2"],
-        "snapshot-fault": ["repo-scorer:job", "repo-scorer:job:fallback-1"],
-    }[path]
-    assert [spec.operation_key for spec in runtime.specs] == expected
-    assert len(set(runtime.names)) == len(expected)
-
-
-@pytest.mark.parametrize("path", ["restored", "fallback", "no-cache", "no-snapshots"])
-def test_each_replaced_workspace_box_reserves_under_a_new_operation_key(tmp_path: Path, path: str) -> None:
-    """Replace the box twice after its prepared tree changed, each time on a key no earlier box used.
+@pytest.mark.parametrize("path", ["restored", "bad-tree", "snapshot-fault", "open-fault", "no-snapshots"])
+def test_each_box_reserves_under_its_own_operation_key(tmp_path: Path, path: str) -> None:
+    """Reserve the setup, metric setup, candidate and metric boxes in the real ledger, each on a new key (E31).
 
     Args:
         tmp_path: Scratch folder.
-        path: Which boxes replace it: boxes from the snapshot, set-up-again boxes
-            after the snapshot did not open, or set-up-again boxes on a runtime
-            with no snapshot cache or no snapshots at all.
+        path: Which boxes open: boxes from the snapshots, a new setup after a
+            restored box with a bad tree or after a box that did not open from
+            the snapshot, or tar states after a failed snapshot or on a runtime
+            with no snapshots.
     """
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", ".optimize/metric-requirements.txt": "numpy\n"})
     runtime_class = _BilledPlainRuntime if path == "no-snapshots" else _BilledSnapshotRuntime
     runtime = runtime_class(
         tmp_path / "snaps",
         _budget(tmp_path),
-        open_error=ServiceError("refused") if path == "fallback" else None,
-        saves=path != "no-cache",
+        tamper=_tamper if path == "bad-tree" else None,
+        snapshot_error=ServiceError("refused") if path == "snapshot-fault" else None,
+        open_error=ServiceError("refused") if path == "open-fault" else None,
     )
     space = RepoWorkspace(
         runtime=runtime,
@@ -511,30 +487,64 @@ def test_each_replaced_workspace_box_reserves_under_a_new_operation_key(tmp_path
         secrets={"API_KEY": "very-secret-value"},
     )
     try:
-        space.checkout("")
-        for _ in range(2):
-            (runtime.boxes[-1]._inner.path / PREPARED_DIR / "src/app.py").write_text("x = 99\n")
-            space.checkout("")
-            assert space.session().read_file(f"{WORK_DIR}/src/app.py") == "x = 1\n"
-            assert space.session() is runtime.boxes[-1]
+        box = _candidate(space)
+        assert box.session.read_file(f"{WORK_DIR}/built.txt") == "x = 1\n"
+        box.close()
+        space.open_metric().close()
     finally:
         space.close()
+    first = ["setup-0", "metric-setup-1", "candidate-2"]
+    again = ["setup-3", "metric-setup-4", "candidate-5", "metric-6"]
     expected = {
-        "restored": ["", ":restored-1", ":restored-2", ":restored-3"],
-        "fallback": ["", ":restored-1", ":fallback-2", ":fallback-3", ":fallback-4"],
-        "no-cache": ["", ":box-1", ":box-2"],
-        "no-snapshots": ["", ":box-1", ":box-2"],
+        "restored": [*first, "metric-3"],
+        "bad-tree": [*first, *again],
+        "snapshot-fault": [*first, "metric-3"],
+        "open-fault": [*first, *again],
+        "no-snapshots": [*first, "metric-3"],
     }[path]
-    assert [spec.operation_key for spec in runtime.specs] == [f"repo-scorer:job{suffix}" for suffix in expected]
+    assert [spec.operation_key for spec in runtime.specs] == [f"repo-scorer:job:{suffix}" for suffix in expected]
     assert len(set(runtime.names)) == len(expected)
-    assert space._snapshots_off is (path == "fallback")
     if path == "restored":
-        assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", "snap-0", "snap-0"]
-        assert [_setups(box) for box in runtime.boxes] == [1, 0, 0, 0]
+        assert [spec.snapshot_id for spec in runtime.specs] == [None, None, "snap-0", "snap-1"]
+
+
+def test_a_metric_box_without_the_metric_packages_sets_up_again_with_tar_states(tmp_path: Path) -> None:
+    """Close a metric box from a snapshot without the installed packages, and set up again in the same call.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+
+    def drop_packages(folder: Path) -> None:
+        """Remove the mark the metric setup step leaves.
+
+        Args:
+            folder: The restored box's folder.
+        """
+        (folder / ".app-metric/ready").unlink(missing_ok=True)
+
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", ".optimize/metric-requirements.txt": "numpy\n"})
+    runtime = _SnapshotRuntime(tmp_path / "snaps", tamper=drop_packages)
+    space = _space(archive, runtime)
+    try:
+        space.open_metric().close()
+    finally:
+        space.close()
+    assert [spec.operation_key for spec in runtime.specs] == [
+        "op:setup-0",
+        "op:metric-setup-1",
+        "op:metric-2",
+        "op:setup-3",
+        "op:metric-setup-4",
+        "op:metric-5",
+    ]
+    assert runtime.specs[2].snapshot_id == "snap-1"
+    assert runtime.specs[-1].snapshot_archive
+    assert all(box.closed for box in runtime.boxes)
 
 
 def test_budget_refusal_during_the_snapshot_stops_setup(tmp_path: Path) -> None:
-    """Raise a budget refusal from the snapshot instead of falling back to a normal box.
+    """Raise a budget refusal from the snapshot instead of falling back to a tar state.
 
     Args:
         tmp_path: Scratch folder.
@@ -544,15 +554,33 @@ def test_budget_refusal_during_the_snapshot_stops_setup(tmp_path: Path) -> None:
     space = _space(archive, runtime)
     try:
         with pytest.raises(UsagePendingError):
-            space.session()
+            space.prepare()
     finally:
         space.close()
     assert len(runtime.specs) == 1
     assert runtime.boxes[0].closed
 
 
-def test_no_snapshot_keeps_the_prepared_box(tmp_path: Path) -> None:
-    """Keep the prepared box and cut its network when the run has no snapshot cache.
+def test_budget_refusal_from_a_box_from_the_snapshot_is_raised(tmp_path: Path) -> None:
+    """Raise a budget refusal from a candidate box that opens from the snapshot instead of setting up again.
+
+    Args:
+        tmp_path: Scratch folder.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _SnapshotRuntime(tmp_path / "snaps", open_error=UsagePendingError("usage pending"))
+    space = _space(archive, runtime)
+    try:
+        with pytest.raises(UsagePendingError):
+            space.open_candidate("")
+    finally:
+        space.close()
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0"]
+    assert not space._snapshots_off
+
+
+def test_a_runtime_without_a_cache_keeps_tar_states(tmp_path: Path) -> None:
+    """Keep a tar state when the runtime saves no snapshot.
 
     Args:
         tmp_path: Scratch folder.
@@ -561,28 +589,29 @@ def test_no_snapshot_keeps_the_prepared_box(tmp_path: Path) -> None:
     runtime = _SnapshotRuntime(tmp_path / "snaps", saves=False)
     space = _space(archive, runtime)
     try:
-        space.session()
+        _candidate(space).close()
     finally:
         space.close()
-    assert [spec.snapshot_id for spec in runtime.specs] == [None]
-    assert not runtime.boxes[0].online
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, None]
+    assert runtime.specs[-1].snapshot_archive
 
 
-def test_each_workspace_gets_its_own_snapshot_key(tmp_path: Path) -> None:
-    """Give two workspaces of one tree different keys, so no box reuses another's snapshot.
+def test_each_workspace_and_each_state_gets_its_own_snapshot_key(tmp_path: Path) -> None:
+    """Give two workspaces of one tree, and the repository and metric states, different keys.
 
     Args:
         tmp_path: Scratch folder.
     """
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", ".optimize/metric-requirements.txt": "numpy\n"})
     runtime = _SnapshotRuntime(tmp_path / "snaps")
     for _ in range(2):
         space = _space(archive, runtime)
         try:
-            space.session()
+            space.prepare()
         finally:
             space.close()
-    assert len(set(runtime.keys)) == 2
+    assert len(runtime.keys) == 4
+    assert len(set(runtime.keys)) == 4
 
 
 def test_stage_boxes_start_from_their_own_snapshot_without_scorer_files(tmp_path: Path) -> None:
@@ -755,23 +784,20 @@ def test_a_broker_parent_runtime_without_a_cache_opens_no_stage_builder(
     assert runtime.specs == []
 
 
-def test_workspace_close_keeps_the_snapshot_and_release_drops_it(tmp_path: Path) -> None:
-    """Keep the snapshot across a box recycle, and release only the workspace's own key.
+def test_workspace_close_keeps_the_snapshots_and_release_drops_them(tmp_path: Path) -> None:
+    """Keep the snapshots when the workspace closes, and release only the workspace's own keys.
 
     Args:
         tmp_path: Scratch folder.
     """
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", ".optimize/metric-requirements.txt": "numpy\n"})
     runtime = _SnapshotRuntime(tmp_path / "snaps")
     space = _space(archive, runtime)
-    space.session()
+    space.prepare()
     space.close()
     assert runtime.released == []
-    space.session()
-    space.close()
     space.release_snapshot()
-    assert runtime.released == [runtime.keys[0]]
-    assert space._snapshot_id is None
+    assert runtime.released == runtime.keys
 
 
 def test_scorer_close_releases_the_workspace_and_stage_snapshots(tmp_path: Path) -> None:
@@ -796,7 +822,8 @@ def test_scorer_close_releases_the_workspace_and_stage_snapshots(tmp_path: Path)
     finally:
         scorer.close()
     assert runtime.released == [runtime.keys[0]]
-    assert scorer_runtime.released == [scorer_runtime.keys[0]]
+    assert scorer_runtime.released[0] == scorer_runtime.keys[0]
+    assert len(scorer_runtime.released) == 2
 
 
 def test_a_bad_stage_snapshot_is_released_when_it_is_dropped(tmp_path: Path) -> None:
@@ -826,9 +853,9 @@ def test_a_failed_workspace_release_is_left_for_the_run_end(tmp_path: Path) -> N
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
     runtime = _SnapshotRuntime(tmp_path / "snaps")
     space = _space(archive, runtime)
-    space.session()
+    space.prepare()
     space.close()
-    raised: list[Exception] = [ServiceError("down"), UsagePendingError("pending")]
+    raised: list[Exception] = [ServiceError("down"), ServiceError("down"), UsagePendingError("pending")]
 
     def refuse(cache_key: str) -> None:
         """Fail the release with the next error.
@@ -859,14 +886,14 @@ _API = ComposeService(name="api", command="python -m api")
 class _ServiceBox(_Box):
     """Record when the workspace starts the compose services, and what the box holds then."""
 
-    def __init__(self, inner: Any, *, online: bool) -> None:
+    def __init__(self, inner: Any, spec: SandboxSpec) -> None:
         """Wrap a local session with no service started.
 
         Args:
             inner: The real local session.
-            online: Whether the box opened with network access.
+            spec: The spec the box opened with.
         """
-        super().__init__(inner, online=online, cutoff="ok")
+        super().__init__(inner, spec)
         self.starts: list[dict[str, Any]] = []
 
     def start_services(self, base_dir: str) -> None:
@@ -888,7 +915,22 @@ class _ServiceBox(_Box):
 
 
 class _ServiceRuntime(_SnapshotRuntime):
-    """Open the snapshot runtime's boxes as boxes that can start compose services."""
+    """Open the snapshot runtime's boxes as boxes that can start compose services.
+
+    With ``fixed`` set, every box works in that one folder, as each Vercel box
+    has the same working folder; the workspace opens one box at a time there.
+    """
+
+    def __init__(self, root: Path, *, fixed: Path | None = None, **options: Any) -> None:
+        """Choose where the boxes work.
+
+        Args:
+            root: Where the saved snapshots go.
+            fixed: The one folder every box works in, if any.
+            **options: The ``_SnapshotRuntime`` options.
+        """
+        super().__init__(root, **options)
+        self._fixed = fixed
 
     def open(self, spec: SandboxSpec) -> _ServiceBox:
         """Open a box that records its service start.
@@ -900,16 +942,25 @@ class _ServiceRuntime(_SnapshotRuntime):
             The box.
         """
         box = super().open(spec)
-        self.boxes[-1] = _ServiceBox(box._inner, online=box.online)
+        inner = box._inner
+        if self._fixed is not None:
+            if self._fixed.exists():
+                # Setup leaves read-only folders, which a plain delete cannot remove.
+                subprocess.run(["chmod", "-R", "u+w", str(self._fixed)], check=True)
+                shutil.rmtree(self._fixed)
+            inner._dir.rename(self._fixed)
+            inner._dir = self._fixed
+        self.boxes[-1] = _ServiceBox(inner, spec)
         return self.boxes[-1]
 
 
-def _service_space(archive: Path, runtime: Any) -> RepoWorkspace:
+def _service_space(archive: Path, runtime: Any, setup: str = _SETUP) -> RepoWorkspace:
     """Build an online workspace with one compose service and a setup command.
 
     Args:
         archive: Packed tree.
         runtime: Where its boxes open.
+        setup: The setup command.
 
     Returns:
         The workspace.
@@ -920,41 +971,67 @@ def _service_space(archive: Path, runtime: Any) -> RepoWorkspace:
         archive=archive,
         editable_paths=["src"],
         readonly_paths=[],
-        setup_command=_SETUP,
+        setup_command=setup,
         secrets={},
     )
 
 
 def _check_start(box: _ServiceBox) -> None:
-    """Check that a box started its services once, offline, after setup, in a copy of the prepared tree.
+    """Check that a box started its services once, offline, after the digest check, in a copy of the prepared tree.
 
     Args:
-        box: The box the workspace kept.
+        box: The candidate box.
     """
     (start,) = box.starts
-    assert start["base"] == (box._inner.path / SERVICES_DIR).resolve()
+    assert start["base"] == (box.path / SERVICES_DIR).resolve()
     assert start["built"]
     assert not start["online"]
     assert "cp -a" in box.commands[start["commands"] - 1][0]
+    before = [command for command, _ in box.commands[: start["commands"]]]
+    assert any("hexdigest" in command for command in before)
+    assert not any("version.patch" in command for command in before)
 
 
-def test_a_kept_setup_box_starts_its_services_after_setup(tmp_path: Path) -> None:
-    """Start the services in a kept setup box only after setup and the cut, and keep the box at checkout.
+@pytest.mark.parametrize("saves", [True, False])
+def test_services_start_in_the_candidate_box_after_the_digest_check(tmp_path: Path, saves: bool) -> None:
+    """Start no service in the setup box or its saved state, and start them in each candidate box after its check.
+
+    Args:
+        tmp_path: Scratch folder.
+        saves: Whether the state is a snapshot or a tar.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    runtime = _ServiceRuntime(tmp_path / "snaps", saves=saves)
+    space = _service_space(archive, runtime)
+    try:
+        _candidate(space, _patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"})).close()
+        _candidate(space).close()
+    finally:
+        space.close()
+    setup, *candidates = runtime.boxes
+    assert setup.starts == []
+    assert all(not (folder / SERVICES_DIR).exists() for folder in runtime.saved.values())
+    assert len(candidates) == 2
+    for box in candidates:
+        _check_start(box)
+
+
+def test_a_candidate_box_without_the_prepared_tree_starts_no_service(tmp_path: Path) -> None:
+    """Start no service in a box from a snapshot that fails its check, and start them in the box after the new setup.
 
     Args:
         tmp_path: Scratch folder.
     """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    runtime = _ServiceRuntime(tmp_path / "snaps", saves=False)
+    runtime = _ServiceRuntime(tmp_path / "snaps", tamper=_tamper)
     space = _service_space(archive, runtime)
     try:
-        space.checkout(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 2\n"}))
-        space.checkout("")
+        _candidate(space).close()
     finally:
         space.close()
-    (box,) = runtime.boxes
-    assert _setups(box) == 1
-    _check_start(box)
+    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", None, None]
+    assert [box.starts for box in runtime.boxes[:3]] == [[], [], []]
+    _check_start(runtime.boxes[3])
 
 
 def test_services_use_their_copy_for_the_paths_that_setup_recorded(tmp_path: Path) -> None:
@@ -964,80 +1041,26 @@ def test_services_use_their_copy_for_the_paths_that_setup_recorded(tmp_path: Pat
         tmp_path: Scratch folder.
     """
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    runtime = _ServiceRuntime(tmp_path / "snaps", saves=False)
-    space = RepoWorkspace(
-        runtime=runtime,
-        spec=replace(_ONLINE, services=(_API,)),
-        archive=archive,
-        editable_paths=["src"],
-        readonly_paths=[],
-        setup_command=(
+    runtime = _ServiceRuntime(tmp_path / "snaps", saves=False, fixed=tmp_path / "box")
+    space = _service_space(
+        archive,
+        runtime,
+        setup=(
             "mkdir -p .venv/bin; printf '#!%s/.venv/bin/python\\n' \"$(pwd -P)\" > .venv/bin/tool;"
             " chmod 555 .venv/bin/tool .venv/bin; cat src/app.py > built.txt"
         ),
-        secrets={},
     )
     try:
-        space.checkout("")
-        (box,) = runtime.boxes
-        base = box.starts[0]["base"]
+        box = _candidate(space)
+        (opened,) = runtime.boxes[1:]
+        base = opened.starts[0]["base"]
         tool = base / ".venv" / "bin" / "tool"
         assert tool.read_text() == f"#!{base}/.venv/bin/python\n"
         assert tool.stat().st_mode & 0o111
-        prepared = (box._inner.path / PREPARED_DIR / ".venv" / "bin" / "tool").read_text()
-        assert prepared == f"#!{(box._inner.path / WORK_DIR).resolve()}/.venv/bin/python\n"
+        prepared = (opened.path / PREPARED_DIR / ".venv" / "bin" / "tool").read_text()
+        assert prepared == f"#!{(opened.path / WORK_DIR).resolve()}/.venv/bin/python\n"
     finally:
-        for opened in runtime.boxes:
-            for folder in opened._inner.path.glob("**/.venv/bin"):
-                folder.chmod(0o755)
+        for folder in (tmp_path / "box").glob("**/.venv/bin"):
+            folder.chmod(0o755)
+        box.close()
         space.close()
-
-
-def test_a_restored_box_starts_its_services_after_the_digest_check(tmp_path: Path) -> None:
-    """Start no service in the box that becomes the snapshot, and start them in the restored box after its check.
-
-    Args:
-        tmp_path: Scratch folder.
-    """
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    runtime = _ServiceRuntime(tmp_path / "snaps")
-    space = _service_space(archive, runtime)
-    try:
-        space.checkout("")
-    finally:
-        space.close()
-    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0"]
-    assert runtime.boxes[0].starts == []
-    assert not (runtime.saved["snap-0"] / SERVICES_DIR).exists()
-    restored = runtime.boxes[1]
-    _check_start(restored)
-    before = [command for command, _, _ in restored.commands[: restored.starts[0]["commands"]]]
-    assert any("hexdigest" in command for command in before)
-
-
-def test_a_fallback_box_starts_its_services_after_setup(tmp_path: Path) -> None:
-    """Start no service in a restored box that fails its check, and start them in the fallback box.
-
-    Args:
-        tmp_path: Scratch folder.
-    """
-
-    def tamper(folder: Path) -> None:
-        """Change the prepared tree in the restored box.
-
-        Args:
-            folder: The restored box's folder.
-        """
-        (folder / PREPARED_DIR / "src/app.py").write_text("x = 99\n")
-
-    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
-    runtime = _ServiceRuntime(tmp_path / "snaps", tamper=tamper)
-    space = _service_space(archive, runtime)
-    try:
-        space.checkout("")
-    finally:
-        space.close()
-    assert [spec.snapshot_id for spec in runtime.specs] == [None, "snap-0", None]
-    assert runtime.boxes[0].starts == []
-    assert runtime.boxes[1].starts == []
-    _check_start(runtime.boxes[2])

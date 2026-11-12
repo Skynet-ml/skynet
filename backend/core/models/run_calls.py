@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-RunCallKind = Literal["model", "mcp", "stage", "evaluator", "host"]
+RunCallKind = Literal["model", "mcp", "stage", "evaluator", "host", "egress"]
 RunCandidateState = Literal["running", "done", "failed"]
 
 

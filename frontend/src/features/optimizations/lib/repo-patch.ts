@@ -4,7 +4,7 @@
  * share one parser.
  */
 
-export interface PatchHunk {
+interface PatchHunk {
   oldStart: number;
   oldLines: number;
   newStart: number;
@@ -13,7 +13,7 @@ export interface PatchHunk {
   lines: string[];
 }
 
-export type FilePatchStatus = "added" | "deleted" | "modified" | "renamed";
+type FilePatchStatus = "added" | "deleted" | "modified" | "renamed";
 
 export interface FilePatch {
   /** Where the file lives after the patch; the old path for a deletion. */

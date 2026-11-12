@@ -19,9 +19,9 @@ export type HardeningStatus =
   | "stale";
 
 export type HardeningView = "black_box" | "white_box";
-export type HardeningPlace = "local" | "cloud";
+type HardeningPlace = "local" | "cloud";
 export type HardeningCheckResult = "pass" | "fail" | "pending";
-export type HardeningRoundStatus =
+type HardeningRoundStatus =
   | "running"
   | "waiting_review"
   | "waiting_fix"
@@ -45,7 +45,7 @@ export interface HardeningExploit {
   user_verdict: "confirmed" | "rejected" | null;
 }
 
-export interface HardeningFixChecks {
+interface HardeningFixChecks {
   suite_replay: HardeningCheckResult;
   base_score_unchanged: HardeningCheckResult;
   /** Null when the metric has no reference solution. */

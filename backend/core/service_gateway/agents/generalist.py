@@ -79,6 +79,7 @@ from .docs_tools import build_docs_tools
 from .github_mcp import github_repo_tools
 from .pi_bridge import turn_stopped
 from .pi_react import run_react_turn_on_pi
+from .secret_request import SECRET_REQUEST_TOOL, secret_request_problem, secret_request_result, secret_request_tool
 from .steering import STEER_APPLIED_EVENT, SteerInbox, get_steer_store
 from .web_tools import build_web_tools
 from .workspace_coder import CODING_AGENT_TOOL, run_coding_agent
@@ -168,8 +169,9 @@ _DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
 
 # Passkeys, linked sign-ins and two-factor codes. These ask in every trust
 # mode, YOLO included, and in every approval policy, because one wrong call
-# can lock the user out.
-_ALWAYS_CONFIRM_TOOLS: frozenset[str] = frozenset({"change_protected_setting"})
+# can lock the user out. ``request_secret`` pauses on the same flow so the
+# user can type the secret in the browser while the turn waits (SKY-641).
+_ALWAYS_CONFIRM_TOOLS: frozenset[str] = frozenset({"change_protected_setting", SECRET_REQUEST_TOOL})
 
 # Safe mutations — metadata toggles, local-only operations.
 # Confirm in Ask mode; auto-approve in Auto-safe and YOLO.
@@ -193,6 +195,8 @@ _SAFE_MUTATIONS: frozenset[str] = frozenset(
         "stage_sample_dataset_datasets_samples",
         # A new folder starts empty, so it gives nobody access to a run.
         "create_folder",
+        # Replaces a tagging session's rubric and task; the next labels follow it.
+        "save_tagging_guide_for_agent",
     }
 )
 
@@ -711,6 +715,14 @@ class _ApprovalGatedTool:
                         }
                     )
                     return order_error
+            if self._tool_name == SECRET_REQUEST_TOOL and (problem := secret_request_problem(kwargs)):
+                self._emit(
+                    {
+                        "event": "tool_end",
+                        "data": {"id": call_id, "tool": self._tool_name, "status": "error", "result": problem},
+                    }
+                )
+                return problem
             pending_key = approval_key(call_id, self._approval_owner)
             # An injected policy (react-serve gates by its own rules) must not
             # be able to wave a protected settings action through.
@@ -747,18 +759,24 @@ class _ApprovalGatedTool:
                     }
                 )
                 if not approved:
+                    declined: Any = (
+                        secret_request_result(str(kwargs.get("name")), saved=False)
+                        if self._tool_name == SECRET_REQUEST_TOOL
+                        else "User declined"
+                    )
                     self._emit(
                         {
                             "event": "tool_end",
                             "data": {
                                 "id": call_id,
                                 "tool": self._tool_name,
-                                "status": "error",
-                                "result": "User declined",
+                                # A skipped secret is the user's answer, not a failure.
+                                "status": "ok" if self._tool_name == SECRET_REQUEST_TOOL else "error",
+                                "result": declined,
                             },
                         }
                     )
-                    return "User declined"
+                    return declined
             result = await self._original(*args, **kwargs)
             shown = self._keep_existing_job_name(_serialize_tool_result(result))
             if self._tool_name == "update_wizard_state":
@@ -1051,10 +1069,14 @@ _ALWAYS_TOOLS = frozenset(
         "get_test_results_optimizations",
         "get_grid_search_result_optimizations",
         "get_pair_test_results_optimizations",
-        # Read-only tagger reach: list the caller's tagging sessions so the agent
-        # can answer questions about them and point the user at /tagger/{id}. The
-        # tagger has its own assist agent; the generalist only reads here.
+        # Tagger reach: list the caller's tagging sessions and point the user at
+        # /tagger/{id}; a new tagging opens through open_page (SKY-631). The
+        # chat reads and saves a session's labeling guide through the same
+        # rules as the tagger's interview. The tagger's own assist agent still
+        # labels the rows.
         "list_tagging_sessions_for_agent",
+        "get_tagging_guide_for_agent",
+        "save_tagging_guide_for_agent",
         # Built-in demo datasets: a user with no file of their own can still
         # reach a submittable run. Staging returns a wizard patch, never rows.
         "list_sample_datasets_datasets_samples_get",
@@ -2043,6 +2065,25 @@ How a turn works:
   result means they refused that action: do not call that tool again this
   turn. Carry on with what does not depend on it and say in the final
   message that it was not done.
+* Starting tagging: when the user asks to tag or label a dataset, call
+  ``open_page`` with ``path`` ``/tagger?dataset=<id>``, with the id from
+  ``list_datasets_for_agent``. The tagger opens on its setup with that
+  dataset loaded. When no saved dataset fits, use ``/tagger?new=1``: the
+  setup opens with no dataset, and the user adds the data there. End the
+  turn with one short line that tells the user to pick the task in the
+  tagger. The tagger opens with this same chat beside it, so never say that
+  a new chat starts.
+* A tagging session's labeling guide: when the user asks to write or
+  change the rules, the question, the categories or the prompt of a
+  tagging session, call ``get_tagging_guide_for_agent`` first. Take the
+  session id from ``list_tagging_sessions_for_agent`` or from a
+  ``/tagger/<id>`` link the user gives. Ask about the cases the sample
+  rows leave open, one short question at a time. Then call
+  ``save_tagging_guide_for_agent`` with the whole rubric, short rules in
+  ``reply_language``. Send ``task`` only to change the task; a session
+  whose ``mode`` is null needs one. Send ``dataset_spec`` only when
+  ``needs_dataset_spec`` is true. Never save while ``autotag_running`` is
+  true.
 
 Reply language — hard rule:
 * The final message, and every user-facing string you hand a tool (a
@@ -2068,6 +2109,12 @@ The wizard screen on view:
   visible screen holds in one call, then tell the user what the next
   screen will hold once they move on with the wizard's arrows. Without
   ``wizard_screen`` the wizard is not on view and any field may be set.
+* Starting a setup: when the user asks to set up, create or start a new
+  optimization run and ``wizard_screen`` is absent, call ``open_page``
+  with ``path`` ``/submit``. The setup opens with this same chat beside
+  it, and its first screen gives you a turn of its own, so write no
+  wizard field in this turn. End the turn with one short line that the
+  setup is open.
 * Say only what a tool result confirms. A refused write changed
   nothing, and the screen moves only when a navigation tool returns
   ``screen_nav``; never tell the user a field is set or that you moved
@@ -2230,6 +2277,12 @@ Capabilities worth knowing about:
   token or key change, 2FA setup, password change, deleting the account)
   call ``open_page`` with the area's tab and tell the user what to do there.
   Use ``open_page`` too when the user asks to see a settings tab.
+* Saved secrets: when a run's optimize.toml sends a secret as ``${NAME}``
+  in a ``[services.<name>]`` entry, call ``request_secret`` with that name,
+  what it is for and its host, one secret per call. The user types the value
+  in a secure card and you get back only ``saved`` or ``skipped``. Never ask
+  for a secret value in the chat. When the user pastes one anyway, never
+  repeat it, write it anywhere or pass it to a tool; ask them to use the card.
 * When you NAME a run, describe it too: set ``job_description`` (one
   or two plain sentences — the task, the data, the goal, in
   ``reply_language``) in the SAME ``update_wizard_state`` patch as
@@ -2351,7 +2404,8 @@ How a turn works:
   user's own comment on line N of that file. Read it with the file's
   current text.
 * Earlier turns of this setup's one conversation precede the current one;
-  they may come from earlier screens. ``wizard_state`` is always the
+  they may come from earlier screens, or from the chat in which the user
+  asked for this setup. ``wizard_state`` is always the
   current form, with the user's own edits: trust it over earlier turns.
 * Call tools one at a time, read each result, and END every turn with a
   ``submit`` call; the user sees only ``submit(assistant_message=…)``.
@@ -2523,7 +2577,10 @@ SCREEN_FOCUS: dict[str, str] = {
         "repository run has no ``run_code``). Its result is where you go on from: the code is already in "
         "the editor, so say in one sentence what it measures and which files it read, and ask the user its "
         "``open_questions``. Check ``metric_code`` with ``validate_code`` before you continue; for a "
-        "repository run the wizard fills its ``column_mapping``."
+        "repository run the wizard fills its ``column_mapping``. When optimize.toml sends a secret as "
+        "``${NAME}`` in a ``[services.<name>]`` entry, call ``request_secret`` for it with its purpose and "
+        "host, one secret per call: the user types the value in a secure card, and you get back only "
+        "``saved`` or ``skipped``. Never ask for a secret value in the chat, and never repeat one the user pasted."
     ),
     "check": (
         "Check: explain the results of the dry run on the screen. When it failed, fix ``run_code`` or "
@@ -3499,7 +3556,7 @@ async def _drive_generalist_agent(
                 authoring_flag=authoring_flag,
                 approval_owner=approval_owner,
             )
-            for tool in [*build_web_tools(), *build_docs_tools(), *github_tools]
+            for tool in [*build_web_tools(), *build_docs_tools(), *github_tools, secret_request_tool()]
         ]
         if screen is not None:
             dspy_tools += [

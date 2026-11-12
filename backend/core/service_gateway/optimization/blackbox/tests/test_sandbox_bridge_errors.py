@@ -19,7 +19,6 @@ from core.sandbox.errors import (
     SandboxTransientError,
 )
 from core.sandbox.factory import ProviderUnavailableError
-from core.sandbox.network import NetworkPolicyError
 from core.sandbox.pacing import ProviderAtCapacityError
 from core.sandbox.pool import TrialFingerprintError
 from core.sandbox.transfer import UnsafeArchiveError
@@ -61,7 +60,6 @@ def _kill_deadline_error() -> SandboxInfraError:
         (SandboxFatalError("fatal"), "The sandbox refused the request: fatal"),
         (ProviderUnavailableError("not in this build"), "The sandbox refused the request: not in this build"),
         (SandboxError("no group"), "The sandbox refused the request: no group"),
-        (NetworkPolicyError("not confirmed"), "The sandbox refused the request: not confirmed"),
         (UnsafeArchiveError("absolute path"), "The sandbox refused the request: absolute path"),
         (TrialFingerprintError("config differs"), "The sandbox refused the request: config differs"),
     ],
@@ -87,7 +85,6 @@ def test_bridge_maps_the_kill_deadline_of_a_timed_command() -> None:
     [
         SandboxSpecError("bad spec"),
         SandboxFatalError("fatal"),
-        NetworkPolicyError("not confirmed"),
         UnsafeArchiveError("absolute path"),
         _kill_deadline_error(),
     ],

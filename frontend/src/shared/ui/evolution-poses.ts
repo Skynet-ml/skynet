@@ -39,7 +39,7 @@ export function parsePoints(d: string): Ctrl[] {
 const TENSION = 1 / 6;
 
 /** Turn control points into a smooth cubic Bézier chain [x0, y0, c1x, c1y, c2x, c2y, x1, y1, …]. */
-export function toBezier(pts: Ctrl[], closed: boolean): Float64Array {
+function toBezier(pts: Ctrl[], closed: boolean): Float64Array {
   const n = pts.length;
   const spans = closed ? n : n - 1;
   const out = new Float64Array(2 + spans * 6);
@@ -72,7 +72,7 @@ export function toBezier(pts: Ctrl[], closed: boolean): Float64Array {
 const r = (v: number) => Math.round(v * 10) / 10;
 
 /** Serialise one Bézier chain as an SVG path. */
-export function chainToPath(c: Float64Array, closed: boolean): string {
+function chainToPath(c: Float64Array, closed: boolean): string {
   let d = `M${r(c[0]!)} ${r(c[1]!)}`;
   for (let k = 2; k < c.length; k += 6) {
     d += `C${r(c[k]!)} ${r(c[k + 1]!)} ${r(c[k + 2]!)} ${r(c[k + 3]!)} ${r(c[k + 4]!)} ${r(c[k + 5]!)}`;
@@ -147,7 +147,6 @@ function densify(bez: Float64Array): { dense: Float64Array; cum: Float64Array } 
       dense[w++] = u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3;
     }
   }
-
 
   const cum = new Float64Array(n);
   for (let i = 1; i < n; i++) {

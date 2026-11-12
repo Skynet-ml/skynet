@@ -27,7 +27,7 @@ OpenAI-compatible endpoint the scorer's ``llm()`` helper talks to; its
 ``api_key`` may be absent when the sandbox injects the credential at the
 network edge instead.
 
-An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services", "mcp"}``)
+An input's optional ``stages`` (``{"prefix", "response_dir", "names", "services", "mcp", "role"}``)
 lets the scorer reach the run's ``[target.<name>]`` stages through the
 parent's relay with ``call(name, input)``. Its optional ``services`` list
 names the ``[services.<name>]`` with a url that the metric may reach: each
@@ -49,16 +49,25 @@ calls share the stage box, so the tree's MCP file, which names
 ``RELAY_PORT``, reaches no call; each call gets ``mcp.json`` in its folder
 with its own port, and ``SKYNET_MCP_CONFIG`` names that copy (SKY-624).
 
-A repository with a ``[run]`` entry runs the candidate first, before the
-metric files are in the tree (E38). ``python3 app_runner.py --candidate
-<call_dir>`` reads ``{"entry", "input", "timeout", "token", "stages"}``,
-starts the entry in its own session with only the case's input (E42),
-stops every process it left, and writes ``{"output", "error", "stopped"}``.
+A repository with a ``[run]`` entry runs the candidate first, in its own
+candidate box (SKY-398). ``python3 app_runner.py --candidate <call_dir>``
+reads ``{"entry", "input", "timeout", "stages"}``, starts the entry in
+its own session with only the case's input (E42), and writes
+``{"output", "error", "elapsed_s"}``. The parent then ends the box, and
+every process the entry left ends with it; the metric runs in another box
+that never holds the candidate's code.
 A function entry (``path/file.py:function``) runs as ``--run <dir>
 <entry>`` and its output is its JSON return value; a command entry
 (``["pytest", "-q"]``) gets the input as JSON on stdin and its output is
 ``{"exit_code", "stdout"}`` (E41). The metric call then gets that output as
 ``score(repo_path, case, output)``, and may start no process of its own (E40).
+Each relay frame names the box's role (``run`` or ``metric``), and the
+parent refuses a frame whose role is not the box's own.
+A metric that also names an ``elapsed_s`` parameter after ``output`` gets
+the entry's run time in seconds as ``elapsed_s=...`` (SKY-642). The
+supervisor measures it in its own process, from just before the entry
+starts until the entry exits and its process group is killed, so the
+candidate's code cannot patch the clock it reads.
 """
 
 from __future__ import annotations
@@ -71,11 +80,15 @@ import inspect
 import io
 import json
 import os
+import pwd
+import shutil
 import signal
 import site
 import ssl
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -127,14 +140,20 @@ RELAY_PORT = 47_311
 CANDIDATE_FLAG = "--candidate"
 # ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
 RUN_FLAG = "--run"
-# Every candidate process inherits this marker, so the supervisor finds the ones
-# that left its process group; a process that clears its environment is still
-# found on Linux, where the supervisor adopts every orphan.
-CANDIDATE_TOKEN_ENV = "APP_CANDIDATE_TOKEN"
-RUN_DIR = "run"
+# The Vercel provider's exec wrapper writes the command's stdout, stderr and
+# exit code to these files (``OUTPUT_PREFIX`` and ``EXIT_PREFIX`` in
+# core/sandbox/providers/vercel.py). This file runs in the box on the standard
+# library alone, so it cannot import them; a test keeps the two equal.
+WRAPPER_OUTPUT_PREFIX = "/tmp/.app-output-"
+WRAPPER_EXIT_PREFIX = "/tmp/.app-exit-"
 MAX_RUN_STDOUT_BYTES = 1024 * 1024
-_STOP_ROUNDS = 100
-_PR_SET_CHILD_SUBREAPER = 36
+# The metric parameter, the input key and the supervisor output key for the entry's run time (SKY-642).
+ELAPSED_PARAM = "elapsed_s"
+# The metric input key that names the folder the metric setup step installed
+# the metric's packages into. ``-I`` reads no user or PYTHONPATH folder, and
+# the image's venv has no system site, so the runner adds this one (SKY-398).
+METRIC_SITE_PARAM = "metric_site"
+_PR_SET_DUMPABLE = 4
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
     " again: run its tests through the [run] entry, and read their report in the metric (its output"
@@ -143,11 +162,13 @@ RERUN_REFUSED = (
 _PROCESS_EVENTS = frozenset(
     {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}
 )
-# The macOS sweep starts ps after the metric call; only that thread may pass the refusal hook.
-_SWEEP = threading.local()
 _STAGE_POLL_SECONDS = 0.05
 # Frames one ``log()`` event on stderr; the host turns each into a run-log line.
 EVENT_PREFIX = "APP_SCORER_EVENT "
+# Frames the candidate supervisor's result on its own stdout. The entry never
+# holds that stdout and runs as another user, so it cannot forge the result,
+# unlike a file it can write (SKY-398).
+RESULT_PREFIX = "APP_RUN_RESULT "
 _EVENT_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 # The module scorer code imports those helpers from: ``from skynet import llm, Image``.
 # Saved user scorers import it by this name, so it stays as it is.
@@ -223,9 +244,10 @@ class StageClient:
         """Bind the relay's frame prefix, response folder and stage names.
 
         Args:
-            config: ``{"prefix", "response_dir", "names", "services", "mcp"}`` from the call's input.
+            config: ``{"prefix", "response_dir", "names", "services", "mcp", "role"}`` from the call's input.
         """
         self._prefix = str(config["prefix"])
+        self._role = config.get("role")
         self._responses = Path(str(config["response_dir"]))
         self._names = tuple(str(name) for name in config.get("names") or ())
         self._lock = threading.Lock()
@@ -303,7 +325,8 @@ class StageClient:
             The message's new id.
         """
         identity = os.urandom(16).hex()
-        frame = self._prefix + json.dumps({"id": identity, **message})
+        role = {"role": self._role} if self._role else {}
+        frame = self._prefix + json.dumps({"id": identity, **message, **role})
         # The real stdout: a scorer that redirects sys.stdout must still reach the relay.
         stream = sys.__stdout__ or sys.stdout
         with self._lock:
@@ -965,6 +988,30 @@ def accepts_output(fn: Callable[..., Any], ran: bool) -> bool:
     return len(named) >= 3 or (ran and any(p.kind == p.VAR_POSITIONAL for p in params))
 
 
+def accepts_elapsed(fn: Callable[..., Any]) -> bool:
+    """Return True when ``fn`` names an ``elapsed_s`` parameter after its first three.
+
+    Args:
+        fn: The scorer callable.
+
+    Returns:
+        True for ``fn(repo_path, case, output, elapsed_s=None)`` and
+        ``fn(repo_path, case, output, *, elapsed_s=None)`` shapes. A
+        ``*args`` or ``**kwargs`` scorer never gets it, so older metrics
+        see the same call as before (SKY-642).
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    for index, param in enumerate(params):
+        if param.name == ELAPSED_PARAM:
+            if param.kind == param.KEYWORD_ONLY:
+                return True
+            return param.kind == param.POSITIONAL_OR_KEYWORD and index >= 3
+    return False
+
+
 def _ssl_context() -> ssl.SSLContext:
     """Build the TLS context for gateway calls, trusting the sandbox's egress proxy when present.
 
@@ -1249,7 +1296,9 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             candidate, case = payload.get("candidate"), payload.get("case")
             if accepts_output(fn, "output" in payload):
-                raw = fn(candidate, case, payload.get("output"))
+                timed = ELAPSED_PARAM in payload and accepts_elapsed(fn)
+                extra = {ELAPSED_PARAM: payload[ELAPSED_PARAM]} if timed else {}
+                raw = fn(candidate, case, payload.get("output"), **extra)
             else:
                 raw = fn(candidate, case) if accepts_case(fn) else fn(candidate)
             score, side_info = normalize_score(raw)
@@ -1280,6 +1329,22 @@ def _keep_user_site() -> None:
         sys.path.append(folder)
 
 
+def _add_metric_site(folder: Any) -> None:
+    """Put the metric packages' folder on ``sys.path`` before the image's site-packages.
+
+    A plain ``sys.path`` entry runs no ``.pth`` file. The metric box holds no
+    candidate code, so the folder holds only the declared packages (SKY-398).
+
+    Args:
+        folder: The folder from the metric input, or ``None`` when the
+            metric declares no packages.
+    """
+    if not isinstance(folder, str) or not Path(folder).is_dir() or folder in sys.path:
+        return
+    sites = [index for index, entry in enumerate(sys.path) if entry.endswith(("site-packages", "dist-packages"))]
+    sys.path.insert(sites[0] if sites else len(sys.path), folder)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one scorer call from ``<call_dir>/input.json`` into ``<call_dir>/output.json``.
 
@@ -1291,37 +1356,42 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The process exit code: 0 whenever the output was written.
     """
-    _keep_user_site()
     args = list(sys.argv[1:] if argv is None else argv)
+    # The supervisor needs only the standard library (SKY-642).
+    if not (len(args) == 2 and args[0] == CANDIDATE_FLAG):
+        _keep_user_site()
     if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
         return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
     if len(args) >= 3 and args[0] == STAGE_COMMAND_FLAG:
         return run_stage_command(Path(args[1]), args[2:])
     if len(args) == 2 and args[0] == CANDIDATE_FLAG:
+        refused = unsafe_output()
+        if refused:
+            sys.stderr.write(refused + "\n")
+            return 3
         call_dir = Path(args[1])
         payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
-        _write_output(call_dir, json.dumps(run_candidate(payload, call_dir)))
+        try:
+            result = run_candidate(payload, call_dir)
+        except EntryUserError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 3
+        _print_result(json.dumps(result))
         return 0
     if len(args) != 1:
         sys.stderr.write("usage: app_runner.py <call_dir>\n")
         return 2
     call_dir = Path(args[0])
     payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
+    _add_metric_site(payload.get(METRIC_SITE_PARAM))
     if "code" not in payload:
         code_path = Path(__file__).resolve().with_name(CODE_FILE)
         payload["code"] = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
     refused = refuse_processes() if "output" in payload else None
-    # The metric call runs the version's code without a [run] entry, and a
-    # ctypes fork passes the audit hook. So no process it starts may outlive
-    # it to write into the prepared tree or a later checkout (E38).
-    token = os.urandom(16).hex()
-    os.environ[CANDIDATE_TOKEN_ENV] = token
-    _become_subreaper()
     result = run_call(payload)
     if refused:
         # The metric may have caught the refusal; its score still does not count.
         result.update(score=None, side_info={}, error=RERUN_REFUSED)
-    result["stopped"] = stop_candidates(token)
     _write_output(call_dir, json.dumps(result))
     return 0
 
@@ -1334,16 +1404,32 @@ def _write_output(call_dir: Path, text: str) -> None:
         text: The output document.
     """
     partial = call_dir / (OUTPUT_FILE + ".part")
+    # A link or folder that the version's code left here must not take the
+    # write; a folder makes the unlink fail, so the call fails (SKY-642).
+    partial.unlink(missing_ok=True)
     partial.write_text(text, encoding="utf-8")
     partial.replace(call_dir / OUTPUT_FILE)
+
+
+def _print_result(text: str) -> None:
+    """Print the candidate supervisor's result as one framed line on its own stdout.
+
+    Args:
+        text: The result document.
+    """
+    stream = sys.__stdout__ or sys.stdout
+    # One write: a relay thread's frame cannot split the line. The leading
+    # newline ends any partial line before it.
+    stream.write("\n" + RESULT_PREFIX + text + "\n")
+    stream.flush()
 
 
 def refuse_processes() -> list[bool]:
     """Refuse every process the metric starts from now on in this process (E40).
 
-    The metric files are in the tree once the candidate has stopped, so code
-    the metric starts again could read them. An audit hook stays for the
-    life of the process, so only the metric call's own process installs it.
+    The metric reads the candidate's report; it must not run the candidate
+    again. An audit hook stays for the life of the process, so only the
+    metric call's own process installs it.
 
     Returns:
         A list that gets an entry each time a process start was refused.
@@ -1360,7 +1446,7 @@ def refuse_processes() -> list[bool]:
         Raises:
             ScorerError: When the event starts a process.
         """
-        if event in _PROCESS_EVENTS and not getattr(_SWEEP, "active", False):
+        if event in _PROCESS_EVENTS:
             refused.append(True)
             raise ScorerError(RERUN_REFUSED)
 
@@ -1368,42 +1454,211 @@ def refuse_processes() -> list[bool]:
     return refused
 
 
-def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
-    """Run the ``[run]`` entry on one case's input, then stop every process it started.
+class EntryUserError(Exception):
+    """The root supervisor found no user other than root to run the entry as."""
 
-    The metric files enter the tree only after this returns, so no process
-    the candidate left may outlive it: the supervisor kills the candidate's
-    process group, then every process that carries the run's marker or, on
-    Linux, that it adopted, until none is left.
+
+def unsafe_output() -> str | None:
+    """Say why the supervisor's stdout could carry a forged result, or ``None`` when it is safe.
+
+    The parent reads the result frame from stdout alone. A pipe, socket or
+    device has its other end with the runtime, so the entry cannot replace
+    it. A file must be the Vercel exec wrapper's
+    ``/tmp/.app-output-<token>.out``. The token is a new ``uuid4``
+    (``os.urandom``) for each command, so no process can know the name
+    before the root wrapper creates the file. The file must belong to root,
+    have no group or other write bit and one link, and its own name must
+    reach it: a link that the redirect followed has another name. In sticky
+    ``/tmp`` the entry, which runs as another user, then cannot rename,
+    replace or write the file. The supervisor also creates the wrapper's
+    exit code file as root before the entry starts, so the entry cannot
+    create it first and write a forged exit code (SKY-398).
+
+    Returns:
+        The refusal, or ``None``.
+    """
+    try:
+        info = os.fstat(1)
+    except OSError:
+        return "The supervisor's stdout is closed."
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        path = str(Path("/proc/self/fd/1").readlink())
+        named = os.lstat(path)
+    except OSError:
+        return "The supervisor cannot check the file behind its stdout."
+    token = path[len(WRAPPER_OUTPUT_PREFIX) : -len(".out")]
+    if (
+        not path.startswith(WRAPPER_OUTPUT_PREFIX)
+        or not path.endswith(".out")
+        or len(token) != 32
+        or token.strip("0123456789abcdef")
+    ):
+        return f"The supervisor's stdout {path} is not a file of the exec wrapper."
+    if os.geteuid() != 0 or info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
+        return f"The supervisor's stdout {path} is not a root-only file."
+    if not stat.S_ISREG(named.st_mode) or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+        return f"The supervisor's stdout {path} is a link or was replaced."
+    # The parent reads the wrapper's files as the box user.
+    os.fchmod(1, 0o644)
+    with _quiet():
+        os.fchmod(2, 0o644)
+    try:
+        sentinel = os.open(WRAPPER_EXIT_PREFIX + token, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        return "The exec wrapper's exit code file exists before the entry started."
+    os.fchmod(sentinel, 0o644)
+    os.close(sentinel)
+    return None
+
+
+def _has_capabilities() -> bool:
+    """Tell whether this process holds any effective Linux capability.
+
+    Returns:
+        ``False`` only when ``/proc/self/status`` shows no effective capability.
+        A host without that file counts as holding them.
+    """
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    for line in status.splitlines():
+        if line.startswith("CapEff:"):
+            return int(line.split()[1], 16) != 0
+    return True
+
+
+def _entry_user(env: dict[str, str]) -> dict[str, Any]:
+    """Choose the user the entry runs as, and set its environment to match.
+
+    A root supervisor starts the entry as the owner of the candidate tree,
+    its working directory. The entry then cannot signal, trace or read the
+    supervisor, or change the exec wrapper's root files (SKY-398). A local
+    Docker box drops every root capability, so its root cannot switch users.
+    That root holds no capability, and a stdout pipe has no file that the
+    entry could replace. So only a root with no capabilities and a pipe
+    stdout runs the entry as itself.
 
     Args:
-        payload: ``{"entry", "input", "timeout", "token", "stages"}``.
+        env: The entry's environment; gets ``HOME``, ``USER`` and ``LOGNAME``.
+
+    Returns:
+        The ``subprocess.Popen`` arguments that switch the user, or none.
+
+    Raises:
+        EntryUserError: When root owns the candidate tree.
+    """
+    if os.geteuid() != 0 or (not stat.S_ISREG(os.fstat(1).st_mode) and not _has_capabilities()):
+        return {}
+    owner = Path().stat()
+    if owner.st_uid == 0:
+        raise EntryUserError("Root owns the candidate tree, so the [run] entry has no other user to run as.")
+    try:
+        account = pwd.getpwuid(owner.st_uid)
+    except KeyError:
+        pass
+    else:
+        env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    return {"user": owner.st_uid, "group": owner.st_gid, "extra_groups": []}
+
+
+def _read_answer(path: Path, user: Any) -> dict[str, Any]:
+    """Read a function entry's ``output.json`` without following a link the entry left.
+
+    Args:
+        path: The answer file.
+        user: The entry's uid, or ``None`` when it runs as the supervisor's user.
+
+    Returns:
+        The answer document.
+
+    Raises:
+        OSError: When the file is missing, a link, not a file, or not the entry's own.
+    """
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        # A root supervisor must not pass on a root file that the entry hard-linked here.
+        if not stat.S_ISREG(info.st_mode) or (user is not None and info.st_uid != user):
+            raise OSError(f"{path} is not the entry's own file")
+        answer = json.loads(handle.read().decode("utf-8"))
+    return answer if isinstance(answer, dict) else {}
+
+
+def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
+    """Run the ``[run]`` entry on one case's input in the candidate box.
+
+    The supervisor kills the entry's process group when the entry exits, so
+    a process left in that group cannot hold the output pipe open and
+    stretch the run time (SKY-642). The parent then ends the box, which is
+    the only cleanup of every other process (SKY-398).
+
+    Args:
+        payload: ``{"entry", "input", "timeout", "stages"}``.
         call_dir: The candidate call's folder.
 
     Returns:
-        ``{"output", "error", "stopped"}``: the entry's output, why the run
-        failed, and whether every candidate process is gone.
+        ``{"output", "error", "elapsed_s"}``: the entry's output, why the run
+        failed, and the entry's run time in seconds, measured here, outside
+        its processes.
     """
-    entry, token = payload["entry"], str(payload["token"])
+    entry = payload["entry"]
     timeout = float(payload["timeout"])
-    _become_subreaper()
+    _block_tracing()
     env = dict(os.environ)
     stages = payload.get("stages")
     if isinstance(stages, dict):
         env.update(_relay_env(StageClient(stages), stages))
-    env[CANDIDATE_TOKEN_ENV] = token
-    run_dir = call_dir / RUN_DIR
-    run_dir.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(payload.get("input"))
+    switch = _entry_user(env)
+    # A new folder in sticky /tmp: the box user can rename anything in the
+    # call's folder, so a root supervisor must not write or chown there.
+    run_dir = Path(tempfile.mkdtemp(prefix=".app-run-"))
+    try:
+        return _run_entry(entry, timeout, env, switch, run_dir, json.dumps(payload.get("input")))
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def _run_entry(
+    entry: Any, timeout: float, env: dict[str, str], switch: dict[str, Any], run_dir: Path, body: str
+) -> dict[str, Any]:
+    """Start the entry, wait for it, kill its process group, and read its output.
+
+    Args:
+        entry: A ``path/file.py:function`` string or a command list.
+        timeout: The entry's time limit in seconds.
+        env: The entry's environment.
+        switch: The ``subprocess.Popen`` arguments that switch the user.
+        run_dir: A new folder for a function entry's input and output.
+        body: The case input as JSON.
+
+    Returns:
+        ``{"output", "error", "elapsed_s"}``.
+    """
+    user = switch.get("user")
     captured: list[bytes] = []
     readers: list[threading.Thread] = []
     try:
         if isinstance(entry, str):
             (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
-            argv = [sys.executable, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
+            if user is not None:
+                os.chown(run_dir, user, switch["group"])
+                os.chown(run_dir / INPUT_FILE, user, switch["group"])
+            # The supervisor runs on the base interpreter without site-packages;
+            # the entry is candidate code and needs the box's python3 from PATH,
+            # where [setup] installed its packages (SKY-642).
+            python = shutil.which("python3", path=env.get("PATH")) or sys.executable
+            argv = [python, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
+            # The candidate runs in its own processes, so it cannot patch this clock (SKY-642).
+            started = time.monotonic()
             # Its prints go to stderr: the parent reads relay frames on stdout.
-            child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True)
+            child = subprocess.Popen(
+                argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True, **switch
+            )
         else:
+            started = time.monotonic()
             child = subprocess.Popen(
                 [str(part) for part in entry],
                 env=env,
@@ -1411,6 +1666,7 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
                 stdout=subprocess.PIPE,
                 stderr=2,
                 start_new_session=True,
+                **switch,
             )
             readers = [
                 threading.Thread(target=_feed, args=(child.stdin, body.encode("utf-8")), daemon=True),
@@ -1419,25 +1675,26 @@ def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
             for reader in readers:
                 reader.start()
     except OSError as exc:
-        return {"output": None, "error": f"The command could not start: {exc}", "stopped": stop_candidates(token)}
+        return {"output": None, "error": f"The command could not start: {exc}"}
     try:
         code: int | None = child.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         code = None
-        with _quiet():
-            os.killpg(child.pid, signal.SIGKILL)
+    with _quiet():
+        os.killpg(child.pid, signal.SIGKILL)
+    if code is None:
         child.wait()
-    stopped = stop_candidates(token, child.pid)
     for reader in readers:
         reader.join(timeout=5)
-    result: dict[str, Any] = {"output": None, "error": None, "stopped": stopped}
+    elapsed = time.monotonic() - started
+    result: dict[str, Any] = {"output": None, "error": None, ELAPSED_PARAM: round(elapsed, 6)}
     if code is None:
         result["error"] = f"timeout after {timeout:g} s"
     elif code < 0:
         result["error"] = f"killed by signal {_signal_name(-code)}"
     elif isinstance(entry, str):
         try:
-            answer = json.loads((run_dir / OUTPUT_FILE).read_text(encoding="utf-8"))
+            answer = _read_answer(run_dir / OUTPUT_FILE, user)
         except (OSError, ValueError):
             answer = {"error": f"exited with code {code} before it returned"}
         if "output" in answer:
@@ -1512,104 +1769,16 @@ def _signal_name(number: int) -> str:
         return str(number)
 
 
-def _become_subreaper() -> None:
-    """Adopt every orphan of the candidate on Linux, so a double fork cannot hide a process."""
+def _block_tracing() -> None:
+    """Stop same-user ptrace and ``/proc/<pid>/mem`` access to this process on Linux (SKY-642).
+
+    Without Yama, any process of the same user could otherwise change the
+    supervisor's clock or its output. A failure leaves the process as it was.
+    """
     if not sys.platform.startswith("linux"):
         return
     with _quiet():
-        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
-
-
-def stop_candidates(token: str, leader: int | None = None) -> bool:
-    """Kill every candidate process, then check that none is left.
-
-    Args:
-        token: The run's marker in each candidate process's environment.
-        leader: The candidate's first process, whose group goes first.
-
-    Returns:
-        Whether no candidate process is left.
-    """
-    if leader is not None:
-        with _quiet():
-            os.killpg(leader, signal.SIGKILL)
-    for _ in range(_STOP_ROUNDS):
-        _reap()
-        left = candidate_processes(token)
-        if not left:
-            return True
-        for pid in left:
-            with _quiet():
-                os.kill(pid, signal.SIGKILL)
-        time.sleep(0.02)
-    _reap()
-    return not candidate_processes(token)
-
-
-def _reap() -> None:
-    """Collect every child that has exited, the adopted ones included."""
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return
-        if pid == 0:
-            return
-
-
-def candidate_processes(token: str) -> set[int]:
-    """Find the live processes that carry the run's marker or descend from this one.
-
-    Args:
-        token: The run's marker.
-
-    Returns:
-        Their process ids; exited processes that wait to be collected are left out.
-    """
-    marker = f"{CANDIDATE_TOKEN_ENV}={token}".encode()
-    me = os.getpid()
-    parents: dict[int, int] = {}
-    found: set[int] = set()
-    proc = Path("/proc")
-    if sys.platform.startswith("linux") and proc.is_dir():
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            try:
-                fields = (entry / "stat").read_text().rpartition(")")[2].split()
-                if fields[0] == "Z":
-                    continue
-                parents[pid] = int(fields[1])
-                if marker in (entry / "environ").read_bytes():
-                    found.add(pid)
-            except (OSError, IndexError, ValueError):
-                continue
-    else:
-        # macOS: no /proc, and orphans go to launchd, so only the marker finds them.
-        # The metric call puts the marker in os.environ, and ps must not find itself.
-        env = {key: value for key, value in os.environ.items() if key != CANDIDATE_TOKEN_ENV}
-        _SWEEP.active = True
-        try:
-            listing = subprocess.run(
-                ["ps", "-axwwE", "-o", "pid=,state=,command="], capture_output=True, check=False, env=env
-            ).stdout
-        finally:
-            _SWEEP.active = False
-        for line in listing.splitlines():
-            parts = line.split(None, 2)
-            if len(parts) == 3 and not parts[1].startswith(b"Z") and marker in parts[2]:
-                found.add(int(parts[0]))
-    children: dict[int, list[int]] = {}
-    for pid, parent in parents.items():
-        children.setdefault(parent, []).append(pid)
-    queue = list(children.get(me, ()))
-    while queue:
-        pid = queue.pop()
-        found.add(pid)
-        queue.extend(children.get(pid, ()))
-    found.discard(me)
-    return found
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)
 
 
 def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:

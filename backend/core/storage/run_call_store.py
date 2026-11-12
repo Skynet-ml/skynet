@@ -24,9 +24,10 @@ from ..billing.usage_tags import LANE_KEY
 from .models import RunCallModel, RunCandidateModel
 
 BODY_CAP_BYTES = 64 * 1024
+# A failure reason can carry a whole stage error or exception text; every polling page reads it.
+FAILURE_REASON_CAP_BYTES = 4 * 1024
 SECRET_MASK = "[REDACTED]"
-CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host"})
-CANDIDATE_STATES = frozenset({"running", "done", "failed"})
+CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host", "egress"})
 CANDIDATE_ID_MAX = 64
 # A GEPA program event carries this flag: its calls are tagged with the
 # proposal iteration, not with the program index in ``candidate_id`` (SKY-364).
@@ -180,7 +181,11 @@ class PostgresRunCallStore:
             "started_at": _parse_timestamp(call.get("started_at")),
             "duration_ms": call.get("duration_ms"),
             "status": str(call.get("status") or "")[:16],
-            "failure_reason": None if failure_reason is None else strip_secrets(str(failure_reason), secrets),
+            "failure_reason": (
+                None
+                if failure_reason is None
+                else cut_body(strip_secrets(str(failure_reason), secrets), FAILURE_REASON_CAP_BYTES)[0]
+            ),
             "cost_usd": call.get("cost_usd"),
             "request": request,
             "request_bytes": request_bytes,
@@ -199,28 +204,6 @@ class PostgresRunCallStore:
             session.add(RunCallModel(seq=seq, **fields))
             session.commit()
             return seq
-
-    def set_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
-        """Insert or update one candidate's role and lifecycle state.
-
-        Args:
-            optimization_id: Owning job id.
-            candidate_id: The candidate within the run.
-            role: The candidate's role or stage.
-            state: ``running``, ``done`` or ``failed``.
-
-        Raises:
-            ValueError: When ``state`` is not a known candidate state.
-        """
-        if state not in CANDIDATE_STATES:
-            raise ValueError(f"unknown candidate state: {state!r}")
-        candidate_id = str(candidate_id)[:CANDIDATE_ID_MAX]
-        with Session(self._engine) as session:
-            candidate = self._lock_candidate(session, optimization_id, candidate_id, role[:64], state)
-            candidate.role = role[:64] or candidate.role
-            candidate.state = state
-            candidate.updated_at = datetime.now(UTC)
-            session.commit()
 
     def finish_candidate(self, optimization_id: str, candidate_id: str, state: str) -> bool:
         """Mark a candidate the run record already has ``done`` or ``failed``.

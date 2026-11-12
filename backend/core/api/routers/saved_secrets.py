@@ -10,9 +10,9 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from ...connectors.saved_secrets import MAX_SECRET_BYTES, SavedSecretStore, SavedSecretView
+from ...connectors.saved_secrets import MAX_SECRET_BYTES, SavedSecretStore, SavedSecretView, clean_allowed_hosts
 from ...models.blackbox import REPO_SECRET_NAME_PATTERN
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
@@ -23,6 +23,7 @@ class SavedSecret(BaseModel):
 
     id: str
     name: str
+    allowed_hosts: list[str]
     created_at: str
     updated_at: str
 
@@ -38,6 +39,22 @@ class SaveSecretRequest(BaseModel):
 
     name: str = Field(pattern=REPO_SECRET_NAME_PATTERN)
     value: str = Field(min_length=1, max_length=MAX_SECRET_BYTES)
+    # The only hosts a run may send this secret to (SKY-641). The server
+    # enforces this list, never the hosts a run payload or optimize.toml names.
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _clean_hosts(cls, hosts: list[str]) -> list[str]:
+        """Normalize the approved hosts and refuse a bad one.
+
+        Args:
+            hosts: Exact hosts or ``*.suffix`` patterns.
+
+        Returns:
+            The cleaned hosts.
+        """
+        return clean_allowed_hosts(hosts)
 
 
 def _public(view: SavedSecretView) -> SavedSecret:
@@ -50,7 +67,11 @@ def _public(view: SavedSecretView) -> SavedSecret:
         The API representation.
     """
     return SavedSecret(
-        id=view.id, name=view.name, created_at=view.created_at.isoformat(), updated_at=view.updated_at.isoformat()
+        id=view.id,
+        name=view.name,
+        allowed_hosts=list(view.allowed_hosts),
+        created_at=view.created_at.isoformat(),
+        updated_at=view.updated_at.isoformat(),
     )
 
 
@@ -88,13 +109,13 @@ def create_saved_secrets_router(*, job_store) -> APIRouter:
         """Encrypt and save a secret, replacing the value of one with the same name.
 
         Args:
-            body: Name and value.
+            body: Name, value and the hosts the caller approves for it.
             user: Authenticated caller.
 
         Returns:
             The saved secret, without its value.
         """
-        return _public(store.save(user.username, body.name, body.value))
+        return _public(store.save(user.username, body.name, body.value, body.allowed_hosts))
 
     @router.delete("/secrets/{secret_id}", status_code=204, summary="Delete a saved secret")
     def delete_secret(

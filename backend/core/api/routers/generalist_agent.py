@@ -83,6 +83,10 @@ TITLE_MAX_CHARS = 40
 _COMPOSER_BLOCK_RE = re.compile(
     r'<pasted_text>.*?</pasted_text>|<attached_file name="([^"]*)">.*?</attached_file>', re.DOTALL
 )
+# Hidden setup wizard turns (frontend ``features/agent-panel/lib/screen-agent.ts``).
+# The kickoff holds no user words; a Back turn carries the agent's request.
+_WIZARD_KICKOFF_MARK = "[The wizard opened this screen; I typed nothing.]"
+_WIZARD_BACK_MARK = "[The wizard went back to this screen for your request; I typed nothing.]"
 
 # The history is re-sent in full every turn, so an unbounded thread grows the
 # prompt without limit. Recent turns carry the working context.
@@ -399,7 +403,8 @@ def _derive_title(user_message: str) -> str:
     Truncates whitespace-collapsed text to ``TITLE_MAX_CHARS`` and appends an
     ellipsis when truncation actually loses characters. Attached-file and
     pasted-text blocks are left out; a message with only files is titled
-    from the first file's name.
+    from the first file's name. A setup wizard kickoff gives no title, and a
+    wizard Back turn is titled from its request without the marker.
 
     Args:
         user_message: The first user turn's text.
@@ -407,6 +412,9 @@ def _derive_title(user_message: str) -> str:
     Returns:
         A short, single-line title suitable for the conversation header.
     """
+    if user_message.lstrip().startswith(_WIZARD_KICKOFF_MARK):
+        return ""
+    user_message = user_message.lstrip().removeprefix(_WIZARD_BACK_MARK)
     typed = _COMPOSER_BLOCK_RE.sub(" ", user_message)
     if not typed.strip():
         files = [m.group(1) for m in _COMPOSER_BLOCK_RE.finditer(user_message) if m.group(1)]
@@ -970,14 +978,20 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
         wizard_state: WizardState = {**req.wizard_state}  # type: ignore[typeddict-item]
         picked = await asyncio.to_thread(engine_agent_model, job_store, current_user.username, req.model)
+        # A cold model catalog builds on the calling thread, so the catalog
+        # reads below run off the event loop (SKY-603).
         model_config = await asyncio.to_thread(
             route_local_byok_model, picked, job_store=job_store, username=current_user.username
-        ) or route_agent_model(picked)
+        ) or await asyncio.to_thread(route_agent_model, picked)
         # A CLI takes its own effort ladder, not the catalog's, and with no
         # pick it runs its own default. The CLI dispatcher drops a level or
         # fast mode the model does not take.
         on_cli = model_config.token_source == "subscription"
-        effort = req.reasoning_effort if on_cli else effective_reasoning_effort(model_config.name, req.reasoning_effort)
+        effort = (
+            req.reasoning_effort
+            if on_cli
+            else await asyncio.to_thread(effective_reasoning_effort, model_config.name, req.reasoning_effort)
+        )
         if effort:
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
         model_config = await asyncio.to_thread(with_fast_mode, model_config, req.fast_mode)

@@ -9,14 +9,17 @@ from __future__ import annotations
 import asyncio
 import importlib
 import io
+import json
 import logging
 import subprocess
 import tarfile
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from core.sandbox import egress_record
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import SandboxFatalError, SandboxInfraError
@@ -27,6 +30,7 @@ from core.sandbox.providers.docker import READY_MARKER, _CliResult
 from core.sandbox.providers.podman import PODMAN_CAPABILITIES, PodmanEnvironment
 from core.sandbox.resources import ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+from core.worker.scoped_relay import CallRecorder
 
 IMAGE = "localhost/skynet-test:latest"
 FAKE_BIN = "podman"
@@ -538,6 +542,36 @@ async def test_a_rootless_allowlist_puts_the_proxy_on_both_networks(fake_podman:
     await env.stop()
     assert not fake_podman.containers
     assert not fake_podman.networks
+
+
+async def test_stop_records_each_proxy_request(fake_podman: _FakePodman) -> None:
+    """Write one egress row for each Podman proxy request before the proxy goes away (SKY-634)."""
+    line = json.dumps(
+        {
+            "event": egress_record.CALL_EVENT,
+            "host": "pypi.org",
+            "port": 443,
+            "status": "ok",
+            "code": 200,
+            "reason": None,
+            "bytes_sent": 3,
+            "bytes_received": 4,
+            "started_at": "2026-11-11T10:00:00.000+00:00",
+            "duration_ms": 7,
+        }
+    )
+    fake_podman.answers["logs"] = _CliResult(0, f"{READY_MARKER}\n{line}\n".encode(), b"")
+    calls: list[dict[str, Any]] = []
+    recorder = CallRecorder(
+        SimpleNamespace(record_call=lambda _run, call, _secrets: calls.append(call)), "job-1", "", ""
+    )
+    env = PodmanEnvironment(_spec(network_disabled=False, allowed_hosts=("pypi.org",)), recorder=recorder)
+    await env.start()
+    await env.stop()
+    assert [(call["kind"], call["target"], call["status"], call["duration_ms"]) for call in calls] == [
+        ("egress", "pypi.org", "ok", 7)
+    ]
+    assert not fake_podman.containers
 
 
 async def test_a_proxy_that_stops_removes_the_network(fake_podman: _FakePodman) -> None:

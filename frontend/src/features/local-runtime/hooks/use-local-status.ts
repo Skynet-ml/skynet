@@ -39,7 +39,7 @@ async function fetchLocalStatus(): Promise<LocalStatus> {
 }
 
 /** Load `/local/status`, sharing one request between every caller. */
-export function loadLocalStatus(force = false): Promise<LocalStatus> {
+function loadLocalStatus(force = false): Promise<LocalStatus> {
   if (!force && cached && Date.now() - cached.at < STATUS_MAX_AGE_MS) {
     return Promise.resolve(cached.status);
   }
@@ -58,7 +58,7 @@ export function loadLocalStatus(force = false): Promise<LocalStatus> {
 }
 
 /** The last status any caller loaded, for code outside React (agent requests). */
-export function peekLocalStatus(): LocalStatus | null {
+function peekLocalStatus(): LocalStatus | null {
   return cached?.status ?? null;
 }
 

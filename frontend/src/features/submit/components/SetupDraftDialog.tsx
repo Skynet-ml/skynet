@@ -42,8 +42,9 @@ export function SetupDraftDialog({
     <Dialog open onOpenChange={(open) => !open && onContinue()}>
       <DialogContent showCloseButton={false} data-tutorial="submit-draft-offer">
         <DialogHeader>
-          <DialogTitle className="sm:whitespace-nowrap">{msg("submit.draft.title")}</DialogTitle>
-          <DialogDescription>
+          <DialogTitle>{msg("submit.draft.title")}</DialogTitle>
+          {/* A long setup name has no spaces to wrap at and would widen the dialog. */}
+          <DialogDescription className="[overflow-wrap:anywhere]">
             {name
               ? formatMsg("submit.draft.left_named", { name, time: ago })
               : formatMsg("submit.draft.left", { time: ago })}

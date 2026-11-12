@@ -30,7 +30,6 @@ from ....models.hardening import (
     HardeningRound,
     HardeningView,
 )
-from ....notifications.catalog import HARDENING_DONE_EVENT, HARDENING_REVIEW_EVENT
 from .classification import JudgeClassification, parse_judge_reply
 
 RETRYABLE_STATUSES: frozenset[str] = frozenset({"failed", "preflight_failed", "stale", "rejected"})
@@ -394,23 +393,6 @@ def retry(job: HardeningJob) -> HardeningJob:
             job.rounds_detail[-1].fix = None
     _reserve(job)
     return job
-
-
-def notification_event(job: HardeningJob) -> str | None:
-    """Return the notification event the job's status sends, if any.
-
-    Args:
-        job: The job.
-
-    Returns:
-        "Review needed" while the user must act, "Hardening done" when the job
-        ends well, or None.
-    """
-    if job.status in ("waiting_review", "waiting_fix"):
-        return HARDENING_REVIEW_EVENT
-    if job.status in ("clean_stop", "budget_stop", "done"):
-        return HARDENING_DONE_EVENT
-    return None
 
 
 def _preflight(job: HardeningJob, runner: HardeningRunner, exploits_path: Path) -> None:

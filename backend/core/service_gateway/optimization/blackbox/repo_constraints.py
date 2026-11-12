@@ -17,16 +17,18 @@ files, not in the toml (E48), and every file they name is protected like
 
 Parsed and validated here, but not enforced yet: ``[proposer]`` and
 ``[target.<name>]`` (mcp, network, services, and for a target its entry,
-vcpus and timeout), ``[services.<name>]`` (a user's API: an https ``url``
-and ``headers`` that name secrets only as ``${NAME}`` placeholders),
+vcpus and timeout), ``[services.<name>]`` (a user's API: an https ``url``,
+and ``headers`` and a ``query`` table that name secrets only as ``${NAME}``
+placeholders),
 ``[metric]`` (the files and exploit folder hidden from the agent) and
 ``[run]`` (the entry that starts the candidate for each case, and its
 timeout; with no ``[run]``, nothing runs and the metric judges only the tree
 and the patch), and ``[data] cases`` (the path of a JSONL file that holds
 the run's cases, one ``{"input": ..., "expected": ...}`` object for each
 line; it is hidden from the agent and the candidate like the metric
-files). ``[run]`` and ``[metric]`` also take the role keys mcp,
-services and illegal; they share one box, so network and vcpus fail. Every
+files). ``[run]`` and ``[metric]`` also take the role keys mcp, network,
+services, illegal and vcpus: the candidate and the metric run in separate
+boxes, so each role sizes and walls off its own box (SKY-398). Every
 role's mcp is the path of a standard ``.mcp.json`` file in the repository,
 read from the same snapshot and checked here; a role's ``tools`` key fails
 and points to mcp (E46). No box gets the proposer's or a target's MCP
@@ -35,8 +37,9 @@ servers in its own mcp file (E49, E55). Every secret goes to one host, and
 the file names it only as ``${NAME}``; a raw secret value fails (E49, E52).
 The worker's preflight gate (``core.worker.repo_gate``) fails a run that
 sets a key its sandbox cannot enforce, before any sandbox time (SKY-352).
-That includes every ``[run]`` key and the ``[metric]`` mcp, services and
-illegal keys, until SKY-385 gives that box its environment.
+``ENFORCED`` there lists the keys that pass; ``[run] entry`` and ``timeout``
+pass because the scorer's supervisor enforces them (SKY-635), and ``[run]
+illegal`` still fails because no judge reads those rules yet.
 """
 
 from __future__ import annotations
@@ -84,18 +87,14 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "paths": frozenset({"editable", "protected"}),
     "setup": frozenset({"command"}),
     "proposer": _ROLE_KEYS,
-    "metric": frozenset({"files", "exploits", "reference", "mcp", "services", "illegal"}),
-    "run": frozenset({"entry", "timeout", "mcp", "services", "illegal"}),
+    "metric": frozenset({"files", "exploits", "reference", "mcp", "network", "services", "illegal", "vcpus"}),
+    "run": frozenset({"entry", "timeout", "mcp", "network", "services", "illegal", "vcpus"}),
     "data": frozenset({"cases"}),
     # Compose services run beside the scorer; [services.<name>] stays the API relay.
     "sandbox": frozenset({"compose"}),
 }
 # Every role names its MCP servers in a .mcp.json file, not catalog tool names (E46).
 _ROLE_SECTIONS = frozenset({"proposer", "run", "metric"})
-_RUN_ROLE_SECTIONS = ("run", "metric")
-# The candidate and the metric share one box today (E37), so neither can size
-# or wall off its own box; these keys fail with that reason, not as unknown.
-_SHARED_BOX_KEYS = frozenset({"network", "vcpus"})
 _BULLET = re.compile(r"[-*+](?:[ \t]+(.*))?")
 # Only an ATX heading counts; "#1 Do not ..." or "#tag" is text and must not be dropped as a heading.
 _HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
@@ -104,6 +103,7 @@ _NAMED_SECTIONS = frozenset({"target", "services"})
 _TABLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _SECRET_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 _HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
+_QUERY_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
 _MAX_URL_CHARS = 2_048
 _MAX_HEADER_CHARS = 1_000
@@ -223,12 +223,15 @@ class TargetStage(RoleEnvironment):
 class ServiceSpec:
     """One ``[services.<name>]`` declaration: the names of the secrets it needs, never values."""
 
-    # The ${NAME} placeholders of headers, in file order (E53).
+    # The ${NAME} placeholders of headers, then of query, in file order (E53, SKY-630).
     secrets: tuple[str, ...] = ()
     # The parser always sets it (E53); only specs built in code leave it None.
     url: str | None = None
     # As written in the file, with ${SECRET} placeholders; None when the file sets none.
     headers: Mapping[str, str] | None = None
+    # URL query parameters whose values are each one ${SECRET} placeholder, for an API
+    # that reads its key from the query, such as Google Geocoding's ?key= (SKY-630).
+    query: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def host(self) -> str | None:
@@ -241,11 +244,12 @@ class ServiceSpec:
 
         Returns:
             The file's headers, or ``Authorization: Bearer ${SECRET}`` when it
-            sets none and the service has exactly one secret (E45).
+            sets no headers and no query and the service has exactly one
+            secret (E45). A query secret never goes out as a header too.
         """
         if self.headers is not None:
             return dict(self.headers)
-        if len(self.secrets) == 1:
+        if not self.query and len(self.secrets) == 1:
             return {"Authorization": f"Bearer ${{{self.secrets[0]}}}"}
         return {}
 
@@ -276,10 +280,14 @@ class RepoConstraints:
     # None means the file has no [run] section, so no candidate runs (E39).
     run_entry: str | tuple[str, ...] | None = None
     run_timeout: float = _DEFAULT_TIMEOUT_SECONDS
-    # network is always None for these two roles: they share one box (E37).
-    # Each role gets only the services it lists and only its own MCP file (E55).
+    # The candidate box runs [run] and the metric box runs [metric] (SKY-398),
+    # so each role sets its own network and vcpus. Each role gets only the
+    # services it lists and only its own MCP file (E55).
     run_role: RoleEnvironment = RoleEnvironment()
     metric_role: RoleEnvironment = RoleEnvironment()
+    # None keeps the runtime's default size for the box.
+    run_vcpus: int | None = None
+    metric_vcpus: int | None = None
     instructions_file: str | None = None
     intent: str | None = None
     rules: tuple[str, ...] = ()
@@ -597,6 +605,34 @@ def _role(section: Mapping[str, Any], label: str, services: Mapping[str, Service
     }
 
 
+def _vcpus(value: Any, label: str, section: str) -> int:
+    """Check a box size: 1, or an even number from 2 to 32.
+
+    Args:
+        value: The ``vcpus`` value from the file.
+        label: The table as the file names it, used in errors.
+        section: The section name the error points to.
+
+    Returns:
+        The number of vCPUs.
+
+    Raises:
+        ConstraintsError: When the value is not a valid box size.
+    """
+    # bool is an int in Python, so ``vcpus = true`` would otherwise read as 1.
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not (value == 1 or (value % 2 == 0 and 2 <= value <= 32))
+    ):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to 32.",
+            section=section,
+            key="vcpus",
+        )
+    return value
+
+
 def _tools_moved(label: str) -> ConstraintsError:
     """Build the error for a role's ``tools`` key, which names catalog tools instead of an MCP file (E46).
 
@@ -710,22 +746,10 @@ def _target(section: Any, name: str, services: Mapping[str, ServiceSpec]) -> Tar
             section=f"target.{name}",
             key="entry",
         )
-    vcpus = section.get("vcpus", _DEFAULT_VCPUS)
-    # bool is an int in Python, so ``vcpus = true`` would otherwise read as 1.
-    if (
-        not isinstance(vcpus, int)
-        or isinstance(vcpus, bool)
-        or not (vcpus == 1 or (vcpus % 2 == 0 and 2 <= vcpus <= 32))
-    ):
-        raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to 32.",
-            section=f"target.{name}",
-            key="vcpus",
-        )
     return TargetStage(
         **_role(section, label, services),
         entry=_entry(section["entry"], label),
-        vcpus=vcpus,
+        vcpus=_vcpus(section.get("vcpus", _DEFAULT_VCPUS), label, f"target.{name}"),
         timeout=_timeout(section, label, "skynet.call"),
     )
 
@@ -782,8 +806,9 @@ def _service(section: Any, name: str) -> ServiceSpec:
     """Read one ``[services.<name>]`` declaration.
 
     The file is public with the repository, so it may name secrets but must
-    never hold one. A header names each secret as ``${NAME}`` (E53). Error
-    messages never repeat a refused value.
+    never hold one. A header names each secret as ``${NAME}`` (E53), and so
+    does each ``query`` value (SKY-630). Error messages never repeat a
+    refused value.
 
     Args:
         section: The value under the service's name.
@@ -794,8 +819,8 @@ def _service(section: Any, name: str) -> ServiceSpec:
 
     Raises:
         ConstraintsError: When the declaration is not a table, has no url, has
-            an unknown key or the removed ``secrets`` key, or a header holds a
-            raw secret value.
+            an unknown key or the removed ``secrets`` key, a header holds a
+            raw secret value, or a query value is not one ``${NAME}``.
     """
     if not isinstance(section, dict):
         raise ConstraintsError(
@@ -819,11 +844,11 @@ def _service(section: Any, name: str) -> ServiceSpec:
             section=f"services.{name}",
             key="secrets",
         )
-    unknown = sorted(set(section) - {"url", "headers"})
+    unknown = sorted(set(section) - {"url", "headers", "query"})
     if unknown:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} {unknown[0][:100]} is not a supported setting. A service has only a"
-            " url and headers; write each secret as ${NAME} in headers, never as a value.",
+            " url, headers and query; write each secret as ${NAME} in headers or query, never as a value.",
             section=f"services.{name}",
             key=unknown[0],
         )
@@ -834,10 +859,12 @@ def _service(section: Any, name: str) -> ServiceSpec:
             key="url",
         )
     headers = _service_headers(section["headers"], label) if "headers" in section else None
+    query = _service_query(section["query"], label) if "query" in section else {}
     return ServiceSpec(
-        secrets=_placeholders(*(headers or {}).values()),
+        secrets=_placeholders(*(headers or {}).values(), *query.values()),
         url=_service_url(section["url"], label),
         headers=headers,
+        query=query,
     )
 
 
@@ -951,6 +978,47 @@ def _service_headers(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> 
                 **_at(f"{label} headers"),
             )
         _check_value(text, f"{label} headers {header}", prefix)
+    return dict(value)
+
+
+def _service_query(value: Any, label: str) -> dict[str, str]:
+    """Read a service's ``query`` table, whose values are each exactly one ``${NAME}`` placeholder (SKY-630).
+
+    The relay adds each parameter, filled, to the url it calls. A query value
+    is never mixed text, so it can only name a secret, never hold one.
+
+    Args:
+        value: The ``query`` value as parsed.
+        label: The service's table, used in errors.
+
+    Returns:
+        The query parameters as written.
+
+    Raises:
+        ConstraintsError: When the value is not a table of parameter names to
+            one ``${NAME}`` each. The message never repeats a value.
+    """
+    if not isinstance(value, dict) or len(value) > _MAX_NAMES:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} query must be a table of at most {_MAX_NAMES} parameter names"
+            ' to ${NAME}, such as query = { key = "${MAPS_API_KEY}" }.',
+            **_at(f"{label} query"),
+        )
+    for name, text in value.items():
+        if not _QUERY_NAME.fullmatch(name):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} query name {name[:100]!r} must use only letters, digits, '_', '.'"
+                " and '-'.",
+                **_at(f"{label} query"),
+            )
+        placeholder = _PLACEHOLDER.fullmatch(text) if isinstance(text, str) else None
+        if placeholder is None or not _SECRET_NAME.fullmatch(placeholder.group(1)):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} query {name} must be one ${{NAME}} placeholder with A-Z, 0-9 and _"
+                ' only, such as "${MAPS_API_KEY}". The file is public with the repository; save the value as a'
+                " Skynet secret.",
+                **_at(f"{label} query"),
+            )
     return dict(value)
 
 
@@ -1254,16 +1322,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
             raise ConstraintsError(f"{CONSTRAINTS_FILE}: {name} must be a [{name}] table.", key=name)
         if name in _NAMED_SECTIONS:
             continue
-        shared = sorted(set(section) & _SHARED_BOX_KEYS) if name in _RUN_ROLE_SECTIONS else []
         if name in _ROLE_SECTIONS and "tools" in section:
             raise _tools_moved(f"[{name}]")
-        if shared:
-            raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: [{name}] {shared[0]} is not supported: the candidate and the metric"
-                " share one box, so neither can set its own network or vcpus. Remove the setting.",
-                section=name,
-                key=shared[0],
-            )
         unknown = sorted(set(section) - _SECTIONS[name])
         # The split comes from the run seed (E59), so a split key would be ignored, not obeyed.
         if name == "data" and "split" in unknown:
@@ -1330,6 +1390,16 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_entry,
         [path for path in metric_only if path is not None],
     )
+    run_vcpus = _vcpus(run_section["vcpus"], "[run]", "run") if "vcpus" in run_section else None
+    metric_vcpus = _vcpus(metric_section["vcpus"], "[metric]", "metric") if "vcpus" in metric_section else None
+    # The metric box holds no repository tree (SKY-398), so a metric with no [run]
+    # and no target stage sees nothing of the version and gives each one the same score.
+    if "metric" in document and run_entry is None and not targets:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [metric] has nothing to judge. The metric box holds no repository"
+            " files, so add a [run] section or a [target.<name>] stage whose outputs the metric scores.",
+            section="metric",
+        )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
@@ -1339,6 +1409,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_timeout=run_timeout,
         run_role=RoleEnvironment(**run_role),
         metric_role=RoleEnvironment(**metric_role),
+        run_vcpus=run_vcpus,
+        metric_vcpus=metric_vcpus,
         instructions_file=instructions_file,
         proposer=RoleEnvironment(**proposer),
         targets=targets,

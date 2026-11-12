@@ -1,19 +1,24 @@
-"""Score repository versions in the trusted parent's box, where the run's secrets live.
+"""Score repository versions in the trusted parent's boxes, where the run's secrets live.
 
-The guest that hosts the coding agent never sees the secrets or this box: it
-posts each version through the parent's evaluator capability, and the parent
-lays it out on a copy of the already set-up tree, then calls the user's
-``score(repo_path)`` (or ``score(repo_path, case)``) on it.
+The guest that hosts the coding agent never sees the secrets or these boxes:
+it posts each version through the parent's evaluator capability, and the
+parent lays it out on a copy of the already set-up tree, then calls the
+user's ``score(repo_path)`` (or ``score(repo_path, case)``).
 
-A repository with a ``[run]`` entry runs the version first, while the metric
-files are out of the tree (E38). The entry gets only the case's ``input``
-(E42). Every process it started stops before the metric files go in; the
-metric then runs in its own process as ``score(repo_path, case, output)``
-with the entry's output (E41). A run that times out, raises, returns no JSON,
-is killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
+Each evaluation gets two fresh boxes (SKY-398). The candidate box C holds
+the prepared tree with the version laid out, and runs the ``[run]`` entry on
+the case's ``input`` only (E42). The parent reads its output, then ends C;
+every process the version started ends with it. The metric box M holds only
+the metric files and the runner, never the repository tree, and opens while
+C runs. M gets the metric files and C's output only after C ended, and runs
+``score(repo_path, case, output)`` with ``repo_path`` the folder that holds
+the metric files at their repository paths (E41). A check that needs the
+version's code belongs in the ``[run]`` entry: without one, the metric sees
+no version code at all. A run that times out, raises, returns no JSON, is
+killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
 feedback, and the metric is not called. A nonzero exit of a command entry is
-an output like any other. Neither process gets the run's secrets: only the
-model route reaches the box.
+an output like any other. Neither box gets the run's secrets: only the model
+route reaches the box.
 
 A scorer returns a score with its feedback, like any scorer, and may return
 per-case results under ``cases``, a mapping of case name to
@@ -25,17 +30,17 @@ A run whose ``optimize.toml`` has ``[target.<name>]`` stages opens one offline
 box for each stage for each candidate evaluation, all before the scorer runs
 (E29). The scorer reaches them with ``call(name, input)``: the call is a
 framed line on the scorer's stdout, the parent runs the stage in its box, and
-writes the answer back into the scorer box. That relay is the stages' only
+writes the answer back into the metric box. That relay is the stages' only
 way out (E27).
 
 The same relay carries the metric's requests to the run's ``[services.<name>]``
 that have a url (E45). The parent checks that the calling role lists the
-service (E55), fills the service's ``${NAME}`` headers with
+service (E55), fills the service's ``${NAME}`` headers and query with
 :func:`relay_request` (each secret only to its own host and the run's allowed
 hosts, a Skynet key metered, E49-E53), calls the url with no redirects, and
 removes every filled value from the answer's headers and body before the box
 gets it (E56). The version's ``[run]`` entry reaches its own services the same
-way, checked against the ``[run]`` role. The scorer box never holds those
+way, checked against the ``[run]`` role. No box ever holds those
 secrets. Catalog connectors do not go through the relay.
 
 A stage whose own MCP file holds a server gets a relay of its own for each
@@ -50,7 +55,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import contextvars
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -60,10 +67,10 @@ import string
 import threading
 import uuid
 from collections.abc import Generator, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 
 import httpx
 
@@ -75,7 +82,7 @@ from ....billing.model_gateway import _tool_target
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
-from ....billing.usage_tags import LANE_KEY, current_tags
+from ....billing.usage_tags import LANE_KEY, box_tag, current_tags
 from ....sandbox.snapshots import snapshot_cache_key
 from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
@@ -84,13 +91,25 @@ from .protocol import STATUS_KEY
 from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
 from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
-from .repo_workspace import GIT, HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
+from .repo_workspace import (
+    GIT,
+    METRIC_DIR,
+    METRIC_REPO_DIR,
+    REPO_DIR,
+    WORK_DIR,
+    CandidateBox,
+    Checkout,
+    MetricBox,
+    RepoSetupError,
+    RepoWorkspace,
+    redact,
+)
 from .rule_judge import RuleJudge
 from .sandbox_contract import SandboxRuntime, SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
 
 if TYPE_CHECKING:
-    from ....worker.scoped_relay import CallRecorder
+    from ....worker.scoped_relay import CallRecorder, CallStart
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +117,35 @@ CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
-_LINKED_BOX = "The version replaced a folder of the scoring box with a link, so it has no score."
 CALLS_DIR = f"{REPO_DIR}/calls"
+METRIC_RUNNER_PATH = f"{METRIC_DIR}/app_runner.py"
+METRIC_CALLS_DIR = f"{METRIC_DIR}/calls"
 # The version's code can write next to the runner and into $HOME, so the
 # runner starts without its own folder, user site-packages or PYTHON* env on
 # its path: a planted json.py or .pth would run before any check (E38, E40).
 # -I drops PYTHONDONTWRITEBYTECODE and PYTHONUNBUFFERED, so -B and -u keep them.
 _ISOLATED = "-I -B -u"
+# The supervisor needs the standard library alone. Without site-packages, a .pth
+# that an earlier call's version code planted there cannot patch the clock that
+# times the [run] entry. The supervisor starts a function entry with python3
+# from PATH, so the entry still gets the [setup] packages (SKY-642).
+_NO_SITE = "-S"
+# The supervisor starts with the image's root-owned base interpreter, not a
+# PATH lookup: /app/.venv/bin is group-writable for the box user, so a version
+# could replace its python3 for the next case. A host without this path (local
+# tests) falls back to PATH (SKY-642).
+_BASE_PYTHON = "/usr/local/bin/python3"
+# The supervisor runs as root, but the box user can rewrite the runner file
+# between the write and the run (a process an earlier case left). So root reads
+# the file once, checks its hash against the parent's copy, and runs those
+# same bytes (SKY-398).
+_SUPERVISOR_BOOT = (
+    "import hashlib,sys;p=sys.argv[1];s=open(p,'rb').read();"
+    "hashlib.sha256(s).hexdigest()==sys.argv[2] or sys.exit('The supervisor file changed before it ran.');"
+    "sys.argv=[p]+sys.argv[3:];g=sys.modules['__main__'].__dict__;g['__file__']=p;"
+    "exec(compile(s,p,'exec'),g)"
+)
+_RUNNER_SHA256 = hashlib.sha256(RUNNER_SOURCE.encode("utf-8")).hexdigest()
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # Each stage call's folder is ``<this>/<call id>``, relative to the box; a
@@ -144,17 +185,25 @@ _DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection"
 _GUEST_DROPPED_HEADERS = frozenset({"accept-encoding", "range"})
 # A server may decode a path again, so a fully decoded service path may hold only plain URL path characters.
 _SERVICE_PATH_CHARS = frozenset(string.ascii_letters + string.digits + "-._~!$&'()*+,=:@/")
-# The version's [run] entry and the metric run in separate processes, each
-# with its own relay, so each service frame is checked against its own role (E37).
+# A service's query secrets ride through relay_request as declared values under this mark, so
+# they get the same host checks, record and answer mask as header secrets. No header name
+# holds it: the parser allows only letters, digits and '-' there (SKY-630).
+_QUERY_MARK = "?"
+# The version's [run] entry and the metric run in separate boxes, each with
+# its own relay, so each frame is checked against its own role (E37, SKY-398).
 _METRIC_ROLE = "metric"
 _RUN_ROLE = "run"
 # Each stage's role is ``target.<name>``, checked against its own MCP file only (SKY-611).
 _TARGET_ROLE = "target."
 # The candidate supervisor's own allowance on top of the [run] timeout: it
-# still has to kill what the entry left and write its output.
+# still has to kill the entry's process group and write its output.
 _RUN_STOP_SECONDS = 60.0
 _RUN_FEEDBACK_CHARS = 2_000
-_RUN_FAILED = "Run failed: "
+RUN_FAILED = "Run failed: "
+# SKY-221: the side info ``status`` of a case whose entry failed. The final run
+# reads it, not the feedback, because pending rule-judge notes go in front of
+# the feedback.
+RUN_FAILED_STATUS = "run_failed"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -337,7 +386,6 @@ class RepoScorer:
         self._timeout_seconds = timeout_seconds
         self._rule_judge = rule_judge
         self._root: str | None = None
-        self._root_session: SandboxSession | None = None
         self._calls = 0
         self._lock = threading.Lock()
         # The stage tree's own snapshot, built from ``stage_archive`` only: a
@@ -350,7 +398,12 @@ class RepoScorer:
         self._stage_snapshot_lock = threading.Lock()
 
     def score(self, patch: str, case: Any = None) -> dict[str, Any]:
-        """Check out one version and score it.
+        """Run one version in its own candidate box, then score it in its own metric box.
+
+        The metric box opens while the candidate box runs, but gets the
+        metric files and the candidate's output only after the candidate box
+        ended (SKY-398). Both boxes close when the evaluation ends, also on a
+        failure, so each releases or settles its own hold.
 
         Args:
             patch: The version as a git patch against the starting commit.
@@ -363,117 +416,167 @@ class RepoScorer:
             RepoScoreError: When the version breaks the path rules or does not
                 apply, changes a protected file while it runs, or the scorer
                 fails or returns no score.
-            BudgetReached: When the run's budget stopped a model, service or MCP call.
-            BudgetError: When a model, service or MCP call had insufficient budget coverage.
-            UsagePendingError: When a model, service or MCP call needs reconciliation.
-            UnpricedOperationError: When the parent cannot bound a model, service or MCP call.
+            BudgetReached: When the run's budget stopped a box, model, service or MCP call.
+            BudgetError: When a box, model, service or MCP call had insufficient budget coverage.
+            UsagePendingError: When a box, model, service or MCP call needs reconciliation.
+            UnpricedOperationError: When the parent cannot bound a box, model, service or MCP call.
         """
         gateway = self._gateway
         secrets = list(self._workspace.secrets.values())
         if gateway is not None and gateway.api_key:
             secrets.append(gateway.api_key)
         judge = self._rule_judge
-        # Checkout and scoring share one lock: the next version's checkout
-        # replaces the tree this one is scored on.
         with self._lock:
-            checkout = self._workspace.checkout(patch)
-            if checkout.path is None:
-                if judge is not None and checkout.blocked:
-                    raise RepoScoreError(judge.blocked(checkout.problems))
-                raise RepoScoreError(" ".join(checkout.problems))
-            session = self._workspace.session()
-            root = self._box_root(session)
+            opened = self._workspace.open_candidate(patch)
+            if isinstance(opened, Checkout):
+                if judge is not None and opened.blocked:
+                    raise RepoScoreError(judge.blocked(opened.problems))
+                raise RepoScoreError(" ".join(opened.problems))
             self._calls += 1
+            # A refusal from the candidate box can name its paths; the metric box sets its own root later.
+            self._root = opened.root
             call = f"{CALLS_DIR}/{self._calls:06d}"
-            call_dir = f"{root}/{call}"
-            # Importing a protected package would otherwise write __pycache__
-            # into it and fail the protected-path check. Skipping the bytecode
+            # Importing a package would otherwise write __pycache__ into the
+            # tree and fail the protected-path check. Skipping the bytecode
             # beats ignoring __pycache__, where a version could plant a .pyc
-            # that the judge then loads. No run secret reaches the box (E38).
+            # that the judge then loads. No run secret reaches a box (E38).
             env = {**self._model_env(), "PYTHONDONTWRITEBYTECODE": "1"}
-            document: dict[str, Any] = {
-                "code": self._code,
-                "candidate": f"{root}/{checkout.path}",
-                "case": case,
-                "gateway": gateway.runner_payload() if gateway is not None else None,
-            }
-            if self._run_entry is not None:
-                ran = self._run_candidate(session, root, checkout.path, call, case, env, secrets)
-                if ran.get("error"):
-                    error = _scrub(_RUN_FAILED + redact(f"{ran['error']}", secrets), root, self._hidden)
-                    error = error[len(_RUN_FAILED) :]
+            # The pool thread does not inherit the usage-scope contextvar, so
+            # the metric box's hold is tagged from a copy of this context.
+            opener = ThreadPoolExecutor(max_workers=1, thread_name_prefix="metric-box")
+            metric_box = opener.submit(contextvars.copy_context().run, self._open_parked_metric)
+            try:
+                try:
+                    ran = self._run_candidate(opened, call, case, env, secrets) if self._run_entry is not None else None
+                finally:
+                    # A budget error from the close must not leave the metric box parked.
+                    try:
+                        opened.close()
+                    finally:
+                        self._unpark(metric_box)
+                if ran is not None and ran.get("error"):
+                    error = _scrub(RUN_FAILED + redact(f"{ran['error']}", secrets), opened.root, self._hidden)
+                    error = error[len(RUN_FAILED) :]
                     return {
                         "score": 0.0,
-                        "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
+                        "feedback": RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(RUN_FAILED)) :],
+                        STATUS_KEY: RUN_FAILED_STATUS,
                     }
-                document["output"] = ran.get("output")
-                # The version's code could rewrite the runner, swap the calls
-                # folder for a link, leave files in this call's folder for the
-                # metric run to read, or plant a module next to the runner
-                # (E38, E40). Its processes are stopped now.
-                reset = session.run(
-                    f"if [ -L {CALLS_DIR} ] || [ ! -d {CALLS_DIR} ]; then exit 3; fi;"
-                    f" find {REPO_DIR} -mindepth 1 -maxdepth 1 ! -name work ! -name prepared ! -name calls"
-                    f" -exec rm -rf {{}} +; rm -rf {shlex.quote(call)}",
-                    timeout_seconds=30,
+                metric = metric_box.result()
+                try:
+                    return self._score_in_metric_box(metric, patch, call, case, env, secrets, ran)
+                finally:
+                    metric.close()
+            finally:
+                opener.shutdown(wait=True)
+                if metric_box.exception() is None:
+                    # Closing twice is a no-op; this closes a box no path above used.
+                    metric_box.result().close()
+
+    def _open_parked_metric(self) -> MetricBox:
+        """Open the metric box and park it in the run budget until the candidate box ended.
+
+        The open metric box only waits for the candidate box, so the run
+        budget may stop a run whose candidate box waits on a model call (SKY-647).
+
+        Returns:
+            The open metric box.
+        """
+        metric = self._workspace.open_metric()
+        park = getattr(self._budget, "park", None)
+        if park is not None and metric.key is not None:
+            park(box_tag(metric.key))
+        return metric
+
+    def _unpark(self, metric_box: Future[MetricBox]) -> None:
+        """Wait for the metric box to open, then end its park, once the candidate box ended.
+
+        Args:
+            metric_box: The metric box being opened; a failed open parked nothing.
+        """
+        if metric_box.exception() is None:
+            key = metric_box.result().key
+            if key is not None and getattr(self._budget, "park", None) is not None:
+                self._budget.unpark(box_tag(key))
+
+    def _score_in_metric_box(
+        self,
+        metric: MetricBox,
+        patch: str,
+        call: str,
+        case: Any,
+        env: Mapping[str, str],
+        secrets: list[str],
+        ran: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Install the metric files in the metric box and call the metric on the candidate's output.
+
+        Args:
+            metric: The evaluation's open metric box.
+            patch: The version, for the stage boxes.
+            call: This call's folder name.
+            case: The case being scored.
+            env: The model route, the box's only environment from the parent.
+            secrets: Values to keep out of anything that leaves the box.
+            ran: The ``[run]`` entry's ``{"output", "error"}``, or ``None`` without a ``[run]`` entry.
+
+        Returns:
+            ``{"score": ..., **side_info}``, secrets redacted.
+
+        Raises:
+            RepoScoreError: When the metric files cannot be installed, or the
+                scorer fails or returns no score.
+            BudgetReached: And the other budget errors, from a stage box or a relayed call.
+        """
+        try:
+            metric.install_metric_files()
+        except RepoSetupError as error:
+            logger.warning("The metric files did not install: %s", redact(str(error), secrets))
+            raise RepoScoreError("The metric files could not be installed, so the version has no score.") from None
+        session, root = metric.session, metric.root
+        self._root = root
+        session.write_files({METRIC_RUNNER_PATH: RUNNER_SOURCE})
+        folder = f"{METRIC_CALLS_DIR}/{call.rsplit('/', 1)[1]}"
+        document: dict[str, Any] = {
+            "code": self._code,
+            "candidate": metric.repo_path,
+            "case": case,
+            "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
+            runner.METRIC_SITE_PARAM: metric.site_path,
+        }
+        if ran is not None:
+            document["output"] = ran.get("output")
+            elapsed = ran.get(runner.ELAPSED_PARAM)
+            if isinstance(elapsed, int | float) and math.isfinite(elapsed) and elapsed >= 0:
+                document[runner.ELAPSED_PARAM] = float(elapsed)
+        with self._stage_relay(patch, f"{folder}/stages", box=session) as relay:
+            if relay is not None:
+                document["stages"] = relay.config(root)
+            session.write_files({f"{folder}/{runner.INPUT_FILE}": json.dumps(document)})
+            # A sink makes the session stream stderr live, which is where log() events travel.
+            with sandbox_log.event_scope(source="scorer"):
+                result = session.run(
+                    f"cd {shlex.quote(metric.repo_path)} && python3 {_ISOLATED}"
+                    f" {shlex.quote(f'{root}/{METRIC_RUNNER_PATH}')} {shlex.quote(f'{root}/{folder}')}",
+                    env=env,
+                    timeout_seconds=self._timeout_seconds,
+                    on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                 )
-                if not reset.ok:
-                    self._workspace.close()
-                    raise RepoScoreError(_LINKED_BOX)
-                session.write_files({RUNNER_PATH: RUNNER_SOURCE})
-            # Boundary (E38): the checkout and the reset run no code that a version
-            # controls. Version code runs in this box before the install only in
-            # [run] above and in earlier calls' metric steps. Every box shell is
-            # bash --noprofile --norc, and the runners and the model mailbox
-            # wrapper start python3 -I, so a profile or user-site .pth that a
-            # version plants does not run in a later step. A .pth or module in a
-            # writable venv or system site-packages still runs (SKY-398).
-            # stop_candidates kills the processes that keep the run's marker or
-            # stay its descendants; a process that drops both can still wait
-            # here. Separate boxes close this (SKY-398). No same-uid sweep: it
-            # would kill the supervisor.
-            not_installed = self._workspace.install_metric_files()
-            if not_installed:
-                raise RepoScoreError(not_installed)
-            with self._stage_relay(patch, f"{call}/stages") as relay:
-                if relay is not None:
-                    document["stages"] = relay.config(root)
-                session.write_files({f"{call}/{runner.INPUT_FILE}": json.dumps(document)})
-                unstamped = self._workspace.stamp_before_run()
-                if unstamped:
-                    raise RepoScoreError(unstamped)
-                # A sink makes the session stream stderr live, which is where log() events travel.
-                with sandbox_log.event_scope(source="scorer"):
-                    result = session.run(
-                        f"cd {shlex.quote(checkout.path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
-                        f" {shlex.quote(call_dir)}",
-                        env=env,
-                        timeout_seconds=self._timeout_seconds,
-                        on_output=relay.output if relay is not None else sandbox_log.ignore_output,
-                    )
-            if result.timed_out:
-                # The runner never stopped the metric's processes; only a new box does.
-                self._workspace.close()
-                raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-            self._check_changes(relay, secrets)
-            text = session.read_file(f"{call}/{runner.OUTPUT_FILE}")
-        # The version's code runs next to the hidden metric and can print or
-        # raise its contents, so the guest gets only a fixed message; the
-        # details stay in the server log (SKY-353).
+        if result.timed_out:
+            raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
+        if relay is not None and relay.unchecked:
+            raise RepoScoreError("A stage answer could not be delivered, so the version has no score.")
+        text = session.read_file(f"{folder}/{runner.OUTPUT_FILE}")
+        # The metric's errors can print or quote its source, so the guest
+        # gets only a fixed message; the details stay in the server log (SKY-353).
         if text is None:
             logger.warning(
                 "Repository scorer did not finish (exit %s): %s",
                 result.exit_code,
                 redact((result.stderr or result.stdout)[-2_000:], secrets),
             )
-            self._workspace.close()
             raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}).")
         output = json.loads(redact(text, secrets))
-        stopped = output.get("stopped") is True
-        if not stopped:
-            # A process of the metric call could write into the prepared tree
-            # or the next checkout; a new box is the only sure stop (E38).
-            self._workspace.close()
         _raise_control(output)
         _raise_control({"control": relay.first_control() if relay is not None else None})
         if output.get("error"):
@@ -484,100 +587,125 @@ class RepoScorer:
         try:
             score = float(output["score"])
         except (TypeError, ValueError):
-            # The error text would echo the value, which the version's code controls.
+            # The error text would echo the value, which the metric's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
-        if not stopped:
-            raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
         side_info = fold_case_scores(output.get("side_info") or {})
+        # SKY-221: only a crashed [run] entry above sets this status, so the
+        # metric's own ``status`` key cannot mark a scored case as a failure.
+        if side_info.get(STATUS_KEY) == RUN_FAILED_STATUS:
+            del side_info[STATUS_KEY]
         return {**side_info, "score": score}
 
     def _run_candidate(
         self,
-        session: SandboxSession,
-        root: str,
-        path: str,
+        candidate: CandidateBox,
         call: str,
         case: Any,
         env: Mapping[str, str],
         secrets: list[str],
     ) -> dict[str, Any]:
-        """Run the ``[run]`` entry on the case's input while the metric files are out of the tree.
+        """Run the ``[run]`` entry on the case's input in the candidate box.
 
-        Every earlier call's folder goes first: each holds the metric source
-        and a full case. The supervisor reports whether it stopped every
-        process the entry started; when it cannot, the box is destroyed, so no
-        process of this version can read the next version's metric files.
+        The box holds no metric file and no earlier call; the caller ends it
+        after this returns, and with it every process the entry left.
 
         Args:
-            session: The workspace's box.
-            root: The box's working directory.
-            path: The version's checkout, relative to the box.
+            candidate: The evaluation's open candidate box.
             call: This call's folder, relative to the box.
             case: The case being scored; only its ``input`` reaches the entry.
             env: The model route, the box's only environment from the parent.
             secrets: Values to keep out of anything that leaves the box.
 
         Returns:
-            ``{"output", "error"}`` from the supervisor.
+            ``{"output", "error", "elapsed_s"}`` from the supervisor.
 
         Raises:
-            RepoScoreError: When the version changed a protected file, or not
-                every process it started could be shown to have stopped.
+            RepoScoreError: When the version changed a protected file, or the
+                supervisor did not exit cleanly.
             BudgetReached: When the run's budget stopped a service or MCP call.
             BudgetError: When a service or MCP call had insufficient budget coverage.
             UsagePendingError: When a service or MCP call needs reconciliation.
             UnpricedOperationError: When the parent cannot bound a service or MCP call.
         """
+        session, root = candidate.session, candidate.root
         supervisor = f"{call}/candidate"
         payload: dict[str, Any] = {
             "entry": self._run_entry if isinstance(self._run_entry, str) else list(self._run_entry or ()),
             "input": case.get("input") if isinstance(case, Mapping) else case,
             "timeout": self._run_timeout,
-            "token": uuid.uuid4().hex,
             "stages": None,
         }
-        with self._service_relay(_RUN_ROLE, f"{supervisor}/stages") as relay:
+        session.write_files({RUNNER_PATH: RUNNER_SOURCE})
+        with self._service_relay(_RUN_ROLE, f"{supervisor}/stages", candidate=candidate) as relay:
             if relay is not None:
                 payload["stages"] = relay.config(root)
             session.write_files({f"{supervisor}/{runner.INPUT_FILE}": json.dumps(payload)})
-            unstamped = self._workspace.stamp_before_run()
+            unstamped = candidate.stamp_before_run()
             if unstamped:
                 raise RepoScoreError(unstamped)
-            calls = shlex.quote(CALLS_DIR)
+            frames: list[str] = []
+            forward = relay.output if relay is not None else sandbox_log.ignore_output
+            pending = [""]
+
+            def output(stream: str, data: str) -> None:
+                """Keep each result frame of the supervisor's stdout, and pass all output on.
+
+                Args:
+                    stream: ``stdout`` or ``stderr``.
+                    data: The next piece of output.
+                """
+                if stream == "stdout":
+                    lines = (pending[0] + data).split("\n")
+                    pending[0] = lines.pop()
+                    prefix = runner.RESULT_PREFIX
+                    frames.extend(line[len(prefix) :] for line in lines if line.startswith(prefix))
+                forward(stream, data)
+
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
-                    f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
+                    f'p={shlex.quote(_BASE_PYTHON)}; [ -x "$p" ] || p=python3'
+                    # exec leaves no shell parent that the entry could trace
+                    # to fake the supervisor's exit code.
+                    f'; cd {shlex.quote(candidate.path)} && exec "$p" {_ISOLATED} {_NO_SITE}'
+                    f" -c {shlex.quote(_SUPERVISOR_BOOT)} {shlex.quote(f'{root}/{RUNNER_PATH}')} {_RUNNER_SHA256}"
                     f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
-                    on_output=relay.output if relay is not None else sandbox_log.ignore_output,
+                    on_output=output,
+                    # Root runs the wrapper and the supervisor; the supervisor
+                    # starts the entry as the tree's owner. On Vercel the
+                    # wrapper's output files are then root's own in sticky
+                    # /tmp, so the entry cannot replace them (SKY-398).
+                    sudo=True,
                 )
-        self._check_changes(relay, secrets)
-        text = session.read_file(f"{supervisor}/{runner.OUTPUT_FILE}")
+        self._check_changes(relay, secrets, candidate)
         try:
-            ran = json.loads(text) if text is not None else None
+            ran = json.loads(frames[0]) if len(frames) == 1 else None
         except ValueError:
             ran = None
-        if not isinstance(ran, dict) or ran.get("stopped") is not True:
+        # The result comes only from the supervisor's stdout, which the entry
+        # never holds: a process the entry left can rewrite any file of the box
+        # user (SKY-398). The supervisor refuses to start when that stdout is a
+        # file the entry's user could replace. A second frame means that some
+        # other process reached that stdout, so no frame counts. It counts only
+        # when the supervisor exited cleanly (SKY-642).
+        if not result.ok or not isinstance(ran, dict):
             logger.warning(
-                "The [run] supervisor did not stop every process (exit %s): %s",
+                "The [run] supervisor did not exit cleanly (exit %s): %s",
                 result.exit_code,
                 redact((result.stderr or result.stdout)[-2_000:], secrets),
             )
-            # A process that outlived its supervisor could read the next
-            # version's metric files; a new box is the only sure stop.
-            self._workspace.close()
-            raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
+            raise RepoScoreError("The [run] supervisor did not finish cleanly, so the version has no score.")
         _raise_control({"control": relay.control if relay is not None else None})
         return ran
 
-    def _check_changes(self, relay: _StageRelay | None, secrets: list[str]) -> None:
-        """Refuse the version when its code changed a protected or hidden file while it ran.
+    def _check_changes(self, relay: _StageRelay | None, secrets: list[str], candidate: CandidateBox) -> None:
+        """Refuse the version when its code changed a protected file while it ran.
 
         Args:
             relay: The finished call's relay, whose answers checked the files too.
             secrets: Values to keep out of the refusal.
+            candidate: The candidate box the version ran in.
 
         Raises:
             RepoScoreError: When a file changed, or a check could not run.
@@ -586,20 +714,15 @@ class RepoScorer:
         unchecked = relay is not None and relay.unchecked
         # After a failed answer check the answer went in by a file write, which moves
         # every ctime, so only the checks the answers passed can still name a change.
-        final = () if unchecked else self._workspace.protected_changes()
-        # Each stage answer checks again, so a lasting change would repeat once per answer.
+        final = () if unchecked else candidate.protected_changes()
+        # Each relay answer checks again, so a lasting change would repeat once per answer.
         changes = tuple(dict.fromkeys((*(relay.changes if relay is not None else ()), *final)))
-        # A hidden change is not a [paths] rule the agent knows, so it
-        # skips the rule judge and its "do not repeat it" message.
-        tampered = [change for change in changes if change != HIDDEN_CHANGED]
-        if tampered:
-            # The version's code names these files and can read the secrets.
-            reason = redact(" ".join(tampered), secrets)
-            raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
         if changes:
-            raise RepoScoreError(HIDDEN_CHANGED)
+            # The version's code names these files and can read the secrets.
+            reason = redact(" ".join(changes), secrets)
+            raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
         if unchecked:
-            raise RepoScoreError("A stage answer could not be checked or delivered, so the version has no score.")
+            raise RepoScoreError("A relay answer could not be checked or delivered, so the version has no score.")
 
     def _model_env(self) -> dict[str, str]:
         """Return the env that points code in the box at the run's model route.
@@ -613,7 +736,7 @@ class RepoScorer:
         return {ENV_API_KEY: gateway.api_key, ENV_MODEL: gateway.model}
 
     @contextlib.contextmanager
-    def _stage_relay(self, patch: str, response_dir: str) -> Iterator[_StageRelay | None]:
+    def _stage_relay(self, patch: str, response_dir: str, *, box: SandboxSession) -> Iterator[_StageRelay | None]:
         """Open this evaluation's stage boxes, lay the version out in each, and relay calls to them.
 
         Every box opens before the scorer's first sample, or none stays open
@@ -625,10 +748,11 @@ class RepoScorer:
 
         Args:
             patch: The version being scored.
-            response_dir: The call's answer folder, relative to the scorer box.
+            response_dir: The call's answer folder, relative to the metric box.
+            box: The metric box, where the relay writes its answers.
 
         Yields:
-            The relay, or ``None`` when the run has no stages.
+            The relay, or ``None`` when the run has no stages and the metric reaches no service or MCP server.
 
         Raises:
             RepoScoreError: When a stage box cannot open for a reason other
@@ -639,12 +763,12 @@ class RepoScorer:
             UnpricedOperationError: When the parent cannot bound a stage box.
         """
         if not self._stages:
-            with self._service_relay(_METRIC_ROLE, response_dir) as relay:
+            with self._service_relay(_METRIC_ROLE, response_dir, box=box) as relay:
                 yield relay
             return
         snapshot_id = self._stage_snapshot()
         try:
-            relay = self._open_stages(patch, response_dir, snapshot_id)
+            relay = self._open_stages(patch, response_dir, snapshot_id, box)
         except _StageSnapshotError:
             # A bad snapshot would fail every later candidate, so this scorer
             # drops it and unpacks the tree in each stage box from now on.
@@ -653,13 +777,13 @@ class RepoScorer:
                 bad, self._stage_snapshot_id = self._stage_snapshot_id, None
                 if bad is not None:
                     self._release_stage_snapshot()
-            relay = self._open_stages(patch, response_dir, None)
+            relay = self._open_stages(patch, response_dir, None, box)
         try:
             yield relay
         finally:
             relay.close()
 
-    def _open_stages(self, patch: str, response_dir: str, snapshot_id: str | None) -> _StageRelay:
+    def _open_stages(self, patch: str, response_dir: str, snapshot_id: str | None, box: SandboxSession) -> _StageRelay:
         """Open one evaluation's stage boxes and lay the version out in each.
 
         Args:
@@ -667,6 +791,7 @@ class RepoScorer:
             response_dir: The call's answer folder, relative to the scorer box.
             snapshot_id: The stage snapshot the boxes start from, or ``None``
                 to unpack the tree in each box.
+            box: The metric box, where the relay writes its answers.
 
         Returns:
             The relay over the open boxes; the caller closes it.
@@ -698,7 +823,7 @@ class RepoScorer:
             logger.warning("Stage boxes did not open: %s", error)
             failure = _StageSnapshotError if snapshot_id is not None else RepoScoreError
             raise failure("The stage boxes could not open, so the version has no score.") from None
-        relay = self._relay(boxes, response_dir)
+        relay = self._relay(boxes, response_dir, box=box)
         try:
             kept = drop_paths(patch, self._hidden)
             try:
@@ -719,12 +844,22 @@ class RepoScorer:
         return relay
 
     @contextlib.contextmanager
-    def _service_relay(self, role: str, response_dir: str) -> Iterator[_StageRelay | None]:
+    def _service_relay(
+        self,
+        role: str,
+        response_dir: str,
+        *,
+        box: SandboxSession | None = None,
+        candidate: CandidateBox | None = None,
+    ) -> Iterator[_StageRelay | None]:
         """Relay one call's service and MCP requests, checked against one role, with no stage boxes.
 
         Args:
             role: ``run`` for the ``[run]`` entry, ``metric`` for the scorer.
             response_dir: The call's answer folder, relative to the box.
+            box: The metric box, where the relay writes its answers.
+            candidate: The candidate box, which checks its protected files
+                with each answer it writes.
 
         Yields:
             The relay, or ``None`` when the role lists no service with a url
@@ -734,7 +869,7 @@ class RepoScorer:
         if not services and not self._mcp_role(role).mcp_servers:
             yield None
             return
-        relay = self._relay({}, response_dir, role=role)
+        relay = self._relay({}, response_dir, role=role, box=box, candidate=candidate)
         try:
             yield relay
         finally:
@@ -747,6 +882,7 @@ class RepoScorer:
         *,
         role: str = _METRIC_ROLE,
         box: SandboxSession | None = None,
+        candidate: CandidateBox | None = None,
     ) -> _StageRelay:
         """Build the relay for one call, checking service and MCP requests against one role.
 
@@ -758,7 +894,9 @@ class RepoScorer:
             boxes: Each stage's open box, by stage name.
             response_dir: The call's answer folder, relative to the box.
             role: The role whose services and MCP servers the caller may reach.
-            box: The stage box this relay answers in; ``None`` answers in the scorer box.
+            box: The metric or stage box this relay answers in.
+            candidate: The candidate box this relay answers in, through its
+                protected-file check; used when ``box`` is ``None``.
 
         Returns:
             The relay for this call.
@@ -774,7 +912,7 @@ class RepoScorer:
             response_dir=response_dir,
             max_concurrency=self._max_concurrency,
             env=self._model_env(),
-            workspace=self._workspace,
+            candidate=candidate,
             services=self._declared,
             role=role,
             allowed=self._service_roles.get(role, ()),
@@ -889,14 +1027,13 @@ class RepoScorer:
         return result.ok
 
     def prepare(self) -> None:
-        """Set the repository up and take its box offline before any version is sent.
+        """Set the repository and the metric packages up before any version is sent.
 
         Raises:
-            RepoSetupError: When the repository cannot be unpacked or set up.
-            NetworkCutoffError: When the box's network cannot be switched off and confirmed.
+            RepoSetupError: When the repository or the metric packages cannot be set up.
         """
         with self._lock:
-            self._workspace.session()
+            self._workspace.prepare()
 
     def dispatch(self, body: Mapping[str, Any]) -> ModelHTTPResult:
         """Answer one guest scoring request through the evaluator capability.
@@ -927,32 +1064,8 @@ class RepoScorer:
             document["feedback"] = "\n\n".join([*notes, *([str(feedback)] if feedback else [])])
         return ModelHTTPResult(200, "application/json", json.dumps(document).encode())
 
-    def _box_root(self, session: SandboxSession) -> str:
-        """Return the box's working directory, and write the runner into the box.
-
-        Each checkout clears the runner with everything else next to the
-        tree, and a failed version can end the box, so it goes in every time.
-
-        Args:
-            session: The workspace's open box.
-
-        Returns:
-            The absolute directory relative paths in the box resolve against.
-
-        Raises:
-            RepoScoreError: When the box cannot report its directory.
-        """
-        if self._root is None or self._root_session is not session:
-            located = session.run("pwd", timeout_seconds=30)
-            root = located.stdout.strip()
-            if not located.ok or not root.startswith("/"):
-                raise RepoScoreError("The scoring box could not report its working directory.")
-            self._root, self._root_session = root, session
-        session.write_files({RUNNER_PATH: RUNNER_SOURCE})
-        return self._root
-
     def close(self) -> None:
-        """Destroy the workspace box and delete this scorer's snapshots.
+        """Delete the workspace's saved states and this scorer's snapshots.
 
         Raises:
             BudgetReached: And the other budget errors, from a snapshot delete.
@@ -1063,6 +1176,57 @@ def _under(target: httpx.URL, base: httpx.URL) -> bool:
     return path == root or path.startswith(root + "/")
 
 
+class _SecretQueryTransport(httpx.BaseTransport):
+    """Add a service's filled query secrets to each request, below the client (SKY-630).
+
+    The client logs and raises with its own request url, so the secret is
+    added only to the copy that goes to the wire. A guest parameter with a
+    declared name, in any case, is dropped first, so the guest can never
+    replace the secret.
+    """
+
+    def __init__(self, transport: httpx.BaseTransport, query: Mapping[str, str]) -> None:
+        """Wrap a transport.
+
+        Args:
+            transport: The pinned transport that sends the request.
+            query: The declared parameters with their secrets filled in.
+        """
+        self._transport = transport
+        self._query = dict(query)
+        self._names = {name.lower() for name in query}
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Send the request with the guest's other parameters and the filled secrets.
+
+        Args:
+            request: The request the client built from the guest's path.
+
+        Returns:
+            The upstream response.
+        """
+        # Some servers also split on ';', so a guest "a=1;key=x" must not slip a declared name past.
+        kept = [
+            part
+            for part in re.split(r"[&;]", request.url.query.decode("ascii"))
+            if part and unquote(part.partition("=")[0].replace("+", " ")).lower() not in self._names
+        ]
+        query = "&".join([*kept, urlencode(self._query)])
+        return self._transport.handle_request(
+            httpx.Request(
+                request.method,
+                request.url.copy_with(query=query.encode("ascii")),
+                headers=request.headers,
+                stream=request.stream,
+                extensions=request.extensions,
+            )
+        )
+
+    def close(self) -> None:
+        """Close the wrapped transport."""
+        self._transport.close()
+
+
 def _json_object(body: bytes) -> dict[str, Any]:
     """Read an MCP request body as one JSON-RPC object, for its run-call target.
 
@@ -1100,7 +1264,7 @@ class _StageRelay:
         response_dir: str,
         max_concurrency: int,
         env: Mapping[str, str],
-        workspace: RepoWorkspace,
+        candidate: CandidateBox | None = None,
         services: Mapping[str, ServiceSpec] | None = None,
         role: str = _METRIC_ROLE,
         allowed: tuple[str, ...] = (),
@@ -1123,8 +1287,8 @@ class _StageRelay:
             max_concurrency: How many calls to one stage run at the same time.
             env: The run's model route, so stage code reaches models only
                 through the parent's mailbox.
-            workspace: The scorer box's workspace, which checks the
-                protected files and writes each answer into the scorer box.
+            candidate: The candidate box, which checks its protected files
+                and writes each answer into the box; ``None`` with ``box``.
             services: The run's ``[services]`` tables, by name.
             role: The role that each service request is checked against:
                 ``run`` for the ``[run]`` entry, ``metric`` for the scorer (E37).
@@ -1139,8 +1303,8 @@ class _StageRelay:
             budget: The run budget, which meters a call with a Skynet key.
             recorder: Writes each relayed call into the run record under
                 ``role``; ``None`` records nothing.
-            box: The stage box whose frames this relay answers, in that
-                box; ``None`` answers in the scorer box through ``workspace``.
+            box: The metric or stage box whose frames this relay answers,
+                in that box; ``None`` answers in ``candidate``.
             stage_relays: Each stage's own relay, by stage name, for the
                 stages whose MCP file holds a server; this relay closes them.
                 For a stage relay, ``response_dir`` is the stage's calls folder.
@@ -1168,6 +1332,8 @@ class _StageRelay:
         self._allowed = tuple(allowed)
         self._mcp = mcp or RoleEnvironment()
         self._secrets = dict(secrets or {})
+        # Values stage code can print or echo: the run's secrets and its box's model route key.
+        self._stage_secrets = [*self._secrets.values(), self._env.get(ENV_API_KEY, "")]
         self._bindings = dict(bindings or {})
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
@@ -1175,12 +1341,12 @@ class _StageRelay:
         # The relay's calls run on pool threads, which do not inherit the usage-scope
         # contextvar, so the candidate is read here, in the scorer thread that holds it.
         tags = current_tags()
-        candidate = tags.get("candidate")
+        tagged = tags.get("candidate")
         self._recorder = (
             recorder.bind(
                 role=role,
                 candidate_id=recorder.candidate_id
-                or (call_candidate_key(candidate, tags.get(LANE_KEY)) if candidate else None),
+                or (call_candidate_key(tagged, tags.get(LANE_KEY)) if tagged else None),
             )
             if recorder is not None
             else None
@@ -1195,7 +1361,7 @@ class _StageRelay:
         self._pending: dict[str, str] = {}
         self._seen: set[str] = set()
         self._lock = threading.Lock()
-        self._workspace = workspace
+        self._candidate = candidate
         self._answer_lock = threading.Lock()
         self._closed = False
         self.changes: list[str] = []
@@ -1212,12 +1378,13 @@ class _StageRelay:
             root: That box's working directory.
 
         Returns:
-            ``{"prefix", "response_dir", "names", "services", "mcp", "mcp_file", "port"}``
+            ``{"prefix", "response_dir", "names", "services", "mcp", "mcp_file", "port", "role"}``
             for the call's input; ``services`` and ``mcp`` list what the role
             may call, by name only. ``mcp_file`` is the role's own
             ``.mcp.json``, which staging rewrote to loopback urls on
-            ``RELAY_PORT``. In a stage box ``port`` is ``0``: each call's
+            ``RELAY_PORT``. For a stage's relay ``port`` is ``0``: each call's
             runner takes a free port and writes its own copy of that file.
+            ``role`` goes into every frame, and the relay refuses a frame of another role.
         """
         return {
             "prefix": self._prefix,
@@ -1227,7 +1394,9 @@ class _StageRelay:
             "mcp": [server.name for server in self._mcp.mcp_servers],
             "mcp_file": self._mcp.mcp,
             # Parallel calls share a stage box, so no call may hold the fixed port (SKY-624).
-            "port": runner.RELAY_PORT if self._box is None else 0,
+            # The metric box also has a box, so the role tells a stage's relay apart.
+            "port": 0 if self._role.startswith(_TARGET_ROLE) else runner.RELAY_PORT,
+            "role": self._role,
         }
 
     def for_call(self, identity: str) -> _StageRelay:
@@ -1249,7 +1418,7 @@ class _StageRelay:
             response_dir=f"{self._response_dir}/{identity}/relay",
             max_concurrency=self._max_concurrency,
             env=self._env,
-            workspace=self._workspace,
+            candidate=self._candidate,
             services=self._declared,
             role=self._role,
             allowed=self._allowed,
@@ -1320,6 +1489,11 @@ class _StageRelay:
                 ):
                     continue
                 self._seen.add(identity)
+                if frame.get("role") != self._role:
+                    # A [run] frame in the metric box, or a metric frame in the candidate box (SKY-398).
+                    if kind != "stop":
+                        self._refusals.submit(self._answer, identity, self._role_refusal(frame.get("role")))
+                    continue
                 if kind == "stop":
                     with self._streams_lock:
                         if isinstance(name, str) and name in self._open_streams:
@@ -1337,9 +1511,24 @@ class _StageRelay:
                     continue
                 pool = self._pools.get(name) if isinstance(name, str) else None
                 if pool is None:
-                    self._refusals.submit(self._answer, identity, {"error": f"Unknown stage {name!r}."})
+                    self._refusals.submit(self._refuse_stage, name, identity, frame.get("input"))
                 else:
                     pool.submit(self._call, name, identity, frame.get("input"))
+
+    def _role_refusal(self, role: Any) -> dict[str, Any]:
+        """Return the answer to a frame that names another role than this relay's box.
+
+        Args:
+            role: The role the frame names; box code controls it.
+
+        Returns:
+            A 403 answer with an error that names the box's role.
+        """
+        named = role if isinstance(role, str) and len(role) <= 100 else "no role"
+        return {
+            "status": 403,
+            "error": f"This box runs the [{self._role}] role; a frame for {named!r} is refused here.",
+        }
 
     def _refuse(self, kind: str, name: Any, identity: str, refusal: Mapping[str, Any]) -> None:
         """Record a service or MCP call the role may not make, then answer the guest with the refusal.
@@ -1352,7 +1541,13 @@ class _StageRelay:
         """
         if self._recorder is not None:
             self._recorder.record(
-                self._recorder.start(), kind=kind, target=str(name), status="refused", failure_reason=refusal["error"]
+                self._recorder.start(),
+                kind=kind,
+                target=str(name),
+                status="refused",
+                failure_reason=refusal["error"],
+                # The frame's name comes from box code and can be any value it holds (SKY-637).
+                secrets=self._stage_secrets,
             )
         self._answer(identity, refusal)
 
@@ -1495,7 +1690,7 @@ class _StageRelay:
         """
         try:
             spec = self._services[name]
-            response = self._request(str(spec.url), spec.request_headers, f"Service {name!r}", frame)
+            response = self._request(str(spec.url), spec.request_headers, f"Service {name!r}", frame, query=spec.query)
         except (BudgetReached, Exception) as error:
             response = self._stopped(error)
             if response is None:
@@ -1529,10 +1724,11 @@ class _StageRelay:
         *,
         kind: str = "host",
         server: str = "",
+        query: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Call a service's or MCP server's url through :func:`relay_request`, so its secrets stay in the parent.
 
-        ``relay_request`` fills the declared headers, refuses a secret outside
+        ``relay_request`` fills the declared headers and query, refuses a secret outside
         its host or the run's allowed hosts, meters a Skynet key, and removes
         every filled value from the answer. The host must resolve to public
         addresses only, the connection stays on that address and origin, and
@@ -1546,6 +1742,8 @@ class _StageRelay:
             kind: ``host`` for a service, ``mcp`` for an MCP server, for the run record.
             server: The MCP server's name, so its record target is
                 ``server@host/tool``; ``""`` for a service.
+            query: The service's declared query parameters, each one
+                ``${SECRET}``; they replace any guest parameter of the same name.
 
         Returns:
             ``{"status", "headers", "body"}`` with a base64 body, or
@@ -1589,7 +1787,8 @@ class _StageRelay:
 
             Args:
                 address: The declared url with the guest's path.
-                filled: The declared headers with their secrets filled in.
+                filled: The declared headers with their secrets filled in, and
+                    the filled query parameters under ``_QUERY_MARK``.
                 content: The guest's body.
 
             Returns:
@@ -1606,7 +1805,11 @@ class _StageRelay:
             except ValueError as error:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
-            transport = _PinnedTransport(origin, pinned)
+            secret_query = {key[1:]: value for key, value in filled.items() if key.startswith(_QUERY_MARK)}
+            filled = {key: value for key, value in filled.items() if not key.startswith(_QUERY_MARK)}
+            transport: httpx.BaseTransport = _PinnedTransport(origin, pinned)
+            if secret_query:
+                transport = _SecretQueryTransport(transport, secret_query)
             with contextlib.ExitStack() as stack:
                 stack.callback(transport.close)
                 client = stack.enter_context(
@@ -1645,7 +1848,7 @@ class _StageRelay:
         try:
             answer = relay_request(
                 url=url,
-                headers=declared,
+                headers={**declared, **{_QUERY_MARK + key: value for key, value in (query or {}).items()}},
                 body=body,
                 user_secrets=self._secrets,
                 bindings=self._bindings,
@@ -1656,6 +1859,8 @@ class _StageRelay:
                 recorder=self._recorder,
                 kind=kind,
                 target=record_target,
+                # Box code can put its model route key into a tool call or a request body (SKY-637).
+                record_secrets=self._stage_secrets,
             )
         except _AnswerTooLargeError:
             return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
@@ -1698,6 +1903,7 @@ class _StageRelay:
             identity: The call's id, also its folder and answer name.
             value: The JSON input.
         """
+        started = self._recorder.start() if self._recorder is not None else None
         try:
             response = self._run(name, identity, value)
         except BudgetReached as error:
@@ -1711,7 +1917,56 @@ class _StageRelay:
         except Exception as error:
             logger.warning("Stage %s call failed in the parent: %s", name, error)
             response = {"error": f"Stage {name!r} could not run."}
+        self._record_stage(started, name, value, response)
         self._answer(identity, response)
+
+    def _refuse_stage(self, name: Any, identity: str, value: Any) -> None:
+        """Record a call to a stage this run does not have, then answer the scorer with the refusal.
+
+        Args:
+            name: The stage the frame names; the record's target.
+            identity: The call's id, also its answer name.
+            value: The JSON input.
+        """
+        response = {"error": f"Unknown stage {name!r}."}
+        started = self._recorder.start() if self._recorder is not None else None
+        self._record_stage(started, str(name), value, response, status="refused")
+        self._answer(identity, response)
+
+    def _record_stage(
+        self,
+        started: CallStart | None,
+        name: str,
+        value: Any,
+        response: Mapping[str, Any],
+        *,
+        status: str | None = None,
+    ) -> None:
+        """Write one stage call into the run record (E28).
+
+        Args:
+            started: When the call started; None when nothing records.
+            name: The stage.
+            value: The JSON input.
+            response: The answer the scorer gets.
+            status: The status to record; None derives it from the answer.
+        """
+        if self._recorder is None or started is None:
+            return
+        control = response.get("control")
+        reason = response.get("error") or (control.get("message") if isinstance(control, Mapping) else None)
+        if status is None:
+            status = "ok" if "output" in response else "refused" if control else "failed"
+        self._recorder.record(
+            started,
+            kind="stage",
+            target=name,
+            status=status,
+            request=json.dumps(value, default=str),
+            response=json.dumps(response, default=str),
+            failure_reason=None if status == "ok" else str(reason or "The stage gave no answer."),
+            secrets=self._stage_secrets,
+        )
 
     def _run(self, name: str, identity: str, value: Any) -> dict[str, Any]:
         """Run one stage call in the stage's box, with a relay of its own when the stage has MCP servers.
@@ -1781,7 +2036,8 @@ class _StageRelay:
         if result.timed_out:
             return {"error": f"Stage {name!r} passed its {stage.timeout:g}s timeout."}
         if not result.ok:
-            tail = (result.stderr or result.stdout).strip()[-_STAGE_ERROR_CHARS:]
+            # Masked before the cut, so a secret across the cut leaves no part of itself.
+            tail = redact((result.stderr or result.stdout).strip(), self._stage_secrets)[-_STAGE_ERROR_CHARS:]
             return {"error": f"Stage {name!r} failed (exit {result.exit_code}): {tail}"}
         text = box.read_file(f"{folder}/{runner.OUTPUT_FILE}")
         try:
@@ -1814,11 +2070,13 @@ class _StageRelay:
         with self._answer_lock:
             if self._closed:
                 return False
-            if self._box is not None:
-                # The protected-file check covers the scorer box; a stage box only runs the version.
-                self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
+            if self._box is not None or self._candidate is None:
+                # The protected-file check covers the candidate box; the metric
+                # box holds no repository and a stage box only runs the version.
+                if self._box is not None:
+                    self._box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
                 return True
-            changes = self._workspace.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
+            changes = self._candidate.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
             if changes is None:
                 # The scorer may wait until its own timeout; either way the version gets no score.
                 self.unchecked = True
@@ -1827,7 +2085,7 @@ class _StageRelay:
             return True
 
     def close(self) -> None:
-        """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
+        """Stop queued calls, keep late answers out of the box, and close every stage box."""
         with self._answer_lock:
             self._closed = True
             relays = [*self._stage_relays.values(), *self._calls]
@@ -1855,7 +2113,7 @@ def _scrub(text: str, root: str | None, hidden: tuple[str, ...] | list[str] = ()
         The text with repository-relative paths and without the metric's frames.
     """
     text = text if text.endswith("\n") else f"{text}\n"
-    if text.startswith(_RUN_FAILED):
+    if text.startswith(RUN_FAILED):
         text = _TRACEBACK.sub(lambda match: _repo_frame(match.group(0), root, hidden), text)
     else:
         text = _TRACEBACK.sub("", text)
@@ -1864,6 +2122,8 @@ def _scrub(text: str, root: str | None, hidden: tuple[str, ...] | list[str] = ()
         text = (
             text.replace(f"{root}/{WORK_DIR}/", "")
             .replace(f"{root}/{WORK_DIR}", ".")
+            .replace(f"{root}/{METRIC_REPO_DIR}/", "")
+            .replace(f"{root}/{METRIC_REPO_DIR}", ".")
             .replace(f"{root}/", "")
             .replace(root, "")
         )

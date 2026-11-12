@@ -5,8 +5,8 @@
  * embeddings on purpose: matches must appear on every keystroke, offline.
  */
 
-export const BM25_K1 = 1.2;
-export const BM25_B = 0.75;
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
 
 /** A partial last token only expands when it has at least this many characters. */
 const MIN_PREFIX_LENGTH = 2;
@@ -17,9 +17,9 @@ const PREFIX_DISCOUNT = 0.9;
  * The most query words a box treats as a lookup. A longer query reads as a
  * sentence or a question, so Enter sends it to the agent instead.
  */
-export const MAX_LOOKUP_TERMS = 3;
+const MAX_LOOKUP_TERMS = 3;
 /** The lowest score a top match needs for Enter to open it. */
-export const MIN_OPEN_SCORE = 1;
+const MIN_OPEN_SCORE = 1;
 
 // Han and kana are written without spaces, so their runs are split into
 // overlapping character pairs (the usual CJK bigram index).

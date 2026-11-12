@@ -13,6 +13,7 @@ import {
   WIZARD_SESSION_KEY,
   decodeWizardSession,
   keepSessionValue,
+  offersLeftSetup,
   readSessionValue,
 } from "../lib/session-state";
 import { deleteSetupDraft, loadSetupDraft } from "../lib/setup-draft-sync";
@@ -58,18 +59,15 @@ export function SubmitEntry() {
     if (accountId === null) return;
     clearRetiredDrafts();
     let live = true;
-    // A reload finds the tab's own setup, and a clone starts from its source run.
-    const reload = readSessionValue(WIZARD_SESSION_KEY) !== null;
+    const tab = readSessionValue(WIZARD_SESSION_KEY);
     void loadSetupDraft(accountId, setupDraftApi).then((draft) => {
       if (!live) return;
-      const usable =
-        draft &&
-        decodeWizardSession(
-          draft.values[WIZARD_SESSION_KEY] ?? null,
-          accountId,
-          WIZARD_V2_STEPS as readonly string[],
-        );
-      if (usable && !reload && !searchParams.has("clone")) setOffer(draft);
+      const steps = WIZARD_V2_STEPS as readonly string[];
+      const left = draft?.values[WIZARD_SESSION_KEY] ?? null;
+      const cloning = searchParams.has("clone");
+      const usable = decodeWizardSession(left, accountId, steps) !== null;
+      const offered = offersLeftSetup({ tab, leftReadable: usable, account: accountId, steps, cloning });
+      if (draft && offered) setOffer(draft);
       // A draft this build cannot read may come from a newer build on another
       // device, so only this browser's copy goes; the server keeps it.
       else if (draft && !usable) clearSetupDraft();

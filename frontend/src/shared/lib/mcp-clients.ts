@@ -17,7 +17,7 @@ export const MCP_SERVER_URL = "https://mcp.skynetml.com/mcp";
 export const MCP_CLIENTS_LAST_CHECKED = "2026-11-01";
 
 /** The server name that the commands and config files register. */
-export const MCP_SERVER_NAME = "skynet";
+const MCP_SERVER_NAME = "skynet";
 
 /** A docs locale code. Text without a translation for it falls back to English. */
 export type McpLocale = string;
@@ -29,7 +29,7 @@ export function mcpText(text: Text, locale: McpLocale): string {
   return text[locale] ?? text.en;
 }
 
-export interface McpSnippet {
+interface McpSnippet {
   label: Text;
   language: "bash" | "json" | "toml" | "text";
   code: string;

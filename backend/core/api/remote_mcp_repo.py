@@ -790,7 +790,7 @@ def preflight_draft(
     except BudgetError as error:
         raise budget_http_error(error) from error
     request.max_cost_cents = budget.total_cents
-    response, _spec = checked_preflight(
+    response = checked_preflight(
         WizardPreflightRequest(
             scope="execution",
             workflow=_BLACKBOX_WORKFLOW,
@@ -801,7 +801,7 @@ def preflight_draft(
         user,
         job_store,
     )
-    answer = localize_preflight(response, None, locale).model_dump(mode="json", exclude_none=True)
+    answer = localize_preflight(response, locale).model_dump(mode="json", exclude_none=True)
     if response.may_advance:
         answer["next_tool"] = "repo_draft_submit"
         answer["note"] = (
@@ -1081,7 +1081,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 max_length=200_000,
                 description="Python that defines score(repo_path), score(repo_path, case) or "
                 "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
-                "returned for the case and None when nothing ran. It returns a "
+                "returned for the case and None when nothing ran. Add elapsed_s=None after output to get the "
+                "entry's run time in seconds, which Skynet measures outside the version's code. It returns a "
                 "(score, feedback) pair or a {'score': float, 'feedback': str} dict. A bare number fails the run.",
             ),
         ],

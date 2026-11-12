@@ -8,7 +8,7 @@ import type { NativeNotification } from "@/shared/lib/api";
 /** Run `fn` after `ms`; returns a cancel function. */
 export type Schedule = (fn: () => void, ms: number) => () => void;
 
-export const browserSchedule: Schedule = (fn, ms) => {
+const browserSchedule: Schedule = (fn, ms) => {
   const timer = setTimeout(fn, ms);
   return () => clearTimeout(timer);
 };

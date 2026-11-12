@@ -26,7 +26,7 @@ import { isLocalMode } from "@/shared/lib/runtime-env";
 
 type MessageKey = Parameters<typeof msg>[0];
 
-export const SETTINGS_TAB_ORDER = [
+const SETTINGS_TAB_ORDER = [
   "wizard",
   "account",
   "notifications",

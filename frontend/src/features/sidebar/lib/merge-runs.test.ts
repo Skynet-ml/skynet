@@ -10,7 +10,6 @@ import {
   mergeRuns,
   refreshLimit,
   runKey,
-  sumCounts,
 } from "./merge-runs.ts";
 
 const run = (optimization_id: string, created_at: string | null) => ({
@@ -135,15 +134,6 @@ test("allLoaded compares each side with its own total", () => {
   assert.equal(allLoaded(loaded, { local: 2, hosted: 3 }), true);
   const merged = mergeRuns({ items: [], total: 4 }, null);
   assert.deepEqual(merged.totals, { local: 4, hosted: null });
-});
-
-test("sumCounts adds the numeric fields", () => {
-  assert.deepEqual(
-    sumCounts({ total: 3, running: 1, shared: 2 }, { total: 4, running: 0, stopped: 1 }),
-    { total: 7, running: 1, shared: 2, stopped: 1 },
-  );
-  const local = { total: 1 };
-  assert.equal(sumCounts(local, null), local);
 });
 
 const tagged = (source: "local" | "hosted", id: string, created_at: string) => ({

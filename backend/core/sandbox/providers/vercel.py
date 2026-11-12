@@ -23,6 +23,13 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
 - ``exec`` streams new command output to the output sink while the command
   runs, so a model mailbox frame reaches the parent before the exit.
 - Harbor's directory transfer feature is left out.
+- In a run, the box starts the egress proxy in record-only mode and points
+  ``HTTPS_PROXY`` at it, so each request goes into the run record (SKY-634).
+  The Vercel edge still enforces the allowlist; the proxy only records. The
+  record is cooperative: code that ignores ``HTTPS_PROXY`` goes out
+  unrecorded, and code in the box can write to the log. Rows carry
+  ``egress_record.VERCEL_SOURCE``. Plain HTTP is not routed, so it goes out
+  unrecorded too.
 """
 
 from __future__ import annotations
@@ -41,7 +48,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -58,6 +65,7 @@ from core.billing.vercel_usage import (
 from core.config import settings
 
 from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources, validate_spec
+from ..egress_record import LOG_BYTES, LOG_LINES, PROXY_SOURCE, READY_MARKER, VERCEL_SOURCE, box_secrets, record_calls
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
@@ -108,6 +116,10 @@ except ImportError:
     SnapshotSource = None
     TagFilter = None
 
+if TYPE_CHECKING:
+    # The worker relay imports the blackbox runtimes, which import this package.
+    from ...worker.scoped_relay import CallRecorder
+
 logger = logging.getLogger(__name__)
 
 CREATE_TIMEOUT = 120.0
@@ -144,6 +156,12 @@ TAIL_SCRIPT = (
     f' | head -c {OUTPUT_POLL_MAX_BYTES} | base64 | tr -d "\\n"; echo; shift 2; done'
 )
 _LIVE_STATUSES = frozenset({"pending", "running"})
+EGRESS_PREFIX = "/tmp/.app-egress-"
+EGRESS_PROXY_PORT = 18443
+# The proxy start waits at most this long for the ready line, inside OUTPUT_POLL_TIMEOUT.
+EGRESS_READY_POLLS = 50
+# A box env that names its own proxy keeps it; the record then misses its requests.
+_PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 
 ResponseCapture = Callable[[httpx.Response], Awaitable[None]]
 ClientFactory = Callable[[ResponseCapture | None], Any]
@@ -342,6 +360,7 @@ class VercelEnvironment(SandboxEnvironment):
         snapshot_id: str | None = None,
         snapshot_usage_factory: UsageFactory = VercelSnapshotReservation,
         services: Sequence[ComposeService] = (),
+        recorder: CallRecorder | None = None,
     ) -> None:
         """Check the spec and prepare the box without a network call.
 
@@ -358,6 +377,8 @@ class VercelEnvironment(SandboxEnvironment):
             snapshot_usage_factory: Makes the storage reservation of a snapshot.
             services: The compose services in start order. The box grows by
                 their size; ``start_services`` starts them.
+            recorder: Writes each request of the in-box egress proxy into the
+                run record, or ``None`` for no proxy.
 
         Raises:
             SandboxSpecError: The spec is invalid, a protected box has no
@@ -402,6 +423,10 @@ class VercelEnvironment(SandboxEnvironment):
         self._snapshot_usage_factory = snapshot_usage_factory
         self._secret_exposed = False
         self._snapshotted = False
+        self._recorder = recorder
+        self._egress_log: str | None = None
+        self._egress_rows = 0
+        self._proxy_env: dict[str, str] = {}
 
     @property
     def usage(self) -> Any | None:
@@ -596,6 +621,103 @@ class VercelEnvironment(SandboxEnvironment):
                 # cancelled, so it must not see a CancelledError.
                 raise SandboxInfraError("The Vercel sandbox stopped during start.") from None
             raise
+        await self._start_egress_proxy()
+
+    async def _run_box_script(self, session: Any, script: str) -> Any:
+        """Run one short Skynet script in the box and capture its output.
+
+        Args:
+            session: The SDK runtime session.
+            script: The shell script.
+
+        Returns:
+            The completed process.
+
+        Raises:
+            TimeoutError: The script did not end in ``OUTPUT_POLL_TIMEOUT``.
+        """
+        if self._pacing is not None:
+            await self._pacing.reads.acquire()
+        async with asyncio.timeout(OUTPUT_POLL_TIMEOUT):
+            return await session.run_process(
+                "bash", [*SHELL_FLAGS, script], capture_output=True, kill_after=OUTPUT_POLL_TIMEOUT
+            )
+
+    async def _start_egress_proxy(self) -> None:
+        """Start the record-only egress proxy in the box. Never raises an Exception.
+
+        The proxy tunnels any ``CONNECT`` target and checks nothing: the
+        Vercel edge enforces the allowlist on every connection the box makes,
+        so the proxy reaches only what the box can reach. A box whose proxy
+        does not start runs without it, and its requests go unrecorded.
+        """
+        if self._recorder is None or any(key in self.spec.env for key in _PROXY_KEYS):
+            return
+        token = uuid.uuid4().hex
+        script = f"{EGRESS_PREFIX}{token}.py"
+        log = f"{EGRESS_PREFIX}{token}.log"
+        lifetime = math.ceil(self.spec.lifetime_seconds)
+        # A box with no python3, setsid or nohup, or a proxy that exits, ends the wait at once.
+        # One `command -v` with several names succeeds when any one exists, so check each name.
+        launch = (
+            "for tool in python3 setsid nohup; do command -v $tool > /dev/null || exit 1; done; "
+            f"setsid nohup python3 -I {script} {EGRESS_PROXY_PORT} {lifetime} '*' > {log} 2>&1 < /dev/null & "
+            "proxy=$!; "
+            f"for _ in $(seq {EGRESS_READY_POLLS}); do grep -qx {READY_MARKER} {log} 2>/dev/null && exit 0; "
+            "kill -0 $proxy 2>/dev/null || exit 1; sleep 0.1; done; exit 1"
+        )
+        try:
+            await self.upload_files({script: PROXY_SOURCE})
+            started = await self._run_box_script(self._require_session(), launch)
+        except Exception as error:
+            logger.warning("Sandbox %s runs with no egress record: %s", self.name, type(error).__name__)
+            return
+        if started.returncode != 0:
+            logger.warning("Sandbox %s runs with no egress record: the proxy did not start.", self.name)
+            return
+        self._egress_log = log
+        url = f"http://127.0.0.1:{EGRESS_PROXY_PORT}"
+        local = "localhost,127.0.0.1,::1"
+        self._proxy_env = {"HTTPS_PROXY": url, "https_proxy": url, "NO_PROXY": local, "no_proxy": local}
+
+    def _with_proxy(self, env: Mapping[str, str] | None) -> Mapping[str, str] | None:
+        """Add the in-box proxy address to a command env.
+
+        Args:
+            env: The command's own env, or ``None``.
+
+        Returns:
+            The env with the proxy keys that neither the box env nor the
+            command env sets; the command env unchanged when it names a proxy.
+        """
+        if not self._proxy_env or (env and any(key in env for key in _PROXY_KEYS)):
+            return env
+        added = {key: value for key, value in self._proxy_env.items() if key not in self.spec.env}
+        return {**added, **(env or {})}
+
+    async def _record_egress(self) -> None:
+        """Write the requests the in-box proxy logged into the run record. Never raises an Exception.
+
+        The read takes only the end of the log, and a log is read once. The
+        rows count against the box and run caps of ``egress_record``.
+        """
+        log, self._egress_log = self._egress_log, None
+        session = self._session
+        if log is None or session is None or self._halted:
+            return
+        try:
+            read = await self._run_box_script(session, f"tail -n {LOG_LINES} {log} 2>/dev/null | head -c {LOG_BYTES}")
+            # Each record is a synchronous database write, so it runs off the event loop.
+            self._egress_rows += await asyncio.to_thread(
+                record_calls,
+                self._recorder,
+                read.stdout.encode(errors="replace"),
+                box_secrets(self.spec.env),
+                box_rows=self._egress_rows,
+                source=VERCEL_SOURCE,
+            )
+        except Exception as error:
+            logger.warning("Could not record the egress requests of %s: %s", self.name, type(error).__name__)
 
     async def _start(self) -> None:
         """Make the client, then wait for capacity, reserve and create the box."""
@@ -758,8 +880,9 @@ class VercelEnvironment(SandboxEnvironment):
             raise settle_error
 
     async def _timed_teardown(self) -> None:
-        """Run the teardown inside the stop phase."""
+        """Record the egress requests, then run the teardown inside the stop phase."""
         with self.timings.phase("stop"):
+            await self._record_egress()
             await self._teardown(None)
 
     async def _teardown(self, error: BaseException | None) -> None:
@@ -1000,6 +1123,7 @@ class VercelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The session stopped.
         """
+        env = self._with_proxy(env)
         for attempt in range(1, EXEC_ATTEMPTS + 1):
             try:
                 return await session.create_process(
@@ -1270,6 +1394,7 @@ class VercelEnvironment(SandboxEnvironment):
         # snapshot starts its own services. The stop runs before the hold, so
         # a cancel here leaves no reserved hold without its pending call.
         await stop_services(self, self._services_up)
+        await self._record_egress()
         reservation = None
         if self._budget is not None:
             # The expiry slides from the last use, so the hold covers a last use

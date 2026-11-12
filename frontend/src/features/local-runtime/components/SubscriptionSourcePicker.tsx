@@ -69,12 +69,7 @@ export function hostCliValue(saved: string | null | undefined): string {
   return saved === null ? HOST_CLI_OFF : HOST_CLI_DEFAULT;
 }
 
-/** The command that signs a CLI in, shown after "Signed out. To sign in, run". */
-export function cliLoginCommand(cli: CliProvider): string {
-  return LOGIN_COMMANDS[cli];
-}
-
-export function cliStateText(state: CliState, version: string | null): string {
+function cliStateText(state: CliState, version: string | null): string {
   switch (state.kind) {
     case "ok":
       return version

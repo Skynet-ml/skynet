@@ -23,14 +23,11 @@ from core.billing.budgets import (
 from core.billing.operation_pricing import OperationQuote
 from core.billing.runtime import BudgetRuntime, UsagePendingError, generation_operation_key
 from core.billing.vercel_usage import VercelUsage
-from core.config import settings
 
 from .errors import SandboxFatalError
-from .factory import PROVIDERS, ProductionNotAllowedError, UnknownProviderError
 
 logger = logging.getLogger(__name__)
 
-_PRODUCTION = "production"
 _WAIT_STEP_SECONDS = 1.0
 
 
@@ -102,37 +99,8 @@ class ProviderUsage(Protocol):
 USAGE_ADAPTERS: dict[str, ProviderUsage] = {"vercel": VercelUsage()}
 
 
-class MissingUsageAdapterError(SandboxFatalError):
-    """Report a provider whose paid usage Skynet cannot meter."""
-
-
 class LeaseExhaustedError(SandboxFatalError):
     """Report a box that asked a lease for more slices than it reserved."""
-
-
-def usage_for(name: str) -> ProviderUsage:
-    """Return the usage adapter of a provider that may run here.
-
-    Args:
-        name: The provider name, a key of ``PROVIDERS``.
-
-    Returns:
-        The provider's usage adapter.
-
-    Raises:
-        UnknownProviderError: The name is not in the registry.
-        ProductionNotAllowedError: Production asked for a provider that is not allowed there.
-        MissingUsageAdapterError: The provider has no usage adapter.
-    """
-    entry = PROVIDERS.get(name)
-    if entry is None:
-        raise UnknownProviderError(f"Unknown sandbox provider {name!r}.")
-    adapter = USAGE_ADAPTERS.get(name)
-    if settings.app_environment == _PRODUCTION and (not entry.production_allowed or adapter is None):
-        raise ProductionNotAllowedError(f"Sandbox provider {name!r} is not metered for production.")
-    if adapter is None:
-        raise MissingUsageAdapterError(f"Sandbox provider {name!r} has no usage adapter.")
-    return adapter
 
 
 class PoolLease:
@@ -205,8 +173,8 @@ class PoolLease:
                     "Previous work is awaiting confirmed usage; its coverage is retained."
                 ) from error
             except BudgetInFlightError as error:
-                # A setup check's own open sandboxes never make room, so the
-                # lease gives up early exactly like a single reservation.
+                # The lease gives up early under the same rule as a single
+                # reservation. It serves no box, so it is never a box's waiting work.
                 refusal = runtime._wait_cannot_help(error)
                 if refusal is not None:
                     raise refusal from error

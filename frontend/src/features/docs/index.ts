@@ -10,11 +10,9 @@ export {
   DOCS_LOCALES,
   DOCS_PAGES,
   DOCS_SECTIONS,
-  docsDir,
   docsHref,
   docsMarkdownHref,
   docsMarkdownSegments,
   isDocsLocale,
   resolveDocsPath,
-  type DocsLocale,
 } from "./lib/nav";

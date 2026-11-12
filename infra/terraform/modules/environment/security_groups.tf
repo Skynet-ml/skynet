@@ -5,10 +5,8 @@ locals {
   sg_names = toset(["alb", "backend", "worker", "frontend", "litellm", "migrate", "dbadmin", "postgres", "valkey"])
 
   postgres_clients = ["backend", "worker", "litellm", "migrate", "dbadmin"]
-  # migrate, only with previews: scripts/preview.sh empties a deleted
-  # preview's Redis DB from a migrate task.
-  valkey_clients  = concat(["backend", "worker", "litellm"], local.preview_enabled ? ["migrate"] : [])
-  litellm_clients = ["backend", "worker"]
+  valkey_clients   = ["backend", "worker", "litellm"]
+  litellm_clients  = ["backend", "worker"]
 
   # Tasks that need outbound internet (LLM providers, Stripe, OAuth, SMTP,
   # Sentry, ECR/Secrets Manager/Logs over NAT).

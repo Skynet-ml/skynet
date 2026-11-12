@@ -181,23 +181,34 @@ export async function getConversation(
   conversationId: string,
   signal?: AbortSignal,
 ): Promise<ConversationDetail | null> {
+  return (await loadConversation(conversationId, signal)).detail;
+}
+
+/**
+ * Load one conversation. `missing` is true only when the server answers 404,
+ * so a server error or no network does not count as a deleted chat.
+ */
+export async function loadConversation(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<{ detail: ConversationDetail | null; missing: boolean }> {
   const { source, id } = parseSourceKey(conversationId);
   // An unlinked Mac would send a web id to the local backend.
-  if (source === "hosted" && !hostedRunsAvailable()) return null;
+  if (source === "hosted" && !hostedRunsAvailable()) return { detail: null, missing: false };
   const path = `/agent/conversations/${encodeURIComponent(id)}`;
   try {
     const res = await fetchWithAuthRetry(
       source === "hosted" ? apiUrl(path, "hosted") : `${apiBase()}${path}`,
       { method: "GET", signal },
     );
-    if (!res.ok) return null;
+    if (!res.ok) return { detail: null, missing: res.status === 404 };
     const raw = (await res.json()) as RawDetail;
     return {
-      ...toSummary(raw, source),
-      messages: raw.messages.map(toMessage),
+      detail: { ...toSummary(raw, source), messages: raw.messages.map(toMessage) },
+      missing: false,
     };
   } catch {
-    return null;
+    return { detail: null, missing: false };
   }
 }
 

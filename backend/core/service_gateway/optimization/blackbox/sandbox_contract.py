@@ -56,6 +56,11 @@ class SandboxSpec:
     # Start from this after-setup snapshot. A runtime without snapshots
     # ignores it and opens a normal box, so callers always check the tree.
     snapshot_id: str | None = None
+    # Start from this parent-side tar.gz of a saved box state instead, when
+    # the runtime has no snapshots (local Docker keeps ``--read-only``, so no
+    # ``docker commit``). Runtimes ignore it: the opener unpacks the archive
+    # and checks its digest, because the broker rebuilds the spec (SKY-398).
+    snapshot_archive: str | None = None
 
 
 @dataclass(frozen=True)

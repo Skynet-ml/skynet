@@ -33,6 +33,8 @@ from core.billing.operation_pricing import OperationCharge, OperationQuote
 from core.billing.pricing import ModelUsage
 from core.billing.runtime import BudgetRuntime, UsagePendingError, generation_operation_key
 from core.billing.service import StripeBillingService, committed_spend_cents, legacy_job_committed_cents
+from core.billing.signals import BudgetReached
+from core.billing.usage_tags import box_tag
 from core.config import settings
 from core.storage.models import (
     Base,
@@ -854,17 +856,381 @@ def test_setup_check_waits_again_once_its_box_is_unpinned(engine: Engine) -> Non
         runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
 
 
-def test_run_lanes_wait_for_each_other_even_with_pinned_boxes(engine: Engine) -> None:
-    """A run's lanes release each other's coverage, so a run never refuses early."""
+def _pinned_box(runtime: BudgetRuntime, key: str, cents: int, *, work: bool = True, parked: bool = False) -> Any:
+    """Reserve and pin one box, tagged by its key, the way a protected sandbox does.
+
+    Args:
+        runtime: The run's budget runtime.
+        key: The box's operation key; its box tag is ``box_tag(key)``.
+        cents: The box's coverage.
+        work: False for a hold that runs no work, such as a snapshot.
+        parked: True for a work box that waits for its next use, such as an
+            idle repository scorer box between evaluations.
+
+    Returns:
+        The box's admitted reservation.
+    """
+    box = runtime.reserve(_quote(cents), operation_key=key, cost_kind="sandbox", role="runtime")
+    runtime.pin(box.id, cent_units(box.max_cents), box=box_tag(key), work=work)
+    if parked:
+        runtime.park(box_tag(key))
+    return box
+
+
+def test_run_stops_at_once_when_only_its_own_boxes_hold_the_room(engine: Engine) -> None:
+    """A run's open boxes stay open while it waits, so it stops at its limit instead of stalling (SKY-647)."""
     service = BudgetService(engine=engine)
-    budget = service.create("alice", 40, idempotency_key="run-lanes")
-    service.attach_to_job(budget.id, "alice", "lanes-job", expected_revision=budget.revision)
-    runtime = _setup_runtime(service, budget.id, phase="run", wait=0)
-    box = runtime.reserve(_quote(10), operation_key="box", cost_kind="sandbox", role="runtime")
-    runtime.pin(box.id, cent_units(box.max_cents))
+    budget = service.create("alice", 60, idempotency_key="run-own-boxes")
+    service.attach_to_job(budget.id, "alice", "own-boxes-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=5)
+    _pinned_box(runtime, "box", 47)
+
+    started = time.monotonic()
+    with pytest.raises(BudgetReached, match=r"needs up to \$0\.20, but this run's sandboxes hold \$0\.47"):
+        runtime.reserve(_quote(20), operation_key="call", cost_kind="model", box=box_tag("box"))
+    assert time.monotonic() - started < 5
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+    assert service.get(budget.id, "alice").reserved_cents == 47
+
+
+def test_run_lane_waits_for_a_new_box_while_another_box_runs(engine: Engine) -> None:
+    """A new box's reservation is no box's work, so it waits for the running box to close."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-new-box")
+    service.attach_to_job(budget.id, "alice", "new-box-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=10)
+    box_b = _pinned_box(runtime, "box-b", 40)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        lane_a = pool.submit(runtime.reserve, _quote(15), operation_key="box-a", cost_kind="sandbox", role="runtime")
+        time.sleep(0.5)
+        assert not lane_a.done()
+        service.mark_dispatched(box_b.id, "alice")
+        service.settle(box_b.id, "alice", evidence_key="box-b-usage", actual_cents=1, evidence={"usage": "box-b"})
+        runtime.unpin(box_b.id)
+        box_a = lane_a.result(timeout=5)
+
+    assert box_a.max_cents == 15
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_run_waits_while_one_box_has_two_waiting_calls_and_another_box_runs(engine: Engine) -> None:
+    """Two waiting calls in one box are one box's work; the other box can still close and make room."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-two-calls")
+    service.attach_to_job(budget.id, "alice", "two-calls-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=10)
+    _pinned_box(runtime, "box-a", 20)
+    box_b = _pinned_box(runtime, "box-b", 21)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [
+            pool.submit(runtime.reserve, _quote(10), operation_key=key, cost_kind="model", box=box_tag("box-a"))
+            for key in ("call-1", "call-2")
+        ]
+        time.sleep(0.5)
+        assert not any(call.done() for call in calls)
+        service.mark_dispatched(box_b.id, "alice")
+        service.settle(box_b.id, "alice", evidence_key="box-b-usage", actual_cents=1, evidence={"usage": "box-b"})
+        runtime.unpin(box_b.id)
+        admitted = [call.result(timeout=5) for call in calls]
+
+    assert [call.max_cents for call in admitted] == [10, 10]
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_run_stops_at_once_when_every_box_waits(engine: Engine) -> None:
+    """Two boxes that each wait on their own call while they hold the room stop the run instead of stalling."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-all-wait")
+    service.attach_to_job(budget.id, "alice", "all-wait-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=30)
+    for key in ("box-a", "box-b"):
+        _pinned_box(runtime, key, 20)
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        lane_a = pool.submit(
+            runtime.reserve, _quote(15), operation_key="call-a", cost_kind="model", box=box_tag("box-a")
+        )
+        time.sleep(0.5)
+        assert not lane_a.done()
+        with pytest.raises(BudgetReached):
+            runtime.reserve(_quote(15), operation_key="call-b", cost_kind="model", box=box_tag("box-b"))
+        with pytest.raises(BudgetReached):
+            lane_a.result(timeout=5)
+    assert time.monotonic() - started < 10
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+
+
+def test_run_stops_at_once_when_a_snapshot_hold_and_a_waiting_box_hold_the_room(engine: Engine) -> None:
+    """A snapshot hold runs no work, so the one box that waits on its call is the last box that could end."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-snapshot")
+    service.attach_to_job(budget.id, "alice", "snapshot-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=30)
+    _pinned_box(runtime, "box:snapshot", 20, work=False)
+    _pinned_box(runtime, "box", 20)
+
+    started = time.monotonic()
+    with pytest.raises(BudgetReached, match=r"needs up to \$0\.15, but this run's sandboxes hold \$0\.40"):
+        runtime.reserve(_quote(15), operation_key="call", cost_kind="model", box=box_tag("box"))
+    assert time.monotonic() - started < 5
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+
+
+def test_repo_run_stops_at_once_when_the_guest_waits_and_the_scorer_box_is_idle(engine: Engine) -> None:
+    """A parked repository scorer box cannot end and free room while the guest waits."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-idle-scorer")
+    service.attach_to_job(budget.id, "alice", "idle-scorer-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=30)
+    _pinned_box(runtime, "repo-scorer:owner", 20, parked=True)
+    _pinned_box(runtime, "sandbox:dspy:artifact", 20)
+
+    started = time.monotonic()
+    with pytest.raises(BudgetReached, match=r"needs up to \$0\.15, but this run's sandboxes hold \$0\.40"):
+        runtime.reserve(_quote(15), operation_key="proposer", cost_kind="model", box=box_tag("sandbox:dspy:artifact"))
+    assert time.monotonic() - started < 5
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+
+
+def test_repo_run_waits_while_the_scorer_box_is_in_use(engine: Engine) -> None:
+    """A scorer box that is not parked can still end, so the guest's call waits for it."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-busy-scorer")
+    service.attach_to_job(budget.id, "alice", "busy-scorer-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=1)
+    _pinned_box(runtime, "repo-scorer:owner", 20)
+    _pinned_box(runtime, "sandbox:dspy:artifact", 20)
 
     with pytest.raises(UsagePendingError):
-        runtime.reserve(_quote(35), operation_key="call", cost_kind="model")
+        runtime.reserve(_quote(15), operation_key="proposer", cost_kind="model", box=box_tag("sandbox:dspy:artifact"))
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_a_closing_box_that_is_not_parked_frees_room_for_a_waiting_call(engine: Engine) -> None:
+    """A box between commands or in its stop counts as working until its unpin, so the call waits for it.
+
+    Round 11 probe: a box that ran no command while it closed made the run
+    stop with budget_reached at once, though its unpin made room.
+    """
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-closing-box")
+    service.attach_to_job(budget.id, "alice", "closing-box-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=10)
+    _pinned_box(runtime, "sandbox:dspy:artifact", 20)
+    closing = _pinned_box(runtime, "sandbox:case-2", 20)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        call = pool.submit(
+            runtime.reserve,
+            _quote(15),
+            operation_key="proposer",
+            cost_kind="model",
+            box=box_tag("sandbox:dspy:artifact"),
+        )
+        time.sleep(1.5)
+        assert not call.done()
+        service.mark_dispatched(closing.id, "alice")
+        service.settle(closing.id, "alice", evidence_key="case-2-usage", actual_cents=1, evidence={"usage": "c2"})
+        runtime.unpin(closing.id)
+        admitted = call.result(timeout=5)
+
+    assert admitted.max_cents == 15
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_an_unparked_scorer_box_counts_as_working_again(engine: Engine) -> None:
+    """A scorer box that the next evaluation unparks can end again, so the guest's call waits for it."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-unparked-scorer")
+    service.attach_to_job(budget.id, "alice", "unparked-scorer-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=1)
+    _pinned_box(runtime, "repo-scorer:owner", 20, parked=True)
+    _pinned_box(runtime, "sandbox:dspy:artifact", 20)
+    runtime.unpark(box_tag("repo-scorer:owner"))
+
+    with pytest.raises(UsagePendingError):
+        runtime.reserve(_quote(15), operation_key="proposer", cost_kind="model", box=box_tag("sandbox:dspy:artifact"))
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_run_stops_at_once_when_only_a_snapshot_hold_holds_the_room(engine: Engine) -> None:
+    """With no pinned work box, only run-long holds remain, and they never end during the run."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-only-snapshot")
+    service.attach_to_job(budget.id, "alice", "only-snapshot-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=30)
+    _pinned_box(runtime, "box:snapshot", 40, work=False)
+
+    started = time.monotonic()
+    with pytest.raises(BudgetReached):
+        runtime.reserve(_quote(15), operation_key="call", cost_kind="model")
+    assert time.monotonic() - started < 5
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+
+
+def test_run_stops_at_once_when_an_engine_box_waits_on_a_scorer_box_that_waits(engine: Engine) -> None:
+    """A native engine box waits on its evaluator, whose scorer box waits for room, so no box can end."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-engine-scorer")
+    service.attach_to_job(budget.id, "alice", "engine-scorer-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=30)
+    _pinned_box(runtime, "engine", 20)
+    _pinned_box(runtime, "scorer", 20)
+
+    started = time.monotonic()
+    with pytest.raises(BudgetReached, match=r"needs up to \$0\.15, but this run's sandboxes hold \$0\.40"):
+        runtime.reserve(
+            _quote(15), operation_key="call", cost_kind="model", box=box_tag("scorer"), for_box=box_tag("engine")
+        )
+    assert time.monotonic() - started < 5
+    assert service.get(budget.id, "alice").blocked_reason == "budget_reached"
+
+
+def test_run_waits_while_an_engine_box_has_a_scorer_box_that_still_runs(engine: Engine) -> None:
+    """A scorer box that runs can still end and make room, so the engine's other evaluation waits for it."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-engine-running")
+    service.attach_to_job(budget.id, "alice", "engine-running-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=10)
+    _pinned_box(runtime, "engine", 15)
+    running = _pinned_box(runtime, "scorer-1", 15)
+    _pinned_box(runtime, "scorer-2", 10)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        call = pool.submit(
+            runtime.reserve,
+            _quote(15),
+            operation_key="call",
+            cost_kind="model",
+            box=box_tag("scorer-2"),
+            for_box=box_tag("engine"),
+        )
+        time.sleep(0.5)
+        assert not call.done()
+        service.mark_dispatched(running.id, "alice")
+        service.settle(running.id, "alice", evidence_key="scorer-1-usage", actual_cents=1, evidence={"usage": "s1"})
+        runtime.unpin(running.id)
+        admitted = call.result(timeout=5)
+
+    assert admitted.max_cents == 15
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+@pytest.mark.parametrize(
+    ("box", "for_box"),
+    [(None, None), ("0123456789abcdef0123456789abcdef", None), (None, box_tag("box"))],
+    ids=["no-box", "unknown-box", "for-box-only"],
+)
+def test_a_call_with_no_box_or_an_unknown_box_is_never_waiting_work(
+    engine: Engine, box: str | None, for_box: str | None
+) -> None:
+    """A call without a box tag, or with a forged tag that names no pinned box, never stops the run early."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-forged")
+    service.attach_to_job(budget.id, "alice", "forged-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=1)
+    _pinned_box(runtime, "box", 40)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        forged = pool.submit(
+            runtime.reserve, _quote(15), operation_key="call-1", cost_kind="model", box=box, for_box=for_box
+        )
+        time.sleep(0.2)
+        with pytest.raises(UsagePendingError):
+            runtime.reserve(_quote(15), operation_key="call-2", cost_kind="model", box=box, for_box=for_box)
+        with pytest.raises(UsagePendingError):
+            forged.result(timeout=5)
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_run_waits_for_room_held_by_unpinned_work(engine: Engine) -> None:
+    """In-flight work that is not an open box settles soon, so the run still waits for it."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 60, idempotency_key="run-other-work")
+    service.attach_to_job(budget.id, "alice", "other-work-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=0)
+    _pinned_box(runtime, "box", 20)
+    runtime.reserve(_quote(30), operation_key="other-call", cost_kind="model")
+
+    with pytest.raises(UsagePendingError):
+        runtime.reserve(_quote(20), operation_key="call", cost_kind="model", box=box_tag("box"))
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_a_call_that_fits_after_unpinned_work_settles_does_not_count_as_waiting(engine: Engine) -> None:
+    """A box whose call fits once unpinned work settles can still end, so the other box's call waits (SKY-647)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-fits-later")
+    service.attach_to_job(budget.id, "alice", "fits-later-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=3)
+    _pinned_box(runtime, "box-a", 20)
+    _pinned_box(runtime, "box-b", 17)
+    unpinned = runtime.reserve(_quote(5), operation_key="unpinned-call", cost_kind="model")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        call_b = pool.submit(
+            runtime.reserve, _quote(10), operation_key="call-b", cost_kind="model", box=box_tag("box-b")
+        )
+        time.sleep(0.5)
+        call_a = pool.submit(
+            runtime.reserve, _quote(20), operation_key="call-a", cost_kind="model", box=box_tag("box-a")
+        )
+        time.sleep(0.5)
+        assert not call_b.done()
+        assert not call_a.done()
+        service.mark_dispatched(unpinned.id, "alice")
+        service.settle(unpinned.id, "alice", evidence_key="unpinned-usage", actual_cents=1, evidence={"usage": "u"})
+        assert call_b.result(timeout=5).max_cents == 10
+        with pytest.raises(UsagePendingError):
+            call_a.result(timeout=10)
+
+    assert service.get(budget.id, "alice").blocked_reason is None
+
+
+def test_a_call_does_not_count_as_waiting_while_it_retries(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retry may be admitted, so its box can still end while the retry runs (SKY-647)."""
+    service = BudgetService(engine=engine)
+    budget = service.create("alice", 50, idempotency_key="run-retry-count")
+    service.attach_to_job(budget.id, "alice", "retry-count-job", expected_revision=budget.revision)
+    runtime = _setup_runtime(service, budget.id, phase="run", wait=10)
+    _pinned_box(runtime, "box-a", 20)
+    box_b = _pinned_box(runtime, "box-b", 20)
+    seen: list[dict[str, int]] = []
+    reserve = service.reserve
+
+    def recording_reserve(*args: Any, **kwargs: Any) -> Any:
+        """Record the waiting counts that each attempt of the box-a call sees.
+
+        Args:
+            *args: Positional arguments of ``BudgetService.reserve``.
+            **kwargs: Keyword arguments of ``BudgetService.reserve``.
+
+        Returns:
+            The result of ``BudgetService.reserve``.
+        """
+        if "call-a" in kwargs["operation_key"]:
+            seen.append(dict(runtime._waiting))
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(service, "reserve", recording_reserve)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        call_a = pool.submit(
+            runtime.reserve, _quote(15), operation_key="call-a", cost_kind="model", box=box_tag("box-a")
+        )
+        time.sleep(1.5)
+        assert not call_a.done()
+        assert runtime._waiting == {box_tag("box-a"): 1}
+        service.mark_dispatched(box_b.id, "alice")
+        service.settle(box_b.id, "alice", evidence_key="box-b-usage", actual_cents=1, evidence={"usage": "box-b"})
+        runtime.unpin(box_b.id)
+        assert call_a.result(timeout=5).max_cents == 15
+
+    assert len(seen) >= 2
+    assert all(waiting == {} for waiting in seen)
+    assert runtime._waiting == {}
 
 
 def _settled_run_call(service: BudgetService, budget_id: str, key: str, cents: int, generation: int = 0) -> None:

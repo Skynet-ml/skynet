@@ -168,12 +168,14 @@ you return.
     ``vcpus`` (1 or an even number from 2 to 32, default 2), ``timeout``
     (seconds for each ``skynet.call``, default 60) and the role keys.
   - ``[run]``: ``entry`` (required when the section is there), ``timeout``
-    (seconds for each case, default 60), ``mcp``, ``services`` and
-    ``illegal``.
+    (seconds for each case, default 60), ``mcp``, ``network``, ``services``,
+    ``illegal`` and ``vcpus``.
   - ``[metric]``: ``files`` (a list of paths hidden from the agent),
     ``exploits`` (a folder, default ``.optimize/exploits``), ``reference``
-    (one path), ``mcp``, ``services`` and ``illegal``. ``[run]`` and
-    ``[metric]`` share one box, so ``network`` and ``vcpus`` fail there.
+    (one path), ``mcp``, ``network``, ``services``, ``illegal`` and
+    ``vcpus``. ``[run]`` and ``[metric]`` run in separate boxes, so each
+    sets its own ``network`` (hosts besides the relay, default none) and
+    ``vcpus`` (SKY-398).
   - ``[data]``: ``cases``, the path of one JSONL file; ``split`` fails.
   - ``[sandbox]``: ``compose``, the path of a compose file whose services
     run beside the metric.

@@ -53,7 +53,7 @@ interface DatasetUploadCardProps {
   onConfirm: (confirmed: ConfirmedDataset) => void;
 }
 
-export const DATASET_FILE_ACCEPT = DATASET_UPLOAD_ACCEPT;
+const DATASET_FILE_ACCEPT = DATASET_UPLOAD_ACCEPT;
 
 export function DatasetUploadCard({
   call,

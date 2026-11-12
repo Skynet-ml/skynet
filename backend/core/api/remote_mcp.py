@@ -21,7 +21,7 @@ import logging
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Annotated, Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 from fastapi import FastAPI
@@ -35,7 +35,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config import settings
+from ..connectors.saved_secrets import SavedSecretStore
 from ..i18n import DEFAULT_LOCALE, request_locale, t_locale, term
+from ..models.blackbox import REPO_SECRET_NAME_PATTERN
 from .auth import AuthenticatedUser
 from .converters import job_owner
 from .errors import DomainError
@@ -73,7 +75,10 @@ _INSTRUCTIONS = (
     "check_run and start_run refuse DSPy program runs. "
     "Use list_runs and get_run to follow the account's runs until the status is terminal. "
     "get_run_progress returns a running run's new progress events and best score. stop_run ends a run early. "
-    "Tools named platform_* call the Skynet API directly."
+    "Tools named platform_* call the Skynet API directly. "
+    "list_secrets names the account's saved secrets. For a missing one, call request_secret and give the user "
+    "its link: the user types the value in Skynet. No tool takes or returns a secret value; "
+    "never ask for one in the chat."
 )
 
 # Adds more tools to the server. It gets the server and the model catalog
@@ -423,6 +428,35 @@ def build_remote_mcp(
         """Stop a running optimization. Spend stops, and the unused budget is released."""
         user = _user(SCOPE_WRITE)
         return guarded(lambda: stop_run(optimization_id, user, job_store=job_store, worker=get_worker()))
+
+    # SKY-641: neither secret tool takes or returns a value. The user types
+    # the value in the Skynet settings page that request_secret links to.
+    @mcp.tool(name="list_secrets", annotations=read_only)
+    def list_secrets_tool() -> dict[str, Any]:
+        """List the names of the account's saved secrets. Values are never returned."""
+        user = _user(SCOPE_READ)
+        views = SavedSecretStore(job_store.engine).list(user.username)
+        return {"secrets": [{"name": view.name, "updated_at": view.updated_at.isoformat()} for view in views]}
+
+    @mcp.tool(name="request_secret", annotations=read_only)
+    def request_secret_tool(
+        name: Annotated[
+            str,
+            Field(
+                pattern=REPO_SECRET_NAME_PATTERN,
+                description="The environment variable name, as in the ${NAME} placeholder in optimize.toml.",
+            ),
+        ],
+    ) -> dict[str, Any]:
+        """Get a link where the user saves the named secret in Skynet. Give the link to the user.
+
+        The user types the value on that page; it never passes through this
+        tool. Call list_secrets later to see whether it is saved.
+        """
+        user = _user(SCOPE_READ)
+        saved = any(view.name == name for view in SavedSecretStore(job_store.engine).list(user.username))
+        url = f"{settings.app_public_url.rstrip('/')}/?settings=connectors&secret={quote(name)}"
+        return {"name": name, "url": url, "already_saved": saved}
 
     for extend in extensions:
         extend(mcp, make_client)

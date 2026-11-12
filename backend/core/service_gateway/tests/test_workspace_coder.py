@@ -519,7 +519,6 @@ def test_coder_prompt_quotes_the_parser_errors() -> None:
 
     assert "is not a supported setting" in prompt
     assert "[run] entry is missing" in prompt
-    assert "share one box" in prompt
     assert "must be a host name such as api.example.com, not a URL" in prompt
 
 
