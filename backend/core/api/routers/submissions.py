@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header
-from fastapi.responses import JSONResponse
 
 from ...billing import (
     ProviderKeyVault,
@@ -70,7 +69,6 @@ from ...models import (
     OptimizerChoice,
     OptimizerOption,
     OptimizerTarget,
-    UnifiedRunRequest,
     optimizer_family,
     optimizers_for,
 )
@@ -79,7 +77,6 @@ from ...models.blackbox import (
     BLACKBOX_MODULE_NAME,
     BLACKBOX_STRATEGY_AUTO,
     BLACKBOX_TARGET_REPO,
-    BLACKBOX_TARGET_TEXT,
 )
 from ...models.common import ModelConfig, OptimizationType
 from ...models.unified import METRIC_SIGNATURE, RUN_ENTRY
@@ -905,24 +902,20 @@ def create_submissions_router(*, job_store) -> APIRouter:
         summary="Submit an optimization run",
         tags=["agent"],
     )
-    def submit_unified_run(
-        payload: UnifiedRunRequest,
-        current_user: AuthenticatedUserDep,
-        idempotency_key: IdempotencyKeyHeader = None,
-    ) -> OptimizationSubmissionResponse | JSONResponse:
+    def submit_unified_run(current_user: AuthenticatedUserDep) -> NoReturn:
         """Refuse a new DSPy program run: runs optimize repositories (SKY-316).
 
         The route and its operation id stay because the in-app agents still
-        list this tool; a caller gets a clear 410 instead of a 404.
+        list this tool; a caller gets a clear 410 instead of a 404. The route
+        takes no body, so any body gets the same 410.
 
         Args:
-            payload: The unified request body validated by FastAPI.
-            current_user: Authenticated submitter resolved from the bearer token.
-            idempotency_key: Optional dedup key; ignored.
+            current_user: Authenticated caller resolved from the bearer token.
 
         Raises:
             DomainError: 410 ``optimization.dspy_run_retired`` for every call.
         """
+        del current_user
         raise DomainError(I18nKey.OPTIMIZATION_DSPY_RUN_RETIRED, status=410)
 
     @router.post(
@@ -975,24 +968,21 @@ def create_submissions_router(*, job_store) -> APIRouter:
         artifact_kind: OptimizerTarget,
         data_mode: DataMode,
     ) -> OptimizerCatalogResponse:
-        """Describe the optimizers the wizard may offer for a DSPy program or a repository.
+        """Describe the optimizers the wizard may offer for a repository run.
 
         A repository run offers Auto first, then the black-box engines, each
-        with this deployment's availability. A DSPy program offers nothing,
-        because a new run cannot pick a DSPy optimizer (SKY-316).
+        with this deployment's availability.
 
         Args:
             current_user: Authenticated caller resolved from the bearer token.
-            artifact_kind: ``dspy_program``, or ``repo`` for a repository run.
+            artifact_kind: ``repo``: every run optimizes a repository (SKY-316).
             data_mode: Whether the run has one input or input/output pairs.
 
         Returns:
-            The relevant options, with what Auto resolves to. When no option
-            is Auto, ``auto_resolves_to`` is empty.
+            The relevant options, with what Auto resolves to.
         """
         del current_user
-        repo = artifact_kind == BLACKBOX_TARGET_REPO
-        catalog = engine_catalog(BLACKBOX_TARGET_REPO if repo else BLACKBOX_TARGET_TEXT)
+        catalog = engine_catalog(BLACKBOX_TARGET_REPO)
         options = [_optimizer_option(option, catalog) for option in optimizers_for(artifact_kind, data_mode)]
         auto_resolves_to = ["auto"] if any(option.id == "auto" for option in options) else []
         return OptimizerCatalogResponse(

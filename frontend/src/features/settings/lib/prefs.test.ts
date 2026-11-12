@@ -80,6 +80,8 @@ test("a saved DSPy default engine reads as Auto; a repository engine stays", () 
     },
   };
   try {
+    store.set(PREF_KEYS.optimizerEngine, JSON.stringify("dspy_gepa"));
+    assert.equal(readPref("optimizerEngine"), "auto");
     store.set(PREF_KEYS.optimizerEngine, JSON.stringify("shinka_evolve"));
     assert.equal(readPref("optimizerEngine"), "shinka_evolve");
     store.set(PREF_KEYS.optimizerEngine, JSON.stringify("unknown_engine"));

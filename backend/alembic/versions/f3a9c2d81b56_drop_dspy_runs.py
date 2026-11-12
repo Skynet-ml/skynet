@@ -1,4 +1,4 @@
-"""Delete the retired DSPy, grid search and pair runs, and drop their table (SKY-656).
+"""Delete the retired DSPy, grid search and pair runs (SKY-656).
 
 Revision ID: f3a9c2d81b56
 Revises: c4d1e8a2f6b3
@@ -26,18 +26,21 @@ billing records, so they keep their rows. Each budget of a deleted job is
 closed and detached the same way ``BudgetService.close_for_deleted_jobs``
 does it: its unstarted reservations are released, so no money stays held.
 
-Then it drops ``grid_pair_results``. It keeps ``jobs.parent_optimization_id``
+It keeps the ``grid_pair_results`` table, ``jobs.parent_optimization_id``
 (with its self FK and index), ``jobs.pair_index`` and ``job_logs.pair_index``:
-aws-deploy migrates before the rollout, and the old pods still map those
-columns. The new ORM does not map them, and they are nullable, so new rows
-leave them empty. A later revision drops them after this deploy.
+aws-deploy migrates before the rollout, and the old pods still use them. An
+old pod deletes from ``grid_pair_results`` on every job delete. The new code
+does not read or write the table; its cascading FK clears it when a job goes.
+The new ORM does not map the pair columns, and they are nullable, so new rows
+leave them empty. A later revision drops the table and the columns after this
+deploy.
 ``gepa_checkpoints.pair_index`` stays for good: it is part of that table's
 primary key and a repository run uses it.
 
 Every step uses ``IF EXISTS`` or matches no rows on a second run, so the
 revision is idempotent. Postgres only, like the revisions that added these
 columns: the SQLite test schema comes from the ORM models. The downgrade
-restores the empty table. It cannot bring the deleted rows back.
+does nothing: it cannot bring the deleted rows back.
 """
 
 from __future__ import annotations
@@ -181,31 +184,16 @@ def _delete_dead_rows() -> None:
 
 
 def upgrade() -> None:
-    """Delete the retired DSPy, grid and pair jobs and drop the grid pair table."""
+    """Delete the retired DSPy, grid and pair jobs and the rows that name them."""
     if op.get_bind().dialect.name != "postgresql":
         return
     _collect_dead_jobs()
     _close_dead_budgets()
     _delete_dead_rows()
-    op.execute("DROP TABLE IF EXISTS grid_pair_results")
-    # Old pods still map jobs.parent_optimization_id, jobs.pair_index and
-    # job_logs.pair_index during the rollout. A later revision drops them
-    # after this deploy.
+    # Old pods still use grid_pair_results, jobs.parent_optimization_id,
+    # jobs.pair_index and job_logs.pair_index during the rollout. A later
+    # revision drops them after this deploy.
 
 
 def downgrade() -> None:
-    """Restore the empty grid table; the deleted rows stay gone."""
-    if op.get_bind().dialect.name != "postgresql":
-        return
-    op.execute(
-        """
-        CREATE TABLE IF NOT EXISTS grid_pair_results (
-            optimization_id VARCHAR(36) NOT NULL REFERENCES jobs(optimization_id) ON DELETE CASCADE,
-            pair_index INTEGER NOT NULL,
-            result JSONB NOT NULL,
-            stored_bytes BIGINT NOT NULL DEFAULT 0,
-            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-            PRIMARY KEY (optimization_id, pair_index)
-        )
-        """
-    )
+    """Do nothing: the schema is unchanged and the deleted rows stay gone."""

@@ -146,7 +146,8 @@ def run_service_in_subprocess(
     - ``EVENT_RESULT`` — emitted once on success, containing the serialised
       ``BlackboxRunResponse``.
     - ``EVENT_ERROR`` — emitted on any ``BaseException``, containing the error
-      string and formatted traceback.
+      string and formatted traceback. A payload that names a job kind other
+      than a repository run ends here too; nothing is raised to the caller.
 
     Args:
         payload_dict: Submission payload plus the ``_optimization_type`` key and,
@@ -154,9 +155,6 @@ def run_service_in_subprocess(
         artifact_id: ID used to attach progress and logs to the right job.
         event_queue: Shared multiprocessing queue back to the parent.
         start_method: The active multiprocessing start method (e.g. ``"fork"``).
-
-    Raises:
-        ValueError: The payload names a job kind other than a repository run.
     """
     payload_dict = dict(payload_dict)
     stable_job_id = payload_dict.pop("_job_id", artifact_id)

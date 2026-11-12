@@ -37,21 +37,6 @@ def _catalog(monkeypatch: pytest.MonkeyPatch, artifact_kind: str, data_mode: str
 
 
 @pytest.mark.usefixtures("runtimes_up")
-@pytest.mark.parametrize("data_mode", ["pairs", "single"])
-def test_dspy_program_offers_no_optimizer_to_a_new_run(monkeypatch: pytest.MonkeyPatch, data_mode: str) -> None:
-    """A new run cannot pick a DSPy optimizer, so a DSPy program gets no options and no Auto.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        data_mode: Single input or pairs.
-    """
-    body = _catalog(monkeypatch, "dspy_program", data_mode)
-
-    assert body["options"] == []
-    assert body["auto_resolves_to"] == []
-    assert body["run_entry"] == "def run(artifact, input)"
-
-
 @pytest.mark.usefixtures("runtimes_up")
 def test_repo_offers_auto_first_then_the_blackbox_engines(monkeypatch: pytest.MonkeyPatch) -> None:
     """A repository run gets Auto as the default, then every black-box engine, under the same contract."""
@@ -99,7 +84,7 @@ def test_missing_sandbox_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_bb_service, "agent_target_unavailable_reason", lambda _settings: "no sandbox here")
     monkeypatch.setattr(_bb_service, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
 
-    body = _catalog(monkeypatch, "dspy_program", "single")
+    body = _catalog(monkeypatch, "repo", "single")
 
     assert body["sandbox_available"] is False
     assert body["sandbox_reason"] == "no sandbox here"
@@ -109,8 +94,9 @@ def test_missing_sandbox_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     "params",
     [
         {"artifact_kind": "prompt", "data_mode": "pairs"},
-        {"artifact_kind": "dspy_program", "data_mode": "many"},
-        {"artifact_kind": "dspy_program"},
+        {"artifact_kind": "dspy_program", "data_mode": "pairs"},
+        {"artifact_kind": "repo", "data_mode": "many"},
+        {"artifact_kind": "repo"},
     ],
 )
 def test_unknown_setup_is_422(monkeypatch: pytest.MonkeyPatch, params: dict) -> None:

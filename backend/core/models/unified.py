@@ -1,9 +1,9 @@
-"""Request models for the retired unified (wizard v2) DSPy program run.
+"""Shared wizard models: optimizer choices, cases, models and workspace rules.
 
-Skynet no longer runs these payloads (SKY-316, SKY-656). ``POST /optimize``
-still documents :class:`UnifiedRunRequest` as its body and answers 410, so
-the models stay in the OpenAPI contract. :class:`UnifiedModels` also carries
-the model roles that repository billing resolves.
+Skynet no longer runs the unified DSPy program payload (SKY-316, SKY-656),
+so its request models are gone. What stays serves repository runs: the
+optimizer catalog, :class:`UnifiedCase`, :class:`UnifiedModels` (the model
+roles that repository billing resolves) and the workspace file rules.
 
 Pydantic class docstrings are part of the OpenAPI contract — see AGENTS.md
 "Pydantic class docstrings" — so per-model annotations live in comments
@@ -15,24 +15,15 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-from ..i18n_en import t_en
-from ..i18n_keys import I18nKey
-from .blackbox import (
-    BlackboxBudget,
-    BlackboxCandidate,
-    BlackboxProposer,
-    BlackboxShinkaSettings,
-    UnifiedSplitCounts,
-)
-from .common import ModelConfig, SplitFractions
+from .blackbox import UnifiedSplitCounts
+from .common import ModelConfig
 from .scorer_dependencies import ScorerDependencyLock
 
-ArtifactKind = Literal["dspy_program"]
-# What the optimizer catalog is asked about: a unified run's artifact, or a
-# repository run, which has no artifact and runs only the black-box engines.
-OptimizerTarget = Literal["dspy_program", "repo"]
+# What the optimizer catalog is asked about: every run optimizes a
+# repository, which has no artifact and runs only the black-box engines.
+OptimizerTarget = Literal["repo"]
 DataMode = Literal["single", "pairs"]
 OptimizerChoice = Literal[
     "auto",
@@ -56,7 +47,6 @@ BLACKBOX_OPTIMIZERS: tuple[str, ...] = (
 # which consumes feedback text.
 FEEDBACK_OPTIMIZERS = frozenset({"gepa", "auto"})
 MIN_PAIRS_FOR_HELD_OUT = 5
-ARTIFACT_KIND_DSPY_PROGRAM = "dspy_program"
 OPTIMIZER_AUTO = "auto"
 
 
@@ -67,16 +57,13 @@ def optimizers_for(target: OptimizerTarget, data_mode: DataMode) -> list[Optimiz
     by the catalog route; this is the static relevance rule.
 
     Args:
-        target: A DSPy program, or ``"repo"`` for a repository run.
+        target: ``"repo"``: every run optimizes a repository (SKY-316).
         data_mode: Whether the run has one input or input/output pairs.
 
     Returns:
-        The allowed choices. A repository run lists ``"auto"`` first, then the
-        black-box engines. A DSPy program lists nothing: Skynet now optimizes
-        repositories only (SKY-316), so a new run cannot pick a DSPy optimizer.
+        ``"auto"`` first, then the black-box engines.
     """
-    if target == ARTIFACT_KIND_DSPY_PROGRAM:
-        return []
+    del target, data_mode
     return [OPTIMIZER_AUTO, *BLACKBOX_OPTIMIZERS]
 
 
@@ -182,67 +169,6 @@ class UnifiedCase(BaseModel):
     expected: Any | None = None
 
 
-# The thing under optimization and where it starts.
-class UnifiedArtifact(BaseModel):
-    kind: ArtifactKind
-    starting_version: BlackboxCandidate
-
-
-class UnifiedTask(BaseModel):
-    objective: str = Field(min_length=1, max_length=8000)
-    background: str = Field(default="", max_length=20000)
-    artifact: UnifiedArtifact
-
-
-# ``expected_field`` names the table column the expected output came from
-# when pairs were built from a dataset.
-class UnifiedData(BaseModel):
-    mode: DataMode
-    cases: list[UnifiedCase] | None = Field(default=None, max_length=200_000)
-    staged_dataset_id: str | None = Field(default=None, min_length=1, max_length=64)
-    input_fields: list[str] = Field(default_factory=list)
-    expected_field: str | None = None
-    split: SplitFractions = Field(default_factory=SplitFractions)
-    shuffle: bool = True
-
-    @model_validator(mode="after")
-    def _ensure_cases(self) -> UnifiedData:
-        """Require cases (or a staged dataset) that fit the data mode.
-
-        Returns:
-            The validated data instance.
-
-        Raises:
-            ValueError: When neither cases nor a staged dataset is given, when
-                single mode does not carry exactly one case, or when pairs mode
-                carries fewer than two cases.
-        """
-        if self.cases is None:
-            if self.staged_dataset_id is None:
-                key = (
-                    I18nKey.SUBMIT_UNIFIED_SINGLE_NEEDS_ONE_CASE
-                    if self.mode == "single"
-                    else I18nKey.SUBMIT_UNIFIED_PAIRS_NEED_CASES
-                )
-                raise ValueError(t_en(key))
-            return self
-        if self.mode == "single" and len(self.cases) != 1:
-            raise ValueError(t_en(I18nKey.SUBMIT_UNIFIED_SINGLE_NEEDS_ONE_CASE))
-        if self.mode == "pairs" and len(self.cases) < 2:
-            raise ValueError(t_en(I18nKey.SUBMIT_UNIFIED_PAIRS_NEED_CASES))
-        return self
-
-
-# ``dspy_kwargs`` reaches the DSPy optimizer constructor; black-box engines
-# ignore it, and DSPy optimizers ignore ``proposer`` and ``shinka``.
-class UnifiedOptimizer(BaseModel):
-    choice: OptimizerChoice = "auto"
-    budget: BlackboxBudget = Field(default_factory=BlackboxBudget)
-    proposer: BlackboxProposer = Field(default_factory=BlackboxProposer)
-    shinka: BlackboxShinkaSettings | None = None
-    dspy_kwargs: dict[str, Any] = Field(default_factory=dict)
-
-
 # ``task_model`` is what ``skynet.llm`` calls inside run code;
 # ``metric_model`` is derived from the metric code and used inside the metric.
 class UnifiedModels(BaseModel):
@@ -281,39 +207,6 @@ class UnifiedWorkspace(BaseModel):
         return self
 
 
-# Submission payload for ``POST /optimize``.
-class UnifiedRunRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    payload_kind: Literal["unified_v1"] = "unified_v1"
-    name: str | None = None
-    description: str | None = Field(default=None, max_length=280)
-    username: str | None = None
-    task: UnifiedTask
-    data: UnifiedData
-    optimizer: UnifiedOptimizer = Field(default_factory=UnifiedOptimizer)
-    models: UnifiedModels
-    workspace: UnifiedWorkspace
-    seed: int | None = None
-    token_source: Literal["managed", "byok", "subscription"] = "managed"
-    is_private: bool = False
-    economy_mode: bool = False
-    preflight_id: str | None = Field(default=None, min_length=1, max_length=64)
-    preflight_fingerprint: str | None = Field(default=None, min_length=1, max_length=128)
-    execution_budget_id: str | None = Field(default=None, min_length=1, max_length=64)
-    execution_budget_revision: int | None = Field(default=None, ge=1)
-    execution_budget_generation: int | None = Field(default=None, ge=0)
-    max_cost_cents: int | None = Field(
-        validation_alias=AliasChoices("max_cost_cents", "max_cost_credits"), default=None, ge=1
-    )
-    estimated_cents_low: int | None = Field(
-        validation_alias=AliasChoices("estimated_cents_low", "estimated_credits_low"), default=None, ge=0
-    )
-    estimated_cents_high: int | None = Field(
-        validation_alias=AliasChoices("estimated_cents_high", "estimated_credits_high"), default=None, ge=0
-    )
-
-
 class OptimizerOption(BaseModel):
     id: OptimizerChoice
     family: OptimizerFamily
@@ -325,8 +218,7 @@ class OptimizerOption(BaseModel):
     native_proposer: bool
 
 
-# ``GET /optimizers``. ``auto_resolves_to`` lists what Auto runs when a new
-# run may pick Auto (a repository run); a DSPy program has no options.
+# ``GET /optimizers``. ``auto_resolves_to`` lists what Auto runs.
 # ``run_entry`` and ``metric_signature`` are the one contract every optimizer runs.
 class OptimizerCatalogResponse(BaseModel):
     artifact_kind: OptimizerTarget
@@ -349,21 +241,15 @@ __all__ = [
     "RUN_ENTRY",
     "RUN_FILE",
     "WORKSPACE_FILE_MAX_COUNT",
-    "ArtifactKind",
     "DataMode",
     "OptimizerCatalogResponse",
     "OptimizerChoice",
     "OptimizerFamily",
     "OptimizerOption",
     "OptimizerTarget",
-    "UnifiedArtifact",
     "UnifiedCase",
-    "UnifiedData",
     "UnifiedModels",
-    "UnifiedOptimizer",
-    "UnifiedRunRequest",
     "UnifiedSplitCounts",
-    "UnifiedTask",
     "UnifiedWorkspace",
     "optimizer_family",
     "optimizers_for",

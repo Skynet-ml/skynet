@@ -100,9 +100,9 @@ def test_malformed_repository_rejected(wizard_client: TestClient, name: str) -> 
     assert resp.status_code == 422
 
 
-@pytest.mark.parametrize("kind", ["prompt", "code", "text"])
+@pytest.mark.parametrize("kind", ["prompt", "code", "text", "dspy_program"])
 def test_other_artifact_kinds_are_refused_for_new_runs(wizard_client: TestClient, kind: str) -> None:
-    """New runs take a DSPy program or a repository, nothing else."""
+    """New runs take a repository, nothing else."""
     resp = wizard_client.post("/wizard/update", json={"artifact_kind": kind})
 
     assert resp.status_code == 422

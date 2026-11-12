@@ -1,10 +1,11 @@
 """Run the SKY-656 migration on seeded rows in a real PostgreSQL database.
 
 The migration deletes the retired DSPy, grid and pair jobs with their rows,
-closes their budgets and drops the grid pair table. Only PostgreSQL runs it, so this module
-needs a disposable database in ``APP_BUDGET_TEST_DB_URL`` and skips without
-one. Each test works in its own schema and drops it afterwards. Never point
-the URL at staging or production.
+and closes their budgets. It keeps the grid pair table for the rollout.
+Only PostgreSQL runs it, so this module needs a disposable database in
+``APP_BUDGET_TEST_DB_URL`` and skips without one. Each test works in its
+own schema and drops it afterwards. Never point the URL at staging or
+production.
 """
 
 from __future__ import annotations
@@ -240,14 +241,15 @@ def test_upgrade_deletes_only_the_dspy_grid_and_pair_rows(conn: Connection) -> N
     assert _ids(conn, "continuous_cycles", "id") == {"cycle-live"}
 
 
-def test_upgrade_drops_the_grid_table_and_keeps_the_columns_for_the_rollout(conn: Connection) -> None:
-    """Drop the grid table, and keep the grid columns, FK and index that old pods still map."""
+def test_upgrade_keeps_the_grid_table_and_columns_for_the_rollout(conn: Connection) -> None:
+    """Keep the grid table, columns, FK and index that old pods still use, and clear the dead grid rows."""
     _seed(conn)
 
     _upgrade(conn)
 
     inspector = inspect(conn)
-    assert not inspector.has_table("grid_pair_results")
+    assert inspector.has_table("grid_pair_results")
+    assert conn.execute(text("SELECT count(*) FROM grid_pair_results")).scalar_one() == 0
     assert {"parent_optimization_id", "pair_index"} <= {column["name"] for column in inspector.get_columns("jobs")}
     assert "pair_index" in {column["name"] for column in inspector.get_columns("job_logs")}
     assert [fk["referred_table"] for fk in inspector.get_foreign_keys("jobs")] == ["jobs"]
@@ -361,8 +363,8 @@ def test_upgrade_releases_and_closes_the_budgets_of_deleted_jobs(conn: Connectio
     }
 
 
-def test_upgrade_runs_twice_and_downgrade_restores_the_empty_schema(conn: Connection) -> None:
-    """Run the upgrade again with no change, then restore the empty grid table."""
+def test_upgrade_runs_twice_and_downgrade_keeps_the_schema(conn: Connection) -> None:
+    """Run the upgrade again with no change, then run the no-op downgrade."""
     _seed(conn)
     _upgrade(conn)
 

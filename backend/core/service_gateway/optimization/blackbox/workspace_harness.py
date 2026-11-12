@@ -109,7 +109,8 @@ METRIC_FILENAME = "<metric_code>"
 DETAIL_MAX_CHARS = 4000
 RUN_ERROR_MAX_CHARS = 300
 RUN_CHILD_FLAG = "--run-child"
-# Mirrors ``unified.dspy_engine.DSPY_STATE_KEY``; this file runs alone in the box.
+# The key a saved DSPy program state uses in a candidate. This file runs
+# alone in the box, so it cannot import a shared constant.
 DSPY_STATE_KEY = "__dspy_state__"
 PREVIEW_MAX_CHARS = 2000
 ARTIFACT_KIND_DSPY_PROGRAM = "dspy_program"
