@@ -43,7 +43,7 @@ function shareLinkTypeDescription(type: ShareLinkType): string {
 }
 
 /** Localized name of a shared item kind. */
-export function sharedItemKindLabel(kind: SharedItemOption["kind"]): string {
+function sharedItemKindLabel(kind: SharedItemOption["kind"]): string {
   if (kind === "run") return msg("shared.agent.share_kind_run");
   if (kind === "dataset") return msg("shared.agent.share_kind_dataset");
   return msg("shared.agent.share_kind_file");

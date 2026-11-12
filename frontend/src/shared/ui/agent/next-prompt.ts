@@ -12,11 +12,11 @@ const TURN_CHARS = 1500;
 const LAST_REPLY_CHARS = 2500;
 const ACTION_CHARS = 160;
 /** The server accepts at most this many actions. */
-export const SUGGEST_MAX_ACTIONS = 20;
+const SUGGEST_MAX_ACTIONS = 20;
 // App-sent turns this close to the end describe what the user just did.
 const RECENT_HIDDEN_WINDOW = 4;
 
-export interface SuggestTurn {
+interface SuggestTurn {
   role: "user" | "assistant";
   content: string;
 }

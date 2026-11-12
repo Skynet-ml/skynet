@@ -53,7 +53,7 @@ function objList(v: unknown): Obj[] {
     : [];
 }
 
-export interface OptimizerOptionView {
+interface OptimizerOptionView {
   id: string;
   available: boolean;
   unavailableReason: string;

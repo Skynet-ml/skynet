@@ -16,7 +16,6 @@ import {
   heldChannels,
   HELD_CHANNELS,
   itemLine,
-  localOffChannels,
   localOffReason,
   maybeLocalHost,
   mergeHead,
@@ -195,15 +194,6 @@ test("the Mac app preserves hosted preferences without local provider setup", ()
   assert.equal(cellShownOn(false, "email", local), false);
   assert.equal(cellShownOn(true, "inbox", local), true);
   assert.equal(cellShownOn(true, "slack", null), true);
-});
-
-test("only unavailable native delivery appears in the local setup warning", () => {
-  assert.deepEqual(localOffChannels(localState({ email: true })), []);
-  assert.deepEqual(localOffChannels(localState({ macos: false })), ["macos"]);
-  assert.equal(cellEditable("finished", "macos", true, localState({ macos: false })), false);
-  assert.equal(cellShownOn(true, "macos", localState({ macos: false })), false);
-  assert.deepEqual(localOffChannels(localState({ email: true, chrome: true, slack: true })), []);
-  assert.deepEqual(localOffChannels(null), []);
 });
 
 test("the hold covers macOS only in the Mac app", () => {

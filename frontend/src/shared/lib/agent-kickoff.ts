@@ -6,7 +6,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
  * the reply itself, in the user's language. Every agent stream that can
  * open by itself recognizes it through `kickoffOpening`.
  */
-export const KICKOFF_OVERSIZED_EVENT = "kickoff_oversized";
+const KICKOFF_OVERSIZED_EVENT = "kickoff_oversized";
 
 /** The opening's text when `event` is the fixed opening; `null` otherwise. */
 export function kickoffOpening(event: string, data: Record<string, unknown>): string | null {

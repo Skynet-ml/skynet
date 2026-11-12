@@ -1,13 +1,9 @@
 export {
-  DEFAULT_LEVEL,
-  EXPERIENCE_LEVELS,
   defaultOpen,
   detailTabGate,
   isVisible,
   jobsColumnGate,
-  normalizeLevel,
   type ExperienceLevel,
-  type Surface,
 } from "./lib/abstraction";
 export { SETUP_SETTING_EVENT, type SetupSettingDetail } from "./lib/setup-tour";
 export {

@@ -94,7 +94,6 @@ function extensionOf(name: string): string {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
-
 /** How one row's name and end slot look; every field is optional. */
 export interface FileTreeRowLook {
   nameClassName?: string;
@@ -102,7 +101,7 @@ export interface FileTreeRowLook {
   trailing?: ReactNode;
 }
 
-export function FileTreeItem<N extends FileTreeNode>({
+function FileTreeItem<N extends FileTreeNode>({
   row,
   selected,
   tabbable,

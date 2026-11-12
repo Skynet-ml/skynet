@@ -9,8 +9,6 @@ import {
   ancestors,
   sortTree,
   treeBuilder,
-  treeRows,
-  type FileTreeRow,
 } from "../../../shared/ui/file-tree-model";
 import type { FilePatch } from "./repo-patch.ts";
 
@@ -30,8 +28,6 @@ export interface RepoNode {
   /** Files at or below this node. */
   fileCount: number;
 }
-
-export type RepoRow = FileTreeRow<RepoNode>;
 
 function countFiles(node: RepoNode): void {
   if (node.type === "file") {
@@ -96,25 +92,6 @@ export function hasFile(root: RepoNode, path: string): boolean {
 
 /** Which files a tree shows: all of them, only the changed ones, or only the rest. */
 export type RepoScope = "all" | "changed" | "unchanged";
-
-function inScope(node: RepoNode, scope: RepoScope): boolean {
-  if (scope === "changed") return node.changedCount > 0;
-  if (scope === "unchanged") return node.fileCount > node.changedCount;
-  return true;
-}
-
-/**
- * The rows a reader sees, in display order. With a filter, only files whose
- * path contains it (any case) and their folders show, every folder open.
- */
-export function visibleRows(
-  root: RepoNode,
-  expanded: ReadonlySet<string>,
-  filter: string,
-  scope: RepoScope = "all",
-): RepoRow[] {
-  return treeRows(root, expanded, filter, (node) => inScope(node, scope));
-}
 
 export type RepoFileKind = "markdown" | "html" | "python" | "json" | "code";
 

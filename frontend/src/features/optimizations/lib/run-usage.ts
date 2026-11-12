@@ -6,7 +6,7 @@ export type { RunUsage, RunUsageRow } from "@/shared/types/run-usage";
 
 export type UsageGrouping = "role" | "model" | "stage" | "candidate";
 
-export const USAGE_GROUPINGS: readonly UsageGrouping[] = ["role", "model", "stage", "candidate"];
+const USAGE_GROUPINGS: readonly UsageGrouping[] = ["role", "model", "stage", "candidate"];
 
 /** Roles that are not model calls; they keep their own row under every grouping. */
 const NON_MODEL_ROLES: ReadonlySet<string> = new Set(["sandbox", "setup", "rounding"]);

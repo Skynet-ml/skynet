@@ -68,9 +68,9 @@ const MessageMarkdown = dynamic(() => import("./message-markdown").then((m) => m
 });
 
 /** Pill button styles for the edit-and-resend row under a user message. */
-export const USER_BUBBLE_EDIT_CANCEL_CLASS =
+const USER_BUBBLE_EDIT_CANCEL_CLASS =
   "text-[0.75rem] font-medium text-foreground/80 hover:text-foreground bg-card border border-border hover:bg-muted px-3.5 py-1.5 rounded-full transition-all duration-150 cursor-pointer active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 focus-visible:ring-offset-1";
-export const USER_BUBBLE_EDIT_SEND_CLASS =
+const USER_BUBBLE_EDIT_SEND_CLASS =
   "text-[0.75rem] font-medium text-primary-foreground bg-primary-fill hover:bg-primary-hover px-4 py-1.5 rounded-full transition-all duration-150 cursor-pointer active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100";
 
 interface UserBubbleProps {

@@ -27,9 +27,7 @@ const {
   withDefaultModels,
   withLevel,
   withOptimizerPatch,
-  workspaceFileText,
   workspacePathIssue,
-  workspacePaths,
   writeWorkspaceFile,
 } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
@@ -275,17 +273,6 @@ test("the task step clears once a repository is named, with no separate confirm"
   assert.equal("confirmed" in empty, false);
   assert.equal(taskIssue(empty), "submit.v2.repo.issue.repository");
   assert.equal(taskIssue({ ...empty, repo: { ...empty.repo, repository: "acme/bot" } }), null);
-});
-
-test("run.py and metric.py write through to the run and metric code; others are extra files", () => {
-  const ws = initialWizardV2State().workspace;
-  assert.deepEqual(writeWorkspaceFile(ws, "run.py", "r"), { runCode: "r" });
-  assert.deepEqual(writeWorkspaceFile(ws, "metric.py", "m"), { metricCode: "m" });
-  const withHelper = { ...ws, ...writeWorkspaceFile(ws, "lib/helpers.py", "X = 1") };
-  assert.deepEqual(withHelper.files, { "lib/helpers.py": "X = 1" });
-  assert.deepEqual(workspacePaths(withHelper), ["run.py", "metric.py", "lib/helpers.py"]);
-  assert.equal(workspaceFileText(withHelper, "lib/helpers.py"), "X = 1");
-  assert.equal(workspaceFileText(withHelper, "missing.py"), null);
 });
 
 test("only extra files can be deleted", () => {

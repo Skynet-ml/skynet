@@ -27,21 +27,21 @@ function parsed(value: unknown): unknown {
 }
 
 /** The host a repos call listed: the GitLab or Bitbucket route names it, the GitHub route does not. */
-export function reposHost(call: AgentToolCall): RepoHost {
+function reposHost(call: AgentToolCall): RepoHost {
   const args = parsed(call.payload?.arguments);
   const provider = args && typeof args === "object" ? (args as Record<string, unknown>).provider : null;
   return provider === "gitlab" || provider === "bitbucket" ? provider : "github";
 }
 
 /** The title of a repos call's step line. */
-export function reposTitle(host: RepoHost): string {
+function reposTitle(host: RepoHost): string {
   return host === "github"
     ? msg("agent.tool.github_repos.title")
     : formatMsg("agent.tool.host_repos.title", { host: REPO_HOST_NAMES[host] });
 }
 
 /** The repositories a GitHub, GitLab or Bitbucket repos call returned, or null for a refusal or an error. */
-export function githubRepos(call: AgentToolCall): Repo[] | null {
+function githubRepos(call: AgentToolCall): Repo[] | null {
   const result = parsed(call.payload?.result);
   const list =
     result && typeof result === "object" ? (result as Record<string, unknown>).repositories : null;

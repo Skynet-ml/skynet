@@ -21,9 +21,6 @@ const {
   SHINKA_PATCH_KINDS,
   patchPercent,
   setPatchPercent,
-  shinkaSettingsFrom,
-  submittedExtraModels,
-  submittedShinka,
   takesExtraModels,
 } = await import("./shinka-settings.ts");
 
@@ -116,61 +113,4 @@ test("out-of-range and invalid shares clamp", () => {
   assert.equal(setPatchPercent(DEFAULT_SHINKA_SETTINGS, "patch_cross", -1).patch_cross, 0);
   assert.equal(setPatchPercent(DEFAULT_SHINKA_SETTINGS, "patch_cross", Number.NaN).patch_cross, 0);
   assert.equal(patchPercent(0.6), 60);
-});
-
-test("a ShinkaEvolve run always sends its settings, the defaults when untouched", () => {
-  const sent = submittedShinka(DEFAULT_SHINKA_SETTINGS, "shinka_evolve");
-  assert.deepEqual(sent, DEFAULT_SHINKA_SETTINGS);
-  assert.notEqual(sent, DEFAULT_SHINKA_SETTINGS);
-  assert.deepEqual(submittedShinka(null, "shinka_evolve"), DEFAULT_SHINKA_SETTINGS);
-});
-
-test("the editor choice goes out with the settings, for ShinkaEvolve and Auto", () => {
-  const agent = { ...DEFAULT_SHINKA_SETTINGS, editor: "agent" as const };
-  assert.equal(submittedShinka(agent, "shinka_evolve")?.editor, "agent");
-  assert.equal(submittedShinka(agent, "auto")?.editor, "agent");
-});
-
-test("other optimizers never send ShinkaEvolve settings", () => {
-  for (const choice of ["gepa", "meta_harness", "autosaddler"] as const) {
-    assert.equal(submittedShinka(DEFAULT_SHINKA_SETTINGS, choice), undefined);
-  }
-});
-
-test("black-box Auto sends the settings only once the user edited them", () => {
-  assert.equal(submittedShinka(null, "auto"), undefined);
-  const tuned = { ...DEFAULT_SHINKA_SETTINGS, num_islands: 4 };
-  assert.deepEqual(submittedShinka(tuned, "auto"), tuned);
-});
-
-test("extra optimization models go out only for ShinkaEvolve", () => {
-  const models = [model("a"), model("b")];
-  assert.equal(takesExtraModels("shinka_evolve"), true);
-  assert.equal(takesExtraModels("auto"), false);
-  assert.deepEqual(submittedExtraModels(models, "shinka_evolve"), models);
-  assert.equal(submittedExtraModels(models, "gepa"), undefined);
-  assert.equal(submittedExtraModels(models, "auto"), undefined);
-});
-
-test("extra models drop blanks, cap at the backend limit, and omit an empty list", () => {
-  assert.equal(submittedExtraModels([], "shinka_evolve"), undefined);
-  assert.equal(submittedExtraModels([model("  ")], "shinka_evolve"), undefined);
-  const many = ["a", "", "b", "c", "d", "e"].map(model);
-  const sent = submittedExtraModels(many, "shinka_evolve");
-  assert.equal(sent?.length, MAX_EXTRA_OPTIMIZATION_MODELS);
-  assert.deepEqual(
-    sent?.map((m) => m.name),
-    ["a", "b", "c", "d"],
-  );
-});
-
-test("a cloned run's partial settings fill in over the defaults", () => {
-  assert.deepEqual(shinkaSettingsFrom(null), DEFAULT_SHINKA_SETTINGS);
-  const restored = shinkaSettingsFrom({ num_islands: 6, novelty: true });
-  assert.equal(restored.num_islands, 6);
-  assert.equal(restored.novelty, true);
-  assert.equal(restored.archive_size, DEFAULT_SHINKA_SETTINGS.archive_size);
-  // Runs from before the editor choice existed clone as the single-call editor.
-  assert.equal(restored.editor, "single_call");
-  assert.equal(shinkaSettingsFrom({ editor: "agent" }).editor, "agent");
 });

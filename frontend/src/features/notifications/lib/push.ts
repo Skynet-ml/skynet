@@ -6,7 +6,6 @@
  */
 
 import {
-  deletePushSubscription,
   getPushVapidKey,
   savePushSubscription,
 } from "@/shared/lib/api";
@@ -21,7 +20,7 @@ import {
 const WORKER_URL = "/sw.js";
 
 /** Whether this browser can do web push at all (secure context, SW, PushManager). */
-export function pushSupported(): boolean {
+function pushSupported(): boolean {
   return (
     typeof window !== "undefined" &&
     window.isSecureContext &&
@@ -103,12 +102,4 @@ export async function syncPushSubscription(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** Stop web push in this browser and forget it on the server. */
-export async function unsubscribePush(): Promise<void> {
-  const subscription = await currentPushSubscription();
-  if (!subscription) return;
-  await deletePushSubscription(subscription.endpoint).catch(() => undefined);
-  await subscription.unsubscribe();
 }

@@ -25,7 +25,7 @@ const HOLD_MS = 68;
 const MORPH_MS = 142;
 
 /** When the human lands; slow submits keep the overlay up and the human simply stays. */
-export const EVOLUTION_DURATION_MS =
+const EVOLUTION_DURATION_MS =
   FIRST_HOLD_MS + (ANIMALS.length - 1) * MORPH_MS + (ANIMALS.length - 2) * HOLD_MS;
 
 function easeInOutCubic(t: number): number {
@@ -41,7 +41,7 @@ function getEvolution(): Evolution {
 }
 
 /** The frame `elapsed` ms into the timeline; past the end it stays on the human. */
-export function frameAt(elapsed: number): FramePart[] {
+function frameAt(elapsed: number): FramePart[] {
   const { animals, transitions } = getEvolution();
   let t = elapsed;
   for (let i = 0; i < transitions.length; i++) {

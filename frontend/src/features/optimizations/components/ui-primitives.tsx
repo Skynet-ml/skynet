@@ -1,7 +1,5 @@
 "use client";
 
-import type { ReactNode } from "react";
-import { motion } from "framer-motion";
 import { type Brand, Curl, DSPy, Go, JavaScript, Python } from "@/shared/ui/brand-marks";
 import { Brain, CaretDown, Check } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
@@ -13,41 +11,6 @@ import {
 } from "@/shared/ui/primitives/dropdown-menu";
 import { formatMsg } from "@/shared/lib/messages";
 import { effortLabel } from "@/shared/lib/model-efforts";
-
-export function InfoCard({
-  label,
-  value,
-  icon,
-}: {
-  label: ReactNode;
-  value: ReactNode;
-  icon?: ReactNode;
-}) {
-  return (
-    <motion.div
-      whileHover={{ y: -1 }}
-      transition={{ duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
-      className="group relative rounded-lg border border-border bg-card px-3.5 py-3 transition-[border-color,box-shadow] duration-200 hover:border-primary-fill/55"
-    >
-      <div className="flex items-center gap-1.5 mb-1.5">
-        {icon && (
-          <span
-            className="shrink-0 inline-flex items-center justify-center size-3.5 text-muted-foreground transition-colors duration-200 group-hover:text-[var(--text-2)]"
-            aria-hidden="true"
-          >
-            {icon}
-          </span>
-        )}
-        <p className="truncate text-[0.625rem] font-semibold uppercase tracking-[0.14em] rtl:tracking-normal text-muted-foreground/70">
-          {label}
-        </p>
-      </div>
-      <p className="text-sm font-semibold text-foreground truncate">
-        {value ?? <span className="text-[#BFB3A3] font-normal">—</span>}
-      </p>
-    </motion.div>
-  );
-}
 
 const LANG_MARKS: Partial<Record<string, Brand>> = {
   curl: Curl,

@@ -11,8 +11,9 @@ registerHooks({
   },
 });
 
-const { ancestors, buildRepoTree, changedFolders, hasFile, repoFileKind, visibleRows } =
-  await import("./repo-browser.ts");
+const { ancestors, buildRepoTree, changedFolders, hasFile, repoFileKind } = await import(
+  "./repo-browser.ts"
+);
 const { parsePatch } = await import("./repo-patch.ts");
 
 const ENTRIES = [
@@ -71,33 +72,6 @@ test("changedFolders opens only folders holding a change", () => {
   assert.deepEqual([...changedFolders(root)].sort(), ["src", "src/new"]);
 });
 
-test("visibleRows hides collapsed folders' children", () => {
-  const rows = visibleRows(root, new Set(["src"]), "");
-  assert.deepEqual(
-    rows.map((r) => [r.node.path, r.depth]),
-    [
-      ["docs", 0],
-      ["src", 0],
-      ["src/new", 1],
-      ["src/app.py", 1],
-      ["src/old.py", 1],
-      ["README.md", 0],
-    ],
-  );
-});
-
-test("visibleRows filters by path and opens the matches' folders", () => {
-  const rows = visibleRows(root, new Set(), "GUIDE");
-  assert.deepEqual(
-    rows.map((r) => [r.node.path, r.expanded]),
-    [
-      ["docs", true],
-      ["docs/guide.md", false],
-    ],
-  );
-  assert.deepEqual(visibleRows(root, new Set(), "nothing-like-this"), []);
-});
-
 test("hasFile finds files, not folders", () => {
   assert.equal(hasFile(root, "src/new/mod.py"), true);
   assert.equal(hasFile(root, "src"), false);
@@ -116,13 +90,8 @@ test("repoFileKind reads the extension", () => {
   assert.equal(repoFileKind("Makefile"), "code");
 });
 
-test("scoped rows split the changed files from the rest", () => {
+test("buildRepoTree counts files and changed files", () => {
   const root = buildRepoTree(ENTRIES, parsePatch(PATCH));
-  const all = new Set(["src", "src/new", "docs"]);
-  const changed = visibleRows(root, all, "", "changed").map((r) => r.node.path);
-  const other = visibleRows(root, all, "", "unchanged").map((r) => r.node.path);
-  assert.deepEqual(changed, ["src", "src/new", "src/new/mod.py", "src/app.py", "src/old.py"]);
-  assert.deepEqual(other, ["docs", "docs/guide.md", "README.md"]);
   assert.equal(root.fileCount, 5);
   assert.equal(root.changedCount, 3);
 });

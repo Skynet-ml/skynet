@@ -597,8 +597,6 @@ export function midTurnOf(
   };
 }
 
-export const EMPTY_STEER_SNAPSHOT = EMPTY;
-
 export type MidTurnKeyAction = "steer" | "queue" | "recall" | null;
 
 /**

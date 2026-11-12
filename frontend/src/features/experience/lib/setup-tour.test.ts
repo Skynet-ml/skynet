@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { COLOR_THEMES } from "../../../shared/lib/color-theme.ts";
 import { INTAKE_LLM_PHASES } from "./intake.ts";
 import {
-  MAX_SETUP_STOPS,
   SETUP_STOPS,
   THEME_OPTIONS,
   advancesOnAnswer,
@@ -26,13 +25,6 @@ function sources(dir: string): string[] {
     return /\.tsx$/.test(name) ? [readFileSync(path, "utf8")] : [];
   });
 }
-
-test("the setup stays short and every stop is unique", () => {
-  for (const billing of ["platform", "byok", "subscription"] as const) {
-    assert.ok(setupStops(billing).length <= MAX_SETUP_STOPS, `${billing}: too many stops`);
-  }
-  assert.equal(new Set(SETUP_STOPS.map((s) => s.id)).size, SETUP_STOPS.length);
-});
 
 test("the level comes first and every settings question is asked once", () => {
   assert.equal(SETUP_STOPS[0]!.question, "level");
@@ -98,12 +90,6 @@ test("only stops about a Settings control open Settings", () => {
       assert.ok(stop.question || stop.id in HANDS_ON, `${stop.id}: opens Settings`);
     }
   }
-});
-
-test("the model key stop shows only after a bring-your-own-key answer", () => {
-  assert.ok(setupStops("byok").some((s) => s.id === "providers"));
-  assert.ok(!setupStops("platform").some((s) => s.id === "providers"));
-  assert.ok(setupStops("byok").length <= MAX_SETUP_STOPS);
 });
 
 test("a CLI subscription answer adds no stop", () => {

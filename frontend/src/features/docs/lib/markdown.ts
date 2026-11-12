@@ -24,7 +24,7 @@ export const MCP_CLIENTS_BLOCK = "skynet-mcp-clients";
 const CALLOUT_KINDS = ["note", "tip", "warning"];
 
 /** Remove inline Markdown (code ticks, links, emphasis) from a line of text. */
-export function stripInline(text: string): string {
+function stripInline(text: string): string {
   return text
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/`([^`]*)`/g, "$1")
