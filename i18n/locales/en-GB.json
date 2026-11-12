@@ -29,7 +29,6 @@
     "optimization.cannot_delete": "Cannot delete an optimisation in state '{status}'. Cancel it first.",
     "optimization.clone_no_payload": "Source optimisation has no saved payload to clone.",
     "optimization.dataset_unavailable": "Optimisation's dataset is unavailable.",
-    "optimization.no_result": "Optimisation has no result data.",
     "optimization.no_result_pending": "Optimisation has no result yet.",
     "optimization.repo_version_unknown": "That version isn't part of this run.",
     "optimization.repo_archive_failed": "The repository couldn't be packed: {reason}",

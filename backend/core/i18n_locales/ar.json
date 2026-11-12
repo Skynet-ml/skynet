@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "لا يملك التحسين المصدر أي حمولة محفوظة لاستنساخها.",
     "optimization.dataset_unavailable": "مجموعة بيانات التحسين غير متاحة.",
     "optimization.insufficient_role": "مستوى وصولك ('{role}') ليس كافيًا لهذا الإجراء — المطلوب '{required}' أو أعلى.",
-    "optimization.no_result": "لا يملك التحسين أي بيانات نتيجة.",
     "optimization.no_result_pending": "لا يملك التحسين أي نتيجة بعد.",
     "optimization.repo_version_unknown": "هذا الإصدار ليس جزءًا من هذا التشغيل.",
     "optimization.repo_archive_failed": "تعذّر حزم المستودع: {reason}",

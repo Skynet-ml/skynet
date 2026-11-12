@@ -101,7 +101,6 @@
     "optimization.not_found": "{term.optimization} לא נמצאה: '{optimization_id}'.",
     "optimization.agent_run_not_found": "ריצת הסוכן {run_id} לא נמצאה עבור ה{term.optimization} '{optimization_id}'.",
     "optimization.insufficient_role": "רמת ההרשאה שלך ('{role}') לא מספיקה לפעולה הזו — נדרשת הרשאה '{required}' ומעלה.",
-    "optimization.no_result": "ל{term.optimization} אין נתוני תוצאה.",
     "optimization.no_result_pending": "ל{term.optimization} עדיין אין תוצאה.",
     "optimization.repo_version_unknown": "הגרסה הזו אינה חלק מהאופטימיזציה.",
     "optimization.repo_archive_failed": "לא ניתן היה לארוז את המאגר: {reason}",

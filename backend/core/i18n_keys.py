@@ -299,7 +299,6 @@ class I18nKey(StrEnum):
     OPTIMIZATION_DATASET_UNAVAILABLE = 'optimization.dataset_unavailable'
     OPTIMIZATION_DSPY_RUN_RETIRED = 'optimization.dspy_run_retired'
     OPTIMIZATION_INSUFFICIENT_ROLE = 'optimization.insufficient_role'
-    OPTIMIZATION_NO_RESULT = 'optimization.no_result'
     OPTIMIZATION_NO_RESULT_PENDING = 'optimization.no_result_pending'
     OPTIMIZATION_NOT_FOUND = 'optimization.not_found'
     OPTIMIZATION_NOT_SUCCESS_STATUS_FOR_SERVE = 'optimization.not_success_status_for_serve'

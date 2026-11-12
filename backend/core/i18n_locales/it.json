@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "L'ottimizzazione di origine non ha alcun payload salvato da clonare.",
     "optimization.dataset_unavailable": "Il dataset dell'ottimizzazione non è disponibile.",
     "optimization.insufficient_role": "Il tuo livello di accesso ('{role}') non è sufficiente per questa azione: è richiesto '{required}' o superiore.",
-    "optimization.no_result": "L'ottimizzazione non ha alcun dato di risultato.",
     "optimization.no_result_pending": "L'ottimizzazione non ha ancora alcun risultato.",
     "optimization.repo_version_unknown": "Questa versione non fa parte di questa esecuzione.",
     "optimization.repo_archive_failed": "Impossibile creare l'archivio del repository: {reason}",

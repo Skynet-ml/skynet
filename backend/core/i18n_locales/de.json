@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "Die Quelloptimierung hat keine gespeicherte Nutzlast zum Klonen.",
     "optimization.dataset_unavailable": "Der Datensatz der Optimierung ist nicht verfügbar.",
     "optimization.insufficient_role": "Ihre Zugriffsstufe ('{role}') ist für diese Aktion nicht hoch genug — '{required}' oder höher ist erforderlich.",
-    "optimization.no_result": "Die Optimierung hat keine Ergebnisdaten.",
     "optimization.no_result_pending": "Die Optimierung hat noch kein Ergebnis.",
     "optimization.repo_version_unknown": "Diese Version gehört nicht zu diesem Lauf.",
     "optimization.repo_archive_failed": "Das Repository konnte nicht gepackt werden: {reason}",

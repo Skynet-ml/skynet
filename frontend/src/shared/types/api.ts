@@ -512,12 +512,6 @@ export interface BlackboxRunRequest {
   estimated_cents_high?: number | null;
 }
 
-export interface ModelTokenUsage {
-  model: string;
-  input_tokens: number;
-  output_tokens: number;
-}
-
 interface BlackboxLaneResult {
   engine: BlackboxEngineId;
   phase: "explore" | "continue" | "single";

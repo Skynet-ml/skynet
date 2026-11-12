@@ -218,7 +218,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "optimization.clone_no_payload": "Source optimization has no saved payload to clone.",
     "optimization.dataset_unavailable": "Optimization's dataset is unavailable.",
     "optimization.insufficient_role": "Your access level ('{role}') is not high enough for this action — '{required}' or higher is required.",
-    "optimization.no_result": "Optimization has no result data.",
     "optimization.no_result_pending": "Optimization has no result yet.",
     "optimization.not_found": "Optimization not found: '{optimization_id}'.",
     "optimization.not_success_status_for_serve": "Optimization is in state '{status}' — only successfully completed optimizations can be served.",

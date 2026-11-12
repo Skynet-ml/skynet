@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "Kaynak optimizasyonun kopyalanacak kayıtlı bir yükü yok.",
     "optimization.dataset_unavailable": "Optimizasyonun veri kümesi kullanılamıyor.",
     "optimization.insufficient_role": "Erişim düzeyiniz ('{role}') bu işlem için yeterince yüksek değil — '{required}' veya daha yükseği gereklidir.",
-    "optimization.no_result": "Optimizasyonun sonuç verisi yok.",
     "optimization.no_result_pending": "Optimizasyonun henüz bir sonucu yok.",
     "optimization.repo_version_unknown": "Bu sürüm bu çalıştırmaya ait değil.",
     "optimization.repo_archive_failed": "Depo paketlenemedi: {reason}",

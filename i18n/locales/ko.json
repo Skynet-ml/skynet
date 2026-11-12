@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "원본 최적화에 복제할 저장된 페이로드가 없습니다.",
     "optimization.dataset_unavailable": "최적화의 데이터셋을 사용할 수 없습니다.",
     "optimization.insufficient_role": "회원님의 액세스 수준('{role}')이 이 작업에 필요한 수준에 미치지 못합니다. '{required}' 이상이 필요합니다.",
-    "optimization.no_result": "최적화에 결과 데이터가 없습니다.",
     "optimization.no_result_pending": "최적화에 아직 결과가 없습니다.",
     "optimization.repo_version_unknown": "해당 버전은 이 실행에 포함되어 있지 않습니다.",
     "optimization.repo_archive_failed": "저장소를 묶을 수 없습니다: {reason}",

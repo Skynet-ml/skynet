@@ -4,7 +4,6 @@ export { DatasetEditorSkeleton } from "./components/DatasetEditorSkeleton";
 export { DatasetPickerDialog } from "./components/DatasetPickerDialog";
 export { DatasetEditorView } from "./components/DatasetEditorView";
 export { DatasetPreviewPanel } from "./components/DatasetPreviewPanel";
-export { DatasetRowReader } from "./components/DatasetRowReader";
 export {
   InvitePeople,
   ROLE_OPTIONS,

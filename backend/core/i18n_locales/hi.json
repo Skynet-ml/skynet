@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "स्रोत ऑप्टिमाइज़ेशन में क्लोन करने के लिए कोई सहेजा गया पेलोड नहीं है।",
     "optimization.dataset_unavailable": "ऑप्टिमाइज़ेशन का डेटासेट अनुपलब्ध है।",
     "optimization.insufficient_role": "आपका एक्सेस स्तर ('{role}') इस कार्रवाई के लिए पर्याप्त नहीं है — '{required}' या उच्चतर आवश्यक है।",
-    "optimization.no_result": "ऑप्टिमाइज़ेशन में कोई परिणाम डेटा नहीं है।",
     "optimization.no_result_pending": "ऑप्टिमाइज़ेशन में अभी तक कोई परिणाम नहीं है।",
     "optimization.repo_version_unknown": "यह संस्करण इस रन का हिस्सा नहीं है।",
     "optimization.repo_archive_failed": "रिपॉज़िटरी पैक नहीं हो सकी: {reason}",

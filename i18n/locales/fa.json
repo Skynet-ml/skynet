@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "بهینه‌سازی مبدأ هیچ بار ذخیره‌شده‌ای برای کلون کردن ندارد.",
     "optimization.dataset_unavailable": "مجموعه‌داده‌ی بهینه‌سازی در دسترس نیست.",
     "optimization.insufficient_role": "سطح دسترسی شما ('{role}') برای این عمل کافی نیست — به '{required}' یا بالاتر نیاز است.",
-    "optimization.no_result": "بهینه‌سازی هیچ داده‌ی نتیجه‌ای ندارد.",
     "optimization.no_result_pending": "بهینه‌سازی هنوز هیچ نتیجه‌ای ندارد.",
     "optimization.repo_version_unknown": "این نسخه بخشی از این اجرا نیست.",
     "optimization.repo_archive_failed": "بسته‌بندی مخزن ممکن نشد: {reason}",

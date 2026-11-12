@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "Вихідна оптимізація не має збережених даних для клонування.",
     "optimization.dataset_unavailable": "Набір даних оптимізації недоступний.",
     "optimization.insufficient_role": "Ваш рівень доступу ('{role}') недостатній для цієї дії — потрібен '{required}' або вищий.",
-    "optimization.no_result": "Оптимізація не має даних результату.",
     "optimization.no_result_pending": "Оптимізація ще не має результату.",
     "optimization.repo_version_unknown": "Ця версія не належить до цього запуску.",
     "optimization.repo_archive_failed": "Не вдалося запакувати репозиторій: {reason}",

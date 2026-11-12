@@ -400,26 +400,6 @@ class _BaseFakeJobStore:
         """
         self._jobs[optimization_id]["payload_overview"] = dict(overview)
 
-    def seed_raw(
-        self,
-        optimization_id: str,
-        *,
-        job: dict,
-        logs: list | None = None,
-        progress: list | None = None,
-    ) -> None:
-        """Seed an entire job row, plus optional logs and progress events.
-
-        Args:
-            optimization_id: Identifier of the synthesised job.
-            job: The full job row to store.
-            logs: Optional log rows to associate with the job.
-            progress: Optional progress events to associate with the job.
-        """
-        self._jobs[optimization_id] = job
-        self._logs[optimization_id] = list(logs or [])
-        self._progress[optimization_id] = list(progress or [])
-
     def delete_jobs(self, optimization_ids: list[str]) -> None:
         """Delete a batch of jobs by identifier.
 

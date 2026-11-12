@@ -172,7 +172,6 @@
     "optimization.clone_no_payload": "Source optimization has no saved payload to clone.",
     "optimization.dataset_unavailable": "Optimization's dataset is unavailable.",
     "optimization.insufficient_role": "Your access level ('{role}') is not high enough for this action — '{required}' or higher is required.",
-    "optimization.no_result": "Optimization has no result data.",
     "optimization.no_result_pending": "Optimization has no result yet.",
     "optimization.repo_version_unknown": "That version isn't part of this optimization.",
     "optimization.repo_archive_failed": "The repository couldn't be packed: {reason}",

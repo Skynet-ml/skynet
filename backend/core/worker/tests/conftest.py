@@ -27,7 +27,6 @@ class FakeJobStore:
     def __init__(self) -> None:
         """Initialise empty in-memory storage and call-recording buffers."""
         self._jobs: dict[str, dict[str, Any]] = {}
-        self._logs: dict[str, list[dict[str, Any]]] = {}
         self._progress: dict[str, list[tuple[str | None, dict[str, Any]]]] = {}
         self._notified: set[str] = set()
         self.append_log_calls: list[dict[str, Any]] = []
@@ -161,7 +160,7 @@ class FakeJobStore:
         timestamp: datetime | None = None,
         **run_log_fields: Any,
     ) -> None:
-        """Persist a log entry and record the call for assertions.
+        """Record a log entry for assertions.
 
         Args:
             optimization_id: ID of the job the log belongs to.
@@ -179,11 +178,10 @@ class FakeJobStore:
             "timestamp": timestamp,
             **run_log_fields,
         }
-        self._logs.setdefault(optimization_id, []).append(entry)
         self.append_log_calls.append(entry)
 
     def append_logs(self, optimization_id: str, entries: list[dict[str, Any]]) -> None:
-        """Persist several log entries, recording each like :meth:`append_log`.
+        """Record several log entries, each like :meth:`append_log`.
 
         Args:
             optimization_id: ID of the job the logs belong to.
@@ -233,21 +231,3 @@ class FakeJobStore:
             text: The transcript piece.
         """
         self.agent_run_calls.append((optimization_id, "append", (run_id, text)))
-
-    def get_logs(self, optimization_id: str, **_kwargs: Any) -> list[dict[str, Any]]:
-        """Return all log entries recorded for a job.
-
-        Args:
-            optimization_id: ID of the job whose logs are requested.
-            **_kwargs: Ignored; matches the JobStore protocol signature.
-
-        Returns:
-            A copy of the in-memory log list (empty if no logs).
-        """
-        return list(self._logs.get(optimization_id, []))
-
-
-@pytest.fixture
-def fake_store() -> FakeJobStore:
-    """Yield a fresh FakeJobStore for a test."""
-    return FakeJobStore()

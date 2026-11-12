@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "複製元の最適化に、複製できる保存済みペイロードがありません。",
     "optimization.dataset_unavailable": "最適化のデータセットが利用できません。",
     "optimization.insufficient_role": "あなたのアクセスレベル（'{role}'）はこの操作には不十分です。'{required}' 以上が必要です。",
-    "optimization.no_result": "最適化に結果データがありません。",
     "optimization.no_result_pending": "最適化にはまだ結果がありません。",
     "optimization.repo_version_unknown": "そのバージョンはこの実行に含まれていません。",
     "optimization.repo_archive_failed": "リポジトリをまとめられませんでした: {reason}",

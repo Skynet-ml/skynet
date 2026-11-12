@@ -1,46 +1,6 @@
-/**
- * Parse per-trial scores from GEPA optimizer log messages.
- *
- * GEPA emits its progress as free-text log lines; this parses
- * the known patterns into a structured series suitable for charting.
- */
-
+/** One point of a run's score series, as the score chart draws it. */
 export interface ScorePoint {
   trial: number;
   score: number;
   best: number;
-}
-
-export function extractScoresFromLogs(logs: Array<{ message: string }>): ScorePoint[] {
-  const points: ScorePoint[] = [];
-  let bestSoFar = -1;
-
-  for (const log of logs) {
-    const msg = log.message;
-
-    // GEPA: "Iteration N: Valset score for new program: 0.78 (coverage X / Y)"
-    const gepaScoreMatch = msg.match(
-      /Iteration\s+(\d+):\s*(?:Full\s+)?Valset score for new program:\s*([\d.]+)/i,
-    );
-    if (gepaScoreMatch) {
-      const iter = parseInt(gepaScoreMatch[1]!, 10);
-      const score = parseFloat(gepaScoreMatch[2]!);
-      bestSoFar = Math.max(bestSoFar, score);
-      points.push({ trial: iter, score, best: bestSoFar });
-      continue;
-    }
-
-    // GEPA: "Iteration N: Base program full valset score: 0.65"
-    const gepaBaseMatch = msg.match(
-      /Iteration (\d+):\s*Base program full valset score:\s*([\d.]+)/i,
-    );
-    if (gepaBaseMatch) {
-      const iter = parseInt(gepaBaseMatch[1]!, 10);
-      const score = parseFloat(gepaBaseMatch[2]!);
-      bestSoFar = Math.max(bestSoFar, score);
-      points.push({ trial: iter, score, best: bestSoFar });
-    }
-  }
-
-  return points;
 }

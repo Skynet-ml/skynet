@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "源优化没有可克隆的已保存载荷。",
     "optimization.dataset_unavailable": "该优化的数据集不可用。",
     "optimization.insufficient_role": "您的访问级别（'{role}'）不足以执行此操作——需要 '{required}' 或更高级别。",
-    "optimization.no_result": "优化没有结果数据。",
     "optimization.no_result_pending": "优化尚无结果。",
     "optimization.repo_version_unknown": "该版本不属于此次运行。",
     "optimization.repo_archive_failed": "无法打包仓库：{reason}",

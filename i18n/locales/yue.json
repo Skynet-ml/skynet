@@ -244,7 +244,6 @@
     "optimization.clone_no_payload": "來源優化冇已儲存嘅 payload 可以複製。",
     "optimization.dataset_unavailable": "優化嘅資料集無法使用。",
     "optimization.insufficient_role": "你嘅權限等級（「{role}」）唔足夠執行呢個操作——需要「{required}」或更高等級。",
-    "optimization.no_result": "優化冇結果資料。",
     "optimization.no_result_pending": "優化仲未有結果。",
     "optimization.repo_version_unknown": "呢個版本唔屬於今次運行。",
     "optimization.repo_archive_failed": "打包唔到儲存庫：{reason}",

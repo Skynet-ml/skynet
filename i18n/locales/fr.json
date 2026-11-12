@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "L'optimisation source n'a aucune charge utile enregistrée à cloner.",
     "optimization.dataset_unavailable": "Le jeu de données de l'optimisation est indisponible.",
     "optimization.insufficient_role": "Votre niveau d'accès ('{role}') n'est pas suffisant pour cette action — '{required}' ou supérieur est requis.",
-    "optimization.no_result": "L'optimisation n'a aucune donnée de résultat.",
     "optimization.no_result_pending": "L'optimisation n'a pas encore de résultat.",
     "optimization.repo_version_unknown": "Cette version ne fait pas partie de cette exécution.",
     "optimization.repo_archive_failed": "Impossible d'empaqueter le dépôt : {reason}",

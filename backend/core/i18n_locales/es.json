@@ -254,7 +254,6 @@
     "optimization.clone_no_payload": "La optimización de origen no tiene ninguna carga útil guardada para clonar.",
     "optimization.dataset_unavailable": "El conjunto de datos de la optimización no está disponible.",
     "optimization.insufficient_role": "Tu nivel de acceso ('{role}') no es suficiente para esta acción; se requiere '{required}' o superior.",
-    "optimization.no_result": "La optimización no tiene datos de resultado.",
     "optimization.no_result_pending": "La optimización aún no tiene ningún resultado.",
     "optimization.repo_version_unknown": "Esa versión no forma parte de esta ejecución.",
     "optimization.repo_archive_failed": "No se pudo empaquetar el repositorio: {reason}",
