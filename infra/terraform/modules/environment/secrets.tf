@@ -53,7 +53,6 @@ locals {
     "BITBUCKET_OAUTH_CLIENT_SECRET",
     "BITBUCKET_OAUTH_REDIRECT_URI",
     "BYOK_VAULT_KEY",
-    "DSPY_SANDBOX_IMAGE",
     "EMBEDDINGS_API_KEY",
     "EMBEDDINGS_BASE_URL",
     "EMBEDDINGS_DIM",
@@ -94,8 +93,6 @@ locals {
     "VERCEL_TOKEN",
   ]
 
-  worker_only_secret_keys = ["JOB_RUN_START_METHOD"]
-
   backend_secret_keys = sort(distinct(concat(
     local.shared_app_secret_keys,
     local.backend_only_secret_keys,
@@ -104,7 +101,6 @@ locals {
 
   worker_secret_keys = sort(distinct(concat(
     local.shared_app_secret_keys,
-    local.worker_only_secret_keys,
     var.worker_secret_keys_extra,
   )))
 
