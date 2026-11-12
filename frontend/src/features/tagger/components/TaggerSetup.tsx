@@ -26,7 +26,7 @@ import { Separator } from "@/shared/ui/primitives/separator";
 import { cn } from "@/shared/lib/utils";
 import { HelpTip } from "@/shared/ui/help-tip";
 import { tip } from "@/shared/lib/tooltips";
-import { getDatasetRows } from "@/shared/lib/api";
+import { getDatasetRows, listDatasets } from "@/shared/lib/api";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
@@ -43,6 +43,7 @@ import type {
   Category,
 } from "../lib/types";
 import { isTaggerAssistEnabled } from "../lib/feature-flag";
+import { linkedDatasetName } from "../lib/deep-link";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { perLocale } from "@/shared/lib/per-locale";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
@@ -225,7 +226,10 @@ export function TaggerSetup({ onStart }: TaggerSetupProps) {
       setParsedRows(detail.rows as DataRow[]);
       setParsedCols(detail.columns);
       setSynthetic(false);
-      setLibraryName(name || msg("tagger.setup.library_fallback_name"));
+      const listed = name ? [] : ((await listDatasets().catch(() => null))?.datasets ?? []);
+      setLibraryName(
+        linkedDatasetName(datasetId, name, listed) || msg("tagger.setup.library_fallback_name"),
+      );
       const roles = detail.column_schema?.column_roles ?? {};
       const inputs = detail.columns.filter((c) => roles[c] === "input");
       if (inputs.length > 0) {
