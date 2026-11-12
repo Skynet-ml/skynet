@@ -1330,25 +1330,57 @@ def _costless_responses_call(
     Returns:
         The mailbox answer and the number of ``/generation`` lookups.
     """
+    final = {
+        "id": "gen-codex-1",
+        "status": "completed",
+        "output": [],
+        "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+    }
+    answer, lookups, _ = _responses_call(gateway, final, generation)
+    return answer, lookups
+
+
+def _responses_call(
+    gateway: ModelGateway, final: dict[str, Any], generation: Callable[[int], httpx.Response]
+) -> tuple[dict[str, Any], int, httpx.Headers]:
+    """Send one guest Responses call whose stream ends with the given final response.
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+        final: The ``response`` object of the closing ``response.completed`` event.
+        generation: Answers the n-th ``/generation`` lookup, counted from 1.
+
+    Returns:
+        The mailbox answer, the number of ``/generation`` lookups, and the
+        headers the provider received on the Responses call.
+    """
     gateway._client.close()
     lookups = 0
-    completed = {
-        "type": "response.completed",
-        "response": {
-            "id": "gen-codex-1",
-            "status": "completed",
-            "output": [],
-            "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
-        },
+    sent: list[httpx.Headers] = []
+    created = {
+        "type": "response.created",
+        "sequence_number": 0,
+        "response": {"id": final["id"], "status": "in_progress"},
     }
+    delta = {
+        "type": "response.output_text.delta",
+        "sequence_number": 1,
+        "item_id": "msg-1",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "ok",
+    }
+    completed = {"type": "response.completed", "sequence_number": 2, "response": final}
     stream = (
-        'event: response.created\ndata: {"type":"response.created","response":{"id":"gen-codex-1",'
-        '"status":"in_progress"}}\n\n'
+        ": OPENROUTER PROCESSING\n\n"
+        f"event: response.created\ndata: {json.dumps(created)}\n\n"
+        f"event: response.output_text.delta\ndata: {json.dumps(delta)}\n\n"
         f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
+        "data: [DONE]\n\n"
     ).encode()
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """Serve prices, a cost-free Responses stream, and the scripted generation lookups."""
+        """Serve prices, the Responses stream, and the scripted generation lookups."""
         nonlocal lookups
         if request.url.path.endswith("/endpoints"):
             return httpx.Response(200, json={"data": CATALOG})
@@ -1356,7 +1388,8 @@ def _costless_responses_call(
             lookups += 1
             return generation(lookups)
         assert request.url.path == "/api/v1/responses"
-        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+        sent.append(request.headers)
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream; charset=utf-8"})
 
     gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
     protected = gateway.protect_payload({"model_config": {"name": "fixture/text"}}, managed_key="upstream-secret")
@@ -1371,7 +1404,103 @@ def _costless_responses_call(
         }
     )
     ModelMailbox(gateway.dispatch_guest, concurrency=1).run(session, "ignored")
-    return session.answer(), lookups
+    return session.answer(), lookups, sent[0]
+
+
+def _openrouter_response(metadata: bool) -> dict[str, Any]:
+    """Build a final OpenRouter Responses object in the documented shape.
+
+    The usage follows the Responses ``Usage`` schema: ``is_byok`` is optional
+    and absent here, and ``upstream_inference_cost`` is a number. The id uses
+    the documented ``resp_`` prefix, which ``/generation`` does not accept.
+
+    Args:
+        metadata: Include the opt-in ``openrouter_metadata`` with ``is_byok``.
+
+    Returns:
+        The ``response`` object of a ``response.completed`` event.
+    """
+    final: dict[str, Any] = {
+        "id": "resp_0a1b2c3d4e5f",
+        "object": "response",
+        "created_at": 1700000000,
+        "completed_at": 1700000004,
+        "model": "fixture/text",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg-1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+            }
+        ],
+        "usage": {
+            "input_tokens": 12,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 15,
+            "cost": 0.002,
+            "cost_details": {
+                "upstream_inference_cost": 0.002,
+                "upstream_inference_input_cost": 0.0012,
+                "upstream_inference_output_cost": 0.0008,
+            },
+        },
+    }
+    if metadata:
+        final["openrouter_metadata"] = {
+            "attempt": 1,
+            "endpoints": {
+                "available": [{"model": "fixture/text", "provider": "Fixture", "selected": True}],
+                "total": 1,
+            },
+            "is_byok": False,
+            "region": "iad",
+            "requested": "fixture/text",
+            "strategy": "direct",
+            "summary": "available=1, selected=Fixture",
+        }
+    return final
+
+
+def test_a_real_shape_responses_stream_settles_from_its_metadata(gateway: ModelGateway) -> None:
+    """Settle a managed Responses call from its own receipt when only the metadata names BYOK (SKY-664).
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+    """
+    answer, lookups, headers = _responses_call(gateway, _openrouter_response(metadata=True), lambda _n: _not_found())
+
+    assert answer["status"] == 200, base64.b64decode(answer["body"])
+    assert headers["x-openrouter-metadata"] == "enabled"
+    assert lookups == 0
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.setup_spent_cents == Decimal("0.2")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.pending_operations == 0
+
+
+def test_an_ambiguous_responses_receipt_with_a_resp_id_is_held_without_lookups(
+    gateway: ModelGateway, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hold a call whose BYOK scope stays unknown, and skip lookups /generation cannot answer (SKY-664).
+
+    Args:
+        gateway: Parent protocol over the capped fixture budget.
+        caplog: Captures the dispatch warning.
+    """
+    with caplog.at_level("WARNING", logger=model_dispatch.__name__):
+        answer, lookups, _ = _responses_call(gateway, _openrouter_response(metadata=False), lambda _n: _not_found())
+
+    assert answer["status"] == 424
+    assert lookups == 0
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, gateway.runtime.username)
+    assert snapshot.pending_operations == 1
+    assert snapshot.reserved_cents > 0
+    assert any("/generation does not accept this id" in record.getMessage() for record in caplog.records)
 
 
 def _generation_record(model: str = "fixture/text") -> httpx.Response:
@@ -1383,7 +1512,20 @@ def _generation_record(model: str = "fixture/text") -> httpx.Response:
     Returns:
         The provider's generation answer.
     """
-    record = {"id": "gen-codex-1", "model": model, "total_cost": 0.002, "is_byok": False}
+    record = {
+        "id": "gen-codex-1",
+        "model": model,
+        "api_type": "responses",
+        "provider_name": "Fixture",
+        "streamed": True,
+        "native_tokens_prompt": 12,
+        "native_tokens_completion": 3,
+        "native_tokens_reasoning": 0,
+        "total_cost": 0.002,
+        "usage": 0.002,
+        "upstream_inference_cost": 0.0012,
+        "is_byok": False,
+    }
     return httpx.Response(200, json={"data": record})
 
 

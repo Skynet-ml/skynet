@@ -235,7 +235,9 @@ def responses_receipt(body: bytes, content_type: str) -> tuple[str | None, dict[
         content_type: JSON or event-stream content type reported by the provider.
 
     Returns:
-        Provider response identity, reported usage when present, and observed terminal state.
+        Provider response identity, reported usage when present (with
+        ``is_byok`` from ``openrouter_metadata`` when the usage omits it), and
+        observed terminal state.
     """
     stream = "text/event-stream" in content_type
     raw_events = []
@@ -246,7 +248,7 @@ def responses_receipt(body: bytes, content_type: str) -> tuple[str | None, dict[
                 raw_events.append(data)
     else:
         raw_events = [body.decode("utf-8", errors="replace")]
-    identity, usage, complete = None, None, False
+    identity, usage, complete, byok = None, None, False, None
     for raw in raw_events:
         try:
             event = json.loads(raw)
@@ -261,7 +263,12 @@ def responses_receipt(body: bytes, content_type: str) -> tuple[str | None, dict[
             identity = response["id"]
         if isinstance(response.get("usage"), dict):
             usage = dict(response["usage"])
+        metadata = response.get("openrouter_metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("is_byok"), bool):
+            byok = metadata["is_byok"]
         complete = complete or (
             response.get("status") in _TERMINAL_STATES and (not stream or event.get("type") in _TERMINAL_EVENTS)
         )
+    if usage is not None and "is_byok" not in usage and byok is not None:
+        usage["is_byok"] = byok
     return identity, usage, complete
